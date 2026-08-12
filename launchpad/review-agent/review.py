@@ -33,8 +33,8 @@ SEVERITY_ORDER = {"Blocker": 0, "High": 1, "Medium": 2, "Low": 3}
 
 COVERAGE_NOTE = (
     "Automated containment covers the delimiter boundary and unambiguous injection "
-    "tells only. It does not cover semantic paraphrase or finding-suppression phrased "
-    "as ordinary prose. **The absence of a containment finding is not evidence that "
+    "tells only. It does not cover injection phrased as ordinary, unremarkable "
+    "prose. **The absence of a containment finding is not evidence that "
     "this pull request contains no injection attempt.**"
 )
 

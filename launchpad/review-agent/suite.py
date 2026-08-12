@@ -6,7 +6,7 @@ fails the moment containment is removed — which is what step 9 measures.
 
 Cases whose payload carries an unambiguous tell additionally assert a finding. The rest
 are enumerated by id as the model layer's responsibility (#117). Naming the gap is the
-point: a suite that silently covered 21 of 35 while reporting "all pass" would be the
+point: a suite that silently covered 28 of 35 while reporting "all pass" would be the
 coverage theatre this issue exists to prevent.
 """
 

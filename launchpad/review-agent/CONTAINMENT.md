@@ -136,8 +136,25 @@ reads as a clean review. A swallowed attack is a visible failure, never a silent
 
 Containment and detection are different layers, and only the first is the boundary.
 
-The deterministic detector (`detect.py`) reports **unambiguous tells only** — phrases
-with no honest reading in pull-request prose. Measured:
+The deterministic detector (`detect.py`) reports two rule classes. Most are
+**unambiguous tells** — phrases with no honest reading in pull-request prose. One is
+not: the suppression rule matches a negated reporting verb whose object is the review's
+own output — and an adjudication register writes that same construction honestly, when
+a reviewer refutes a finding and asks that it not be raised. There is no lexical
+distinction between the two, so
+that rule carries a **known benign class**. It measured zero false positives across 554
+real texts from this fork, so it does not fire today; it would fire on a PR body quoting
+an adjudication verdict. That is a credibility cost, not a security regression, and it
+is named here rather than discovered later.
+
+**This paragraph is deliberately not written with the example sentence in it.** An
+earlier draft quoted the benign phrasing verbatim, and the control that requires zero
+false positives on this repository's own documents failed — on this file. That is the
+rule behaving exactly as described, and it is the sharpest available demonstration that
+the benign class is real: a document *about* the attack instantiated the attack's
+construction and was flagged for it. Describe the shape here; do not write it out.
+
+Measured:
 
 | | |
 |---|---|
@@ -198,7 +215,7 @@ A stage that builds a prompt must envelope first, without exception.
 |---|---|---|
 | [#116](https://github.com/launchpad-26/buzz/issues/116) pre-flight | `fetch.fetch_all(pr, repo)` — emit one labelled field per entry point | concatenate surfaces into one blob, or build a prompt |
 | [#117](https://github.com/launchpad-26/buzz/issues/117) dimensions | `contain.render(surfaces, nonce)` before any text reaches a model | place any surface above the preamble or after the closing marker |
-| [#118](https://github.com/launchpad-26/buzz/issues/118) adjudication | read findings and contained blocks only | re-read raw PR text to "check for itself" |
+| [#118](https://github.com/launchpad-26/buzz/issues/118) adjudication | `contain.findings_for(surfaces, nonce)` — findings and contained blocks only | re-read raw PR text to "check for itself" |
 | [#119](https://github.com/launchpad-26/buzz/issues/119) publish | `review.render_review(findings, states)` | publish evidence in raw form — quote post-escape or not at all |
 
 All four route the same seven labels: `pr_title`, `pr_body`, `pr_diff`,
@@ -209,9 +226,9 @@ that untrusted text is carried through as data and "the mitigation lives in the 
 that does call a model". That is correct *because* #116 makes no model call. It stops
 being correct the moment #116 grows one, so if that changes, this table changes with it.
 
-**#117 carries the detection gap.** `detect.detect` catches 21 of 35 known attack
-shapes at zero false positives and misses semantic paraphrase and finding-suppression
-entirely — see § Detection. Those 14 cases are #117's responsibility, not an accident.
+**#117 carries the detection gap.** `detect.detect` catches 28 of 35 known attack
+shapes at zero false positives and misses semantic paraphrase entirely — see
+§ Detection. Those 7 cases are #117's responsibility, not an accident.
 A dimension that assumes pre-flight already flagged every attempt will miss two whole
 payload classes. This dependency is written down here because it is otherwise invisible
 from inside #117.

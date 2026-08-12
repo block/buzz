@@ -16,6 +16,7 @@ HERE = Path(__file__).parent
 
 #: (script, needs_network). The step-7 suite is invoked here; CI calls this runner.
 CONTROLS = [
+    ("check_contract.py", False),
     ("check_step2.py", False),
     ("check_step3.py", True),
     ("check_step45.py", False),

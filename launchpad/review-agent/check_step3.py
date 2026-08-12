@@ -61,6 +61,10 @@ data = json.loads(out)
 found = blocks_of(data["document"])
 
 check(code == 0, "(a) captured payload exits 0")
+# Every key on the JSON contract needs a reader, or it can vanish silently.
+check(re.fullmatch(r"[0-9a-f]{32}", data["nonce"]) is not None, "(a) --json carries the nonce")
+check(data["nonce"] in data["document"], "(a) the emitted nonce is the one in the markers")
+check(data["all_readable"] is True, "(a) --json carries all_readable")
 check(set(found) == set(ENTRY_POINTS), f"(a) seven blocks, one per label (got {len(found)})")
 
 for entry_point, sentinel in SENTINELS.items():

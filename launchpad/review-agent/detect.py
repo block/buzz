@@ -49,12 +49,32 @@ _STANDALONE = re.compile(
     re.IGNORECASE,
 )
 
-#: Suppression, which #120's second criterion names alongside skip and approve. Kept
-#: narrow — a negated reporting verb whose object is the reporting itself. Measured at
-#: zero false positives across both benign corpora, including this repo's own issues.
+#: Suppression, which #120's second criterion names alongside skip and approve.
+#:
+#: **This one is not an unambiguous tell, and saying otherwise would be false.** A
+#: negated reporting verb whose object is the review's own output is exactly what an
+#: attack writes — and exactly what an adjudication register writes when a reviewer
+#: refutes a finding and asks that it not be raised. There is no lexical distinction
+#: between the two, so the rule carries a known benign class rather than none. The
+#: example is not spelled out here for the same reason it is not spelled out in
+#: CONTAINMENT.md: writing it would trip this very rule.
+#:
+#: Measured at zero false positives across 554 real texts (this fork's issues, PRs,
+#: comments and tracked documents), so it does not fire today. It fires the day someone
+#: pastes an adjudication verdict into a PR body — a Blocker on an honest PR, which is
+#: a credibility cost per PRD #109, not a security regression. Re-measure if that
+#: becomes common, and see CONTAINMENT.md § Detection.
 _SUPPRESS = re.compile(
-    r"(?:do\s+not|don't|never)\s+(?:report|mention|include|list|flag|raise)\b[^.!?]{0,60}"
-    r"\b(?:it|this|them|find|finding|findings|issue|as\s+a\s+finding|in\s+your)\b",
+    r"(?:do\s+not|don't|never)\s+(?:report|mention|include|list|flag|raise|surface)\b"
+    r"[^.!?]{0,60}?"
+    # The object must be the REVIEW's own output. An earlier version accepted any
+    # noun, which matched ordinary prose like "do not flag this as an issue — it is
+    # tracked in #137". Zero false positives were measured, but by luck of phrasing
+    # rather than by the property the contract claims, so the claim was made true.
+    r"\b(?:as\s+a\s+(?:finding|blocker|problem)"
+    r"|in\s+(?:your|the)\s+(?:review|summary|report|findings|comment|output)"
+    r"|to\s+the\s+(?:reviewer|maintainers?)"
+    r"|in\s+your\s+response)\b",
     re.IGNORECASE,
 )
 

@@ -285,6 +285,18 @@ def render(surfaces: dict, nonce: str, *, enabled: bool = True) -> tuple[str, li
     return "\n".join(lines), findings, all_readable
 
 
+def findings_for(surfaces: dict, nonce: str) -> list:
+    """Containment findings alone, for a stage that adjudicates rather than reads.
+
+    #118 must never re-read raw PR text "to check for itself" — that would put author
+    text back in a position the envelope exists to deny it. This is the entry point that
+    makes the prohibition followable: it returns what render() found, and nothing that
+    would tempt a caller back to the surfaces.
+    """
+    _, findings, _ = render(surfaces, nonce)
+    return findings
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import json as _json

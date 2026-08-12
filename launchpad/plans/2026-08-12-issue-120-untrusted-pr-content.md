@@ -278,11 +278,14 @@ OPEN      What the issue did not decide:
           - The script path. #116 says "path decided in the PR" and #120 says the
             same of fixtures. This plan proposes `launchpad/review-agent/` on the
             strength of AGENTS.md §3, but that is an assumption, not a ruling.
-          - "Structurally marked as data" has two readings. Delimiter-and-preamble
-            inside one prompt string, or a separate structured field the stage
-            receives out of band. This plan assumes the first, because it works
-            regardless of ADR #110's outcome. The second is stronger and should be
-            preferred if #110 lands somewhere that supports it.
+          - ~~"Structurally marked as data" has two readings.~~ **RESOLVED
+            2026-08-12, during the review-final fix round.** Both readings apply,
+            split by whether the stage calls a model: text entering a *prompt* is
+            enveloped, and a stage making no model call may carry labelled
+            structured fields. Recorded in CONTAINMENT.md § Consumer preamble and
+            applied per stage in § Contract for later stages. It does not wait on
+            ADR #110. Struck through rather than deleted so the decision is
+            traceable to the round that made it.
           - Unicode confusables can be escaped or flagged, but a model reads text
             visually rather than byte-wise, so a look-alike delimiter may still
             mislead a stage even when step 2 handles it correctly. Step 2 makes
