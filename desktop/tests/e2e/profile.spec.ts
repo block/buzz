@@ -104,16 +104,27 @@ async function addGenericAgent(
           __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
             command: string,
             payload?: Record<string, unknown>,
-          ) => Promise<{ agent?: { pubkey: string } }>;
+          ) => Promise<{ agent?: { pubkey: string }; id?: string }>;
         }
       ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
       if (!invoke) {
         throw new Error("Mock bridge is not installed.");
       }
 
+      const persona = await invoke("create_persona", {
+        input: {
+          displayName: agentName,
+          systemPrompt,
+        },
+      });
+      if (!persona.id) {
+        throw new Error("Mock persona creation did not return an id.");
+      }
+
       const created = await invoke("create_managed_agent", {
         input: {
           name: agentName,
+          personaId: persona.id,
           spawnAfterCreate: true,
           systemPrompt,
         },
@@ -163,6 +174,72 @@ async function waitForMockLiveSubscription(page: Page, channelName: string) {
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
+});
+
+test("profile panel shows communication actions as quick action tiles", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await page.evaluate((bobPubkey) => {
+    const emit = (
+      window as Window & {
+        __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+          channelName: string;
+          content: string;
+          pubkey: string;
+        }) => unknown;
+      }
+    ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) {
+      throw new Error("Mock message emitter is unavailable.");
+    }
+    emit({
+      channelName: "general",
+      content: "Profile action tile check",
+      pubkey: bobPubkey,
+    });
+  }, TEST_IDENTITIES.bob.pubkey);
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Profile action tile check" });
+  await expect(messageRow).toBeVisible();
+  await messageRow.locator("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByTestId("user-profile-header-edit-agent")).toHaveCount(
+    0,
+  );
+  const actionGroup = panel.getByTestId("user-profile-primary-actions");
+  await expect(actionGroup).toBeVisible();
+  await expect(actionGroup).toHaveClass(/grid-flow-col/);
+  await expect(actionGroup).toHaveClass(/auto-cols-fr/);
+  const waveAction = panel.getByTestId("user-profile-wave");
+  const messageAction = panel.getByTestId("user-profile-message");
+  const huddleAction = panel.getByTestId("user-profile-huddle");
+  await expect(waveAction).toHaveClass(/flex-col/);
+  await expect(messageAction).toHaveClass(/flex-col/);
+  await expect(huddleAction).toHaveClass(/flex-col/);
+  const communicationActionOrder = await actionGroup
+    .locator("button[data-testid]")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("data-testid")),
+    );
+  expect(communicationActionOrder).toEqual([
+    "user-profile-message",
+    "user-profile-huddle",
+    "user-profile-wave",
+  ]);
+  await expect(panel.getByTestId("user-profile-copy-pubkey")).toBeVisible();
+
+  await waveAction.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
+  await expect(page.getByTestId("message-wave-attachment")).toBeVisible();
 });
 
 test("keeps the saved profile description after a community round trip", async ({
@@ -860,7 +937,11 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
 }) => {
   await installMockBridge(page, {
     agentMemory: createMockAgentMemoryListing(),
+    // The viewer is the agent's verified NIP-OA owner, so archiveActions
+    // grants the Archive row (canArchive gate; the relay re-verifies on submit).
+    oaOwnerIsMe: true,
   });
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/");
 
   const longAgentInstruction = [
@@ -911,57 +992,538 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await messageRow.locator("button").first().click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await expect(page.getByTestId("user-profile-message")).toBeVisible();
+  await expect(page.getByTestId("user-profile-huddle")).toHaveCount(0);
+  await expect(page.getByTestId("user-profile-wave")).toHaveCount(0);
+  const agentPresenceBadge = page.getByTestId("user-profile-presence-badge");
+  await expect(agentPresenceBadge).toBeVisible();
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
+  const headerEditAgent = page.getByTestId("user-profile-header-edit-agent");
+  await expect(headerEditAgent).toHaveText("Edit");
+  await expect(headerEditAgent.locator("svg")).toHaveCount(0);
+  await expect(
+    page.getByTestId("user-profile-settings-menu-trigger"),
+  ).toHaveCount(0);
+  const closePanelButton = page.getByTestId("auxiliary-panel-close");
+  const headerActionOrder = await headerEditAgent
+    .locator("xpath=..")
+    .locator("button")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("data-testid")),
+    );
+  expect(headerActionOrder.at(-2)).toBe("user-profile-header-edit-agent");
+  expect(headerActionOrder.at(-1)).toBe("auxiliary-panel-close");
+  await headerEditAgent.click();
+  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await page
+    .getByTestId("persona-dialog")
+    .getByRole("button", { name: "Cancel" })
+    .click();
+  await expect(closePanelButton).toBeVisible();
+  const agentEdit = page.getByTestId("user-profile-edit-agent");
+  const agentEditIcon = page.getByTestId("user-profile-edit-agent-icon");
+  await expect(agentEdit).toBeVisible();
+  await expect(agentEditIcon).toHaveCSS("opacity", "0");
+  await agentEdit.hover();
+  await expect(agentEditIcon).toHaveCSS("opacity", "1");
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Stop");
+  await expect(page.getByTestId("user-profile-agent-restart")).toBeVisible();
+  const runningAgentActionOrder = await page
+    .getByTestId("user-profile-primary-actions")
+    .locator("button[data-testid]")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("data-testid")),
+    );
+  expect(runningAgentActionOrder).toEqual([
+    "user-profile-agent-primary-action",
+    "user-profile-agent-restart",
+    "user-profile-message",
+  ]);
+  const runningAgentActionWidths = await page
+    .getByTestId("user-profile-primary-actions")
+    .locator("button[data-testid]")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.getBoundingClientRect().width),
+    );
+  expect(
+    runningAgentActionWidths.every(
+      (width) => Math.abs(width - runningAgentActionWidths[0]) <= 1,
+    ),
+  ).toBe(true);
+  const agentPrimaryAction = page.getByTestId(
+    "user-profile-agent-primary-action",
+  );
+  await expect(agentPrimaryAction).toHaveClass(/bg-foreground/);
+  await expect(agentPrimaryAction).toHaveClass(/text-background/);
+  await agentPrimaryAction.click();
+  await expect(agentPrimaryAction).toHaveAttribute("aria-label", "Start agent");
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Offline");
+  await expect(agentPrimaryAction).toHaveClass(/bg-foreground/);
+  await expect(agentPrimaryAction).toHaveClass(/text-background/);
+  await expect(page.getByTestId("user-profile-agent-restart")).toHaveCount(0);
+  const stoppedAgentActionOrder = await page
+    .getByTestId("user-profile-primary-actions")
+    .locator("button[data-testid]")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("data-testid")),
+    );
+  expect(stoppedAgentActionOrder).toEqual([
+    "user-profile-agent-primary-action",
+    "user-profile-message",
+  ]);
+  await expect(agentPrimaryAction).toBeEnabled();
+  await agentPrimaryAction.click();
+  await expect(agentPrimaryAction).toHaveAttribute("aria-label", "Stop");
+  await expect(agentPresenceBadge).toHaveAttribute("aria-label", "Online");
+  await expect(page.getByTestId("user-profile-agent-restart")).toBeVisible();
   await expectHashSearchParam(page, "profileTab", null);
 
   await expect(page.getByTestId("user-profile-tab-info")).toBeVisible();
-  await expect(page.getByTestId("user-profile-runtime-status")).toHaveAttribute(
-    "data-status",
-    "running",
+  const profileScrollBody = page.getByTestId("user-profile-scroll-body");
+  const profileHeader = page.getByTestId("user-profile-panel-header");
+  const primaryActions = page.getByTestId("user-profile-primary-actions");
+  const stickyHero = page.getByTestId("user-profile-sticky-hero");
+  const stickyTabs = page.getByTestId("user-profile-sticky-tabs");
+  const stickyChromeSurface = page.getByTestId(
+    "user-profile-sticky-chrome-surface",
   );
-  await page.getByTestId("user-profile-tab-runtime").click();
-  await expectHashSearchParam(page, "profileTab", "runtime");
-  const instructionPane = page.getByTestId("user-profile-agent-instruction");
-  await expect(instructionPane).toContainText(
-    "Watch the channel and help when asked.",
+  await expect(stickyHero).toHaveCSS("position", "sticky");
+  await expect(stickyTabs).toHaveCSS("position", "sticky");
+  await expect(stickyTabs).toHaveCSS("padding-top", "8px");
+  await expect(profileHeader).toHaveCSS("backdrop-filter", "none");
+  await expect(stickyHero).toHaveCSS("backdrop-filter", "none");
+  await expect(stickyTabs).toHaveCSS("backdrop-filter", "none");
+  await profileScrollBody.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(stickyChromeSurface).toHaveAttribute("data-active", "false");
+  await expect(stickyChromeSurface).toHaveCSS("opacity", "0");
+  await expect(primaryActions).toHaveCSS("opacity", "1");
+  await expect(primaryActions).toHaveCSS("transform", "none");
+  for (const removedFadeTestId of [
+    "user-profile-header-blur-fade",
+    "user-profile-hero-blur-fade",
+    "user-profile-sticky-blur-fade",
+  ]) {
+    await expect(page.getByTestId(removedFadeTestId)).toHaveCount(0);
+  }
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await profileScrollBody.evaluate((element) => {
+    element.scrollTop = 24;
+  });
+  await expect(primaryActions).not.toHaveAttribute("aria-hidden", "true");
+  await expect(primaryActions).toHaveCSS("opacity", "0.75");
+  await expect(primaryActions).toHaveCSS("transform", "none");
+  await profileScrollBody.evaluate((element) => {
+    element.scrollTop = 48;
+  });
+  await expect(primaryActions).not.toHaveAttribute("aria-hidden", "true");
+  await expect(primaryActions).toHaveCSS("opacity", "0.5");
+  await expect(primaryActions).toHaveCSS("transform", "none");
+  await profileScrollBody.evaluate((element) => {
+    element.scrollTop = 96;
+  });
+  await expect(primaryActions).toHaveAttribute("aria-hidden", "true");
+  await expect(primaryActions).toHaveCSS("opacity", "0");
+  await expect(primaryActions).toHaveCSS("transform", "none");
+  await profileScrollBody.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(primaryActions).not.toHaveAttribute("aria-hidden", "true");
+  await expect(primaryActions).toHaveCSS("opacity", "1");
+  await expect(primaryActions).toHaveCSS("transform", "none");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  const stickyOffsets = await page
+    .getByTestId("user-profile-summary-scroll-layout")
+    .evaluate((layout) => {
+      const tabs = layout.querySelector<HTMLElement>(
+        '[data-testid="user-profile-sticky-tabs"]',
+      );
+      return {
+        heroHeight: Number.parseFloat(
+          getComputedStyle(layout).getPropertyValue(
+            "--buzz-profile-sticky-hero-height",
+          ),
+        ),
+        tabsTop: tabs ? Number.parseFloat(getComputedStyle(tabs).top) : 0,
+      };
+    });
+  expect(stickyOffsets.heroHeight).toBeGreaterThan(0);
+  expect(stickyOffsets.tabsTop).toBeCloseTo(stickyOffsets.heroHeight, 0);
+  await profileScrollBody.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(
+    page.getByTestId("user-profile-primary-actions"),
+  ).not.toBeInViewport();
+  await expect(primaryActions).toHaveCSS("opacity", "0");
+  await expect(stickyChromeSurface).toHaveAttribute("data-active", "true");
+  await expect(stickyChromeSurface).toHaveCSS("opacity", "1");
+  await expect(stickyChromeSurface).toHaveCSS("pointer-events", "none");
+  await expect(stickyChromeSurface).not.toHaveCSS("backdrop-filter", "none");
+  await expect(stickyHero).toBeInViewport();
+  await expect(stickyTabs).toBeInViewport();
+  const stickyChromeRects = await Promise.all(
+    [profileHeader, stickyHero, stickyTabs].map((element) =>
+      element.evaluate((node) => node.getBoundingClientRect().toJSON()),
+    ),
   );
-  await expect(instructionPane).toHaveClass(/line-clamp-2/);
-  await page.getByTestId("user-profile-agent-instruction-row").click();
-  await expectHashSearchParam(page, "profileView", "instructions");
+  expect(stickyChromeRects[1]?.top).toBeCloseTo(
+    stickyChromeRects[0]?.bottom ?? 0,
+    0,
+  );
+  expect(
+    Math.abs(
+      (stickyChromeRects[2]?.top ?? 0) - (stickyChromeRects[1]?.bottom ?? 0),
+    ),
+  ).toBeLessThanOrEqual(1);
+  const stickySurfaceRect = await stickyChromeSurface.evaluate((node) =>
+    node.getBoundingClientRect().toJSON(),
+  );
+  expect(stickySurfaceRect.top).toBeCloseTo(stickyChromeRects[0]?.top ?? 0, 0);
+  expect(stickySurfaceRect.bottom).toBeCloseTo(
+    stickyChromeRects[2]?.bottom ?? 0,
+    0,
+  );
+  await profileScrollBody.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(stickyChromeSurface).toHaveAttribute("data-active", "false");
+  await expect(stickyChromeSurface).toHaveCSS("opacity", "0");
   await expect(
-    page.getByRole("heading", { level: 2, name: "Instructions" }),
+    page.getByTestId("user-profile-panel").getByRole("heading", {
+      exact: true,
+      level: 2,
+      name: "Info",
+    }),
   ).toBeVisible();
+  await expect(page.getByTestId("user-profile-info-sections")).toHaveClass(
+    /space-y-4/,
+  );
   await expect(
-    page.getByTestId("user-profile-agent-instructions-view"),
-  ).toContainText("When uncertainty remains");
-  await page.getByTestId("user-profile-panel-back").click();
-  await expectHashSearchParam(page, "profileView", null);
-  await expectHashSearchParam(page, "profileTab", "runtime");
+    page.getByTestId("user-profile-tab-content-transition"),
+  ).toHaveClass(/pt-2/);
+  const infoSection = page.getByTestId("user-profile-info-section");
   await expect(
-    page.getByRole("heading", { level: 2, name: "Profile" }),
-  ).toBeVisible();
-
-  await page.getByTestId("user-profile-tab-runtime").click();
-  await expectHashSearchParam(page, "profileTab", "runtime");
-  // The dedicated Model row was consolidated into the runtime config panel;
-  // Model now renders as a normalized config row with real provenance.
+    infoSection.getByRole("heading", { exact: true, name: "Info" }),
+  ).toHaveClass(/text-xs/);
+  await expect(
+    infoSection.getByRole("heading", { exact: true, name: "Info" }),
+  ).toHaveClass(/text-muted-foreground\/70/);
+  await expect(
+    infoSection.locator('[data-slot="panel-section-header"]'),
+  ).toHaveClass(/px-4/);
+  await expect(
+    infoSection
+      .locator('[data-slot="panel-section-card"]')
+      .getByRole("heading", { exact: true, name: "Info" }),
+  ).toHaveCount(0);
   await expect(
     page
-      .getByTestId("user-profile-panel")
-      .getByText("Model", { exact: true })
-      .first(),
-  ).toBeVisible();
-  await expect(page.getByTestId("user-profile-respond-to")).toBeVisible();
-
-  await page.getByTestId("user-profile-settings-menu-trigger").click();
+      .getByTestId("user-profile-public-key")
+      .locator('[data-slot="profile-field-icon"]'),
+  ).toHaveCount(0);
   await expect(
-    page.getByTestId(`user-profile-agent-auto-start-${agentPubkey}`),
+    page
+      .getByTestId("user-profile-managed-by")
+      .locator('[data-slot="profile-field-icon"]'),
+  ).toHaveCount(0);
+  const managedByRow = page.getByTestId("user-profile-managed-by");
+  const managedByActionIndicator = page.getByTestId(
+    "user-profile-managed-by-action-indicator",
+  );
+  await expect(managedByActionIndicator).toHaveCSS("opacity", "0");
+  await managedByRow.hover();
+  await expect(managedByActionIndicator).toHaveCSS("opacity", "1");
+  await expect(page.getByTestId("user-profile-owner-avatar")).toHaveCount(0);
+  await expect(
+    page.getByTestId("user-profile-model-settings-section"),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("user-profile-agent-management-section")
+      .locator('[data-slot="panel-section-header"]'),
+  ).toHaveCount(0);
+  const instructionRow = page.getByTestId("user-profile-agent-instruction-row");
+  await expect(instructionRow).toContainText("Agent instructions");
+  await expect(instructionRow).not.toContainText("View");
+  const publicKeyRow = page.getByTestId("user-profile-public-key");
+  const publicKeyCopy = page.getByTestId("user-profile-public-key-copy-status");
+  await expect(publicKeyCopy).toHaveCSS("opacity", "0");
+  await publicKeyRow.hover();
+  await expect(publicKeyCopy).toHaveCSS("opacity", "1");
+  await publicKeyRow.click();
+  await expect(publicKeyCopy).toHaveAttribute("data-copied", "true");
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(agentPubkey);
+  await expect(page.getByTestId("user-profile-agent-instruction")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("user-profile-edit-agent-row")).toHaveCount(0);
+  await instructionRow.click();
+  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await page
+    .getByTestId("persona-dialog")
+    .getByRole("button", {
+      name: "Cancel",
+    })
+    .click();
+  const managementRowOrder = await page
+    .getByTestId("user-profile-agent-management-section")
+    .locator("button[data-testid]")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("data-testid")),
+    );
+  expect(managementRowOrder).toEqual([
+    "user-profile-duplicate-agent-row",
+    "user-profile-export-agent-row",
+    "user-profile-archive-agent-row",
+    "user-profile-delete-agent-row",
+  ]);
+  for (const rowTestId of managementRowOrder) {
+    const actionRow = page.getByTestId(rowTestId ?? "");
+    await expect(
+      actionRow.locator(":scope > svg[data-slot='profile-action-icon']"),
+    ).toHaveCount(1);
+    await expect(actionRow.locator(":scope > span.rounded-full")).toHaveCount(
+      0,
+    );
+  }
+  await page.getByTestId("user-profile-duplicate-agent-row").click();
+  const duplicateDialog = page.getByTestId("persona-dialog");
+  await expect(duplicateDialog).toBeVisible();
+  await duplicateDialog.getByRole("button", { name: "Cancel" }).click();
+  await page.getByTestId("user-profile-export-agent-row").click();
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  await expect(exportDialog).toBeVisible();
+  await exportDialog.getByRole("button", { name: "Cancel" }).click();
+  const archiveAgentRow = page.getByTestId("user-profile-archive-agent-row");
+  await expect(archiveAgentRow).toHaveText(/Archive agent/);
+  await archiveAgentRow.click();
+  await expect(page.getByTestId("archive-confirm-dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  const deleteAgentRow = page.getByTestId("user-profile-delete-agent-row");
+  await expect(deleteAgentRow).toHaveText("Delete agent");
+  await deleteAgentRow.click();
+  await expect(page.getByTestId("agent-delete-confirm-dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByTestId("user-profile-tab-memories")).toHaveText(
+    "Memories",
+  );
+  await expect(page.getByTestId("user-profile-tab-runtime")).toHaveText(
+    "Runtime",
+  );
+  await expect(page.getByTestId("user-profile-tab-channels")).toHaveText(
+    "Channels",
+  );
+  await expect(page.getByTestId("user-profile-tab-list")).toHaveClass(
+    /bg-muted/,
+  );
+  const actionBackground = await page
+    .getByTestId("user-profile-agent-restart")
+    .evaluate((element) => getComputedStyle(element).backgroundColor);
+  const segmentBackground = await page
+    .getByTestId("user-profile-tab-list")
+    .evaluate((element) => getComputedStyle(element).backgroundColor);
+  expect(actionBackground).toBe(segmentBackground);
+  await expect(page.getByTestId("user-profile-tab-indicator")).toHaveCSS(
+    "transform",
+    "matrix(1, 0, 0, 1, 0, 0)",
+  );
+  await expect(page.getByTestId("user-profile-runtime-status")).toHaveCount(0);
+  await expect(page.getByTestId("user-profile-create-card")).toHaveCount(0);
+  await expect(
+    page.getByTestId("user-profile-model-settings-edit"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("agent-config-model-copy-status")).toHaveCount(
+    0,
+  );
+  const tabContentTransition = page.getByTestId(
+    "user-profile-tab-content-transition",
+  );
+  await expect(tabContentTransition).toHaveClass(/pt-2/);
+  const tabMotionSamplesPromise = tabContentTransition.evaluate(
+    (container) =>
+      new Promise<Array<{ activeTab: string | undefined; x: number[] }>>(
+        (resolve) => {
+          const samples: Array<{
+            activeTab: string | undefined;
+            x: number[];
+          }> = [];
+          const startedAt = performance.now();
+          const sample = () => {
+            samples.push({
+              activeTab: container.dataset.activeTab,
+              x: Array.from(container.children).map((child) => {
+                const transform = getComputedStyle(child).transform;
+                return transform === "none"
+                  ? 0
+                  : new DOMMatrixReadOnly(transform).m41;
+              }),
+            });
+            if (performance.now() - startedAt < 320) {
+              requestAnimationFrame(sample);
+            } else {
+              resolve(samples);
+            }
+          };
+          requestAnimationFrame(sample);
+        },
+      ),
+  );
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await expect(tabContentTransition).toHaveAttribute(
+    "data-transition-direction",
+    "forward",
+  );
+  const tabMotionSamples = await tabMotionSamplesPromise;
+  expect(
+    tabMotionSamples.some(
+      (sample) => sample.activeTab === "runtime" && sample.x.some((x) => x > 1),
+    ),
+  ).toBe(true);
+  expect(
+    tabMotionSamples.some(
+      (sample) =>
+        sample.activeTab === "runtime" && sample.x.some((x) => x < -1),
+    ),
+  ).toBe(true);
+  await expect
+    .poll(() =>
+      tabContentTransition.evaluate((container) =>
+        Array.from(container.children).every((child) => {
+          const transform = getComputedStyle(child).transform;
+          const x =
+            transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m41;
+          return Math.abs(x) < 1;
+        }),
+      ),
+    )
+    .toBe(true);
+  await expect(page.getByTestId("user-profile-tab-runtime")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  await expect(
+    page.getByTestId("user-profile-panel").getByRole("heading", {
+      exact: true,
+      level: 2,
+      name: "Activity",
+    }),
   ).toBeVisible();
-  await page.keyboard.press("Escape");
+  await expect(
+    page.getByTestId("user-profile-model-settings-section"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("user-profile-panel").getByRole("heading", {
+      exact: true,
+      level: 2,
+      name: "Agent configuration",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("user-profile-agent-instruction-row"),
+  ).toHaveCount(0);
+  const modelEditRow = page.getByRole("button", { name: "Edit Model" });
+  const modelEditIndicator = page.getByTestId(
+    "agent-config-model-edit-indicator",
+  );
+  await expect(modelEditIndicator).toHaveCSS("opacity", "0");
+  await modelEditRow.hover();
+  await expect(modelEditIndicator).toHaveCSS("opacity", "1");
+  await modelEditRow.click();
+  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await page
+    .getByTestId("persona-dialog")
+    .getByRole("button", { name: "Cancel" })
+    .click();
+  const acpRow = page.getByTestId("user-profile-acp");
+  const acpCopy = page.getByTestId("user-profile-acp-copy-status");
+  await expect(acpCopy).toHaveCSS("opacity", "0");
+  await acpRow.hover();
+  await expect(acpCopy).toHaveCSS("opacity", "1");
+  const startOnLaunchRow = page.getByTestId("user-profile-start-on-launch");
+  const startOnLaunchToggle = page.getByTestId(
+    "user-profile-start-on-launch-toggle",
+  );
+  await expect(startOnLaunchRow).not.toContainText("Yes");
+  await expect(startOnLaunchRow).toBeChecked();
+  await expect(startOnLaunchToggle).toHaveAttribute("data-state", "checked");
+  await startOnLaunchRow.click();
+  await expect(startOnLaunchRow).not.toBeChecked();
+  await expect(startOnLaunchToggle).toHaveAttribute("data-state", "unchecked");
+  await expectHashSearchParam(page, "profileTab", "runtime");
+  const instancesSection = page.getByTestId("user-profile-instances-section");
+  await expect(
+    instancesSection.getByRole("heading", {
+      exact: true,
+      level: 2,
+      name: "Instances",
+    }),
+  ).toHaveClass(/text-xs/);
+  await expect(
+    instancesSection
+      .locator('[data-slot="panel-section-card"]')
+      .getByRole("heading", { exact: true, name: "Instances" }),
+  ).toHaveCount(0);
+  const runtimeSectionHeaderOffsets = await Promise.all(
+    [
+      page.getByTestId("user-profile-runtime-activity-section"),
+      page.getByTestId("user-profile-agent-configuration-section"),
+      page.getByTestId("user-profile-model-settings-section"),
+      instancesSection,
+    ].map((section) =>
+      section.evaluate((element) => {
+        const header = element.querySelector(
+          '[data-slot="panel-section-header"]',
+        );
+        const card = element.querySelector('[data-slot="panel-section-card"]');
+        if (
+          !(header instanceof HTMLElement) ||
+          !(card instanceof HTMLElement)
+        ) {
+          throw new Error("Expected panel section header and card");
+        }
+        return (
+          card.getBoundingClientRect().top - header.getBoundingClientRect().top
+        );
+      }),
+    ),
+  );
+  expect(
+    runtimeSectionHeaderOffsets.every(
+      (offset) => Math.abs(offset - runtimeSectionHeaderOffsets[0]) <= 1,
+    ),
+  ).toBe(true);
+  const instancesRow = page.getByTestId("user-profile-instances");
+  await expect(instancesRow).toContainText("1 instance");
+  await expect(instancesRow).toHaveClass(/min-h-16/);
+  await instancesRow.click();
+  await expect(
+    page.getByTestId(`user-profile-instance-${agentPubkey}`),
+  ).toContainText("Current");
 
-  await page.getByTestId("user-profile-diagnostics-ingress").click();
+  await expect(
+    page.getByTestId("user-profile-settings-menu-trigger"),
+  ).toHaveCount(0);
+
+  const diagnosticsIngress = page.getByTestId(
+    "user-profile-diagnostics-ingress",
+  );
+  await expect(diagnosticsIngress).not.toContainText("View");
+  await expect(
+    diagnosticsIngress.locator("svg.lucide-chevron-right"),
+  ).toBeVisible();
+  await expect(diagnosticsIngress.locator("svg.lucide-chevron-up")).toHaveCount(
+    0,
+  );
+  await diagnosticsIngress.click();
   await expectHashSearchParam(page, "profileView", "diagnostics");
   await expect(
-    page.getByRole("heading", { level: 2, name: "Harness Log" }),
+    page.getByRole("heading", { level: 2, name: "Harness log" }),
   ).toBeVisible();
   await expect(page.getByTestId("user-profile-agent-status")).toHaveCount(0);
   await expect(page.getByTestId("managed-agent-log-content")).toBeVisible();
@@ -973,6 +1535,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   ).toBeVisible();
 
   await page.getByTestId("user-profile-tab-info").click();
+  await expect(
+    page.getByTestId("user-profile-tab-content-transition"),
+  ).toHaveAttribute("data-transition-direction", "backward");
   await expectHashSearchParam(page, "profileTab", null);
   await page.getByTestId(`user-profile-view-activity-${agentPubkey}`).click();
   await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
@@ -984,12 +1549,36 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
 
   await page.getByTestId("user-profile-tab-channels").click();
   await expectHashSearchParam(page, "profileTab", "channels");
+  await expect(
+    page.getByTestId("user-profile-panel").getByRole("heading", {
+      exact: true,
+      level: 2,
+      name: "Channels",
+    }),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("user-profile-channels-section")
+      .locator('[data-slot="panel-section-header"]'),
+  ).toHaveCount(0);
   await expect(page.getByTestId("user-profile-channels-list")).toContainText(
     "#general",
   );
 
   await page.getByTestId("user-profile-tab-memories").click();
   await expectHashSearchParam(page, "profileTab", "memories");
+  await expect(
+    page.getByTestId("user-profile-panel").getByRole("heading", {
+      exact: true,
+      level: 2,
+      name: "Memories",
+    }),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("user-profile-memories-section")
+      .locator('[data-slot="panel-section-header"]'),
+  ).toHaveCount(0);
   await expect(page.getByTestId("agent-memory-section")).toBeVisible();
   await expect(page.getByTestId("agent-memory-list")).toContainText(
     "ui-density",
