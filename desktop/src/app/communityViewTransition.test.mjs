@@ -3,6 +3,7 @@ import test, { afterEach, mock } from "node:test";
 
 import {
   completeCommunityViewTransition,
+  isLinuxWebKitGtk,
   replaceCommunityDestinationRoute,
   runCommunityViewTransition,
 } from "./communityViewTransition.ts";
@@ -31,6 +32,54 @@ test("replaceCommunityDestinationRoute uses router history and encodes the chann
     replace: (href) => replacements.push(href),
   });
   assert.deepEqual(replacements, ["/channels/channel%2Fwith%20spaces"]);
+});
+
+const WEBKITGTK_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
+test("isLinuxWebKitGtk matches WebKitGTK and nothing else", () => {
+  assert.equal(isLinuxWebKitGtk(WEBKITGTK_UA), true);
+  assert.equal(
+    isLinuxWebKitGtk(
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    ),
+    false,
+  );
+  assert.equal(
+    isLinuxWebKitGtk(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    ),
+    false,
+  );
+  assert.equal(isLinuxWebKitGtk(""), false);
+});
+
+test("linux webkitgtk runs the update without starting a transition", async () => {
+  const startViewTransition = mock.fn((callback) => transitionFor(callback));
+  installBrowser(startViewTransition);
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "navigator",
+  );
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { userAgent: WEBKITGTK_UA },
+  });
+
+  try {
+    let updated = false;
+    await runCommunityViewTransition(async () => {
+      updated = true;
+    });
+    assert.equal(updated, true);
+    assert.equal(startViewTransition.mock.callCount(), 0);
+  } finally {
+    if (navigatorDescriptor) {
+      Object.defineProperty(globalThis, "navigator", navigatorDescriptor);
+    } else {
+      delete globalThis.navigator;
+    }
+  }
 });
 
 test("unsupported browsers execute the update and contain rejection", async () => {
