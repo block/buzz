@@ -36,20 +36,23 @@ import type {
   AgentPersona,
   ChannelMember,
   ChannelType,
-  UserSearchResult,
 } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
+import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
 import { hasMention } from "./hasMention";
 import { extractMentionPubkeys } from "./extractMentionPubkeys";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
+  appendUniqueName,
   buildTeamMentionCandidates,
+  formatSearchUserDisplayName,
+  formatSearchUserSecondaryLabel,
   formatTeamMention,
   globalSearchIdentityKey,
   type MentionCandidate,
@@ -64,24 +67,6 @@ export type PersonaMentionTarget = {
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
-function formatSearchUserDisplayName(user: UserSearchResult) {
-  return user.displayName?.trim() || user.nip05Handle?.trim() || null;
-}
-function formatSearchUserSecondaryLabel(user: UserSearchResult) {
-  const displayName = user.displayName?.trim();
-  const nip05Handle = user.nip05Handle?.trim();
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-  return null;
-}
-function appendUniqueName(current: string[], name: string): string[] {
-  return current.some(
-    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
-  )
-    ? current
-    : [...current, name];
-}
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -118,12 +103,17 @@ export function useMentions(
   const teamsQuery = useTeamsQuery();
   const agentAccessOwnerOnlyQuery = useAgentAccessOwnerOnlyQuery();
   const managedAgentDirectoryReady =
-    managedAgentsQuery.data !== undefined && managedAgentsQuery.error === null;
+    managedAgentsQuery.data !== undefined &&
+    managedAgentsQuery.error === null &&
+    !managedAgentsQuery.isFetching;
   const relayAgentDirectoryReady =
-    relayAgentsQuery.data !== undefined && relayAgentsQuery.error === null;
+    relayAgentsQuery.data !== undefined &&
+    relayAgentsQuery.error === null &&
+    !relayAgentsQuery.isFetching;
   const ownerPolicyReady =
     agentAccessOwnerOnlyQuery.data !== undefined &&
-    agentAccessOwnerOnlyQuery.error === null;
+    agentAccessOwnerOnlyQuery.error === null &&
+    !agentAccessOwnerOnlyQuery.isFetching;
   const agentDirectoriesReady =
     managedAgentDirectoryReady && relayAgentDirectoryReady && ownerPolicyReady;
   const canSearchGlobalUsers = canSearchGlobalPeople && agentDirectoriesReady;
@@ -401,7 +391,6 @@ export function useMentions(
         });
       }
     }
-
     const personaCandidates: MentionCandidate[] = activePersonas
       .filter((persona) => !managedAgentPersonaIds.has(persona.id))
       .map((persona) => ({
@@ -413,7 +402,6 @@ export function useMentions(
         isAgent: true,
       }))
       .filter((candidate) => candidate.displayName.trim().length > 0);
-
     return coalesceAgentAutocompleteCandidates(
       coalesceAutocompleteCandidatesByKey(
         [...candidatesByPubkey.values(), ...personaCandidates],
@@ -447,12 +435,10 @@ export function useMentions(
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
   ]);
-
   const admittedAgentPubkeys = React.useMemo(
     () => getAdmittedAgentPubkeys(mentionCandidates),
     [mentionCandidates],
   );
-
   const mentionCandidatesWithTeams = React.useMemo(
     () => [
       ...mentionCandidates,
@@ -464,7 +450,6 @@ export function useMentions(
     ],
     [mentionCandidates, personasQuery.data, teamsQuery.data],
   );
-
   const ownerPubkeys = React.useMemo(
     () => [
       ...new Set(
@@ -478,7 +463,6 @@ export function useMentions(
   const ownerProfilesQuery = useUsersBatchQuery(ownerPubkeys, {
     enabled: ownerPubkeys.length > 0,
   });
-
   const searchableNames = React.useMemo(
     () => uniqueAutocompleteLabels(mentionCandidatesWithTeams),
     [mentionCandidatesWithTeams],
@@ -830,6 +814,21 @@ export function useMentions(
     [admittedAgentPubkeys, agentIdentityPubkeys, mentionCandidates],
   );
 
+  const revalidateMentionPubkeys = useAgentMentionRevalidation({
+    agentPubkeys: agentIdentityPubkeys,
+    getSelectedAgentPubkeys: () => selectedAgentMentionPubkeysRef.current,
+    candidates: mentionCandidates,
+    currentPubkey,
+    eligibilityScope: mentionChannelId
+      ? { type: "channel", channelId: mentionChannelId }
+      : { type: "managed-only" },
+    sharedChannelIds,
+    ownerOnly: agentAccessOwnerOnlyQuery.data,
+    ownerPolicyError: agentAccessOwnerOnlyQuery.error,
+    refetchManagedAgents: managedAgentsQuery.refetch,
+    refetchRelayAgents: relayAgentsQuery.refetch,
+  });
+
   const extractMentionPersonas = React.useCallback(
     (text: string): PersonaMentionTarget[] => {
       const targets: PersonaMentionTarget[] = [];
@@ -972,6 +971,7 @@ export function useMentions(
     clearMentions,
     extractMentionPersonas,
     extractMentionPubkeys: extractMentionPubkeysForCurrentMentions,
+    revalidateMentionPubkeys,
     getDraftMentionRefs,
     getMentionDisplayName,
     handleMentionKeyDown,

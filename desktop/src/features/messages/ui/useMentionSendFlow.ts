@@ -240,7 +240,6 @@ export function useMentionSendFlow({
       startAgentMutation,
     ],
   );
-
   const createMentionedPersonaAgents = React.useCallback(
     async (trimmed: string, capturedChannelId: string) => {
       const personaMentions = mentions.extractMentionPersonas(trimmed);
@@ -251,7 +250,6 @@ export function useMentionSendFlow({
           pubkeys: [] as string[],
         };
       }
-
       const runtimes = await getAvailableRuntimes();
       const defaultRuntime = runtimes[0] ?? null;
       const errors: string[] = [];
@@ -260,13 +258,11 @@ export function useMentionSendFlow({
       const seenPersonaIds = new Set<string>();
       const shouldProvisionForDm =
         channelType === "dm" && Boolean(onPrepareSendChannel);
-
       for (const { displayName, persona } of personaMentions) {
         if (seenPersonaIds.has(persona.id)) {
           continue;
         }
         seenPersonaIds.add(persona.id);
-
         const { runtime } = resolvePersonaRuntime(
           persona.runtime,
           runtimes,
@@ -276,7 +272,6 @@ export function useMentionSendFlow({
           errors.push(`${displayName}: No agent runtime available.`);
           continue;
         }
-
         try {
           const input: CreateChannelManagedAgentInput & {
             channelId: string;
@@ -309,7 +304,6 @@ export function useMentionSendFlow({
           );
         }
       }
-
       return {
         agents,
         errors,
@@ -560,23 +554,28 @@ export function useMentionSendFlow({
             outgoingTags ?? [],
           );
           if (signal?.aborted) return;
+          const revalidatedMentionPubkeys =
+            await mentions.revalidateMentionPubkeys(mentionPubkeys);
+          if (signal?.aborted) return;
+          const revalidatedExplicitAgentPubkeys =
+            filterEffectiveExplicitAgentPubkeys(
+              draft.explicitAgentPubkeys,
+              revalidatedMentionPubkeys,
+            );
           await send(
             finalContent,
-            mentionPubkeys,
+            revalidatedMentionPubkeys,
             finalOutgoingTags,
             sendChannelId,
             draft.capturedThreadContext,
           );
           if (signal?.aborted) return;
-          if (effectiveExplicitAgentPubkeys.length > 0) {
-            // Promote only explicitly authored agents that remained effective
-            // for this successful send. "Send without inviting" removes its
-            // excluded recipients here as well as from event routing.
+          if (revalidatedExplicitAgentPubkeys.length > 0) {
             onSuccessfulExplicitAgentAudience?.({
               channelId: sendChannelId ?? draft.capturedChannelId ?? "",
               expectedGeneration: draft.audienceGeneration,
               expectedRevision: draft.audienceRevision,
-              explicitAgentPubkeys: effectiveExplicitAgentPubkeys,
+              explicitAgentPubkeys: revalidatedExplicitAgentPubkeys,
             });
           }
           if (draft.sentDraftKey) {
@@ -647,6 +646,7 @@ export function useMentionSendFlow({
       ensureManagedAgentMentionsReady,
       getManagedAgentsByPubkey,
       mentions.isAgentPubkey,
+      mentions.revalidateMentionPubkeys,
       onPrepareSendChannel,
       onSendRef,
       onSuccessfulExplicitAgentAudience,
