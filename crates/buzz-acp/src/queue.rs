@@ -590,6 +590,39 @@ impl EventQueue {
             .any(|id| !self.in_flight_channels.contains(id))
     }
 
+    /// Returns `true` if any undispatched work remains for a channel that is
+    /// NOT currently in-flight — *including* work held back only by a
+    /// `retry_after` backoff throttle.
+    ///
+    /// This is deliberately broader than [`has_flushable_work`](Self::has_flushable_work):
+    /// that method excludes `retry_after`-throttled channels because they are
+    /// not flushable *right now*, but the events are still queued and MUST be
+    /// delivered once the backoff deadline passes. Idle-pool-sleep teardown
+    /// must gate on this, not on flushability — a failed turn requeued with a
+    /// future backoff deadline is real queued work, and sleeping on it (while
+    /// the maintenance timer is disabled and lazy re-wake is itself gated by
+    /// flushability) would strand the batch until unrelated traffic arrives.
+    ///
+    /// Covers the three tables where undispatched, non-in-flight work can
+    /// live: non-empty `queues` (throttled or not), pending `cancelled_batches`,
+    /// and `withheld_native_steer` events. Read-only (no in-flight expiry) —
+    /// in-flight liveness is gated separately by [`has_in_flight`](Self::has_in_flight).
+    pub fn has_undispatched_work(&self) -> bool {
+        let has_queued = self
+            .queues
+            .iter()
+            .any(|(id, q)| !q.is_empty() && !self.in_flight_channels.contains(id));
+        let has_cancelled = self
+            .cancelled_batches
+            .keys()
+            .any(|id| !self.in_flight_channels.contains(id));
+        let has_withheld = self
+            .withheld_native_steer
+            .iter()
+            .any(|(id, v)| !v.is_empty() && !self.in_flight_channels.contains(id));
+        has_queued || has_cancelled || has_withheld
+    }
+
     /// Number of channels with pending events.
     pub fn pending_channels(&self) -> usize {
         self.queues.len()
@@ -990,6 +1023,9 @@ pub enum ConversationContext {
 /// A single message in a conversation context section.
 #[derive(Debug, Clone)]
 pub struct ContextMessage {
+    /// Nostr event ID. Legacy REST fixtures may omit it, in which case it is
+    /// empty and cannot participate in delivery deduplication.
+    pub event_id: String,
     pub pubkey: String,
     pub timestamp: String,
     pub content: String,
@@ -1000,6 +1036,8 @@ pub struct ContextMessage {
 pub struct PromptChannelInfo {
     pub name: String,
     pub channel_type: String,
+    /// Channel description from the kind-39000 `about` tag, if present.
+    pub description: Option<String>,
 }
 
 /// Minimal profile fields needed to label users in ACP prompts.
@@ -1228,6 +1266,48 @@ fn resolve_reply_anchor(
     )
 }
 
+/// Maximum length (in characters) of a channel description rendered into `[Context]`.
+///
+/// Limits prompt bloat from unusually long descriptions; a raw embedded newline
+/// in a description must not be able to spoof another `[Context]` field, so
+/// multiline text is collapsed to single-space-joined lines before truncation.
+const MAX_DESCRIPTION_LEN: usize = 500;
+
+/// Append a `Description: …` line to a `[Context]` block when non-empty.
+///
+/// Collapses internal newlines (any `\r\n`, `\r`, or `\n`) to a single space
+/// so a multi-line description cannot inject a fake `[Context]` field line.
+/// Truncates at [`MAX_DESCRIPTION_LEN`] characters with a `…` marker.
+fn append_channel_description(s: &mut String, channel_info: Option<&PromptChannelInfo>) {
+    let desc = match channel_info.and_then(|ci| ci.description.as_deref()) {
+        Some(d) if !d.is_empty() => d,
+        _ => return,
+    };
+    // Collapse newlines to spaces so the description can never spoof another field.
+    let collapsed: String = desc
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return;
+    }
+    // Truncate at a character boundary (not byte boundary) to avoid splitting
+    // multi-byte sequences.
+    let truncated = if collapsed.chars().count() > MAX_DESCRIPTION_LEN {
+        let end = collapsed
+            .char_indices()
+            .nth(MAX_DESCRIPTION_LEN)
+            .map(|(i, _)| i)
+            .unwrap_or(collapsed.len());
+        format!("{}…", &collapsed[..end])
+    } else {
+        collapsed
+    };
+    s.push_str(&format!("\nDescription: {truncated}"));
+}
+
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
@@ -1241,6 +1321,7 @@ fn format_context_hints(
     thread_tags: &ThreadTags,
     is_dm: bool,
     has_conversation_context: bool,
+    conversation_context_had_delivered_events: bool,
     reply_anchor: Option<&str>,
 ) -> String {
     let channel_display = match channel_info {
@@ -1258,6 +1339,10 @@ fn format_context_hints(
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
         } else if has_conversation_context {
             "Conversation context included below. Use `buzz messages get --channel <UUID>` for full history if truncated."
+        } else if conversation_context_had_delivered_events && is_reply {
+            "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read the reply chain."
+        } else if conversation_context_had_delivered_events {
+            "Earlier conversation context was already delivered in this session. Use `buzz messages get --channel <UUID>` to re-read it."
         } else if is_reply {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch the reply chain."
         } else {
@@ -1285,15 +1370,18 @@ fn format_context_hints(
     } else if let Some(ref root) = thread_tags.root_event_id {
         let ctx_hint = if has_conversation_context {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
+        } else if conversation_context_had_delivered_events {
+            "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read it."
         } else {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch thread context."
         };
         let mut s = format!(
             "[Context]\n\
              Scope: thread\n\
-             Channel: {channel_display}\n\
-             Thread root: {root}"
+             Channel: {channel_display}"
         );
+        append_channel_description(&mut s, channel_info);
+        s.push_str(&format!("\nThread root: {root}"));
         if let Some(ref parent) = thread_tags.parent_event_id {
             if parent != root {
                 s.push_str(&format!("\nParent: {parent}"));
@@ -1308,8 +1396,11 @@ fn format_context_hints(
         let mut s = format!(
             "[Context]\n\
              Scope: channel\n\
-             Channel: {channel_display}\n\
-             Hint: Use `buzz messages get --channel <UUID>` for recent messages if needed."
+             Channel: {channel_display}"
+        );
+        append_channel_description(&mut s, channel_info);
+        s.push_str(
+            "\nHint: Use `buzz messages get --channel <UUID>` for recent messages if needed.",
         );
         if let Some(event_id) = reply_anchor {
             append_new_thread_reply_instruction(&mut s, event_id);
@@ -1359,6 +1450,9 @@ pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
+    /// True when delivery-delta filtering removed at least one event that this
+    /// live session had already received. Trigger-only context does not set it.
+    pub conversation_context_had_delivered_events: bool,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
@@ -1374,9 +1468,62 @@ pub struct FormatPromptArgs<'a> {
     ///
     /// For modern agents (protocol_version >= 2) the section is delivered via
     /// the system role in session/new; omit here to avoid duplication.
-    /// For legacy agents it rides in the user message on every turn of the
-    /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Set once this session's standing context has already been delivered —
+    /// see [`StandingContext`]. Only meaningful for legacy agents; modern
+    /// agents are gated by `has_system_prompt_support` regardless.
+    ///
+    /// Defaults to `false` so a caller that never sets it behaves as if this
+    /// were the session's first message.
+    pub standing_context_sent: bool,
+}
+
+/// The prompt sections that do not change for the life of a session: base
+/// prompt, persona, team instructions, core memory, and channel canvas.
+///
+/// Protocol-v2 agents receive all of this through the system role at
+/// `session/new`, once. Legacy agents (`protocol_version < 2`) have no system
+/// role, so it has to ride in a user message — but only in the session's
+/// *first* one. Re-sending it every turn makes the standing framing the newest
+/// and most-repeated text in the window, outweighing the conversation it exists
+/// to frame, and evicting real channel history that much sooner.
+///
+/// Both legacy dispatch paths (initial message, batch flush) render through
+/// this one type so their section set and ordering cannot drift apart.
+#[derive(Default)]
+pub(crate) struct StandingContext<'a> {
+    pub base_prompt: Option<&'a str>,
+    pub system_prompt: Option<&'a str>,
+    pub team_instructions: Option<&'a str>,
+    pub agent_core: Option<&'a str>,
+    pub agent_canvas: Option<&'a str>,
+}
+
+impl StandingContext<'_> {
+    /// Render the sections in the order legacy agents have always seen them.
+    pub(crate) fn sections(&self) -> Vec<String> {
+        let mut sections = Vec::with_capacity(5);
+        if let Some(bp) = self.base_prompt {
+            sections.push(base_section(bp));
+        }
+        if let Some(sp) = self.system_prompt {
+            sections.push(format!("[System]\n{sp}"));
+        }
+        if let Some(team) = self
+            .team_instructions
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(format!("[Team Instructions]\n{team}"));
+        }
+        if let Some(core) = self.agent_core {
+            sections.push(core.to_string());
+        }
+        if let Some(canvas) = self.agent_canvas {
+            sections.push(canvas.to_string());
+        }
+        sections
+    }
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1391,12 +1538,12 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
-/// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
-/// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
-/// 2. `[Agent Memory — core]` — if agent core memory is set
-/// 3. `[Context]` — scope, channel name, and contextual hints for the agent
-/// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
-/// 5. `[Event]` / `[Buzz events]` — the triggering event(s)
+/// 0. [`StandingContext`] — `[Base]`, `[System]`, `[Team Instructions]`,
+///    `[Agent Memory — core]`, `[Channel Canvas]`. Legacy agents only, and only
+///    on the session's first message (see `standing_context_sent`)
+/// 1. `[Context]` — scope, channel name, and contextual hints for the agent
+/// 2. `[Thread Context]` or `[Conversation Context]` — if fetched
+/// 3. `[Event]` / `[Buzz events]` — the triggering event(s)
 ///
 /// Each section is returned as its own block rather than one joined string so
 /// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
@@ -1428,38 +1575,22 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     let mut sections: Vec<String> = Vec::with_capacity(7);
 
-    // For legacy agents (protocol_version < 2), inject base_prompt and
-    // system_prompt as user-message sections. Modern agents receive these
-    // via the system role in session/new.
-    if !args.has_system_prompt_support {
-        if let Some(bp) = args.base_prompt {
-            sections.push(base_section(bp));
-        }
-        if let Some(sp) = args.system_prompt {
-            sections.push(format!("[System]\n{sp}"));
-        }
-        if let Some(team) = args
-            .team_instructions
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            sections.push(format!("[Team Instructions]\n{team}"));
-        }
-    }
-
-    // NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
-    // For modern agents (protocol_version >= 2), core is delivered via the
-    // system role in session/new, so it is omitted here to avoid duplication.
-    // Legacy agents have no system role, so core rides in the user message
-    // alongside `[Base]`/`[System]`.
-    if !args.has_system_prompt_support {
-        if let Some(core) = args.agent_core {
-            sections.push(core.to_string());
-        }
-        // Channel canvas metadata — same delivery semantics as core for legacy agents.
-        if let Some(canvas) = args.agent_canvas {
-            sections.push(canvas.to_string());
-        }
+    // Standing context — base prompt, persona, team instructions, core memory
+    // and canvas. Modern agents received all of it via the system role in
+    // session/new. Legacy agents get it here, in the session's first message
+    // only; `standing_context_sent` means an earlier message in this session
+    // already carried it.
+    if !args.has_system_prompt_support && !args.standing_context_sent {
+        sections.extend(
+            StandingContext {
+                base_prompt: args.base_prompt,
+                system_prompt: args.system_prompt,
+                team_instructions: args.team_instructions,
+                agent_core: args.agent_core,
+                agent_canvas: args.agent_canvas,
+            }
+            .sections(),
+        );
     }
 
     // 2. Context hints (with a human-aware reply anchor).
@@ -1489,6 +1620,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         &thread_tags,
         is_dm,
         args.conversation_context.is_some(),
+        args.conversation_context_had_delivered_events,
         reply_anchor.as_deref(),
     ));
 
@@ -2151,6 +2283,85 @@ mod tests {
         assert_eq!(batch2.events[1].event.content, "msg2");
     }
 
+    // ── Retry-throttled work must block idle-pool-sleep teardown ────────────
+    //
+    // Regression for the PR #5682 review blocker: a failed turn requeued with a
+    // future backoff deadline is real queued work. `has_flushable_work()`
+    // returns false for it (throttled → not flushable *now*), so gating
+    // idle-pool-sleep on flushability would tear down the pool while the batch
+    // sits waiting — and because lazy re-wake is itself gated on flushability
+    // and the maintenance timer is disabled while sleeping, the batch would be
+    // stranded until unrelated traffic arrived. `has_undispatched_work()` must
+    // see the throttled batch so the sleep gate keeps the pool alive.
+    #[test]
+    fn test_retry_throttled_batch_is_undispatched_but_not_flushable() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        queue.push(make_queued(ch, "msg1"));
+        queue.push(make_queued(ch, "msg2"));
+
+        // Drive a real failure → requeue-with-backoff → mark_complete cycle.
+        let batch = queue.flush_next().unwrap();
+        assert_eq!(batch.events.len(), 2);
+        assert!(
+            queue.requeue(batch).is_none(),
+            "batch requeued, not dead-lettered"
+        );
+        queue.mark_complete(ch);
+
+        // The batch is back in the queue, no longer in-flight, and throttled by
+        // a future `retry_after`. BASE_RETRY_DELAY guarantees the deadline is in
+        // the future, so this is not timing-fragile.
+        assert!(
+            queue
+                .retry_after
+                .get(&ch)
+                .is_some_and(|&t| t > Instant::now()),
+            "requeue must have set a future backoff deadline"
+        );
+        assert!(!queue.has_in_flight(), "turn completed, nothing in-flight");
+
+        // The bug: throttled work is invisible to flushability...
+        assert!(
+            !queue.has_flushable_work(),
+            "throttled batch must NOT be flushable yet"
+        );
+        // ...but it IS undispatched work the sleep gate must protect.
+        assert!(
+            queue.has_undispatched_work(),
+            "retry-throttled batch MUST count as undispatched work"
+        );
+    }
+
+    #[test]
+    fn test_has_undispatched_work_false_when_truly_empty_or_in_flight() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Empty queue: no undispatched work.
+        assert!(!queue.has_undispatched_work());
+
+        // Dispatched batch (in-flight): the events left the queue, and an
+        // in-flight turn is gated separately (has_in_flight), so this must be
+        // false — otherwise the pool could never sleep after any turn.
+        queue.push(make_queued(ch, "msg1"));
+        assert!(
+            queue.has_undispatched_work(),
+            "queued-but-not-flushed is undispatched"
+        );
+        let batch = queue.flush_next().unwrap();
+        assert!(queue.has_in_flight());
+        assert!(
+            !queue.has_undispatched_work(),
+            "in-flight work is not undispatched — it is gated by has_in_flight"
+        );
+
+        // Completed cleanly (no requeue): fully drained, nothing left.
+        queue.mark_complete(batch.channel_id);
+        assert!(!queue.has_undispatched_work());
+        assert!(!queue.has_in_flight());
+    }
+
     #[test]
     fn test_requeue_interleaves_with_other_channels() {
         let mut queue = EventQueue::new(DedupMode::Queue);
@@ -2409,6 +2620,60 @@ mod tests {
     }
 
     #[test]
+    fn test_format_prompt_legacy_agent_omits_standing_after_first_message() {
+        // The defect this pins: standing context was re-sent on every turn of a
+        // legacy session, so the largest and least informative part of the
+        // prompt was also the most recent — crowding out the conversation and
+        // evicting real channel history sooner.
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hello"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let canvas = "[Channel Canvas]\ncanvas content";
+        let core = "[Agent Memory — core]\nremember this";
+        let args = |sent| FormatPromptArgs {
+            has_system_prompt_support: false,
+            base_prompt: Some("test base prompt"),
+            system_prompt: Some("test system prompt"),
+            team_instructions: Some("ship small"),
+            agent_core: Some(core),
+            agent_canvas: Some(canvas),
+            standing_context_sent: sent,
+            ..Default::default()
+        };
+
+        let first = format_prompt(&batch, &args(false)).join("\n\n");
+        let later = format_prompt(&batch, &args(true)).join("\n\n");
+
+        for section in [
+            "[Base]",
+            "[System]",
+            "[Team Instructions]",
+            "[Agent Memory — core]",
+            "[Channel Canvas]",
+        ] {
+            assert!(first.contains(section), "first message missing {section}");
+            assert!(!later.contains(section), "turn 2 repeated {section}");
+        }
+        // What the turn is actually about survives, and now leads.
+        assert!(later.starts_with("[Context]"), "got: {later}");
+        assert!(later.contains("hello"));
+        assert!(
+            later.len() < first.len(),
+            "later turns must be smaller: {} vs {}",
+            later.len(),
+            first.len()
+        );
+    }
+
+    #[test]
     fn test_format_prompt_modern_agent_suppresses_base_and_system() {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
@@ -2464,6 +2729,7 @@ mod tests {
 
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: "npub1test".into(),
                 content: "prior message".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
@@ -2981,6 +3247,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "engineering".into(),
             channel_type: "stream".into(),
+            description: None,
         };
 
         let prompt = format_prompt(
@@ -3012,6 +3279,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         let prompt = format_prompt(
@@ -3078,11 +3346,13 @@ mod tests {
         let ctx = ConversationContext::Thread {
             messages: vec![
                 ContextMessage {
+                    event_id: String::new(),
                     pubkey: "npub1xyz".into(),
                     timestamp: "2026-03-15T16:30:00Z".into(),
                     content: "Let's refactor auth".into(),
                 },
                 ContextMessage {
+                    event_id: String::new(),
                     pubkey: "npub1def".into(),
                     timestamp: "2026-03-15T16:35:00Z".into(),
                     content: "yes go ahead".into(),
@@ -3122,9 +3392,11 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
         let ctx = ConversationContext::Dm {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: "npub1abc".into(),
                 timestamp: "2026-03-15T16:00:00Z".into(),
                 content: "Can you deploy?".into(),
@@ -3170,6 +3442,7 @@ mod tests {
         };
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: author_hex.clone(),
                 timestamp: "2026-03-25T05:51:25Z".into(),
                 content: "follow up".into(),
@@ -3378,10 +3651,12 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
         // Thread context fetched (as the fetch path does for DM replies).
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: "npub1xyz".into(),
                 timestamp: "2026-03-15T16:30:00Z".into(),
                 content: "Should I deploy?".into(),
@@ -3419,6 +3694,96 @@ mod tests {
     }
 
     #[test]
+    fn test_format_prompt_empty_thread_delta_distinguishes_trigger_only_from_delivered() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "follow up",
+            vec![vec![
+                "e".into(),
+                "root123".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let trigger_only_prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(trigger_only_prompt.contains("fetch thread context"));
+        assert!(!trigger_only_prompt.contains("already delivered in this session"));
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context_had_delivered_events: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("Earlier thread context was already delivered in this session"));
+        assert!(prompt.contains("buzz messages thread"));
+        assert!(!prompt.contains("Thread context included below"));
+        assert!(!prompt.contains("[Thread Context"));
+    }
+
+    #[test]
+    fn test_format_prompt_empty_dm_delta_distinguishes_trigger_only_from_delivered() {
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("follow up"),
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+            description: None,
+        };
+
+        let trigger_only_prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(trigger_only_prompt.contains("for conversation context"));
+        assert!(!trigger_only_prompt.contains("already delivered in this session"));
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                conversation_context_had_delivered_events: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(
+            prompt.contains("Earlier conversation context was already delivered in this session")
+        );
+        assert!(prompt.contains("buzz messages get"));
+        assert!(!prompt.contains("Conversation context included below"));
+        assert!(!prompt.contains("[Conversation Context"));
+    }
+
+    #[test]
     fn test_format_prompt_dm_non_reply_hints_get_messages() {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
@@ -3435,6 +3800,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         // No context fetched — hints only.
@@ -3930,6 +4296,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         let prompt = format_prompt(
@@ -3993,6 +4360,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         let prompt = format_prompt(
@@ -4759,6 +5127,256 @@ mod tests {
         assert!(
             after_second >= after_first,
             "second extend must not move deadline backward (monotonic)"
+        );
+    }
+
+    // ── channel description delivery ─────────────────────────────────────────
+
+    #[test]
+    fn test_append_channel_description_adds_description_line() {
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some("Engineering discussions".into()),
+        };
+        let mut s = "[Context]\nScope: channel\nChannel: team (#abc)".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        assert!(
+            s.contains("\nDescription: Engineering discussions"),
+            "description must be appended; got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_absent_when_none() {
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: None,
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        assert!(
+            !s.contains("Description:"),
+            "no description must be appended when None; got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_absent_when_channel_info_none() {
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, None);
+        assert!(
+            !s.contains("Description:"),
+            "no description must be appended when channel_info is None; got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_collapses_newlines_spoof_prevention() {
+        // A multiline description must not be able to inject a fake [Context] field.
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some("Line one\nScope: injected\nLine two".into()),
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        // The whole description is on a single Description line — no injected field.
+        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
+        assert_eq!(
+            desc_line, "Description: Line one Scope: injected Line two",
+            "multiline description must collapse to one line, never a fake field"
+        );
+        assert_eq!(
+            s.lines().filter(|l| l.starts_with("Description:")).count(),
+            1,
+            "exactly one Description line is rendered"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_truncates_at_cap() {
+        let long_desc = "x".repeat(600);
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some(long_desc),
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
+        assert!(
+            desc_line.ends_with('…'),
+            "truncated description must end with '…'; got: {desc_line}"
+        );
+        // Value = first MAX_DESCRIPTION_LEN chars + the "…" marker.
+        let value = desc_line.strip_prefix("Description: ").unwrap();
+        assert_eq!(
+            value.chars().count(),
+            MAX_DESCRIPTION_LEN + 1,
+            "truncated value is exactly the cap plus the ellipsis marker"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_multibyte_truncation_is_char_safe() {
+        // Truncation must land on a char boundary, never split a multi-byte code point.
+        let long_desc = "é".repeat(600);
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some(long_desc),
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
+        let value = desc_line.strip_prefix("Description: ").unwrap();
+        assert_eq!(value.chars().count(), MAX_DESCRIPTION_LEN + 1);
+    }
+
+    #[test]
+    fn test_append_channel_description_whitespace_only_is_absent() {
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some("\n  \r\n \n".into()),
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        assert!(
+            !s.contains("Description:"),
+            "a whitespace-only description collapses to empty and is not rendered; got: {s}"
+        );
+    }
+
+    fn description_batch(ch: Uuid, event: Event) -> FlushBatch {
+        FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_format_prompt_includes_description_in_context_for_channel_turn() {
+        let ch = Uuid::new_v4();
+        let batch = description_batch(ch, make_event("what should we build?"));
+        let ci = PromptChannelInfo {
+            name: "engineering".into(),
+            channel_type: "stream".into(),
+            description: Some("Engineering discussions and planning.".into()),
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: channel"),
+            "channel-scope turn expected; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Description: Engineering discussions and planning."),
+            "description must appear in [Context] for channel turns; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_includes_description_in_context_for_thread_turn() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "reply in thread",
+            vec![vec![
+                "e".into(),
+                "root123".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let batch = description_batch(ch, event);
+        let ci = PromptChannelInfo {
+            name: "engineering".into(),
+            channel_type: "stream".into(),
+            description: Some("Engineering discussions and planning.".into()),
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: thread"),
+            "thread-scope turn expected; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Description: Engineering discussions and planning."),
+            "description must appear in [Context] for thread turns; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_excludes_description_for_dm_turn() {
+        let ch = Uuid::new_v4();
+        let batch = description_batch(ch, make_event("hey"));
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+            description: Some("This should not appear.".into()),
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: dm"),
+            "dm-scope turn expected; got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Description:"),
+            "DM turn must not include a Description field; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_no_description_when_channel_metadata_unresolved() {
+        let ch = Uuid::new_v4();
+        let batch = description_batch(ch, make_event("what should we build?"));
+        // channel_info None models unresolved metadata: no name, no description.
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: None,
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: channel"),
+            "channel-scope turn expected; got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Description:"),
+            "unresolved metadata must not render a Description field; got: {prompt}"
         );
     }
 }

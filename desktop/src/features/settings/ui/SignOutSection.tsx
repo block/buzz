@@ -16,6 +16,7 @@ import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { SettingsOptionGroup } from "./SettingsOptionGroup";
 
 /**
  * The exact phrase the user must type before the destructive sign-out button
@@ -120,33 +121,25 @@ export function SignOutSection() {
   }
 
   return (
-    <div
-      className="mt-8 border-t border-border/60 pb-6 pt-5"
-      data-testid="settings-signout"
-    >
-      <div className="flex items-center justify-between gap-4 px-1">
-        <div className="min-w-0 space-y-1">
-          <h2 className="text-lg font-semibold tracking-tight">Sign out</h2>
-          <p className="text-sm text-muted-foreground">
-            Removes your identity key and all local app data from this device.
-            Before signing out, create and test a password-protected key backup
-            above — this cannot be undone.
-          </p>
-        </div>
-        <Button
-          className="shrink-0"
-          data-testid="signout-open-dialog"
-          disabled={isPending}
-          onClick={() => void openDialog()}
-          type="button"
-          variant="destructive"
-        >
-          {isPending ? (
-            <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
-          ) : null}
-          {isPending ? "Signing out…" : "Delete my data"}
-        </Button>
-      </div>
+    <div className="mt-12 pb-6" data-testid="settings-signout">
+      <SettingsOptionGroup
+        description="Removes your identity key and all local app data from this device. Before signing out, create and test a password-protected key backup above — this cannot be undone."
+        headerAction={
+          <Button
+            data-testid="signout-open-dialog"
+            disabled={isPending}
+            onClick={() => void openDialog()}
+            type="button"
+            variant="destructive"
+          >
+            {isPending ? (
+              <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
+            ) : null}
+            {isPending ? "Signing out…" : "Delete my data"}
+          </Button>
+        }
+        title="Sign out"
+      />
       <AlertDialog
         onOpenChange={(open) => {
           if (!open && !isPending) {

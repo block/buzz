@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -33,6 +36,8 @@ import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
 
+part 'message_actions/reaction_popover.dart';
+
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
 const _reminderPreviewLength = 100;
@@ -47,7 +52,21 @@ void showMessageActions({
   String? currentPubkey,
   bool isMember = false,
   bool isArchived = false,
+  Rect? anchorRect,
+  EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
 }) {
+  final hasReactionOnlyActions = message.isSystem && !canManageMessage;
+  if (anchorRect != null && hasReactionOnlyActions) {
+    _showMessageReactionPopover(
+      context: context,
+      ref: ref,
+      message: message,
+      anchorRect: anchorRect,
+      spotlightPadding: popoverSpotlightPadding,
+    );
+    return;
+  }
+
   showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -639,11 +658,16 @@ class _QuickReactionRow extends ConsumerWidget {
   /// bottom sheet, so it must not read through the sheet's disposed ref.
   final WidgetRef pageRef;
 
+  /// Drives the staged glyph reveal when this row is shown in the popover.
+  /// The bottom sheet leaves this null and retains its existing static row.
+  final Animation<double>? presentationAnimation;
+
   const _QuickReactionRow({
     required this.message,
     required this.sheetContext,
     required this.pageContext,
     required this.pageRef,
+    this.presentationAnimation,
   });
 
   @override
@@ -685,30 +709,38 @@ class _QuickReactionRow extends ConsumerWidget {
                 .clamp(0.0, Grid.twelve)
                 .toDouble();
         final circles = <Widget>[
-          for (final value in emoji)
-            _QuickReactionCircle(
-              key: ValueKey('quick-reaction-$value'),
+          for (var index = 0; index < emoji.length; index++)
+            _ReactionItemReveal(
+              key: ValueKey('quick-reaction-${emoji[index]}'),
+              animation: presentationAnimation,
+              index: index,
+              child: _QuickReactionCircle(
+                size: circleSize,
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  react(emoji[index]);
+                },
+                child: _QuickReactionGlyph(
+                  value: emoji[index],
+                  customByShortcode: customByShortcode,
+                ),
+              ),
+            ),
+          _ReactionItemReveal(
+            key: const ValueKey('quick-reaction-more'),
+            animation: presentationAnimation,
+            index: emoji.length,
+            child: _QuickReactionCircle(
               size: circleSize,
               onTap: () {
                 Navigator.of(sheetContext).pop();
-                react(value);
+                showEmojiPicker(context: pageContext, onSelect: react);
               },
-              child: _QuickReactionGlyph(
-                value: value,
-                customByShortcode: customByShortcode,
+              child: Icon(
+                LucideIcons.plus,
+                size: 24,
+                color: context.colors.onSurfaceVariant,
               ),
-            ),
-          _QuickReactionCircle(
-            key: const ValueKey('quick-reaction-more'),
-            size: circleSize,
-            onTap: () {
-              Navigator.of(sheetContext).pop();
-              showEmojiPicker(context: pageContext, onSelect: react);
-            },
-            child: Icon(
-              LucideIcons.plus,
-              size: 24,
-              color: context.colors.onSurfaceVariant,
             ),
           ),
         ];
@@ -723,6 +755,44 @@ class _QuickReactionRow extends ConsumerWidget {
           ],
         );
       },
+    );
+  }
+}
+
+class _ReactionItemReveal extends StatelessWidget {
+  final Animation<double>? animation;
+  final int index;
+  final Widget child;
+
+  const _ReactionItemReveal({
+    super.key,
+    required this.animation,
+    required this.index,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final parent = animation;
+    if (parent == null) return child;
+
+    final start = 0.06 + (index * 0.11);
+    final opacityEnd = math.min(1.0, start + 0.20);
+    final scaleEnd = math.min(1.0, start + 0.30);
+    final opacity = CurvedAnimation(
+      parent: parent,
+      curve: Interval(start, opacityEnd, curve: Curves.easeOutCubic),
+    );
+    final scale = Tween<double>(begin: 0.86, end: 1).animate(
+      CurvedAnimation(
+        parent: parent,
+        curve: Interval(start, scaleEnd, curve: _reactionSpringCurve),
+      ),
+    );
+
+    return FadeTransition(
+      opacity: opacity,
+      child: ScaleTransition(scale: scale, child: child),
     );
   }
 }
@@ -763,7 +833,6 @@ class _QuickReactionCircle extends StatelessWidget {
   final double size;
 
   const _QuickReactionCircle({
-    super.key,
     required this.onTap,
     required this.child,
     required this.size,
@@ -781,7 +850,11 @@ class _QuickReactionCircle extends StatelessWidget {
         height: size,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: context.colors.surfaceContainerHighest,
+          color: Color.lerp(
+            context.colors.surface,
+            context.colors.primaryContainer,
+            0.78,
+          ),
           shape: BoxShape.circle,
         ),
         child: child,

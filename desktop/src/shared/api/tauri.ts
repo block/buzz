@@ -7,6 +7,7 @@ import {
   fromRawInstallRuntimeResult,
   type RawInstallRuntimeResult,
 } from "@/shared/api/installTypes";
+import type { RawSendChannelMessageResult } from "@/shared/api/tauriMessageTypes";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -95,14 +96,6 @@ type RawSearchHit = {
 type RawSearchResponse = {
   hits: RawSearchHit[];
   found: number;
-};
-
-type RawSendChannelMessageResult = {
-  event_id: string;
-  parent_event_id: string | null;
-  root_event_id: string | null;
-  depth: number;
-  created_at: number;
 };
 
 type RawRelayAgent = {
@@ -549,6 +542,8 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  linkPreviewTags?: string[][],
+  sentFromThreadTag?: string[],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -559,11 +554,12 @@ export async function sendChannelMessage(
       mediaTags: mediaTags ?? null,
       emojiTags: emojiTags ?? null,
       mentionTags: mentionTags ?? null,
+      linkPreviewTags,
+      sentFromThreadTag: sentFromThreadTag ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
     },
   );
-
   return {
     eventId: response.event_id,
     parentEventId: response.parent_event_id,
@@ -615,23 +611,7 @@ export async function uploadMediaBytes(
   });
 }
 
-export async function editMessage(
-  channelId: string,
-  eventId: string,
-  content: string,
-  mediaTags?: string[][],
-  emojiTags?: string[][],
-  mentionPubkeys?: string[],
-): Promise<void> {
-  await invokeTauri("edit_message", {
-    channelId,
-    eventId,
-    content,
-    mediaTags: mediaTags ?? [],
-    emojiTags: emojiTags ?? [],
-    mentionPubkeys: mentionPubkeys ?? null,
-  });
-}
+export { editMessage } from "@/shared/api/editMessage";
 
 export async function deleteMessage(
   channelId: string,
@@ -1125,8 +1105,6 @@ export async function nip44DecryptFromSelf(
 ): Promise<string> {
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
 }
-
-// ── NIP-AB device pairing ───────────────────────────────────────────────────
 
 export async function startPairing(): Promise<string> {
   return invokeTauri<string>("start_pairing");

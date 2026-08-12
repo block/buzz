@@ -20,10 +20,11 @@ export type ImetaLookup = Map<string, ImetaEntry>;
 
 export type MessageLinkPillProps = {
   channels: Channel[];
-  href: string;
   interactive: boolean;
   link: ParsedMessageLink;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
+  threadExcerpt?: string | null;
+  variant?: "default" | "sent-from-thread";
 };
 
 export type MarkdownRuntime = {
@@ -68,6 +69,11 @@ export type MarkdownProps = {
   mentionNames?: string[];
   mentionPubkeysByName?: Record<string, string>;
   mediaInset?: boolean;
+  /** Event/message identity used only for local preview-image visibility. */
+  messageId?: string;
+  linkPreviewsSuppressed?: boolean;
+  linkPreviewTags?: readonly (readonly string[])[];
+  onRemoveLinkPreviewsForEveryone?: () => Promise<void>;
   searchQuery?: string;
   /** Display name shown in shared-agent card metadata. */
   snapshotSharedBy?: string;

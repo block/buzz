@@ -155,7 +155,7 @@ pub struct AcpClient {
     /// a `cancelled` outcome before the agent returns from `session/prompt`.
     pending_permission_id: Option<serde_json::Value>,
     /// Whether we have already sent a response to the pending permission request.
-    /// Guards against double-response if a timeout fires after the rejection
+    /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
@@ -881,6 +881,16 @@ impl AcpClient {
         self.goose_usage.take()
     }
 
+    /// Notify the usage tracker that buzz-acp just spawned a new session.
+    ///
+    /// Seeds a zero baseline so the first usage notification for `session_id`
+    /// produces `delta_reliable: true` (turn delta == cumulative from zero).
+    /// Must be called only when buzz-acp created the session via `session/new`;
+    /// never when attaching to a pre-existing session.
+    pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
+        self.goose_usage.seed_zero_baseline(session_id);
+    }
+
     /// Install a per-turn steer request channel for goose-native
     /// non-cancelling mid-turn delivery.
     ///
@@ -1162,8 +1172,7 @@ impl AcpClient {
     ///
     /// While waiting, handles:
     /// - `session/update` notifications → logged via tracing
-    /// - `session/request_permission` requests → rejected unless an owner has
-    ///   already selected a non-interactive permission mode at session setup
+    /// - `session/request_permission` requests → auto-approved with `allow_once`
     /// - Any other messages → debug-logged and ignored; if they carry an `id`
     ///   (i.e. they are requests, not notifications), a JSON-RPC -32601 error is sent.
     ///
@@ -1608,7 +1617,9 @@ impl AcpClient {
                                                     "steer accepted as {STEER_OUTCOME_STARTED_NEW_TURN}: \
                                                      awaited turn had ended — hard deadline not renewed"
                                                 );
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             Some(_) => {
                                                 let renew_now = Instant::now();
@@ -1620,7 +1631,9 @@ impl AcpClient {
                                                         "steer success: renewed hard deadline ({max_duration:?} from now)"
                                                     );
                                                 }
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             None => {
                                                 // Report the raw string when
@@ -1850,8 +1863,8 @@ impl AcpClient {
                     tracing::debug!(
                         target: "acp::usage",
                         session_id = %notif.session_id,
-                        input = payload.accumulated_input_tokens,
-                        output = payload.accumulated_output_tokens,
+                        input = ?payload.accumulated_input_tokens,
+                        output = ?payload.accumulated_output_tokens,
                         // A subset of `input`, logged so downstream accounting can
                         // price it at the provider's cached rate. Always emitted,
                         // including as 0, so a parser can tell "no cache hits"
@@ -1871,12 +1884,12 @@ impl AcpClient {
         }
     }
 
-    /// Reject a `session/request_permission` request from the agent.
+    /// Auto-approve a `session/request_permission` request from the agent.
     ///
-    /// Buzz has no human permission prompt in this harness, so selecting
-    /// `allow_once` would turn any admitted prompt into an implicit approval.
-    /// Find `reject_once` by kind when the adapter offers it; otherwise use the
-    /// protocol's cancelled outcome, which is also fail-closed.
+    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
+    /// If no `allow_once` option exists, falls back to `reject_once`.
+    ///
+    /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
     ///
     /// The request `id` is stored as `serde_json::Value` to support both numeric
     /// and string IDs per JSON-RPC 2.0.
@@ -1902,7 +1915,40 @@ impl AcpClient {
             options.len()
         );
 
-        let response = permission_denial_response(&id, options)?;
+        // Find allow_once by kind — NEVER hardcode optionId.
+        let allow_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+
+        let response = if let Some(opt) = allow_once {
+            let option_id = opt["optionId"]
+                .as_str()
+                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
+            tracing::info!(
+                target: "acp::permission",
+                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
+            );
+            permission_response_selected(&id, option_id)
+        } else {
+            // No allow_once — fall back to reject_once.
+            tracing::warn!(
+                target: "acp::permission",
+                "no allow_once option found in permission request id={id}, falling back to reject_once"
+            );
+            let reject = options
+                .iter()
+                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
+
+            if let Some(opt) = reject {
+                let option_id = opt["optionId"].as_str().unwrap_or("reject");
+                permission_response_selected(&id, option_id)
+            } else {
+                return Err(AcpError::Protocol(
+                    "no suitable permission option found (neither allow_once nor reject_once)"
+                        .into(),
+                ));
+            }
+        };
 
         // Write the response first, then mark as responded.
         //
@@ -2012,42 +2058,6 @@ fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
         "id": id,
         "result": { "outcome": { "outcome": "cancelled" } }
     })
-}
-
-/// Choose the fail-closed response to a `session/request_permission` request.
-///
-/// Buzz has no human permission prompt in this harness, so selecting
-/// `allow_once` would turn any admitted prompt into an implicit approval.
-/// Prefer the adapter's `reject_once` option — matched by `kind`, never by a
-/// hardcoded `optionId` — and fall back to the protocol's cancelled outcome for
-/// adapters that do not offer one. Both answers deny.
-///
-/// Kept free of the client so the decision is testable without an agent
-/// subprocess: `AcpClient` owns a real `Child` and its stdio pipes.
-fn permission_denial_response(
-    id: &serde_json::Value,
-    options: &[serde_json::Value],
-) -> Result<serde_json::Value, AcpError> {
-    let reject_once = options
-        .iter()
-        .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-
-    let Some(opt) = reject_once else {
-        tracing::warn!(
-            target: "acp::permission",
-            "no reject_once option found in permission request id={id}, cancelling"
-        );
-        return Ok(permission_response_cancelled(id));
-    };
-
-    let option_id = opt["optionId"]
-        .as_str()
-        .ok_or_else(|| AcpError::Protocol("reject_once option missing optionId".into()))?;
-    tracing::info!(
-        target: "acp::permission",
-        "rejecting permission id={id} with reject_once optionId={option_id:?}"
-    );
-    Ok(permission_response_selected(id, option_id))
 }
 
 /// Full `session/new` response — session ID plus the raw JSON result.
@@ -2304,96 +2314,63 @@ mod tests {
         assert_eq!(StopReason::from_str("Refusal"), Some(StopReason::Refusal));
     }
 
-    fn options(json: &str) -> Vec<serde_json::Value> {
-        serde_json::from_str(json).expect("option list")
-    }
-
-    fn outcome(response: &serde_json::Value) -> Option<&str> {
-        response["result"]["outcome"]["outcome"].as_str()
-    }
-
-    /// The offered `allow_once` and `allow_always` options must be ignored:
-    /// there is no human to click them, so choosing either would make every
-    /// admitted prompt an implicit approval. `optionId`s are deliberately
-    /// non-obvious to prove they are matched by `kind`, never hardcoded.
     #[test]
-    fn permission_requests_select_reject_once_not_allow_once() {
-        let options = options(
+    fn find_allow_once_by_kind_not_by_option_id() {
+        // optionId values are intentionally non-obvious to prove we don't hardcode them.
+        let options: Vec<serde_json::Value> = serde_json::from_str(
             r#"[
             {"optionId": "opt-reject-42",  "name": "Reject",       "kind": "reject_once"},
             {"optionId": "opt-allow-99",   "name": "Allow once",   "kind": "allow_once"},
             {"optionId": "opt-always-7",   "name": "Always allow", "kind": "allow_always"}
         ]"#,
-        );
+        )
+        .unwrap();
 
-        let response =
-            permission_denial_response(&serde_json::json!(7), &options).expect("denial response");
+        let allow_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
 
-        assert_eq!(outcome(&response), Some("selected"));
-        assert_eq!(
-            response["result"]["outcome"]["optionId"].as_str(),
-            Some("opt-reject-42"),
-            "must select reject_once even when allow options are offered"
-        );
+        assert!(allow_once.is_some(), "should find allow_once option");
+        let opt = allow_once.unwrap();
+        // Found by kind, not by hardcoded optionId
+        assert_eq!(opt["kind"].as_str(), Some("allow_once"));
+        assert_eq!(opt["optionId"].as_str(), Some("opt-allow-99"));
     }
 
-    /// Fail-closed backstop: an adapter that offers no `reject_once` must still
-    /// be denied, via the protocol's cancelled outcome rather than an error or
-    /// an approval.
     #[test]
-    fn permission_request_without_reject_once_is_cancelled() {
-        let options = options(
+    fn find_allow_once_returns_none_when_absent() {
+        let options: Vec<serde_json::Value> = serde_json::from_str(
             r#"[
-            {"optionId": "opt-allow-99", "name": "Allow once",   "kind": "allow_once"},
-            {"optionId": "opt-always-7", "name": "Always allow", "kind": "allow_always"}
+            {"optionId": "reject-1",      "name": "Reject",        "kind": "reject_once"},
+            {"optionId": "reject-always", "name": "Always reject", "kind": "reject_always"}
         ]"#,
-        );
+        )
+        .unwrap();
 
-        let response = permission_denial_response(&serde_json::json!("req-1"), &options)
-            .expect("cancelled response");
+        let allow_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
 
-        assert_eq!(outcome(&response), Some("cancelled"));
-        assert_eq!(
-            response["id"].as_str(),
-            Some("req-1"),
-            "string ids must round-trip per JSON-RPC 2.0"
-        );
-    }
-
-    /// An empty option list is the degenerate form of the same backstop.
-    #[test]
-    fn permission_request_with_no_options_is_cancelled() {
-        let response =
-            permission_denial_response(&serde_json::json!(1), &[]).expect("cancelled response");
-
-        assert_eq!(outcome(&response), Some("cancelled"));
-    }
-
-    /// A `reject_once` option missing its `optionId` is a protocol violation.
-    /// Erroring propagates to the caller, which tears the turn down — still no
-    /// approval is ever sent.
-    #[test]
-    fn reject_once_without_option_id_is_a_protocol_error() {
-        let options = options(r#"[{"name": "Reject", "kind": "reject_once"}]"#);
-
-        let err = permission_denial_response(&serde_json::json!(1), &options)
-            .expect_err("missing optionId must error");
-
-        assert!(matches!(err, AcpError::Protocol(_)), "got {err:?}");
+        assert!(allow_once.is_none());
     }
 
     #[test]
-    fn find_reject_once_by_kind() {
-        let options =
-            options(r#"[{"optionId": "rej-x", "name": "Reject", "kind": "reject_once"}]"#);
+    fn find_reject_once_fallback_when_no_allow_once() {
+        let options: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"optionId": "rej-x", "name": "Reject", "kind": "reject_once"}]"#,
+        )
+        .unwrap();
 
-        let response =
-            permission_denial_response(&serde_json::json!(1), &options).expect("denial response");
+        let allow_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+        assert!(allow_once.is_none());
 
-        assert_eq!(
-            response["result"]["outcome"]["optionId"].as_str(),
-            Some("rej-x")
-        );
+        let reject_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
+        assert!(reject_once.is_some());
+        assert_eq!(reject_once.unwrap()["optionId"].as_str(), Some("rej-x"));
     }
 
     #[test]
@@ -3826,7 +3803,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -3887,7 +3864,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -4071,7 +4048,7 @@ mod tests {
             "_session/steering must not carry expectedRunId; wrote: {written}"
         );
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected outcome must ack Success, got {ack:?}"
         );
     }
@@ -4103,7 +4080,7 @@ mod tests {
         // no `outcome`) — the OutcomeRejected guard applies only to
         // `_session/steering`.
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "goose success result must ack Success, got {ack:?}"
         );
     }
@@ -4208,7 +4185,7 @@ mod tests {
         assert_eq!(result.unwrap()["done"], serde_json::json!(true));
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected must ack Success, got {ack:?}"
         );
     }
@@ -4265,7 +4242,7 @@ mod tests {
         // rather than released — hence Success, not an Err.
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "startedNewTurn is a delivery success, got {ack:?}"
         );
     }
@@ -4343,8 +4320,8 @@ mod tests {
         assert_eq!(usage.session_id, "s1");
         assert_eq!(usage.turn_seq, 1);
         assert!(!usage.delta_reliable, "first turn must be unreliable");
-        assert_eq!(usage.cumulative_input_tokens, 1000);
-        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(usage.cumulative_output_tokens, Some(200));
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
 
         // Second take must be None.

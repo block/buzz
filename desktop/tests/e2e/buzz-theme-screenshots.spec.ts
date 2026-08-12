@@ -5,6 +5,9 @@ import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/buzz-theme";
 const THEME_STORAGE_KEY = "buzz-theme";
+const GLASS_BACKGROUND_STORAGE_KEY = "buzz-glass-background";
+const GLASS_OPACITY_STORAGE_KEY = "buzz-glass-opacity";
+const PROMINENT_ACTIVE_TAB_STORAGE_KEY = "buzz-prominent-active-tab";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
@@ -57,10 +60,10 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
     mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(255, 255, 255, 0.4)";
   const searchSurface =
     mode === "light" ? "rgba(0, 0, 0, 0.04)" : "rgba(255, 255, 255, 0.04)";
-  const hoverSurface =
+  const rowHoverSurface =
     mode === "light" ? "rgba(0, 0, 0, 0.04)" : "rgba(255, 255, 255, 0.04)";
   const activeSurface =
-    mode === "light" ? "rgba(0, 0, 0, 0.07)" : "color(srgb 1 1 1 / 0.16)";
+    mode === "light" ? "rgba(0, 0, 0, 0.07)" : "rgba(255, 255, 255, 0.16)";
   const chromeColor =
     mode === "light" ? "rgba(0, 0, 0, 0.5)" : "rgba(255, 255, 255, 0.5)";
   const search = page.getByTestId("open-search");
@@ -155,31 +158,57 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
     mutedColor,
   );
   await expect(page.getByTestId("channel-general")).toHaveCSS(
+    "font-weight",
+    "400",
+  );
+  await expect(
+    page.getByTestId("channel-general").locator("[data-sidebar-row-label]"),
+  ).toHaveCSS("opacity", "1");
+  await page.mouse.move(600, 100);
+  await expect(page.getByTestId("channel-general")).toHaveCSS(
     "background-color",
     activeSurface,
   );
   const hoverChannel = page.getByTestId("channel-random");
   await hoverChannel.hover();
-  await expect(hoverChannel).toHaveCSS("background-color", hoverSurface);
+  await expect(hoverChannel).toHaveCSS("background-color", rowHoverSurface);
 
   const firstDmItem = page
     .getByTestId("dm-list")
     .locator('[data-sidebar="menu-item"]')
     .first();
   const firstDmButton = firstDmItem.locator('[data-sidebar="menu-button"]');
+  const firstDmLabel = firstDmButton.locator("[data-sidebar-row-label]");
   const closeDmButton = firstDmItem.getByRole("button", {
     name: "Close direct message",
   });
+  const hoverChannelLabel = hoverChannel.locator("[data-sidebar-row-label]");
+  const hoverChannelIcon = hoverChannel.locator("svg").first();
+  const agentsButton = page.getByTestId("open-agents-view");
+  const agentsLabel = agentsButton.locator('[data-sidebar="menu-label"]');
+  const agentsIcon = agentsButton.locator("svg").first();
+  const sidebarForeground = await page
+    .getByTestId("app-sidebar")
+    .evaluate((element) => getComputedStyle(element).color);
+  await expect(hoverChannel).toHaveCSS("color", sidebarForeground);
+  await expect(firstDmButton).toHaveCSS("color", sidebarForeground);
+  await expect(agentsButton).toHaveCSS("color", sidebarForeground);
+  await expect(hoverChannelLabel).toHaveCSS("opacity", "0.8");
+  await expect(hoverChannelIcon).toHaveCSS("opacity", "0.8");
+  await expect(firstDmButton).toHaveCSS("opacity", "1");
+  await expect(firstDmLabel).toHaveCSS("opacity", "0.8");
+  await expect(agentsLabel).toHaveCSS("opacity", "0.8");
+  await expect(agentsIcon).toHaveCSS("opacity", "0.8");
   await firstDmItem.hover();
   await expect(closeDmButton).toBeVisible();
   await closeDmButton.hover();
-  await expect(firstDmButton).toHaveCSS("background-color", hoverSurface);
+  await expect(firstDmButton).toHaveCSS("background-color", rowHoverSurface);
 
   const scrollbarThumbColor = await sidebarScroller.evaluate(
     (element) =>
       getComputedStyle(element, "::-webkit-scrollbar-thumb").backgroundColor,
   );
-  expect(scrollbarThumbColor).toBe(hoverSurface);
+  expect(scrollbarThumbColor).toBe(searchSurface);
 }
 
 async function expectIconlessSectionTitleAligned(
@@ -445,6 +474,148 @@ async function openAppearance(page: Page, mode: "system" | "light" | "dark") {
   return panel;
 }
 
+test("appearance groups theme and preferences into labeled rows", async ({
+  page,
+}) => {
+  await seedTheme(page, "github-light");
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+  const themeCard = page.getByTestId("appearance-theme-card");
+  const preferencesCard = page.getByTestId("appearance-preferences-card");
+
+  await expect(
+    themeCard.getByRole("heading", { name: "Theme", exact: true }),
+  ).toBeVisible();
+  await expect(
+    preferencesCard.getByRole("heading", {
+      name: "Preferences",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    themeCard.getByRole("group", { name: "Color mode" }),
+  ).toBeVisible();
+  await expect(themeCard.getByTestId("glass-background-toggle")).toBeVisible();
+  await expect(
+    themeCard.getByTestId("prominent-active-tab-toggle"),
+  ).toHaveCount(0);
+  await expect(
+    preferencesCard.getByTestId("prominent-active-tab-toggle"),
+  ).toHaveCount(0);
+  await expect(
+    preferencesCard.getByTestId("thread-layout-trigger"),
+  ).toBeVisible();
+  const themeStyleTrigger = themeCard.getByTestId("theme-style-trigger");
+  const themeStyleOptions = themeCard.getByTestId("theme-style-options");
+  const selectedThemePreview = themeCard.getByTestId(
+    "theme-style-selected-preview",
+  );
+  await expect(themeStyleTrigger).toHaveAttribute(
+    "aria-label",
+    "Theme style, Github Light",
+  );
+  await expect(themeStyleTrigger).not.toContainText("Github Light");
+  await expect(themeStyleTrigger).toHaveAttribute("aria-expanded", "false");
+  await expect(themeStyleTrigger).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(themeStyleTrigger).toHaveCSS("border-width", "0px");
+  await expect(selectedThemePreview).toBeVisible();
+  const selectedThemePreviewSvg = selectedThemePreview.locator("svg");
+  await expect(selectedThemePreviewSvg).toBeVisible();
+  const selectedThemePreviewBox = await selectedThemePreview.boundingBox();
+  const selectedThemePreviewSvgBox =
+    await selectedThemePreviewSvg.boundingBox();
+  expect(selectedThemePreviewBox?.width).toBe(168);
+  expect(selectedThemePreviewBox?.height).toBe(112);
+  expect(selectedThemePreviewSvgBox?.width).toBeGreaterThan(100);
+  expect(selectedThemePreviewSvgBox?.height).toBeGreaterThan(70);
+  await expect(themeStyleOptions).toHaveCount(0);
+
+  await themeStyleTrigger.click();
+  await expect(themeStyleTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(themeStyleOptions).toBeVisible();
+  await themeCard.getByTestId("theme-option-buzz").click();
+  await expect(themeStyleTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(themeStyleOptions).toBeVisible();
+
+  const colorModeLabelBox = await themeCard
+    .getByTestId("appearance-color-mode-row")
+    .locator("p")
+    .first()
+    .boundingBox();
+  const colorModeControlBox = await themeCard
+    .getByRole("group", { name: "Color mode" })
+    .boundingBox();
+  const glassLabelBox = await themeCard
+    .getByText("Glass background", { exact: true })
+    .boundingBox();
+  const glassToggleBox = await themeCard
+    .getByTestId("glass-background-toggle")
+    .boundingBox();
+  const colorModeIndicator = themeCard.getByTestId(
+    "appearance-color-mode-indicator",
+  );
+  const lightModeButton = themeCard.getByTestId("appearance-mode-light");
+  const initialIndicatorBox = await colorModeIndicator.boundingBox();
+  const lightModeButtonBox = await lightModeButton.boundingBox();
+  const themeCardBox = await themeCard.boundingBox();
+  const preferencesCardBox = await preferencesCard.boundingBox();
+
+  expect(colorModeLabelBox).not.toBeNull();
+  expect(colorModeControlBox).not.toBeNull();
+  expect(glassLabelBox).not.toBeNull();
+  expect(glassToggleBox).not.toBeNull();
+  expect(initialIndicatorBox).not.toBeNull();
+  expect(lightModeButtonBox).not.toBeNull();
+  expect(themeCardBox).not.toBeNull();
+  expect(preferencesCardBox).not.toBeNull();
+  if (
+    !colorModeLabelBox ||
+    !colorModeControlBox ||
+    !glassLabelBox ||
+    !glassToggleBox ||
+    !initialIndicatorBox ||
+    !lightModeButtonBox ||
+    !themeCardBox ||
+    !preferencesCardBox
+  ) {
+    throw new Error("Appearance card geometry is missing");
+  }
+
+  expect(colorModeLabelBox.x).toBeLessThan(colorModeControlBox.x);
+  expect(glassLabelBox.x).toBeLessThan(glassToggleBox.x);
+  expect(themeCardBox.y).toBeLessThan(preferencesCardBox.y);
+  expect(
+    Math.abs(
+      initialIndicatorBox.x +
+        initialIndicatorBox.width / 2 -
+        (lightModeButtonBox.x + lightModeButtonBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(0.5);
+  await expect(colorModeIndicator).toHaveCSS("transition-duration", "0.25s");
+
+  await themeCard.getByTestId("appearance-mode-dark").click();
+  await waitForAnimations(page);
+  const movedIndicatorBox = await colorModeIndicator.boundingBox();
+  const darkModeButtonBox = await themeCard
+    .getByTestId("appearance-mode-dark")
+    .boundingBox();
+  expect(movedIndicatorBox).not.toBeNull();
+  expect(darkModeButtonBox).not.toBeNull();
+  if (!movedIndicatorBox || !darkModeButtonBox) {
+    throw new Error("Color mode indicator geometry is missing");
+  }
+  expect(
+    Math.abs(
+      movedIndicatorBox.x +
+        movedIndicatorBox.width / 2 -
+        (darkModeButtonBox.x + darkModeButtonBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(0.5);
+});
+
 test("appearance picker — system tab (Buzz follows OS)", async ({ page }) => {
   await seedTheme(page, "buzz");
   await installMockBridge(page);
@@ -518,6 +689,212 @@ test("settings nav uses Buzz active pill + hover (dark)", async ({ page }) => {
   });
 });
 
+test("prominent active tab is opt-in and switches selection surfaces", async ({
+  page,
+}) => {
+  await seedTheme(page, "buzz");
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  const root = page.locator("html");
+  const activeRow = page.getByTestId("settings-nav-appearance");
+  const toggle = page.getByTestId("prominent-active-tab-toggle");
+  await expect(toggle).not.toBeChecked();
+  await expect(root).not.toHaveAttribute("data-prominent-active-tab", "");
+  await expect(activeRow).toHaveCSS("background-color", "rgba(0, 0, 0, 0.07)");
+  const subtleTextStyle = await activeRow.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return { color: styles.color, fontWeight: styles.fontWeight };
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        PROMINENT_ACTIVE_TAB_STORAGE_KEY,
+      ),
+    )
+    .toBeNull();
+
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect(root).toHaveAttribute("data-prominent-active-tab", "");
+  await expect(activeRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        PROMINENT_ACTIVE_TAB_STORAGE_KEY,
+      ),
+    )
+    .toBe("true");
+  const prominentTextStyle = await activeRow.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return { color: styles.color, fontWeight: styles.fontWeight };
+  });
+  expect(prominentTextStyle).toEqual(subtleTextStyle);
+
+  await toggle.click();
+  await expect(root).not.toHaveAttribute("data-prominent-active-tab", "");
+  await expect(activeRow).toHaveCSS("background-color", "rgba(0, 0, 0, 0.07)");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        PROMINENT_ACTIVE_TAB_STORAGE_KEY,
+      ),
+    )
+    .toBe("false");
+});
+
+test("prominent channel and direct-message rows share one flat active state", async ({
+  page,
+}) => {
+  await seedTheme(page, "buzz");
+  await page.addInitScript(
+    ({ key }) => window.localStorage.setItem(key, "true"),
+    { key: PROMINENT_ACTIVE_TAB_STORAGE_KEY },
+  );
+  await installMockBridge(page);
+  await openChannel(page);
+
+  const channelRow = page.getByTestId("channel-general");
+  const directMessageRow = page.getByTestId("channel-alice-tyler");
+
+  await expect(channelRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+  await expect(channelRow).toHaveCSS("box-shadow", "none");
+  await channelRow.hover();
+  await expect(channelRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+
+  await directMessageRow.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await expect(directMessageRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+  await expect(directMessageRow).toHaveCSS("box-shadow", "none");
+  await directMessageRow.hover();
+  await expect(directMessageRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+});
+
+for (const { activeSurface, hoverSurface, mode, theme } of [
+  {
+    activeSurface: "rgba(0, 0, 0, 0.07)",
+    hoverSurface: "rgba(0, 0, 0, 0.04)",
+    mode: "light" as const,
+    theme: "buzz",
+  },
+  {
+    activeSurface: "rgba(255, 255, 255, 0.16)",
+    hoverSurface: "rgba(255, 255, 255, 0.04)",
+    mode: "dark" as const,
+    theme: "buzz-dark",
+  },
+]) {
+  test(`non-prominent ${theme} selection matches production`, async ({
+    page,
+  }) => {
+    await seedTheme(page, theme);
+    await page.addInitScript(
+      ({ key }) => window.localStorage.setItem(key, "false"),
+      { key: PROMINENT_ACTIVE_TAB_STORAGE_KEY },
+    );
+    await installMockBridge(page);
+    await openChannel(page);
+
+    const root = page.locator("html");
+    const sidebar = page.getByTestId("app-sidebar");
+    const activeRow = page.getByTestId("channel-general");
+    await expect(root).toHaveClass(
+      new RegExp(`(^|\\s)${mode === "dark" ? "dark" : "light"}($|\\s)`),
+    );
+    await expect(root).not.toHaveAttribute("data-prominent-active-tab", "");
+    await expect(activeRow).toHaveCSS("background-color", activeSurface);
+    await expect(activeRow).toHaveCSS("box-shadow", "none");
+    await expect(activeRow).toHaveCSS("font-weight", "400");
+    await activeRow.hover();
+    await expect(activeRow).toHaveCSS("background-color", activeSurface);
+    const inactiveRow = page.getByTestId("channel-random");
+    await inactiveRow.hover();
+    await expect(inactiveRow).toHaveCSS("background-color", hoverSurface);
+    const expectedForeground = await sidebar.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.color = "hsl(var(--sidebar-active-foreground))";
+      element.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    });
+    await expect(activeRow).toHaveCSS("color", expectedForeground);
+  });
+}
+
+for (const { mode, theme } of [
+  { mode: "light" as const, theme: "github-light" },
+  { mode: "dark" as const, theme: "github-dark" },
+]) {
+  test(`${theme} ignores the Buzz prominent preference`, async ({ page }) => {
+    await seedTheme(page, theme);
+    await page.addInitScript(
+      ({ key }) => window.localStorage.setItem(key, "true"),
+      { key: PROMINENT_ACTIVE_TAB_STORAGE_KEY },
+    );
+    await installMockBridge(page);
+    await openAppearance(page, mode);
+
+    const root = page.locator("html");
+    const activeRow = page.getByTestId("settings-nav-appearance");
+    await expect(page.getByTestId("prominent-active-tab-row")).toHaveCount(0);
+    await expect(root).not.toHaveAttribute("data-prominent-active-tab", "");
+
+    const productionStyle = await page.evaluate(() => {
+      const sidebar = document.querySelector<HTMLElement>(
+        '[data-testid="settings-sidebar"]',
+      );
+      const row = document.querySelector<HTMLElement>(
+        '[data-testid="settings-nav-appearance"]',
+      );
+      if (!sidebar || !row) return null;
+      const probe = document.createElement("span");
+      probe.style.backgroundColor = "hsl(var(--sidebar-active))";
+      probe.style.color = "hsl(var(--sidebar-active-foreground))";
+      sidebar.append(probe);
+      const probeStyles = getComputedStyle(probe);
+      const rowStyles = getComputedStyle(row);
+      const result = {
+        expectedBackground: probeStyles.backgroundColor,
+        expectedForeground: probeStyles.color,
+        background: rowStyles.backgroundColor,
+        color: rowStyles.color,
+        fontWeight: rowStyles.fontWeight,
+      };
+      probe.remove();
+      return result;
+    });
+
+    expect(productionStyle).not.toBeNull();
+    expect(productionStyle?.background).toBe(
+      productionStyle?.expectedBackground,
+    );
+    expect(productionStyle?.color).toBe(productionStyle?.expectedForeground);
+    await expect(activeRow).toHaveCSS(
+      "font-weight",
+      productionStyle?.fontWeight ?? "",
+    );
+  });
+}
+
 test("settings content uses the same inset surface as the main app", async ({
   page,
 }) => {
@@ -530,10 +907,22 @@ test("settings content uses the same inset surface as the main app", async ({
 
   const settingsView = page.getByTestId("settings-view");
   const contentSurface = page.getByTestId("settings-content-surface");
+  const settingsTopChrome = page.getByTestId("settings-top-chrome");
+  const settingsSidebarTopChrome = page.getByTestId(
+    "settings-sidebar-top-chrome",
+  );
   const backToAppBox = await page
     .getByTestId("settings-back-to-app")
     .boundingBox();
   await expect(contentSurface).toBeVisible({ timeout: 10_000 });
+  for (const dragRegion of [settingsTopChrome, settingsSidebarTopChrome]) {
+    await expect(dragRegion).toHaveAttribute(
+      "data-tauri-drag-region",
+      /^(?:|true)$/,
+    );
+    await expect(dragRegion).toHaveCSS("cursor", "default");
+    await expect(dragRegion).toHaveCSS("user-select", "none");
+  }
   await expect(page.getByTestId("settings-content-scroll")).toHaveCSS(
     "padding-top",
     "24px",
@@ -560,6 +949,28 @@ test("settings content uses the same inset surface as the main app", async ({
     8,
   );
 
+  const topChromeBox = await settingsTopChrome.boundingBox();
+  const settingsHeadingBox = await page
+    .getByRole("heading", { level: 1, name: "Profile" })
+    .boundingBox();
+  expect(topChromeBox).not.toBeNull();
+  expect(settingsHeadingBox).not.toBeNull();
+  if (!topChromeBox || !settingsHeadingBox) {
+    throw new Error("Settings drag region or title is missing");
+  }
+  await page.mouse.move(
+    topChromeBox.x + topChromeBox.width / 2,
+    topChromeBox.y + topChromeBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    settingsHeadingBox.x + settingsHeadingBox.width / 2,
+    settingsHeadingBox.y + settingsHeadingBox.height / 2,
+    { steps: 5 },
+  );
+  await page.mouse.up();
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("");
+
   await waitForAnimations(page);
   await settingsView.screenshot({
     path: `${SHOTS}/08-settings-content-inset.png`,
@@ -576,6 +987,191 @@ test("appearance hides accent picker under Buzz", async ({ page }) => {
   await panel.screenshot({ path: `${SHOTS}/10-appearance-no-accent.png` });
 });
 
+test("glass background keeps the content panel solid", async ({ page }) => {
+  await seedTheme(page, "buzz");
+  await page.addInitScript(() => {
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page);
+  const panel = await openAppearance(page, "light");
+
+  const toggle = page.getByTestId("glass-background-toggle");
+  const opacitySlider = page.getByTestId("glass-opacity-slider");
+  const root = page.locator("html");
+  await expect(toggle).toBeEnabled();
+  await expect(toggle).not.toBeChecked();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        GLASS_BACKGROUND_STORAGE_KEY,
+      ),
+    )
+    .toBeNull();
+  await expect(opacitySlider).toHaveCount(0);
+  await expect(root).not.toHaveAttribute("data-glass-background", "");
+  await expect(page.locator(".buzz-theme-gradient-underlay")).not.toHaveCSS(
+    "background-image",
+    "none",
+  );
+
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect(opacitySlider).toBeVisible();
+  await expect(opacitySlider).toHaveClass(/buzz-avatar-framing-slider/);
+  await expect(opacitySlider).toHaveAttribute("aria-valuenow", "65");
+  await expect(opacitySlider).toHaveCSS("height", "32px");
+  const matchingRadiusControls = [
+    page.getByTestId("appearance-color-mode-control"),
+    page.getByTestId("appearance-color-mode-indicator"),
+    page.getByTestId("theme-style-trigger"),
+    page.getByTestId("link-preview-style-trigger"),
+    page.getByTestId("thread-layout-trigger"),
+  ];
+  for (const control of matchingRadiusControls) {
+    await expect(control).toHaveCSS("border-radius", "8px");
+  }
+  await page.getByTestId("link-preview-style-trigger").click();
+  await expect(page.getByTestId("link-preview-style-menu")).toHaveCSS(
+    "border-radius",
+    "8px",
+  );
+  await page.keyboard.press("Escape");
+  await page.getByTestId("thread-layout-trigger").click();
+  await expect(page.getByTestId("thread-layout-menu")).toHaveCSS(
+    "border-radius",
+    "8px",
+  );
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("glass-opacity-value")).toHaveCount(0);
+  await expect(
+    opacitySlider.locator(".buzz-avatar-framing-slider-handle"),
+  ).toHaveCSS("opacity", "1");
+  await expect(root).toHaveAttribute("data-glass-background", "");
+  const buzzSettingOrder = await page
+    .getByTestId("appearance-theme-card")
+    .locator(
+      '[data-testid="appearance-color-mode-row"], [data-testid="theme-style-row"], [data-testid="glass-background-row"], [data-testid="glass-opacity-row"], [data-testid="prominent-active-tab-row"]',
+    )
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
+  expect(buzzSettingOrder).toEqual([
+    "appearance-color-mode-row",
+    "theme-style-row",
+    "glass-background-row",
+    "glass-opacity-row",
+    "prominent-active-tab-row",
+  ]);
+  await expect(page.locator(".buzz-theme-gradient-underlay")).toHaveCSS(
+    "background-image",
+    "none",
+  );
+  for (const canvas of [root, page.locator("body"), page.locator("#root")]) {
+    await expect(canvas).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  }
+  await expect(
+    page.getByTestId("settings-sidebar").locator('[data-sidebar="sidebar"]'),
+  ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.getByTestId("settings-content-surface")).not.toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) =>
+            entry.command === "set_window_vibrancy" &&
+            (entry.payload as { enabled?: boolean } | undefined)?.enabled ===
+              true,
+        ),
+      ),
+    )
+    .toBe(true);
+
+  await opacitySlider.press("Home");
+  await expect(opacitySlider).toHaveAttribute("aria-valuenow", "30");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        document.documentElement.style.getPropertyValue(
+          "--glass-background-opacity",
+        ),
+      ),
+    )
+    .toBe("30%");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => localStorage.getItem(storageKey),
+        GLASS_OPACITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("30");
+  await waitForAnimations(page);
+  await panel.screenshot({ path: `${SHOTS}/11-appearance-glass.png` });
+
+  await toggle.click();
+  await expect(root).not.toHaveAttribute("data-glass-background", "");
+  await expect(opacitySlider).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => localStorage.getItem(storageKey),
+        GLASS_BACKGROUND_STORAGE_KEY,
+      ),
+    )
+    .toBe("false");
+});
+
+test("non-Buzz glass preserves the selected theme sidebar tint", async ({
+  page,
+}) => {
+  await seedTheme(page, "rose-pine-dawn");
+  await page.addInitScript(() => {
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  const root = page.locator("html");
+  await expect(root).not.toHaveAttribute("data-buzz-sidebar", "");
+  await page.getByTestId("glass-background-toggle").click();
+  await expect(root).toHaveAttribute("data-glass-background", "");
+
+  const tint = await page
+    .locator(".buzz-theme-gradient-layer")
+    .evaluate((element) => {
+      const rootStyles = getComputedStyle(document.documentElement);
+      const sidebar = rootStyles
+        .getPropertyValue("--sidebar-background")
+        .trim();
+      const staticFallback = rootStyles.getPropertyValue("--sidebar").trim();
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = `hsl(${sidebar} / 65%)`;
+      document.body.appendChild(probe);
+      const expected = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+
+      return {
+        actual: getComputedStyle(element).backgroundColor,
+        expected,
+        sidebar,
+        staticFallback,
+      };
+    });
+
+  expect(tint.sidebar).not.toBe(tint.staticFallback);
+  expect(tint.actual).toBe(tint.expected);
+});
+
 test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
   // Start on a non-Buzz theme so the accent picker is present, then select the
   // Buzz tile — the picker should animate out and unmount. Reselecting a
@@ -585,14 +1181,68 @@ test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
   await installMockBridge(page);
   await openAppearance(page, "light");
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+  const nonBuzzSettingOrder = await page
+    .getByTestId("appearance-theme-card")
+    .locator(
+      '[data-testid="appearance-color-mode-row"], [data-testid="theme-style-row"], [data-testid="accent-color-options"], [data-testid="glass-background-row"], [data-testid="prominent-active-tab-row"]',
+    )
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
+  expect(nonBuzzSettingOrder).toEqual([
+    "appearance-color-mode-row",
+    "theme-style-row",
+    "accent-color-options",
+    "glass-background-row",
+  ]);
 
   // Switch to Buzz — picker should leave (allow the exit animation to settle).
+  await page.getByTestId("theme-style-trigger").click();
   await page.getByTestId("theme-option-buzz").click();
+  await expect(page.getByTestId("theme-style-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
   await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
 
   // Back to a non-Buzz theme — picker returns.
   await page.getByTestId("theme-option-github-light").click();
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+  await expect(page.getByTestId("theme-style-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+
+  const swatchBoxes = await page
+    .getByTestId("accent-color-options")
+    .locator("button")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => {
+        const box = button.getBoundingClientRect();
+        return { x: box.x, y: box.y };
+      }),
+    );
+  expect(swatchBoxes).toHaveLength(10);
+  expect(new Set(swatchBoxes.map((box) => Math.round(box.y))).size).toBe(1);
+  await expect(page.getByTestId("accent-color-options")).toHaveCSS(
+    "overflow-x",
+    "auto",
+  );
+  await expect(page.getByTestId("accent-color-blue")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    page.getByTestId("accent-color-blue").getByTestId("accent-color-selection"),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.getByTestId("settings-theme").screenshot({
+    path: `${SHOTS}/12-appearance-theme-and-accents.png`,
+  });
+  const accentOptions = page.getByTestId("accent-color-options");
+  await accentOptions.scrollIntoViewIfNeeded();
+  await waitForAnimations(page);
+  await accentOptions.screenshot({
+    path: `${SHOTS}/13-appearance-accent-row.png`,
+  });
 });
 
 test("Buzz light and dark modes apply live without a reload", async ({

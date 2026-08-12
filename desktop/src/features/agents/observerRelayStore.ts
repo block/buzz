@@ -193,44 +193,63 @@ function observerTag(event: RelayEvent, tagName: string) {
   return event.tags.find((tag) => tag[0] === tagName)?.[1] ?? null;
 }
 
-function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
+function appendAgentEvents(
+  agentPubkey: string,
+  events: readonly ObserverEvent[],
+): boolean {
+  if (events.length === 0) return false;
+
   const key = normalizePubkey(agentPubkey);
   const current = eventsByAgent.get(key) ?? [];
-  if (
-    current.some(
-      (existing) =>
-        existing.seq === event.seq && existing.timestamp === event.timestamp,
-    )
-  ) {
-    return;
+  const seen = new Set(
+    current.map(
+      (event) => `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
+    ),
+  );
+  const added: ObserverEvent[] = [];
+  for (const event of events) {
+    const eventKey = `${event.timestamp.length}:${event.timestamp}:${event.seq}`;
+    if (seen.has(eventKey)) continue;
+    seen.add(eventKey);
+    added.push(event);
   }
+  if (added.length === 0) return false;
 
-  const sorted = [...current, event].sort(compareObserverEvents);
+  const sortedAdded = added.sort(compareObserverEvents);
+  const sorted = [...current, ...sortedAdded].sort(compareObserverEvents);
   const trimmed = sorted.length > MAX_OBSERVER_EVENTS;
   const final = trimmed
     ? sorted.slice(sorted.length - MAX_OBSERVER_EVENTS)
     : sorted;
   eventsByAgent.set(key, final);
 
-  // Determine whether the new event landed at the end of the sorted array.
-  // If it did (common case), we can incrementally process just this event.
-  // If not (out-of-order arrival) or if we trimmed, fall back to full rebuild.
-  const eventAtEnd = sorted[sorted.length - 1] === event;
-
-  if (eventAtEnd && !trimmed) {
-    // Fast path: incremental update
-    const transcriptState =
+  // The common live path appends a sorted batch after the retained window. Fold
+  // that batch through the transcript state once without rebuilding history.
+  // Out-of-order arrivals and cap eviction rebuild from the final window so
+  // stateful tool/permission relationships remain correct.
+  const currentLast = current.at(-1);
+  const allAtEnd =
+    !currentLast ||
+    sortedAdded.every((event) => compareObserverEvents(event, currentLast) > 0);
+  if (allAtEnd && !trimmed) {
+    let transcriptState =
       transcriptByAgent.get(key) ?? createEmptyTranscriptState();
-    const updatedTranscript = processTranscriptEvent(transcriptState, event);
-    transcriptByAgent.set(key, updatedTranscript);
+    for (const event of sortedAdded) {
+      transcriptState = processTranscriptEvent(transcriptState, event);
+    }
+    transcriptByAgent.set(key, transcriptState);
   } else {
-    // Slow path: full rebuild (out-of-order insertion or trim fired)
     transcriptByAgent.set(key, buildTranscriptState(final));
   }
 
   invalidateSnapshot(key);
+  return true;
+}
 
-  notifyListeners();
+function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
+  if (appendAgentEvents(agentPubkey, [event])) {
+    notifyListeners();
+  }
 }
 
 /**
@@ -362,44 +381,60 @@ function unwrapObserverBatch(parsed: ObserverEvent): ObserverEvent[] {
 
 // Per-event processing shared by every event a live frame carries (one for a
 // plain frame, many for a batch envelope).
-function processLiveObserverEvent(agentPubkey: string, parsed: ObserverEvent) {
-  // Track the latest-live-session-id per (agent, channel) on the live path.
-  // Only set when the parsed event carries both a sessionId and channelId,
-  // so we never attribute a session to the wrong channel.
-  if (parsed.sessionId && parsed.channelId) {
-    const key = liveSessionKey(agentPubkey, parsed.channelId);
-    const stored = latestLiveSessionByAgentChannel.get(key);
-    // Advance only when this event sorts strictly AFTER the stored one via
-    // isObserverEventAfter (timestamp then seq — same ordering as
-    // compareObserverEvents). This prevents late-arriving live frames from
-    // older sessions from regressing the latest-live id, while also
-    // correctly advancing on a same-timestamp frame with a higher seq.
-    if (!stored || isObserverEventAfter(parsed, stored)) {
-      latestLiveSessionByAgentChannel.set(key, {
-        sessionId: parsed.sessionId,
-        timestamp: parsed.timestamp,
-        seq: parsed.seq,
-      });
+function processLiveObserverEvents(
+  agentPubkey: string,
+  events: readonly ObserverEvent[],
+) {
+  // Commit the full envelope before dispatching synchronous specialized
+  // callbacks. Those callbacks historically observed their triggering frame
+  // in the raw/transcript stores; batching must preserve that visibility while
+  // deferring only the global external-store publication.
+  const observerChanged = appendAgentEvents(agentPubkey, events);
+
+  for (const parsed of events) {
+    // Track the latest-live-session-id per (agent, channel) on the live path.
+    // Only set when the parsed event carries both a sessionId and channelId,
+    // so we never attribute a session to the wrong channel.
+    if (parsed.sessionId && parsed.channelId) {
+      const key = liveSessionKey(agentPubkey, parsed.channelId);
+      const stored = latestLiveSessionByAgentChannel.get(key);
+      // Advance only when this event sorts strictly AFTER the stored one via
+      // isObserverEventAfter (timestamp then seq — same ordering as
+      // compareObserverEvents). This prevents late-arriving live frames from
+      // older sessions from regressing the latest-live id, while also
+      // correctly advancing on a same-timestamp frame with a higher seq.
+      if (!stored || isObserverEventAfter(parsed, stored)) {
+        latestLiveSessionByAgentChannel.set(key, {
+          sessionId: parsed.sessionId,
+          timestamp: parsed.timestamp,
+          seq: parsed.seq,
+        });
+      }
+    }
+    const managementRequest = parseAgentManagementRequest(parsed.payload);
+    if (managementRequest) {
+      for (const listener of agentManagementListeners) {
+        listener(agentPubkey, managementRequest);
+      }
+    }
+    if (parsed.kind === "session_config_captured") {
+      void putAgentSessionConfig(agentPubkey, parsed.payload);
+      onSessionConfigCaptured?.(agentPubkey);
+    } else if (parsed.kind === "control_result") {
+      dispatchControlResult(agentPubkey, parsed.payload);
+    } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
+      void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
+        (error) => {
+          console.debug("Late/untracked lifecycle frame dropped:", error);
+        },
+      );
     }
   }
-  appendAgentEvent(agentPubkey, parsed);
-  const managementRequest = parseAgentManagementRequest(parsed.payload);
-  if (managementRequest) {
-    for (const listener of agentManagementListeners) {
-      listener(agentPubkey, managementRequest);
-    }
-  }
-  if (parsed.kind === "session_config_captured") {
-    void putAgentSessionConfig(agentPubkey, parsed.payload);
-    onSessionConfigCaptured?.(agentPubkey);
-  } else if (parsed.kind === "control_result") {
-    dispatchControlResult(agentPubkey, parsed.payload);
-  } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
-    void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
-      (error) => {
-        console.debug("Late/untracked lifecycle frame dropped:", error);
-      },
-    );
+
+  // Preserve the harness's envelope backpressure: retained state was committed
+  // before specialized callbacks, but external-store subscribers publish once.
+  if (observerChanged) {
+    notifyListeners();
   }
 }
 
@@ -437,9 +472,7 @@ async function handleRelayObserverEvent(
     if (activeGeneration !== generation) {
       return;
     }
-    for (const inner of unwrapObserverBatch(parsed)) {
-      processLiveObserverEvent(agentPubkey, inner);
-    }
+    processLiveObserverEvents(agentPubkey, unwrapObserverBatch(parsed));
   } catch (error) {
     if (activeGeneration !== generation) {
       return;
@@ -748,10 +781,9 @@ export function injectObserverEventsForE2E(
   agentPubkey: string,
   events: ObserverEvent[],
 ) {
-  for (const event of events) {
-    appendAgentEvent(agentPubkey, event);
+  if (appendAgentEvents(agentPubkey, events)) {
+    notifyListeners();
   }
-  notifyListeners();
 }
 
 /**
@@ -762,8 +794,8 @@ export function syncAgentObserverEvents(
   agentPubkey: string,
   events: ObserverEvent[],
 ) {
-  for (const event of events) {
-    appendAgentEvent(agentPubkey, event);
+  if (appendAgentEvents(agentPubkey, events)) {
+    notifyListeners();
   }
 }
 
@@ -799,6 +831,14 @@ export function _testRegisterKnownAgents(
   pubkeys: readonly string[],
 ): void {
   registerKnownAgents(subscriptionId, pubkeys);
+}
+
+/** Test-only: exercise live envelope ordering without relay/decryption setup. */
+export function _testProcessLiveObserverEvents(
+  agentPubkey: string,
+  events: readonly ObserverEvent[],
+): void {
+  processLiveObserverEvents(agentPubkey, events);
 }
 
 /**

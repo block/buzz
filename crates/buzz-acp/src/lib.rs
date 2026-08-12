@@ -1468,6 +1468,33 @@ fn inactivity_expired(
     !bound.is_zero() && !turn_in_flight && now.duration_since(last_activity) >= bound
 }
 
+/// Whether a woken lazy pool may be torn back down to the empty-slot state.
+///
+/// True only when the pool is ready, the idle bound has elapsed with no
+/// dispatched turn or heartbeat in flight and no in-flight prompt tasks, no
+/// work is queued, and no wake/respawn task is running. The queue and task
+/// gates make teardown race-safe with enqueue/wake: an event that landed in
+/// the queue (or a wake/respawn already in flight) blocks this decision, so a
+/// queued batch is never stranded — the caller's next loop iteration will
+/// dispatch or wake it instead.
+#[allow(clippy::too_many_arguments)]
+fn idle_pool_sleep_due(
+    pool_ready: bool,
+    last_activity: tokio::time::Instant,
+    now: tokio::time::Instant,
+    bound: Duration,
+    turn_in_flight: bool,
+    prompt_tasks_in_flight: bool,
+    work_queued: bool,
+    wake_or_respawn_in_flight: bool,
+) -> bool {
+    pool_ready
+        && !work_queued
+        && !prompt_tasks_in_flight
+        && !wake_or_respawn_in_flight
+        && inactivity_expired(last_activity, now, bound, turn_in_flight)
+}
+
 #[cfg(test)]
 mod inactivity_tests {
     use super::*;
@@ -1509,6 +1536,179 @@ mod inactivity_tests {
             Duration::from_secs(60),
             false
         ));
+    }
+}
+
+#[cfg(test)]
+mod idle_pool_sleep_tests {
+    use super::*;
+
+    // The all-clear baseline: pool ready, bound elapsed, nothing busy or
+    // queued. Every negative case below flips exactly one gate off this.
+    fn ready_after_bound() -> (tokio::time::Instant, tokio::time::Instant, Duration) {
+        let started = tokio::time::Instant::now();
+        (
+            started,
+            started + Duration::from_secs(61),
+            Duration::from_secs(60),
+        )
+    }
+
+    #[test]
+    fn sleeps_when_ready_idle_and_quiet() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(idle_pool_sleep_due(
+            true, last, now, bound, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn zero_bound_never_sleeps() {
+        let (last, now, _) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            Duration::ZERO,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn not_ready_never_sleeps() {
+        // A still-sleeping (or waking) pool must not "re-sleep".
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            false, last, now, bound, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn active_turn_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, true, false, false, false
+        ));
+    }
+
+    #[test]
+    fn in_flight_prompt_task_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, true, false, false
+        ));
+    }
+
+    #[test]
+    fn queued_work_at_boundary_defers_sleep() {
+        // Enqueue-at-teardown protection: a batch sitting in the queue blocks
+        // teardown so it is never stranded — the loop dispatches it instead.
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, false, true, false
+        ));
+    }
+
+    #[test]
+    fn wake_or_respawn_in_flight_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn recent_activity_defers_sleep() {
+        // Activity 50s ago under a 60s bound: not yet idle.
+        let started = tokio::time::Instant::now();
+        let recent = started + Duration::from_secs(50);
+        let now = started + Duration::from_secs(59);
+        assert!(!idle_pool_sleep_due(
+            true,
+            recent,
+            now,
+            Duration::from_secs(60),
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    fn slot(respawn_in_flight: bool) -> SlotCircuit {
+        SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight,
+        }
+    }
+
+    // The call-site signal for the `wake_or_respawn_in_flight` gate is
+    // `any_respawn_in_flight(&crash_history)`, NOT `!respawn_tasks.is_empty()`.
+    // Regression for the PR #5682 review blocker: completed respawn tasks are
+    // never joined from the `respawn_tasks` JoinSet (their payloads arrive
+    // out-of-band via `respawn_rx`), so `!is_empty()` stays true forever after
+    // the first refill/crash recovery and the pool could never re-sleep. The
+    // authoritative signal clears per-slot when the payload is received.
+    #[test]
+    fn respawn_in_flight_signal_gates_then_clears_for_sleep() {
+        let (last, now, bound) = ready_after_bound();
+
+        // A respawn in flight for any slot defers sleep.
+        let busy = [slot(false), slot(true), slot(false)];
+        assert!(any_respawn_in_flight(&busy));
+        assert!(!idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            bound,
+            false,
+            false,
+            false,
+            any_respawn_in_flight(&busy),
+        ));
+
+        // Once the respawn completes (payload received → flag cleared), the
+        // signal goes false and the otherwise-quiet pool becomes sleep-eligible
+        // — even though a naive `!JoinSet.is_empty()` would still be stuck true.
+        let quiet = [slot(false), slot(false), slot(false)];
+        assert!(!any_respawn_in_flight(&quiet));
+        assert!(idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            bound,
+            false,
+            false,
+            false,
+            any_respawn_in_flight(&quiet),
+        ));
+    }
+
+    // The reaper (`respawn_tasks.join_next().now_or_never()` loop) must drain
+    // completed handles so the JoinSet does not grow without bound and so
+    // `!respawn_tasks.is_empty()` cannot become a permanent busy bit if anyone
+    // ever reintroduces it as the gate signal.
+    #[tokio::test]
+    async fn completed_respawn_tasks_are_reaped_from_the_joinset() {
+        let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        respawn_tasks.spawn(async {});
+        respawn_tasks.spawn(async {});
+        // Let both tasks run to completion.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // The reaper drains finished handles non-blockingly.
+        while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
+
+        assert!(
+            respawn_tasks.is_empty(),
+            "completed respawn tasks must be reaped so the set does not wedge \
+             the idle-sleep gate or grow unbounded"
+        );
     }
 }
 
@@ -1900,6 +2100,27 @@ async fn tokio_main() -> Result<()> {
         ))
     };
 
+    // Idle pool re-sleep: tear a woken lazy pool back down to the empty-slot
+    // state after `idle_pool_sleep_bound` of quiet, releasing worker
+    // subprocesses. The next accepted event re-wakes it through the same lazy
+    // path. Only meaningful under `lazy_pool`; the tick arm additionally gates
+    // on `pool_ready`, so a still-sleeping pool never re-sleeps. Reuses the
+    // `last_activity` clock the dispatch path already maintains.
+    let idle_pool_sleep_bound = if config.lazy_pool {
+        Duration::from_secs(config.idle_pool_sleep_secs)
+    } else {
+        Duration::ZERO
+    };
+    let mut idle_pool_sleep_reaper = if idle_pool_sleep_bound.is_zero() {
+        None
+    } else {
+        let interval = idle_pool_sleep_bound.min(Duration::from_secs(30));
+        Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + interval,
+            interval,
+        ))
+    };
+
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
     // spawn_and_init never blocks the main loop.
@@ -2107,6 +2328,17 @@ async fn tokio_main() -> Result<()> {
                 }
             }
         }
+        // Reap completed respawn handles from the JoinSet. Payloads are
+        // delivered out-of-band through `respawn_rx` (drained above), so the
+        // JoinSet is never joined by the normal flow — Tokio retains finished
+        // tasks until `join_next`, so without this the set grows on every
+        // refill/crash recovery and `!respawn_tasks.is_empty()` would stay true
+        // forever. Non-blocking (`now_or_never`), same pattern as
+        // `drain_ready_join_results` for `pool.join_set`. The authoritative
+        // in-flight signal is `any_respawn_in_flight(&crash_history)` (each
+        // slot's `respawn_in_flight` is cleared when its payload is received),
+        // not JoinSet occupancy.
+        while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
         // Flush requeued events that were waiting for a live agent. Without
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
@@ -2600,6 +2832,56 @@ async fn tokio_main() -> Result<()> {
                     None
                 }
                 _ = async {
+                    match idle_pool_sleep_reaper.as_mut() {
+                        Some(timer) => timer.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx; // end split borrow before touching pool
+                    // A wake in flight (pool not yet ready) is covered by the
+                    // pool_ready gate; respawn tasks and in-flight prompt tasks
+                    // are the remaining "busy" signals. Never sleep mid-work:
+                    // `has_undispatched_work()` (not `has_flushable_work()`)
+                    // keeps `work_queued` true for a retry-throttled batch too,
+                    // so a failed turn awaiting backoff is never stranded — the
+                    // next iteration dispatches or re-wakes it.
+                    if idle_pool_sleep_due(
+                        pool_ready,
+                        last_activity,
+                        tokio::time::Instant::now(),
+                        idle_pool_sleep_bound,
+                        queue.has_in_flight() || heartbeat_in_flight,
+                        !pool.join_set.is_empty(),
+                        queue.has_undispatched_work(),
+                        !wake_tasks.is_empty()
+                            || any_respawn_in_flight(&crash_history),
+                    ) {
+                        tracing::info!(
+                            idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
+                            "idle pool sleep bound reached — tearing pool back to lazy state"
+                        );
+                        shutdown_agent_pool(&mut pool).await;
+                        // Return to the exact pre-wake lazy state: empty slots,
+                        // Listening lifecycle. The top-of-loop wake path re-wakes
+                        // on the next accepted event. No second lifecycle.
+                        pool = AgentPool::from_slots(
+                            (0..config.agents).map(|_| None).collect(),
+                        );
+                        pool_ready = false;
+                        pool_lifecycle = PoolLifecycle::listening();
+                        last_activity = tokio::time::Instant::now();
+                        emit_runtime_lifecycle(
+                            observer.as_ref(),
+                            &runtime_start_nonce,
+                            &pubkey_hex,
+                            &config.relay_url,
+                            "listening",
+                            None,
+                        );
+                    }
+                    None
+                }
+                _ = async {
                     match heartbeat.as_mut() {
                         Some(hb) => hb.tick().await,
                         None => std::future::pending().await,
@@ -2821,7 +3103,7 @@ async fn tokio_main() -> Result<()> {
                 //     treat as PromptCompletedNeutral to avoid leaking
                 //     the withheld event in `withheld_native_steer`.
                 let (release_withheld, drop_withheld, signal_fallback) = match &ack {
-                    Ok(pool::SteerAck::Success) => (false, true, false),
+                    Ok(pool::SteerAck::Success { .. }) => (false, true, false),
                     // -32601 = method_not_found: agent does not implement the
                     // steer extension. Fire cancel+merge so the message still
                     // reaches the agent.
@@ -2854,8 +3136,19 @@ async fn tokio_main() -> Result<()> {
                     signal_fallback,
                     "non-cancelling steer ack received"
                 );
-                if matches!(ack, Ok(pool::SteerAck::Success)) {
+                if let Ok(pool::SteerAck::Success { session_id }) = &ack {
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
+                    if !pool.record_successful_steer(
+                        channel_id,
+                        event_id.clone(),
+                        session_id.clone(),
+                    ) {
+                        tracing::warn!(
+                            channel = %channel_id,
+                            event_id = %event_id,
+                            "successful steer lost its in-flight delivery ledger"
+                        );
+                    }
                 }
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
@@ -3318,6 +3611,7 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -3399,9 +3693,30 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
+    let successful_steer_deliveries = pool
+        .task_map()
+        .values()
+        .find(|meta| meta.agent_index == agent_index)
+        .map(|meta| meta.successful_steer_deliveries.clone())
+        .unwrap_or_default();
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
+    if let PromptSource::Channel(channel_id) = &result.source {
+        // The task may have invalidated this session before returning. Never
+        // resurrect delivery state for a dead session; its replacement must
+        // receive fresh standing context and history.
+        if let Some(live_session_id) = result.agent.state.sessions.get(channel_id).cloned() {
+            let event_ids = successful_steer_deliveries
+                .into_iter()
+                .filter(|delivery| delivery.session_id == live_session_id)
+                .map(|delivery| delivery.event_id);
+            result
+                .agent
+                .state
+                .mark_channel_delivery_success(*channel_id, false, event_ids);
+        }
+    }
 
     // The hard-timeout death_message (below) must describe the batch's
     // *actual* fate, not just the `recently_active` eligibility flag — a
@@ -3932,6 +4247,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
+            successful_steer_deliveries: HashSet::new(),
         },
     );
     *heartbeat_in_flight = true;
@@ -4574,17 +4890,23 @@ mod heartbeat_base_prompt_tests {
     // heartbeat user message, composed as `[Base]\n{bp}\n\n{prompt}`. This is
     // the second half of the round-2 regression (the first being initial_message).
 
+    fn heartbeat_standing() -> queue::StandingContext<'static> {
+        queue::StandingContext {
+            base_prompt: Some("you are a helpful agent"),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_heartbeat_legacy_agent_gets_base_prepended() {
         // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
         // with the [Base] section exactly as the legacy session/new path would.
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(1, Some("you are a helpful agent"), prompt);
+        let composed = pool::prepend_standing_for_legacy(1, &heartbeat_standing(), prompt);
         assert_eq!(
             composed,
             "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
         );
-        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
     }
 
     #[test]
@@ -4592,7 +4914,7 @@ mod heartbeat_base_prompt_tests {
         // protocol_version 2 gets base_prompt via session/new; the heartbeat
         // prompt is sent verbatim.
         let prompt = "[System: Heartbeat]\nrun feed get";
-        let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
+        let composed = pool::prepend_standing_for_legacy(2, &heartbeat_standing(), prompt);
         assert_eq!(composed, prompt);
     }
 }
@@ -4703,6 +5025,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
 
@@ -4990,6 +5313,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "dm".into(),
                     channel_type: "dm".into(),
+                    description: None,
                 },
             ),
             (
@@ -4997,6 +5321,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "stream".into(),
                     channel_type: "stream".into(),
+                    description: None,
                 },
             ),
         ]);
@@ -5013,6 +5338,7 @@ mod author_gate_tests {
             relay::ChannelInfo {
                 name: "unknown".into(),
                 channel_type: "unknown".into(),
+                description: None,
             },
         )]);
         assert!(
@@ -6199,7 +6525,7 @@ mod build_mcp_servers_tests {
             memory_enabled: false,
             model: None,
             session_title: None,
-            permission_mode: config::PermissionMode::DontAsk,
+            permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
@@ -6208,6 +6534,7 @@ mod build_mcp_servers_tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -6421,7 +6748,7 @@ mod error_outcome_emission_tests {
             memory_enabled: false,
             model: None,
             session_title: None,
-            permission_mode: config::PermissionMode::DontAsk,
+            permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
@@ -6430,6 +6757,7 @@ mod error_outcome_emission_tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -6473,6 +6801,263 @@ mod error_outcome_emission_tests {
         }
     }
 
+    #[tokio::test]
+    async fn successful_native_steer_is_transferred_to_live_session_delivery_state() {
+        let channel_id = Uuid::new_v4();
+        let steer_event_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([
+                    crate::pool::SuccessfulSteerDelivery {
+                        event_id: steer_event_id.into(),
+                        session_id: "live-session".into(),
+                    },
+                ]),
+            },
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .contains(steer_event_id));
+    }
+
+    #[tokio::test]
+    async fn in_flight_stale_native_steer_ack_cannot_update_replacement_session() {
+        let channel_id = Uuid::new_v4();
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "replacement-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([
+                    crate::pool::SuccessfulSteerDelivery {
+                        event_id: "stale-event".into(),
+                        session_id: "old-session".into(),
+                    },
+                ]),
+            },
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn successful_native_steer_ack_after_task_return_updates_matching_live_session() {
+        let channel_id = Uuid::new_v4();
+        let steer_event_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        assert!(pool.record_successful_steer(
+            channel_id,
+            steer_event_id.into(),
+            "live-session".into(),
+        ));
+        let returned = pool.agents_mut()[0].as_ref().expect("idle returned agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .contains(steer_event_id));
+    }
+
+    #[tokio::test]
+    async fn late_native_steer_ack_cannot_update_replacement_session() {
+        let channel_id = Uuid::new_v4();
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "replacement-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        assert!(!pool.record_successful_steer(
+            channel_id,
+            "stale-event".into(),
+            "old-session".into(),
+        ));
+        let returned = pool.agents_mut()[0].as_ref().expect("replacement agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalidated_session_does_not_resurrect_successful_steer_delivery_state() {
+        let channel_id = Uuid::new_v4();
+        let agent = dummy_agent(0).await;
+        // No live session: simulates the prompt task invalidating before return.
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([
+                    crate::pool::SuccessfulSteerDelivery {
+                        event_id: "stale-event".into(),
+                        session_id: "invalidated-session".into(),
+                    },
+                ]),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
+        assert!(!returned.state.deliveries.contains_key(&channel_id));
+    }
+
     /// Drive one error outcome through `handle_prompt_result` and return how
     /// many `turn_error` events it emitted to the observer feed.
     async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
@@ -6493,6 +7078,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
 
@@ -6569,6 +7155,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         started_rx.await.unwrap();
@@ -6661,6 +7248,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    successful_steer_deliveries: HashSet::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6752,6 +7340,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    successful_steer_deliveries: HashSet::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6857,6 +7446,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    successful_steer_deliveries: HashSet::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6933,6 +7523,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7027,6 +7618,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let config = test_config();
@@ -7143,6 +7735,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7282,6 +7875,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7470,6 +8064,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7555,6 +8150,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);

@@ -16,6 +16,7 @@ import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
+import { useCommittedEmptyTimeline } from "./useCommittedEmptyTimeline";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { ChannelIntroBlock, type ChannelIntro } from "./ChannelIntroBlock";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
@@ -285,13 +286,20 @@ const MessageTimelineBase = React.forwardRef<
     setTimelineVirtualizerApi(null);
   }, [scrollContainerRef, scrollContainerDomKey]);
 
+  const hasPersistentIntro =
+    channelIntro !== null || directMessageIntro !== null || pinnedIntro != null;
+  const timelineIsLoading = isLoading || isDeferredSnapshotStale;
+  const preserveSettledEmptyIntro = useCommittedEmptyTimeline({
+    channelId: channelId ?? null,
+    deferredCount: deferredMessages.length,
+    hasPersistentIntro,
+    isLoading: timelineIsLoading,
+    liveCount: messages.length,
+  });
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
-    hasPersistentIntro:
-      channelIntro !== null ||
-      directMessageIntro !== null ||
-      pinnedIntro != null,
-    isLoading: isLoading || isDeferredSnapshotStale,
+    preserveSettledEmptyIntro,
+    isLoading: timelineIsLoading,
     liveCount: messages.length,
   });
   const showTimelineSkeleton = timelineBodySurface === "skeleton";

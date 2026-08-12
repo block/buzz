@@ -188,7 +188,7 @@ export function VoiceSettingsCard() {
       />
 
       <div className="flex flex-col gap-4">
-        <SettingsOptionGroup>
+        <SettingsOptionGroup title="Playback">
           <SettingsOptionRow>
             <div className="min-w-0">
               <label
@@ -197,7 +197,10 @@ export function VoiceSettingsCard() {
               >
                 Agent text to speech
               </label>
-              <p className="text-sm text-muted-foreground">
+              <p
+                className="text-sm text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Read new agent messages aloud in the order they arrive.
               </p>
             </div>
@@ -221,11 +224,14 @@ export function VoiceSettingsCard() {
           )}
           data-testid="pocket-voice-controls"
         >
-          <SettingsOptionGroup>
+          <SettingsOptionGroup title="Voice">
             <SettingsOptionRow>
               <div className="min-w-0">
                 <p className="text-sm font-medium">Pocket TTS voice</p>
-                <p className="text-sm text-muted-foreground">
+                <p
+                  className="text-sm text-muted-foreground/70"
+                  data-settings-subcopy
+                >
                   Voice files stay private on this device.
                 </p>
               </div>

@@ -1,7 +1,8 @@
 //! Databricks v1/v2 model discovery and interactive reauthentication.
 
-use std::collections::BTreeMap;
-use std::sync::LazyLock;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::commands::agent_models_env::{
     env_or_process_value, redaction_env_with_value, DiscoveryProvider,
@@ -12,6 +13,77 @@ use crate::managed_agents::AgentModelsResponse;
 // Model discovery can be triggered by multiple dialogs at once. Permit only one
 // callback listener/browser flow for the process-wide OAuth cache.
 static AUTH_GATE: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+// Hard cap on the interactive browser flow launched from a discovery surface.
+// An abandoned SSO tab must fail discovery cleanly rather than wedge the
+// dropdown forever. (`authenticate_databricks` has its own 60s callback wait;
+// this outer bound also covers endpoint discovery and token exchange.)
+const AUTH_FLOW_TIMEOUT: Duration = Duration::from_secs(150);
+
+// How long a failed/cancelled interactive sign-in suppresses re-launching the
+// browser from passive surfaces.
+pub(super) const AUTH_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+/// Per-host record of a recently failed, cancelled, or timed-out interactive
+/// sign-in.
+///
+/// Passive discovery surfaces fire on every form-state change, so without this
+/// a cancelled SSO page would re-pop the browser on the very next keystroke.
+/// Entries expire so a genuine later retry still launches; the saved-model
+/// picker bypasses the cooldown and a success clears it.
+#[derive(Default)]
+pub(super) struct AuthCooldown {
+    until: Mutex<HashMap<String, Instant>>,
+}
+
+impl AuthCooldown {
+    fn map(&self) -> MutexGuard<'_, HashMap<String, Instant>> {
+        // The critical sections below are panic-free map ops, so recover from a
+        // poisoned lock rather than wedge every future sign-in on one panic.
+        self.until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(super) fn is_active(&self, host: &str, now: Instant) -> bool {
+        let mut map = self.map();
+        match map.get(host) {
+            Some(&expiry) if now < expiry => true,
+            Some(_) => {
+                map.remove(host);
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub(super) fn record(&self, host: &str, now: Instant) {
+        self.map().insert(host.to_string(), now + AUTH_COOLDOWN);
+    }
+
+    pub(super) fn clear(&self, host: &str) {
+        self.map().remove(host);
+    }
+
+    /// Whether the interactive browser flow may launch now under `auth_intent`.
+    /// Passive surfaces are suppressed while a per-host cooldown is active; the
+    /// explicit picker path always launches and clears any stale suppression.
+    pub(super) fn permits_launch(
+        &self,
+        auth_intent: DatabricksAuthIntent,
+        host: &str,
+        now: Instant,
+    ) -> bool {
+        if auth_intent.respects_cooldown() {
+            !self.is_active(host, now)
+        } else {
+            self.clear(host);
+            true
+        }
+    }
+}
+
+static AUTH_COOLDOWNS: LazyLock<AuthCooldown> = LazyLock::new(AuthCooldown::default);
 
 pub(super) fn is_databricks_provider(provider: Option<&str>) -> bool {
     matches!(
@@ -50,8 +122,14 @@ pub(super) enum DatabricksAuthIntent {
 }
 
 impl DatabricksAuthIntent {
-    fn allows_interactive_auth(self) -> bool {
-        matches!(self, Self::InteractiveModelPicker)
+    /// Passive draft discovery honors (and, on failure, writes) the per-host
+    /// cooldown so a cancelled SSO page does not re-pop on the next form
+    /// keystroke. The saved-model picker is an explicit user action, so it
+    /// bypasses the cooldown and clears it before launching. Both surfaces
+    /// launch the browser flow (Phase 2 goose-parity); this predicate is the
+    /// only behavioral difference between them.
+    fn respects_cooldown(self) -> bool {
+        matches!(self, Self::PassiveDraftDiscovery)
     }
 }
 
@@ -60,11 +138,16 @@ pub(super) fn databricks_sign_in_required_error() -> String {
         .to_string()
 }
 
-pub(super) fn should_start_interactive_auth(
-    api_key: &str,
-    auth_intent: DatabricksAuthIntent,
-) -> bool {
-    api_key.is_empty() && auth_intent.allows_interactive_auth()
+pub(super) fn databricks_sign_in_timed_out_error() -> String {
+    "Databricks sign-in timed out; open the model picker to retry, or run `buzz-agent auth databricks`"
+        .to_string()
+}
+
+pub(super) fn should_start_interactive_auth(api_key: &str) -> bool {
+    // Phase 2: both discovery surfaces launch the browser flow when no static
+    // token is configured. Which surface is allowed to actually pop the browser
+    // (vs. respect a cooldown) is decided via `AuthCooldown::permits_launch`.
+    api_key.is_empty()
 }
 
 pub(super) async fn discover_databricks_models(
@@ -93,22 +176,26 @@ pub(super) async fn discover_databricks_models(
 
     let entries = match buzz_agent_pkg::discover_databricks_models(&config).await {
         Ok(entries) => entries,
-        Err(buzz_agent_pkg::AgentError::LlmAuth(_))
-            if should_start_interactive_auth(&api_key, auth_intent) =>
-        {
+        Err(buzz_agent_pkg::AgentError::LlmAuth(_)) if should_start_interactive_auth(&api_key) => {
             let _auth = AUTH_GATE.lock().await;
             match buzz_agent_pkg::discover_databricks_models(&config).await {
+                // A peer sign-in under the gate already succeeded.
                 Ok(entries) => entries,
                 Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
-                    buzz_agent_pkg::authenticate_databricks(&host)
-                        .await
-                        .map_err(|error| {
-                            format_redacted_error(
-                                "Databricks sign-in failed",
-                                &error,
-                                &redaction_env,
-                            )
-                        })?;
+                    // Passive surfaces suppress the browser while a recent
+                    // failure/cancel is cooling down; the explicit picker path
+                    // always launches (and clears any stale cooldown).
+                    if !AUTH_COOLDOWNS.permits_launch(auth_intent, &host, Instant::now()) {
+                        return Err(databricks_sign_in_required_error());
+                    }
+                    run_interactive_databricks_auth(
+                        buzz_agent_pkg::authenticate_databricks(&host),
+                        AUTH_FLOW_TIMEOUT,
+                        &AUTH_COOLDOWNS,
+                        &host,
+                        &redaction_env,
+                    )
+                    .await?;
                     buzz_agent_pkg::discover_databricks_models(&config)
                         .await
                         .map_err(|error| {
@@ -172,3 +259,43 @@ fn format_redacted_error(
     let message = crate::managed_agents::redact_env_values_in(&error.to_string(), redaction_env);
     format!("{context}: {message}")
 }
+
+/// Run the interactive browser OAuth flow under a hard timeout and maintain the
+/// per-host cooldown. Success clears the cooldown; a failure, cancel, or
+/// timeout records it so passive surfaces stop re-launching the browser on the
+/// next form keystroke. `timeout` is injected (production passes
+/// [`AUTH_FLOW_TIMEOUT`]) so the timeout/cooldown policy is unit-testable
+/// without a live browser.
+pub(super) async fn run_interactive_databricks_auth<Fut>(
+    auth: Fut,
+    timeout: Duration,
+    cooldowns: &AuthCooldown,
+    host: &str,
+    redaction_env: &BTreeMap<String, String>,
+) -> Result<(), String>
+where
+    Fut: std::future::Future<Output = Result<(), buzz_agent_pkg::AgentError>>,
+{
+    match tokio::time::timeout(timeout, auth).await {
+        Ok(Ok(())) => {
+            cooldowns.clear(host);
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            cooldowns.record(host, Instant::now());
+            Err(format_redacted_error(
+                "Databricks sign-in failed",
+                &error,
+                redaction_env,
+            ))
+        }
+        Err(_elapsed) => {
+            cooldowns.record(host, Instant::now());
+            Err(databricks_sign_in_timed_out_error())
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "agent_models_databricks_tests.rs"]
+mod tests;

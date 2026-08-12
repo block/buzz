@@ -358,6 +358,21 @@ fn default_true() -> bool {
     true
 }
 
+/// Response payload for `get_channels`. When the caller supplies a hash that
+/// matches the computed stable hash, `channels` is `None` so the multi-MB
+/// channel list is not serialized across IPC. `last_messages` is always
+/// included — it is cheap and changes frequently (every new message).
+#[derive(Serialize)]
+pub struct GetChannelsPayload {
+    pub hash: String,
+    /// `None` on a not-modified response (hash matched); `Some` with the full
+    /// sorted list otherwise.
+    pub channels: Option<Vec<ChannelInfo>>,
+    /// Map of channel id → ISO-8601 timestamp of its most recent message.
+    /// Empty for channels with no messages.
+    pub last_messages: std::collections::HashMap<String, String>,
+}
+
 // ── Social / Contact list ───────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]

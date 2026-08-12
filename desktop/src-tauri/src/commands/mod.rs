@@ -35,6 +35,8 @@ mod media_transcode;
 mod media_upload_progress;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_llm;
+#[cfg(feature = "mesh-llm")]
+pub(crate) mod mesh_readiness;
 mod messages;
 mod notifications;
 mod observer_archive;

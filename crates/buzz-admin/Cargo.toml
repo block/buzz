@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-db = { workspace = true }
+buzz-deletion = { workspace = true }
 buzz-core = { workspace = true }
 buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }

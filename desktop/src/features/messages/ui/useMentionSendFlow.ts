@@ -73,7 +73,7 @@ type UseMentionSendFlowOptions = {
   >;
   richText: Pick<
     UseRichTextEditorResult,
-    "clearContent" | "setContent" | "setContentAndFocusEnd"
+    "clearContent" | "setContent" | "restorePlainTextAndFocusEnd"
   >;
   setContent: (content: string) => void;
   setIsEmojiPickerOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -187,7 +187,6 @@ export function useMentionSendFlow({
           pubkeys: [] as string[],
         };
       }
-
       const managedAgentsByPubkey = await getManagedAgentsByPubkey();
       for (const agent of preparedManagedAgents) {
         managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
@@ -198,13 +197,11 @@ export function useMentionSendFlow({
       ]);
       const errors: string[] = [];
       const pubkeys: string[] = [];
-
       for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) {
           continue;
         }
-
         try {
           if (participantPubkeys.has(pubkey)) {
             if (isProviderBackedAgent(agent)) {
@@ -231,7 +228,6 @@ export function useMentionSendFlow({
           );
         }
       }
-
       return {
         errors,
         pubkeys: uniqueNormalizedPubkeys(pubkeys),
@@ -338,7 +334,7 @@ export function useMentionSendFlow({
       setContent(postSendContent);
       contentRef.current = postSendContent;
       if (postSendContent) {
-        richText.setContentAndFocusEnd(postSendContent);
+        richText.restorePlainTextAndFocusEnd(postSendContent);
         mentions.cancelMentionAutocomplete();
       } else richText.clearContent();
       setPendingImeta([]);
@@ -356,7 +352,7 @@ export function useMentionSendFlow({
       mentions.cancelMentionAutocomplete,
       mentions.clearMentions,
       richText.clearContent,
-      richText.setContentAndFocusEnd,
+      richText.restorePlainTextAndFocusEnd,
       setContent,
       setIsEmojiPickerOpen,
       setPendingImeta,
@@ -713,6 +709,7 @@ export function useMentionSendFlow({
       capturedThreadContext = null,
       pendingImeta,
       queuedAttachments = [],
+      linkPreviewTags = [],
       sentDraftKey,
       recoveryDraftKey,
       spoileredAttachmentUrls = new Set(),
@@ -775,7 +772,10 @@ export function useMentionSendFlow({
             createdPersonaAgentPubkeySet.has(pubkey),
         );
         const pubkeys = explicitMentionPubkeys;
-        const outgoingTags = buildCustomEmojiTags(trimmed, customEmoji);
+        const outgoingTags = [
+          ...buildCustomEmojiTags(trimmed, customEmoji),
+          ...linkPreviewTags,
+        ];
         const nonMemberPubkeys = getNonMemberMentionPubkeys(pubkeys);
         let promptNonMemberPubkeys = nonMemberPubkeys.filter(
           (pubkey) =>

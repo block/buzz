@@ -1,22 +1,11 @@
 import * as React from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { Activity, Headphones, MessageSquare } from "lucide-react";
-import { toast } from "sonner";
 
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useHuddle } from "@/features/huddle";
-import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import {
-  channelsQueryKey,
-  useChannelsQuery,
-  useOpenDmMutation,
-} from "@/features/channels/hooks";
-import {
-  useProfileQuery,
   useUserProfileQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
-import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
@@ -33,18 +22,11 @@ import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
-import {
-  createOptimisticMessage,
-  mergeTimelineCacheMessages,
-} from "@/features/messages/hooks";
-import { buildWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
-import { sendChannelMessage } from "@/shared/api/tauri";
-import type { Channel, RelayEvent } from "@/shared/api/types";
-import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { useProfileInteractionActions } from "@/features/profile/ui/useProfileInteractionActions";
 
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
@@ -87,43 +69,6 @@ function InfoBadge({ children }: { children: React.ReactNode }) {
     <span className="inline-flex items-center rounded-full bg-muted/50 px-2 py-0.5 text-xs text-muted-foreground">
       {children}
     </span>
-  );
-}
-
-function findCachedOneToOneDm(
-  channels: Channel[] | undefined,
-  targetPubkey: string,
-  currentPubkey: string | undefined,
-) {
-  const normalizedTargetPubkey = normalizePubkey(targetPubkey);
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
-    : null;
-
-  return (
-    channels?.find((channel) => {
-      if (channel.channelType !== "dm") {
-        return false;
-      }
-
-      const participantPubkeys =
-        channel.participantPubkeys.map(normalizePubkey);
-      if (!participantPubkeys.includes(normalizedTargetPubkey)) {
-        return false;
-      }
-
-      const otherParticipantPubkeys = normalizedCurrentPubkey
-        ? participantPubkeys.filter(
-            (participantPubkey) =>
-              participantPubkey !== normalizedCurrentPubkey,
-          )
-        : participantPubkeys;
-
-      return (
-        otherParticipantPubkeys.length === 1 &&
-        otherParticipantPubkeys[0] === normalizedTargetPubkey
-      );
-    }) ?? null
   );
 }
 
@@ -181,17 +126,9 @@ export function UserProfilePopover({
   botIdenticonValue,
 }: UserProfilePopoverProps) {
   const [open, setOpen] = React.useState(false);
-  const [pendingAction, setPendingAction] = React.useState<
-    "message" | "huddle" | "wave" | null
-  >(null);
-  const isMountedRef = React.useRef(false);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const queryClient = useQueryClient();
-  const { goChannel } = useAppNavigation();
-  const openDmMutation = useOpenDmMutation();
-  const { isStarting: isStartingHuddle, startHuddle } = useHuddle();
   const profileQuery = useUserProfileQuery(open ? pubkey : undefined);
   const usersBatchQuery = useUsersBatchQuery(open ? [pubkey] : [], {
     enabled: open,
@@ -260,7 +197,6 @@ export function UserProfilePopover({
   const showProfileActions = currentPubkey !== undefined && !isSelf;
   const showHumanProfileActions =
     showProfileActions && !isBotProfile && !isAgentClassificationPending;
-  const selfProfileQuery = useProfileQuery(open && showProfileActions);
   const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
   const showHuddleAction =
@@ -334,186 +270,31 @@ export function UserProfilePopover({
     [canOpenProfilePanel, clearHoverTimer, openProfilePanel, pubkey],
   );
 
-  const handleMessage = React.useCallback(async () => {
-    if (!showMessageAction || pendingAction !== null) return;
-
-    clearHoverTimer();
-    setPendingAction("message");
-
-    try {
-      const dm = await openDmMutation.mutateAsync({ pubkeys: [pubkey] });
-      await goChannel(dm.id);
-      if (isMountedRef.current) {
-        setOpen(false);
-      }
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Failed to open direct message.",
-      );
-    } finally {
-      if (isMountedRef.current) {
-        setPendingAction(null);
-      }
-    }
-  }, [
-    clearHoverTimer,
-    goChannel,
-    openDmMutation,
-    pendingAction,
-    pubkey,
-    showMessageAction,
-  ]);
-
-  const handleHuddle = React.useCallback(async () => {
-    if (
-      !showProfileActions ||
-      !showHuddleAction ||
-      pendingAction !== null ||
-      isStartingHuddle
-    ) {
-      return;
-    }
-
-    clearHoverTimer();
-    setPendingAction("huddle");
-
-    try {
-      const dm = await openDmMutation.mutateAsync({ pubkeys: [pubkey] });
-      await goChannel(dm.id);
-      await startHuddle(dm.id, isBotProfile ? [pubkey] : []);
-      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
-      if (isMountedRef.current) {
-        setOpen(false);
-      }
-    } catch (error) {
-      toast.error(formatHuddleActionError(error, "start"));
-    } finally {
-      if (isMountedRef.current) {
-        setPendingAction(null);
-      }
-    }
-  }, [
-    clearHoverTimer,
-    goChannel,
+  const closeProfileActions = React.useCallback(() => setOpen(false), []);
+  const {
+    handleHuddle,
+    handleMessage,
+    handleWave,
+    isOpeningDm,
     isStartingHuddle,
-    openDmMutation,
     pendingAction,
-    pubkey,
-    queryClient,
-    isBotProfile,
-    showHuddleAction,
-    showProfileActions,
-    startHuddle,
-  ]);
-
-  const handleWave = React.useCallback(async () => {
-    if (
-      !showProfileActions ||
-      !showHumanProfileActions ||
-      pendingAction !== null
-    ) {
-      return;
-    }
-
-    clearHoverTimer();
-    setPendingAction("wave");
-
-    try {
-      const identity = identityQuery.data;
-      if (!identity) {
-        throw new Error("No identity available for sending messages.");
-      }
-
-      const dm =
-        findCachedOneToOneDm(channelsQuery.data, pubkey, currentPubkey) ??
-        (await openDmMutation.mutateAsync({ pubkeys: [pubkey] }));
-      const senderName =
-        selfProfileQuery.data?.displayName?.trim() ||
-        identity.displayName.trim() ||
-        truncatePubkey(identity.pubkey);
-      const content = buildWaveMessageContent(senderName);
-      const queryKey = channelMessagesKey(dm.id);
-
-      await queryClient.cancelQueries({ queryKey });
-      const previousMessages =
-        queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const optimisticMessage = createOptimisticMessage(
-        dm.id,
-        content,
-        identity,
-        previousMessages,
-      );
-
-      queryClient.setQueryData<RelayEvent[]>(
-        queryKey,
-        mergeTimelineCacheMessages(previousMessages, optimisticMessage),
-      );
-
-      try {
-        await goChannel(dm.id);
-        if (isMountedRef.current) {
-          setOpen(false);
-        }
-
-        const result = await sendChannelMessage(dm.id, content);
-        queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-          mergeTimelineCacheMessages(current, {
-            id: result.eventId,
-            localKey: optimisticMessage.id,
-            pubkey: identity.pubkey,
-            created_at: result.createdAt,
-            kind: KIND_STREAM_MESSAGE,
-            tags: [
-              ["h", dm.id],
-              ["p", identity.pubkey],
-            ],
-            content: content.trim(),
-            sig: "",
-          }),
-        );
-      } catch (error) {
-        queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-          current.filter(
-            (message) =>
-              message.id !== optimisticMessage.id &&
-              message.localKey !== optimisticMessage.localKey,
-          ),
-        );
-        throw error;
-      }
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to send wave.",
-      );
-    } finally {
-      if (isMountedRef.current) {
-        setPendingAction(null);
-      }
-    }
-  }, [
-    channelsQuery.data,
-    clearHoverTimer,
-    currentPubkey,
-    goChannel,
-    identityQuery.data,
-    openDmMutation,
-    pendingAction,
-    pubkey,
-    queryClient,
-    selfProfileQuery.data?.displayName,
-    showHumanProfileActions,
-    showProfileActions,
-  ]);
+  } = useProfileInteractionActions({
+    availability: {
+      huddle: showHuddleAction,
+      message: showMessageAction,
+      wave: showHumanProfileActions,
+    },
+    effectivePubkey: pubkey,
+    enabled: open,
+    isBot: isBotProfile,
+    isSelf,
+    onBeforeAction: clearHoverTimer,
+    onClose: closeProfileActions,
+    viewerIsOwner,
+  });
 
   React.useEffect(() => {
-    isMountedRef.current = true;
-
-    return () => {
-      isMountedRef.current = false;
-      clearHoverTimer();
-    };
+    return clearHoverTimer;
   }, [clearHoverTimer]);
 
   const TriggerElement = triggerElement;
@@ -691,9 +472,7 @@ export function UserProfilePopover({
                       aria-label="Wave"
                       className="buzz-wave-hover-trigger shrink-0 px-3 transition-transform duration-100 ease-out motion-reduce:transition-none motion-safe:active:scale-[0.97]"
                       data-testid={`user-profile-popover-wave-${pubkey}`}
-                      disabled={
-                        pendingAction !== null || openDmMutation.isPending
-                      }
+                      disabled={pendingAction !== null || isOpeningDm}
                       onClick={() => {
                         void handleWave();
                       }}
@@ -720,9 +499,7 @@ export function UserProfilePopover({
                     <Button
                       className="min-w-0 flex-1"
                       data-testid={`user-profile-popover-message-${pubkey}`}
-                      disabled={
-                        pendingAction !== null || openDmMutation.isPending
-                      }
+                      disabled={pendingAction !== null || isOpeningDm}
                       onClick={() => {
                         void handleMessage();
                       }}
@@ -747,7 +524,7 @@ export function UserProfilePopover({
                       data-testid={`user-profile-popover-huddle-${pubkey}`}
                       disabled={
                         pendingAction !== null ||
-                        openDmMutation.isPending ||
+                        isOpeningDm ||
                         isStartingHuddle
                       }
                       onClick={() => {
