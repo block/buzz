@@ -73,14 +73,25 @@ the sibling worktrees — not against notes)
   publication. review.py's module docstring opens "Render the review body. Does
   not post it — #119 owns publication." `review.SEVERITY_ORDER` is
   {"Blocker": 0, "High": 1, "Medium": 2, "Low": 3} at review.py:32, and
-  `render_review(findings, states, *, unreadable=None) -> str` at review.py:42
+  `render_review(findings, states) -> str` at review.py:45
   already renders containment findings, an "Incomplete" line naming unreadable
   surfaces, and a COVERAGE_NOTE. #119 composes with that function; it does not
   replace it and does not re-declare the ladder.
+  **The signature changed after this plan was committed, and the old one is a
+  TypeError.** It was `render_review(findings, states, *, unreadable=None)` at
+  review.py:42 when STEP 4 was written. #120 removed the `unreadable` keyword in
+  `e072fba55`, because it had no producer anywhere on that branch — so the
+  "Incomplete" banner it fed could never render, and a caller cannot forget an
+  argument that does not exist. `unreadable` is now DERIVED inside the function
+  from `states`, against `UNREADABLE_STATES = ("absent", "oversized",
+  "unparseable")` — which now occupies review.py:42, the line this plan cites for
+  the signature. STEP 4 is corrected accordingly.
   Those two line numbers were 19 and 29 when this plan was first drafted and
-  moved to 32 and 42 within the hour, because #120 is actively writing in that
-  worktree. They are recorded here as of 2026-08-12 20:10 and are expected to
-  move again. Cite them as orientation, never as evidence.
+  moved to 32 and 42 within the hour, because #120 was actively writing in that
+  worktree. `render_review` has since moved again, to 45, while SEVERITY_ORDER
+  stayed at 32. Recorded here as of 2026-08-13 against `c64ff7958`. Cite them as
+  orientation, never as evidence — this paragraph's warning has now fired twice,
+  and the second time it was the signature rather than the line that moved.
 
   `render_review` does NOT accept #117's records, and that is a design
   constraint, not a detail. It takes `findings: list[Finding]` and reads
@@ -237,12 +248,27 @@ STEP 4  launchpad/review-agent/publish_render.py — the findings body.      [in
         `containment` is a SEPARATE argument, not an entry in `reports`, because
         `review.render_review` cannot read #117's records — see ALREADY TRUE. Its
         shape is `{findings: [{severity, kind, entry_point, evidence}], states:
-        {entry_point: state}, unreadable: [entry_point]}`, which is
-        `contain.Finding` and `fetch.Surface.state` in JSON. render_body
-        reconstructs `contain.Finding` objects from that block and passes them,
-        with `states` and `unreadable`, straight into `review.render_review`, so
-        the post-escape rendering rule in CONTAINMENT.md is honoured by the code
-        that already holds it rather than reimplemented here.
+        {entry_point: state}}`, which is `contain.Finding` and
+        `fetch.Surface.state` in JSON. render_body reconstructs `contain.Finding`
+        objects from that block and passes them, with `states`, straight into
+        `review.render_review`, so the post-escape rendering rule in
+        CONTAINMENT.md is honoured by the code that already holds it rather than
+        reimplemented here.
+        The block carries NO `unreadable` key, and render_body passes no
+        `unreadable=` argument — that keyword was removed in #120's `e072fba55`
+        and passing it now raises TypeError. See ALREADY TRUE. Re-adding it here
+        would be a second source of truth for a fact `states` already carries:
+        the two could disagree, and `render_review` would silently ignore the one
+        this plan sent. Derive, never pass.
+        The consequence is that **`states` is now load-bearing for the
+        "Incomplete" banner**, not merely for the "Fetched and empty" line. If the
+        `containment` block omits `states`, or populates it for only the surfaces
+        that succeeded, every unreadable surface reads as absent-from-the-map
+        rather than unreadable, and the banner never renders. That is #120's
+        original defect — a banner with no producer — relocated one stage up. STEP
+        5's trigger for a MISSING block does not cover a PRESENT block with a thin
+        `states` map, so the control must assert the map names all seven entry
+        points, not merely that it exists.
         This block does not exist upstream yet. #117's runner has the objects —
         `contain.render` returns them — but emits them nowhere. Adding it is a
         one-key change to #117's output and is recorded in OPEN as a dependency,
@@ -503,14 +529,22 @@ BUDGET
   the static half first so at least one assertion is provable without one.
   Second, and structural rather than per-step: everything #119 imports —
   `review.SEVERITY_ORDER`, `review.render_review`, `run_controls.CONTROLS`,
-  CONTAINMENT.md's rendering rule — exists only as untracked files in #120's
-  worktree, on no branch and in no commit. If that work is rebased, renamed or
-  abandoned, STEPs 4, 5, 6, 11 and 12 are all rewriting against a moved target,
-  and nothing in this plan detects it early. Before STEP 4, re-verify
-  render_review's signature and SEVERITY_ORDER's location against whatever #120
-  has actually committed by then, rather than trusting the line numbers quoted in
-  ALREADY TRUE. The cheapest mitigation is ordering: let #120 land first. That is
-  a fleet sequencing decision, not this plan's.
+  CONTAINMENT.md's rendering rule — existed only as untracked files in #120's
+  worktree, on no branch and in no commit. **That is no longer true, as of
+  2026-08-13.** #120 is three commits on `feat/review-agent-untrusted-input`,
+  all pushed, at `c64ff7958`, with its control suite green (11 controls, 0
+  failed, 0 skipped). The dependency is now a real ref rather than a working
+  directory, so STEPs 4, 5, 6, 11 and 12 can cite commits instead of a path on
+  one machine. The risk it replaces is smaller but not gone: the branch is
+  unmerged, so a rebase before it lands still moves every line number here.
+  Before STEP 4, re-verify render_review's signature and SEVERITY_ORDER's
+  location against whatever #120 has actually committed by then, rather than
+  trusting the line numbers quoted in ALREADY TRUE. **That instruction has now
+  paid for itself**: run on 2026-08-13 it caught the removal of the `unreadable`
+  keyword, which would otherwise have been a TypeError on the first call STEP 4
+  made — found by reading, not by running, because none of this is built yet.
+  The cheapest mitigation is still ordering: let #120 land first. That is a fleet
+  sequencing decision, not this plan's.
   This risk is not hypothetical — it fired during planning. Between the first
   draft and its review, `review.py` moved SEVERITY_ORDER from line 19 to 32 and
   render_review from 29 to 42, and two new control scripts appeared in that
