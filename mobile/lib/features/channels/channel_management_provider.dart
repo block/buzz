@@ -68,6 +68,26 @@ class ChannelMember {
   }
 }
 
+/// Uses the relay-backed member list when connected, but keeps the channel
+/// snapshot visible while a reconnect temporarily publishes an empty result.
+///
+/// An empty member list is authoritative while connected. During reconnect,
+/// [channelMembersProvider] deliberately avoids a relay request and returns an
+/// empty value; autocomplete should treat that value as unavailable so the
+/// snapshot can keep suggestions visible until the refresh completes.
+List<ChannelMember> channelMembersForAutocomplete({
+  required AsyncValue<List<ChannelMember>> membersAsync,
+  required SessionStatus sessionStatus,
+  required List<ChannelMember> cachedMembers,
+}) {
+  final loadedMembers = membersAsync.asData?.value;
+  if (loadedMembers == null) return cachedMembers;
+  if (sessionStatus != SessionStatus.connected && loadedMembers.isEmpty) {
+    return cachedMembers;
+  }
+  return loadedMembers;
+}
+
 @immutable
 class ChannelCanvas {
   final String? content;

@@ -201,6 +201,7 @@ class ComposeBar extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
 
     final membersAsync = ref.watch(channelMembersProvider(channelId));
+    final sessionStatus = ref.watch(relaySessionProvider).status;
     final cachedMembers = channelsAsync.asData == null
         ? const <ChannelMember>[]
         : ref
@@ -228,7 +229,11 @@ class ComposeBar extends HookConsumerWidget {
     }, [controller, agentMentionLabelsKey]);
     useEffect(
       () {
-        final memberList = membersAsync.asData?.value ?? cachedMembers;
+        final memberList = channelMembersForAutocomplete(
+          membersAsync: membersAsync,
+          sessionStatus: sessionStatus,
+          cachedMembers: cachedMembers,
+        );
         final pubkeys = [
           ...memberList.map((m) => m.pubkey),
           ...?relayAgents?.map((a) => a.pubkey),

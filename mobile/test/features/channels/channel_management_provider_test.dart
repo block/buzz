@@ -253,6 +253,46 @@ void main() {
       expect(members.single.pubkey, _memberPubkey);
       expect(members.single.role, 'admin');
     });
+
+    test('keeps the member snapshot available during reconnect', () {
+      final cachedMembers = [
+        ChannelMember(
+          pubkey: _memberPubkey,
+          role: 'member',
+          joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+        ),
+      ];
+      final refreshedMember = ChannelMember(
+        pubkey: _memberPubkey,
+        role: 'admin',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+      );
+
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: const AsyncData([]),
+          sessionStatus: SessionStatus.connected,
+          cachedMembers: cachedMembers,
+        ),
+        isEmpty,
+      );
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: const AsyncData([]),
+          sessionStatus: SessionStatus.reconnecting,
+          cachedMembers: cachedMembers,
+        ),
+        same(cachedMembers),
+      );
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: AsyncData([refreshedMember]),
+          sessionStatus: SessionStatus.connected,
+          cachedMembers: cachedMembers,
+        ),
+        [refreshedMember],
+      );
+    });
   });
 
   group('directory providers relay-config invalidation', () {

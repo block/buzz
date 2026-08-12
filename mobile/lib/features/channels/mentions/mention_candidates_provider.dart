@@ -74,17 +74,18 @@ final mentionCandidatesProvider = Provider.family
       args,
     ) {
       final channelsAsync = ref.watch(channelsProvider);
-      final loadedMembers = ref
-          .watch(channelMembersProvider(args.channelId))
-          .asData
-          ?.value;
-      final members =
-          loadedMembers ??
-          (channelsAsync.asData == null
-              ? const <ChannelMember>[]
-              : ref
-                    .read(channelsProvider.notifier)
-                    .cachedMembersForChannel(args.channelId));
+      final membersAsync = ref.watch(channelMembersProvider(args.channelId));
+      final sessionStatus = ref.watch(relaySessionProvider).status;
+      final cachedMembers = channelsAsync.asData == null
+          ? const <ChannelMember>[]
+          : ref
+                .read(channelsProvider.notifier)
+                .cachedMembersForChannel(args.channelId);
+      final members = channelMembersForAutocomplete(
+        membersAsync: membersAsync,
+        sessionStatus: sessionStatus,
+        cachedMembers: cachedMembers,
+      );
       final relayAgents =
           ref.watch(agentDirectoryProvider).asData?.value ??
           const <AgentDirectoryEntry>[];
