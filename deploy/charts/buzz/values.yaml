@@ -101,6 +101,10 @@ secrets:
 
 # ── Relay behavior ───────────────────────────────────────────────────────────
 relay:
+  lifecycle:
+    preStop:
+      exec:
+        command: ["sleep", "5"]
   bindAddr: "0.0.0.0:3000"
   maxConnections: 10000
   maxConcurrentHandlers: 1024

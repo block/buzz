@@ -30,6 +30,12 @@ tests:
           path: kind
           value: Service
         template: templates/service.yaml
+      - equal:
+          path: spec.template.spec.containers[0].lifecycle.preStop.exec.command
+          value:
+            - sleep
+            - "5"
+        template: templates/deployment.yaml
       - notContains:
           path: spec.template.spec.containers[0].env
           content:

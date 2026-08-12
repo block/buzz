@@ -73,6 +73,10 @@
           "items": { "type": "string" }
         },
         "ephemeralTtlOverride": { "type": "integer", "minimum": 0 },
+        "lifecycle": {
+          "type": "object",
+          "description": "Kubernetes lifecycle hooks for the relay container."
+        },
         "command": {
           "type": "array",
           "items": { "type": "string" },
