@@ -4,15 +4,17 @@
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    agent_activity::AgentActivityFrame,
     kind::{
-        KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
-        KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_AGENT_ACTIVITY_SUMMARY, KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY,
+        KIND_APPROVAL_GRANT, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET,
+        KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+        KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+        KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST,
+        KIND_IA_UNARCHIVE_REQUEST, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
+        KIND_PRESENCE_UPDATE, KIND_PROJECT, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+        KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -242,6 +244,27 @@ pub fn build_message(
     Ok(EventBuilder::new(Kind::Custom(9), content)
         .tags(tags)
         .allow_self_tagging())
+}
+
+/// Build a member-visible, channel-scoped managed-agent activity frame (kind 24201).
+///
+/// The frame is validated against the closed privacy-sanitized schema before
+/// serialization. The caller MUST sign with `agent_pubkey`; relay ingest enforces
+/// that signer/tag equality and current channel membership.
+pub fn build_agent_activity_summary(
+    channel_id: Uuid,
+    agent_pubkey: &str,
+    frame: &AgentActivityFrame,
+) -> Result<EventBuilder, SdkError> {
+    let agent_pubkey = check_pubkey_hex(agent_pubkey, "agent_pubkey")?;
+    let content = frame
+        .to_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["agent", &agent_pubkey])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_AGENT_ACTIVITY_SUMMARY as u16), content).tags(tags))
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
