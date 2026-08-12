@@ -1053,15 +1053,20 @@ dependencies = [
 name = "buzz-db"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "buzz-auth",
  "buzz-core",
  "buzz-datastore-tracing",
+ "buzz-media",
  "chrono",
+ "dashmap",
  "hex",
+ "http",
  "metrics",
  "metrics-util",
  "nostr 0.44.7",
  "rand 0.10.1",
+ "rust-s3",
  "serde",
  "serde_json",
  "sha2 0.11.0",

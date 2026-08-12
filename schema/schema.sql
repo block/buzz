@@ -213,9 +213,9 @@ CREATE TABLE IF NOT EXISTS authorization_event_capacity (
     CONSTRAINT authorization_event_capacity_failure_code_check CHECK (failure_code IS NULL OR (failure_code IN (1, 2, 3))),
     CONSTRAINT authorization_event_capacity_generations CHECK (recovery_generation <= failure_generation),
     CONSTRAINT authorization_event_capacity_health_state_check CHECK (health_state IN (1, 2)),
-    CONSTRAINT authorization_event_capacity_max_bytes CHECK (max_bytes_per_domain >= 1 AND max_bytes_per_domain <= 16777216),
-    CONSTRAINT authorization_event_capacity_max_envelope CHECK (max_envelope_bytes >= 1 AND max_envelope_bytes <= 16384),
-    CONSTRAINT authorization_event_capacity_max_events CHECK (max_events_per_domain >= 1 AND max_events_per_domain <= 10000),
+    CONSTRAINT authorization_event_capacity_max_bytes CHECK (max_bytes_per_domain >= 1 AND max_bytes_per_domain <= 4294967296),
+    CONSTRAINT authorization_event_capacity_max_envelope CHECK (max_envelope_bytes >= 1 AND max_envelope_bytes <= 65536),
+    CONSTRAINT authorization_event_capacity_max_events CHECK (max_events_per_domain >= 1 AND max_events_per_domain <= 1000000),
     CONSTRAINT authorization_event_capacity_reserve_bytes CHECK (restrictive_reserve_bytes =
 CASE
     WHEN max_bytes_per_domain > max_envelope_bytes THEN GREATEST(max_envelope_bytes::bigint, LEAST(262144::bigint, max_bytes_per_domain / 8))
@@ -1892,7 +1892,7 @@ CREATE TABLE IF NOT EXISTS protected_publication_projection_outbox (
     delivered_at timestamptz,
     failure_code smallint DEFAULT 0 NOT NULL,
     created_at timestamptz DEFAULT transaction_timestamp() NOT NULL,
-    publication_sequence bigint NOT NULL,
+    publication_sequence bigint GENERATED ALWAYS AS IDENTITY,
     CONSTRAINT protected_publication_projection_outbox_pkey PRIMARY KEY (community_id, operation_id, projection_kind),
     CONSTRAINT protected_publication_project_community_id_publication_sequ_key UNIQUE (community_id, publication_sequence),
     CONSTRAINT protected_publication_project_community_id_operation_id_re_fkey FOREIGN KEY (community_id, operation_id, request_fingerprint) REFERENCES authorization_operation_receipts (community_id, operation_id, request_fingerprint) DEFERRABLE INITIALLY DEFERRED,
@@ -1907,6 +1907,7 @@ CREATE TABLE IF NOT EXISTS protected_publication_projection_outbox (
     CONSTRAINT protected_publication_projection_outbox_check CHECK ((attempt_count = 0) = (last_attempt_at IS NULL)),
     CONSTRAINT protected_publication_projection_outbox_check1 CHECK (last_attempt_at IS NULL OR last_attempt_at >= created_at),
     CONSTRAINT protected_publication_projection_outbox_check2 CHECK (delivered_at IS NULL OR delivered_at >= created_at),
+    CONSTRAINT protected_publication_projection_outbox_check3 CHECK ((delivery_state = 1 AND delivered_at IS NULL AND failure_code IN (0, 1, 2)) OR (delivery_state = 2 AND delivered_at IS NOT NULL AND failure_code = 0) OR (delivery_state = 3 AND delivered_at IS NULL AND failure_code >= 3 AND failure_code <= 6)),
     CONSTRAINT protected_publication_projection_outbox_delivery_state_check CHECK (delivery_state IN (1, 2, 3)),
     CONSTRAINT protected_publication_projection_outbox_failure_code_check CHECK (failure_code >= 0 AND failure_code <= 6),
     CONSTRAINT protected_publication_projection_outbox_object_key_check CHECK (octet_length(object_key) = 32 AND object_key <> decode(repeat('00'::text, 32), 'hex'::text)),
@@ -4419,13 +4420,20 @@ BEGIN
             jsonb_build_array(
                 'buzz:nip-fi:protected-publication-projection:v1',
                 NEW.community_id::TEXT,
+                NEW.object_kind,
+                encode(NEW.object_key, 'hex'),
                 NEW.projection_kind,
                 NEW.projection_key
             )::TEXT,
             0
         )
     );
-    NEW.publication_sequence := nextval('protected_publication_projection_sequence_v1');
+    NEW.publication_sequence := nextval(
+        pg_get_serial_sequence(
+            'protected_publication_projection_outbox',
+            'publication_sequence'
+        )::regclass
+    );
     NEW.created_at := transaction_timestamp();
     NEW.next_attempt_at := transaction_timestamp();
     RETURN NEW;
@@ -6046,9 +6054,6 @@ ALTER TABLE ONLY moderation_reports
 
 ALTER TABLE ONLY protected_object_authority
     ADD CONSTRAINT protected_object_authority_check1 CHECK ((((owner_pubkey IS NULL) AND (delegated_relationship_id IS NULL) AND (delegated_relationship_revision IS NULL) AND (delegation_conditions_fingerprint IS NULL)) OR ((owner_pubkey IS NOT NULL) AND (delegated_relationship_id IS NOT NULL) AND (delegated_relationship_revision IS NOT NULL) AND (delegation_conditions_fingerprint IS NOT NULL))));
-
-ALTER TABLE ONLY protected_publication_projection_outbox
-    ADD CONSTRAINT protected_publication_projection_outbox_check3 CHECK ((((delivery_state = 1) AND (delivered_at IS NULL) AND (failure_code = ANY (ARRAY[0, 1, 2]))) OR ((delivery_state = 2) AND (delivered_at IS NOT NULL) AND (failure_code = 0)) OR ((delivery_state = 3) AND (delivered_at IS NULL) AND (failure_code >= 3) AND (failure_code <= 6))));
 
 ALTER TABLE ONLY push_leases
     ADD CONSTRAINT push_leases_check CHECK (((active AND (app_profile IS NOT NULL) AND (endpoint_hash IS NOT NULL) AND (endpoint_grant IS NOT NULL) AND (max_class IS NOT NULL) AND (subscriptions IS NOT NULL)) OR ((NOT active) AND (app_profile IS NULL) AND (endpoint_hash IS NULL) AND (endpoint_grant IS NULL) AND (max_class IS NULL) AND (subscriptions IS NULL))));

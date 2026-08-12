@@ -19,8 +19,16 @@ pub mod archived_identities;
 pub mod authorization_admission;
 /// Immutable provider-free authorization events and capacity controls.
 pub mod authorization_events;
+/// Durable authorization invalidation epochs and snapshots.
+pub mod authorization_invalidation;
 /// Immutable provider-free enrollment-policy reconciliation.
 pub mod authorization_policy;
+/// Provider-free authorization resolution against current bindings.
+pub mod authorization_resolver;
+/// Durable recovery of interrupted authorization operations.
+pub mod authorization_restore;
+/// Versioned authorization state and protected publication coordinates.
+pub mod authorization_version;
 /// Channel and membership persistence.
 pub mod channel;
 /// Direct message channel persistence.

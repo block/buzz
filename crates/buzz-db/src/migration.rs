@@ -562,7 +562,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 34);
+        assert_eq!(migrations.len(), 35);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1084,6 +1084,40 @@ mod tests {
                 "migration 0036 missing Invitation object-kind closure: {required}",
             );
         }
+
+        assert_eq!(migrations[34].version, 37);
+        let invalidation_restore_runtime = migrations[34].sql.as_str();
+        for required in [
+            "authorization_invalidation_domains",
+            "authorization_operation_version_delta_manifests",
+            "client_status_revisions",
+            "max_events_per_domain BETWEEN 1 AND 1000000",
+            "max_bytes_per_domain BETWEEN 1 AND 4294967296",
+            "max_envelope_bytes BETWEEN 1 AND 65536",
+            "ADD GENERATED ALWAYS AS IDENTITY",
+            "pg_get_serial_sequence",
+            "nip_fi_0037_ephemeral_status_required",
+        ] {
+            assert!(
+                invalidation_restore_runtime.contains(required),
+                "migration 0037 missing runtime catalog closure: {required}",
+            );
+        }
+        assert!(
+            !invalidation_restore_runtime.contains("CREATE TABLE client_status_revisions"),
+            "migration 0037 must keep client status connection-local",
+        );
+        for required in [
+            "OR NEW.authority_operation_id IS NOT NULL",
+            "OR NEW.authority_request_fingerprint IS NOT NULL",
+            "OR NEW.authority_epoch IS NOT NULL",
+            "OR NEW.authority_fence IS NOT NULL",
+        ] {
+            assert!(
+                invalidation_restore_runtime.contains(required),
+                "final projection insert guard must reserve authority binding for the deferred guard: {required}",
+            );
+        }
     }
 
     #[test]
@@ -1326,7 +1360,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(36));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(37));
     }
 
     #[tokio::test]

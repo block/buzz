@@ -12,7 +12,7 @@ use buzz_auth::{
     AuthorizationEventCapacityPolicy, FinalizedAuthContext, PreparedAuthorization, ProofTransport,
     VerifiedFederatedAssertion, VerifiedNostrProof,
 };
-use buzz_core::{CanonicalCurrentBindingEvidence, CommunityId};
+use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Row, Transaction};
@@ -94,8 +94,6 @@ pub enum AuthorizationOperationKind {
     ProtectedMutation = 11,
     /// Invalidation advance.
     Invalidation = 12,
-    /// Client-status revision.
-    StatusRevision = 13,
 }
 
 /// Persisted result classification for one operation receipt.
@@ -207,10 +205,6 @@ pub enum AuthorizationEventKind {
     ProtectedAllowed = 10,
     /// Protected operation denied.
     ProtectedDenied = 11,
-    /// Current-binding status published.
-    StatusPublished = 12,
-    /// Current-binding status withdrawn.
-    StatusWithdrawn = 13,
     /// Invalidation generation advanced.
     InvalidationAdvanced = 14,
 }
@@ -229,8 +223,6 @@ impl AuthorizationEventKind {
             9 => Ok(Self::OperatorDenied),
             10 => Ok(Self::ProtectedAllowed),
             11 => Ok(Self::ProtectedDenied),
-            12 => Ok(Self::StatusPublished),
-            13 => Ok(Self::StatusWithdrawn),
             14 => Ok(Self::InvalidationAdvanced),
             _ => Err(DbError::InvalidData(
                 "authorization event kind is invalid".to_owned(),
@@ -549,6 +541,16 @@ impl AuthorizationEventActor {
     pub const fn authority_loss_target(&self) -> Option<AuthorizationAuthorityLossTarget> {
         self.authority_loss_target
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_direct(community_id: CommunityId) -> Self {
+        local_actor(
+            AuthorizationActorKind::Direct,
+            community_id,
+            &[b"protected-version-test"],
+            None,
+        )
+    }
 }
 
 const fn proof_transport_code(transport: ProofTransport) -> i16 {
@@ -777,132 +779,6 @@ fn local_actor(
     }
 }
 
-/// Mint status-publication attribution only after the complete evidence tuple
-/// has been rechecked inside the allocation transaction.
-pub async fn resolve_current_binding_event_actor_tx(
-    transaction: &mut Transaction<'_, Postgres>,
-    evidence: &CanonicalCurrentBindingEvidence,
-) -> Result<AuthorizationEventActor> {
-    let mut object_key_digest = Sha256::new();
-    object_key_digest.update(b"buzz:client-binding-status-authority:v1");
-    object_key_digest.update((16_u64).to_be_bytes());
-    object_key_digest.update(evidence.authorization_domain().as_uuid().as_bytes());
-    object_key_digest.update((32_u64).to_be_bytes());
-    object_key_digest.update(evidence.event_author_pubkey().to_bytes());
-    let object_key: [u8; 32] = object_key_digest.finalize().into();
-    sqlx::query(
-        "SELECT 1 FROM identity_bindings b \
-         JOIN identity_enrollment_policies p \
-           ON p.community_id=b.community_id AND p.policy_revision=b.policy_revision \
-         JOIN authorization_invalidation_domains d ON d.community_id=b.community_id \
-         JOIN authorization_authority_epochs a \
-           ON a.community_id=b.community_id AND a.object_kind=7 AND a.object_key=$10 \
-         WHERE b.community_id=$1 AND b.binding_id=$2 AND b.binding_version=$3 \
-           AND b.event_author_pubkey=$4 AND b.policy_revision=$5 \
-           AND d.current_generation=$6 AND a.authority_epoch=$7 AND a.fence=$8 \
-           AND b.binding_state=1 AND $9 > clock_timestamp() \
-           AND $11 <= clock_timestamp() \
-           AND (b.expires_at IS NULL OR b.expires_at > clock_timestamp()) \
-           AND p.effective_at <= clock_timestamp() \
-           AND (p.expires_at IS NULL OR p.expires_at > clock_timestamp()) \
-         FOR SHARE OF b,p,d,a",
-    )
-    .bind(evidence.authorization_domain().as_uuid())
-    .bind(evidence.binding_id())
-    .bind(i64::try_from(evidence.binding_version()).map_err(|_| {
-        DbError::InvalidData("authorization binding version is out of range".to_owned())
-    })?)
-    .bind(evidence.event_author_pubkey().to_bytes().as_slice())
-    .bind(i64::try_from(evidence.policy_revision()).map_err(|_| {
-        DbError::InvalidData("authorization policy revision is out of range".to_owned())
-    })?)
-    .bind(
-        i64::try_from(evidence.invalidation_generation()).map_err(|_| {
-            DbError::InvalidData("authorization invalidation generation is out of range".to_owned())
-        })?,
-    )
-    .bind(i64::try_from(evidence.authority_epoch()).map_err(|_| {
-        DbError::InvalidData("authorization authority epoch is out of range".to_owned())
-    })?)
-    .bind(evidence.fence().as_bytes().as_slice())
-    .bind(evidence.fresh_until())
-    .bind(object_key.as_slice())
-    .bind(evidence.observed_at())
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or_else(|| DbError::NotFound("current binding event actor".to_owned()))?;
-    current_binding_event_actor(evidence)
-}
-
-/// Derive redaction-safe attribution from already rechecked binding evidence.
-pub fn current_binding_event_actor(
-    evidence: &CanonicalCurrentBindingEvidence,
-) -> Result<AuthorizationEventActor> {
-    Ok(local_actor(
-        AuthorizationActorKind::Direct,
-        evidence.authorization_domain(),
-        &[
-            evidence.binding_id().as_bytes(),
-            &evidence.binding_version().to_be_bytes(),
-            &evidence.event_author_pubkey().to_bytes(),
-        ],
-        None,
-    ))
-}
-
-/// Mint withdrawal attribution only from the exact current durable status
-/// receipt that is about to be superseded.
-pub async fn resolve_status_withdrawal_event_actor_tx(
-    transaction: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
-    event_author_pubkey: [u8; 32],
-    supersedes_revision: u64,
-) -> Result<AuthorizationEventActor> {
-    let current = sqlx::query(
-        "SELECT revision,disposition FROM client_status_revisions \
-         WHERE community_id=$1 AND event_author_pubkey=$2 \
-         ORDER BY revision DESC LIMIT 1 FOR UPDATE",
-    )
-    .bind(community_id.as_uuid())
-    .bind(event_author_pubkey.as_slice())
-    .fetch_optional(&mut **transaction)
-    .await?;
-    let Some(current) = current else {
-        return Err(DbError::NotFound(
-            "current status withdrawal actor".to_owned(),
-        ));
-    };
-    if current.try_get::<i16, _>("disposition")? != 1
-        || u64::try_from(current.try_get::<i64, _>("revision")?).map_err(|_| {
-            DbError::InvalidData("authorization status revision is invalid".to_owned())
-        })? != supersedes_revision
-    {
-        return Err(DbError::InvalidData(
-            "current status withdrawal actor changed".to_owned(),
-        ));
-    }
-    status_withdrawal_event_actor(community_id, event_author_pubkey, supersedes_revision)
-}
-
-/// Derive withdrawal attribution from one exact durable status revision.
-pub fn status_withdrawal_event_actor(
-    community_id: CommunityId,
-    event_author_pubkey: [u8; 32],
-    supersedes_revision: u64,
-) -> Result<AuthorizationEventActor> {
-    if community_id.as_uuid().is_nil() || supersedes_revision == 0 {
-        return Err(DbError::InvalidData(
-            "authorization status withdrawal actor is invalid".to_owned(),
-        ));
-    }
-    Ok(local_actor(
-        AuthorizationActorKind::Direct,
-        community_id,
-        &[&event_author_pubkey, &supersedes_revision.to_be_bytes()],
-        None,
-    ))
-}
-
 fn append_hash_optional(digest: &mut Sha256, value: Option<&[u8]>) {
     match value {
         Some(value) => {
@@ -1022,8 +898,6 @@ fn valid_event_semantics(
                 && !matches!(reason, Reason::Current | Reason::Replay | Reason::Withdrawn)
         }
         Kind::ProtectedAllowed => outcome == Outcome::Allowed && reason == Reason::Current,
-        Kind::StatusPublished => outcome == Outcome::Allowed && reason == Reason::Current,
-        Kind::StatusWithdrawn => outcome == Outcome::Withdrawn && reason == Reason::Withdrawn,
         Kind::InvalidationAdvanced => outcome == Outcome::Allowed && reason == Reason::Invalidated,
     }
 }
@@ -1888,12 +1762,6 @@ mod tests {
             )
         };
         assert!(base(
-            AuthorizationEventKind::StatusPublished,
-            AuthorizationEventOutcome::Denied,
-            AuthorizationReasonCode::Withdrawn,
-        )
-        .is_err());
-        assert!(base(
             AuthorizationEventKind::InvalidationAdvanced,
             AuthorizationEventOutcome::Allowed,
             AuthorizationReasonCode::Current,
@@ -1905,5 +1773,16 @@ mod tests {
             AuthorizationReasonCode::Current,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn retired_status_codes_are_not_canonical_authority() {
+        assert!(AuthorizationEventKind::from_database(12).is_err());
+        assert!(AuthorizationEventKind::from_database(13).is_err());
+        assert_eq!(
+            AuthorizationEventKind::from_database(14).unwrap(),
+            AuthorizationEventKind::InvalidationAdvanced,
+        );
+        assert_eq!(AuthorizationOperationKind::Invalidation as i16, 12);
     }
 }

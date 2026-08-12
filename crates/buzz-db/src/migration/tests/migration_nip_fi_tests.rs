@@ -1214,15 +1214,15 @@ async fn nip_fi_direct_final_catalog_and_behavior() {
 
     for (limits, expected_constraint) in [
         (
-            (10_001_i64, 16_777_216_i64, 16_384_i32),
+            (1_000_001_i64, 4_294_967_296_i64, 65_536_i32),
             "authorization_event_capacity_max_events",
         ),
         (
-            (10_000_i64, 16_777_217_i64, 16_384_i32),
+            (1_000_000_i64, 4_294_967_297_i64, 65_536_i32),
             "authorization_event_capacity_max_bytes",
         ),
         (
-            (10_000_i64, 16_777_216_i64, 16_385_i32),
+            (1_000_000_i64, 4_294_967_296_i64, 65_537_i32),
             "authorization_event_capacity_max_envelope",
         ),
     ] {
@@ -1243,7 +1243,7 @@ async fn nip_fi_direct_final_catalog_and_behavior() {
     sqlx::query(
         "INSERT INTO authorization_event_capacity \
          (community_id,max_events_per_domain,max_bytes_per_domain,max_envelope_bytes) \
-         VALUES ($1,10000,16777216,16384)",
+         VALUES ($1,1000000,4294967296,65536)",
     )
     .bind(community_id)
     .execute(&pool)
