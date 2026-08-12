@@ -1,6 +1,6 @@
 import * as React from "react";
 
-/** Device-level message sizing and spacing used across conversation surfaces. */
+/** Device-level spacing used across conversation surfaces. */
 export type ConversationDensity = "compact" | "comfortable" | "spacious";
 
 export const CONVERSATION_DENSITY_STORAGE_KEY =

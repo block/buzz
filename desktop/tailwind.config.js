@@ -12,8 +12,8 @@ export default {
         "3xs": "0.5rem", // 8px — tiny glyphs / micro labels
         badge: "0.625rem", // 10px — compact status badges
         // Shared channel, DM, thread, and composer type. Backed by CSS
-        // variables so the Appearance preference can change the complete
-        // conversation rhythm without branching individual components.
+        // variables so font size and density can change independently without
+        // branching individual components.
         message: [
           "var(--conversation-message-font-size)",
           { lineHeight: "var(--conversation-message-line-height)" },

@@ -22,6 +22,12 @@ import {
   type ConversationDensity,
 } from "@/shared/lib/conversationDensityPreference";
 import {
+  previewConversationFontSize,
+  setConversationFontSize,
+  useConversationFontSize,
+  type ConversationFontSize,
+} from "@/shared/lib/conversationFontSizePreference";
+import {
   ACCENT_COLORS,
   DEFAULT_GLASS_OPACITY,
   GLASS_OPACITY_MAX,
@@ -106,6 +112,24 @@ const CONVERSATION_DENSITY_OPTIONS: readonly {
   },
 ];
 
+const CONVERSATION_FONT_SIZE_OPTIONS: readonly {
+  value: ConversationFontSize;
+  label: string;
+}[] = [
+  {
+    value: "smaller",
+    label: "Smaller",
+  },
+  {
+    value: "default",
+    label: "Default",
+  },
+  {
+    value: "larger",
+    label: "Larger",
+  },
+];
+
 function ConversationDensityPreviewMessage({
   avatar,
   author,
@@ -139,18 +163,18 @@ function ConversationDensityPreviewMessage({
   );
 }
 
-function ConversationDensityPreview() {
+function ConversationPreview() {
   return (
-    <div className="px-4 py-3" data-testid="conversation-density-preview">
+    <div className="px-4 py-3" data-testid="conversation-preview">
       <div
         aria-hidden="true"
         className="relative overflow-hidden rounded-xl border border-border/65 bg-muted/45"
-        data-testid="conversation-density-preview-surface"
+        data-testid="conversation-preview-surface"
       >
         <span className="absolute right-3 top-3 inline-flex rounded-full border border-border/65 bg-background/70 px-2.5 py-1 text-xs font-medium text-muted-foreground">
           Preview
         </span>
-        <div className="p-4" data-testid="conversation-density-preview-content">
+        <div className="p-4" data-testid="conversation-preview-content">
           <ConversationDensityPreviewMessage
             avatar="M"
             author="Maya"
@@ -177,12 +201,34 @@ function ConversationDensityPreview() {
   );
 }
 
-/** Message sizing and spacing shared by every conversation surface. */
-export function ConversationDensitySetting() {
+/** Independent message type and spacing controls shared by every conversation. */
+export function ConversationDisplaySettings() {
   const density = useConversationDensity();
+  const fontSize = useConversationFontSize();
 
   return (
     <>
+      <SettingsOptionRow data-testid="conversation-font-size-row">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Font size</p>
+          <p
+            className="text-sm font-normal text-muted-foreground/70"
+            data-settings-subcopy
+          >
+            Adjust message text and line height.
+          </p>
+        </div>
+        <SettingsSegmentedControl
+          className="w-72"
+          legend="Font size"
+          onPreviewChange={previewConversationFontSize}
+          onValueChange={setConversationFontSize}
+          optionTestIdPrefix="conversation-font-size"
+          options={CONVERSATION_FONT_SIZE_OPTIONS}
+          testId="conversation-font-size-control"
+          value={fontSize}
+        />
+      </SettingsOptionRow>
       <SettingsOptionRow data-testid="conversation-density-row">
         <div className="min-w-0">
           <p className="text-sm font-medium">Conversation density</p>
@@ -190,7 +236,7 @@ export function ConversationDensitySetting() {
             className="text-sm font-normal text-muted-foreground/70"
             data-settings-subcopy
           >
-            Adjust message size and spacing.
+            Adjust message and paragraph spacing.
           </p>
         </div>
         <SettingsSegmentedControl
@@ -204,7 +250,7 @@ export function ConversationDensitySetting() {
           value={density}
         />
       </SettingsOptionRow>
-      <ConversationDensityPreview />
+      <ConversationPreview />
     </>
   );
 }
