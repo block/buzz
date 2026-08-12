@@ -577,12 +577,7 @@ pub async fn create_managed_agent(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    if let Some(parallelism) = input.parallelism {
-        if !(1..=32).contains(&parallelism) {
-            return Err("parallelism must be between 1 and 32".to_string());
-        }
-    }
-    crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+    super::agent_fs::validate_create(&input)?;
 
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
@@ -882,6 +877,7 @@ pub async fn create_managed_agent(
             persona_team_dir: None,
             persona_name_in_team: None,
             env_vars: input.env_vars.clone(),
+            filesystem_isolation: input.filesystem_isolation.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,

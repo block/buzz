@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf, process::Child};
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -120,6 +120,7 @@ impl AgentDefinition {
             provider: self.provider,
             persona_source_version: None,
             env_vars: self.env_vars,
+            filesystem_isolation: None,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
@@ -307,6 +308,10 @@ pub struct ManagedAgentRecord {
     /// To "override" a persona env var: set the same key here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
+    /// Enforced local process-tree filesystem boundary. `None` preserves the
+    /// pre-isolation behavior for existing agents and remote backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_isolation: Option<FilesystemIsolationProfile>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
     /// Auto-restart this agent when its effective spawn config drifts from
@@ -458,38 +463,6 @@ pub struct RelayMeshConfig {
     pub model_ref: String,
 }
 
-#[derive(Debug)]
-pub struct ManagedAgentProcess {
-    pub child: Child,
-    pub log_path: PathBuf,
-    /// The effective spawn config this process was launched with (see
-    /// `spawn_snapshot::SpawnConfigSnapshot`). Runtime-only — never persisted.
-    /// The summary builder recomputes a prospective snapshot and reports
-    /// differing fields via `ManagedAgentSummary::restart_diff`. Agents
-    /// adopted via `runtime_pid` have none; their config is unknown.
-    pub spawn_config: super::spawn_snapshot::SpawnConfigSnapshot,
-    /// Whether this process was spawned in setup-listener mode (i.e.
-    /// `BUZZ_ACP_SETUP_PAYLOAD` was set at launch because the agent was
-    /// `NotReady`). Runtime-only — never persisted. Used by
-    /// `install_acp_runtime` to target only stuck agents for auto-restart,
-    /// excluding healthy in-pool agents.
-    pub setup_mode: bool,
-    /// Adapter availability status stamped at spawn time for runtimes with a
-    /// version gate (currently codex only; `None` for all others). Runtime-only
-    /// — never persisted. The summary builder compares this against the current
-    /// cached availability and sets `needs_restart` on drift, catching out-of-
-    /// band adapter changes that Phase-1 auto-restart doesn't cover.
-    pub adapter_availability: Option<AcpAvailabilityStatus>,
-    /// Unpredictable identity shared only with this harness generation.
-    pub start_nonce: String,
-    /// Win32 Job Object owning the harness + its entire process tree. Closing
-    /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
-    /// tree — the Windows mirror of the Unix process-group teardown. `None`
-    /// if job creation/assignment failed (we fall back to `Child::kill()`).
-    #[cfg(windows)]
-    pub job: Option<crate::managed_agents::JobHandle>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
     pub pubkey: String,
@@ -550,6 +523,8 @@ pub struct ManagedAgentSummary {
     pub restart_diff: Vec<super::spawn_snapshot::RestartDiffEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_isolation: Option<FilesystemIsolationProfile>,
     pub backend: BackendKind,
     pub backend_agent_id: Option<String>,
     pub status: String,
@@ -990,6 +965,10 @@ pub fn resolve_mint_behavioral_defaults(
 
 mod catalog_source;
 pub use catalog_source::CatalogSource;
+mod filesystem_isolation;
+pub use filesystem_isolation::FilesystemIsolationProfile;
+mod managed_agent_process;
+pub use managed_agent_process::ManagedAgentProcess;
 mod requests;
 pub use requests::*;
 

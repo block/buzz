@@ -6,6 +6,7 @@ import {
 import type {
   ManagedAgent,
   ManagedAgentRuntimeStatus,
+  PreparedFilesystemIsolation,
 } from "@/shared/api/types";
 
 export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
@@ -63,6 +64,25 @@ export async function startManagedAgentRuntime(
   relayUrl: string,
 ): Promise<ManagedAgentRuntimeStatus> {
   return invokeTauri("start_managed_agent_runtime", { pubkey, relayUrl });
+}
+
+export async function prepareManagedAgentIsolation(
+  pubkey: string,
+): Promise<PreparedFilesystemIsolation> {
+  return invokeTauri("prepare_managed_agent_isolation", { pubkey });
+}
+
+export async function abortManagedAgentIsolation(
+  pubkey: string,
+  runId: string,
+): Promise<void> {
+  return invokeTauri("abort_managed_agent_isolation", { pubkey, runId });
+}
+
+export async function getPreparedManagedAgentIsolation(
+  pubkey: string,
+): Promise<PreparedFilesystemIsolation | null> {
+  return invokeTauri("get_prepared_managed_agent_isolation", { pubkey });
 }
 
 export async function stopManagedAgentRuntime(

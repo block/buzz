@@ -123,6 +123,7 @@ pub(crate) struct SpawnConfigSnapshot {
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
+    pub filesystem_isolation: Option<super::FilesystemIsolationProfile>,
 }
 
 impl SpawnConfigSnapshot {
@@ -174,6 +175,7 @@ impl SpawnConfigSnapshot {
             // pool and must badge. The diff surface consequently displays the
             // effective value — that is correct, it is what actually runs.
             parallelism: super::effective_parallelism(&descriptor.command, record.parallelism),
+            filesystem_isolation: record.filesystem_isolation.clone(),
         }
     }
 

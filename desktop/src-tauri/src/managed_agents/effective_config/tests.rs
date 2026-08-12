@@ -60,6 +60,7 @@ fn record(
         provider: provider.map(str::to_string),
         persona_source_version: None,
         env_vars: BTreeMap::new(),
+        filesystem_isolation: None,
         start_on_app_launch: false,
         runtime_pid: None,
         backend: BackendKind::Local,

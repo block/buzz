@@ -121,6 +121,65 @@ test("relay rate-limited: prefix check is case-sensitive (Rust always emits lowe
 
 const { fromRawAcpRuntimeCatalogEntry } = await import("./tauri.ts");
 
+const {
+  fromRawFilesystemIsolationProfile,
+  toRawFilesystemIsolationProfile,
+  toRawUpdateManagedAgentInput,
+} = await import("./tauri.ts");
+
+test("filesystem isolation profile maps across the nested Tauri wire boundary", () => {
+  const frontend = {
+    mode: "ephemeral",
+    readOnlyRoots: ["/opt/runtime", "/usr/local/share"],
+  };
+  const raw = toRawFilesystemIsolationProfile(frontend);
+  assert.deepEqual(raw, {
+    mode: "ephemeral",
+    read_only_roots: ["/opt/runtime", "/usr/local/share"],
+  });
+  assert.deepEqual(fromRawFilesystemIsolationProfile(raw), frontend);
+});
+
+test("absent filesystem isolation maps to an explicit disabled profile", () => {
+  assert.equal(fromRawFilesystemIsolationProfile(undefined), null);
+  assert.equal(fromRawFilesystemIsolationProfile(null), null);
+});
+
+test("managed-agent update omits an unchanged isolation profile", () => {
+  const raw = toRawUpdateManagedAgentInput({ pubkey: "ab" });
+  assert.equal(raw.filesystemIsolation, undefined);
+  assert.equal(JSON.stringify(raw).includes("filesystemIsolation"), false);
+});
+
+test("managed-agent update preserves explicit null isolation removal", () => {
+  assert.deepEqual(
+    toRawUpdateManagedAgentInput({
+      pubkey: "ab",
+      filesystemIsolation: null,
+    }),
+    { pubkey: "ab", filesystemIsolation: null },
+  );
+});
+
+test("managed-agent update serializes declared roots without defaults", () => {
+  assert.deepEqual(
+    toRawUpdateManagedAgentInput({
+      pubkey: "ab",
+      filesystemIsolation: {
+        mode: "ephemeral",
+        readOnlyRoots: ["/opt/runtime"],
+      },
+    }),
+    {
+      pubkey: "ab",
+      filesystemIsolation: {
+        mode: "ephemeral",
+        read_only_roots: ["/opt/runtime"],
+      },
+    },
+  );
+});
+
 test("fromRawAcpRuntimeCatalogEntry maps definition_env to definitionEnv", () => {
   const raw = {
     id: "my-harness",

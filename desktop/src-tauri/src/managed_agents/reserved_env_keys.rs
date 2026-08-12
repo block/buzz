@@ -70,6 +70,13 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // for same-session sweep decisions.
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
+    // Filesystem boundary receipt and run-root identity are stamped only by
+    // the Desktop wrapper. User env must not forge cosmetic attestation or
+    // point tools at a different root than the enforced profile.
+    "BUZZ_FILESYSTEM_ISOLATION_ATTESTATION",
+    "BUZZ_FILESYSTEM_ISOLATION_RUN_ROOT",
+    "BUZZ_FILESYSTEM_ISOLATION_CONTROL_URL",
+    "BUZZ_FILESYSTEM_ISOLATION_CONTROL_TOKEN",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

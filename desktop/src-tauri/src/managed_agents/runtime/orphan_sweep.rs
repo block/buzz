@@ -282,14 +282,23 @@ pub(crate) fn collect_same_instance_orphans(
     instance_id: &str,
     skip_pids: &[u32],
 ) -> std::collections::HashSet<u32> {
+    collect_same_instance_orphans_checked(instance_id, skip_pids).unwrap_or_default()
+}
+
+/// Fail-closed process snapshot used by security-sensitive preflight paths.
+/// Unlike the periodic sweep helper, process-table enumeration errors are
+/// surfaced so an empty set cannot be mistaken for proof that no harness is
+/// live.
+#[cfg(target_os = "macos")]
+pub(crate) fn collect_same_instance_orphans_checked(
+    instance_id: &str,
+    skip_pids: &[u32],
+) -> Result<std::collections::HashSet<u32>, String> {
     let my_uid = unsafe { libc::getuid() };
     let my_pid = std::process::id() as i32;
     let mut orphans = std::collections::HashSet::new();
 
-    let pids = sweep::collect_all_pids();
-    if pids.is_empty() {
-        return orphans;
-    }
+    let pids = sweep::collect_all_pids_checked()?;
 
     for &pid in &pids {
         if pid <= 0 || pid == my_pid {
@@ -327,7 +336,7 @@ pub(crate) fn collect_same_instance_orphans(
         }
         orphans.insert(upid);
     }
-    orphans
+    Ok(orphans)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -378,10 +387,26 @@ pub(crate) fn collect_same_instance_orphans(
     orphans
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn collect_same_instance_orphans_checked(
+    instance_id: &str,
+    skip_pids: &[u32],
+) -> Result<std::collections::HashSet<u32>, String> {
+    Ok(collect_same_instance_orphans(instance_id, skip_pids))
+}
+
 #[cfg(not(unix))]
 pub(crate) fn collect_same_instance_orphans(
     _instance_id: &str,
     _skip_pids: &[u32],
 ) -> std::collections::HashSet<u32> {
     std::collections::HashSet::new()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn collect_same_instance_orphans_checked(
+    instance_id: &str,
+    skip_pids: &[u32],
+) -> Result<std::collections::HashSet<u32>, String> {
+    Ok(collect_same_instance_orphans(instance_id, skip_pids))
 }

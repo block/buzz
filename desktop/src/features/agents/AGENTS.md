@@ -172,6 +172,16 @@ with a TypeScript lookup table or an id comparison in a component.
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
 
+12. **Filesystem isolation is instance-local and enforced at the outer spawn.**
+    `ManagedAgentRecord.filesystem_isolation` is never a persona capability or
+    public catalog field. Desktop wraps `buzz-acp` in `runtime.rs`, before the
+    harness creates the ACP runtime or MCP/tool children, and retains the fresh
+    run-root guard on `ManagedAgentProcess` until the whole process tree exits.
+    Do not move the boundary into `AcpClient::spawn`, represent it as a `cwd`,
+    or expose an attestation env key that user `env_vars` can override. Extra
+    read-only roots are explicit owner-reviewed instance paths; `/`, the bare
+    home directory, and any root overlapping the Buzz nest must fail closed.
+
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
