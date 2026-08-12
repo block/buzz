@@ -17,6 +17,10 @@ use crate::{
     util::now_iso,
 };
 
+pub(super) mod payload_digest;
+
+use payload_digest::{deploy_input_digest, digest_parts};
+
 type DeployLocks = StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
 /// Per-agent provider-deploy serialization: at most one provider call may be
@@ -49,27 +53,46 @@ pub(super) fn needs_reconciliation_with_policy(
 }
 
 /// A provider deploy captured under the store lock: the coordinates the
-/// provider call will use plus the record generation (`updated_at`) the
-/// completion is bound to. Every deploy path (create, start, reconcile,
-/// redeploy) snapshots one of these under the per-agent deploy lock before
-/// releasing the store lock for the long-running provider call.
+/// provider call will use, the record generation (`updated_at`), and the
+/// digest of the fully resolved deploy input the completion is bound to.
+/// Every deploy path (create, start, reconcile, redeploy) snapshots one of
+/// these under the per-agent deploy lock before releasing the store lock for
+/// the long-running provider call.
+///
+/// Two bindings, not one, and deliberately conservative — a completion is only
+/// reported as current when *both* hold:
+///
+/// * `updated_at` catches an owner edit to the agent row even when the edited
+///   field does not reach the provider, so a deploy is never reported as
+///   having applied an edit it did not carry.
+/// * `payload_digest` catches everything the agent row does not cover. The
+///   payload is re-resolved from the live persona, team, global agent config,
+///   effective harness descriptor, workspace relay URL and owner pubkey, and
+///   the provider config rides beside it — all of which can change with the
+///   agent row untouched.
 #[derive(Debug)]
 pub(super) struct CapturedDeploy {
     pub(super) provider_id: String,
     pub(super) config: serde_json::Value,
     pub(super) cached_binary_path: Option<String>,
     pub(super) updated_at: String,
+    pub(super) payload_digest: String,
 }
 
-/// Capture the provider coordinates and configuration generation of `record`
-/// for a deploy. Errors when the record is not provider-backed.
-fn capture_provider_deploy(record: &ManagedAgentRecord) -> Result<CapturedDeploy, String> {
+/// Capture the provider coordinates, configuration generation and resolved
+/// payload digest of `record` for a deploy. Errors when the record is not
+/// provider-backed.
+fn capture_provider_deploy(
+    record: &ManagedAgentRecord,
+    payload: &serde_json::Value,
+) -> Result<CapturedDeploy, String> {
     match &record.backend {
         BackendKind::Provider { id, config } => Ok(CapturedDeploy {
             provider_id: id.clone(),
             config: config.clone(),
             cached_binary_path: record.provider_binary_path.clone(),
             updated_at: record.updated_at.clone(),
+            payload_digest: digest_parts(id, config, payload)?,
         }),
         BackendKind::Local => Err(format!(
             "agent {} is not provider-backed and cannot be deployed to a provider",
@@ -244,9 +267,10 @@ mod tests {
 pub(super) fn redeploy_provider_target(
     pubkey: &str,
     record: &ManagedAgentRecord,
+    payload: &serde_json::Value,
 ) -> Result<CapturedDeploy, String> {
     match (&record.backend, record.backend_agent_id.as_deref()) {
-        (BackendKind::Provider { .. }, Some(_)) => capture_provider_deploy(record),
+        (BackendKind::Provider { .. }, Some(_)) => capture_provider_deploy(record, payload),
         (BackendKind::Provider { .. }, None) => Err(format!(
             "agent {pubkey} has not been deployed yet; deploy it before redeploying"
         )),
@@ -256,76 +280,154 @@ pub(super) fn redeploy_provider_target(
     }
 }
 
-/// Everything a deploy flow captures under the store lock before the
-/// provider call. `captured.updated_at` is the configuration generation the
-/// completion is bound to.
+/// Everything a deploy flow captures under the store lock before the provider
+/// call: the provider coordinates, the generation and digest the completion is
+/// bound to, and the fully resolved payload that will be sent.
+///
+/// The payload is resolved here — under the same lock, in the same instant as
+/// the digest — rather than after the lock is released, so the bytes on the
+/// wire and the digest the completion compares against can never come from two
+/// different reads of the persona, team or global config.
 pub(super) struct DeploySnapshot {
-    pub(super) record: ManagedAgentRecord,
     pub(super) captured: CapturedDeploy,
+    pub(super) payload: serde_json::Value,
 }
 
 /// How a finished provider call was bound to the store state found on
 /// completion. Computed by [`bind_completion`].
 #[derive(Debug)]
 pub(super) enum CompletionOutcome {
-    /// Record unchanged since the snapshot: success persisted as current.
+    /// Record and its fully resolved deploy input both unchanged since the
+    /// snapshot: success persisted as current.
     AppliedCurrent(Box<ManagedAgentRecord>),
-    /// Record edited mid-flight: the remote facts are persisted
+    /// The deploy input moved mid-flight — the agent row was edited, or an
+    /// input outside it (persona, team, global config, relay URL, owner,
+    /// provider config) resolved differently. The remote facts are persisted
     /// (`backend_agent_id`, `last_started_at`) because the deploy really
-    /// happened, but the running deployment carries the previously saved
-    /// configuration, so nothing may imply the current record was applied —
+    /// happened, but what the provider received is not what the store now
+    /// describes, so nothing may imply the current configuration was sent —
     /// `last_error` is left untouched.
     AppliedStale,
+    /// The deploy succeeded but the payload could not be re-resolved on
+    /// completion, so currency could not be *proved* either way. The remote
+    /// facts are persisted; nothing claims currency. Carries the resolution
+    /// error.
+    AppliedUnverified(String),
     /// Record switched away from the captured provider backend mid-flight
     /// (to local, or to a different provider): nothing persisted — the
     /// deployment id belongs to a backend the record no longer describes.
     BackendChanged,
     /// Record deleted mid-flight: nothing persisted.
     Deleted,
-    /// Provider call failed: the failure is stamped on the surviving record.
+    /// Provider call failed and the surviving record is still the one that
+    /// failed: the failure is stamped on it.
     Failed(String),
+    /// Provider call failed, but the record in the store is no longer the
+    /// deploy that failed — a different backend, or a moved generation.
+    /// Nothing is stamped: `last_error` on a record describes *that* record's
+    /// last attempt, and this attempt was of something else.
+    FailedUnstamped(String),
+}
+
+/// Re-resolves the full deploy input of a record found on completion and
+/// digests it, so inputs that live outside the agent row (persona, team,
+/// global config, relay URL, owner) are compared too. Supplied by the
+/// [`DeployEffects`] impl, which knows how to reach them.
+pub(super) type ResolveDigest<'a> = dyn Fn(&ManagedAgentRecord) -> Result<String, String> + 'a;
+
+/// The completion body [`DeployEffects::with_store`] runs against the loaded
+/// records, returning whether the caller must save.
+pub(super) type CompletionApply<'a, R> =
+    dyn FnMut(&mut Vec<ManagedAgentRecord>, &ResolveDigest<'_>) -> (bool, R) + 'a;
+
+/// Whether the record found on completion is still the deploy that was sent.
+#[derive(Debug)]
+enum Currency {
+    /// Same generation and same fully resolved deploy input.
+    Current,
+    /// The agent row, or an input resolved outside it, moved.
+    Moved,
+    /// The deploy input could not be re-resolved, so neither can be proved.
+    Unverified(String),
+}
+
+/// Compare the record in the store against the captured deploy. Must be called
+/// before the completion mutates `record.updated_at`.
+fn currency(
+    record: &ManagedAgentRecord,
+    captured: &CapturedDeploy,
+    resolve_digest: &ResolveDigest<'_>,
+) -> Currency {
+    if record.updated_at != captured.updated_at {
+        return Currency::Moved;
+    }
+    match resolve_digest(record) {
+        Ok(digest) if digest == captured.payload_digest => Currency::Current,
+        Ok(_) => Currency::Moved,
+        Err(error) => Currency::Unverified(error),
+    }
 }
 
 /// Bind a finished provider call to whatever the store holds now. Mutates
 /// `records` in place; the returned bool says whether the caller must save.
-/// A successful deploy is only stamped onto a record that is still backed by
-/// the captured provider; otherwise the id would describe a foreign backend.
+///
+/// Every stamp — success *and* failure — is gated on the surviving record
+/// still being the deploy this completion belongs to: same provider backend,
+/// same generation, same re-resolved deploy input. A success stamped onto a
+/// foreign backend would describe a deployment that backend never made; a
+/// failure stamped onto a moved record would report an attempt of a
+/// configuration that was never attempted.
+///
+/// `resolve_digest` re-resolves the full deploy input for the record found on
+/// completion, so inputs that live outside the agent row are compared too.
 pub(super) fn bind_completion(
     records: &mut [ManagedAgentRecord],
     pubkey: &str,
-    captured_provider_id: &str,
-    captured_updated_at: &str,
+    captured: &CapturedDeploy,
+    resolve_digest: &ResolveDigest<'_>,
     deploy_result: &Result<String, String>,
 ) -> (bool, CompletionOutcome) {
     let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) else {
         return (false, CompletionOutcome::Deleted);
     };
+    let same_backend = matches!(
+        &record.backend,
+        BackendKind::Provider { id, .. } if *id == captured.provider_id
+    );
     match deploy_result {
         Err(error) => {
-            record.last_error = Some(error.clone());
-            record.updated_at = now_iso();
-            (true, CompletionOutcome::Failed(error.clone()))
+            if !same_backend {
+                return (false, CompletionOutcome::FailedUnstamped(error.clone()));
+            }
+            match currency(record, captured, resolve_digest) {
+                Currency::Current => {
+                    record.last_error = Some(error.clone());
+                    record.updated_at = now_iso();
+                    (true, CompletionOutcome::Failed(error.clone()))
+                }
+                Currency::Moved | Currency::Unverified(_) => {
+                    (false, CompletionOutcome::FailedUnstamped(error.clone()))
+                }
+            }
         }
         Ok(backend_agent_id) => {
-            let same_backend = matches!(
-                &record.backend,
-                BackendKind::Provider { id, .. } if id == captured_provider_id
-            );
             if !same_backend {
                 return (false, CompletionOutcome::BackendChanged);
             }
-            let unchanged = record.updated_at == captured_updated_at;
+            let currency = currency(record, captured, resolve_digest);
             record.backend_agent_id = Some(backend_agent_id.clone());
             record.last_started_at = Some(now_iso());
             record.updated_at = now_iso();
-            if unchanged {
-                record.last_error = None;
-                (
-                    true,
-                    CompletionOutcome::AppliedCurrent(Box::new(record.clone())),
-                )
-            } else {
-                (true, CompletionOutcome::AppliedStale)
+            match currency {
+                Currency::Current => {
+                    record.last_error = None;
+                    (
+                        true,
+                        CompletionOutcome::AppliedCurrent(Box::new(record.clone())),
+                    )
+                }
+                Currency::Moved => (true, CompletionOutcome::AppliedStale),
+                Currency::Unverified(error) => (true, CompletionOutcome::AppliedUnverified(error)),
             }
         }
     }
@@ -343,9 +445,13 @@ pub(super) fn completion_result(
     match outcome {
         CompletionOutcome::AppliedCurrent(record) => Ok(record),
         CompletionOutcome::AppliedStale => Err("Agent settings changed while the deploy was in \
-             flight, so the agent is running the previous configuration. Redeploy to apply the \
-             latest settings — a queued redeploy will do that automatically."
+             flight, so the provider was sent the previous settings. Redeploy to send the latest \
+             ones — a queued redeploy will do that automatically."
             .to_string()),
+        CompletionOutcome::AppliedUnverified(error) => Err(format!(
+            "The settings were sent, but Buzz could not re-read them afterwards to confirm the \
+             provider got the current ones: {error}"
+        )),
         CompletionOutcome::BackendChanged => Err("The agent's backend changed while the deploy \
              was in flight. The finished deployment may still be running on the previous \
              provider backend."
@@ -356,7 +462,10 @@ pub(super) fn completion_result(
                 .to_string(),
             Err(error) => error,
         }),
-        CompletionOutcome::Failed(error) => Err(error),
+        // The provider's own error either way. It is what the owner needs to
+        // act on, and it reaches them verbatim in a toast whether or not the
+        // moved record was a legitimate place to stamp it.
+        CompletionOutcome::Failed(error) | CompletionOutcome::FailedUnstamped(error) => Err(error),
     }
 }
 
@@ -367,19 +476,19 @@ pub(super) fn completion_result(
 pub(super) trait DeployEffects {
     type Success;
 
-    /// Under the store lock: load the record and validate it as a deploy
-    /// target.
+    /// Under the store lock: load the record, resolve its deploy payload, and
+    /// validate it as a deploy target.
     fn snapshot(&mut self, pubkey: &str) -> Result<DeploySnapshot, String>;
 
-    /// The provider call (payload build + deploy). Must not touch the store.
+    /// The provider call. Must not touch the store — the payload it sends was
+    /// resolved in [`DeployEffects::snapshot`].
     async fn deploy(&mut self, snapshot: &DeploySnapshot) -> Result<String, String>;
 
     /// Run `apply` on the loaded records under the store lock, saving when it
-    /// returns `true`.
-    fn with_store<R>(
-        &mut self,
-        apply: &mut dyn FnMut(&mut Vec<ManagedAgentRecord>) -> (bool, R),
-    ) -> Result<R, String>;
+    /// returns `true`. `apply`'s second argument re-resolves a record's full
+    /// deploy input digest, so the completion can compare inputs that live
+    /// outside the agent row.
+    fn with_store<R>(&mut self, apply: &mut CompletionApply<'_, R>) -> Result<R, String>;
 
     /// Build the success value from the freshly persisted record.
     fn success(&mut self, record: &ManagedAgentRecord) -> Result<Self::Success, String>;
@@ -402,14 +511,9 @@ pub(super) async fn run_deploy<E: DeployEffects>(
 
     let deploy_result = effects.deploy(&snapshot).await;
 
-    let outcome = effects.with_store(&mut |records| {
-        bind_completion(
-            records,
-            pubkey,
-            &snapshot.captured.provider_id,
-            &snapshot.captured.updated_at,
-            &deploy_result,
-        )
+    let captured = &snapshot.captured;
+    let outcome = effects.with_store(&mut |records, resolve_digest| {
+        bind_completion(records, pubkey, captured, resolve_digest, &deploy_result)
     })?;
 
     let record = completion_result(outcome, deploy_result)?;
@@ -421,8 +525,9 @@ pub(super) async fn run_deploy<E: DeployEffects>(
 fn deploy_provider_target(
     _pubkey: &str,
     record: &ManagedAgentRecord,
+    payload: &serde_json::Value,
 ) -> Result<CapturedDeploy, String> {
-    capture_provider_deploy(record)
+    capture_provider_deploy(record, payload)
 }
 
 /// [`DeployEffects`] wired to the real store, payload builder, and provider
@@ -433,7 +538,7 @@ fn deploy_provider_target(
 struct CommandDeployEffects<'a> {
     app: &'a AppHandle,
     state: &'a AppState,
-    target: fn(&str, &ManagedAgentRecord) -> Result<CapturedDeploy, String>,
+    target: fn(&str, &ManagedAgentRecord, &serde_json::Value) -> Result<CapturedDeploy, String>,
 }
 
 impl DeployEffects for CommandDeployEffects<'_> {
@@ -450,29 +555,33 @@ impl DeployEffects for CommandDeployEffects<'_> {
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        let captured = (self.target)(pubkey, record)?;
-        Ok(DeploySnapshot {
-            record: record.clone(),
-            captured,
-        })
+        let payload = super::build_deploy_payload(self.app, self.state, record)?;
+        let captured = (self.target)(pubkey, record, &payload)?;
+        Ok(DeploySnapshot { captured, payload })
     }
 
     async fn deploy(&mut self, snapshot: &DeploySnapshot) -> Result<String, String> {
-        let agent_json = super::build_deploy_payload(self.app, self.state, &snapshot.record)?;
-        call_provider_deploy(&snapshot.captured, agent_json).await?
+        call_provider_deploy(&snapshot.captured, snapshot.payload.clone()).await?
     }
 
-    fn with_store<R>(
-        &mut self,
-        apply: &mut dyn FnMut(&mut Vec<ManagedAgentRecord>) -> (bool, R),
-    ) -> Result<R, String> {
+    fn with_store<R>(&mut self, apply: &mut CompletionApply<'_, R>) -> Result<R, String> {
         let _store_guard = self
             .state
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(self.app)?;
-        let (save, result) = apply(&mut records);
+        // Copies of two shared references, so the resolver borrows nothing
+        // that the save below needs back. Resolving under the store lock is
+        // deliberate: it reads personas, teams and global config, none of
+        // which take this lock, and it must see the same store state the
+        // completion is about to stamp.
+        let (app, state) = (self.app, self.state);
+        let resolve_digest = move |record: &ManagedAgentRecord| -> Result<String, String> {
+            let payload = super::build_deploy_payload(app, state, record)?;
+            deploy_input_digest(record, &payload)
+        };
+        let (save, result) = apply(&mut records, &resolve_digest);
         if save {
             save_managed_agents(self.app, &records)?;
         }
