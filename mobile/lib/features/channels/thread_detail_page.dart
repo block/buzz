@@ -33,6 +33,7 @@ import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
+import 'thread_unread_marker.dart';
 import 'timeline_message.dart';
 import 'unread_divider.dart';
 
@@ -273,26 +274,16 @@ class ThreadDetailPage extends HookConsumerWidget {
       }
     }
 
-    // Oldest reply the user has not seen, from the frozen snapshot. Own
-    // replies never count as unread.
-    String? firstUnreadReplyId;
-    if (readState.isReady) {
-      final localPubkey = currentPubkey?.toLowerCase();
-      for (final reply in replies) {
-        if (localPubkey != null && reply.pubkey.toLowerCase() == localPubkey) {
-          continue;
-        }
-        final snapshot = openReadSnapshot.value;
-        if (!snapshot.containsKey(reply.id)) continue;
-        final readAt = snapshot[reply.id];
-        if (readState.isForcedUnread(msgContextKey(reply.id)) ||
-            readAt == null ||
-            reply.createdAt > readAt) {
-          firstUnreadReplyId = reply.id;
-          break;
-        }
-      }
-    }
+    // Oldest reply the user has not seen, from the frozen snapshot.
+    final firstUnreadReplyId = readState.isReady
+        ? firstUnreadThreadReplyId(
+            replies: replies,
+            openReadSnapshot: openReadSnapshot.value,
+            isForcedUnread: (messageId) =>
+                readState.isForcedUnread(msgContextKey(messageId)),
+            currentPubkey: currentPubkey,
+          )
+        : null;
 
     // One-shot resume: land on the first unread reply instead of the tail.
     // A deep link names its own target and always wins.
