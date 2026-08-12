@@ -89,7 +89,7 @@ export function CompactLinkPreviewAttachment({
         {reserveImage ? (
           <AttachmentMedia
             aria-hidden={showImage ? undefined : "true"}
-            className="aspect-auto h-full min-h-0 w-30 min-w-30 max-w-30 self-stretch rounded-xl bg-muted sm:w-34 sm:min-w-34 sm:max-w-34"
+            className="aspect-auto h-16 min-h-16 max-h-16 w-26 min-w-26 max-w-26 rounded-xl bg-muted"
             data-link-preview-thumbnail=""
             variant="image"
           >
@@ -145,7 +145,7 @@ export function CompactLinkPreviewAttachment({
             ) : null}
             <span className="truncate">{hostname}</span>
           </a>
-          <AttachmentTitle className="line-clamp-2 whitespace-normal group-hover/attachment:underline">
+          <AttachmentTitle className="group-hover/attachment:underline">
             {preview.title}
           </AttachmentTitle>
           {preview.description ? (

@@ -1220,6 +1220,42 @@ test("composer link preview embeds stay attachment-sized while loading and ready
   }
 });
 
+test("compact link preview image geometry truncates long titles to one line", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?geometry=1";
+  await page.setViewportSize({ width: 800, height: 700 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+  await waitForReadyComposerSnapshots(page);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const card = row.locator('[data-link-preview="github-pull-request"]');
+  const thumbnail = card.locator("[data-link-preview-thumbnail]");
+  const title = card.locator('[data-slot="attachment-title"]');
+  await expect(thumbnail).toHaveCSS("height", "64px");
+  await expect(thumbnail).toHaveCSS("width", "104px");
+  await expect(title).toHaveText(
+    "Ship a wider horizontal preview with a two-line title that wraps cleanly",
+  );
+  await expect(title).toHaveCSS("white-space", "nowrap");
+  await expect
+    .poll(() =>
+      title.evaluate((element) => element.scrollWidth - element.clientWidth),
+    )
+    .toBeGreaterThan(1);
+
+  if (process.env.BUZZ_LINK_PREVIEW_SCREENSHOTS_DIR) {
+    await waitForAnimations(page);
+    await row.screenshot({
+      animations: "disabled",
+      path: `${process.env.BUZZ_LINK_PREVIEW_SCREENSHOTS_DIR}/recipient-compact-long-title.png`,
+    });
+  }
+});
+
 test("composer no-image link embeds keep the attachment footprint", async ({
   page,
 }) => {
