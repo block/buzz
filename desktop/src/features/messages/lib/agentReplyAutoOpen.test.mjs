@@ -44,6 +44,10 @@ test("skips when no expected root id is pending", () => {
   assert.deepEqual(decide({ expectedRootId: null }), {});
 });
 
+test("skips non-message events with forged reply tags", () => {
+  assert.deepEqual(decide({ event: event({ kind: 40003 }) }), {});
+});
+
 test("skips human replies", () => {
   assert.deepEqual(decide({ event: event({ pubkey: HUMAN_PUBKEY }) }), {});
 });

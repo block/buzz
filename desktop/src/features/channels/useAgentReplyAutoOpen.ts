@@ -48,6 +48,10 @@ export function useAgentReplyAutoOpen({
   const recentAgentTargetMessageRef = React.useRef<string | null>(null);
   const activeChannelId = activeChannel?.id ?? null;
   const autoOpenChannelIdRef = React.useRef(activeChannelId);
+  // Render-mirrored so the deferred timer below sees panel state as of its
+  // firing, not as of the live event — a panel opened in between must win.
+  const hasActiveAuxiliaryPanelRef = React.useRef(hasActiveAuxiliaryPanel);
+  hasActiveAuxiliaryPanelRef.current = hasActiveAuxiliaryPanel;
 
   if (autoOpenChannelIdRef.current !== activeChannelId) {
     autoOpenChannelIdRef.current = activeChannelId;
@@ -93,11 +97,14 @@ export function useAgentReplyAutoOpen({
       const replyId = decision.replyId;
       // Capture the channel the reply arrived on. The policy already checked
       // `hasActiveAuxiliaryPanel` at the moment the live event fired, but the
-      // deferred setters can otherwise outlive a channel navigation and open a
-      // thread in the new channel — bail when the active channel has changed.
+      // deferred setters can otherwise outlive a channel navigation or a
+      // panel the user opened in the interim — bail when either changed.
       const scheduledChannelId = activeChannelId;
       window.setTimeout(() => {
-        if (autoOpenChannelIdRef.current !== scheduledChannelId) {
+        if (
+          autoOpenChannelIdRef.current !== scheduledChannelId ||
+          hasActiveAuxiliaryPanelRef.current
+        ) {
           return;
         }
         React.startTransition(() => {

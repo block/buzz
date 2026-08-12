@@ -20,6 +20,7 @@ import { getThreadReference, isBroadcastReply } from "./threading.ts";
 import type { RelayEvent } from "@/shared/api/types";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
 
 export type AgentReplyAutoOpenInput = {
   /** Newly received live channel event. */
@@ -49,7 +50,11 @@ export type AgentReplyAutoOpenDecision = {
 export function decideAgentReplyAutoOpen(
   input: AgentReplyAutoOpenInput,
 ): AgentReplyAutoOpenDecision {
-  if (input.hasActiveAuxiliaryPanel || input.expectedRootId === null) {
+  if (
+    input.hasActiveAuxiliaryPanel ||
+    input.expectedRootId === null ||
+    input.event.kind !== KIND_STREAM_MESSAGE
+  ) {
     return {};
   }
 
