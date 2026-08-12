@@ -81,7 +81,7 @@ enum Command {
         #[command(subcommand)]
         command: ProductFeedbackCommand,
     },
-    /// Emit kind:39000/39002 events for channels missing them.
+    /// Emit kind:39000/39001/39002 events for channels missing them.
     ///
     /// Channels created via direct SQL (seed scripts, pre-migration data) won't
     /// have Nostr discovery events. This command creates them so pure-nostr
@@ -92,6 +92,14 @@ enum Command {
         /// an ephemeral key (events will be unverifiable after restart).
         #[arg(long)]
         relay_key: Option<String>,
+        /// Also republish channels that already have discovery events.
+        ///
+        /// Use this to repair events written by an older build whose tags have
+        /// since drifted from the database — a stale kind:39000 is not visibly
+        /// broken, it just tells every client something the channel row no
+        /// longer says.
+        #[arg(long)]
+        rebuild: bool,
     },
 }
 
@@ -148,8 +156,8 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
-        Command::ReconcileChannels { relay_key } => {
-            reconcile_channels(relay_key).await?;
+        Command::ReconcileChannels { relay_key, rebuild } => {
+            reconcile_channels(relay_key, rebuild).await?;
             Ok(0)
         }
     }
@@ -458,8 +466,11 @@ async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
     Ok(TenantContext::resolved(record.id, record.host))
 }
 
-async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
-    use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
+async fn reconcile_channels(relay_key_arg: Option<String>, rebuild: bool) -> Result<()> {
+    use buzz_core::kind::{
+        KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    };
+    use buzz_db::channel_discovery::{nip29_admins_tags, nip29_members_tags, nip29_metadata_tags};
     use buzz_db::event::EventQuery;
 
     let db = connect_db().await?;
@@ -505,70 +516,39 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
             .await
             .unwrap_or_default();
 
-        if !existing.is_empty() {
+        if !existing.is_empty() && !rebuild {
             skipped += 1;
             continue;
         }
 
         let members = db.get_members(tenant.community(), channel.id).await?;
 
-        // kind:39000 — channel metadata
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            tags.push(Tag::parse(["name", &channel.name])?);
-            if let Some(ref desc) = channel.description {
-                if !desc.is_empty() {
-                    tags.push(Tag::parse(["about", desc])?);
-                }
-            }
-            if channel.visibility == "private" {
-                tags.push(Tag::parse(["private"])?);
-            } else {
-                tags.push(Tag::parse(["public"])?);
-            }
-            if channel.channel_type == "dm" {
-                tags.push(Tag::parse(["hidden"])?);
-            }
-            tags.push(Tag::parse(["closed"])?);
-            tags.push(Tag::parse(["t", &channel.channel_type])?);
-
-            let event = EventBuilder::new(Kind::Custom(39000), "")
+        // Same builders the relay signs with — see buzz_db::channel_discovery.
+        // Reconcile once carried its own copy of these tag shapes and lost the
+        // `archived` tag, which un-hid archived channels in every client while
+        // the database still said archived.
+        for (kind, tags) in [
+            (
+                KIND_NIP29_GROUP_METADATA,
+                nip29_metadata_tags(channel, &members),
+            ),
+            (
+                KIND_NIP29_GROUP_ADMINS,
+                nip29_admins_tags(channel.id, &members),
+            ),
+            (
+                KIND_NIP29_GROUP_MEMBERS,
+                nip29_members_tags(channel.id, &members),
+            ),
+        ] {
+            let tags: Vec<Tag> = tags
+                .into_iter()
+                .map(Tag::parse)
+                .collect::<std::result::Result<_, _>>()?;
+            let event = EventBuilder::new(Kind::Custom(kind as u16), "")
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
-        }
-
-        // kind:39001 — admins
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in members
-                .iter()
-                .filter(|m| m.role == "owner" || m.role == "admin")
-            {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, &m.role])?);
-            }
-            let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
-        }
-
-        // kind:39002 — members
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in &members {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, "", &m.role])?);
-            }
-            let event = EventBuilder::new(Kind::Custom(39002), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39002: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("sign kind:{kind}: {e}"))?;
             db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
                 .await?;
         }
@@ -576,8 +556,9 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         reconciled += 1;
     }
 
+    let verb = if rebuild { "Republished" } else { "Reconciled" };
     println!(
-        "Reconciled {reconciled} channels ({skipped} already had events, {} total).",
+        "{verb} {reconciled} channels ({skipped} already had events, {} total).",
         channels.len()
     );
     Ok(())
