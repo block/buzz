@@ -206,10 +206,12 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
-    /// Usage tracker — accumulates cumulative token counts from
-    /// `_goose/unstable/session/update` notifications and computes per-turn
-    /// deltas. Both goose and buzz-agent emit this notification; goose gates
-    /// on client capability advertisement, buzz-agent emits unconditionally.
+    /// Usage tracker — per-turn token/cost metrics from all three intake
+    /// surfaces: `_goose/unstable/session/update` cumulative counters (goose,
+    /// buzz-agent; per-turn deltas are derived), standard ACP end-turn `usage`
+    /// on the `session/prompt` result (claude-agent-acp, codex-acp; per-turn
+    /// exact), and standard `session/update` `usage_update` cost. The name
+    /// predates the standard-surface intake.
     goose_usage: UsageTracker,
 }
 
@@ -821,7 +823,12 @@ impl AcpClient {
                 self.current_hard_deadline = None;
             }
         }
-        self.parse_stop_reason(&result?)
+        let result = result?;
+        // Standard ACP end-turn usage rides on the prompt result itself —
+        // capture it before extracting the stop reason so take_turn_usage()
+        // sees it at publish time.
+        self.ingest_end_turn_usage(session_id, &result);
+        self.parse_stop_reason(&result)
     }
 
     /// Send a `session/cancel` **notification** (no `id` field, no response expected).
@@ -867,13 +874,15 @@ impl AcpClient {
         self.steering_supported
     }
 
-    /// Consume and return the per-turn usage record computed from the most
-    /// recent `_goose/unstable/session/update` notification.
+    /// Consume and return the per-turn usage record for the completed turn,
+    /// whichever intake surface produced it: a
+    /// `_goose/unstable/session/update` notification, a standard ACP end-turn
+    /// `usage` object on the prompt result, or (cost-only) a standard
+    /// `usage_update` session update.
     ///
-    /// Returns `None` if no usage update arrived since the last call (i.e.
-    /// the harness did not emit one for this turn, or this is not a goose
-    /// agent). Must be called at most once per turn; subsequent calls return
-    /// `None` until the next `usage_update` notification is recorded.
+    /// Returns `None` if no usage arrived from any source since the last call
+    /// (i.e. the harness does not report usage). Must be called at most once
+    /// per turn; subsequent calls return `None` until new usage is recorded.
     ///
     /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
     /// publish a kind 44200 NIP-AM event.
@@ -1048,6 +1057,10 @@ impl AcpClient {
                 remaining,
             )
             .await?;
+        // Adapters that report end-turn usage include it on the cancelled
+        // response too (the partial turn still consumed tokens) — capture it
+        // so the metric for a cancelled turn is not silently dropped.
+        self.ingest_end_turn_usage(session_id, &result);
         self.parse_stop_reason(&result)
     }
 
@@ -1831,10 +1844,120 @@ impl AcpClient {
                 }
                 false
             }
+            "usage_update" => {
+                // The stabilized standard ACP usage_update variant: context
+                // occupancy plus cumulative session cost. claude-agent-acp and
+                // codex-acp emit this instead of the Goose extension
+                // notification, so it must reach the usage tracker for the
+                // cost to flow into this turn's kind-44200 metric.
+                self.handle_standard_usage_update(msg);
+                false
+            }
             "keepalive" => false,
             other => {
                 tracing::debug!(target: "acp::update", "session/update: {other}");
                 false
+            }
+        }
+    }
+
+    /// Parse a standard `session/update` `usage_update` variant and route its
+    /// cumulative session cost into the usage tracker.
+    ///
+    /// `used`/`size` (context occupancy) have no NIP-AM slot and are logged
+    /// only. Cost is accepted when the currency is USD and the amount is a
+    /// finite non-negative number — anything else is skipped (the kind-44200
+    /// payload validator rejects negative/non-finite costs at publish time, so
+    /// filtering here keeps a bad adapter value from voiding a whole metric).
+    /// Best-effort observability data: malformed shapes are logged at debug
+    /// and ignored, never failing the turn.
+    fn handle_standard_usage_update(&mut self, msg: &serde_json::Value) {
+        use crate::usage::StandardUsageUpdatePayload;
+        let Some(session_id) = msg["params"]["sessionId"].as_str() else {
+            tracing::debug!(
+                target: "acp::usage",
+                "standard usage_update: missing params.sessionId"
+            );
+            return;
+        };
+        let payload = match serde_json::from_value::<StandardUsageUpdatePayload>(
+            msg["params"]["update"].clone(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!(
+                    target: "acp::usage",
+                    "standard usage_update: deserialization error: {e}"
+                );
+                return;
+            }
+        };
+        let cost_usd = payload.cost.as_ref().and_then(|c| {
+            if c.currency != "USD" {
+                tracing::debug!(
+                    target: "acp::usage",
+                    currency = %c.currency,
+                    "standard usage_update: non-USD cost skipped"
+                );
+                return None;
+            }
+            if !c.amount.is_finite() || c.amount < 0.0 {
+                tracing::debug!(
+                    target: "acp::usage",
+                    amount = c.amount,
+                    "standard usage_update: invalid cost amount skipped"
+                );
+                return None;
+            }
+            Some(c.amount)
+        });
+        tracing::debug!(
+            target: "acp::usage",
+            session_id = %session_id,
+            used = ?payload.used,
+            size = ?payload.size,
+            cost_usd = ?cost_usd,
+            "standard usage update"
+        );
+        let session_id = session_id.to_string();
+        self.goose_usage
+            .record_standard_usage_update(&session_id, cost_usd);
+    }
+
+    /// Capture the optional standard ACP end-turn `usage` object from a
+    /// `session/prompt` result and feed it into the usage tracker.
+    ///
+    /// claude-agent-acp and codex-acp report per-turn usage here (End-Turn
+    /// Token Usage RFD) instead of the Goose extension notification — without
+    /// this intake those runtimes produce zero kind-44200 events. Best-effort:
+    /// malformed shapes are logged at debug and ignored, never failing the
+    /// turn.
+    fn ingest_end_turn_usage(&mut self, session_id: &str, result: &serde_json::Value) {
+        let Some(raw) = result.get("usage") else {
+            return;
+        };
+        if raw.is_null() {
+            return;
+        }
+        match serde_json::from_value::<crate::usage::EndTurnUsage>(raw.clone()) {
+            Ok(usage) => {
+                tracing::debug!(
+                    target: "acp::usage",
+                    session_id = %session_id,
+                    input = ?usage.input_tokens,
+                    output = ?usage.output_tokens,
+                    total = ?usage.total_tokens,
+                    cached_read = ?usage.cached_read_tokens,
+                    cached_write = ?usage.cached_write_tokens,
+                    "end-turn usage"
+                );
+                self.goose_usage.record_end_turn(session_id, &usage);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "acp::usage",
+                    "end-turn usage: deserialization error: {e}"
+                );
             }
         }
     }
@@ -4363,6 +4486,115 @@ mod tests {
         });
         client.handle_goose_usage_update(&bad2);
         assert!(client.take_turn_usage().is_none());
+    }
+
+    // ── Standard ACP usage intake (end-turn usage + usage_update) ──────────
+
+    /// End-turn usage on a `session/prompt` result must populate the turn
+    /// usage record — the intake path for claude-agent-acp / codex-acp, which
+    /// never emit the Goose extension notification.
+    #[tokio::test]
+    async fn end_turn_usage_from_prompt_result_populates_turn_usage() {
+        let mut client = spawn_inert_client().await;
+        client.notify_session_spawned("s-std");
+        client.goose_usage.begin_turn("s-std");
+
+        // claude-agent-acp-shaped prompt result.
+        let result = serde_json::json!({
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 100,
+                "outputTokens": 40,
+                "cachedReadTokens": 400,
+                "cachedWriteTokens": 50,
+                "totalTokens": 590
+            }
+        });
+        client.ingest_end_turn_usage("s-std", &result);
+
+        let usage = client.take_turn_usage().expect("end-turn usage recorded");
+        assert_eq!(usage.session_id, "s-std");
+        assert!(usage.delta_reliable, "per-turn exact source is reliable");
+        // Inclusive input: fresh 100 + cacheRead 400 + cacheWrite 50.
+        assert_eq!(usage.turn_input_tokens, Some(550));
+        assert_eq!(usage.turn_output_tokens, Some(40));
+        assert_eq!(usage.turn_total_tokens, Some(590));
+        assert_eq!(usage.turn_cache_read_tokens, Some(400));
+        assert_eq!(usage.turn_cache_write_tokens, Some(50));
+    }
+
+    /// A result without `usage` (adapters predating the RFD) and a malformed
+    /// `usage` value must both be ignored without failing the turn.
+    #[tokio::test]
+    async fn end_turn_usage_absent_or_malformed_is_ignored() {
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s-none");
+
+        client.ingest_end_turn_usage("s-none", &serde_json::json!({"stopReason": "end_turn"}));
+        client.ingest_end_turn_usage(
+            "s-none",
+            &serde_json::json!({"stopReason": "end_turn", "usage": null}),
+        );
+        client.ingest_end_turn_usage(
+            "s-none",
+            &serde_json::json!({"stopReason": "end_turn", "usage": "not-an-object"}),
+        );
+        assert!(client.take_turn_usage().is_none());
+    }
+
+    /// Build a standard `session/update` `usage_update` notification.
+    fn standard_usage_update_msg(session_id: &str, cost: Option<(f64, &str)>) -> serde_json::Value {
+        let mut update = serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": 12_000u64,
+            "size": 200_000u64,
+        });
+        if let Some((amount, currency)) = cost {
+            update["cost"] = serde_json::json!({"amount": amount, "currency": currency});
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": { "sessionId": session_id, "update": update }
+        })
+    }
+
+    /// The standard `usage_update` variant must route through
+    /// `handle_session_update` into the tracker: its cumulative USD cost
+    /// publishes even when no token usage arrives.
+    #[tokio::test]
+    async fn standard_usage_update_routes_cost_into_tracker() {
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s-cost");
+
+        let handled =
+            client.handle_session_update(&standard_usage_update_msg("s-cost", Some((0.42, "USD"))));
+        assert!(!handled, "usage_update must not reset the idle clock");
+
+        let usage = client.take_turn_usage().expect("cost-only record");
+        assert_eq!(usage.cumulative_cost_usd, Some(0.42));
+    }
+
+    /// Non-USD, negative, and non-finite costs must be skipped at intake so a
+    /// bad adapter value cannot void the metric at publish-time validation.
+    #[tokio::test]
+    async fn standard_usage_update_rejects_non_usd_and_invalid_costs() {
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s-eur");
+        client.handle_session_update(&standard_usage_update_msg("s-eur", Some((0.42, "EUR"))));
+        assert!(client.take_turn_usage().is_none(), "non-USD cost skipped");
+
+        client.goose_usage.begin_turn("s-neg");
+        client.handle_session_update(&standard_usage_update_msg("s-neg", Some((-0.01, "USD"))));
+        assert!(client.take_turn_usage().is_none(), "negative cost skipped");
+
+        // No cost at all: used/size have no NIP-AM slot — nothing publishes.
+        client.goose_usage.begin_turn("s-nocost");
+        client.handle_session_update(&standard_usage_update_msg("s-nocost", None));
+        assert!(
+            client.take_turn_usage().is_none(),
+            "cost-less update skipped"
+        );
     }
 
     #[test]

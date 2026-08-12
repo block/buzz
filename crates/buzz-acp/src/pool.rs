@@ -7409,6 +7409,48 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         );
     }
 
+    /// Standard ACP end-turn usage (claude-agent-acp / codex-acp) flows
+    /// through the tracker into the kind-44200 publish mapping: per-turn
+    /// counts are present on the very first turn (per-turn exact source),
+    /// input is cache-inclusive, and absent cache categories stay unreported.
+    #[test]
+    fn end_turn_usage_flows_to_turn_metric_counts() {
+        let mut tracker = crate::usage::UsageTracker::default();
+        tracker.seed_zero_baseline("std-sess");
+        tracker.begin_turn("std-sess");
+        // codex-shaped end-turn usage: no cachedWriteTokens.
+        let usage: crate::usage::EndTurnUsage = serde_json::from_value(serde_json::json!({
+            "inputTokens": 2_000,
+            "outputTokens": 300,
+            "thoughtTokens": 120,
+            "cachedReadTokens": 1_500,
+            "totalTokens": 3_800,
+        }))
+        .expect("end-turn usage deserializes");
+        tracker.record_end_turn("std-sess", &usage);
+        let record = tracker.take().expect("end-turn record");
+
+        let (turn, cumulative) = build_turn_metric_counts(&record);
+        let turn = turn.expect("per-turn exact source: turn counts on turn 1");
+        // Inclusive input: fresh 2000 + cacheRead 1500 (cacheWrite unknown).
+        assert_eq!(turn.input_tokens, Some(3_500));
+        // Reasoning is already inside outputTokens — thoughtTokens not re-added.
+        assert_eq!(turn.output_tokens, Some(300));
+        assert_eq!(
+            turn.total_tokens,
+            Some(3_800),
+            "adapter-reported total passes through"
+        );
+        assert_eq!(turn.cache_read_tokens, Some(1_500));
+        assert!(
+            turn.cache_write_tokens.is_none(),
+            "absent cache-write stays unreported (never zero)"
+        );
+        let cumulative = cumulative.expect("cumulative present");
+        assert_eq!(cumulative.input_tokens, Some(3_500));
+        assert!(cumulative.cache_write_tokens.is_none());
+    }
+
     fn make_prompt_context_no_owner() -> PromptContext {
         let agent_keys = nostr::Keys::generate();
         make_prompt_context_impl(&agent_keys, None)
