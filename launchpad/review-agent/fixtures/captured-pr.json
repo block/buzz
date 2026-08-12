@@ -1,0 +1,10 @@
+{
+  "_comment": "A captured PR, so step 3's control does not depend on live GitHub. Each surface carries a distinct sentinel, which is how the control proves each block holds its own field rather than a copy of one field in all seven.",
+  "pr_title": "fix(relay): correct the trust store split SENTINEL-TITLE-0a1b",
+  "pr_body": "Closes #108.\n\nSwitches the desktop WebSocket to native TLS roots. SENTINEL-BODY-2c3d",
+  "pr_diff": "diff --git a/crates/buzz-relay/src/tls.rs b/crates/buzz-relay/src/tls.rs\n@@ -1,3 +1,4 @@\n+// SENTINEL-DIFF-4e5f\n use rustls::RootCertStore;",
+  "pr_issue_comments": "Looks reasonable to me, though I'd want a test. SENTINEL-ISSUECOMMENT-6a7b",
+  "pr_review_comments": "This line drops the error rather than propagating it. SENTINEL-REVIEWCOMMENT-8c9d",
+  "pr_review_bodies": "Requesting changes until the error path is covered. SENTINEL-REVIEWBODY-aeaf",
+  "linked_issue": "The desktop client refuses a valid certificate on Linux. SENTINEL-LINKEDISSUE-c0d1"
+}
