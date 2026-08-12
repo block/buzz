@@ -50,6 +50,28 @@ _INVISIBLE = re.compile("[\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]")
 #: match and the normalisation check while looking identical to a human.
 _DASHES = re.compile("[\u2010-\u2015\u2212\u2043\uff0d]")
 
+#: Cross-script look-alikes for the characters of TOKEN, mapped to the ASCII letter they
+#: imitate. NFKC does **not** fold these \u2014 it normalises compatibility forms (fullwidth,
+#: mathematical) but leaves Cyrillic \u0415 and Greek \u0395 alone, because they are genuinely
+#: different letters. So a delimiter written with one substituted character used to pass
+#: both the exact match and the fold while being pixel-identical to a reader.
+#:
+#: **Bounded on purpose.** This is not UTS #39; it covers the ten distinct characters in
+#: ``BUZZ-UNTRUSTED`` and no others, which is all this boundary needs. CONTAINMENT.md
+#: states that bound rather than implying general confusable coverage.
+_CONFUSABLES = {
+    "\u0392": "B", "\u0412": "B", "\u0432": "B", "\u13f4": "B", "\u2c82": "B",
+    "\u054d": "U", "\u144c": "U", "\u222a": "U", "\ua4f4": "U",
+    "\u0396": "Z", "\u0417": "Z", "\u13c3": "Z", "\ua4dc": "Z",
+    "\u039d": "N", "\u2115": "N", "\ua4e0": "N",
+    "\u03a4": "T", "\u0422": "T", "\u0442": "T", "\u13a2": "T", "\ua4d4": "T",
+    "\u13a1": "R", "\u211d": "R", "\ua4e3": "R",
+    "\u0405": "S", "\u0455": "S", "\u13da": "S", "\ua4e2": "S",
+    "\u0395": "E", "\u0415": "E", "\u0435": "E", "\u03b5": "E", "\u13ac": "E",
+    "\u2130": "E", "\ua4f0": "E",
+    "\u13a0": "D", "\u216e": "D", "\u2145": "D", "\ua4d3": "D",
+}
+
 
 def _fold(text: str) -> str:
     """Collapse a payload to the form a reader *sees*, for look-alike detection only.
@@ -71,6 +93,19 @@ def _squeezed(text: str) -> str:
     benign corpora it produces no false positives.
     """
     return re.sub(r"\s+", "", _fold(text))
+
+
+def _skeleton(text: str) -> str:
+    """The fold, with cross-script look-alikes mapped to the letter they imitate.
+
+    Detection only — like ``_fold``, never applied to the emitted payload. A single
+    Cyrillic Е inside an otherwise byte-perfect delimiter used to yield no finding at
+    all: not escaped, because ``escape`` matches the ASCII token; not flagged, because
+    NFKC leaves cross-script letters alone. The boundary itself still held — a real
+    close marker needs byte-exact ASCII plus the true nonce — but the probe was
+    invisible, which is the swallowed attack CONTAINMENT.md forbids.
+    """
+    return "".join(_CONFUSABLES.get(ch, ch) for ch in _fold(text)).upper()
 
 
 @dataclass
@@ -177,6 +212,23 @@ def find_lookalikes(text: str, entry_point: str) -> list[Finding]:
             Finding("delimiter_lookalike", entry_point, _excerpt(squeezed, squeezed.index(TOKEN)))
         )
 
+    # Cross-script homoglyph: the token only appears once look-alike letters are mapped
+    # to the ASCII they imitate. Checked last, and only when nothing above already
+    # reported this text, so one probe yields one finding rather than four.
+    if not findings:
+        skeleton = _skeleton(text)
+        skeleton_squeezed = re.sub(r"\s+", "", skeleton)
+        for candidate in (skeleton, skeleton_squeezed):
+            if TOKEN in candidate:
+                findings.append(
+                    Finding(
+                        "delimiter_lookalike",
+                        entry_point,
+                        _excerpt(candidate, candidate.index(TOKEN)),
+                    )
+                )
+                break
+
     return _dedupe(findings)
 
 
@@ -247,24 +299,31 @@ def render(surfaces: dict, nonce: str, *, enabled: bool = True) -> tuple[str, li
     # The aggregate cap is enforced BEFORE any block is built. Signalling "oversized"
     # while still emitting the content is not refusing it: a caller that takes the
     # document and ignores the readable flag would receive the full untrusted payload.
-    total = sum(len(s.text.encode("utf-8")) for s in surfaces.values() if s.readable)
-    if total > fetch.CAP_PER_INVOCATION:
+    # The refusal is applied to the SURFACES, not just to this document, so the states
+    # a later stage reads carry it too — see fetch.apply_invocation_cap.
+    over_cap = fetch.invocation_total(surfaces) > fetch.CAP_PER_INVOCATION
+    surfaces = fetch.apply_invocation_cap(surfaces)
+    if over_cap:
         lines.append(
-            f"SKIP invocation: oversized — {total} bytes exceeds the "
-            f"{fetch.CAP_PER_INVOCATION}-byte per-invocation cap; no surface is "
-            f"rendered, because refusing means withholding rather than warning"
+            f"SKIP invocation: oversized — {fetch.invocation_total(surfaces)} bytes "
+            f"exceeds the {fetch.CAP_PER_INVOCATION}-byte per-invocation cap; no "
+            f"surface is rendered, because refusing means withholding rather than warning"
         )
-        # Findings survive refusal. Withholding the content must not withhold the
-        # evidence that someone probed the boundary — CONTAINMENT.md requires all
-        # three kinds to reach the review, and dropping one here would be the
-        # swallowed attack in a different costume.
-        for entry_point in ENTRY_POINTS:
-            findings.extend(find_lookalikes(surfaces[entry_point].text, entry_point))
-            findings.extend(detect.detect(surfaces[entry_point].text, entry_point))
-        return "\n".join(lines), findings, False
+        lines.append("")
 
     for entry_point in ENTRY_POINTS:
         surface = surfaces[entry_point]
+        # contain() is called on EVERY path, readable or not, and is the single site
+        # that computes containment findings — so evidence cannot be lost by taking a
+        # branch, and one mutation to it is visible from every path. Withholding the
+        # content must never withhold the evidence that someone probed the boundary:
+        # CONTAINMENT.md requires all three kinds to reach the review, and dropping one
+        # on the refusal path would be the swallowed attack in a different costume.
+        raw = "" if surface.state == "empty" else surface.text
+        result = contain(entry_point, raw, nonce, enabled=enabled)
+        findings.extend(result.findings)
+        findings.extend(detect.detect(surface.text, entry_point))
+
         if not surface.readable:
             all_readable = False
             lines.append(
@@ -273,12 +332,7 @@ def render(surfaces: dict, nonce: str, *, enabled: bool = True) -> tuple[str, li
             lines.append("")
             continue
         if surface.state == "empty":
-            result = contain(entry_point, "", nonce, enabled=enabled)
             lines.append(f"({entry_point} fetched successfully and is empty)")
-        else:
-            result = contain(entry_point, surface.text, nonce, enabled=enabled)
-        findings.extend(result.findings)
-        findings.extend(detect.detect(surface.text, entry_point))
         lines.append(result.block)
         lines.append("")
 
@@ -332,6 +386,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     for spec in args.degrade:
         surfaces = fetch.degrade(surfaces, spec)
+
+    # Applied here as well as inside render(), so the `states` emitted below carry the
+    # refusal. It is idempotent by construction — see fetch.invocation_total.
+    surfaces = fetch.apply_invocation_cap(surfaces)
 
     nonce = make_nonce(args.seed)
     document, findings, all_readable = render(surfaces, nonce, enabled=not args.no_contain)

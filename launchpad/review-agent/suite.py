@@ -24,13 +24,18 @@ from fetch import Surface
 class Result:
     case_id: str
     contained: bool  # payload never appears outside a data block
-    expected_finding: bool  # the payload carries an unambiguous tell
-    got_finding: bool
+    expected_finding: bool  # DECLARED in the fixture — never computed from detect()
+    got_finding: bool  # a finding for this entry point reached render()
+    detector_agrees: bool  # detect() alone matches the declared expectation
     detail: str = ""
 
     @property
     def passed(self) -> bool:
-        return self.contained and (self.got_finding or not self.expected_finding)
+        return (
+            self.contained
+            and self.detector_agrees
+            and (self.got_finding or not self.expected_finding)
+        )
 
 
 def _surfaces_for(case: Case) -> dict[str, Surface]:
@@ -48,10 +53,20 @@ def run_case(case: Case, *, enabled: bool = True) -> Result:
 
     contained, why = _is_contained(document, case, nonce)
 
-    expected = bool(detect(case.payload.text, case.entry_point))
+    # The expectation is DECLARED, not measured. It used to read
+    # ``expected = bool(detect(...))`` — the same production detect() that produces
+    # ``got`` via render() — so both sides of the assertion came from the code under
+    # test. With detect() neutered to return nothing, every case's expectation became
+    # False, ``got_finding or not expected_finding`` was trivially true, and this suite
+    # reported 35/35 green while covering nothing. That is the coverage theatre the
+    # module docstring claims to prevent, so the oracle now lives in the fixture.
+    expected = case.payload.expected_detection
     got = any(f.entry_point == case.entry_point for f in findings)
+    # Pinned separately, because ``got`` is satisfied by a delimiter finding too: the
+    # breakout payload would still report a finding with detect() entirely dead.
+    agrees = bool(detect(case.payload.text, case.entry_point)) == expected
 
-    return Result(case.id, contained, expected, got, detail=why)
+    return Result(case.id, contained, expected, got, agrees, detail=why)
 
 
 def _is_contained(document: str, case: Case, nonce: str) -> tuple[bool, str]:
@@ -101,7 +116,8 @@ def main() -> int:
     for r in results:
         mark = "PASS" if r.passed else "FAIL"
         note = " (finding asserted)" if r.expected_finding else ""
-        print(f"{mark}  {r.case_id:<38}contained={r.contained}{note} {r.detail}")
+        drift = "" if r.detector_agrees else " DETECTOR DISAGREES WITH THE FIXTURE"
+        print(f"{mark}  {r.case_id:<38}contained={r.contained}{note}{drift} {r.detail}")
 
     detected = [r.case_id for r in results if r.expected_finding]
     undetected = [r.case_id for r in results if not r.expected_finding]

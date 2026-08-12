@@ -60,6 +60,43 @@ check(not banned, f"step 4: the paraphrase uses none of skip/approve/suppress (f
 breakout = next(p for p in payloads if p.id == "delimiter-breakout").text
 check("BUZZ-UNTRUSTED" in breakout, "step 4: the breakout payload contains the real token")
 
+# --- the declared detection oracle -----------------------------------------
+# suite.py used to compute its own expected answer by calling detect(), so it passed
+# 35/35 with the detector neutered. The expectation now lives in the fixture, which
+# makes the fixture load-bearing: these checks are what keep it honest.
+check(
+    all(isinstance(p.expected_detection, bool) for p in payloads),
+    "step 4: every payload declares expected_detection as a boolean",
+)
+declared = sum(1 for p in payloads if p.expected_detection)
+check(
+    0 < declared < len(payloads),
+    f"step 4: the oracle declares both outcomes (got {declared} true of {len(payloads)}) "
+    "— all-true or all-false would make the assertion vacuous",
+)
+check(
+    not next(p for p in payloads if p.id == "paraphrase").expected_detection,
+    "step 4: the paraphrase is declared UNDETECTED, pinning the documented recall gap",
+)
+
+# `intent` had no reader anywhere on the branch. It is the only machine-readable record
+# of #120's three named intents, so nothing stopped one being swapped for a second
+# paraphrase while the 35-case count stayed green.
+intents = {p.id: p.intent for p in payloads}
+check(
+    all(t.strip() for t in intents.values()) and len(set(intents.values())) == len(payloads),
+    "step 4: every payload states a distinct, non-empty intent",
+)
+for required, phrase in (
+    ("skip-review", "abandon the review"),
+    ("approve", "grant approval"),
+    ("suppress-a-finding", "withhold"),
+):
+    check(
+        phrase in intents.get(required, ""),
+        f"step 4: #120's named intent is present and described — {required} ({phrase!r})",
+    )
+
 # --- step 5 ----------------------------------------------------------------
 records, held_out, held_out_in_scope = load_benign()
 

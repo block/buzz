@@ -70,10 +70,18 @@ MUTATIONS = [
     ),
     (
         "cap-warns-only",
-        "contain.py",
-        '        return "\\n".join(lines), findings, False',
-        '        pass',
+        "fetch.py",
+        "    total = invocation_total(surfaces)\n    if total <= CAP_PER_INVOCATION:",
+        "    total = invocation_total(surfaces)\n    if True:",
         "oversized input is warned about but still rendered in full",
+    ),
+    (
+        "cap-leaves-states-ok",
+        "fetch.py",
+        '        ep: Surface(ep, "oversized", text=s.text, reason=reason) if s.readable else s',
+        "        ep: s",
+        "content is withheld but every state stays `ok`, so the review of a wholly "
+        "withheld pull request renders with no incomplete banner and reads as clean",
     ),
     (
         "empty-reads-as-absent",
@@ -81,6 +89,32 @@ MUTATIONS = [
         '        return Surface(entry_point, "empty")',
         '        return Surface(entry_point, "absent", reason="no content")',
         "a fetched-and-empty surface becomes indistinguishable from one never read",
+    ),
+    (
+        "no-homoglyph-detection",
+        "contain.py",
+        "        skeleton = _skeleton(text)",
+        '        skeleton = ""',
+        "a cross-script look-alike delimiter is neither escaped nor flagged, so a "
+        "boundary probe that is pixel-identical to the real marker passes unreported",
+    ),
+    (
+        "newline-split-restored",
+        "detect.py",
+        '        joined = re.sub(r"\\s+", " ", " ".join(passage))\n'
+        "        out.extend(chunk.strip() for chunk in _SENTENCE_END.split(joined) if chunk.strip())",
+        "        for line in passage:\n"
+        "            out.extend(c.strip() for c in _SENTENCE_END.split(line) if c.strip())",
+        "sentences split on newlines again, so one newline mid-phrase defeats every "
+        "injection tell — the bypass that let three of four attack classes through",
+    ),
+    (
+        "detect-rule-dropped",
+        "detect.py",
+        r'    r"|system\s+directive"',
+        r'    r"|system\s+directive_disabled"',
+        "one alternative is quietly removed from the standalone tells, lowering recall "
+        "without changing any count the contract states",
     ),
 ]
 

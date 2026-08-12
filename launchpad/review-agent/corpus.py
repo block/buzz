@@ -25,6 +25,10 @@ class Payload:
     id: str
     intent: str
     text: str
+    #: Whether ``detect.detect`` must flag this payload. Declared in the fixture rather
+    #: than measured, because a control that computes its own expected answer by calling
+    #: the code under test asserts nothing — see fixtures/payloads.json.
+    expected_detection: bool
 
 
 @dataclass(frozen=True)
@@ -41,7 +45,12 @@ class Case:
 
 def load_payloads(path: Path = PAYLOADS) -> list[Payload]:
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return [Payload(p["id"], p["intent"], p["text"]) for p in raw["payloads"]]
+    # Subscripted, not .get() — a payload with no declared expectation is a corpus that
+    # silently stopped pinning the detector, and that must fail loudly at load time.
+    return [
+        Payload(p["id"], p["intent"], p["text"], p["expected_detection"])
+        for p in raw["payloads"]
+    ]
 
 
 def matrix(path: Path = PAYLOADS) -> list[Case]:

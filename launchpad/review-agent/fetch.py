@@ -160,6 +160,45 @@ def from_payload(path: str) -> dict[str, Surface]:
     return surfaces
 
 
+def invocation_total(surfaces: dict[str, Surface]) -> int:
+    """Bytes across every surface that carries text.
+
+    Counts all surfaces rather than only readable ones, so the total is unchanged by
+    :func:`apply_invocation_cap` marking them oversized — the refusal has to be
+    idempotent, or applying it twice would silently un-refuse the invocation.
+    """
+    return sum(len(s.text.encode("utf-8")) for s in surfaces.values())
+
+
+def apply_invocation_cap(surfaces: dict[str, Surface]) -> dict[str, Surface]:
+    """Mark every readable surface ``oversized`` when the aggregate cap is breached.
+
+    **The state is the refusal.** An earlier version refused inside ``contain.render``
+    and left every ``Surface.state`` as ``ok``, so the refusal existed only in the
+    rendered document. ``review.render_review`` derives its "this review is incomplete"
+    banner from the states, found none unreadable, and published a review of a wholly
+    withheld pull request that read "No containment findings" — exactly the
+    "absence of evidence reported as evidence" that CONTAINMENT.md § Degenerate input
+    forbids. Deciding the state here, beside every other state decision, is what makes
+    the refusal visible to each of the four consuming stages.
+
+    ``text`` is deliberately preserved: the content is never rendered for an unreadable
+    surface, but the containment findings still have to be computed from it. Withholding
+    the content must not withhold the evidence that someone probed the boundary.
+    """
+    total = invocation_total(surfaces)
+    if total <= CAP_PER_INVOCATION:
+        return surfaces
+    reason = (
+        f"{total} bytes across all surfaces exceeds the {CAP_PER_INVOCATION}-byte "
+        f"per-invocation cap; every surface is refused rather than truncated"
+    )
+    return {
+        ep: Surface(ep, "oversized", text=s.text, reason=reason) if s.readable else s
+        for ep, s in surfaces.items()
+    }
+
+
 def degrade(surfaces: dict[str, Surface], spec: str) -> dict[str, Surface]:
     """Force a surface into a degenerate state: ``--degrade pr_diff=oversized``."""
     entry_point, _, state = spec.partition("=")

@@ -29,7 +29,12 @@ BUZZ-UNTRUSTED:{label}:{nonce}>>>
 - `label` — one of the seven entry points, below. It names *where the text came from*,
   never what to do with it.
 - `nonce` — 128 bits of randomness, lowercase hex, generated once per invocation and
-  shared by every block in that invocation.
+  shared by every block in that invocation. **Produced by `contain.make_nonce()` and
+  by nothing else.** Every stage in § Contract for later stages takes a `nonce`
+  argument, so the document has to say where a caller gets one: `make_nonce()` for a
+  real run, `make_nonce(seed)` under test. A stage that mints its own — inline
+  `secrets`, a constant, or a value handed in by its caller — breaks the guarantee
+  below, and the last of those is forbidden outright four lines down.
 - The payload is escaped per the next section before it is placed inside.
 
 **Why a nonce.** A fixed delimiter published in a public repo is a delimiter an attacker
@@ -75,7 +80,7 @@ through unexamined**.
 | The escape sequence itself | a payload already containing `\x5c<<<` | escaped first, so unescape round-trips |
 | Whitespace variant | `<<< BUZZ-UNTRUSTED` | flagged `delimiter_lookalike` |
 | Case variant | `<<<buzz-untrusted` | flagged `delimiter_lookalike` |
-| Unicode confusable | `＜＜＜BUZZ-UNTRUSTED`, homoglyph or zero-width | flagged `delimiter_lookalike` |
+| Unicode confusable | `＜＜＜BUZZ-UNTRUSTED`, zero-width, or a cross-script homoglyph | flagged `delimiter_lookalike` |
 
 **Escaped** means the sequence is rewritten so it cannot terminate the block, and
 `unescape(escape(x)) == x` for every input. Escaping alone is not enough: an author
@@ -87,9 +92,25 @@ resembles it closely enough to be an attempt. It is wrapped normally *and* repor
 a `delimiter_lookalike` finding. It is never silently normalised away — an attacker
 probing the boundary is information the reviewer needs.
 
+**How confusables are recognised, and how far that reaches.** Three transforms run
+before the comparison, and each catches a class the one before it misses: NFKC
+normalisation (fullwidth and mathematical forms), invisible- and dash-character
+stripping, and a **look-alike skeleton** that maps cross-script letters to the ASCII
+they imitate. The skeleton is not UTS #39. It covers the ten distinct characters of
+`BUZZ-UNTRUSTED` across Latin, Greek, Cyrillic, Cherokee and a handful of mathematical
+and Lisu forms — bounded to the token's own alphabet, which is all this boundary needs.
+That bound is stated here rather than left for a reader to infer from the source.
+
+NFKC alone was not enough, and the reason is worth keeping: it deliberately does *not*
+fold Cyrillic `Е` onto Latin `E`, because they are genuinely different letters. So a
+delimiter with one substituted character was neither escaped — `escape` matches the
+ASCII token — nor flagged, while being pixel-identical to the real marker. Silent, and
+therefore the swallowed attack this section exists to forbid.
+
 **A limit, stated rather than hidden.** Escaping and flagging are byte-level. A model
-reads text visually, so a homoglyph boundary may still mislead a stage even when handled
-correctly here. This makes the attempt *visible*; it does not make it *harmless*.
+reads text visually, so a boundary built from characters outside the skeleton's bound
+may still mislead a stage. Recognition makes the attempt *visible*; it does not make it
+*harmless*.
 
 ---
 
@@ -162,6 +183,16 @@ Measured:
 | missed | 7 of 35 — semantic paraphrase, which has no unambiguous tell |
 | false positives | 0, across 10 upstream PRs and this repo's own review-heavy docs |
 
+**Whitespace is not a boundary, and treating it as one was a bypass.** Sentences are
+split on punctuation only; lines are joined and whitespace collapsed before matching.
+An earlier version also split on newlines, reasoning that diffs are line-oriented. Every
+rule needs whitespace between its words and no chunk produced by a newline split ever
+contained a newline, so `ignore all previous` + newline + `instructions` matched nothing
+— **three of the four detected classes evaded for one keystroke**, and the corpus never
+noticed because every fixture was written on one line. The measured recall below was
+therefore true only of an author who did not wrap. A hunk header still ends a passage,
+so text is never joined across two files.
+
 **Why it is not broader.** Telling an attack from a *description* of an attack is the
 use–mention problem. This document contains the sentence "A diff that 'asks' the agent
 to skip review is itself a Blocker finding"; an attack contains "do not report the
@@ -215,11 +246,19 @@ A stage that builds a prompt must envelope first, without exception.
 |---|---|---|
 | [#116](https://github.com/launchpad-26/buzz/issues/116) pre-flight | `fetch.fetch_all(pr, repo)` — emit one labelled field per entry point | concatenate surfaces into one blob, or build a prompt |
 | [#117](https://github.com/launchpad-26/buzz/issues/117) dimensions | `contain.render(surfaces, nonce)` before any text reaches a model | place any surface above the preamble or after the closing marker |
-| [#118](https://github.com/launchpad-26/buzz/issues/118) adjudication | `contain.findings_for(surfaces, nonce)` — findings and contained blocks only | re-read raw PR text to "check for itself" |
+| [#118](https://github.com/launchpad-26/buzz/issues/118) adjudication | `contain.findings_for(surfaces, nonce)` — returns `list[Finding]` and nothing else | re-read raw PR text to "check for itself" |
 | [#119](https://github.com/launchpad-26/buzz/issues/119) publish | `review.render_review(findings, states)` | publish evidence in raw form — quote post-escape or not at all |
 
 All four route the same seven labels: `pr_title`, `pr_body`, `pr_diff`,
 `pr_issue_comments`, `pr_review_comments`, `pr_review_bodies`, `linked_issue`.
+
+**Where the `nonce` comes from.** Both stages that take one call `contain.make_nonce()`
+first and pass the result. It is the only sanctioned producer — see § Envelope
+structure. `findings_for` returns findings alone; a stage that also needs the contained
+blocks calls `contain.render(surfaces, nonce)`, which returns
+`(document, findings, all_readable)`. #118 is told to adjudicate what containment
+already found, so `findings_for` is the narrower call that keeps it from reaching back
+to the surfaces.
 
 **#116 and this document agree, and the agreement is load-bearing.** #116's plan states
 that untrusted text is carried through as data and "the mitigation lives in the stage

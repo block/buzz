@@ -78,21 +78,48 @@ _SUPPRESS = re.compile(
     re.IGNORECASE,
 )
 
-#: Sentence-ish split. Newlines matter: diffs and comments are line-oriented.
-_SPLIT = re.compile(r"(?<=[.!?:])\s+|\n+")
+#: Sentence split. On punctuation **only** — never on a newline. See ``_sentences``.
+_SENTENCE_END = re.compile(r"(?<=[.!?:])\s+")
 
 #: Diff structure that is never prose.
 _DIFF_META = re.compile(r"^(?:diff --git|index |---|\+\+\+|@@|similarity index|rename )")
 
 
 def _sentences(text: str) -> list[str]:
-    out: list[str] = []
-    for chunk in _SPLIT.split(text):
-        chunk = chunk.strip()
-        if not chunk or _DIFF_META.match(chunk):
+    r"""Prose passages, split on sentence punctuation only.
+
+    **A newline is not a sentence boundary, and treating it as one was a bypass.** The
+    earlier version split on ``\n+`` as well, reasoning that diffs are line-oriented.
+    Every pattern below needs ``\s+`` between its words, and no chunk produced by a
+    newline split ever contained one — so ``ignore all previous\ninstructions`` matched
+    nothing at all. Three of the four attack classes this layer detects evaded it for
+    the cost of one keystroke, and the corpus never noticed because every fixture was
+    written on a single line.
+
+    So lines are joined, and whitespace within a passage is collapsed before matching.
+    Diff structure still ends a passage: a hunk header is a real boundary, and joining
+    across one would let two unrelated files' text form a phrase that neither wrote.
+    """
+    passages: list[list[str]] = [[]]
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if _DIFF_META.match(stripped):
+            if passages[-1]:
+                passages.append([])
+            continue
+        if not stripped:
             continue
         # Strip a leading diff marker so an added line is still read as prose.
-        out.append(chunk[1:].strip() if chunk[:1] in "+-" else chunk)
+        passages[-1].append(stripped[1:].strip() if stripped[:1] in "+-" else stripped)
+
+    out: list[str] = []
+    for passage in passages:
+        if not passage:
+            continue
+        # Collapse every whitespace run, so a phrase broken across lines — or padded
+        # with tabs and doubled spaces — reads as the contiguous phrase it is.
+        joined = re.sub(r"\s+", " ", " ".join(passage))
+        out.extend(chunk.strip() for chunk in _SENTENCE_END.split(joined) if chunk.strip())
     return out
 
 
