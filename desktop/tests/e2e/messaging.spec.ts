@@ -280,44 +280,63 @@ test.beforeEach(async ({ page }, testInfo) => {
                               "link-preview-image",
                             ],
                           }
-                        : testInfo.title.includes("link preview") ||
-                            testInfo.title.includes("supported Compact")
+                        : testInfo.title.includes(
+                              "sent link preview media uses",
+                            )
                           ? {
+                              mediaProxyInitiallyUnavailable: true,
                               linkPreviewMetadata: {
                                 title: "Buzz pull request",
                                 siteName: "GitHub",
                                 description:
                                   "A sender-authored preview snapshot.",
-                                imageDataUrl: null,
-                                imageDomain: null,
+                                imageDataUrl:
+                                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                                imageDomain: "opengraph.githubassets.com",
+                                faviconDataUrl:
+                                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                               },
-                              linkPreviewMetadataDelayMs:
-                                testInfo.title.includes(
-                                  "loading card before cold resolver work",
-                                )
-                                  ? 10_000
-                                  : testInfo.title.includes(
-                                        "send does not wait",
-                                      )
-                                    ? 3_000
-                                    : testInfo.title.includes("draft auto-send")
-                                      ? 500
-                                      : testInfo.title.includes(
-                                            "style defaults",
-                                          ) ||
-                                          testInfo.title.includes(
-                                            "attachment-sized",
-                                          )
-                                        ? 1_500
-                                        : undefined,
-                              linkPreviewMetadataStartBlockMs:
-                                testInfo.title.includes(
-                                  "loading card before cold resolver work",
-                                )
-                                  ? 150
-                                  : undefined,
                             }
-                          : undefined;
+                          : testInfo.title.includes("link preview") ||
+                              testInfo.title.includes("supported Compact")
+                            ? {
+                                linkPreviewMetadata: {
+                                  title: "Buzz pull request",
+                                  siteName: "GitHub",
+                                  description:
+                                    "A sender-authored preview snapshot.",
+                                  imageDataUrl: null,
+                                  imageDomain: null,
+                                },
+                                linkPreviewMetadataDelayMs:
+                                  testInfo.title.includes(
+                                    "loading card before cold resolver work",
+                                  )
+                                    ? 10_000
+                                    : testInfo.title.includes(
+                                          "send does not wait",
+                                        )
+                                      ? 3_000
+                                      : testInfo.title.includes(
+                                            "draft auto-send",
+                                          )
+                                        ? 500
+                                        : testInfo.title.includes(
+                                              "style defaults",
+                                            ) ||
+                                            testInfo.title.includes(
+                                              "attachment-sized",
+                                            )
+                                          ? 1_500
+                                          : undefined,
+                                linkPreviewMetadataStartBlockMs:
+                                  testInfo.title.includes(
+                                    "loading card before cold resolver work",
+                                  )
+                                    ? 150
+                                    : undefined,
+                              }
+                            : undefined;
   const mock = testInfo.title.includes("unresolvable preview")
     ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 800 }
     : baseMock;
@@ -460,6 +479,69 @@ test("markdown tables overflow wide content and fill the message when narrow", a
       }),
     )
     .toBeLessThanOrEqual(1);
+});
+
+test("sent link preview media uses the authenticated proxy in compact and rich cards", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?proxy=1";
+  const fallbackMediaPattern =
+    /^buzz-media:\/\/localhost\/media\/[\da-f]{64}\.png$/;
+  const proxyMediaPattern =
+    /^http:\/\/127\.0\.0\.1:54321\/media\/[\da-f]{64}\.png$/;
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#22c55e"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+  await waitForReadyComposerSnapshots(page);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const compactPreview = row.locator(
+    '[data-link-preview="github-pull-request"]',
+  );
+  const compactThumbnail = compactPreview
+    .locator("[data-link-preview-thumbnail] img")
+    .first();
+  const compactFavicon = compactPreview.locator(
+    "img[data-link-preview-hostname-favicon]",
+  );
+  await expect(compactThumbnail).toHaveAttribute("src", fallbackMediaPattern);
+  await expect(compactFavicon).toHaveAttribute("src", fallbackMediaPattern);
+
+  const releasedPort = await page.evaluate(() =>
+    window.__BUZZ_E2E_RELEASE_MEDIA_PROXY__?.(),
+  );
+  expect(releasedPort).toBe(54321);
+  await expect(compactThumbnail).toHaveAttribute("src", proxyMediaPattern);
+  await expect(compactFavicon).toHaveAttribute("src", proxyMediaPattern);
+  await expect
+    .poll(() => compactThumbnail.evaluate((image) => image.naturalWidth))
+    .toBe(40);
+
+  await openSettings(page, "appearance");
+  await page.getByTestId("link-preview-style-trigger").click();
+  await page.getByTestId("link-preview-style-rich").click();
+  await page.getByTestId("settings-back-to-app").click();
+
+  const richPreview = row.locator(
+    '[data-link-preview="github-pull-request"][data-link-preview-inline]',
+  );
+  const richThumbnail = richPreview
+    .locator("[data-link-preview-thumbnail] img")
+    .first();
+  const richFavicon = richPreview.locator("img[data-link-preview-favicon]");
+  await expect(richThumbnail).toHaveAttribute("src", proxyMediaPattern);
+  await expect(richFavicon).toHaveAttribute("src", proxyMediaPattern);
+  await expect
+    .poll(() => richThumbnail.evaluate((image) => image.naturalWidth))
+    .toBe(40);
 });
 
 test("link preview style defaults to compact and Rich unfurls descriptions", async ({
