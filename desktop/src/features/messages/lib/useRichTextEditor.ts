@@ -742,17 +742,26 @@ export function useRichTextEditor({
     [editor],
   );
 
-  const setContentAndFocusEnd = React.useCallback(
-    (markdown: string) => {
+  /**
+   * Replace the editor document with literal plain text and focus its end.
+   *
+   * Unlike markdown `setContent`, this preserves trailing whitespace. The
+   * transaction is marked as programmatic so authored-update observers do not
+   * reconcile against the intermediate post-send restoration.
+   */
+  const restorePlainTextAndFocusEnd = React.useCallback(
+    (text: string) => {
       if (!editor) return;
-      // The caller already synchronizes composer state. Keep this programmatic
-      // restoration out of user-edit observers (autocomplete/reconciliation),
-      // then move selection in the same command chain.
-      editor
-        .chain()
-        .setContent(markdown, { emitUpdate: false })
-        .focus("end")
-        .run();
+      const paragraph = editor.schema.nodes.paragraph.create(
+        null,
+        text ? editor.schema.text(text) : undefined,
+      );
+      const tr = editor.state.tr
+        .replaceWith(0, editor.state.doc.content.size, paragraph)
+        .setMeta("preventUpdate", true);
+      tr.setSelection(TextSelection.atEnd(tr.doc));
+      editor.view.dispatch(tr);
+      editor.view.focus();
     },
     [editor],
   );
@@ -950,7 +959,7 @@ export function useRichTextEditor({
     isEmpty,
     clearContent,
     setContent,
-    setContentAndFocusEnd,
+    restorePlainTextAndFocusEnd,
     focus,
     focusEnd,
     focusPreserve,
