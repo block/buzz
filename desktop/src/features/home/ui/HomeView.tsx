@@ -61,7 +61,7 @@ import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
-import type { HomeFeedResponse } from "@/shared/api/types";
+import type { Channel, HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -72,6 +72,7 @@ import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/Aux
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { Button } from "@/shared/ui/button";
+import { HomeMembersSidebarOverlay } from "./HomeMembersSidebarOverlay";
 
 const INBOX_SEARCH_KEYS = [
   "item",
@@ -165,6 +166,9 @@ export function HomeView({
   } | null>(null);
   const selectedEventId = urlSelectedItemId ?? autoSelectedEventId;
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
+    null,
+  );
+  const [membersChannel, setMembersChannel] = React.useState<Channel | null>(
     null,
   );
   const { goChannel } = useAppNavigation();
@@ -972,6 +976,7 @@ export function HomeView({
                 channel={managedChannel}
                 currentPubkey={currentPubkey}
                 layout="split"
+                onOpenMembers={() => setMembersChannel(managedChannel)}
                 onOpenChange={(nextOpen) => {
                   if (!nextOpen) {
                     setManagedChannelId(null);
@@ -983,6 +988,11 @@ export function HomeView({
           ) : null}
         </div>
       </div>
+      <HomeMembersSidebarOverlay
+        channel={membersChannel}
+        currentPubkey={currentPubkey}
+        onClose={() => setMembersChannel(null)}
+      />
     </ProfilePanelProvider>
   );
 }
