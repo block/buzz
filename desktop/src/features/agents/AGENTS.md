@@ -134,7 +134,9 @@ with a TypeScript lookup table or an id comparison in a component.
     toggles await relay acceptance before the UI claims that an agent was
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
-    optimistic local persona.
+    optimistic local persona. Author-owned definition sync backfills on startup
+    and after reconnect, and retries failed history and live-subscription setup;
+    otherwise a device can permanently miss definitions published elsewhere.
 11. **Shared agent access names the consequence where it is selected.** The
    shared respond-to field shows a persistent warning whenever `anyone` **or**
    `allowlist` is selected — both hand the host's access to someone other than
@@ -198,6 +200,8 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- `lib/usePersonaSync.test.mjs` — author-owned definition history/live sync,
+  arrival-relay scoping, transient retry, and reconnect catch-up.
 
 ## Keep this file true
 
