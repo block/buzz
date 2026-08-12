@@ -408,6 +408,36 @@ fn prepare_windows_mesh_runtime_dependencies(app: &AppHandle) {
 #[cfg(not(target_os = "windows"))]
 fn prepare_windows_mesh_runtime_dependencies(_app: &AppHandle) {}
 
+fn mesh_runtime_load_error_needs_windows_dependency_retry(error: &anyhow::Error) -> bool {
+    let error = format!("{error:#}");
+    error.contains("LoadLibraryExW failed") || error.contains("OS error 126")
+}
+
+async fn start_mesh_runtime_with_windows_dependency_retry(
+    app: &AppHandle,
+    request: mesh_llm::StartMeshNodeRequest,
+) -> anyhow::Result<mesh_llm::DesktopMeshRuntime> {
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
+    #[cfg(target_os = "windows")]
+    let retry_request = request.clone();
+    match mesh_llm::DesktopMeshRuntime::start(request).await {
+        Ok(started) => Ok(started),
+        #[cfg(target_os = "windows")]
+        Err(error) if mesh_runtime_load_error_needs_windows_dependency_retry(&error) => {
+            append_mesh_debug_log(
+                app,
+                format!(
+                    "DesktopMeshRuntime::start load failed; refreshing Windows DLL directories before one retry: {error:#}"
+                ),
+            );
+            prepare_windows_mesh_runtime_dependencies(app);
+            mesh_llm::DesktopMeshRuntime::start(retry_request).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 const RELAY_MESH_RUNTIME_NO_TARGET: &str =
     "Buzz shared compute requires a live serving member; start serving the selected model on a member, then try again";
 
@@ -717,7 +747,7 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
         relay_url: Some(relay_url),
         trusted_owner_ids: Some(trusted_owner_ids),
     };
-    let started = mesh_llm::DesktopMeshRuntime::start(request)
+    let started = start_mesh_runtime_with_windows_dependency_retry(app, request)
         .await
         .map_err(|error| format!("failed to restore Share Compute: {error:#}"))?;
     // Install the restored runtime immediately: it is tracked by AppState from
@@ -893,7 +923,7 @@ async fn mesh_start_node_inner(
     }
 
     append_mesh_debug_log(&app, "starting DesktopMeshRuntime");
-    let started = match mesh_llm::DesktopMeshRuntime::start(request).await {
+    let started = match start_mesh_runtime_with_windows_dependency_retry(&app, request).await {
         Ok(started) => {
             append_mesh_debug_log(&app, "DesktopMeshRuntime::start returned ok");
             started

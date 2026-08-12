@@ -66,6 +66,27 @@ fn windows_mesh_gpu_sdk_dll_dirs_discovers_versioned_rocm_and_cuda_dirs() {
 }
 
 #[test]
+fn mesh_runtime_load_error_retry_only_matches_windows_loader_failures() {
+    let load_library = anyhow::anyhow!(
+        "load native runtime meshllm-native-runtime-windows-x86_64-cuda12: LoadLibraryExW failed"
+    );
+    let module_not_found = anyhow::anyhow!(
+        "failed to load native runtime library cublas64_12.dll: OS error 126: The specified module could not be found."
+    );
+    let other = anyhow::anyhow!("model download failed");
+
+    assert!(mesh_runtime_load_error_needs_windows_dependency_retry(
+        &load_library
+    ));
+    assert!(mesh_runtime_load_error_needs_windows_dependency_retry(
+        &module_not_found
+    ));
+    assert!(!mesh_runtime_load_error_needs_windows_dependency_retry(
+        &other
+    ));
+}
+
+#[test]
 fn buzz_mesh_join_uses_the_same_live_member_from_every_other_node() {
     let targets = vec![
         reported_target("member-c", "model-c", "addr-c"),
