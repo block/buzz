@@ -76,6 +76,31 @@ say pr92-meta.json "closing keyword present, in visible text"
 gh pr view 5695 --repo "$UP" --json title,body,labels > upstream5695-meta.json
 say upstream5695-meta.json "closing keyword ONLY inside <!-- -->"
 
+# ------------------------------------------- GitHub's own answer to "what does
+# this PR close?" — closingIssuesReferences. Recorded for three PRs because the
+# text and GitHub disagree in three different directions, and a control needs all
+# three:
+#   86    body says Closes #79; GitHub says #79 AND #91 — a regex takes the first
+#         match and under-reports the rest
+#   92    body says Closes #n;  GitHub says NOTHING, because the PR's base was not
+#         the default branch, so merging it would close no issue at all
+#   5695  body's only keyword is inside <!-- -->; GitHub agrees it closes nothing
+CLOSING_QUERY='query($owner:String!,$repo:String!,$pr:Int!){
+  repository(owner:$owner,name:$repo){
+    pullRequest(number:$pr){closingIssuesReferences(first:50){nodes{number}}}}}'
+
+gh api graphql -f owner="${REPO%%/*}" -f repo="${REPO##*/}" -F pr=86 \
+  -f query="$CLOSING_QUERY" > pr86-closing-refs.json
+say pr86-closing-refs.json "GitHub: PR 86 closes TWO issues"
+
+gh api graphql -f owner="${REPO%%/*}" -f repo="${REPO##*/}" -F pr=92 \
+  -f query="$CLOSING_QUERY" > pr92-closing-refs.json
+say pr92-closing-refs.json "GitHub: PR 92 closes NOTHING despite its keyword"
+
+gh api graphql -f owner=block -f repo=buzz -F pr=5695 \
+  -f query="$CLOSING_QUERY" > upstream5695-closing-refs.json
+say upstream5695-closing-refs.json "GitHub: a commented-out keyword closes nothing"
+
 # --------------------------------------------------------------- fixture (iv)
 # A PR number that does not exist. `gh api` prints the error body on stdout and
 # exits 1; both halves are the fixture, so the exit code is recorded beside it.
