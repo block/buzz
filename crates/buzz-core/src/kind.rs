@@ -68,11 +68,9 @@ pub const KIND_LONG_FORM: u32 = 30023;
 /// Parameterized replaceable (NIP-33, 30000–39999 range) — keyed by `(pubkey, kind, d_tag)`.
 /// Stored globally (channel_id = NULL); user-owned personal data, not channel-scoped.
 pub const KIND_USER_STATUS: u32 = 30315;
-/// NIP-85: relay-signed trusted assertion about a user pubkey.
+/// NIP-85: relay-signed binding assertion about a user public key.
 ///
-/// Buzz uses this standard user-subject assertion kind to project an active
-/// enterprise identity binding without exposing the binding's stable uid.
-/// The relay authors the event and keys it by the subject pubkey in `d`.
+/// The relay authors the event and keys it by the subject public key in `d`.
 pub const KIND_USER_TRUSTED_ASSERTION: u32 = 30382;
 /// NIP-78 / NIP-RS: Per-client read state blob for cross-device read position sync.
 /// Parameterized replaceable (NIP-33, 30000–39999 range) — keyed by `(pubkey, kind, d_tag)`.
@@ -85,6 +83,13 @@ pub const KIND_AUTH: u32 = 22242;
 pub const KIND_BLOSSOM_AUTH: u32 = 24242;
 /// Buzz custom one-time identity binding proof (ephemeral, not stored).
 pub const KIND_NOSTR_IDENTITY_BINDING: u32 = 24243;
+/// Buzz relay-authenticated, display-only client binding status.
+///
+/// Kind 24244 is ephemeral and relay-authored. It is never durable profile
+/// authority and must not be used to make authorization decisions.
+pub const KIND_CLIENT_BINDING_STATUS: u32 = 24244;
+/// Buzz relay-authenticated connection bootstrap (ephemeral, not stored).
+pub const KIND_CLIENT_BINDING_BOOTSTRAP: u32 = 24245;
 /// NIP-98: HTTP auth event (used in nip98.rs, not stored).
 pub const KIND_HTTP_AUTH: u32 = 27235;
 
@@ -702,6 +707,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TYPING_INDICATOR,
     KIND_HUDDLE_REACTION,
     KIND_BLOSSOM_AUTH,
+    KIND_CLIENT_BINDING_STATUS,
+    KIND_CLIENT_BINDING_BOOTSTRAP,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
     KIND_HTTP_AUTH,
@@ -837,6 +844,8 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
         KIND_NIP43_MEMBERSHIP_LIST
+            | KIND_CLIENT_BINDING_STATUS
+            | KIND_CLIENT_BINDING_BOOTSTRAP
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
@@ -917,6 +926,14 @@ mod tests {
     fn nip43_membership_snapshot_is_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
+    }
+
+    #[test]
+    fn client_binding_connection_events_are_relay_only_and_ephemeral() {
+        assert!(is_relay_only_kind(KIND_CLIENT_BINDING_STATUS));
+        assert!(is_ephemeral(KIND_CLIENT_BINDING_STATUS));
+        assert!(is_relay_only_kind(KIND_CLIENT_BINDING_BOOTSTRAP));
+        assert!(is_ephemeral(KIND_CLIENT_BINDING_BOOTSTRAP));
     }
 
     #[test]
