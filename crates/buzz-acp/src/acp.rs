@@ -108,6 +108,52 @@ pub enum AcpError {
     AgentError { code: i64, message: String },
 }
 
+#[derive(Debug)]
+struct CapturedAgentMessage {
+    message_id: String,
+    text: String,
+}
+
+fn capture_agent_message_chunk(
+    messages: &mut Vec<CapturedAgentMessage>,
+    update: &serde_json::Value,
+) {
+    let Some(text) = update
+        .get("content")
+        .and_then(|content| content.get("text"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    let message_id = update
+        .get("messageId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("__legacy_agent_message");
+
+    if let Some(message) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.message_id == message_id)
+    {
+        message.text.push_str(text);
+        return;
+    }
+
+    messages.push(CapturedAgentMessage {
+        message_id: message_id.to_string(),
+        text: text.to_string(),
+    });
+}
+
+fn take_final_captured_agent_message(messages: &mut Vec<CapturedAgentMessage>) -> Option<String> {
+    while let Some(message) = messages.pop() {
+        if !message.text.trim().is_empty() {
+            return Some(message.text);
+        }
+    }
+    None
+}
+
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
@@ -211,6 +257,13 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Text messages emitted by the agent during the active `session/prompt`.
+    ///
+    /// ACP returns only a stop reason. The visible answer arrives separately as
+    /// `agent_message_chunk` notifications. Keep the message boundaries so the
+    /// harness can recover the final assistant message when an external agent
+    /// forgets to publish it to Buzz.
+    captured_agent_messages: Vec<CapturedAgentMessage>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +603,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            captured_agent_messages: Vec::new(),
         })
     }
 
@@ -584,6 +638,12 @@ impl AcpClient {
                 payload,
             );
         }
+    }
+
+    /// Remove and return the final non-empty agent text message captured during
+    /// the most recent prompt.
+    pub(crate) fn take_final_agent_message(&mut self) -> Option<String> {
+        take_final_captured_agent_message(&mut self.captured_agent_messages)
     }
 
     /// Send the `initialize` request and return the agent's response result value.
@@ -768,6 +828,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.captured_agent_messages.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1744,6 +1805,7 @@ impl AcpClient {
 
         match update_type {
             "agent_message_chunk" => {
+                capture_agent_message_chunk(&mut self.captured_agent_messages, update);
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
                 }
@@ -2269,6 +2331,51 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_agent_chunks_join_by_message_id() {
+        let mut messages = Vec::new();
+        capture_agent_message_chunk(
+            &mut messages,
+            &serde_json::json!({
+                "messageId": "answer-1",
+                "content": { "text": "Hello " }
+            }),
+        );
+        capture_agent_message_chunk(
+            &mut messages,
+            &serde_json::json!({
+                "messageId": "answer-1",
+                "content": { "text": "world" }
+            }),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "Hello world");
+    }
+
+    #[test]
+    fn final_captured_agent_message_uses_latest_non_empty_message() {
+        let mut messages = Vec::new();
+        for (message_id, text) in [
+            ("answer-1", "first"),
+            ("answer-2", "final"),
+            ("answer-3", "   "),
+        ] {
+            capture_agent_message_chunk(
+                &mut messages,
+                &serde_json::json!({
+                    "messageId": message_id,
+                    "content": { "text": text }
+                }),
+            );
+        }
+
+        assert_eq!(
+            take_final_captured_agent_message(&mut messages),
+            Some("final".to_string())
+        );
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
