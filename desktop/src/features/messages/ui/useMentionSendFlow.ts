@@ -398,8 +398,15 @@ export function useMentionSendFlow({
       };
       let uploadStarted = false;
       try {
+        const admittedMentionPubkeys = uniqueNormalizedPubkeys(
+          await mentions.revalidateMentionPubkeys(mentionPubkeys),
+        );
+        if (!isMountedRef.current) return persistPreflightDraft();
+        const admittedMentionPubkeySet = new Set(admittedMentionPubkeys);
         const readyAgentPubkeys = new Set(
-          (draft.readyAgentPubkeys ?? []).map(normalizePubkey),
+          uniqueNormalizedPubkeys(draft.readyAgentPubkeys ?? []).filter(
+            (pubkey) => admittedMentionPubkeySet.has(pubkey),
+          ),
         );
         const managedAgentsByPubkey = await getManagedAgentsByPubkey();
         if (!isMountedRef.current) {
@@ -409,8 +416,7 @@ export function useMentionSendFlow({
         for (const agent of draft.preparedManagedAgents ?? []) {
           managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
         }
-        const normalizedMentionPubkeys =
-          uniqueNormalizedPubkeys(mentionPubkeys);
+        const normalizedMentionPubkeys = admittedMentionPubkeys;
         const managedMentionPubkeys = normalizedMentionPubkeys.filter(
           (pubkey) => managedAgentsByPubkey.has(pubkey),
         );
@@ -457,7 +463,6 @@ export function useMentionSendFlow({
           toast.error(message);
           return;
         }
-
         if (preparedAgentPubkeys.length > 0 && sendChannelId) {
           try {
             await invokeTauri("sync_agents_to_active_huddle", {
@@ -474,13 +479,11 @@ export function useMentionSendFlow({
             return;
           }
         }
-
         const effectiveExplicitAgentPubkeys =
           filterEffectiveExplicitAgentPubkeys(
             draft.explicitAgentPubkeys,
             mentionPubkeys,
           );
-
         const send = onSendRef.current;
         const persistCanceledDraft = () => {
           if (!draft.recoveryDraftKey) return;
@@ -611,7 +614,6 @@ export function useMentionSendFlow({
             return;
           }
         }
-
         // Replace the sent body directly with its final post-send state before
         // the async network send starts. This avoids an intermediate blank frame
         // for persistent audiences while preserving the ordinary empty state.

@@ -1212,6 +1212,7 @@ test("selected relay agents revoked before send emit no p tag", async ({
       );
     }
   });
+  const baselineCommands = await readCommandLog(page);
   await page.getByTestId("send-message").click();
 
   await expect
@@ -1220,6 +1221,17 @@ test("selected relay agents revoked before send emit no p tag", async ({
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
     .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  const commands = await readCommandLog(page);
+  for (const command of [
+    "add_channel_members",
+    "start_managed_agent",
+    "attach_managed_agent",
+    "sync_agents_to_active_huddle",
+  ]) {
+    expect(commandCount(commands, command)).toBe(
+      commandCount(baselineCommands, command),
+    );
+  }
 });
 
 test("selected relay agents revoked during send emit no p tag", async ({
@@ -1247,7 +1259,7 @@ test("selected relay agents revoked during send emit no p tag", async ({
 
   await page.evaluate(() => {
     window.__BUZZ_E2E__.mock ??= {};
-    window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
+    window.__BUZZ_E2E__.mock.agentListDelayMs = 300;
   });
   await page.getByTestId("send-message").click();
   await page.getByRole("button", { name: "Invite", exact: true }).click();
