@@ -3,12 +3,30 @@ import test from "node:test";
 
 import {
   CODEX_TASK_LOAD_FAILED_COPY,
+  CODEX_WRITER_CONFLICT_COPY,
   friendlyAgentLastError,
   friendlyTurnErrorCopy,
   CLI_ACP_INTERNAL_ERROR_COPY,
+  isCodexWriterConflictError,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
+
+test("writer conflicts are actionable even with JSON-RPC -32600", () => {
+  const active = "thread abc already has an active writer";
+  const local = "thread abc already has a live local writer";
+
+  assert.deepEqual(friendlyAgentLastError(active, -32600), {
+    severity: "generic",
+    copy: CODEX_WRITER_CONFLICT_COPY,
+  });
+  assert.deepEqual(friendlyAgentLastError(local, -32600), {
+    severity: "generic",
+    copy: CODEX_WRITER_CONFLICT_COPY,
+  });
+  assert.equal(isCodexWriterConflictError(active), true);
+  assert.equal(isCodexWriterConflictError("network timeout"), false);
+});
 
 test("maps Codex task load timeouts to actionable retry guidance", () => {
   assert.deepEqual(

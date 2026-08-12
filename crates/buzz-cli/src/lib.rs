@@ -2,6 +2,7 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod image_upload;
 mod links;
 mod validate;
 
@@ -1693,7 +1694,7 @@ pub enum IssuesCmd {
 
 #[derive(Subcommand)]
 pub enum UploadCmd {
-    /// Upload a file to the relay's Blossom store
+    /// Upload a file; static images are metadata-scrubbed and fit to 25 MP
     File {
         /// Path to the file to upload
         #[arg(long)]

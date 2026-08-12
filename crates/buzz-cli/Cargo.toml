@@ -63,6 +63,11 @@ bytes = "1"
 # MIME type detection via magic bytes — file upload validation
 infer = "0.19"
 
+# Agent-uploaded figures follow the same metadata-free, 25 MP contract as the
+# desktop uploader and relay.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+imagesize = "0.14"
+
 # URL parsing — extract server domain for Blossom auth tag
 url = { workspace = true }
 

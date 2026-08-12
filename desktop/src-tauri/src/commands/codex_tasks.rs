@@ -28,3 +28,11 @@ pub async fn launch_codex_desktop_shared() -> Result<(), String> {
         .await
         .map_err(|error| format!("spawn_blocking failed: {error}"))?
 }
+
+#[tauri::command]
+pub async fn take_over_codex_desktop_shared(
+    app: AppHandle,
+    confirmed: bool,
+) -> Result<CodexSharedRuntimeStatus, String> {
+    crate::managed_agents::take_over_codex_desktop_shared(&app, confirmed).await
+}

@@ -1131,6 +1131,31 @@ impl BuzzClient {
             )));
         }
 
+        // Agent-generated figures often contain editor metadata that the relay
+        // intentionally rejects, and scientific plots can exceed its 25 MP
+        // decode budget. Apply the same metadata-free contract as the desktop
+        // uploader and scale by pixel area (not an arbitrary 5000px edge cap).
+        let bytes = if mime.starts_with("image/") {
+            let prepared =
+                crate::image_upload::prepare_image_upload(bytes, &mime).map_err(CliError::Usage)?;
+            if let Some((original_width, original_height)) = prepared.resized_from {
+                eprintln!(
+                    "buzz: resized figure from {original_width}x{original_height} to {}x{} to fit the relay's 25 MP limit",
+                    prepared.dimensions.0, prepared.dimensions.1
+                );
+            }
+            prepared.bytes
+        } else {
+            bytes
+        };
+        if bytes.len() as u64 > max {
+            return Err(CliError::Usage(format!(
+                "sanitized file is too large: {} bytes (max {})",
+                bytes.len(),
+                max
+            )));
+        }
+
         // 4. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
 
@@ -2125,13 +2150,14 @@ mod retry_policy_tests {
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncWriteExt;
 
-        // Write a minimal JPEG file so MIME detection works.
+        // Write a real tiny JPEG so the upload sanitizer and MIME detection
+        // exercise the same path as production figures.
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        // JPEG magic + JFIF app0 marker: enough for `infer` to detect image/jpeg.
-        let jpeg_header: &[u8] = &[
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
-        ];
-        tmp.write_all(jpeg_header).unwrap();
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        tmp.write_all(jpeg.get_ref()).unwrap();
         let file_path = tmp.path().to_str().unwrap().to_string();
 
         let counter = Arc::new(AtomicU32::new(0));

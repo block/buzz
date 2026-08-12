@@ -31,7 +31,11 @@ function remoteOrDataSource(source: string): string | null {
 }
 
 function localImagePath(source: string): string | null {
-  if (/^[a-zA-Z]:[\\/]/.test(source) || source.startsWith("/") || source.startsWith("\\\\")) {
+  if (
+    /^[a-zA-Z]:[\\/]/.test(source) ||
+    source.startsWith("/") ||
+    source.startsWith("\\\\")
+  ) {
     return source;
   }
   if (source.startsWith("file:///")) {

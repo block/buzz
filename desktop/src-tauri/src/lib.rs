@@ -89,7 +89,6 @@ pub fn run() {
     // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
     // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
     // stacks for this reason; give Tauri's command runtime the same headroom
-    // before anything else touches tauri::async_runtime.
     #[cfg(feature = "mesh-llm")]
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -765,6 +764,7 @@ pub fn run() {
             get_codex_shared_runtime_status,
             enable_codex_shared_runtime,
             launch_codex_desktop_shared,
+            take_over_codex_desktop_shared,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,

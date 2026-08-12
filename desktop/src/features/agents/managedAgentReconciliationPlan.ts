@@ -1,4 +1,5 @@
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
+import { isCodexWriterConflictError } from "@/features/agents/lib/friendlyAgentLastError";
 
 /**
  * Pure planning core for incremental, retrying runtime reconciliation.
@@ -75,21 +76,30 @@ export function classifyReconcileResult(
   attempted: readonly string[],
   rows: readonly ManagedAgentRuntimeStatus[] | null,
   canonicalize: (url: string) => string | null,
-): { succeeded: string[]; failed: string[] } {
+): { succeeded: string[]; failed: string[]; blocked: string[] } {
   if (rows === null) {
-    return { succeeded: [], failed: [...attempted] };
+    return { succeeded: [], failed: [...attempted], blocked: [] };
   }
   const failedRelays = new Set<string>();
+  const blockedRelays = new Set<string>();
   for (const row of rows) {
     if (row.lifecycle !== "failed") continue;
     const canonical = canonicalize(row.requestedRelayUrl ?? row.relayUrl);
-    if (canonical !== null) failedRelays.add(canonical);
+    if (canonical === null) continue;
+    if (isCodexWriterConflictError(row.error)) {
+      blockedRelays.add(canonical);
+      failedRelays.delete(canonical);
+    } else if (!blockedRelays.has(canonical)) {
+      failedRelays.add(canonical);
+    }
   }
   const succeeded: string[] = [];
   const failed: string[] = [];
+  const blocked: string[] = [];
   for (const relay of attempted) {
-    if (failedRelays.has(relay)) failed.push(relay);
+    if (blockedRelays.has(relay)) blocked.push(relay);
+    else if (failedRelays.has(relay)) failed.push(relay);
     else succeeded.push(relay);
   }
-  return { succeeded, failed };
+  return { succeeded, failed, blocked };
 }

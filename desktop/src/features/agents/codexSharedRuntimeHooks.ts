@@ -4,6 +4,7 @@ import {
   enableCodexSharedRuntime,
   getCodexSharedRuntimeStatus,
   launchCodexDesktopShared,
+  takeOverCodexDesktopShared,
 } from "@/shared/api/codexTasks";
 
 export const codexSharedRuntimeQueryKey = ["codex-shared-runtime"] as const;
@@ -30,4 +31,14 @@ export function useEnableCodexSharedRuntimeMutation() {
 
 export function useLaunchCodexDesktopSharedMutation() {
   return useMutation({ mutationFn: launchCodexDesktopShared });
+}
+
+export function useTakeOverCodexDesktopSharedMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: takeOverCodexDesktopShared,
+    onSuccess: (status) => {
+      queryClient.setQueryData(codexSharedRuntimeQueryKey, status);
+    },
+  });
 }

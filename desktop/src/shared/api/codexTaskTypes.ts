@@ -26,7 +26,34 @@ export type CodexSharedRuntimeStatus = {
   state: CodexSharedRuntimeState;
   url: string;
   detail: string | null;
+  desktopProcessIds: number[];
+  privateAppServerProcessIds: number[];
+  desktopDetectionError: string | null;
 };
+
+export type RawCodexSharedRuntimeStatus = {
+  enabled: boolean;
+  state: CodexSharedRuntimeState;
+  url: string;
+  detail?: string | null;
+  desktop_process_ids?: number[];
+  private_app_server_process_ids?: number[];
+  desktop_detection_error?: string | null;
+};
+
+export function fromRawCodexSharedRuntimeStatus(
+  status: RawCodexSharedRuntimeStatus,
+): CodexSharedRuntimeStatus {
+  return {
+    enabled: status.enabled,
+    state: status.state,
+    url: status.url,
+    detail: status.detail ?? null,
+    desktopProcessIds: status.desktop_process_ids ?? [],
+    privateAppServerProcessIds: status.private_app_server_process_ids ?? [],
+    desktopDetectionError: status.desktop_detection_error ?? null,
+  };
+}
 
 export type RawCodexTaskBinding = {
   task_id: string;

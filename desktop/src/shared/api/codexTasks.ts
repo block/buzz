@@ -1,7 +1,9 @@
 import type {
+  RawCodexSharedRuntimeStatus,
   CodexSharedRuntimeStatus,
   CodexTaskSummary,
 } from "@/shared/api/codexTaskTypes";
+import { fromRawCodexSharedRuntimeStatus } from "@/shared/api/codexTaskTypes";
 import { invokeTauri } from "@/shared/api/tauri";
 
 type RawCodexTaskSummary = {
@@ -25,16 +27,28 @@ export async function listCodexTasks(): Promise<CodexTaskSummary[]> {
   }));
 }
 
+async function invokeCodexSharedRuntimeStatus(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<CodexSharedRuntimeStatus> {
+  const status = await invokeTauri<RawCodexSharedRuntimeStatus>(command, args);
+  return fromRawCodexSharedRuntimeStatus(status);
+}
+
 export function getCodexSharedRuntimeStatus() {
-  return invokeTauri<CodexSharedRuntimeStatus>(
-    "get_codex_shared_runtime_status",
-  );
+  return invokeCodexSharedRuntimeStatus("get_codex_shared_runtime_status");
 }
 
 export function enableCodexSharedRuntime() {
-  return invokeTauri<CodexSharedRuntimeStatus>("enable_codex_shared_runtime");
+  return invokeCodexSharedRuntimeStatus("enable_codex_shared_runtime");
 }
 
 export function launchCodexDesktopShared() {
   return invokeTauri<void>("launch_codex_desktop_shared");
+}
+
+export function takeOverCodexDesktopShared() {
+  return invokeCodexSharedRuntimeStatus("take_over_codex_desktop_shared", {
+    confirmed: true,
+  });
 }

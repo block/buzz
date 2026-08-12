@@ -48,6 +48,23 @@ export const CLI_ACP_INTERNAL_ERROR_COPY =
 export const CODEX_TASK_LOAD_FAILED_COPY =
   "The Codex task did not load before the 60-second timeout. It may be busy in Codex Desktop, or the shared app-server may be unresponsive. Wait for the task to become idle, then retry.";
 
+export const CODEX_WRITER_CONFLICT_COPY =
+  "This Codex task is open in a separate Codex Desktop runtime. Open Codex shared runtime settings, take over Desktop, then retry the agent.";
+
+const CODEX_WRITER_CONFLICT_MARKERS = [
+  "already has an active writer",
+  "already has a live local writer",
+] as const;
+
+export function isCodexWriterConflictError(
+  raw: string | null | undefined,
+): boolean {
+  const normalized = raw?.toLocaleLowerCase() ?? "";
+  return CODEX_WRITER_CONFLICT_MARKERS.some((marker) =>
+    normalized.includes(marker),
+  );
+}
+
 const EMBEDDED_CODE_RE = /^Agent reported error \(code (-?\d+)\): /;
 /** Bare form of the standard JSON-RPC -32603 message (after stripping the ACP wrapper prefix). */
 const BARE_INTERNAL_ERROR = "Internal error";
@@ -71,6 +88,13 @@ export function friendlyAgentLastError(
   if (raw == null) return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
+
+  // The app-server can surface this user-actionable condition through more
+  // than one JSON-RPC code, including -32600. Classify the specific message
+  // before the unknown-code pass-through so automatic retries can stop.
+  if (isCodexWriterConflictError(trimmed)) {
+    return { severity: "generic", copy: CODEX_WRITER_CONFLICT_COPY };
+  }
 
   // Structured code first; a code embedded in the message string is the
   // same signal recovered from a record that lost the field.

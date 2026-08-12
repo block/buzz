@@ -8,6 +8,7 @@ import {
   useCreateManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { useCodexSharedRuntimeQuery } from "@/features/agents/codexSharedRuntimeHooks";
+import { isCodexSharedRuntimeUsable } from "@/features/agents/codexSharedRuntimeStatus";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import type { CodexTaskSummary } from "@/shared/api/codexTaskTypes";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -36,7 +37,9 @@ export function CodexTaskAgentDialog({
   open: boolean;
 }) {
   const sharedRuntimeQuery = useCodexSharedRuntimeQuery({ enabled: open });
-  const sharedRuntimeReady = sharedRuntimeQuery.data?.state === "ready";
+  const sharedRuntimeReady = isCodexSharedRuntimeUsable(
+    sharedRuntimeQuery.data,
+  );
   const tasksQuery = useCodexTasksQuery({
     enabled: open && sharedRuntimeReady,
   });

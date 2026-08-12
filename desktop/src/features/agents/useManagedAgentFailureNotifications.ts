@@ -5,7 +5,10 @@ import {
   useManagedAgentsQuery,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
-import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
+import {
+  friendlyAgentLastError,
+  isCodexWriterConflictError,
+} from "@/features/agents/lib/friendlyAgentLastError";
 import type { ManagedAgent } from "@/shared/api/types";
 
 type FailureCursor = ReadonlyMap<string, string | null>;
@@ -30,6 +33,10 @@ function failureCursor(
   return new Map(agents.map((agent) => [agent.pubkey, agent.lastStoppedAt]));
 }
 
+export function managedAgentFailureAllowsRetry(agent: ManagedAgent): boolean {
+  return !isCodexWriterConflictError(agent.lastError);
+}
+
 export function useManagedAgentFailureNotifications(): void {
   const agents = useManagedAgentsQuery().data;
   const startAgent = useStartManagedAgentMutation();
@@ -50,24 +57,26 @@ export function useManagedAgentFailureNotifications(): void {
       const toastId = `managed-agent-failure-${agent.pubkey}-${agent.lastStoppedAt}`;
 
       toast.error(`${agent.name} stopped`, {
-        action: {
-          label: "Retry",
-          onClick: (event) => {
-            event.preventDefault();
-            startAgent.mutate(agent.pubkey, {
-              onError: (error) => {
-                window.setTimeout(() => {
-                  toast.error(`Couldn't restart ${agent.name}`, {
-                    description:
-                      error instanceof Error
-                        ? error.message
-                        : "Agent startup failed.",
-                  });
-                }, 0);
+        action: managedAgentFailureAllowsRetry(agent)
+          ? {
+              label: "Retry",
+              onClick: (event) => {
+                event.preventDefault();
+                startAgent.mutate(agent.pubkey, {
+                  onError: (error) => {
+                    window.setTimeout(() => {
+                      toast.error(`Couldn't restart ${agent.name}`, {
+                        description:
+                          error instanceof Error
+                            ? error.message
+                            : "Agent startup failed.",
+                      });
+                    }, 0);
+                  },
+                });
               },
-            });
-          },
-        },
+            }
+          : undefined,
         description,
         duration: 15_000,
         id: toastId,

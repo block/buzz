@@ -94,9 +94,7 @@ test("buildImageContent retains absolute local resource links for Tauri preview"
 test("buildImageContent converts ACP image blocks to data URLs", () => {
   const image = buildImageContent(
     makeTool({
-      contentBlocks: [
-        { type: "image", data: "abc", mimeType: "image/png" },
-      ],
+      contentBlocks: [{ type: "image", data: "abc", mimeType: "image/png" }],
     }),
     imageDescriptor,
   );

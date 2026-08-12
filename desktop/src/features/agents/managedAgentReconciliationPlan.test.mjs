@@ -59,6 +59,7 @@ test("classifyReconcileResult marks the whole batch failed when the call throws"
     {
       succeeded: [],
       failed: attempted,
+      blocked: [],
     },
   );
 });
@@ -94,6 +95,7 @@ test("classifyReconcileResult splits by Failed rows, matching on requested URL",
     {
       succeeded: ["ws://127.0.0.1:3000"],
       failed: ["wss://b.example"],
+      blocked: [],
     },
   );
 });
@@ -103,6 +105,37 @@ test("classifyReconcileResult treats a relay with no rows as reconciled", () => 
   // still count as reconciled so the hook stops retrying it.
   assert.deepEqual(
     classifyReconcileResult(["wss://a.example"], [], canonicalRelayUrl),
-    { succeeded: ["wss://a.example"], failed: [] },
+    { succeeded: ["wss://a.example"], failed: [], blocked: [] },
   );
+});
+
+test("classifyReconcileResult stops automatic retries for writer conflicts", () => {
+  const relay = "wss://relay.example";
+  const rows = [
+    {
+      pubkey: "aa",
+      relayUrl: relay,
+      requestedRelayUrl: relay,
+      localSetup: true,
+      lifecycle: "failed",
+      pid: null,
+      error: "thread task-id already has an active writer",
+      logPath: null,
+    },
+    {
+      pubkey: "bb",
+      relayUrl: relay,
+      requestedRelayUrl: relay,
+      localSetup: true,
+      lifecycle: "failed",
+      pid: null,
+      error: "another transient startup error",
+      logPath: null,
+    },
+  ];
+  assert.deepEqual(classifyReconcileResult([relay], rows, canonicalRelayUrl), {
+    succeeded: [],
+    failed: [],
+    blocked: [relay],
+  });
 });

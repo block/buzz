@@ -115,9 +115,9 @@ export function useManagedAgentRuntimeReconciliation(
           console.warn("[managed-agent-runtimes] reconcile failed:", error);
           return classifyReconcileResult(pending, null, canonicalRelayUrl);
         })
-        .then(({ succeeded, failed }) => {
+        .then(({ succeeded, failed, blocked }) => {
           for (const relay of pending) inFlightRef.current.delete(relay);
-          for (const relay of succeeded) {
+          for (const relay of [...succeeded, ...blocked]) {
             reconciledRef.current.add(relay);
             failuresRef.current.delete(relay);
           }

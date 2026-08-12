@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findNewManagedAgentFailures } from "./useManagedAgentFailureNotifications.ts";
+import {
+  findNewManagedAgentFailures,
+  managedAgentFailureAllowsRetry,
+} from "./useManagedAgentFailureNotifications.ts";
 
 function agent(overrides = {}) {
   return {
@@ -43,4 +46,14 @@ test("does not notify for initial, running, or clean stops", () => {
     ]),
     [],
   );
+});
+
+test("writer conflicts do not offer a blind retry action", () => {
+  assert.equal(
+    managedAgentFailureAllowsRetry(
+      agent({ lastError: "thread abc already has an active writer" }),
+    ),
+    false,
+  );
+  assert.equal(managedAgentFailureAllowsRetry(agent()), true);
 });

@@ -25,24 +25,19 @@ const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60)
 
 /// Validate that a URL is a legitimate relay media URL.
 ///
-/// Ensures:
-/// - URL scheme is `https` (or `http` for localhost dev)
+/// - URL scheme is `https` or `http`
 /// - URL origin matches the relay base URL
 /// - URL path matches `/media/{hash}.{ext}`
 fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| "invalid URL".to_string())?;
     let base = url::Url::parse(relay_base).map_err(|_| "invalid relay base URL".to_string())?;
 
-    // Scheme must be https (allow http for localhost dev servers).
-    match parsed.scheme() {
-        "https" => {}
-        "http" => {
-            let host = parsed.host_str().unwrap_or("");
-            if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
-                return Err("download URL must use HTTPS".to_string());
-            }
-        }
-        _ => return Err("download URL must use HTTPS".to_string()),
+    // The configured relay may be an HTTP-only private/LAN deployment. This is
+    // safe at the SSRF boundary because the exact origin check below prevents
+    // the caller from selecting any host other than the already configured
+    // relay; the native client also refuses redirects before attaching auth.
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("download URL must use HTTP or HTTPS".to_string());
     }
 
     // Origin must match relay.
@@ -834,14 +829,26 @@ mod tests {
     fn test_validate_download_url_non_https_scheme_rejected() {
         let result = validate_download_url("ftp://relay.example.com/media/abc.jpg", RELAY_BASE);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("HTTPS"));
+        assert!(result.unwrap_err().contains("HTTP or HTTPS"));
     }
 
     #[test]
-    fn test_validate_download_url_http_non_localhost_rejected() {
-        let result = validate_download_url("http://relay.example.com/media/abc.jpg", RELAY_BASE);
+    fn test_validate_download_url_http_private_relay_allowed() {
+        assert!(validate_download_url(
+            "http://192.168.50.20:4500/media/abc.jpg",
+            "http://192.168.50.20:4500",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_validate_download_url_http_still_requires_exact_relay_origin() {
+        let result = validate_download_url(
+            "http://192.168.50.21:4500/media/abc.jpg",
+            "http://192.168.50.20:4500",
+        );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("HTTPS"));
+        assert!(result.unwrap_err().contains("relay origin"));
     }
 
     #[test]
