@@ -674,7 +674,6 @@ impl RunCtx<'_> {
                 tracing::warn!(
                     recovery = max_tokens_recoveries,
                     max_recoveries = self.cfg.max_token_recoveries,
-                    discarded_tool_calls = response.tool_calls.len(),
                     "provider hit output token limit; asking model to continue in smaller steps"
                 );
                 self.history
