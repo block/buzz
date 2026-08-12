@@ -98,6 +98,54 @@ test("inspection distinguishes absent from invalid snapshots", () => {
   assert.ok(invalid.diagnostics.serializedBytes > 0);
 });
 
+test("inspection memoizes parsing for repeated reads of the same document", () => {
+  writeChannelSnapshot(RELAY, OWNER, [makeChannel()], "memo-hash");
+  const originalParse = JSON.parse;
+  let parses = 0;
+  JSON.parse = (...args) => {
+    parses += 1;
+    return originalParse(...args);
+  };
+  try {
+    assert.notEqual(inspectChannelSnapshot(RELAY, OWNER).snapshot, null);
+    assert.notEqual(inspectChannelSnapshot(RELAY, OWNER).snapshot, null);
+    assert.equal(parses, 1);
+  } finally {
+    JSON.parse = originalParse;
+  }
+});
+
+test("inspection tolerates denied storage without retrying the read", () => {
+  const original = window.localStorage;
+  let reads = 0;
+  window.localStorage = {
+    get length() {
+      return 0;
+    },
+    key: () => null,
+    getItem: () => {
+      reads += 1;
+      throw new DOMException("storage denied", "SecurityError");
+    },
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  try {
+    assert.deepEqual(inspectChannelSnapshot(RELAY, OWNER), {
+      diagnostics: {
+        ageMs: 0,
+        channelCount: 0,
+        presence: "absent",
+        serializedBytes: 0,
+      },
+      snapshot: null,
+    });
+    assert.equal(reads, 1);
+  } finally {
+    window.localStorage = original;
+  }
+});
+
 test("write replaces list and hash in lockstep", () => {
   writeChannelSnapshot(RELAY, OWNER, [makeChannel()], "old-hash");
   const channels = [

@@ -293,6 +293,25 @@ export function applyLastMessages(
   });
 }
 
+/**
+ * A failed identity read must disable persisted snapshots, not the live channel
+ * request. The backend still resolves its authoritative current identity.
+ */
+export function canFetchChannelsForIdentity(
+  ownerPubkey: string | null,
+  identityReadFailed: boolean,
+): boolean {
+  return ownerPubkey !== null || identityReadFailed;
+}
+
+/** A hashless retry must return a full list before it can become authoritative. */
+export function requireFullChannelList(channels: Channel[] | null): Channel[] {
+  if (channels === null) {
+    throw new Error("get_channels returned no list for a hashless request");
+  }
+  return channels;
+}
+
 export function useChannelsQuery(options?: { enabled?: boolean }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? null;
@@ -301,6 +320,7 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
   // is creation-time display metadata and can be stale after identity changes.
   const identityQuery = useIdentityQuery();
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
+  const queryClient = useQueryClient();
   const snapshotRead = React.useMemo(
     () =>
       relayUrl && ownerPubkey
@@ -317,22 +337,19 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
     [snapshot],
   );
   React.useEffect(() => {
-    if (relayUrl && snapshotRead && options?.enabled !== false) {
-      markSnapshotDiagnostic(
-        relayUrl,
-        ownerPubkey ?? "unknown",
-        snapshotRead.diagnostics,
-      );
+    if (relayUrl && ownerPubkey && snapshotRead && options?.enabled !== false) {
+      markSnapshotDiagnostic(relayUrl, ownerPubkey, snapshotRead.diagnostics);
     }
   }, [options?.enabled, ownerPubkey, relayUrl, snapshotRead]);
   const refetchInterval = useFocusedRefetchInterval(
     CHANNELS_REFETCH_INTERVAL_MS,
   );
-  const queryClient = useQueryClient();
 
   const query = useQuery({
     enabled:
-      (options?.enabled ?? true) && relayUrl !== null && ownerPubkey !== null,
+      (options?.enabled ?? true) &&
+      relayUrl !== null &&
+      canFetchChannelsForIdentity(ownerPubkey, identityQuery.isError),
     queryKey: channelsQueryKey,
     queryFn: async () => {
       // Revalidation uses only an authoritative list/hash pair. The displayed
@@ -361,7 +378,10 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
         // and fetch a complete authoritative list before updating persistence.
         const full = await getChannels(null);
         const sorted = sortChannels(
-          applyLastMessages(full.channels ?? [], full.lastMessages),
+          applyLastMessages(
+            requireFullChannelList(full.channels),
+            full.lastMessages,
+          ),
         );
         const pair = { channels: sorted, hash: full.hash };
         queryClient.setQueryData(channelsSnapshotPairKey, pair);
@@ -412,15 +432,12 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
   React.useEffect(() => {
     if (
       relayUrl &&
+      ownerPubkey &&
       query.isSuccess &&
       query.fetchStatus === "idle" &&
       query.dataUpdatedAt > 0
     ) {
-      measureFullSidebarPaint(
-        relayUrl,
-        ownerPubkey ?? "unknown",
-        query.data.length,
-      );
+      measureFullSidebarPaint(relayUrl, ownerPubkey, query.data.length);
     }
   }, [
     query.data,

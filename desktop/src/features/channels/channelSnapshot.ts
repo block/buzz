@@ -105,9 +105,67 @@ function serializedBytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
+type ParsedChannelSnapshotCacheEntry = {
+  presence: "invalid" | "present";
+  raw: string;
+  serializedBytes: number;
+  snapshot: ChannelSnapshot | null;
+  updatedAt: number | null;
+};
+
+const parsedSnapshotCache = new Map<string, ParsedChannelSnapshotCacheEntry>();
+
+function snapshotResultFromRaw(
+  key: string,
+  raw: string,
+  ownerPubkey: string,
+): ChannelSnapshotReadResult {
+  let cached = parsedSnapshotCache.get(key);
+  if (!cached || cached.raw !== raw) {
+    let parsedJson: Record<string, unknown> | null = null;
+    try {
+      parsedJson = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      // Malformed snapshots are invalid cache entries, never fatal reads.
+    }
+    const snapshot = parsedJson
+      ? parseChannelSnapshot(parsedJson, ownerPubkey)
+      : null;
+    const updatedAt =
+      parsedJson &&
+      typeof parsedJson.updatedAt === "number" &&
+      Number.isFinite(parsedJson.updatedAt)
+        ? parsedJson.updatedAt
+        : null;
+    cached = {
+      presence: snapshot ? "present" : "invalid",
+      raw,
+      serializedBytes: serializedBytes(raw),
+      snapshot,
+      updatedAt,
+    };
+    parsedSnapshotCache.set(key, cached);
+  }
+
+  return {
+    diagnostics: {
+      ageMs:
+        cached.updatedAt === null
+          ? 0
+          : Math.max(0, Date.now() - cached.updatedAt),
+      channelCount: cached.snapshot?.channels.length ?? 0,
+      presence: cached.presence,
+      serializedBytes: cached.serializedBytes,
+    },
+    snapshot: cached.snapshot,
+  };
+}
+
 /**
  * Reads the atomic snapshot and reports why it can or cannot seed the sidebar.
  * Invalid includes malformed, legacy, hashless, partial, and wrong-owner data.
+ * Parsing and integrity validation are memoized by storage key and raw value so
+ * repeated hook consumers do not rescan the same multi-megabyte document.
  */
 export function inspectChannelSnapshot(
   relayUrl: string,
@@ -119,31 +177,17 @@ export function inspectChannelSnapshot(
     presence: "absent",
     serializedBytes: 0,
   };
+  const key = channelSnapshotKey(relayUrl, ownerPubkey);
+  let raw: string | null = null;
 
   try {
-    const raw = window.localStorage.getItem(
-      channelSnapshotKey(relayUrl, ownerPubkey),
-    );
+    raw = window.localStorage.getItem(key);
     if (!raw) return { diagnostics: absent, snapshot: null };
-
-    const parsedJson = JSON.parse(raw) as Record<string, unknown>;
-    const snapshot = parseChannelSnapshot(parsedJson, ownerPubkey);
-    const updatedAt =
-      typeof parsedJson.updatedAt === "number" &&
-      Number.isFinite(parsedJson.updatedAt)
-        ? parsedJson.updatedAt
-        : null;
-    const diagnostics: ChannelSnapshotDiagnostics = {
-      ageMs: updatedAt === null ? 0 : Math.max(0, Date.now() - updatedAt),
-      channelCount: snapshot?.channels.length ?? 0,
-      presence: snapshot ? "present" : "invalid",
-      serializedBytes: serializedBytes(raw),
-    };
-    return { diagnostics, snapshot };
+    return snapshotResultFromRaw(key, raw, ownerPubkey);
   } catch {
-    const raw = window.localStorage.getItem(
-      channelSnapshotKey(relayUrl, ownerPubkey),
-    );
+    // `getItem` itself can throw when WebKit denies storage access. Never retry
+    // that read from the catch path: snapshot hydration is optional and must
+    // degrade to a live fetch rather than escaping into the render tree.
     return {
       diagnostics: {
         ...absent,
