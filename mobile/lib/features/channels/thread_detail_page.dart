@@ -34,6 +34,7 @@ import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'timeline_message.dart';
+import 'unread_divider.dart';
 
 part 'thread_detail_page/nested_thread_summary.dart';
 part 'thread_detail_page/thread_message.dart';
@@ -254,6 +255,69 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [hasFetchedReplies, replies.length]);
     final readState = ref.watch(readStateProvider);
+
+    // Freeze each reply's read timestamp the first time it is rendered.
+    // This must happen during build: the effect below marks every loaded
+    // reply read in a post-frame callback, and markers are monotonic, so a
+    // snapshot taken any later would already be the post-mark value and the
+    // divider would collapse the instant the thread opened. `putIfAbsent`
+    // makes the first capture win; a captured `null` (never read) is a real
+    // answer, so reads below use `containsKey` rather than `??`.
+    final openReadSnapshot = useRef(<String, int?>{});
+    if (readState.isReady) {
+      for (final reply in replies) {
+        openReadSnapshot.value.putIfAbsent(
+          reply.id,
+          () => readState.effectiveTimestamp(msgContextKey(reply.id)),
+        );
+      }
+    }
+
+    // Oldest reply the user has not seen, from the frozen snapshot. Own
+    // replies never count as unread.
+    String? firstUnreadReplyId;
+    if (readState.isReady) {
+      final localPubkey = currentPubkey?.toLowerCase();
+      for (final reply in replies) {
+        if (localPubkey != null && reply.pubkey.toLowerCase() == localPubkey) {
+          continue;
+        }
+        final snapshot = openReadSnapshot.value;
+        if (!snapshot.containsKey(reply.id)) continue;
+        final readAt = snapshot[reply.id];
+        if (readState.isForcedUnread(msgContextKey(reply.id)) ||
+            readAt == null ||
+            reply.createdAt > readAt) {
+          firstUnreadReplyId = reply.id;
+          break;
+        }
+      }
+    }
+
+    // One-shot resume: land on the first unread reply instead of the tail.
+    // A deep link names its own target and always wins.
+    final didResumeAtFirstUnread = useRef(false);
+    final resumeTargetId = firstUnreadReplyId;
+    useEffect(() {
+      if (initialMessageId != null || fetchedReplies == null) return null;
+      if (didResumeAtFirstUnread.value || resumeTargetId == null) return null;
+      final chronologicalIndex = replies.indexWhere(
+        (reply) => reply.id == resumeTargetId,
+      );
+      if (chronologicalIndex < 0) return null;
+      final targetIndex = indexForReply(chronologicalIndex);
+      didResumeAtFirstUnread.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted || !itemScrollController.isAttached) return;
+        // Resuming deliberately leaves the reader above the newest reply, so
+        // opt out of tail-following before moving.
+        followsThreadTail.value = false;
+        pendingTailAlignment.value = null;
+        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
+      });
+      return null;
+    }, [initialMessageId, fetchedReplies, replies.length, resumeTargetId]);
+
     final visibleReplyReadKey = replies
         .map((reply) => '${reply.id}:${reply.createdAt}')
         .join(',');
@@ -493,6 +557,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                             if (showDayDivider)
                               DayDivider(
                                 label: formatDayHeading(reply.createdAt),
+                              ),
+                            if (reply.id == firstUnreadReplyId)
+                              const UnreadDivider(
+                                key: ValueKey('thread-unread-divider'),
                               ),
                             _ThreadMessage(
                               message: reply,
