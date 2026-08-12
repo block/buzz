@@ -1,0 +1,213 @@
+{
+  "schema": "nip-fi-conformance-report-v2",
+  "document_role": "shape-example-not-conformance-claim",
+  "numeric_values_role": "illustrative-shape-values-not-production-defaults",
+  "claim": {
+    "implementation_revision": "REPLACE_WITH_40_HEX_COMMIT",
+    "adapter_revision": "REPLACE_WITH_40_HEX_COMMIT",
+    "build_artifact_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+    "deployment_revision": "REPLACE_WITH_IMMUTABLE_DEPLOYMENT_ID",
+    "domain_policy_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+    "transport_contract_revision": 2,
+    "advertised_transport_profiles": [
+      "trusted-proxy-hmac-v2"
+    ],
+    "configured_transport_profiles": [
+      {
+        "profile_ref": "trusted-proxy-hmac-v2",
+        "profile_contract_artifact": "REPLACE_WITH_CONTENT_ADDRESSED_ARTIFACT_REFERENCE",
+        "profile_contract_digest": "sha256:REPLACE_WITH_64_HEX_DIGEST"
+      }
+    ],
+    "enrollment_mode": "attested-key",
+    "delegation": false
+  },
+  "results": [
+    {
+      "trace_id": "FI-TRACE-PROXY-SPOOF",
+      "transport_contracts": [
+        {
+          "profile_ref": "trusted-proxy-hmac-v2",
+          "transport_contract_revision": 2,
+          "profile_contract_digest": "sha256:REPLACE_WITH_64_HEX_DIGEST"
+        }
+      ],
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-PROXY-REPLAY",
+      "transport_contracts": [
+        {
+          "profile_ref": "trusted-proxy-hmac-v2",
+          "transport_contract_revision": 2,
+          "profile_contract_digest": "sha256:REPLACE_WITH_64_HEX_DIGEST"
+        }
+      ],
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-PROXY-CROSS-REQUEST",
+      "transport_contracts": [
+        {
+          "profile_ref": "trusted-proxy-hmac-v2",
+          "transport_contract_revision": 2,
+          "profile_contract_digest": "sha256:REPLACE_WITH_64_HEX_DIGEST"
+        }
+      ],
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-AUTHORITY-UNIFORM",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-VERIFIER-PARITY",
+      "transport_contracts": [
+        {
+          "profile_ref": "trusted-proxy-hmac-v2",
+          "transport_contract_revision": 2,
+          "profile_contract_digest": "sha256:REPLACE_WITH_64_HEX_DIGEST"
+        }
+      ],
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-DOMAIN-SPOOF",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-ASSERTION-KEY-MISMATCH",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-BINDING-CONFLICT",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-TOMBSTONE-REPLAY",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-ASSERTION-REFRESH",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-ADMIN-EXPIRY",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-JWKS-ADD",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-JWKS-REMOVE",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-PREPARED-STALE",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-FINAL-DENIAL-NO-MUTATION",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-CONCURRENT-ENROLLMENT",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-TOFU-THEFT",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-DELEGATE-OWNER-ROTATED",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-DELEGATION-EXPIRED",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-DENIAL-ORACLE",
+      "execution": {
+        "iteration_count": 1000,
+        "warm_up_iterations": 100,
+        "runner_artifact_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+        "environment_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+        "public_response_corpus_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+        "sampling_method": "REPLACE_WITH_PREDECLARED_METHOD_REFERENCE",
+        "predeclared_bounds": "REPLACE_WITH_IMMUTABLE_BOUNDS_REFERENCE",
+        "statistical_rule": "REPLACE_WITH_IMMUTABLE_RULE_REFERENCE",
+        "noise_treatment": "REPLACE_WITH_PREDECLARED_NOISE_TREATMENT",
+        "acceptance_threshold": "REPLACE_WITH_PREDECLARED_THRESHOLD",
+        "raw_measurements_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+        "automatic_retry_on_failure": false
+      },
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-DEPENDENCY-FAIL-CLOSED",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-MULTI-KEY-SESSION",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-CROSS-DOMAIN-COLLISION",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    },
+    {
+      "trace_id": "FI-TRACE-PRIVACY-NONPUBLIC",
+      "status": "not-run",
+      "adapter_test_ids": [],
+      "evidence": []
+    }
+  ]
+}

@@ -1,0 +1,156 @@
+{
+  "schema": "nip-fi-stock-domain-review-v2",
+  "document_role": "review-template-not-runtime-schema",
+  "numeric_values_role": "illustrative-review-values-not-production-defaults",
+  "domain": {
+    "id": "community.example.test",
+    "authorization_domain_id": "00000000-0000-0000-0000-000000000001",
+    "authority": "community.example.test:443",
+    "protected_ingress_classes": [
+      "websocket",
+      "http-event-query-count",
+      "media-read-write",
+      "git-smart-http",
+      "audio",
+      "invite-moderation",
+      "operator-lifecycle"
+    ]
+  },
+  "policy_control": {
+    "current_policy_identity": "REPLACE_WITH_STABLE_POLICY_DIGEST",
+    "current_policy_lineage": "REPLACE_WITH_MONOTONIC_LINEAGE_ID",
+    "verifier_contract_fingerprint": "REPLACE_WITH_COMPILED_CONTRACT_DIGEST",
+    "verifier_contract_fingerprint_source": "implementation-observed-not-operator-input"
+  },
+  "transport": {
+    "profile": "trusted-proxy-hmac-v2",
+    "transport_contract_revision": 2,
+    "profile_contract_artifact": "REPLACE_WITH_CONTENT_ADDRESSED_ARTIFACT_REFERENCE",
+    "profile_contract_digest": "sha256:REPLACE_WITH_64_HEX_DIGEST",
+    "assertion_field": "Nostr-Federated-Identity",
+    "assertion_scheme": "Bearer",
+    "assertion_field_cardinality": "exactly-one",
+    "federated_assertion_in_authorization_field": false,
+    "provenance_field": "Nostr-Federated-Identity-Provenance",
+    "client_peer_field": "Nostr-Federated-Identity-Client-Peer",
+    "client_peer_encoding": "canonical-ip",
+    "hmac_secret_ref": "secret://nip-fi/community.example.test/proxy-hmac",
+    "hmac_algorithm": "HMAC-SHA-256",
+    "minimum_hmac_secret_bits": 256,
+    "maximum_provenance_age_seconds": 30,
+    "future_skew_seconds": 5,
+    "maximum_provenance_field_bytes": 512,
+    "minimum_nonce_bytes": 16,
+    "maximum_nonce_bytes": 64,
+    "nonce_retention_minimum_seconds": 35,
+    "nonce_replay_scope": "domain-and-profile-independent-of-secret-version",
+    "mac_binds": [
+      "assertion-digest",
+      "authorization-domain-id",
+      "method",
+      "authority",
+      "path-and-query",
+      "body-digest",
+      "proof-transport-code",
+      "authenticated-client-peer"
+    ],
+    "legacy_v1_envelopes": "deny",
+    "direct_origin_allowed": false,
+    "fallback_profile": null
+  },
+  "request_context": {
+    "method_source": "matched-server-route-uppercase-ascii",
+    "authority_source": "server-configured-host-and-explicit-port",
+    "path_and_query_source": "exact-post-routing-origin-form",
+    "body_digest": "SHA-256-over-exact-request-body",
+    "maximum_body_bytes": 10485760,
+    "unknown_operation": "deny",
+    "unknown_resource": "deny"
+  },
+  "assertion_policy": {
+    "issuer": "https://issuer.example.test",
+    "audiences": [
+      "community.example.test"
+    ],
+    "allowed_asymmetric_algorithms": [
+      "RS256"
+    ],
+    "authenticated_key_source": "https://issuer.example.test/keys.json",
+    "subject_claim": "sub",
+    "subject_stability_evidence": "REPLACE_WITH_REVIEW_RECORD_ID",
+    "subject_reassignment_policy": "disable-issuer-until-remediated",
+    "nostr_key_claim": "nostr_pubkey",
+    "maximum_assertion_age_seconds": 300,
+    "clock_skew_seconds": 30,
+    "maximum_assertion_bytes": 16384,
+    "maximum_protected_header_bytes": 4096,
+    "maximum_claims_bytes": 8192,
+    "maximum_subject_bytes": 512,
+    "maximum_key_identifier_bytes": 256,
+    "maximum_configured_keys": 32,
+    "jwks_soft_refresh_seconds": 300,
+    "jwks_stale_known_key_seconds": 0,
+    "jwks_hard_maximum_age_seconds": 3600,
+    "jwks_rollback_model": "current-authenticated-snapshot-no-durable-anti-rollback",
+    "unknown_key_refresh_is_per_request": false
+  },
+  "nostr_proof": {
+    "nip42_maximum_age_seconds": 60,
+    "nip98_maximum_age_seconds": 60,
+    "replay_retention_covers_acceptance_window": true
+  },
+  "enrollment": {
+    "mode": "attested-key"
+  },
+  "lifecycle_policy": {
+    "ordinary_enrollment_sets_binding_not_after": false,
+    "administrative_expiry_requires_privileged_transition": true
+  },
+  "leases": {
+    "direct_maximum_seconds": 300,
+    "delegation_enabled": false,
+    "delegated_maximum_seconds": null
+  },
+  "safety": {
+    "unknown_protected_route": "deny",
+    "dependency_unavailable": "deny",
+    "competing_authority": "startup-deny",
+    "public_identity_projection": false,
+    "denial_observation": {
+      "authority_role": "non-authoritative-best-effort",
+      "capacity_is_separate_from_authorization_audit": true,
+      "maximum_records": 100000,
+      "maximum_bytes": 268435456,
+      "maximum_record_bytes": 1024,
+      "write_failure_effect": "denial-stands-observation-may-drop",
+      "authorization_receipt_on_denial": false,
+      "allowed_payload": [
+        "stable-reason-code",
+        "correlation-identifier",
+        "timestamp",
+        "transport-class",
+        "bounded-or-keyed-hashed-source-coordinates"
+      ],
+      "raw_tokens_or_verbatim_unverified_claims": "forbidden",
+      "policy_dependency": "none"
+    },
+    "public_denial_mapping": {
+      "missing_evidence": {
+        "http_status": 401,
+        "nostr_prefix": "auth-required:"
+      },
+      "evidence_rejected": {
+        "http_status": 403,
+        "nostr_prefix": "restricted:"
+      },
+      "authorization_denied": {
+        "http_status": 403,
+        "nostr_prefix": "restricted:"
+      },
+      "authorization_unavailable": {
+        "http_status": 503,
+        "nostr_prefix": "restricted:"
+      }
+    }
+  }
+}

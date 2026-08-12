@@ -36,10 +36,29 @@ keypair.
   `buzz-admin migrate` before starting the relay when bootstrapping a fresh
   database. Auto-migration requires an image that includes embedded SQLx
   migrations.
+- The proposed NIP-FI configuration contract is future-facing; this bundle
+  does not imply that the current relay parses or enforces it. See the
+  [identity configuration contract](../../docs/CORPORATE_IDENTITY.md).
 - The stack uses Postgres, Redis, MinIO, and a git data volume because
   those are real Buzz dependencies today. Minimal mode can simplify this later.
 
 Run `./run.sh backup-hint` for the backup checklist.
+
+## NIP-FI readiness
+
+This Compose bundle does not provision a NIP-FI runtime, trusted edge, issuer
+integration, or conformance runner. It makes no claim that the proposed
+`BUZZ_NIP_FI_V1_CONFIG_JSON` document is parsed or enforced. Do not advertise
+or enforce NIP-FI from this bundle, and do not add a provider-specific sidecar
+or unsigned corporate identity header as a substitute.
+
+An activating deployment must pin an exact image, isolate verifier ingress
+when `trusted-proxy-hmac-v2` is enabled, deliver HMAC secrets through a
+secret store rather than `.env`, and pass the complete exact-head behavioral
+matrix before activation. A valid Compose render or healthy relay does not
+close those gates. See the
+[provider-neutral deployment guide](../../docs/NIP_FI_DEPLOYMENT.md) and
+[runtime operations guide](../../docs/NIP_FI_RUNTIME_OPERATIONS.md).
 
 ## Validation
 

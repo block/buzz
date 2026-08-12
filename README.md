@@ -187,6 +187,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 
 - **[VISION.md](VISION.md)** · **[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md)** · **[VISION_PROJECTS.md](VISION_PROJECTS.md)** · **[VISION_AGENT.md](VISION_AGENT.md)** — the four vision docs
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design, kind ranges, subsystem boundaries
+- **[NIP-FI](docs/nips/NIP-FI.md)** · **[integration](docs/NIP_FI_INTEGRATION.md)** · **[threat model](docs/NIP_FI_THREAT_MODEL.md)** · **[deployment](docs/NIP_FI_DEPLOYMENT.md)** · **[operations](docs/NIP_FI_RUNTIME_OPERATIONS.md)** — federated-identity contract and public guidance; this documentation revision does not include or activate a runtime adapter
 - **[TESTING.md](TESTING.md)** — multi-agent E2E test suite
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** · **[SECURITY.md](SECURITY.md)** · **[GOVERNANCE.md](GOVERNANCE.md)**
 

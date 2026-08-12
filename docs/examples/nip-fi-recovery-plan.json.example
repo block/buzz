@@ -1,0 +1,44 @@
+{
+  "schema": "nip-fi-recovery-plan-v1",
+  "document_role": "operator-review-template-not-runtime-request",
+  "domain": "community.example.test",
+  "operation": "recover",
+  "authorization": {
+    "operator_authority_ref": "evidence://operator-approval/REPLACE_ME",
+    "request_digest": "REPLACE_WITH_64_HEX_DIGEST",
+    "expires_at": "2030-01-01T00:00:00Z"
+  },
+  "identity_ref": "private://identity/REPLACE_ME",
+  "expected_lineage": {
+    "old_binding_version": "REPLACE_WITH_VERSION",
+    "retired_pair_ref": "private://retired-pair/REPLACE_ME",
+    "pending_replacement_ref": "private://pending-replacement/REPLACE_ME"
+  },
+  "target": {
+    "nostr_key": "REPLACE_WITH_64_HEX_PUBLIC_KEY",
+    "fresh_proof_ref": "evidence://nostr-proof/REPLACE_ME",
+    "issuer_attestation_required": true,
+    "issuer_attestation_ref": "evidence://assertion/REPLACE_ME"
+  },
+  "preconditions": [
+    "identity-is-not-disabled",
+    "identity-has-no-active-binding",
+    "pending-lineage-matches",
+    "retired-pair-matches",
+    "target-key-is-unbound",
+    "target-key-is-not-revoked",
+    "target-pair-is-not-retired"
+  ],
+  "expected_postconditions": [
+    "old-pair-remains-retired",
+    "pending-lineage-is-consumed-once",
+    "new-binding-has-new-version",
+    "replacement-provenance-matches-evidence",
+    "dependent-leases-are-invalidated"
+  ],
+  "rollback": {
+    "database_rewind_allowed": false,
+    "ordinary_authorization_repair_allowed": false,
+    "compensating_privileged_transition_required": true
+  }
+}
