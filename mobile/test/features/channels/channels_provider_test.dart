@@ -22,6 +22,42 @@ void main() {
   const myPk = 'me';
 
   test(
+    'seeds members from the channel-list snapshot during reconnect',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk, additionalPubkey: 'alice')],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      final memberQueryCount = session.historyFilters
+          .where(
+            (filter) =>
+                filter.kinds.contains(39002) && filter.tags['#d'] != null,
+          )
+          .length;
+
+      session.setStatus(SessionStatus.reconnecting);
+      final members = await container.read(
+        channelMembersProvider(_channelA).future,
+      );
+
+      expect(members.map((member) => member.pubkey), [myPk, 'alice']);
+      expect(
+        session.historyFilters
+            .where(
+              (filter) =>
+                  filter.kinds.contains(39002) && filter.tags['#d'] != null,
+            )
+            .length,
+        memberQueryCount,
+      );
+    },
+  );
+
+  test(
     'subscribes per-channel with #h tags (only joined, non-archived)',
     () async {
       final session = _FakeRelaySession(
