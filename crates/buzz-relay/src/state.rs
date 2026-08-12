@@ -85,10 +85,12 @@ impl CommunityConnectionControl {
     }
 }
 
+/// Process-local fixed-window limiter keyed by community and public key.
+pub(crate) type ScopedRateLimiter = DashMap<ScopedPubkeyKey, SlidingWindowCounter>;
+
 /// Leaves headroom under the process-wide drain deadline for a stalled writer.
 const RESTART_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 type SlidingWindowCounter = (u32, Instant);
-type ScopedRateLimiter = DashMap<ScopedPubkeyKey, SlidingWindowCounter>;
 
 /// Per-connection entry in the connection manager.
 struct ConnEntry {
@@ -729,6 +731,9 @@ pub struct AppState {
     /// Key: (community_id, agent pubkey bytes). Value: (count, window_start).
     /// 100 events/sec per agent — prevents relay/DB pressure from bursty telemetry.
     pub observer_rate_limiter: Arc<ScopedRateLimiter>,
+    /// Per-agent sliding-window admission limiter for shared activity (kind 24201).
+    /// Kept separate from owner-only observer traffic so either path cannot starve the other.
+    pub agent_activity_rate_limiter: Arc<ScopedRateLimiter>,
     /// Per-uploader sliding-window rate limiter for media upload starts.
     /// Key: (community_id, uploader pubkey bytes). Value: (count, window_start).
     pub media_upload_rate_limiter: Arc<ScopedRateLimiter>,
@@ -914,6 +919,7 @@ impl AppState {
             nip98_replay,
             admission_rate_limiter,
             observer_rate_limiter: Arc::new(DashMap::new()),
+            agent_activity_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),
             invite_claim_rate_limiter: Arc::new(
                 moka::sync::Cache::builder()

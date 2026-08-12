@@ -5,10 +5,11 @@ use std::{collections::HashMap, sync::Arc};
 use axum::body::Bytes;
 use tracing::{debug, error, info, warn};
 
+use buzz_core::agent_activity::{AgentActivityFrame, AGENT_ACTIVITY_AGENT_TAG};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    KIND_AGENT_ACTIVITY_SUMMARY, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -96,15 +97,39 @@ where
     drop_count
 }
 
-/// Drop recipients without access before fan-out on a private channel.
+/// Keep only subscriptions that explicitly opted into the dedicated live-only
+/// kind-24201 contract for this exact channel. Channel wildcard and mixed-kind
+/// filters remain valid for ordinary traffic, but are never authority to receive
+/// member-only agent activity.
+fn filter_agent_activity_subscription_matches(
+    registry: &crate::subscription::SubscriptionRegistry,
+    channel_id: uuid::Uuid,
+    matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+    matches
+        .into_iter()
+        .filter(|(conn_id, sub_id)| {
+            registry
+                .get_filters(*conn_id, sub_id)
+                .is_some_and(|filters| {
+                    crate::handlers::req::agent_activity_req_channel(&filters)
+                        == Ok(Some(channel_id))
+                })
+        })
+        .collect()
+}
+
+/// Drop recipients without access before fan-out.
 ///
-/// Open and channel-less events skip membership filtering (open channel-scoped
-/// events pay one visibility lookup; see `channel_visibility_cached`). For a
-/// private channel, each recipient is kept only if its connection's
-/// authenticated pubkey is a current member; unknown/unauthenticated recipients
-/// fail closed. This is the cluster-wide backstop: even if a stale subscription
-/// survives on another node after an open->private flip, its events are not
-/// delivered here.
+/// Kind 24201 is fenced first: channel-less events fail closed, the channel must
+/// currently be a stream/forum, and every authenticated recipient must appear in
+/// one fresh batched `membership_pairs` result. No visibility or membership cache
+/// is consulted, including for open channels. This chokepoint is shared by local
+/// and Redis fan-out and therefore also protects generic/kindless subscriptions.
+///
+/// Other open and channel-less events retain their existing behavior. For a
+/// private channel, each recipient is kept only if its connection's authenticated
+/// pubkey is a member according to the existing membership-cache policy.
 ///
 /// `threaded` is an optional visibility read resolved earlier in the same
 /// request (E1 phase-2, §4.8 phase-2 addendum). It is consulted only when its
@@ -173,6 +198,84 @@ pub async fn filter_fanout_by_access(
     } else {
         matches
     };
+
+    // Authoritative kind-24201 fence: run before channel-less/open-channel
+    // short-circuits and before every cache-backed membership path.
+    if event_kind_u32(&stored_event.event) == KIND_AGENT_ACTIVITY_SUMMARY {
+        let Some(channel_id) = stored_event.channel_id else {
+            return Vec::new();
+        };
+        let matches =
+            filter_agent_activity_subscription_matches(&state.sub_registry, channel_id, matches);
+        if matches.is_empty() {
+            return Vec::new();
+        }
+        let channel = match state.db.get_channel(community_id, channel_id).await {
+            Ok(channel)
+                if agent_activity_channel_allowed(
+                    &channel.channel_type,
+                    channel.archived_at.is_some(),
+                ) =>
+            {
+                channel
+            }
+            Ok(_) => return Vec::new(),
+            Err(error) => {
+                warn!(
+                    %channel_id,
+                    "agent activity fan-out fence: channel lookup failed: {error}"
+                );
+                return Vec::new();
+            }
+        };
+        debug_assert!(agent_activity_channel_allowed(
+            &channel.channel_type,
+            channel.archived_at.is_some()
+        ));
+
+        let mut recipient_pubkeys: Vec<Vec<u8>> = matches
+            .iter()
+            .filter_map(|(conn_id, _)| state.conn_manager.pubkey_for_conn(*conn_id))
+            .collect();
+        recipient_pubkeys.sort_unstable();
+        recipient_pubkeys.dedup();
+        if recipient_pubkeys.is_empty() {
+            return Vec::new();
+        }
+
+        let active_pairs = match state
+            .db
+            .membership_pairs(community_id, &[channel_id], &recipient_pubkeys)
+            .await
+        {
+            Ok(pairs) => pairs,
+            Err(error) => {
+                warn!(
+                    %channel_id,
+                    "agent activity fan-out fence: membership lookup failed: {error}"
+                );
+                return Vec::new();
+            }
+        };
+        let active_pubkeys: std::collections::HashSet<Vec<u8>> = active_pairs
+            .into_iter()
+            .filter_map(|(pair_channel, pubkey)| (pair_channel == channel_id).then_some(pubkey))
+            .collect();
+
+        return matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                let pubkey = state.conn_manager.pubkey_for_conn(*conn_id);
+                agent_activity_delivery_allowed(
+                    Some(channel_id),
+                    Some(&channel.channel_type),
+                    Some(&channel.visibility),
+                    pubkey.as_deref(),
+                    &active_pubkeys,
+                )
+            })
+            .collect();
+    }
 
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
@@ -691,6 +794,20 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    if kind_u32 == KIND_AGENT_ACTIVITY_SUMMARY {
+        if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
+            reject("scope");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "restricted: insufficient scope for agent activity",
+            ));
+            return;
+        }
+        handle_agent_activity_event(event, conn_id, &event_id_hex, channel_ids, conn, state).await;
+        return;
+    }
+
     // Scope enforcement for ephemeral kinds: require MessagesWrite.
     // Persistent events skip this gate and rely on
     // ingest_event()'s per-kind scope allowlist instead, so a token with
@@ -918,21 +1035,15 @@ struct AgentObserverRoute {
     direction: AgentObserverDirection,
 }
 
-/// Check + bump the per-agent observer telemetry limit (100/sec window).
-///
-/// Observer frames are ephemeral, but the rejection is visible to the sender.
-/// Scope the counter by community so an agent key active in one tenant does not
-/// consume another tenant's logical rate budget.
-fn observer_frame_rate_limited(
-    state: &AppState,
+/// Check + bump a fixed-window per-agent limiter.
+fn scoped_agent_rate_limited(
+    limiter: &crate::state::ScopedRateLimiter,
     community_id: CommunityId,
     agent_key: [u8; 32],
+    max_per_second: u32,
 ) -> bool {
     let now = std::time::Instant::now();
-    let mut entry = state
-        .observer_rate_limiter
-        .entry((community_id, agent_key))
-        .or_insert((0, now));
+    let mut entry = limiter.entry((community_id, agent_key)).or_insert((0, now));
     let (count, window_start) = entry.value_mut();
     if now.duration_since(*window_start).as_secs() >= 1 {
         *count = 1;
@@ -940,8 +1051,247 @@ fn observer_frame_rate_limited(
         false
     } else {
         *count += 1;
-        *count > 100
+        *count > max_per_second
     }
+}
+
+fn observer_frame_rate_limited(
+    state: &AppState,
+    community_id: CommunityId,
+    agent_key: [u8; 32],
+) -> bool {
+    // Preserve the established kind-24200 budget exactly.
+    scoped_agent_rate_limited(&state.observer_rate_limiter, community_id, agent_key, 100)
+}
+
+fn agent_activity_rate_limited(
+    state: &AppState,
+    community_id: CommunityId,
+    agent_key: [u8; 32],
+) -> bool {
+    // Producers target <=30 summaries/minute. Permit a bounded catch-up burst,
+    // but keep this far below kind 24200's telemetry budget.
+    scoped_agent_rate_limited(
+        &state.agent_activity_rate_limiter,
+        community_id,
+        agent_key,
+        10,
+    )
+}
+
+fn agent_activity_timestamp_is_fresh(event_ts: i64, now: i64) -> bool {
+    (event_ts - now).unsigned_abs() <= 300
+}
+
+fn agent_activity_principal_allowed(
+    policy: Option<&(String, Option<Vec<u8>>)>,
+    is_member: bool,
+) -> bool {
+    is_member && policy.is_some_and(|(_, owner)| owner.is_some())
+}
+
+fn agent_activity_channel_type_allowed(channel_type: &str) -> bool {
+    matches!(channel_type, "stream" | "forum")
+}
+
+fn agent_activity_channel_allowed(channel_type: &str, is_archived: bool) -> bool {
+    !is_archived && agent_activity_channel_type_allowed(channel_type)
+}
+
+/// Pure final-delivery decision used after the fresh DB batch returns.
+///
+/// `channel_visibility` is deliberately not an allow condition: kind 24201 is
+/// member-only on open channels too. Keeping it explicit in this seam makes that
+/// otherwise easy-to-regress policy testable without a live Postgres fixture.
+fn agent_activity_delivery_allowed(
+    channel_id: Option<uuid::Uuid>,
+    channel_type: Option<&str>,
+    _channel_visibility: Option<&str>,
+    recipient_pubkey: Option<&[u8]>,
+    active_pubkeys: &std::collections::HashSet<Vec<u8>>,
+) -> bool {
+    channel_id.is_some()
+        && channel_type.is_some_and(agent_activity_channel_type_allowed)
+        && recipient_pubkey.is_some_and(|pubkey| active_pubkeys.contains(pubkey))
+}
+
+fn agent_activity_token_allows_channel(
+    token_channel_ids: Option<&[uuid::Uuid]>,
+    channel_id: uuid::Uuid,
+) -> bool {
+    token_channel_ids.is_none_or(|allowed| allowed.contains(&channel_id))
+}
+
+fn agent_activity_route(event: &Event) -> Result<uuid::Uuid, String> {
+    if event.tags.len() != 2 {
+        return Err("invalid: agent activity requires exactly two tags".into());
+    }
+
+    let mut channel_id = None;
+    let mut tagged_agent = None;
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() != 2 {
+            return Err("invalid: agent activity tags must contain exactly two elements".into());
+        }
+        match parts[0].as_str() {
+            "h" if channel_id.is_none() => {
+                let parsed = uuid::Uuid::parse_str(&parts[1])
+                    .map_err(|_| "invalid: agent activity h tag must be a UUID")?;
+                if parts[1] != parsed.to_string() {
+                    return Err(
+                        "invalid: agent activity h tag must be canonical lowercase UUID".into(),
+                    );
+                }
+                channel_id = Some(parsed);
+            }
+            AGENT_ACTIVITY_AGENT_TAG if tagged_agent.is_none() => {
+                let parsed = PublicKey::from_hex(&parts[1])
+                    .map_err(|_| "invalid: agent activity agent tag must be a hex pubkey")?;
+                if parts[1] != parsed.to_hex() {
+                    return Err(
+                        "invalid: agent activity agent tag must be 64-char lowercase hex".into(),
+                    );
+                }
+                tagged_agent = Some(parsed);
+            }
+            _ => return Err("invalid: agent activity contains duplicate or extra tags".into()),
+        }
+    }
+
+    if tagged_agent != Some(event.pubkey) {
+        return Err("invalid: agent activity agent tag must equal signer".into());
+    }
+    AgentActivityFrame::parse(&event.content)
+        .map_err(|error| format!("invalid: agent activity content: {error}"))?;
+    channel_id.ok_or_else(|| "invalid: agent activity missing h tag".into())
+}
+
+fn validate_agent_activity_envelope(event: &Event, now: i64) -> Result<uuid::Uuid, String> {
+    verify_event(event).map_err(|error| format!("invalid: {error}"))?;
+    let event_ts = event.created_at.as_secs() as i64;
+    if !agent_activity_timestamp_is_fresh(event_ts, now) {
+        return Err("invalid: agent activity timestamp outside ±5 minute freshness window".into());
+    }
+    agent_activity_route(event)
+}
+
+async fn handle_agent_activity_event(
+    event: Event,
+    conn_id: uuid::Uuid,
+    event_id_hex: &str,
+    token_channel_ids: Option<Vec<uuid::Uuid>>,
+    conn: Arc<ConnectionState>,
+    state: Arc<AppState>,
+) {
+    let now = chrono::Utc::now().timestamp();
+    let event_clone = event.clone();
+    let channel_id = match tokio::task::spawn_blocking(move || {
+        validate_agent_activity_envelope(&event_clone, now)
+    })
+    .await
+    {
+        Ok(Ok(channel_id)) => channel_id,
+        Ok(Err(message)) => {
+            reject("invalid");
+            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+            return;
+        }
+        Err(_) => {
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "error: internal error",
+            ));
+            return;
+        }
+    };
+
+    if !agent_activity_token_allows_channel(token_channel_ids.as_deref(), channel_id) {
+        reject("scope");
+        conn.send(RelayMessage::ok(
+            event_id_hex,
+            false,
+            "restricted: token does not include agent activity channel",
+        ));
+        return;
+    }
+
+    let community_id = conn.tenant.community();
+    let agent_bytes = event.pubkey.to_bytes().to_vec();
+    let (policy, member, channel) = tokio::join!(
+        state
+            .db
+            .get_agent_channel_policy(community_id, &agent_bytes),
+        state.db.is_member(community_id, channel_id, &agent_bytes),
+        state.db.get_channel(community_id, channel_id),
+    );
+    let (policy, member, channel) = match (policy, member, channel) {
+        (Ok(policy), Ok(member), Ok(channel)) => (policy, member, channel),
+        _ => {
+            warn!(
+                conn_id = %conn_id,
+                event_id = %event_id_hex,
+                %channel_id,
+                "agent activity authorization lookup failed"
+            );
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "error: internal server error",
+            ));
+            return;
+        }
+    };
+
+    if !agent_activity_channel_allowed(&channel.channel_type, channel.archived_at.is_some()) {
+        reject("invalid");
+        conn.send(RelayMessage::ok(
+            event_id_hex,
+            false,
+            "restricted: agent activity requires a nonarchived stream or forum channel",
+        ));
+        return;
+    }
+    if !agent_activity_principal_allowed(policy.as_ref(), member) {
+        reject("auth");
+        conn.send(RelayMessage::ok(
+            event_id_hex,
+            false,
+            "restricted: agent activity requires a managed agent that is a current channel member",
+        ));
+        return;
+    }
+
+    if agent_activity_rate_limited(&state, community_id, event.pubkey.to_bytes()) {
+        conn.send(RelayMessage::ok(
+            event_id_hex,
+            false,
+            "rate-limited: agent activity rate exceeded (10/sec per agent)",
+        ));
+        return;
+    }
+
+    state.mark_local_event(community_id, &event.id);
+    if let Err(error) = state
+        .pubsub
+        .publish_event(&conn.tenant, EventTopic::Channel(channel_id), &event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(community_id, event.id.to_bytes()));
+        warn!(
+            conn_id = %conn_id,
+            event_id = %event_id_hex,
+            %channel_id,
+            "agent activity publish failed: {error}"
+        );
+    }
+
+    let stored = StoredEvent::new(event, Some(channel_id));
+    fan_out_event_to_local_subscribers(&state, community_id, &stored).await;
+    conn.send(RelayMessage::ok(event_id_hex, true, ""));
 }
 
 /// Handle encrypted agent observer frames (kind 24200).
@@ -1170,14 +1520,15 @@ mod tests {
     use std::sync::Arc;
 
     use buzz_core::kind::{
-        KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST,
-        KIND_FORUM_VOTE, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
+        KIND_AGENT_ACTIVITY_SUMMARY, KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT,
+        KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_DIFF,
     };
     use buzz_core::observer::{
         encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
         OBSERVER_FRAME_TELEMETRY,
     };
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr::{EventBuilder, Filter, Keys, Kind, Tag};
     use tokio::sync::{mpsc, Mutex, RwLock};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
@@ -1319,6 +1670,343 @@ mod tests {
 
         let err = super::agent_observer_route(&event).expect_err("route should reject plaintext");
         assert!(err.contains("NIP-44"));
+    }
+
+    #[test]
+    fn agent_activity_route_accepts_exact_canonical_tags_and_strict_content() {
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = agent_activity_event(&agent, channel_id, valid_agent_activity_content(), None);
+
+        assert_eq!(
+            super::agent_activity_route(&event).expect("valid route"),
+            channel_id
+        );
+    }
+
+    #[test]
+    fn agent_activity_route_rejects_duplicate_extended_extra_and_noncanonical_tags() {
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let agent_hex = agent.public_key().to_hex();
+        let content = valid_agent_activity_content();
+        let invalid_tags = [
+            vec![
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["agent", &agent_hex]).unwrap(),
+            ],
+            vec![
+                Tag::parse(["h", &channel_id.to_string(), "extra"]).unwrap(),
+                Tag::parse(["agent", &agent_hex]).unwrap(),
+            ],
+            vec![
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["agent", &agent_hex, "extra"]).unwrap(),
+            ],
+            vec![
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["agent", &agent_hex]).unwrap(),
+                Tag::parse(["e", &"11".repeat(32)]).unwrap(),
+            ],
+            vec![
+                Tag::parse(["h", &channel_id.to_string().to_uppercase()]).unwrap(),
+                Tag::parse(["agent", &agent_hex]).unwrap(),
+            ],
+            vec![
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["agent", &agent_hex.to_uppercase()]).unwrap(),
+            ],
+        ];
+
+        for (case, tags) in invalid_tags.into_iter().enumerate() {
+            let event =
+                EventBuilder::new(Kind::Custom(KIND_AGENT_ACTIVITY_SUMMARY as u16), &content)
+                    .tags(tags)
+                    .sign_with_keys(&agent)
+                    .unwrap();
+            assert!(
+                super::agent_activity_route(&event).is_err(),
+                "invalid tag shape case {case} was accepted: {:?}",
+                event.tags
+            );
+        }
+    }
+
+    #[test]
+    fn agent_activity_route_rejects_agent_tag_not_equal_to_signer() {
+        let agent = Keys::generate();
+        let other = Keys::generate();
+        let event = agent_activity_event(
+            &agent,
+            Uuid::new_v4(),
+            valid_agent_activity_content(),
+            Some(other.public_key().to_hex()),
+        );
+
+        assert!(super::agent_activity_route(&event).is_err());
+    }
+
+    #[test]
+    fn agent_activity_route_rejects_unknown_content_field() {
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let content = serde_json::json!({
+            "version": 1,
+            "activities": [{
+                "activityId": Uuid::new_v4(),
+                "occurredAt": "2026-08-12T12:00:00Z",
+                "activityClass": "turn",
+                "status": "started",
+                "secret": "must not pass"
+            }]
+        })
+        .to_string();
+        let event = agent_activity_event(&agent, channel_id, content, None);
+
+        assert!(super::agent_activity_route(&event).is_err());
+    }
+
+    #[test]
+    fn agent_activity_envelope_rejects_stale_timestamp_and_bad_signature() {
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let now = 20_000_i64;
+        let stale = EventBuilder::new(
+            Kind::Custom(KIND_AGENT_ACTIVITY_SUMMARY as u16),
+            valid_agent_activity_content(),
+        )
+        .tags([
+            Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            Tag::parse(["agent", &agent.public_key().to_hex()]).unwrap(),
+        ])
+        .custom_created_at(nostr::Timestamp::from((now - 301) as u64))
+        .sign_with_keys(&agent)
+        .unwrap();
+        assert!(super::validate_agent_activity_envelope(&stale, now).is_err());
+
+        let valid = agent_activity_event(&agent, channel_id, valid_agent_activity_content(), None);
+        let mut json = serde_json::to_value(valid).unwrap();
+        json["sig"] = serde_json::Value::String("00".repeat(64));
+        let forged: nostr::Event = serde_json::from_value(json).unwrap();
+        assert!(super::validate_agent_activity_envelope(
+            &forged,
+            forged.created_at.as_secs() as i64
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn agent_activity_timestamp_accepts_exact_five_minute_boundary_only() {
+        let now = 10_000_i64;
+        assert!(super::agent_activity_timestamp_is_fresh(now - 300, now));
+        assert!(super::agent_activity_timestamp_is_fresh(now + 300, now));
+        assert!(!super::agent_activity_timestamp_is_fresh(now - 301, now));
+        assert!(!super::agent_activity_timestamp_is_fresh(now + 301, now));
+    }
+
+    #[test]
+    fn agent_activity_principal_requires_managed_agent_and_fresh_membership() {
+        let owner = vec![7u8; 32];
+        let managed = Some(("anyone".to_string(), Some(owner)));
+        let human = Some(("anyone".to_string(), None));
+
+        assert!(super::agent_activity_principal_allowed(
+            managed.as_ref(),
+            true
+        ));
+        assert!(!super::agent_activity_principal_allowed(
+            managed.as_ref(),
+            false
+        ));
+        assert!(!super::agent_activity_principal_allowed(
+            human.as_ref(),
+            true
+        ));
+        assert!(!super::agent_activity_principal_allowed(None, true));
+    }
+
+    #[test]
+    fn agent_activity_channel_policy_requires_nonarchived_stream_or_forum() {
+        assert!(super::agent_activity_channel_allowed("stream", false));
+        assert!(super::agent_activity_channel_allowed("forum", false));
+        assert!(!super::agent_activity_channel_allowed("stream", true));
+        assert!(!super::agent_activity_channel_allowed("forum", true));
+        assert!(!super::agent_activity_channel_allowed("dm", false));
+        assert!(!super::agent_activity_channel_allowed("workflow", false));
+    }
+
+    #[test]
+    fn agent_activity_channel_and_token_policy_reject_dm_other_and_scope_mismatch() {
+        let channel = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        assert!(super::agent_activity_channel_type_allowed("stream"));
+        assert!(super::agent_activity_channel_type_allowed("forum"));
+        assert!(!super::agent_activity_channel_type_allowed("dm"));
+        assert!(!super::agent_activity_channel_type_allowed("workflow"));
+        assert!(super::agent_activity_token_allows_channel(None, channel));
+        assert!(super::agent_activity_token_allows_channel(
+            Some(&[channel]),
+            channel
+        ));
+        assert!(!super::agent_activity_token_allows_channel(
+            Some(&[other]),
+            channel
+        ));
+    }
+
+    #[test]
+    fn agent_activity_delivery_keeps_only_explicit_exact_activity_subscriptions() {
+        let registry = crate::subscription::SubscriptionRegistry::new();
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let channel = Uuid::new_v4();
+        let explicit_conn = Uuid::new_v4();
+        let wildcard_conn = Uuid::new_v4();
+        let mixed_conn = Uuid::new_v4();
+        let activity = Kind::Custom(KIND_AGENT_ACTIVITY_SUMMARY as u16);
+        let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+
+        registry.register_scoped(
+            community,
+            explicit_conn,
+            "explicit".to_string(),
+            vec![Filter::new()
+                .kind(activity)
+                .custom_tags(h, [channel.to_string()])],
+            Some(channel),
+        );
+        registry.register_scoped(
+            community,
+            wildcard_conn,
+            "wildcard".to_string(),
+            vec![Filter::new().custom_tags(h, [channel.to_string()])],
+            Some(channel),
+        );
+        registry.register_scoped(
+            community,
+            mixed_conn,
+            "mixed".to_string(),
+            vec![Filter::new()
+                .kinds([activity, Kind::TextNote])
+                .custom_tags(h, [channel.to_string()])],
+            Some(channel),
+        );
+
+        let matches = vec![
+            (explicit_conn, "explicit".to_string()),
+            (wildcard_conn, "wildcard".to_string()),
+            (mixed_conn, "mixed".to_string()),
+        ];
+        assert_eq!(
+            super::filter_agent_activity_subscription_matches(&registry, channel, matches),
+            vec![(explicit_conn, "explicit".to_string())]
+        );
+    }
+
+    #[test]
+    fn agent_activity_delivery_requires_authenticated_current_stream_or_forum_member() {
+        let channel = Uuid::new_v4();
+        let member = vec![1u8; 32];
+        let removed = vec![2u8; 32];
+        let active = std::collections::HashSet::from([member.clone()]);
+
+        assert!(super::agent_activity_delivery_allowed(
+            Some(channel),
+            Some("stream"),
+            Some("open"),
+            Some(&member),
+            &active,
+        ));
+        assert!(super::agent_activity_delivery_allowed(
+            Some(channel),
+            Some("forum"),
+            Some("private"),
+            Some(&member),
+            &active,
+        ));
+        assert!(!super::agent_activity_delivery_allowed(
+            Some(channel),
+            Some("stream"),
+            Some("open"),
+            Some(&removed),
+            &active,
+        ));
+        assert!(!super::agent_activity_delivery_allowed(
+            Some(channel),
+            Some("stream"),
+            Some("open"),
+            None,
+            &active,
+        ));
+        assert!(!super::agent_activity_delivery_allowed(
+            None,
+            Some("stream"),
+            Some("open"),
+            Some(&member),
+            &active,
+        ));
+        assert!(!super::agent_activity_delivery_allowed(
+            Some(channel),
+            Some("dm"),
+            Some("private"),
+            Some(&member),
+            &active,
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_activity_rate_limiter_is_bounded_and_scoped_by_community() {
+        let state = fanout_access::test_state().await;
+        let agent_key = Keys::generate().public_key().to_bytes();
+        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xA1));
+        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xB1));
+
+        for _ in 0..10 {
+            assert!(!super::agent_activity_rate_limited(
+                &state,
+                community_a,
+                agent_key
+            ));
+        }
+        assert!(super::agent_activity_rate_limited(
+            &state,
+            community_a,
+            agent_key
+        ));
+        assert!(!super::agent_activity_rate_limited(
+            &state,
+            community_b,
+            agent_key
+        ));
+    }
+
+    fn valid_agent_activity_content() -> String {
+        serde_json::json!({
+            "version": 1,
+            "activities": [{
+                "activityId": Uuid::new_v4(),
+                "occurredAt": "2026-08-12T12:00:00Z",
+                "activityClass": "turn",
+                "status": "started"
+            }]
+        })
+        .to_string()
+    }
+
+    fn agent_activity_event(
+        agent: &Keys,
+        channel_id: Uuid,
+        content: String,
+        agent_tag: Option<String>,
+    ) -> nostr::Event {
+        let agent_tag = agent_tag.unwrap_or_else(|| agent.public_key().to_hex());
+        EventBuilder::new(Kind::Custom(KIND_AGENT_ACTIVITY_SUMMARY as u16), content)
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["agent", &agent_tag]).unwrap(),
+            ])
+            .sign_with_keys(agent)
+            .unwrap()
     }
 
     #[tokio::test]
@@ -2128,6 +2816,31 @@ mod tests {
             StoredEvent::new(event, channel_id)
         }
 
+        fn agent_activity_event(channel_id: Option<Uuid>) -> StoredEvent {
+            let agent = Keys::generate();
+            let event = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as u16),
+                serde_json::json!({
+                    "version": 1,
+                    "activities": [{
+                        "activityId": Uuid::new_v4(),
+                        "occurredAt": "2026-08-12T12:00:00Z",
+                        "activityClass": "turn",
+                        "status": "started"
+                    }]
+                })
+                .to_string(),
+            )
+            .tags([
+                nostr::Tag::parse(["h", &channel_id.unwrap_or_default().to_string()])
+                    .expect("h tag"),
+                nostr::Tag::parse(["agent", &agent.public_key().to_hex()]).expect("agent tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign event");
+            StoredEvent::new(event, channel_id)
+        }
+
         #[tokio::test]
         async fn channel_less_event_passes_through() {
             let state = test_state().await;
@@ -2142,6 +2855,36 @@ mod tests {
             )
             .await;
             assert_eq!(out, matches);
+        }
+
+        #[tokio::test]
+        async fn agent_activity_missing_channel_fails_closed_before_db_lookup() {
+            let state = test_state().await;
+            let conn = register_conn(&state, Some(vec![1u8; 32]));
+            let out = filter_fanout_by_access(
+                &state,
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                &agent_activity_event(None),
+                vec![(conn, "generic".to_string())],
+                None,
+            )
+            .await;
+            assert!(out.is_empty());
+        }
+
+        #[tokio::test]
+        async fn agent_activity_db_or_unknown_channel_error_fails_closed() {
+            let state = test_state().await;
+            let conn = register_conn(&state, Some(vec![1u8; 32]));
+            let out = filter_fanout_by_access(
+                &state,
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                &agent_activity_event(Some(Uuid::new_v4())),
+                vec![(conn, "generic".to_string())],
+                None,
+            )
+            .await;
+            assert!(out.is_empty());
         }
 
         #[tokio::test]

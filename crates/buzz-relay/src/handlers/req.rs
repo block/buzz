@@ -7,8 +7,9 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ACTIVITY_SUMMARY, KIND_AGENT_ENGRAM,
+    KIND_AGENT_TURN_METRIC, KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS,
+    SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -38,6 +39,101 @@ pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
 // reconsidering pool contention (see docs above). Compile-time — violating
 // the range fails the build.
 const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY <= 8);
+
+/// Validate the special live-only subscription shape for shared agent activity.
+///
+/// A request enters this validator when any filter explicitly names kind 24201.
+/// At that point every filter must be a kind-24201-only live filter for one
+/// canonical channel. Kindless subscriptions remain valid NIP-01 subscriptions;
+/// the authoritative delivery fence still protects them if they happen to match
+/// a kind-24201 event.
+fn filters_request_agent_activity(filters: &[Filter]) -> bool {
+    filters.iter().any(|filter| {
+        filter.kinds.as_ref().is_some_and(|kinds| {
+            kinds
+                .iter()
+                .any(|kind| kind.as_u16() as u32 == KIND_AGENT_ACTIVITY_SUMMARY)
+        })
+    })
+}
+
+pub(crate) fn agent_activity_req_channel(
+    filters: &[Filter],
+) -> Result<Option<uuid::Uuid>, &'static str> {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let mut request_channel = None;
+    for filter in filters {
+        let kinds = filter
+            .kinds
+            .as_ref()
+            .ok_or("restricted: agent activity filters must name kind 24201")?;
+        if kinds.len() != 1
+            || kinds
+                .iter()
+                .next()
+                .is_none_or(|kind| kind.as_u16() as u32 != KIND_AGENT_ACTIVITY_SUMMARY)
+        {
+            return Err("restricted: agent activity filters must exclusively name kind 24201");
+        }
+
+        if filter.ids.is_some()
+            || filter.search.is_some()
+            || filter.since.is_some()
+            || filter.until.is_some()
+            || filter.limit.is_some_and(|limit| limit != 0)
+        {
+            return Err("restricted: agent activity subscriptions are live-only");
+        }
+        if filter
+            .authors
+            .as_ref()
+            .is_some_and(|authors| authors.is_empty())
+        {
+            return Err("restricted: agent activity authors must be exact public keys");
+        }
+        if filter.generic_tags.len() != 1 {
+            return Err("restricted: agent activity filters only permit #h and authors");
+        }
+
+        let channels = filter
+            .generic_tags
+            .get(&h_tag)
+            .ok_or("restricted: agent activity filters require one #h channel")?;
+        if channels.len() != 1 {
+            return Err("restricted: agent activity filters require exactly one #h channel");
+        }
+        let raw_channel = channels
+            .iter()
+            .next()
+            .expect("one channel was checked above");
+        let channel = uuid::Uuid::parse_str(raw_channel)
+            .map_err(|_| "restricted: agent activity #h must be a UUID")?;
+        if raw_channel != &channel.to_string() {
+            return Err("restricted: agent activity #h must be a canonical lowercase UUID");
+        }
+        if request_channel.is_some_and(|existing| existing != channel) {
+            return Err("restricted: agent activity filters must name the same channel");
+        }
+        request_channel = Some(channel);
+    }
+
+    request_channel
+        .map(Some)
+        .ok_or("restricted: agent activity requires at least one filter")
+}
+
+fn agent_activity_req_access_allowed(
+    is_member: bool,
+    channel_type: &str,
+    is_archived: bool,
+    token_channel_ids: Option<&[uuid::Uuid]>,
+    channel_id: uuid::Uuid,
+) -> bool {
+    is_member
+        && !is_archived
+        && matches!(channel_type, "stream" | "forum")
+        && token_channel_ids.is_none_or(|allowed| allowed.contains(&channel_id))
+}
 
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
 pub async fn handle_req(
@@ -85,7 +181,71 @@ pub async fn handle_req(
         }
     };
 
-    let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
+    // Any explicit kind-24201 filter opts the whole REQ into the dedicated,
+    // fail-closed live subscription contract. Run this before either cache-based
+    // access resolution or subscription registration.
+    let agent_activity_channel = if filters_request_agent_activity(&filters) {
+        match agent_activity_req_channel(&filters) {
+            Ok(channel) => channel,
+            Err(message) => {
+                conn.send(RelayMessage::closed(&sub_id, message));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut accessible_channels = if let Some(channel_id) = agent_activity_channel {
+        if !token_channel_ids
+            .as_deref()
+            .is_none_or(|allowed| allowed.contains(&channel_id))
+        {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: token does not include agent activity channel",
+            ));
+            return;
+        }
+
+        // Deliberately bypass both accessible-channel and membership caches.
+        // Kind 24201 is member-only even for open channels, so current DB state
+        // is authoritative at registration time.
+        let (member, channel) = tokio::join!(
+            state
+                .db
+                .is_member(conn.tenant.community(), channel_id, &pubkey_bytes),
+            state.db.get_channel(conn.tenant.community(), channel_id),
+        );
+        let (member, channel) = match (member, channel) {
+            (Ok(member), Ok(channel)) => (member, channel),
+            (member_result, channel_result) => {
+                warn!(
+                    conn_id = %conn_id,
+                    %channel_id,
+                    membership_lookup_failed = member_result.is_err(),
+                    channel_lookup_failed = channel_result.is_err(),
+                    "Agent activity REQ authorization lookup failed"
+                );
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
+        };
+        if !agent_activity_req_access_allowed(
+            member,
+            &channel.channel_type,
+            channel.archived_at.is_some(),
+            token_channel_ids.as_deref(),
+            channel_id,
+        ) {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: agent activity requires current membership in a nonarchived stream or forum",
+            ));
+            return;
+        }
+        vec![channel_id]
+    } else if filters_are_nip43_membership_only(&filters) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
             .increment(1);
         Vec::new()
@@ -106,7 +266,7 @@ pub async fn handle_req(
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
 
-    let channel_id = extract_channel_id_from_filters(&filters);
+    let channel_id = agent_activity_channel.or_else(|| extract_channel_id_from_filters(&filters));
 
     // Build the conformance `AbstractState` once at request entry. The
     // `Option` only goes `None` on malformed pubkey bytes (already a
@@ -1300,6 +1460,120 @@ fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    #[test]
+    fn agent_activity_req_accepts_live_only_single_channel_filters_with_optional_authors() {
+        let channel = uuid::Uuid::new_v4();
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as u16);
+        let h = SingleLetterTag::lowercase(Alphabet::H);
+        let author = nostr::Keys::generate().public_key();
+
+        for filter in [
+            Filter::new()
+                .kind(kind)
+                .custom_tags(h, [channel.to_string()]),
+            Filter::new()
+                .kind(kind)
+                .author(author)
+                .custom_tags(h, [channel.to_string()])
+                .limit(0),
+        ] {
+            assert_eq!(
+                agent_activity_req_channel(&[filter]).expect("valid activity REQ"),
+                Some(channel)
+            );
+        }
+    }
+
+    #[test]
+    fn agent_activity_req_rejects_kindless_mixed_and_malformed_channel_shapes() {
+        let channel = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let activity = nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as u16);
+        let h = SingleLetterTag::lowercase(Alphabet::H);
+        let cases = [
+            vec![Filter::new().custom_tags(h, [channel.to_string()])],
+            vec![Filter::new()
+                .kinds([activity, nostr::Kind::TextNote])
+                .custom_tags(h, [channel.to_string()])],
+            vec![Filter::new().kind(activity)],
+            vec![Filter::new()
+                .kind(activity)
+                .custom_tags(h, [channel.to_string(), other.to_string()])],
+            vec![Filter::new()
+                .kind(activity)
+                .custom_tags(h, [channel.to_string().to_uppercase()])],
+            vec![
+                Filter::new()
+                    .kind(activity)
+                    .custom_tags(h, [channel.to_string()]),
+                Filter::new()
+                    .kind(activity)
+                    .custom_tags(h, [other.to_string()]),
+            ],
+        ];
+
+        for filters in cases {
+            assert!(agent_activity_req_channel(&filters).is_err());
+        }
+    }
+
+    #[test]
+    fn agent_activity_req_rejects_historical_and_non_author_constraints() {
+        let channel = uuid::Uuid::new_v4();
+        let activity = nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as u16);
+        let h = SingleLetterTag::lowercase(Alphabet::H);
+        let p = SingleLetterTag::lowercase(Alphabet::P);
+        let base = || {
+            Filter::new()
+                .kind(activity)
+                .custom_tags(h, [channel.to_string()])
+        };
+        let cases = [
+            base().id(nostr::EventId::all_zeros()),
+            base().search("history"),
+            base().since(nostr::Timestamp::from(1)),
+            base().until(nostr::Timestamp::from(2)),
+            base().limit(1),
+            base().custom_tags(p, ["11".repeat(32)]),
+        ];
+
+        for filter in cases {
+            assert!(agent_activity_req_channel(&[filter]).is_err());
+        }
+    }
+
+    #[test]
+    fn agent_activity_req_policy_requires_current_membership_stream_or_forum_and_token_scope() {
+        let channel = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        assert!(agent_activity_req_access_allowed(
+            true, "stream", false, None, channel
+        ));
+        assert!(agent_activity_req_access_allowed(
+            true,
+            "forum",
+            false,
+            Some(&[channel]),
+            channel
+        ));
+        assert!(!agent_activity_req_access_allowed(
+            false, "stream", false, None, channel
+        ));
+        assert!(!agent_activity_req_access_allowed(
+            true, "stream", true, None, channel
+        ));
+        assert!(!agent_activity_req_access_allowed(
+            true, "dm", false, None, channel
+        ));
+        assert!(!agent_activity_req_access_allowed(
+            true,
+            "stream",
+            false,
+            Some(&[other]),
+            channel
+        ));
+    }
 
     #[test]
     fn global_queries_push_access_scope_before_limit() {
