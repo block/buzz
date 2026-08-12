@@ -6,6 +6,8 @@
     "sha": "e14f5fafb9cc13890530f019556a343b02997c34"
   },
   "status": "ahead",
+  "ahead_by": 1,
+  "behind_by": 0,
   "files": [
     {
       "filename": "launchpad/AGENTS.md",

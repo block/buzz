@@ -1,11 +1,13 @@
 {
   "base_commit": {
-    "sha": "e14f5fafb9cc13890530f019556a343b02997c34"
+    "sha": "bbcb677a7b37b433dd005447cea7a2f9fe07274c"
   },
   "merge_base_commit": {
     "sha": "bbcb677a7b37b433dd005447cea7a2f9fe07274c"
   },
-  "status": "diverged",
+  "status": "ahead",
+  "ahead_by": 4,
+  "behind_by": 0,
   "files": [
     {
       "filename": ".github/ISSUE_TEMPLATE/01-prd.yml",
