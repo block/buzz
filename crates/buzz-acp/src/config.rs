@@ -72,6 +72,7 @@ pub enum MultipleEventHandling {
     /// treated as a replacement. Fires for any author the inbound author gate
     /// admits (owner ∪ allowlist ∪ siblings). This is the default mid-turn
     /// delivery path. Requires DedupMode::Queue.
+    #[value(alias = "steer-thread")]
     Steer,
     /// Cancel the in-flight turn and re-dispatch a merged prompt combining
     /// the original events with the new ones, framed as a **supersede** (the
@@ -2590,6 +2591,18 @@ channels = "ALL"
         assert_eq!(args.multiple_event_handling, MultipleEventHandling::Steer);
         // Dedup default must remain `queue` so steering's requirement is met.
         assert!(matches!(args.dedup, DedupMode::Queue));
+    }
+
+    #[test]
+    fn test_multiple_event_handling_accepts_legacy_steer_thread_alias() {
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &"0".repeat(64),
+            "--multiple-event-handling",
+            "steer-thread",
+        ]);
+        assert_eq!(args.multiple_event_handling, MultipleEventHandling::Steer);
     }
 
     #[test]
