@@ -7,10 +7,27 @@ name: Release Buzz desktop
 # users to update automatically once a release lands here — no more manually
 # building on a dev machine and hand-distributing the installer.
 #
+# This tag namespace (`v*`) is deliberately distinct from block/buzz's own
+# `desktop-v*`/`relay-v*`/`chart-v*` release lanes (see
+# auto-tag-on-release-pr-merge.yml) — no collision, and this workflow doesn't
+# consume or interfere with those. block/buzz's own desktop release workflow
+# (the one that lane's comment refers to as "release.yml (desktop app)") is
+# not present in this fork — it depends on signing/App-token infrastructure
+# this fork doesn't have — so this file is a from-scratch equivalent scoped
+# to k2alpha's own distribution, not a copy of anything upstream ships.
+#
+# Structurally mirrors windows-canary.yml (the repo's own working Windows
+# Tauri build) wherever the two overlap — toolchain handling, pnpm pinning,
+# CMake workaround, sidecar build — rather than reinventing those; see inline
+# comments below for the specific reasoning windows-canary.yml documents for
+# each.
+#
 # Scoped to Windows only for now, matching how this fork is actually being
 # distributed today (k2alpha is a Windows team). To add macOS/Linux builds
 # later, add entries to the `matrix.include` list below — the rest of the
-# job (signing, publishing) is platform-agnostic and doesn't need to change.
+# job (signing, publishing) is platform-agnostic and doesn't need to change,
+# but `bundle.targets` in tauri.conf.json would need to become platform-aware
+# again (it's currently pinned to `["nsis"]`, a Windows-only bundle format).
 on:
   push:
     tags:
@@ -24,6 +41,7 @@ jobs:
       matrix:
         include:
           - platform: windows-latest
+            target: x86_64-pc-windows-msvc
             args: ""
 
     runs-on: ${{ matrix.platform }}
@@ -33,25 +51,90 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # No explicit Rust-install action. windows-latest ships rustup
+      # preinstalled, and rust-toolchain.toml in the repo root (channel
+      # 1.95.0) is auto-detected and activated the moment any `cargo`/`rustc`
+      # command runs below — this is exactly how windows-canary.yml does it,
+      # specifically to avoid what an explicit `dtolnay/rust-toolchain@stable`
+      # step would otherwise do: install and activate the floating "stable"
+      # channel, silently overriding the pinned 1.95.0 with whatever
+      # "stable" happens to resolve to on a given CI run. We only need to
+      # confirm the target triple is registered — a no-op on windows-latest
+      # since the host triple already is x86_64-pc-windows-msvc, but explicit
+      # here for the same reason windows-canary.yml is explicit about it.
+      - name: Add Rust target
+        shell: bash
+        run: rustup target add "${{ matrix.target }}"
 
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
-      - name: Enable Corepack (pnpm)
-        run: corepack enable
+      # Pinned via pnpm/action-setup rather than bare `corepack enable`.
+      # desktop/package.json has no `"packageManager"` field, so corepack
+      # alone has no version to pin to and can stall or behave
+      # unpredictably resolving a version non-interactively in CI.
+      # windows-canary.yml sidesteps this the same way, with an explicit
+      # version pin instead.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
         working-directory: desktop
 
+      # `tauri.conf.json` declares these as `externalBin` sidecars — Tauri's
+      # build.rs fails hard (not a warning) if the target-triple-suffixed
+      # binaries aren't already sitting in desktop/src-tauri/binaries/ before
+      # `tauri build` runs. `desktop-release-build` in the Justfile solves
+      # this for LOCAL/test builds by touching empty placeholder files
+      # (Tauri only validates that the path exists at compile time, not that
+      # it's a real binary) — that's fine for a build nobody's going to run,
+      # but this workflow produces the actual installer k2alpha users install,
+      # so it builds the real sidecars, matching the `staging`/`production`
+      # Justfile recipes (and windows-canary.yml) rather than the
+      # placeholder-stub one.
+      #
+      # tauri.conf.json's base `externalBin` lists SIX entries including
+      # `buzz-backend-kubernetes`, but `desktop/src-tauri/tauri.windows.conf.json`
+      # — a Tauri platform-config override, auto-merged by the CLI for any
+      # Windows build — replaces `externalBin` with a FIVE-entry list that
+      # omits it entirely. So on this job's actual `windows-latest` build,
+      # `buzz-backend-kubernetes` is never in the effective externalBin list
+      # and doesn't need to be built or placed here — confirmed by reading
+      # tauri.windows.conf.json directly, not inferred from the other
+      # scripts' Windows exclusions (which was the earlier, weaker
+      # justification for building it anyway as a "belt and suspenders"
+      # step; that step has been removed as unnecessary CI time).
+      #
+      # CMAKE_POLICY_VERSION_MINIMUM: windows-canary.yml sets this on its
+      # Tauri build step to work around a native dependency's CMakeLists.txt
+      # declaring an old minimum CMake version that a newer CMake on the
+      # runner rejects by default. Setting it here too, on both the sidecar
+      # build and the tauri-action build below, since either could hit it.
+      - name: Build sidecar binaries
+        run: cargo build --release --target "${{ matrix.target }}" -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+      # --target was passed to `cargo build` above (matching
+      # windows-canary.yml), so binaries land in `target/<triple>/release/`
+      # — pass the same target as this script's argument so it looks in the
+      # matching directory. bundle-sidecars.sh itself also excludes
+      # buzz-backend-kubernetes on Windows targets, consistent with
+      # tauri.windows.conf.json above.
+      - name: Bundle sidecars into desktop/src-tauri/binaries
+        shell: bash
+        run: ./scripts/bundle-sidecars.sh "${{ matrix.target }}"
+
       - name: Build and publish
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
           # Required so the updater manifest (`latest.json`) and installers
           # are cryptographically signed the same way `tauri signer generate`
           # produced the keypair configured in tauri.conf.json's
@@ -61,6 +144,20 @@ jobs:
           # the one-time manual step.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # desktop/src-tauri/build.rs only sets `cfg(buzz_updater_enabled)`
+          # — the flag that gates whether `tauri_plugin_updater` gets
+          # registered on the app builder AT ALL (see lib.rs, "Register the
+          # updater only in configured release builds; omit it locally") —
+          # when BOTH of these env vars are present at build time. Without
+          # them the binary compiles fine and everything in tauri.conf.json
+          # is still valid JSON, but the updater plugin is simply never
+          # wired into the app, so every "check for updates" click reports
+          # "unavailable" no matter what's published to GitHub Releases.
+          # Values just need to be non-empty to flip the cfg gate; using the
+          # real values here anyway to match tauri.conf.json and avoid
+          # future confusion.
+          BUZZ_UPDATER_PUBLIC_KEY: "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBQjE2Q0NGRjYzMTlBNTgKUldSWW1qSDJ6Mnl4K3VxaWdpYi9DVDNYdUI5amF3dnhJb0JCWUdmTXJpTk9MZGYrdUFqMXdyRVIK"
+          BUZZ_UPDATER_ENDPOINT: "https://github.com/ranjank2alpha/buzz/releases/latest/download/latest.json"
         with:
           projectPath: desktop
           tagName: ${{ github.ref_name }}
@@ -68,4 +165,4 @@ jobs:
           releaseBody: "See CHANGELOG.md or the in-app What's New screen for details."
           releaseDraft: false
           prerelease: false
-          args: ${{ matrix.args }}
+          args: --target ${{ matrix.target }} ${{ matrix.args }}

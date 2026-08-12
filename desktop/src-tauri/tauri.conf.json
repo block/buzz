@@ -55,7 +55,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/buzz-acp",
       "binaries/buzz-agent",
