@@ -24,6 +24,7 @@ abstract final class EventKind {
   static const streamMessageV2 = 40002;
   static const channelThreadSummary = 39005;
   static const channelWindowBounds = 39006;
+  static const presenceSnapshot = 40902;
   static const streamMessageEdit = 40003;
   static const streamMessageDiff = 40008;
   static const systemMessage = 40099;
