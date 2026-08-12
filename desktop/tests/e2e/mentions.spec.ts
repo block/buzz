@@ -1008,6 +1008,17 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   page,
 }) => {
   await installMockBridge(page, {
+    deferredComposerUploads: true,
+    uploadDescriptors: [
+      {
+        url: `https://mock.relay/media/${"f".repeat(64)}.pdf`,
+        sha256: "f".repeat(64),
+        size: 12345,
+        type: "application/pdf",
+        uploaded: Math.floor(Date.now() / 1000),
+        filename: "forum-race.pdf",
+      },
+    ],
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
@@ -1027,6 +1038,11 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   await input.fill("@quinn");
   await page.getByTestId("mention-autocomplete").getByText("quinn").click();
   await page.keyboard.type("hello");
+  await page.getByRole("button", { name: "Attach file" }).click();
+  const removeAttachment = page.getByRole("button", {
+    name: "Remove attachment",
+  });
+  await expect(removeAttachment).toBeVisible();
   await page.evaluate(() => {
     window.__BUZZ_E2E__.mock ??= {};
     window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
@@ -1037,16 +1053,22 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
 
   await page.getByTestId("send-message").click();
   await expect(input).toHaveAttribute("contenteditable", "false");
+  await expect(removeAttachment).toBeDisabled();
+  await removeAttachment.evaluate((button: HTMLButtonElement) =>
+    button.click(),
+  );
+  await expect(removeAttachment).toBeVisible();
   await input.focus();
   await page.keyboard.type(" later edit");
   await expect(input).toContainText("@quinn hello");
   await expect(input).not.toContainText("later edit");
 
+  const outgoingContent = `@quinn hello\n[forum-race.pdf](https://mock.relay/media/${"f".repeat(64)}.pdf)`;
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
     .not.toBeNull();
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
     .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 });
 

@@ -141,6 +141,7 @@ export function ForumComposer({
   // Native ProseMirror transactions — no markdown round-trip.
   const applyMentionInsert = React.useCallback(
     (suggestion: MentionSuggestion) => {
+      if (isSubmissionPendingRef.current) return;
       const { cursor } = richText.getPlainTextAndCursor();
       const { replaceFromOffset, replaceToOffset, insertText } =
         mentions.insertMention(suggestion, cursor);
@@ -159,6 +160,7 @@ export function ForumComposer({
 
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
+      if (isSubmissionPendingRef.current) return;
       const { cursor } = richText.getPlainTextAndCursor();
       const { replaceFromOffset, replaceToOffset, insertText } =
         channelLinks.insertChannel(suggestion, cursor);
@@ -177,7 +179,7 @@ export function ForumComposer({
 
   const insertEmoji = React.useCallback(
     (emoji: string) => {
-      if (!richText.editor) return;
+      if (isSubmissionPendingRef.current || !richText.editor) return;
       richText.editor.chain().focus().insertContent(emoji).run();
       setIsEmojiPickerOpen(false);
       mentions.clearMentions();
@@ -232,6 +234,9 @@ export function ForumComposer({
 
       isSubmissionPendingRef.current = true;
       setIsSubmissionPending(true);
+      mentions.cancelMentionAutocomplete();
+      channelLinks.clearChannels();
+      setIsEmojiPickerOpen(false);
       try {
         const pubkeys = await mentions.revalidateMentionPubkeys(
           mentions.extractMentionPubkeys(trimmed),
@@ -280,6 +285,7 @@ export function ForumComposer({
       compact,
       media.pendingImetaRef,
       media.setPendingImeta,
+      mentions.cancelMentionAutocomplete,
       mentions.extractMentionPubkeys,
       mentions.revalidateMentionPubkeys,
       mentions.clearMentions,
@@ -463,6 +469,7 @@ export function ForumComposer({
           "relative rounded-2xl border border-input bg-card px-3 py-2 sm:px-4",
           className,
         )}
+        inert={isSubmissionPending ? true : undefined}
         onBlurCapture={handleFormBlur}
         onDragEnter={(event) => {
           if (isSubmissionPending) {
@@ -525,7 +532,15 @@ export function ForumComposer({
               position={autocompletePosition}
             />
 
-            <ForumComposerMediaStatus media={media} />
+            <fieldset
+              className="min-w-0 border-0 p-0"
+              disabled={isSubmissionPending}
+            >
+              <ForumComposerMediaStatus
+                disabled={isSubmissionPending}
+                media={media}
+              />
+            </fieldset>
 
             {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
             <div
@@ -610,8 +625,8 @@ export function ForumComposer({
           </>
         )}
       </form>
-      {linkEditor.card}
-      {linkEditor.dialog}
+      {!isSubmissionPending && linkEditor.card}
+      {!isSubmissionPending && linkEditor.dialog}
     </>
   );
 }
