@@ -2893,8 +2893,33 @@ mod tests {
         );
     }
 
+    /// Locate a bash that behaves like a real POSIX shell for harness scripts.
+    ///
+    /// `Command::new("bash")` on Windows resolves through `CreateProcessW`'s
+    /// search order, which checks `C:\Windows\System32` before any PATH entry.
+    /// On machines with WSL installed that yields `System32\bash.exe` — the
+    /// WSL launcher — instead of the Git-for-Windows bash sitting earlier in
+    /// PATH. WSL bash mounts the filesystem at `/mnt/c`, cannot redirect into
+    /// `C:/...` paths, and boots slowly enough to trip the harness's idle
+    /// timeout, which makes every `spawn_script`-based test fail or flake.
+    /// Prefer a Git-for-Windows bash when one is installed.
+    fn find_bash() -> String {
+        #[cfg(windows)]
+        for candidate in [
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
+        }
+        "bash".to_string()
+    }
+
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn(&find_bash(), &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
     }
@@ -3037,8 +3062,11 @@ mod tests {
     async fn idle_resets_on_stdout_activity() {
         // Send valid JSON (session/update notifications) to reset the idle timer.
         // Non-JSON lines no longer reset idle — only valid JSON notifications do.
+        // The 300ms idle budget is generous: the harness bash on Windows can take
+        // >100ms to emit its first line under full-suite parallelism, and a
+        // tighter budget made this flake on cold CI runners.
         let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
+            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
         let max_dur = std::time::Duration::from_secs(10);
@@ -3048,14 +3076,15 @@ mod tests {
             .read_until_response_with_idle_timeout(
                 "test",
                 999,
-                std::time::Duration::from_millis(200),
+                std::time::Duration::from_millis(300),
                 hard_deadline,
                 max_dur,
             )
             .await;
         let elapsed = start.elapsed();
-        // 10 messages × 50ms = ~500ms of activity, then idle timeout fires after 200ms more
-        assert!(elapsed >= std::time::Duration::from_millis(400));
+        // 20 messages × 50ms = ~1000ms of activity, then idle timeout fires after
+        // 300ms more — must survive well past the 300ms deadline.
+        assert!(elapsed >= std::time::Duration::from_millis(500));
         assert!(elapsed < std::time::Duration::from_secs(3));
         assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
@@ -3232,8 +3261,11 @@ mod tests {
 
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
+        // Keepalive session/update lines every 50ms against a 300ms idle
+        // deadline. The turn should survive well past the 300ms deadline
+        // (proves the fix). The budget is kept generous because the harness
+        // bash on Windows can take >100ms to emit its first line under test
+        // parallelism, and a 100ms budget made this flake on cold CI runners.
         let mut client = spawn_script(
             r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
         )
@@ -3245,14 +3277,14 @@ mod tests {
             .read_until_response_with_idle_timeout(
                 "test",
                 999,
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(300),
                 hard_deadline,
                 max_dur,
             )
             .await;
         let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
-        // Must survive well past the 100ms deadline.
+        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after
+        // 300ms more. Must survive well past the 300ms deadline.
         assert!(
             elapsed >= std::time::Duration::from_millis(500),
             "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
@@ -3887,10 +3919,26 @@ mod tests {
         capture_path: &std::path::Path,
         response: &str,
     ) -> AcpClient {
+        // `temp_dir()` can return the 8.3 short path (`C:\Users\KHOAPH~1\...`)
+        // which MSYS bash cannot redirect into. Canonicalizing the
+        // already-created parent dir yields the long form — with a `\\?\`
+        // extended-length prefix on Windows that bash also can't handle, so
+        // strip it. Forward-slashes + single quotes then survive the space
+        // in the user's home dir (`C:\Users\khoa phan\...`).
+        let dir = capture_path.parent().expect("capture path has a parent");
+        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let mut dir = dir.display().to_string();
+        if let Some(stripped) = dir.strip_prefix(r"\\?\") {
+            dir = stripped.to_string();
+        }
+        let capture = std::path::Path::new(&dir)
+            .join(capture_path.file_name().expect("capture path has a file name"))
+            .display()
+            .to_string()
+            .replace('\\', "/");
         let script = format!(
-            "read -r line; printf '%s' \"$line\" > {capture}; \
+            "read -r line; printf '%s' \"$line\" > '{capture}'; \
              printf '%s\\n' '{response}'; sleep 10",
-            capture = capture_path.display(),
             response = response,
         );
         spawn_script(&script).await

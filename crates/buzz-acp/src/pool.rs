@@ -408,6 +408,18 @@ pub enum SteerError {
     /// Transport-level failure: write error, read EOF, JSON-RPC framing
     /// violation, etc. The string carries the underlying `AcpError`'s display.
     Transport(String),
+    /// The steer channel is capacity-1 and already holds an in-flight steer
+    /// write for this channel (`TrySendError::Full` from `send_steer`).
+    ///
+    /// This is a *burst* condition, not a failure: a second mention arrived
+    /// while an earlier steer was still queued for the same live turn. The
+    /// turn itself is healthy and must NOT be cancelled — the caller keeps
+    /// the event queued and lets normal dispatch deliver it after the turn
+    /// completes.
+    ///
+    /// Returned synchronously by `send_steer`. Never sent through the ack
+    /// channel.
+    SteerChannelBusy,
     /// At steer-write time neither steer transport was available: no
     /// `expectedRunId` (`AcpClient::active_run_id` was `None`, so the
     /// goose-native method could not be formed) and the agent did not
@@ -702,10 +714,13 @@ impl AgentPool {
     ///
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
-    /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
-    /// (already-in-flight write, or read loop torn down). Callers must
-    /// fall back to the universal `ControlSignal::Steer` cancel+merge path
-    /// on `Err`.
+    /// write). Returns `Err(SteerError::SteerChannelBusy)` on `Full`
+    /// (another steer is already in flight for this channel — the caller
+    /// should keep the event queued and let normal dispatch deliver it after
+    /// the turn, NOT cancel the turn). Returns
+    /// `Err(SteerError::Transport(_))` on `Closed` (read loop torn down).
+    /// Callers must fall back to the universal `ControlSignal::Steer`
+    /// cancel+merge path on `Err` except `SteerChannelBusy`.
     ///
     /// This does **not** spawn the ack watcher — the caller owns the
     /// oneshot `ack_tx` inside `SteerRequest` and is responsible for
@@ -734,7 +749,14 @@ impl AgentPool {
             .as_ref()
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
-            .map_err(|e| SteerError::Transport(e.to_string()))
+            .map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    SteerError::SteerChannelBusy
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    SteerError::Transport("steer channel closed".into())
+                }
+            })
     }
 
     /// Durably associate a successful steer with the exact ACP session that
@@ -7009,6 +7031,66 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
         result.agent.acp.install_steer_rx(steer_rx);
         // Reaching here without a panic is the test.
+    }
+
+    // ── send_steer capacity semantics ─────────────────────────────────────
+
+    /// The steer channel is capacity-1 with a single in-flight slot. A second
+    /// `send_steer` while the first is still queued must return
+    /// `SteerError::SteerChannelBusy` — NOT `Transport` — so the main loop can
+    /// tell the burst case apart (turn healthy, keep the event queued, deliver
+    /// via normal dispatch after the turn) from a genuine transport failure
+    /// (fall through to cancel+merge).
+    ///
+    /// Regression for the 3-mention burst bug: lumping `TrySendError::Full` in
+    /// with transport errors made the caller fire cancel+merge on a healthy
+    /// in-flight turn, killing the running reply and forcing a respawn that
+    /// only ever answered the last mention.
+    #[tokio::test]
+    async fn test_send_steer_full_returns_steer_channel_busy() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        let channel_id = Uuid::new_v4();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: Some(steer_tx),
+            },
+        );
+
+        let request = |seq: &str| SteerRequest {
+            prompt_blocks: vec![seq.to_string()],
+            ack_tx: tokio::sync::oneshot::channel().0,
+        };
+
+        // First steer fills the single slot.
+        assert!(
+            pool.send_steer(channel_id, request("first")).is_ok(),
+            "first steer must fill the capacity-1 slot"
+        );
+
+        // Second steer while the first is still in flight → Busy, not Transport.
+        match pool.send_steer(channel_id, request("second")) {
+            Err(SteerError::SteerChannelBusy) => {}
+            other => panic!("expected SteerChannelBusy, got {other:?}"),
+        }
+
+        // Once the read loop drains the slot, steering works again.
+        let drained = steer_rx
+            .recv()
+            .await
+            .expect("first steer must be drainable");
+        assert_eq!(drained.prompt_blocks, vec!["first"]);
+        assert!(
+            pool.send_steer(channel_id, request("third")).is_ok(),
+            "steer must succeed after the slot is drained"
+        );
     }
 
     // ── NIP-AM emit-hook unit tests ────────────────────────────────────────
