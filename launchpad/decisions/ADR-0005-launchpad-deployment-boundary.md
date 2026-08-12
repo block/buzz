@@ -31,6 +31,39 @@ Anything beyond those five lives under `launchpad/`. Upstream's own jobs that La
 does not operate are **disabled in place** with `if: github.repository == 'block/buzz'`
 rather than deleted, so upstream's copy stays intact and the diff stays reviewable.
 
+## Enforcement
+
+The list above is **machine-checked and intended to become a required status check**, not
+a convention. `launchpad/scripts/adr_boundary_check.py` reads the table in this record,
+requires this record's own prose count to agree with it, then requires `launchpad/AGENTS.md`
+§3 and the filesystem to match. The workflow is `launchpad-adr-check.yml`, and the
+enforcement task is #153.
+
+Four properties of that check are decisions in their own right, because each one costs
+somebody something:
+
+- **This record is the source of truth.** The check does not hold its own copy of the
+  list. A fourth copy would be the very defect being checked for. Adding a sixth file
+  therefore requires editing this record, which is what "the list is closed" has to mean
+  if it is to mean anything.
+- **The check runs on every pull request, with no path filter.** A required check that is
+  skipped stays pending forever and blocks the merge it was meant to guard, so filtering
+  by path would turn "this pull request does not touch the boundary" into "this pull
+  request can never merge".
+- **It fails closed.** A missing checker, a missing record, or a partial checkout fails
+  rather than passes. The cost is real and falls on everyone: a branch created before this
+  record existed genuinely lacks these files and fails until it rebases onto `launchpad`.
+- **A deterministic check may gate; a model verdict may not.** #118 records agent judges
+  scoring AUROC 0.48–0.64 against 6,642 human-verified labels on adversarial security
+  claims. A required check that goes red on a model's opinion produces false blocks, and
+  the remedy people find for a flaky required check is learning to route around it — which
+  costs the gate entirely. Scripts gate. Model output annotates.
+
+That last point reaches past this record. Whether the wider review process becomes required
+CI, and what may turn such a check green, is a separate decision drafted at #154; this is
+only its first instance, and it was chosen as the pilot because its subject is a fixed list
+of five strings rather than a judgement.
+
 ## Context
 
 `launchpad/AGENTS.md` §3 says everything cohort-specific lives under `launchpad/` and
@@ -76,6 +109,12 @@ which was the actual defect. What remains needs a deliberate act with a stale `.
 
 **Bad.** Five sanctioned files is a list, and lists rot. Adding a sixth is a change to
 this record, not a judgement call in a pull request.
+
+**Bad, and accepted.** Enforcing that mechanically taxes every contributor, not only the
+ones touching deployment. The check runs on every pull request and fails closed, so a
+branch that predates this record fails until it rebases — at the time of writing that is
+#124, #144, #147 and #151. A cheaper check would run only on the files it guards, and
+would be skipped exactly when someone deletes them.
 
 ## Provenance
 
