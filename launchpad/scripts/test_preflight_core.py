@@ -719,5 +719,122 @@ class CliShell(unittest.TestCase):
         self.assertIn("truncated: true", text.lower(), "--help must name the partial-tree trap")
 
 
+class ExitContract(unittest.TestCase):
+    """STEP 8 — which unreadable input is fatal, proved one call at a time.
+
+    The nonexistent-PR case STEP 3 covers is the easy one. These break exactly
+    one call each and leave the other seven working, which is the only way to
+    show that *this* input is the one whose failure is fatal — and, for the
+    skip-only ones, that it is not.
+    """
+
+    def test_each_required_input_failing_alone_exits_non_zero(self):
+        for name in core.REQUIRED_INPUTS:
+            with self.subTest(required=name):
+                code, out, err = run_cli(["86"], FakeGh(fail={name: NOT_FOUND}))
+                self.assertNotEqual(code, 0, f"{name} failed and the run still exited 0")
+                self.assertEqual(out, "", f"{name} failed and a record was printed anyway")
+                self.assertIn("skips", json.loads(err))
+
+    def test_each_skip_only_input_failing_alone_exits_zero(self):
+        for name in core.SKIP_ONLY_INPUTS:
+            with self.subTest(skip_only=name):
+                code, out, err = run_cli(["86"], FakeGh(fail={name: FORBIDDEN_RESULT}))
+                self.assertEqual(code, 0, f"{name} is skip-only and must not be fatal: {err}")
+                record = json.loads(out)
+                self.assertTrue(record["skips"], "the skip must be published, not swallowed")
+
+    def test_a_truncated_head_tree_exits_non_zero(self):
+        """HTTP 200 with a partial list, which must not read as "no rules file"."""
+        code, out, err = run_cli(["86"], FakeGh(payloads={"tree": fixture("tree-truncated.json")}))
+        self.assertNotEqual(code, 0, "a half-read tree cannot answer the nearest-rules question")
+        self.assertEqual(out, "")
+        entry = next(s for s in json.loads(err)["skips"] if s["field"] == "nearest_rules")
+        self.assertEqual(entry["reason"], core.TRUNCATED)
+
+    def test_a_truncated_tree_is_not_reported_as_an_empty_result(self):
+        skips = core.Skips()
+        resolved = core.build_nearest_rules(
+            core.Read("tree", data=fixture("tree-truncated.json"), endpoint=ENDPOINTS["tree"]),
+            {"files": [{"path": "kernel/fork.c"}]},
+            skips,
+        )
+        self.assertIsNone(resolved, "None means not read; {} would mean nothing found")
+        self.assertTrue(core.is_fatal(skips.entries[0]))
+
+    def test_every_enumerated_reason_is_reachable_from_a_control(self):
+        gh_missing = fetch.RunResult(127, "", "gh is not installed")
+        empty_rollup = {
+            "data": {"repository": {"pullRequest": {"commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}}}}
+        }
+        cases = {
+            core.ABSENT: FakeGh(fail={"tree": NOT_FOUND}),
+            core.FORBIDDEN: FakeGh(fail={"compare": FORBIDDEN_RESULT}),
+            core.MALFORMED: FakeGh(fail={"compare": GARBAGE}),
+            core.UNREACHABLE: FakeGh(fail={"pr": gh_missing}),
+            core.TRUNCATED: FakeGh(payloads={"tree": fixture("tree-truncated.json")}),
+            core.EMPTY: FakeGh(payloads={"checks": empty_rollup}),
+        }
+        self.assertEqual(set(cases), set(core.SKIP_REASONS), "a reason with no control is a reason nothing tests")
+        for reason, fake in cases.items():
+            with self.subTest(reason=reason):
+                _, out, err = run_cli(["86"], fake)
+                published = json.loads(out or err)
+                self.assertIn(reason, {s["reason"] for s in published["skips"]})
+
+    def test_an_empty_but_readable_check_list_is_not_a_failure(self):
+        """A head commit whose checks have not started is readable, and empty."""
+        empty_rollup = {
+            "data": {"repository": {"pullRequest": {"commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}}}}
+        }
+        code, out, err = run_cli(["86"], FakeGh(payloads={"checks": empty_rollup}))
+        self.assertEqual(code, 0, f"empty is an answer, not a failed read: {err}")
+        record = json.loads(out)
+        self.assertIsNone(record["checks"], "None, never [] — nothing was read into it")
+        entry = next(s for s in record["skips"] if s["field"] == "checks")
+        self.assertEqual(entry["reason"], core.EMPTY)
+
+    def test_a_required_field_that_was_not_read_is_none_and_never_a_value(self):
+        for name in ("compare", "checks", "tree"):
+            with self.subTest(required=name):
+                skips = core.Skips()
+                if name == "compare":
+                    value = core.build_diff(unreadable("compare", core.ABSENT), {"head_sha": "x"}, skips)
+                elif name == "checks":
+                    value = core.build_checks(unreadable("checks", core.ABSENT), skips)
+                else:
+                    value = core.build_nearest_rules(
+                        unreadable("tree", core.ABSENT), {"files": []}, skips
+                    )
+                self.assertIsNone(value, "an unread field must not come back as [] or {}")
+                self.assertTrue(skips.entries)
+
+    def test_the_module_docstring_lists_the_taxonomy_and_the_split(self):
+        doc = core.__doc__
+        for reason in core.SKIP_REASONS:
+            self.assertIn(reason, doc)
+        for name in core.REQUIRED_INPUTS:
+            self.assertIn(name, doc)
+        for name in core.SKIP_ONLY_INPUTS:
+            self.assertIn(name, doc)
+        self.assertIn("truncated: true", doc)
+        self.assertIn("exit", doc.lower())
+
+    def test_a_usage_error_is_a_different_exit_code_from_an_unreadable_input(self):
+        """Both would be 2 if argparse's default stood, and the contract says 1."""
+        for bad in (["0"], ["-4"], ["not-a-number"]):
+            with self.subTest(argv=bad):
+                fake = FakeGh()
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as caught:
+                        fetch.main(bad, runner=fake)
+                self.assertEqual(caught.exception.code, 1, "usage error is 1, not argparse's 2")
+                self.assertEqual(fake.calls, [], "nothing should be fetched for a bad argument")
+
+        unreadable_code, _, _ = run_cli(["86"], FakeGh(fail={"pr": NOT_FOUND}))
+        self.assertEqual(unreadable_code, 2)
+        self.assertNotEqual(unreadable_code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

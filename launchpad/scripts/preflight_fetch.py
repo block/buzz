@@ -310,8 +310,20 @@ def _epilogue() -> str:
     )
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, which is this tool's "unreadable
+    required input" code. Two very different failures sharing an exit code makes
+    the contract untestable, so usage errors are moved to 1 and 2 keeps its
+    meaning."""
+
+    def error(self, message: str):  # noqa: D102 - argparse's own contract
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f"{self.prog}: error: {message}\n")
+        raise SystemExit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="pr-preflight.py",
         description=(
             "Emit the deterministic facts a PR review needs, as JSON on stdout. "

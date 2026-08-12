@@ -85,6 +85,10 @@ criterion this script has.
 *a path with no ancestor rules file at all*
     a real answer, not a failure
 
+**``empty`` is never fatal, whichever kind the field belongs to.** An empty
+answer was read. A head commit with no check runs yet and a check list that could
+not be fetched are different facts, and only the second is a failure.
+
 ``truncated`` is why those two kinds do not blur. The trees API does not fail
 loudly when it cannot return a whole tree: it answers HTTP 200 with
 ``truncated: true`` and a partial list past roughly 100,000 entries or 7 MB. A
@@ -668,18 +672,40 @@ def build_record(reads: Mapping[str, Read]) -> dict[str, Any]:
     return record
 
 
+#: Reasons that mean the input was NOT read. `empty` is deliberately absent: it
+#: means the input was read and carries nothing, which is an answer.
+FATAL_REASONS = (ABSENT, FORBIDDEN, MALFORMED, TRUNCATED, UNREACHABLE)
+
+#: Record fields whose unreadability is fatal — the five REQUIRED inputs, seen
+#: from the record's side rather than the fetch layer's.
+FATAL_FIELDS = ("pr", "closing_issue", "diff", "checks", "nearest_rules")
+
+#: Named explicitly rather than matched by prefix, so a new field cannot become
+#: non-fatal by accident of what it is called.
+NEVER_FATAL_FIELDS = (
+    "required_gate",
+    "required_gate.org_rulesets",
+    "closing_issue.closing_refs",
+)
+
+
 def is_fatal(skip_entry: Mapping[str, str]) -> bool:
     """Whether one skip entry means the process must exit non-zero.
 
-    A field is fatal when it is one of the REQUIRED record sections. The two
-    SKIP-ONLY carve-outs are named explicitly rather than by prefix so that a new
-    field cannot become non-fatal by accident of its name.
+    Two rules, and the first outranks the second:
+
+    1. **``empty`` is never fatal, for any field.** An empty answer was *read*.
+       A pull request whose head commit has no check runs yet, and a pull request
+       whose check list could not be fetched, are different facts — and treating
+       the first as a failure is the same conflation, pointed the other way, as
+       treating the second as "no checks are required".
+    2. Otherwise a field is fatal when it is one of the five REQUIRED inputs.
     """
+    if skip_entry["reason"] == EMPTY:
+        return False
     field_name = skip_entry["field"]
-    if field_name in ("required_gate.org_rulesets", "closing_issue.closing_refs"):
+    if field_name in NEVER_FATAL_FIELDS:
         return False
-    if field_name.startswith("nearest_rules[") and skip_entry["reason"] == EMPTY:
+    if field_name.startswith("nearest_rules["):
         return False
-    if field_name == "required_gate":
-        return False
-    return field_name in ("pr", "closing_issue", "diff", "checks", "nearest_rules")
+    return field_name in FATAL_FIELDS
