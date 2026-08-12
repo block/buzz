@@ -9,7 +9,7 @@ use std::{collections::HashSet, fmt};
 
 use buzz_auth::{
     operator_lifecycle::{VerifiedOperatorLifecycleGrant, VerifiedProvisionBindingIntent},
-    AuthorizationEventCapacityPolicy, FinalizedAuthContext, ProofTransport,
+    AuthorizationEventCapacityPolicy, FinalizedAuthContext, PreparedAuthorization, ProofTransport,
     VerifiedFederatedAssertion, VerifiedNostrProof,
 };
 use buzz_core::{CanonicalCurrentBindingEvidence, CommunityId};
@@ -22,6 +22,49 @@ use uuid::Uuid;
 use crate::{Db, DbError, Result};
 
 const MAX_EVENT_PAGE: u16 = 1_000;
+
+/// Closed protected surfaces sharing the bounded denial bucket family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i16)]
+pub enum ProtectedDenialSurface {
+    /// Invite claim admission.
+    InviteClaim = 2,
+    /// Moderation command admission.
+    Moderation = 3,
+}
+
+/// Closed protected actions represented by denial evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i16)]
+pub enum ProtectedDenialAction {
+    /// Claim one relay invite.
+    InviteClaim = 1,
+    /// Apply one moderation command.
+    ModerationCommand = 2,
+}
+
+/// Coarse durable denial reasons. These values are operational evidence, not
+/// public error detail, and intentionally retain no request coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i16)]
+pub enum ProtectedDenialReason {
+    /// Required command proof or assertion was absent.
+    MissingProof = 1,
+    /// A supplied command proof or assertion was malformed or unverifiable.
+    InvalidProof = 2,
+    /// The configured admission mode closed the protected surface.
+    ModeDenied = 3,
+    /// Current authority or policy did not permit the operation.
+    AuthorizationDenied = 4,
+    /// The protected resource was expired, exhausted, banned, or revoked.
+    ResourceDenied = 5,
+    /// Commit-time policy or authority state superseded preparation.
+    PolicySuperseded = 6,
+    /// Replay or intent identity conflicted with retained state.
+    ReplayConflict = 7,
+    /// A required audit, database, or verifier dependency was unavailable.
+    DependencyUnavailable = 8,
+}
 
 /// Closed operation kinds stored in the single canonical receipt table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,6 +291,8 @@ pub enum AuthorizationReasonCode {
     IntentConflict = 15,
     /// Explicit withdrawal.
     Withdrawn = 16,
+    /// A replay identity was rejected rather than accepted as an exact replay.
+    ReplayRejected = 17,
 }
 
 /// Pseudonymous actor classification derived only from sealed or
@@ -315,6 +360,23 @@ pub struct AuthorizationEventActor {
 }
 
 impl AuthorizationEventActor {
+    /// Derive direct/delegated attribution from one sealed prepared route.
+    pub(crate) fn from_prepared_authorization(prepared: &PreparedAuthorization) -> Result<Self> {
+        let snapshot = prepared.recheck_request().lease_dependencies();
+        let (_, domain) = snapshot.identity();
+        let (_, actor, owner) = snapshot.authority();
+        let relationship = snapshot
+            .delegated_relationship()
+            .map(|(id, revision, _)| (id, revision));
+        actor_from_route_coordinates(
+            domain,
+            actor.to_bytes(),
+            owner.map(|value| value.to_bytes()),
+            snapshot.binding(),
+            relationship,
+        )
+    }
+
     /// Derive operator attribution only from one origin-sealed lifecycle
     /// grant. Callers cannot select the actor class or fingerprint.
     pub fn from_verified_operator_grant(grant: &VerifiedOperatorLifecycleGrant) -> Result<Self> {
@@ -468,7 +530,7 @@ impl AuthorizationEventActor {
         self.kind
     }
 
-    const fn fingerprint(&self) -> Option<[u8; 32]> {
+    pub(crate) const fn fingerprint(&self) -> Option<[u8; 32]> {
         self.fingerprint
     }
 
@@ -1377,6 +1439,42 @@ impl Db {
         })
     }
 
+    /// Increment one fixed-cardinality, redacted protected-denial bucket.
+    ///
+    /// This uses an independent autocommit statement, so a denial remains
+    /// observable after an admission transaction rolls back. The bucket stores
+    /// only closed coordinates, a bounded count, and authoritative timestamps.
+    pub async fn record_protected_denial_bucket(
+        &self,
+        community_id: CommunityId,
+        surface: ProtectedDenialSurface,
+        reason: ProtectedDenialReason,
+        action: ProtectedDenialAction,
+    ) -> Result<u64> {
+        if community_id.as_uuid().is_nil() {
+            return Err(DbError::InvalidData(
+                "protected denial bucket coordinate is invalid".to_owned(),
+            ));
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT authorization_denial_bucket_record_v1($1,$2,$3,$4)")
+                .bind(community_id.as_uuid())
+                .bind(surface as i16)
+                .bind(reason as i16)
+                .bind(action as i16)
+                .fetch_one(&self.pool)
+                .await?;
+        nonnegative(count).and_then(|value| {
+            if value == 0 {
+                Err(DbError::InvalidData(
+                    "protected denial bucket count is invalid".to_owned(),
+                ))
+            } else {
+                Ok(value)
+            }
+        })
+    }
+
     /// Read immutable-capacity health for readiness and operator controls.
     pub async fn authorization_event_capacity_health(
         &self,
@@ -1684,6 +1782,7 @@ mod tests {
     fn page_limits_are_bounded() {
         assert_eq!(MAX_EVENT_PAGE, 1_000);
         assert_eq!(AuthorizationAuditFailureCode::CapacityExhausted as i16, 1);
+        assert_eq!(AuthorizationReasonCode::ReplayRejected as i16, 17);
     }
 
     #[test]

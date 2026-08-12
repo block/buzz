@@ -60,7 +60,12 @@ pub use nip42::{
     generate_challenge, verify_nip42_authorization_proof, verify_nip42_event,
     Nip42AuthorizationProofError,
 };
-pub use nip98::verify_nip98_event;
+pub use nip98::{
+    verify_nip42_moderation_command_proof, verify_nip98_event, verify_nip98_invite_claim_proof,
+    verify_nip98_moderation_command_proof, Nip42ModerationCommandCoordinates,
+    Nip98InviteClaimCoordinates, Nip98ModerationCommandCoordinates, VerifiedModerationCommandProof,
+    VerifiedNip98InviteClaimProof,
+};
 pub use nip98_replay::{
     nip98_replay_key, nip98_replay_key_for_scope, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS,
     MAX_REPLAY_TTL_SECS,

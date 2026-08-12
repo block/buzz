@@ -13,6 +13,11 @@ fn operator_audit_upgrade_is_bounded_and_uses_constant_time_capacity() {
         "recovery_generation",
         "authorization_event_capacity_before_insert_v2",
         "authorization_operator_denial_buckets",
+        "authorization_denial_bucket_record_v1",
+        "surface_kind",
+        "lifetime_count",
+        "clock_timestamp()",
+        "at most 960 rows",
         "selected_slot := (generation % 12)::SMALLINT",
         "authorization_operator_denial_bucket_record_v1",
     ] {
@@ -25,6 +30,20 @@ fn operator_audit_upgrade_is_bounded_and_uses_constant_time_capacity() {
     assert!(
         !OPERATOR_AUDIT_SQL.contains("CREATE TABLE authorization_operator_preauth_denial_events")
     );
+    for sensitive in [
+        "actor_fingerprint",
+        "request_fingerprint",
+        "subject_fingerprint",
+        "canonical_envelope",
+        "token_hash",
+    ] {
+        let bucket_definition = OPERATOR_AUDIT_SQL
+            .split("CREATE TABLE authorization_operator_denial_buckets")
+            .nth(1)
+            .and_then(|sql| sql.split(");").next())
+            .expect("bounded denial bucket definition");
+        assert!(!bucket_definition.contains(sensitive));
+    }
 }
 
 #[tokio::test]
@@ -147,6 +166,82 @@ async fn operator_0034_reserves_restrictive_audit_and_recovers_by_generation() {
     .await
     .expect("count bounded denial rows");
     assert_eq!(bucket_rows, 1);
+
+    for expected_count in 1_i64..=4 {
+        let retained: i64 =
+            sqlx::query_scalar("SELECT authorization_denial_bucket_record_v1($1,$2,$3,$4)")
+                .bind(community_id)
+                .bind(2_i16)
+                .bind(1_i16)
+                .bind(1_i16)
+                .fetch_one(&pool)
+                .await
+                .expect("record bounded invite denial");
+        assert_eq!(retained, expected_count);
+    }
+    let protected_bucket: (i64, i64, i16) = sqlx::query_as(
+        "SELECT denial_count,lifetime_count,surface_kind \
+         FROM authorization_operator_denial_buckets \
+         WHERE community_id=$1 AND surface_kind=2 AND denial_class=1 AND action_kind=1",
+    )
+    .bind(community_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read bounded invite denial");
+    assert_eq!(protected_bucket, (4, 4, 2));
+    let invalid_cross_product =
+        sqlx::query_scalar::<_, i64>("SELECT authorization_denial_bucket_record_v1($1,$2,$3,$4)")
+            .bind(community_id)
+            .bind(2_i16)
+            .bind(1_i16)
+            .bind(2_i16)
+            .fetch_one(&pool)
+            .await
+            .expect_err("invite surface rejects moderation action");
+    assert_eq!(
+        invalid_cross_product
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned())),
+        Some("23514".to_owned())
+    );
+
+    let concurrent: Vec<_> = (0..32)
+        .map(|_| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT authorization_denial_bucket_record_v1($1,$2,$3,$4)",
+                )
+                .bind(community_id)
+                .bind(2_i16)
+                .bind(1_i16)
+                .bind(1_i16)
+                .fetch_one(&pool)
+                .await
+            })
+        })
+        .collect();
+    for write in concurrent {
+        assert!(write.await.expect("join concurrent denial writer").is_ok());
+    }
+    let concurrent_counts: (i64, i64) = sqlx::query_as(
+        "SELECT denial_count,lifetime_count \
+         FROM authorization_operator_denial_buckets \
+         WHERE community_id=$1 AND surface_kind=2 AND denial_class=1 AND action_kind=1",
+    )
+    .bind(community_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read concurrent denial count");
+    assert_eq!(concurrent_counts, (36, 36));
+    let total_bucket_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM authorization_operator_denial_buckets WHERE community_id=$1",
+    )
+    .bind(community_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count shared bounded denial rows");
+    assert_eq!(total_bucket_rows, 2);
 }
 
 async fn insert_authenticated_event(

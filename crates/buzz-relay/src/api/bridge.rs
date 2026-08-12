@@ -127,6 +127,19 @@ pub(crate) fn verify_bridge_auth_with_options(
     Err(api_error(StatusCode::UNAUTHORIZED, "missing Nostr auth"))
 }
 
+fn exact_nip98_authorization_event(headers: &HeaderMap) -> Option<Arc<str>> {
+    let mut values = headers.get_all("authorization").iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let encoded = value.strip_prefix("Nostr ")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    String::from_utf8(bytes).ok().map(Arc::<str>::from)
+}
+
 /// Corporate identity enrollment must always start from cryptographic proof of
 /// the Nostr key. The development-only `X-Pubkey` fallback is caller-controlled
 /// and therefore cannot safely participate in a durable identity binding.
@@ -891,10 +904,21 @@ async fn submit_event_authed(
     }
 
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+    let moderation_evidence = buzz_core::kind::is_moderation_command_kind(kind_u32)
+        .then(|| {
+            exact_nip98_authorization_event(headers).map(|authorization_event| {
+                crate::handlers::ingest::ModerationTransportEvidence::Nip98 {
+                    authorization_event,
+                    body: axum::body::Bytes::copy_from_slice(body),
+                }
+            })
+        })
+        .flatten();
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        moderation_evidence,
     };
 
     match crate::handlers::ingest::ingest_event(state, tenant, event, auth).await {

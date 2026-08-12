@@ -14,18 +14,24 @@ use std::{
 };
 
 use buzz_auth::{
-    AuthoritativeAuthorizationRecheck, AuthorizationError, AuthorizationFinalizationRechecker,
-    AuthorizationFinalizer, AuthorizationInput, AuthorizationReason, DirectEnrollmentProposal,
-    FinalizedAuthContext, LocalAuthorizationPolicy, LocalBindingResolution, PreparedAuthorization,
-    PreparedAuthorizationRecheck, ProofTransport, RouteCapability, VerifiedFederatedAssertion,
-    VerifiedNostrProof,
+    ActiveLocalBinding, AuthoritativeAuthorizationRecheck, AuthorizationError,
+    AuthorizationFinalizationRechecker, AuthorizationFinalizer, AuthorizationInput,
+    AuthorizationReason, DirectEnrollmentProposal, FinalizedAuthContext, LocalAuthorizationPolicy,
+    LocalBindingResolution, PreparedAuthorization, PreparedAuthorizationRecheck, ProofTransport,
+    RouteCapability, VerifiedFederatedAssertion, VerifiedModerationCommandProof,
+    VerifiedNip98InviteClaimProof, VerifiedNostrProof, VerifierPolicyStamp,
 };
-use buzz_core::CommunityId;
-use chrono::{DateTime, Datelike, Utc};
+use buzz_core::{AuthorizationLeaseFence, CommunityId};
+use chrono::{DateTime, Datelike, Duration as TimeDelta, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::authorization_events::{
+    record_authorization_event_tx, AuthorizationAuditFailureCode, AuthorizationEventActor,
+    AuthorizationEventKind, AuthorizationEventOutcome, AuthorizationEventWriteError,
+    AuthorizationReasonCode, NewAuthorizationEvent,
+};
 use crate::identity_enrollment::{
     actor_fingerprint, execute_authoritative_enrollment_tx, EnrollmentDisposition,
     IdentityEnrollmentError, PreparedDirectEnrollment,
@@ -46,10 +52,12 @@ pub enum AdmissionObjectKind {
     ModerationTarget,
     /// One audio session.
     AudioSession,
+    /// One server-resolved invitation.
+    Invitation,
 }
 
 impl AdmissionObjectKind {
-    /// Stable database code shared with `protected_object_authority`.
+    /// Stable durable namespace code shared with `protected_object_authority`.
     pub const fn database_code(self) -> i16 {
         match self {
             Self::Domain => 1,
@@ -58,6 +66,7 @@ impl AdmissionObjectKind {
             Self::Media => 4,
             Self::ModerationTarget => 5,
             Self::AudioSession => 6,
+            Self::Invitation => 9,
         }
     }
 }
@@ -271,6 +280,7 @@ pub struct AdmissionCommitRequest {
     object: AdmissionObject,
     replay_claim: Option<AdmissionReplayClaim>,
     application_effect: Option<Box<dyn AdmissionApplicationEffect>>,
+    semantic_fingerprint_override: Option<[u8; 32]>,
     preparation: AdmissionPreparation,
 }
 
@@ -289,6 +299,7 @@ impl AdmissionCommitRequest {
             object,
             replay_claim: None,
             application_effect: None,
+            semantic_fingerprint_override: None,
             preparation: AdmissionPreparation::Existing {
                 prepared: Box::new(prepared),
             },
@@ -312,6 +323,7 @@ impl AdmissionCommitRequest {
             object,
             replay_claim: None,
             application_effect: None,
+            semantic_fingerprint_override: None,
             preparation: AdmissionPreparation::Enrollment {
                 correlation_id,
                 capability,
@@ -363,6 +375,17 @@ impl AdmissionCommitRequest {
         Ok(self)
     }
 
+    fn with_semantic_fingerprint_override(
+        mut self,
+        semantic_fingerprint: [u8; 32],
+    ) -> Result<Self, AdmissionCommitError> {
+        if semantic_fingerprint == [0; 32] {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        self.semantic_fingerprint_override = Some(semantic_fingerprint);
+        Ok(self)
+    }
+
     /// Domain sealed by the independently verified evidence.
     pub fn authorization_domain(&self) -> CommunityId {
         match &self.preparation {
@@ -388,6 +411,33 @@ impl AdmissionCommitRequest {
         }
     }
 
+    fn denial_actor(&self) -> Result<AuthorizationEventActor, AdmissionCommitError> {
+        match &self.preparation {
+            AdmissionPreparation::Existing { prepared } => {
+                AuthorizationEventActor::from_prepared_authorization(prepared)
+            }
+            AdmissionPreparation::Enrollment { evidence, .. } => {
+                AuthorizationEventActor::from_verified_direct_enrollment(
+                    &evidence.assertion,
+                    &evidence.proof,
+                )
+            }
+        }
+        .map_err(|_| AdmissionCommitError::AuthorizationDenied)
+    }
+
+    fn denial_correlation_id(&self) -> Uuid {
+        match &self.preparation {
+            AdmissionPreparation::Enrollment { correlation_id, .. } => *correlation_id,
+            AdmissionPreparation::Existing { prepared } => prepared.correlation_id(),
+        }
+    }
+
+    /// Server-generated correlation identifier sealed by the prepared authority.
+    pub fn correlation_id(&self) -> Uuid {
+        self.denial_correlation_id()
+    }
+
     /// Exact provider-free transport binding sealed by the prepared witness.
     ///
     /// Trusted transport adapters must compare both values byte-for-byte with
@@ -408,6 +458,9 @@ impl AdmissionCommitRequest {
 
     /// Full canonical route/application intent persisted with the receipt.
     pub fn semantic_fingerprint(&self) -> [u8; 32] {
+        if let Some(semantic_fingerprint) = self.semantic_fingerprint_override {
+            return semantic_fingerprint;
+        }
         let domain = self.authorization_domain();
         let request_fingerprint = self.request_fingerprint();
         let (
@@ -652,6 +705,57 @@ impl fmt::Debug for AdmissionCommitReceipt {
     }
 }
 
+/// Server-derived coordinates for validating one fresh application result.
+///
+/// The canonical committer creates this value from its pre-commit application
+/// context. Application adapters can therefore validate a returned result
+/// without treating fields reconstructed from the durable receipt as expected
+/// values. Exact replay never exposes a fresh binding.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionApplicationResultBinding {
+    authorization_domain: CommunityId,
+    object: AdmissionObject,
+    semantic_fingerprint: [u8; 32],
+    application_intent_digest: [u8; 32],
+}
+
+impl AdmissionApplicationResultBinding {
+    fn from_context(context: &AdmissionApplicationContext<'_>) -> Self {
+        Self {
+            authorization_domain: context.authorization_domain(),
+            object: context.object(),
+            semantic_fingerprint: *context.semantic_fingerprint(),
+            application_intent_digest: *context.application_intent_digest(),
+        }
+    }
+
+    /// Server-owned authorization domain.
+    pub const fn authorization_domain(self) -> CommunityId {
+        self.authorization_domain
+    }
+
+    /// Server-resolved application object.
+    pub const fn object(self) -> AdmissionObject {
+        self.object
+    }
+
+    /// Complete canonical admission semantic fingerprint.
+    pub const fn semantic_fingerprint(&self) -> &[u8; 32] {
+        &self.semantic_fingerprint
+    }
+
+    /// Effect-owned intent digest captured before application DML.
+    pub const fn application_intent_digest(&self) -> &[u8; 32] {
+        &self.application_intent_digest
+    }
+}
+
+impl fmt::Debug for AdmissionApplicationResultBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AdmissionApplicationResultBinding([REDACTED])")
+    }
+}
+
 /// Atomic canonical-admission result.
 pub enum AdmissionCommitOutcome {
     /// This transaction committed every required authority effect.
@@ -662,6 +766,8 @@ pub enum AdmissionCommitOutcome {
         receipt: AdmissionCommitReceipt,
         /// Fresh closed application result, when application DML participated.
         application_result: Option<AdmissionApplicationResult>,
+        /// Pre-commit coordinates for independently validating that result.
+        application_result_binding: Option<AdmissionApplicationResultBinding>,
     },
     /// The exact operation and request were committed previously.
     ExactReplay {
@@ -696,6 +802,21 @@ pub enum AdmissionCommitError {
     /// A proxy nonce or proof replay identity was already consumed.
     #[error("canonical admission replay rejected")]
     ReplayRejected,
+    /// Invalid canonical input was already retained as denial evidence.
+    #[error("recorded invalid canonical admission request")]
+    RecordedInvalidRequest,
+    /// Authorization denial was already retained as canonical evidence.
+    #[error("recorded canonical admission denial")]
+    RecordedAuthorizationDenied,
+    /// An intent conflict was already retained as canonical denial evidence.
+    #[error("recorded canonical admission intent conflict")]
+    RecordedIntentConflict,
+    /// A replay rejection was already retained as canonical denial evidence.
+    #[error("recorded canonical admission replay rejection")]
+    RecordedReplayRejected,
+    /// Audit unavailability was already retained as canonical denial evidence.
+    #[error("recorded canonical authorization audit unavailable")]
+    RecordedAuditUnavailable,
     /// Required canonical audit evidence could not be retained.
     #[error("canonical authorization audit unavailable")]
     AuditUnavailable,
@@ -711,6 +832,51 @@ pub enum CanonicalInviteClaimOutcome {
     Joined,
     /// Membership already existed and no invite use was consumed.
     AlreadyMember,
+}
+
+/// Whether canonical invite admission executed application DML or reused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalInviteClaimDisposition {
+    /// This request committed the stored invite outcome.
+    Fresh,
+    /// This request returned an already committed exact outcome.
+    ExactReplay,
+}
+
+/// Origin-sealed canonical invite result returned to the relay adapter.
+///
+/// The outcome preserves the original public response on exact replay. The
+/// disposition prevents callers from repeating post-commit side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalInviteClaimResult {
+    outcome: CanonicalInviteClaimOutcome,
+    disposition: CanonicalInviteClaimDisposition,
+}
+
+impl CanonicalInviteClaimResult {
+    const fn fresh(outcome: CanonicalInviteClaimOutcome) -> Self {
+        Self {
+            outcome,
+            disposition: CanonicalInviteClaimDisposition::Fresh,
+        }
+    }
+
+    const fn exact_replay(outcome: CanonicalInviteClaimOutcome) -> Self {
+        Self {
+            outcome,
+            disposition: CanonicalInviteClaimDisposition::ExactReplay,
+        }
+    }
+
+    /// Original typed outcome stored by canonical admission.
+    pub const fn outcome(self) -> CanonicalInviteClaimOutcome {
+        self.outcome
+    }
+
+    /// Whether this call committed or reused the stored outcome.
+    pub const fn disposition(self) -> CanonicalInviteClaimDisposition {
+        self.disposition
+    }
 }
 
 impl CanonicalInviteClaimOutcome {
@@ -1151,7 +1317,7 @@ impl AdmissionApplicationEffect for CanonicalInviteClaimEffect {
     > {
         Box::pin(async move {
             if context.authorization().capability() != RouteCapability::InviteClaim
-                || context.object().kind() != AdmissionObjectKind::Domain
+                || context.object().kind() != AdmissionObjectKind::Invitation
             {
                 return Err(AdmissionCommitError::AuthorizationDenied);
             }
@@ -1162,6 +1328,7 @@ impl AdmissionApplicationEffect for CanonicalInviteClaimEffect {
                 self.token_hash,
                 self.policy_version.as_deref(),
                 self.intent_digest,
+                *context.object().key(),
             )
             .await
         })
@@ -1175,19 +1342,17 @@ async fn apply_canonical_invite_claim_tx(
     token_hash: [u8; 32],
     policy_version: Option<&str>,
     intent_digest: [u8; 32],
+    expected_resource_key: [u8; 32],
 ) -> Result<AdmissionApplicationOutcome, AdmissionCommitError> {
     if domain.as_uuid().is_nil()
         || actor_pubkey.len() != 64
         || !actor_pubkey.bytes().all(|byte| byte.is_ascii_hexdigit())
         || token_hash == [0; 32]
         || intent_digest == [0; 32]
+        || expected_resource_key == [0; 32]
     {
         return Err(AdmissionCommitError::InvalidRequest);
     }
-    let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
     let invite = sqlx::query(
         r#"
         SELECT id, max_uses, use_count, expires_at
@@ -1214,11 +1379,27 @@ async fn apply_canonical_invite_claim_tx(
     let expires_at: DateTime<Utc> = invite
         .try_get("expires_at")
         .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    if canonical_invite_resource_key(domain, invite_id) != expected_resource_key {
+        return Err(AdmissionCommitError::AuthorizationDenied);
+    }
+    let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
     if invite_id.is_nil()
         || use_count < 0
         || max_uses.is_some_and(|maximum| maximum <= 0 || use_count > maximum)
         || expires_at <= authoritative_now
     {
+        return Err(AdmissionCommitError::AuthorizationDenied);
+    }
+
+    let actor_bytes =
+        hex::decode(actor_pubkey).map_err(|_| AdmissionCommitError::InvalidRequest)?;
+    let restrictions = crate::moderation::restriction_state_tx(transaction, domain, &actor_bytes)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    if restrictions.banned {
         return Err(AdmissionCommitError::AuthorizationDenied);
     }
 
@@ -1232,6 +1413,7 @@ async fn apply_canonical_invite_claim_tx(
     .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
     .is_some();
     if existing {
+        recheck_invite_claimability_tx(transaction, domain, invite_id, use_count).await?;
         persist_invite_policy_acceptance(transaction, domain, actor_pubkey, policy_version).await?;
         return invite_application_outcome(
             intent_digest,
@@ -1239,6 +1421,14 @@ async fn apply_canonical_invite_claim_tx(
         );
     }
     if max_uses.is_some_and(|maximum| use_count >= maximum) {
+        return Err(AdmissionCommitError::AuthorizationDenied);
+    }
+
+    let final_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    if final_now >= expires_at {
         return Err(AdmissionCommitError::AuthorizationDenied);
     }
 
@@ -1252,8 +1442,9 @@ async fn apply_canonical_invite_claim_tx(
     .await
     .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
     .rows_affected();
-    persist_invite_policy_acceptance(transaction, domain, actor_pubkey, policy_version).await?;
     if inserted == 0 {
+        recheck_invite_claimability_tx(transaction, domain, invite_id, use_count).await?;
+        persist_invite_policy_acceptance(transaction, domain, actor_pubkey, policy_version).await?;
         return invite_application_outcome(
             intent_digest,
             CanonicalInviteClaimOutcome::AlreadyMember,
@@ -1262,12 +1453,15 @@ async fn apply_canonical_invite_claim_tx(
     if inserted != 1 {
         return Err(AdmissionCommitError::DependencyUnavailable);
     }
+    persist_invite_policy_acceptance(transaction, domain, actor_pubkey, policy_version).await?;
     let next_use_count = use_count
         .checked_add(1)
         .ok_or(AdmissionCommitError::DependencyUnavailable)?;
     let updated = sqlx::query(
         "UPDATE relay_invites SET use_count=$1 \
-         WHERE community_id=$2 AND id=$3 AND use_count=$4",
+         WHERE community_id=$2 AND id=$3 AND use_count=$4 \
+           AND expires_at > clock_timestamp() \
+           AND (max_uses IS NULL OR use_count < max_uses)",
     )
     .bind(next_use_count)
     .bind(domain.as_uuid())
@@ -1277,9 +1471,34 @@ async fn apply_canonical_invite_claim_tx(
     .await
     .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
     if updated.rows_affected() != 1 {
-        return Err(AdmissionCommitError::DependencyUnavailable);
+        return Err(AdmissionCommitError::AuthorizationDenied);
     }
     invite_application_outcome(intent_digest, CanonicalInviteClaimOutcome::Joined)
+}
+
+async fn recheck_invite_claimability_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    domain: CommunityId,
+    invite_id: Uuid,
+    expected_use_count: i32,
+) -> Result<(), AdmissionCommitError> {
+    let claimable: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM relay_invites \
+         WHERE community_id=$1 AND id=$2 AND use_count=$3 \
+           AND expires_at > clock_timestamp() \
+           AND (max_uses IS NULL OR use_count < max_uses))",
+    )
+    .bind(domain.as_uuid())
+    .bind(invite_id)
+    .bind(expected_use_count)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    if claimable {
+        Ok(())
+    } else {
+        Err(AdmissionCommitError::AuthorizationDenied)
+    }
 }
 
 async fn persist_invite_policy_acceptance(
@@ -1335,6 +1554,768 @@ pub trait AdmissionFinalRechecker: Send + Sync {
     >;
 }
 
+/// External verifier-generation recheck required inside final admission.
+///
+/// Implementations retain only verifier policy and key-generation state. They
+/// must not accept assertions, credentials, or caller-selected coordinates.
+pub trait AdmissionVerifierRechecker: Send + Sync {
+    /// Confirm that one prepared verifier stamp is still current.
+    fn recheck<'a>(
+        &'a self,
+        expected: VerifierPolicyStamp,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AdmissionCommitError>> + Send + 'a>>;
+}
+
+/// Server-resolved invitation resource accepted by canonical admission.
+///
+/// Construction is restricted to the read-only database resolver so callers
+/// cannot substitute a client-selected token digest or generic domain target.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalInviteResource {
+    key: [u8; 32],
+}
+
+impl CanonicalInviteResource {
+    /// Exact opaque invitation fingerprint used by proof verification.
+    pub const fn fingerprint(self) -> [u8; 32] {
+        self.key
+    }
+}
+
+impl fmt::Debug for CanonicalInviteResource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CanonicalInviteResource([REDACTED])")
+    }
+}
+
+struct CanonicalModerationFinalRechecker;
+
+impl AdmissionFinalRechecker for CanonicalModerationFinalRechecker {
+    fn authoritative_recheck<'a, 'transaction>(
+        &'a self,
+        transaction: &'a mut Transaction<'transaction, Postgres>,
+        request: &'a PreparedAuthorizationRecheck,
+        object: AdmissionObject,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<AuthoritativeAuthorizationRecheck, AdmissionCommitError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let snapshot = request.lease_dependencies();
+            let (_, domain) = snapshot.identity();
+            let (capability, actor, owner) = snapshot.authority();
+            let (binding_id, binding_version) = snapshot.binding();
+            let (request_fingerprint, target, _, _) = snapshot.request_binding();
+            let (policy_revision, invalidation_generation, authority_epoch) =
+                snapshot.dependency_versions();
+            if object.kind() != AdmissionObjectKind::ModerationTarget
+                || target != object.key()
+                || capability != RouteCapability::Moderation
+                || owner.is_some()
+                || request_fingerprint == &[0; 32]
+                || request.verifier_stamp().is_some()
+            {
+                return Err(AdmissionCommitError::AuthorizationDenied);
+            }
+
+            let actor_bytes = actor.to_bytes();
+            let binding_current: Option<bool> = sqlx::query_scalar(
+                "SELECT binding_state=1 \
+                        AND (expires_at IS NULL OR transaction_timestamp() < expires_at) \
+                 FROM identity_bindings \
+                 WHERE community_id=$1 AND binding_id=$2 AND binding_version=$3 \
+                   AND event_author_pubkey=$4 FOR SHARE",
+            )
+            .bind(domain.as_uuid())
+            .bind(binding_id)
+            .bind(to_i64(binding_version)?)
+            .bind(actor_bytes.as_slice())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            sqlx::query("LOCK TABLE identity_enrollment_policies IN SHARE MODE")
+                .execute(&mut **transaction)
+                .await
+                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let current_policy: Option<i64> = sqlx::query_scalar(
+                "SELECT MAX(policy_revision) FROM identity_enrollment_policies \
+                 WHERE community_id=$1 AND effective_at <= transaction_timestamp() \
+                   AND (expires_at IS NULL OR transaction_timestamp() < expires_at)",
+            )
+            .bind(domain.as_uuid())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let current_generation: Option<i64> = sqlx::query_scalar(
+                "SELECT current_generation FROM authorization_invalidation_domains \
+                 WHERE community_id=$1 FOR SHARE",
+            )
+            .bind(domain.as_uuid())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let current_epoch: Option<i64> = sqlx::query_scalar(
+                "SELECT authority_epoch FROM authorization_authority_epochs \
+                 WHERE community_id=$1 AND object_kind=$2 AND object_key=$3 FOR UPDATE",
+            )
+            .bind(domain.as_uuid())
+            .bind(object.kind().database_code())
+            .bind(object.key().as_slice())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let next_epoch = current_epoch
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+            if binding_current != Some(true)
+                || current_policy != Some(to_i64(policy_revision)?)
+                || current_generation != Some(to_i64_allow_zero(invalidation_generation)?)
+                || next_epoch != to_i64(authority_epoch)?
+            {
+                return Err(AdmissionCommitError::AuthorizationDenied);
+            }
+            let authoritative_now: DateTime<Utc> =
+                sqlx::query_scalar("SELECT transaction_timestamp()")
+                    .fetch_one(&mut **transaction)
+                    .await
+                    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            Ok(AuthoritativeAuthorizationRecheck::from_authoritative_parts(
+                snapshot,
+                None,
+                authoritative_now,
+            ))
+        })
+    }
+}
+
+impl crate::Db {
+    /// Resolve current local authority for one exact verified moderation
+    /// command without performing any mutation.
+    pub async fn prepare_canonical_moderation_request(
+        &self,
+        proof: VerifiedModerationCommandProof,
+        object: AdmissionObject,
+    ) -> Result<AdmissionCommitRequest, AdmissionCommitError> {
+        if object.kind() != AdmissionObjectKind::ModerationTarget {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        let domain = proof.authorization_domain();
+        if proof.target_fingerprint() != object.key() {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        let actor = proof.actor_pubkey();
+        let proof_expires_at = proof.expires_at();
+        let request_fingerprint = *proof.request_fingerprint();
+        let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+        let row = sqlx::query(
+            "SELECT issuer, subject, binding_id, binding_version, expires_at \
+             FROM identity_bindings \
+             WHERE community_id=$1 AND event_author_pubkey=$2 AND binding_state=1 \
+               AND (expires_at IS NULL OR $3 < expires_at)",
+        )
+        .bind(domain.as_uuid())
+        .bind(actor.as_bytes())
+        .bind(authoritative_now)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
+        .ok_or(AdmissionCommitError::AuthorizationDenied)?;
+        let binding_version = u64::try_from(
+            row.try_get::<i64, _>("binding_version")
+                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+        )
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+        let binding = ActiveLocalBinding::from_storage_parts(
+            domain,
+            row.try_get("issuer")
+                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+            row.try_get("subject")
+                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+            row.try_get("binding_id")
+                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+            binding_version,
+            actor,
+            row.try_get("expires_at")
+                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+        )
+        .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+        let policy = prepare_moderation_authorization_policy(
+            &self.pool,
+            domain,
+            object,
+            proof_expires_at,
+            authoritative_now,
+        )
+        .await?;
+        let prepared = proof
+            .prepare_authorization(binding, policy, authoritative_now)
+            .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
+        let semantic_fingerprint = admission_framed_digest(
+            b"buzz:canonical-moderation-admission:v1",
+            &[
+                domain.as_uuid().as_bytes(),
+                actor.as_bytes(),
+                &request_fingerprint,
+                &(object.kind().database_code()).to_be_bytes(),
+                object.key(),
+                b"Moderation",
+            ],
+        );
+        AdmissionCommitRequest::existing(Uuid::new_v4(), object, prepared)?
+            .with_semantic_fingerprint_override(semantic_fingerprint)
+    }
+
+    /// Build the sole PostgreSQL committer for prepared moderation authority.
+    pub fn canonical_moderation_committer(&self) -> PostgresCanonicalAdmissionCommitter {
+        PostgresCanonicalAdmissionCommitter::new(
+            self.pool.clone(),
+            Arc::new(CanonicalModerationFinalRechecker),
+        )
+    }
+}
+
+async fn prepare_moderation_authorization_policy(
+    pool: &PgPool,
+    domain: CommunityId,
+    object: AdmissionObject,
+    proof_expires_at: DateTime<Utc>,
+    authoritative_now: DateTime<Utc>,
+) -> Result<LocalAuthorizationPolicy, AdmissionCommitError> {
+    let policy = sqlx::query(
+        "SELECT policy_revision, expires_at FROM identity_enrollment_policies \
+         WHERE community_id=$1 AND effective_at <= $2 \
+           AND (expires_at IS NULL OR $2 < expires_at) \
+         ORDER BY policy_revision DESC LIMIT 1",
+    )
+    .bind(domain.as_uuid())
+    .bind(authoritative_now)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
+    .ok_or(AdmissionCommitError::AuthorizationDenied)?;
+    let policy_revision = u64::try_from(
+        policy
+            .try_get::<i64, _>("policy_revision")
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+    )
+    .ok()
+    .filter(|value| *value > 0)
+    .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+    let policy_expires_at: Option<DateTime<Utc>> = policy
+        .try_get("expires_at")
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let invalidation_generation: i64 = sqlx::query_scalar(
+        "SELECT current_generation FROM authorization_invalidation_domains WHERE community_id=$1",
+    )
+    .bind(domain.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
+    .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+    let invalidation_generation = u64::try_from(invalidation_generation)
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let current_epoch: Option<i64> = sqlx::query_scalar(
+        "SELECT authority_epoch FROM authorization_authority_epochs \
+         WHERE community_id=$1 AND object_kind=$2 AND object_key=$3",
+    )
+    .bind(domain.as_uuid())
+    .bind(object.kind().database_code())
+    .bind(object.key().as_slice())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let authority_epoch = u64::try_from(
+        current_epoch
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(AdmissionCommitError::DependencyUnavailable)?,
+    )
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let fence_bytes: Vec<u8> =
+        sqlx::query_scalar("SELECT uuid_send(gen_random_uuid()) || uuid_send(gen_random_uuid())")
+            .fetch_one(pool)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let fence = AuthorizationLeaseFence::from_bytes(
+        fence_bytes
+            .try_into()
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+    )
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let mut expires_at = proof_expires_at.min(authoritative_now + TimeDelta::minutes(1));
+    if let Some(policy_expires_at) = policy_expires_at {
+        expires_at = expires_at.min(policy_expires_at);
+    }
+    if expires_at <= authoritative_now {
+        return Err(AdmissionCommitError::AuthorizationDenied);
+    }
+    LocalAuthorizationPolicy::from_database(
+        domain,
+        Uuid::new_v4(),
+        policy_revision,
+        invalidation_generation,
+        authority_epoch,
+        fence,
+        RouteCapability::Moderation,
+        expires_at,
+        None,
+        None,
+    )
+    .ok_or(AdmissionCommitError::DependencyUnavailable)
+}
+
+struct CanonicalInviteFinalRechecker {
+    verifier: Arc<dyn AdmissionVerifierRechecker>,
+}
+
+impl AdmissionFinalRechecker for CanonicalInviteFinalRechecker {
+    fn authoritative_recheck<'a, 'transaction>(
+        &'a self,
+        transaction: &'a mut Transaction<'transaction, Postgres>,
+        request: &'a PreparedAuthorizationRecheck,
+        object: AdmissionObject,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<AuthoritativeAuthorizationRecheck, AdmissionCommitError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let snapshot = request.lease_dependencies();
+            let (_, domain) = snapshot.identity();
+            let (capability, actor, owner) = snapshot.authority();
+            let (binding_id, binding_version) = snapshot.binding();
+            let (request_fingerprint, target, transport, _) = snapshot.request_binding();
+            let (policy_revision, invalidation_generation, authority_epoch) =
+                snapshot.dependency_versions();
+            if object.kind() != AdmissionObjectKind::Invitation
+                || target != object.key()
+                || capability != RouteCapability::InviteClaim
+                || transport != ProofTransport::Nip98
+                || owner.is_some()
+                || request_fingerprint == &[0; 32]
+            {
+                return Err(AdmissionCommitError::AuthorizationDenied);
+            }
+
+            let actor_bytes = actor.to_bytes();
+            let binding_current: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM identity_bindings \
+                 WHERE community_id=$1 AND binding_id=$2 AND binding_version=$3 \
+                   AND event_author_pubkey=$4 AND binding_state=1 \
+                   AND (expires_at IS NULL OR clock_timestamp() < expires_at))",
+            )
+            .bind(domain.as_uuid())
+            .bind(binding_id)
+            .bind(to_i64(binding_version)?)
+            .bind(actor_bytes.as_slice())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let current_policy: Option<i64> = sqlx::query_scalar(
+                "SELECT MAX(policy_revision) FROM identity_enrollment_policies \
+                 WHERE community_id=$1 AND effective_at <= clock_timestamp() \
+                   AND (expires_at IS NULL OR clock_timestamp() < expires_at)",
+            )
+            .bind(domain.as_uuid())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let current_generation: Option<i64> = sqlx::query_scalar(
+                "SELECT current_generation FROM authorization_invalidation_domains \
+                 WHERE community_id=$1 FOR SHARE",
+            )
+            .bind(domain.as_uuid())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let current_epoch: Option<i64> = sqlx::query_scalar(
+                "SELECT authority_epoch FROM authorization_authority_epochs \
+                 WHERE community_id=$1 AND object_kind=$2 AND object_key=$3 FOR SHARE",
+            )
+            .bind(domain.as_uuid())
+            .bind(object.kind().database_code())
+            .bind(object.key().as_slice())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let next_epoch = current_epoch
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+            if !binding_current
+                || current_policy != Some(to_i64(policy_revision)?)
+                || current_generation != Some(to_i64_allow_zero(invalidation_generation)?)
+                || next_epoch != to_i64(authority_epoch)?
+            {
+                return Err(AdmissionCommitError::AuthorizationDenied);
+            }
+            let verifier_stamp = request
+                .verifier_stamp()
+                .ok_or(AdmissionCommitError::AuthorizationDenied)?;
+            self.verifier.recheck(verifier_stamp).await?;
+            let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            Ok(AuthoritativeAuthorizationRecheck::from_authoritative_parts(
+                snapshot,
+                Some(verifier_stamp),
+                authoritative_now,
+            ))
+        })
+    }
+}
+
+impl crate::Db {
+    /// Resolve one opaque invite digest to its server-owned protected target.
+    pub async fn resolve_canonical_invite_target(
+        &self,
+        domain: CommunityId,
+        token_hash: [u8; 32],
+    ) -> Result<CanonicalInviteResource, AdmissionCommitError> {
+        if domain.as_uuid().is_nil() || token_hash == [0; 32] {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        let invite_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM relay_invites WHERE community_id=$1 AND token_hash=$2",
+        )
+        .bind(domain.as_uuid())
+        .bind(token_hash.as_slice())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
+        .ok_or(AdmissionCommitError::AuthorizationDenied)?;
+        if invite_id.is_nil() {
+            return Err(AdmissionCommitError::AuthorizationDenied);
+        }
+        Ok(CanonicalInviteResource {
+            key: canonical_invite_resource_key(domain, invite_id),
+        })
+    }
+
+    /// Prepare read-only evidence, then claim one invite through canonical admission.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_canonical_invite_claim(
+        &self,
+        assertion: VerifiedFederatedAssertion,
+        proof: VerifiedNip98InviteClaimProof,
+        resource: CanonicalInviteResource,
+        token_hash: [u8; 32],
+        policy_version: Option<&str>,
+        verifier: Arc<dyn AdmissionVerifierRechecker>,
+    ) -> Result<CanonicalInviteClaimResult, AdmissionCommitError> {
+        for attempt in 0..2 {
+            let result = self
+                .commit_canonical_invite_claim_once(
+                    assertion.clone(),
+                    proof.clone(),
+                    resource,
+                    token_hash,
+                    policy_version,
+                    Arc::clone(&verifier),
+                )
+                .await;
+            if attempt == 0 && result == Err(AdmissionCommitError::AuthorizationDenied) {
+                continue;
+            }
+            return result;
+        }
+        Err(AdmissionCommitError::AuthorizationDenied)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_canonical_invite_claim_once(
+        &self,
+        assertion: VerifiedFederatedAssertion,
+        proof: VerifiedNip98InviteClaimProof,
+        resource: CanonicalInviteResource,
+        token_hash: [u8; 32],
+        policy_version: Option<&str>,
+        verifier: Arc<dyn AdmissionVerifierRechecker>,
+    ) -> Result<CanonicalInviteClaimResult, AdmissionCommitError> {
+        let proof = proof.into_verified_nostr_proof();
+        if assertion.authorization_domain() != proof.authorization_domain()
+            || proof.transport() != ProofTransport::Nip98
+            || proof.target_fingerprint() != &resource.key
+        {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        let domain = proof.authorization_domain();
+        let object = canonical_invite_admission_object(*proof.target_fingerprint())?;
+        let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+        let prepared = crate::identity_enrollment::prepare_direct_enrollment(
+            &self.pool,
+            assertion.clone(),
+            proof.clone(),
+            authoritative_now,
+        )
+        .await
+        .map_err(map_enrollment_error)?;
+        let policy = prepare_invite_authorization_policy(
+            &self.pool,
+            domain,
+            object,
+            proof.expires_at(),
+            authoritative_now,
+        )
+        .await?;
+        let effect = CanonicalInviteClaimEffect::new(token_hash, policy_version)?;
+        let principal = assertion.principal_storage_key();
+        let effect_intent = effect.intent_digest();
+        let semantic_fingerprint = admission_framed_digest(
+            b"buzz:canonical-invite-admission:v1",
+            &[
+                domain.as_uuid().as_bytes(),
+                principal.issuer().as_bytes(),
+                principal.subject().as_bytes(),
+                proof.actor_pubkey().as_bytes(),
+                proof.request_fingerprint(),
+                proof.target_fingerprint(),
+                proof.transport_context_fingerprint(),
+                b"InviteClaim",
+                b"Invitation",
+                b"Mutate",
+                b"Nip98",
+                &effect_intent,
+            ],
+        );
+        let evidence = AdmissionEnrollmentEvidence::new(prepared, assertion, proof, policy)?;
+        let request = AdmissionCommitRequest::enrollment(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            object,
+            RouteCapability::InviteClaim,
+            evidence,
+        )?
+        .with_semantic_fingerprint_override(semantic_fingerprint)?
+        .with_application_effect(Box::new(effect))?;
+        let committer = PostgresCanonicalAdmissionCommitter::new(
+            self.pool.clone(),
+            Arc::new(CanonicalInviteFinalRechecker { verifier }),
+        );
+        match committer.commit(request).await? {
+            AdmissionCommitOutcome::Committed {
+                receipt,
+                application_result: Some(result),
+                application_result_binding: Some(binding),
+                ..
+            } => validate_committed_invite_result(
+                domain,
+                object,
+                semantic_fingerprint,
+                effect_intent,
+                binding,
+                receipt,
+                &result,
+            )
+            .map(CanonicalInviteClaimResult::fresh),
+            AdmissionCommitOutcome::ExactReplay {
+                receipt,
+                application_result: Some(result),
+            } => validate_stored_invite_result(
+                domain,
+                object,
+                semantic_fingerprint,
+                effect_intent,
+                receipt,
+                &result,
+            )
+            .map(CanonicalInviteClaimResult::exact_replay),
+            AdmissionCommitOutcome::ExactReplay {
+                application_result: None,
+                ..
+            } => Err(AdmissionCommitError::IntentConflict),
+            AdmissionCommitOutcome::Committed { .. } => {
+                Err(AdmissionCommitError::DependencyUnavailable)
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_committed_invite_result(
+    authorization_domain: CommunityId,
+    object: AdmissionObject,
+    semantic_fingerprint: [u8; 32],
+    application_intent_digest: [u8; 32],
+    binding: AdmissionApplicationResultBinding,
+    receipt: AdmissionCommitReceipt,
+    result: &AdmissionApplicationResult,
+) -> Result<CanonicalInviteClaimOutcome, AdmissionCommitError> {
+    if binding.authorization_domain() != authorization_domain
+        || binding.object() != object
+        || binding.semantic_fingerprint() != &semantic_fingerprint
+        || binding.application_intent_digest() != &application_intent_digest
+    {
+        return Err(AdmissionCommitError::IntentConflict);
+    }
+    validate_stored_invite_result(
+        authorization_domain,
+        object,
+        semantic_fingerprint,
+        application_intent_digest,
+        receipt,
+        result,
+    )
+}
+
+fn validate_stored_invite_result(
+    authorization_domain: CommunityId,
+    object: AdmissionObject,
+    semantic_fingerprint: [u8; 32],
+    application_intent_digest: [u8; 32],
+    receipt: AdmissionCommitReceipt,
+    result: &AdmissionApplicationResult,
+) -> Result<CanonicalInviteClaimOutcome, AdmissionCommitError> {
+    if object.kind() != AdmissionObjectKind::Invitation
+        || receipt.authorization_domain() != authorization_domain
+        || receipt.object() != object
+        || receipt.semantic_fingerprint() != &semantic_fingerprint
+        || result.schema() != AdmissionApplicationResultSchema::invite_claim()
+        || !result.payload().is_empty()
+    {
+        return Err(AdmissionCommitError::IntentConflict);
+    }
+    let outcome = result
+        .decode_invite_claim()
+        .map_err(|_| AdmissionCommitError::IntentConflict)?;
+    let expected_result = AdmissionApplicationResult::invite_claim(outcome);
+    if result != &expected_result {
+        return Err(AdmissionCommitError::IntentConflict);
+    }
+    let expected_digest = canonical_application_result_digest(
+        authorization_domain,
+        object,
+        semantic_fingerprint,
+        application_intent_digest,
+        &expected_result,
+    )?;
+    if receipt.application_result_digest() != Some(&expected_digest) {
+        return Err(AdmissionCommitError::IntentConflict);
+    }
+    Ok(outcome)
+}
+
+fn canonical_invite_resource_key(domain: CommunityId, invite_id: Uuid) -> [u8; 32] {
+    admission_framed_digest(
+        b"buzz:canonical-invite-resource:v1",
+        &[domain.as_uuid().as_bytes(), invite_id.as_bytes()],
+    )
+}
+
+/// Encode an exact invitation inside its dedicated durable namespace.
+///
+/// The object key is the server-resolved, domain-separated fingerprint of one
+/// invitation. Clients cannot select this coordinate.
+fn canonical_invite_admission_object(
+    resource_key: [u8; 32],
+) -> Result<AdmissionObject, AdmissionCommitError> {
+    AdmissionObject::new(AdmissionObjectKind::Invitation, resource_key)
+        .ok_or(AdmissionCommitError::InvalidRequest)
+}
+
+async fn prepare_invite_authorization_policy(
+    pool: &PgPool,
+    domain: CommunityId,
+    object: AdmissionObject,
+    proof_expires_at: DateTime<Utc>,
+    authoritative_now: DateTime<Utc>,
+) -> Result<LocalAuthorizationPolicy, AdmissionCommitError> {
+    let policy = sqlx::query(
+        "SELECT policy_revision, expires_at FROM identity_enrollment_policies \
+         WHERE community_id=$1 AND effective_at <= $2 \
+           AND (expires_at IS NULL OR $2 < expires_at) \
+         ORDER BY policy_revision DESC LIMIT 1",
+    )
+    .bind(domain.as_uuid())
+    .bind(authoritative_now)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
+    .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+    let policy_revision = u64::try_from(
+        policy
+            .try_get::<i64, _>("policy_revision")
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+    )
+    .ok()
+    .filter(|value| *value > 0)
+    .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+    let policy_expires_at: Option<DateTime<Utc>> = policy
+        .try_get("expires_at")
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let invalidation_generation: i64 = sqlx::query_scalar(
+        "SELECT current_generation FROM authorization_invalidation_domains WHERE community_id=$1",
+    )
+    .bind(domain.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
+    .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+    let invalidation_generation = u64::try_from(invalidation_generation)
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let current_epoch: Option<i64> = sqlx::query_scalar(
+        "SELECT authority_epoch FROM authorization_authority_epochs \
+         WHERE community_id=$1 AND object_kind=$2 AND object_key=$3",
+    )
+    .bind(domain.as_uuid())
+    .bind(object.kind().database_code())
+    .bind(object.key().as_slice())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let authority_epoch = u64::try_from(
+        current_epoch
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(AdmissionCommitError::DependencyUnavailable)?,
+    )
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let fence_bytes: Vec<u8> =
+        sqlx::query_scalar("SELECT uuid_send(gen_random_uuid()) || uuid_send(gen_random_uuid())")
+            .fetch_one(pool)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let fence = AuthorizationLeaseFence::from_bytes(
+        fence_bytes
+            .try_into()
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+    )
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let mut expires_at = proof_expires_at.min(authoritative_now + TimeDelta::minutes(1));
+    if let Some(policy_expires_at) = policy_expires_at {
+        expires_at = expires_at.min(policy_expires_at);
+    }
+    if expires_at <= authoritative_now {
+        return Err(AdmissionCommitError::AuthorizationDenied);
+    }
+    LocalAuthorizationPolicy::from_database(
+        domain,
+        Uuid::new_v4(),
+        policy_revision,
+        invalidation_generation,
+        authority_epoch,
+        fence,
+        RouteCapability::InviteClaim,
+        expires_at,
+        None,
+        None,
+    )
+    .ok_or(AdmissionCommitError::DependencyUnavailable)
+}
+
 /// PostgreSQL implementation of the canonical final-admission boundary.
 pub struct PostgresCanonicalAdmissionCommitter {
     pool: PgPool,
@@ -1357,6 +2338,8 @@ impl PostgresCanonicalAdmissionCommitter {
         let attempt_id = request.attempt_id;
         let object = request.object;
         let request_fingerprint = request.request_fingerprint();
+        let denial_actor = request.denial_actor()?;
+        let denial_correlation_id = request.denial_correlation_id();
         let receipt_shape = AdmissionReceiptShape::from_preparation(&request.preparation);
         let replay_claim = request.replay_claim;
         let expected_application_schema = request
@@ -1367,7 +2350,6 @@ impl PostgresCanonicalAdmissionCommitter {
             .application_effect
             .as_ref()
             .map(|effect| effect.intent_digest());
-        let mut application_effect = request.application_effect;
         let mut transaction = self
             .pool
             .begin()
@@ -1375,7 +2357,7 @@ impl PostgresCanonicalAdmissionCommitter {
             .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
 
         lock_operation(&mut transaction, domain, operation_id).await?;
-        if let Some(receipt) = read_existing_receipt(
+        if let Some(existing) = read_existing_receipt(
             &mut transaction,
             ExistingAdmissionLookup {
                 domain,
@@ -1389,141 +2371,320 @@ impl PostgresCanonicalAdmissionCommitter {
         )
         .await?
         {
-            if let Some(claim) = replay_claim {
-                let authoritative_now: DateTime<Utc> =
-                    sqlx::query_scalar("SELECT transaction_timestamp()")
-                        .fetch_one(&mut *transaction)
+            match existing {
+                ExistingAdmissionRecord::Denied(denial) => {
+                    transaction
+                        .rollback()
                         .await
                         .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
-                claim_replay_identity_tx(&mut transaction, domain, claim, authoritative_now)
-                    .await?;
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
-            } else {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+                    return Err(denial);
+                }
+                ExistingAdmissionRecord::Allowed(allowed) => {
+                    let (receipt, application_result) = *allowed;
+                    if let Some(claim) = replay_claim {
+                        let authoritative_now: DateTime<Utc> =
+                            sqlx::query_scalar("SELECT transaction_timestamp()")
+                                .fetch_one(&mut *transaction)
+                                .await
+                                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+                        claim_replay_identity_tx(
+                            &mut transaction,
+                            domain,
+                            claim,
+                            authoritative_now,
+                        )
+                        .await?;
+                        transaction
+                            .commit()
+                            .await
+                            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+                    } else {
+                        transaction
+                            .rollback()
+                            .await
+                            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+                    }
+                    return Ok(AdmissionCommitOutcome::ExactReplay {
+                        receipt,
+                        application_result,
+                    });
+                }
             }
-            return Ok(AdmissionCommitOutcome::ExactReplay {
-                receipt: receipt.0,
-                application_result: receipt.1,
-            });
         }
 
-        let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
-        if let Some(claim) = replay_claim {
-            claim_replay_identity_tx(&mut transaction, domain, claim, authoritative_now).await?;
-        }
-
-        let (prepared, enrollment_disposition) = match request.preparation {
-            AdmissionPreparation::Existing { prepared } => (*prepared, None),
-            AdmissionPreparation::Enrollment {
-                correlation_id,
-                capability,
-                evidence,
-            } => {
-                let AdmissionEnrollmentEvidence {
-                    proposal,
-                    enrollment_policy_digest,
-                    assertion,
-                    proof,
-                    policy,
-                } = *evidence;
-                let enrollment = execute_authoritative_enrollment_tx(
-                    &mut transaction,
-                    operation_id,
-                    request_fingerprint,
-                    &proposal,
-                    enrollment_policy_digest,
-                    &assertion,
-                    &proof,
-                    authoritative_now,
-                )
-                .await
-                .map_err(map_enrollment_error)?;
-                let input = AuthorizationInput::new(domain, correlation_id, proof, capability)
-                    .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
-                let resolution = LocalBindingResolution::enrollment(proposal, enrollment.binding);
-                let prepared =
-                    AuthorizationFinalizer::prepare(input, resolution, policy, authoritative_now)
-                        .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
-                (prepared, Some(enrollment.disposition))
-            }
-        };
-
-        let recheck_request = prepared.recheck_request();
-        let observation = self
-            .rechecker
-            .authoritative_recheck(&mut transaction, &recheck_request, object)
-            .await?;
-        let one_shot = OneShotRechecker::new(observation);
-        let witness = AuthorizationFinalizer::recheck(&prepared, &one_shot)
-            .await
-            .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
-        let authorization = AuthorizationFinalizer::finalize(prepared, witness)
-            .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
-
-        let application_context = application_intent_digest
-            .map(|intent| {
-                AdmissionApplicationContext::new(
-                    &authorization,
-                    operation_id,
-                    object,
-                    semantic_fingerprint,
-                    intent,
-                    authoritative_now,
-                )
-            })
-            .transpose()?;
-        let application_outcome = match (application_effect.as_mut(), application_context.as_ref())
-        {
-            (Some(effect), Some(context)) => {
-                let outcome = effect.apply(&mut transaction, context).await?;
-                let _ = context.canonical_result_digest(&outcome)?;
-                Some(outcome)
-            }
-            (None, None) => None,
-            _ => return Err(AdmissionCommitError::DependencyUnavailable),
-        };
-        if application_outcome
-            .as_ref()
-            .map(|outcome| outcome.result().schema())
-            != expected_application_schema
-        {
-            return Err(AdmissionCommitError::DependencyUnavailable);
-        }
-
-        let receipt = persist_committed_admission(
-            &mut transaction,
-            operation_id,
-            attempt_id,
-            object,
-            request_fingerprint,
-            semantic_fingerprint,
-            &authorization,
-            enrollment_disposition,
-            application_intent_digest,
-            application_outcome.as_ref(),
-            authoritative_now,
-        )
-        .await?;
-        sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        sqlx::query("SAVEPOINT canonical_admission_attempt")
             .execute(&mut *transaction)
             .await
-            .map_err(map_commit_error)?;
-        transaction.commit().await.map_err(map_commit_error)?;
-        Ok(AdmissionCommitOutcome::Committed {
-            authorization: Box::new(authorization),
-            receipt,
-            application_result: application_outcome.map(|outcome| outcome.result),
-        })
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+        let fresh = execute_fresh_admission(
+            &mut transaction,
+            self.rechecker.as_ref(),
+            request,
+            FreshAdmissionCoordinates {
+                operation_id,
+                attempt_id,
+                object,
+                request_fingerprint,
+                semantic_fingerprint,
+                replay_claim,
+                expected_application_schema,
+                application_intent_digest,
+            },
+        )
+        .await;
+        match fresh {
+            Ok(fresh) => {
+                transaction.commit().await.map_err(map_commit_error)?;
+                Ok(AdmissionCommitOutcome::Committed {
+                    authorization: Box::new(fresh.authorization),
+                    receipt: fresh.receipt,
+                    application_result: fresh.application_result,
+                    application_result_binding: fresh.application_result_binding,
+                })
+            }
+            Err(denial) => {
+                sqlx::query("ROLLBACK TO SAVEPOINT canonical_admission_attempt")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+                let Some(reason) = denial_reason(denial) else {
+                    transaction
+                        .rollback()
+                        .await
+                        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+                    return Err(denial);
+                };
+                if sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+                    .execute(&mut *transaction)
+                    .await
+                    .is_err()
+                {
+                    let _ = transaction.rollback().await;
+                    latch_admission_audit_failure(
+                        &self.pool,
+                        domain,
+                        AuthorizationAuditFailureCode::StorageUnavailable,
+                    )
+                    .await;
+                    return Err(AdmissionCommitError::AuditUnavailable);
+                }
+                match persist_denied_admission(
+                    &mut transaction,
+                    DeniedAdmissionRecord {
+                        domain,
+                        operation_id,
+                        attempt_id,
+                        correlation_id: denial_correlation_id,
+                        object,
+                        request_fingerprint,
+                        semantic_fingerprint,
+                        actor: denial_actor,
+                        reason,
+                    },
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(failure) => {
+                        let _ = transaction.rollback().await;
+                        latch_admission_audit_failure(&self.pool, domain, failure.audit_code())
+                            .await;
+                        return Err(AdmissionCommitError::AuditUnavailable);
+                    }
+                }
+                if sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+                    .execute(&mut *transaction)
+                    .await
+                    .is_err()
+                {
+                    let _ = transaction.rollback().await;
+                    latch_admission_audit_failure(
+                        &self.pool,
+                        domain,
+                        AuthorizationAuditFailureCode::StorageUnavailable,
+                    )
+                    .await;
+                    return Err(AdmissionCommitError::AuditUnavailable);
+                }
+                if transaction.commit().await.is_err() {
+                    latch_admission_audit_failure(
+                        &self.pool,
+                        domain,
+                        AuthorizationAuditFailureCode::StorageUnavailable,
+                    )
+                    .await;
+                    return Err(AdmissionCommitError::AuditUnavailable);
+                }
+                Err(recorded_denial_error(denial))
+            }
+        }
     }
+}
+
+async fn latch_admission_audit_failure(
+    pool: &PgPool,
+    domain: CommunityId,
+    failure: AuthorizationAuditFailureCode,
+) {
+    let _: Result<i64, sqlx::Error> =
+        sqlx::query_scalar("SELECT authorization_event_capacity_report_failure_v2($1,$2)")
+            .bind(domain.as_uuid())
+            .bind(failure as i16)
+            .fetch_one(pool)
+            .await;
+}
+
+struct FreshAdmissionOutcome {
+    authorization: FinalizedAuthContext,
+    receipt: AdmissionCommitReceipt,
+    application_result: Option<AdmissionApplicationResult>,
+    application_result_binding: Option<AdmissionApplicationResultBinding>,
+}
+
+struct FreshAdmissionCoordinates {
+    operation_id: Uuid,
+    attempt_id: Uuid,
+    object: AdmissionObject,
+    request_fingerprint: [u8; 32],
+    semantic_fingerprint: [u8; 32],
+    replay_claim: Option<AdmissionReplayClaim>,
+    expected_application_schema: Option<AdmissionApplicationResultSchema>,
+    application_intent_digest: Option<[u8; 32]>,
+}
+
+async fn execute_fresh_admission(
+    transaction: &mut Transaction<'_, Postgres>,
+    rechecker: &dyn AdmissionFinalRechecker,
+    request: AdmissionCommitRequest,
+    coordinates: FreshAdmissionCoordinates,
+) -> Result<FreshAdmissionOutcome, AdmissionCommitError> {
+    let FreshAdmissionCoordinates {
+        operation_id,
+        attempt_id,
+        object,
+        request_fingerprint,
+        semantic_fingerprint,
+        replay_claim,
+        expected_application_schema,
+        application_intent_digest,
+    } = coordinates;
+    let domain = request.authorization_domain();
+    let AdmissionCommitRequest {
+        preparation,
+        mut application_effect,
+        ..
+    } = request;
+    let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    if let Some(claim) = replay_claim {
+        claim_replay_identity_tx(transaction, domain, claim, authoritative_now).await?;
+    }
+
+    let (prepared, enrollment_disposition) = match preparation {
+        AdmissionPreparation::Existing { prepared } => (*prepared, None),
+        AdmissionPreparation::Enrollment {
+            correlation_id,
+            capability,
+            evidence,
+        } => {
+            let AdmissionEnrollmentEvidence {
+                proposal,
+                enrollment_policy_digest,
+                assertion,
+                proof,
+                policy,
+            } = *evidence;
+            let enrollment = execute_authoritative_enrollment_tx(
+                transaction,
+                operation_id,
+                request_fingerprint,
+                &proposal,
+                enrollment_policy_digest,
+                &assertion,
+                &proof,
+                authoritative_now,
+            )
+            .await
+            .map_err(map_enrollment_error)?;
+            let input = AuthorizationInput::new(domain, correlation_id, proof, capability)
+                .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
+            let resolution = LocalBindingResolution::enrollment(proposal, enrollment.binding);
+            let prepared =
+                AuthorizationFinalizer::prepare(input, resolution, policy, authoritative_now)
+                    .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
+            (prepared, Some(enrollment.disposition))
+        }
+    };
+
+    let recheck_request = prepared.recheck_request();
+    let observation = rechecker
+        .authoritative_recheck(transaction, &recheck_request, object)
+        .await?;
+    let one_shot = OneShotRechecker::new(observation);
+    let witness = AuthorizationFinalizer::recheck(&prepared, &one_shot)
+        .await
+        .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
+    let authorization = AuthorizationFinalizer::finalize(prepared, witness)
+        .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
+
+    let application_context = application_intent_digest
+        .map(|intent| {
+            AdmissionApplicationContext::new(
+                &authorization,
+                operation_id,
+                object,
+                semantic_fingerprint,
+                intent,
+                authoritative_now,
+            )
+        })
+        .transpose()?;
+    let application_result_binding = application_context
+        .as_ref()
+        .map(AdmissionApplicationResultBinding::from_context);
+    let application_outcome = match (application_effect.as_mut(), application_context.as_ref()) {
+        (Some(effect), Some(context)) => {
+            let outcome = effect.apply(transaction, context).await?;
+            let _ = context.canonical_result_digest(&outcome)?;
+            Some(outcome)
+        }
+        (None, None) => None,
+        _ => return Err(AdmissionCommitError::DependencyUnavailable),
+    };
+    if application_outcome
+        .as_ref()
+        .map(|outcome| outcome.result().schema())
+        != expected_application_schema
+    {
+        return Err(AdmissionCommitError::DependencyUnavailable);
+    }
+
+    let receipt = persist_committed_admission(
+        transaction,
+        operation_id,
+        attempt_id,
+        object,
+        request_fingerprint,
+        semantic_fingerprint,
+        &authorization,
+        enrollment_disposition,
+        application_intent_digest,
+        application_outcome.as_ref(),
+        authoritative_now,
+    )
+    .await?;
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_commit_error)?;
+    Ok(FreshAdmissionOutcome {
+        authorization,
+        receipt,
+        application_result: application_outcome.map(|outcome| outcome.result),
+        application_result_binding,
+    })
 }
 
 async fn claim_replay_identity_tx(
@@ -1644,13 +2805,15 @@ struct ExistingAdmissionLookup {
     expected_application_schema: Option<AdmissionApplicationResultSchema>,
 }
 
+enum ExistingAdmissionRecord {
+    Allowed(Box<(AdmissionCommitReceipt, Option<AdmissionApplicationResult>)>),
+    Denied(AdmissionCommitError),
+}
+
 async fn read_existing_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     lookup: ExistingAdmissionLookup,
-) -> Result<
-    Option<(AdmissionCommitReceipt, Option<AdmissionApplicationResult>)>,
-    AdmissionCommitError,
-> {
+) -> Result<Option<ExistingAdmissionRecord>, AdmissionCommitError> {
     let ExistingAdmissionLookup {
         domain,
         operation_id,
@@ -1677,12 +2840,14 @@ async fn read_existing_receipt(
                event.event_id AS audit_event_id,
                event.event_kind AS audit_event_kind,
                event.outcome_code AS audit_outcome_code,
+               event.reason_code AS audit_reason_code,
                event.matching_event_count
         FROM authorization_operation_receipts receipt
         LEFT JOIN LATERAL (
             SELECT (array_agg(event_id ORDER BY accepted_at, event_id))[1] AS event_id,
                    min(event_kind) AS event_kind,
                    min(outcome_code) AS outcome_code,
+                   min(reason_code) AS reason_code,
                    count(*) AS matching_event_count
             FROM authorization_events
             WHERE community_id = receipt.community_id
@@ -1741,9 +2906,7 @@ async fn read_existing_receipt(
     let event_count: i64 = row
         .try_get("matching_event_count")
         .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
-    if event_count != 1
-        || !receipt_shape.matches(operation_kind, receipt_outcome, event_kind, event_outcome)
-    {
+    if event_count != 1 {
         return Err(AdmissionCommitError::IntentConflict);
     }
     let result_digest = fixed_digest(&row, "result_digest")?;
@@ -1771,6 +2934,35 @@ async fn read_existing_receipt(
     let stored_application_result_digest: Option<Vec<u8>> = row
         .try_get("application_result_digest")
         .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    if receipt_outcome == 2
+        && operation_kind == 11
+        && event_kind == Some(11)
+        && event_outcome == Some(2)
+    {
+        if stored_application_type.is_some()
+            || stored_application_version.is_some()
+            || stored_application_code.is_some()
+            || stored_application_payload.is_some()
+            || stored_application_intent.is_some()
+            || stored_application_effect.is_some()
+            || stored_application_result_digest.is_some()
+        {
+            return Err(AdmissionCommitError::IntentConflict);
+        }
+        let reason_code: i16 = row
+            .try_get("audit_reason_code")
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+        let denial = denial_error_from_reason_code(reason_code)?;
+        if result_digest
+            != canonical_denial_result_digest(domain, object, semantic_fingerprint, reason_code)
+        {
+            return Err(AdmissionCommitError::DependencyUnavailable);
+        }
+        return Ok(Some(ExistingAdmissionRecord::Denied(denial)));
+    }
+    if !receipt_shape.matches(operation_kind, receipt_outcome, event_kind, event_outcome) {
+        return Err(AdmissionCommitError::IntentConflict);
+    }
     let (
         application_result,
         stored_application_intent,
@@ -1863,7 +3055,184 @@ async fn read_existing_receipt(
         audit_event_id.ok_or(AdmissionCommitError::DependencyUnavailable)?,
     )
     .ok_or(AdmissionCommitError::DependencyUnavailable)?;
-    Ok(Some((receipt, application_result)))
+    Ok(Some(ExistingAdmissionRecord::Allowed(Box::new((
+        receipt,
+        application_result,
+    )))))
+}
+
+fn denial_reason(error: AdmissionCommitError) -> Option<AuthorizationReasonCode> {
+    match error {
+        AdmissionCommitError::InvalidRequest | AdmissionCommitError::RecordedInvalidRequest => {
+            Some(AuthorizationReasonCode::Invalid)
+        }
+        AdmissionCommitError::AuthorizationDenied
+        | AdmissionCommitError::RecordedAuthorizationDenied => {
+            Some(AuthorizationReasonCode::PolicyDenied)
+        }
+        AdmissionCommitError::IntentConflict | AdmissionCommitError::RecordedIntentConflict => {
+            Some(AuthorizationReasonCode::IntentConflict)
+        }
+        AdmissionCommitError::ReplayRejected | AdmissionCommitError::RecordedReplayRejected => {
+            Some(AuthorizationReasonCode::ReplayRejected)
+        }
+        AdmissionCommitError::AuditUnavailable | AdmissionCommitError::RecordedAuditUnavailable => {
+            Some(AuthorizationReasonCode::CapacityExhausted)
+        }
+        AdmissionCommitError::DependencyUnavailable => None,
+    }
+}
+
+const fn recorded_denial_error(error: AdmissionCommitError) -> AdmissionCommitError {
+    match error {
+        AdmissionCommitError::InvalidRequest => AdmissionCommitError::RecordedInvalidRequest,
+        AdmissionCommitError::AuthorizationDenied => {
+            AdmissionCommitError::RecordedAuthorizationDenied
+        }
+        AdmissionCommitError::IntentConflict => AdmissionCommitError::RecordedIntentConflict,
+        AdmissionCommitError::ReplayRejected => AdmissionCommitError::RecordedReplayRejected,
+        AdmissionCommitError::AuditUnavailable => AdmissionCommitError::RecordedAuditUnavailable,
+        other => other,
+    }
+}
+
+fn denial_error_from_reason_code(
+    reason_code: i16,
+) -> Result<AdmissionCommitError, AdmissionCommitError> {
+    match reason_code {
+        3 => Ok(AdmissionCommitError::RecordedInvalidRequest),
+        9 => Ok(AdmissionCommitError::RecordedAuthorizationDenied),
+        11 => Ok(AdmissionCommitError::RecordedAuditUnavailable),
+        15 => Ok(AdmissionCommitError::RecordedIntentConflict),
+        17 => Ok(AdmissionCommitError::RecordedReplayRejected),
+        _ => Err(AdmissionCommitError::DependencyUnavailable),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeniedAdmissionPersistenceError {
+    CapacityUnavailable,
+    InvalidEnvelope,
+    StorageUnavailable,
+}
+
+impl DeniedAdmissionPersistenceError {
+    const fn audit_code(self) -> AuthorizationAuditFailureCode {
+        match self {
+            Self::CapacityUnavailable => AuthorizationAuditFailureCode::CapacityExhausted,
+            Self::InvalidEnvelope => AuthorizationAuditFailureCode::InvalidEnvelope,
+            Self::StorageUnavailable => AuthorizationAuditFailureCode::StorageUnavailable,
+        }
+    }
+}
+
+fn canonical_denial_result_digest(
+    domain: CommunityId,
+    object: AdmissionObject,
+    semantic_fingerprint: [u8; 32],
+    reason_code: i16,
+) -> [u8; 32] {
+    admission_framed_digest(
+        b"buzz:canonical-admission-denial:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            &object.kind().database_code().to_be_bytes(),
+            object.key(),
+            &semantic_fingerprint,
+            &reason_code.to_be_bytes(),
+        ],
+    )
+}
+
+struct DeniedAdmissionRecord {
+    domain: CommunityId,
+    operation_id: Uuid,
+    attempt_id: Uuid,
+    correlation_id: Uuid,
+    object: AdmissionObject,
+    request_fingerprint: [u8; 32],
+    semantic_fingerprint: [u8; 32],
+    actor: AuthorizationEventActor,
+    reason: AuthorizationReasonCode,
+}
+
+async fn persist_denied_admission(
+    transaction: &mut Transaction<'_, Postgres>,
+    record: DeniedAdmissionRecord,
+) -> Result<(), DeniedAdmissionPersistenceError> {
+    let DeniedAdmissionRecord {
+        domain,
+        operation_id,
+        attempt_id,
+        correlation_id,
+        object,
+        request_fingerprint,
+        semantic_fingerprint,
+        actor,
+        reason,
+    } = record;
+    let actor_digest = actor
+        .fingerprint()
+        .ok_or(DeniedAdmissionPersistenceError::InvalidEnvelope)?;
+    let reason_code = reason as i16;
+    let result_digest =
+        canonical_denial_result_digest(domain, object, semantic_fingerprint, reason_code);
+    let event_id = Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO authorization_operation_receipts \
+         (community_id,operation_id,request_fingerprint,operation_kind,actor_fingerprint, \
+          outcome_code,result_digest) VALUES ($1,$2,$3,11,$4,2,$5)",
+    )
+    .bind(domain.as_uuid())
+    .bind(operation_id)
+    .bind(request_fingerprint.as_slice())
+    .bind(actor_digest.as_slice())
+    .bind(result_digest.as_slice())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| DeniedAdmissionPersistenceError::StorageUnavailable)?;
+
+    let event = NewAuthorizationEvent::new(
+        domain,
+        event_id,
+        AuthorizationEventKind::ProtectedDenied,
+        AuthorizationEventOutcome::Denied,
+        reason,
+        actor,
+        None,
+        operation_id,
+        Some(request_fingerprint),
+        correlation_id,
+        attempt_id,
+    )
+    .map_err(|_| DeniedAdmissionPersistenceError::InvalidEnvelope)?;
+    record_authorization_event_tx(transaction, &event)
+        .await
+        .map_err(|error| match error {
+            AuthorizationEventWriteError::CapacityUnavailable => {
+                DeniedAdmissionPersistenceError::CapacityUnavailable
+            }
+            AuthorizationEventWriteError::Database(_) => {
+                DeniedAdmissionPersistenceError::StorageUnavailable
+            }
+        })?;
+
+    sqlx::query(
+        "INSERT INTO authorization_admission_results \
+         (community_id,operation_id,request_fingerprint,semantic_fingerprint, \
+          object_kind,object_key) VALUES ($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(domain.as_uuid())
+    .bind(operation_id)
+    .bind(request_fingerprint.as_slice())
+    .bind(semantic_fingerprint.as_slice())
+    .bind(object.kind().database_code())
+    .bind(object.key().as_slice())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| DeniedAdmissionPersistenceError::StorageUnavailable)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2480,9 +3849,12 @@ mod tests {
     };
     use buzz_core::AuthorizationLeaseFence;
     use chrono::TimeDelta;
-    use nostr::{EventBuilder, Keys, RelayUrl};
+    use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag};
 
     use super::*;
+
+    const TEST_VERIFIER_ISSUER: &str = "https://verifier.example";
+    const TEST_VERIFIER_AUDIENCE: &str = "buzz-relay-test";
 
     fn loopback_test_database_url() -> String {
         format!(
@@ -2490,7 +3862,6 @@ mod tests {
             "postgres", "buzz", "buzz_dev", "localhost", 5432, "buzz"
         )
     }
-
     fn base64_url(input: &[u8]) -> String {
         const ALPHABET: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -2578,9 +3949,17 @@ mod tests {
 
     fn signed_test_jwt(subject: &str, event_author: [u8; 32]) -> (String, serde_json::Value) {
         let issued_at = Utc::now().timestamp() - 1;
+        signed_test_jwt_at(subject, event_author, issued_at)
+    }
+
+    fn signed_test_jwt_at(
+        subject: &str,
+        event_author: [u8; 32],
+        issued_at: i64,
+    ) -> (String, serde_json::Value) {
         let claims = serde_json::json!({
-            "iss": "https://s3-verifier.test",
-            "aud": "buzz-s3-test",
+            "iss": TEST_VERIFIER_ISSUER,
+            "aud": TEST_VERIFIER_AUDIENCE,
             "sub": subject,
             "event_author": hex::encode(event_author),
             "iat": issued_at,
@@ -2626,8 +4005,8 @@ mod tests {
         let (token, jwks) = signed_test_jwt(subject, keys.public_key().to_bytes());
         let verifier = CanonicalFederatedAssertionVerifier::new(
             CanonicalVerifierPolicy::new(
-                "https://s3-verifier.test".to_owned(),
-                "buzz-s3-test".to_owned(),
+                TEST_VERIFIER_ISSUER.to_owned(),
+                TEST_VERIFIER_AUDIENCE.to_owned(),
                 "sub".to_owned(),
                 Some("event_author".to_owned()),
                 5,
@@ -2673,6 +4052,77 @@ mod tests {
         )
         .expect("verify NIP-42 authorization proof");
         (assertion, proof)
+    }
+
+    fn verified_invite_evidence(
+        domain: CommunityId,
+        keys: &Keys,
+        subject: &str,
+        target: [u8; 32],
+        body: &[u8],
+        issued_at: i64,
+    ) -> (VerifiedFederatedAssertion, VerifiedNip98InviteClaimProof) {
+        let url = "https://invite-admission.test/api/invites/claim";
+        let coordinates = buzz_auth::Nip98InviteClaimCoordinates::new(domain, target, url, body)
+            .expect("invite proof coordinates");
+        let (request, target, context) = coordinates.request_binding();
+        let (token, jwks) = signed_test_jwt_at(subject, keys.public_key().to_bytes(), issued_at);
+        let verifier = CanonicalFederatedAssertionVerifier::new(
+            CanonicalVerifierPolicy::new(
+                TEST_VERIFIER_ISSUER.to_owned(),
+                TEST_VERIFIER_AUDIENCE.to_owned(),
+                "sub".to_owned(),
+                Some("event_author".to_owned()),
+                5,
+                600,
+            )
+            .expect("canonical verifier policy"),
+        );
+        let key_set = CanonicalVerifierKeySet::new(
+            VerifierKeyGeneration::new(1).expect("positive verifier generation"),
+            serde_json::from_value(jwks).expect("parse generated test JWKS"),
+        );
+        let assertion = verifier
+            .verify(
+                &token,
+                &key_set,
+                domain,
+                ProofTransport::Nip98,
+                *target,
+                *request,
+                *context,
+            )
+            .expect("verify invite assertion");
+        let payload = hex::encode(Sha256::digest(body));
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags(vec![
+                Tag::parse(["u", url]).expect("invite u tag"),
+                Tag::parse(["method", "POST"]).expect("invite method tag"),
+                Tag::parse(["payload", payload.as_str()]).expect("invite payload tag"),
+            ])
+            .sign_with_keys(keys)
+            .expect("sign invite proof");
+        let event_json = serde_json::to_string(&event).expect("serialize invite proof");
+        let proof = buzz_auth::verify_nip98_invite_claim_proof(
+            &event_json,
+            &coordinates,
+            body,
+            &assertion,
+            Utc::now(),
+        )
+        .expect("verify invite proof");
+        (assertion, proof)
+    }
+
+    struct TestInviteVerifierRechecker;
+
+    impl AdmissionVerifierRechecker for TestInviteVerifierRechecker {
+        fn recheck<'a>(
+            &'a self,
+            _expected: VerifierPolicyStamp,
+        ) -> Pin<Box<dyn Future<Output = Result<(), AdmissionCommitError>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
     }
 
     struct TestPostgresAdmissionRechecker;
@@ -2922,6 +4372,59 @@ mod tests {
     }
 
     #[test]
+    fn canonical_denial_reason_round_trip_preserves_conflict_class() {
+        for (error, code, replayed) in [
+            (
+                AdmissionCommitError::InvalidRequest,
+                AuthorizationReasonCode::Invalid as i16,
+                AdmissionCommitError::RecordedInvalidRequest,
+            ),
+            (
+                AdmissionCommitError::AuthorizationDenied,
+                AuthorizationReasonCode::PolicyDenied as i16,
+                AdmissionCommitError::RecordedAuthorizationDenied,
+            ),
+            (
+                AdmissionCommitError::IntentConflict,
+                AuthorizationReasonCode::IntentConflict as i16,
+                AdmissionCommitError::RecordedIntentConflict,
+            ),
+            (
+                AdmissionCommitError::ReplayRejected,
+                AuthorizationReasonCode::ReplayRejected as i16,
+                AdmissionCommitError::RecordedReplayRejected,
+            ),
+            (
+                AdmissionCommitError::AuditUnavailable,
+                AuthorizationReasonCode::CapacityExhausted as i16,
+                AdmissionCommitError::RecordedAuditUnavailable,
+            ),
+        ] {
+            assert_eq!(denial_reason(error).map(|reason| reason as i16), Some(code));
+            assert_eq!(denial_error_from_reason_code(code), Ok(replayed));
+            assert_eq!(recorded_denial_error(error), replayed);
+        }
+    }
+
+    #[test]
+    fn invite_resources_use_the_dedicated_durable_namespace() {
+        let domain = CommunityId::from_uuid(Uuid::new_v4());
+        let first_key = canonical_invite_resource_key(domain, Uuid::new_v4());
+        let second_key = canonical_invite_resource_key(domain, Uuid::new_v4());
+        let first = canonical_invite_admission_object(first_key).expect("invite object");
+
+        assert_eq!(first.kind(), AdmissionObjectKind::Invitation);
+        assert_eq!(first.kind().database_code(), 9);
+        assert_eq!(first.key(), &first_key);
+        assert_ne!(first_key, second_key);
+        assert_ne!(
+            first,
+            AdmissionObject::new(AdmissionObjectKind::Domain, first_key)
+                .expect("domain-scoped object")
+        );
+    }
+
+    #[test]
     fn logical_operation_id_is_stable_domain_separated_and_server_formed() {
         let semantic = admission_framed_digest(
             b"buzz:test:admission-intent:v1",
@@ -2986,6 +4489,165 @@ mod tests {
             AdmissionApplicationResult::from_database(vec![1; 31], 1, 1, Vec::new()),
             Err(AdmissionCommitError::DependencyUnavailable)
         );
+    }
+
+    #[test]
+    fn committed_invite_result_requires_the_precommit_binding_and_exact_digest() {
+        let domain = CommunityId::from_uuid(Uuid::new_v4());
+        let object = canonical_invite_admission_object([81; 32]).expect("invite object");
+        let semantic_fingerprint = [82; 32];
+        let application_intent_digest = [83; 32];
+        let result = AdmissionApplicationResult::invite_claim(CanonicalInviteClaimOutcome::Joined);
+        let application_result_digest = canonical_application_result_digest(
+            domain,
+            object,
+            semantic_fingerprint,
+            application_intent_digest,
+            &result,
+        )
+        .expect("canonical application result digest");
+        let binding = AdmissionApplicationResultBinding {
+            authorization_domain: domain,
+            object,
+            semantic_fingerprint,
+            application_intent_digest,
+        };
+        let receipt = AdmissionCommitReceipt::from_storage(
+            domain,
+            object,
+            Uuid::new_v4(),
+            [84; 32],
+            semantic_fingerprint,
+            AdmissionCommitDigests::new([85; 32], Some(application_result_digest))
+                .expect("canonical admission digests"),
+            Uuid::new_v4(),
+        )
+        .expect("canonical admission receipt");
+
+        assert_eq!(
+            validate_committed_invite_result(
+                domain,
+                object,
+                semantic_fingerprint,
+                application_intent_digest,
+                binding,
+                receipt,
+                &result,
+            ),
+            Ok(CanonicalInviteClaimOutcome::Joined)
+        );
+        let wrong_digest_receipt = AdmissionCommitReceipt::from_storage(
+            domain,
+            object,
+            Uuid::new_v4(),
+            [84; 32],
+            semantic_fingerprint,
+            AdmissionCommitDigests::new([85; 32], Some([86; 32]))
+                .expect("non-sentinel admission digests"),
+            Uuid::new_v4(),
+        )
+        .expect("adversarial admission receipt");
+        assert_eq!(
+            validate_committed_invite_result(
+                domain,
+                object,
+                semantic_fingerprint,
+                application_intent_digest,
+                binding,
+                wrong_digest_receipt,
+                &result,
+            ),
+            Err(AdmissionCommitError::IntentConflict)
+        );
+        let noncanonical_result = AdmissionApplicationResult::new(
+            AdmissionApplicationResultSchema::invite_claim(),
+            CanonicalInviteClaimOutcome::Joined.database_code(),
+            b"noncanonical".to_vec(),
+        )
+        .expect("bounded adversarial result");
+        assert_eq!(
+            validate_committed_invite_result(
+                domain,
+                object,
+                semantic_fingerprint,
+                application_intent_digest,
+                binding,
+                receipt,
+                &noncanonical_result,
+            ),
+            Err(AdmissionCommitError::IntentConflict)
+        );
+        assert_eq!(
+            validate_committed_invite_result(
+                domain,
+                object,
+                semantic_fingerprint,
+                [87; 32],
+                binding,
+                receipt,
+                &result,
+            ),
+            Err(AdmissionCommitError::IntentConflict)
+        );
+    }
+
+    #[test]
+    fn stored_invite_replay_returns_the_original_result_and_rejects_cross_resource() {
+        let domain = CommunityId::from_uuid(Uuid::new_v4());
+        let object = canonical_invite_admission_object([88; 32]).expect("invite object");
+        let other_object =
+            canonical_invite_admission_object([89; 32]).expect("other invite object");
+        let semantic_fingerprint = [90; 32];
+        let application_intent_digest = [91; 32];
+
+        for outcome in [
+            CanonicalInviteClaimOutcome::Joined,
+            CanonicalInviteClaimOutcome::AlreadyMember,
+        ] {
+            let result = AdmissionApplicationResult::invite_claim(outcome);
+            let application_result_digest = canonical_application_result_digest(
+                domain,
+                object,
+                semantic_fingerprint,
+                application_intent_digest,
+                &result,
+            )
+            .expect("canonical application result digest");
+            let receipt = AdmissionCommitReceipt::from_storage(
+                domain,
+                object,
+                Uuid::new_v4(),
+                [92; 32],
+                semantic_fingerprint,
+                AdmissionCommitDigests::new([93; 32], Some(application_result_digest))
+                    .expect("canonical admission digests"),
+                Uuid::new_v4(),
+            )
+            .expect("canonical admission receipt");
+
+            assert_eq!(
+                validate_stored_invite_result(
+                    domain,
+                    object,
+                    semantic_fingerprint,
+                    application_intent_digest,
+                    receipt,
+                    &result,
+                ),
+                Ok(outcome)
+            );
+            assert_eq!(
+                validate_stored_invite_result(
+                    domain,
+                    other_object,
+                    semantic_fingerprint,
+                    application_intent_digest,
+                    receipt,
+                    &result,
+                ),
+                Err(AdmissionCommitError::IntentConflict)
+            );
+        }
     }
 
     #[test]
@@ -3075,11 +4737,17 @@ mod tests {
         .expect("create transaction marker table");
 
         let domain = CommunityId::from_uuid(Uuid::new_v4());
-        let target = [101_u8; 32];
+        let invite_id = Uuid::new_v4();
+        let alternate_invite_id = Uuid::new_v4();
+        let specialized_invite_id = Uuid::new_v4();
+        let concurrent_invite_id = Uuid::new_v4();
+        let target = canonical_invite_resource_key(domain, invite_id);
+        let alternate_target = canonical_invite_resource_key(domain, alternate_invite_id);
+        let specialized_target = canonical_invite_resource_key(domain, specialized_invite_id);
+        let concurrent_target = canonical_invite_resource_key(domain, concurrent_invite_id);
         let request_fingerprint = [102_u8; 32];
         let transport_context = [103_u8; 32];
-        let object =
-            AdmissionObject::new(AdmissionObjectKind::Domain, target).expect("test object");
+        let object = canonical_invite_admission_object(target).expect("test object");
         sqlx::query("INSERT INTO communities (id,host) VALUES ($1,$2)")
             .bind(domain.as_uuid())
             .bind(format!("admission-{}.example", domain.as_uuid().simple()))
@@ -3117,14 +4785,23 @@ mod tests {
         .expect("activate admission invalidation");
         let invite_token = [105_u8; 32];
         let alternate_invite = [106_u8; 32];
-        for token in [invite_token, alternate_invite] {
+        let specialized_invite = [129_u8; 32];
+        let concurrent_invite = [130_u8; 32];
+        for (invite_id, token, maximum) in [
+            (invite_id, invite_token, 8_i32),
+            (alternate_invite_id, alternate_invite, 8_i32),
+            (specialized_invite_id, specialized_invite, 8_i32),
+            (concurrent_invite_id, concurrent_invite, 2_i32),
+        ] {
             sqlx::query(
                 "INSERT INTO relay_invites \
-                 (community_id,token_hash,max_uses,expires_at,created_by) \
-                 VALUES ($1,$2,8,transaction_timestamp()+interval '1 hour','operator')",
+                 (id,community_id,token_hash,max_uses,expires_at,created_by) \
+                 VALUES ($1,$2,$3,$4,transaction_timestamp()+interval '1 hour','operator')",
             )
+            .bind(invite_id)
             .bind(domain.as_uuid())
             .bind(token.as_slice())
+            .bind(maximum)
             .execute(&pool)
             .await
             .expect("insert relay invite");
@@ -3139,6 +4816,8 @@ mod tests {
             request_fingerprint,
             transport_context,
         );
+        let alternate_object =
+            canonical_invite_admission_object(alternate_target).expect("alternate invite object");
         let policy = LocalAuthorizationPolicy::from_database(
             domain,
             Uuid::new_v4(),
@@ -3186,7 +4865,7 @@ mod tests {
         .await;
         assert!(matches!(
             committer.commit(cross_capability).await,
-            Err(AdmissionCommitError::AuthorizationDenied)
+            Err(AdmissionCommitError::RecordedAuthorizationDenied)
         ));
 
         let cross_object = enrollment_commit_request(
@@ -3205,7 +4884,7 @@ mod tests {
         .await;
         assert!(matches!(
             committer.commit(cross_object).await,
-            Err(AdmissionCommitError::AuthorizationDenied)
+            Err(AdmissionCommitError::RecordedAuthorizationDenied)
         ));
         let (
             denied_bindings,
@@ -3240,7 +4919,7 @@ mod tests {
                 denied_events,
                 denied_claims,
             ),
-            (0, 0, 0, 0, 0, 0)
+            (0, 0, 0, 2, 2, 0)
         );
 
         sqlx::query(
@@ -3312,7 +4991,7 @@ mod tests {
                 failed_claims,
                 failed_acceptances,
             ),
-            (0, 0, 0, 0, 0, 0, 0)
+            (0, 0, 0, 2, 2, 0, 0)
         );
         sqlx::query("DROP TRIGGER s3_reject_policy_acceptance ON join_policy_acceptances")
             .execute(&pool)
@@ -3322,6 +5001,102 @@ mod tests {
             .execute(&pool)
             .await
             .expect("remove concrete invite DML failure function");
+
+        for (reason, expected, semantic, replay_key) in [
+            (
+                AuthorizationReasonCode::IntentConflict,
+                AdmissionCommitError::RecordedIntentConflict,
+                [201_u8; 32],
+                [211_u8; 32],
+            ),
+            (
+                AuthorizationReasonCode::ReplayRejected,
+                AdmissionCommitError::RecordedReplayRejected,
+                [202_u8; 32],
+                [212_u8; 32],
+            ),
+        ] {
+            let denied_request = enrollment_commit_request(
+                &pool,
+                assertion.clone(),
+                proof.clone(),
+                policy.clone(),
+                object,
+                replay_key,
+                Box::new(
+                    CanonicalInviteClaimEffect::new(invite_token, None)
+                        .expect("denied replay effect"),
+                ),
+            )
+            .await
+            .with_semantic_fingerprint_override(semantic)
+            .expect("distinct denial semantic fingerprint");
+            let denial_operation = denied_request.operation_id();
+            let denial_attempt = denied_request.attempt_id;
+            let denial_correlation = denied_request.denial_correlation_id();
+            let denial_request_fingerprint = denied_request.request_fingerprint();
+            let denial_semantic = denied_request.semantic_fingerprint();
+            let denial_actor = denied_request.denial_actor().expect("sealed denial actor");
+            let mut denial_tx = pool.begin().await.expect("begin denied admission");
+            sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+                .execute(&mut *denial_tx)
+                .await
+                .expect("defer denial evidence constraints");
+            persist_denied_admission(
+                &mut denial_tx,
+                DeniedAdmissionRecord {
+                    domain,
+                    operation_id: denial_operation,
+                    attempt_id: denial_attempt,
+                    correlation_id: denial_correlation,
+                    object,
+                    request_fingerprint: denial_request_fingerprint,
+                    semantic_fingerprint: denial_semantic,
+                    actor: denial_actor,
+                    reason,
+                },
+            )
+            .await
+            .expect("persist typed denied admission");
+            denial_tx.commit().await.expect("commit denied admission");
+
+            assert!(matches!(
+                committer.commit(denied_request).await,
+                Err(error) if error == expected
+            ));
+            let denied_retry = enrollment_commit_request(
+                &pool,
+                assertion.clone(),
+                proof.clone(),
+                policy.clone(),
+                object,
+                replay_key,
+                Box::new(
+                    CanonicalInviteClaimEffect::new(invite_token, None)
+                        .expect("denied replay retry effect"),
+                ),
+            )
+            .await
+            .with_semantic_fingerprint_override(semantic)
+            .expect("stable denial semantic fingerprint");
+            assert!(matches!(
+                committer.commit(denied_retry).await,
+                Err(error) if error == expected
+            ));
+            let denial_counts: (i64, i64) = sqlx::query_as(
+                "SELECT \
+                    (SELECT count(*) FROM authorization_operation_receipts \
+                       WHERE community_id=$1 AND operation_id=$2 AND outcome_code=2), \
+                    (SELECT count(*) FROM authorization_events \
+                       WHERE community_id=$1 AND operation_id=$2 AND event_kind=11)",
+            )
+            .bind(domain.as_uuid())
+            .bind(denial_operation)
+            .fetch_one(&pool)
+            .await
+            .expect("count exact denied replay evidence");
+            assert_eq!(denial_counts, (1, 1));
+        }
 
         let first_request = enrollment_commit_request(
             &pool,
@@ -3520,7 +5295,7 @@ mod tests {
         let mismatched_operation = mismatched_same_epoch.operation_id();
         assert!(matches!(
             committer.commit(mismatched_same_epoch).await,
-            Err(AdmissionCommitError::AuthorizationDenied)
+            Err(AdmissionCommitError::RecordedAuthorizationDenied)
         ));
 
         let lower_epoch_policy = LocalAuthorizationPolicy::from_database(
@@ -3552,7 +5327,7 @@ mod tests {
         let lower_operation = lower_epoch.operation_id();
         assert!(matches!(
             committer.commit(lower_epoch).await,
-            Err(AdmissionCommitError::AuthorizationDenied)
+            Err(AdmissionCommitError::RecordedAuthorizationDenied)
         ));
         let denied_authority_markers: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM s3_admission_markers WHERE operation_id IN ($1,$2)",
@@ -3606,7 +5381,7 @@ mod tests {
             domain,
             &audit_keys,
             "audit-capacity-subject",
-            target,
+            alternate_target,
             request_fingerprint,
             transport_context,
         );
@@ -3615,7 +5390,7 @@ mod tests {
             audit_assertion,
             audit_proof,
             policy.clone(),
-            object,
+            alternate_object,
             [114; 32],
             Box::new(
                 CanonicalInviteClaimEffect::new(alternate_invite, None)
@@ -3682,7 +5457,7 @@ mod tests {
             domain,
             &other_keys,
             "canonical-subject",
-            target,
+            alternate_target,
             request_fingerprint,
             transport_context,
         );
@@ -3691,7 +5466,7 @@ mod tests {
             other_assertion,
             other_proof,
             policy.clone(),
-            object,
+            alternate_object,
             [116; 32],
             Box::new(
                 CanonicalInviteClaimEffect::new(alternate_invite, None)
@@ -3701,15 +5476,376 @@ mod tests {
         .await;
         assert!(matches!(
             committer.commit(partial_bijection_request).await,
-            Err(AdmissionCommitError::AuthorizationDenied)
+            Err(AdmissionCommitError::RecordedAuthorizationDenied)
         ));
+
+        let specialized_body = br#"{"code":"v2.specialized"}"#;
+        let specialized_keys = Keys::generate();
+        let issued_at = Utc::now().timestamp() - 2;
+        let (specialized_assertion, specialized_proof) = verified_invite_evidence(
+            domain,
+            &specialized_keys,
+            "specialized-invite-subject",
+            specialized_target,
+            specialized_body,
+            issued_at,
+        );
+        let (refreshed_assertion, refreshed_proof) = verified_invite_evidence(
+            domain,
+            &specialized_keys,
+            "specialized-invite-subject",
+            specialized_target,
+            specialized_body,
+            issued_at + 1,
+        );
+        let db = crate::Db::from_pool(pool.clone());
+        let terminal_denial_invite_id = Uuid::new_v4();
+        let terminal_denial_token = [203_u8; 32];
+        let terminal_denial_target =
+            canonical_invite_resource_key(domain, terminal_denial_invite_id);
+        sqlx::query(
+            "INSERT INTO relay_invites \
+             (id,community_id,token_hash,max_uses,expires_at,created_by) \
+             VALUES ($1,$2,$3,1,transaction_timestamp()-interval '1 second','operator')",
+        )
+        .bind(terminal_denial_invite_id)
+        .bind(domain.as_uuid())
+        .bind(terminal_denial_token.as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert terminal denial invitation");
+        let terminal_denial_resource = db
+            .resolve_canonical_invite_target(domain, terminal_denial_token)
+            .await
+            .expect("resolve terminal denial invitation");
+        let terminal_denial_keys = Keys::generate();
+        let terminal_denial_body = br#"{"code":"v2.terminal-denial"}"#;
+        let (terminal_denial_assertion, terminal_denial_proof) = verified_invite_evidence(
+            domain,
+            &terminal_denial_keys,
+            "terminal-denial-subject",
+            terminal_denial_target,
+            terminal_denial_body,
+            issued_at,
+        );
+        let terminal_evidence_before: (i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM authorization_operation_receipts \
+                   WHERE community_id=$1 AND outcome_code=2), \
+                (SELECT count(*) FROM authorization_events \
+                   WHERE community_id=$1 AND event_kind=11 AND outcome_code=2)",
+        )
+        .bind(domain.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count denial evidence before terminal invite denial");
+        assert_eq!(
+            db.commit_canonical_invite_claim(
+                terminal_denial_assertion,
+                terminal_denial_proof,
+                terminal_denial_resource,
+                terminal_denial_token,
+                None,
+                Arc::new(TestInviteVerifierRechecker),
+            )
+            .await,
+            Err(AdmissionCommitError::RecordedAuthorizationDenied)
+        );
+        let terminal_evidence_after: (i64, i64, i32, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM authorization_operation_receipts \
+                   WHERE community_id=$1 AND outcome_code=2), \
+                (SELECT count(*) FROM authorization_events \
+                   WHERE community_id=$1 AND event_kind=11 AND outcome_code=2), \
+                (SELECT use_count FROM relay_invites \
+                   WHERE community_id=$1 AND token_hash=$2), \
+                (SELECT count(*) FROM relay_members WHERE community_id=$1 AND pubkey=$3)",
+        )
+        .bind(domain.as_uuid())
+        .bind(terminal_denial_token.as_slice())
+        .bind(terminal_denial_keys.public_key().to_hex())
+        .fetch_one(&pool)
+        .await
+        .expect("read terminal invite denial evidence");
+        assert_eq!(terminal_evidence_after.0, terminal_evidence_before.0 + 1);
+        assert_eq!(terminal_evidence_after.1, terminal_evidence_before.1 + 1);
+        assert_eq!(
+            (terminal_evidence_after.2, terminal_evidence_after.3),
+            (0, 0)
+        );
+        let specialized_resource = db
+            .resolve_canonical_invite_target(domain, specialized_invite)
+            .await
+            .expect("resolve specialized invitation");
+        let alternate_resource = db
+            .resolve_canonical_invite_target(domain, alternate_invite)
+            .await
+            .expect("resolve alternate invitation");
+        assert_eq!(specialized_resource.fingerprint(), specialized_target);
+        assert_eq!(
+            db.commit_canonical_invite_claim(
+                specialized_assertion.clone(),
+                specialized_proof.clone(),
+                alternate_resource,
+                specialized_invite,
+                None,
+                Arc::new(TestInviteVerifierRechecker),
+            )
+            .await,
+            Err(AdmissionCommitError::InvalidRequest)
+        );
+        assert_eq!(
+            db.commit_canonical_invite_claim(
+                specialized_assertion.clone(),
+                specialized_proof.clone(),
+                specialized_resource,
+                alternate_invite,
+                None,
+                Arc::new(TestInviteVerifierRechecker),
+            )
+            .await,
+            Err(AdmissionCommitError::RecordedAuthorizationDenied)
+        );
+        let (
+            mismatched_bindings,
+            mismatched_members,
+            mismatched_specialized_uses,
+            mismatched_alternate_uses,
+            mismatched_results,
+            mismatched_events,
+            mismatched_authorities,
+        ): (i64, i64, i32, i32, i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+             (SELECT count(*) FROM identity_bindings \
+               WHERE community_id=$1 AND event_author_pubkey=$2), \
+             (SELECT count(*) FROM relay_members WHERE community_id=$1 AND pubkey=$3), \
+             (SELECT use_count FROM relay_invites WHERE community_id=$1 AND token_hash=$4), \
+             (SELECT use_count FROM relay_invites WHERE community_id=$1 AND token_hash=$5), \
+             (SELECT count(*) FROM authorization_admission_results \
+               WHERE community_id=$1 AND object_key IN ($6,$7)), \
+             (SELECT count(*) FROM authorization_events WHERE community_id=$1 \
+               AND operation_id IN (SELECT operation_id FROM authorization_admission_results \
+                 WHERE community_id=$1 AND object_key IN ($6,$7))), \
+             (SELECT count(*) FROM protected_object_authority \
+               WHERE community_id=$1 AND object_key IN ($6,$7))",
+        )
+        .bind(domain.as_uuid())
+        .bind(specialized_keys.public_key().to_bytes().to_vec())
+        .bind(specialized_keys.public_key().to_hex())
+        .bind(specialized_invite.as_slice())
+        .bind(alternate_invite.as_slice())
+        .bind(specialized_target.as_slice())
+        .bind(alternate_target.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read cross-invite denial residue");
+        assert_eq!(
+            (
+                mismatched_bindings,
+                mismatched_members,
+                mismatched_specialized_uses,
+                mismatched_alternate_uses,
+                mismatched_results,
+                mismatched_events,
+                mismatched_authorities,
+            ),
+            (0, 0, 0, 0, 2, 2, 0)
+        );
+        assert_eq!(
+            db.commit_canonical_invite_claim(
+                specialized_assertion.clone(),
+                specialized_proof.clone(),
+                specialized_resource,
+                specialized_invite,
+                None,
+                Arc::new(TestInviteVerifierRechecker),
+            )
+            .await,
+            Ok(CanonicalInviteClaimResult::fresh(
+                CanonicalInviteClaimOutcome::Joined
+            ))
+        );
+        assert_eq!(
+            db.commit_canonical_invite_claim(
+                refreshed_assertion,
+                refreshed_proof,
+                specialized_resource,
+                specialized_invite,
+                None,
+                Arc::new(TestInviteVerifierRechecker),
+            )
+            .await,
+            Ok(CanonicalInviteClaimResult::exact_replay(
+                CanonicalInviteClaimOutcome::Joined
+            ))
+        );
+        let (specialized_members, specialized_uses, specialized_receipts): (i64, i32, i64) =
+            sqlx::query_as(
+                "SELECT \
+                 (SELECT count(*) FROM relay_members WHERE community_id=$1 AND pubkey=$2), \
+                 (SELECT use_count FROM relay_invites WHERE community_id=$1 AND token_hash=$3), \
+                 (SELECT count(*) FROM authorization_operation_receipts receipt \
+                   JOIN authorization_admission_results admission \
+                     ON admission.community_id=receipt.community_id \
+                    AND admission.operation_id=receipt.operation_id \
+                    AND admission.request_fingerprint=receipt.request_fingerprint \
+                   WHERE receipt.community_id=$1 AND admission.object_key=$4)",
+            )
+            .bind(domain.as_uuid())
+            .bind(specialized_keys.public_key().to_hex())
+            .bind(specialized_invite.as_slice())
+            .bind(specialized_target.as_slice())
+            .fetch_one(&pool)
+            .await
+            .expect("read specialized invite residue");
+        assert_eq!(
+            (specialized_members, specialized_uses, specialized_receipts),
+            (1, 1, 2)
+        );
+
+        let already_member_body = br#"{"code":"v2.already-member"}"#;
+        let already_member_keys = Keys::generate();
+        let (already_member_assertion, already_member_proof) = verified_invite_evidence(
+            domain,
+            &already_member_keys,
+            "already-member-subject",
+            alternate_target,
+            already_member_body,
+            issued_at,
+        );
+        let (refreshed_member_assertion, refreshed_member_proof) = verified_invite_evidence(
+            domain,
+            &already_member_keys,
+            "already-member-subject",
+            alternate_target,
+            already_member_body,
+            issued_at + 1,
+        );
+        sqlx::query(
+            "INSERT INTO relay_members (community_id,pubkey,role,added_by) \
+             VALUES ($1,$2,'member','test')",
+        )
+        .bind(domain.as_uuid())
+        .bind(already_member_keys.public_key().to_hex())
+        .execute(&pool)
+        .await
+        .expect("insert existing invite member");
+        assert_eq!(
+            db.commit_canonical_invite_claim(
+                already_member_assertion,
+                already_member_proof,
+                alternate_resource,
+                alternate_invite,
+                None,
+                Arc::new(TestInviteVerifierRechecker),
+            )
+            .await,
+            Ok(CanonicalInviteClaimResult::fresh(
+                CanonicalInviteClaimOutcome::AlreadyMember
+            ))
+        );
+        assert_eq!(
+            db.commit_canonical_invite_claim(
+                refreshed_member_assertion,
+                refreshed_member_proof,
+                alternate_resource,
+                alternate_invite,
+                None,
+                Arc::new(TestInviteVerifierRechecker),
+            )
+            .await,
+            Ok(CanonicalInviteClaimResult::exact_replay(
+                CanonicalInviteClaimOutcome::AlreadyMember
+            ))
+        );
+        let (already_members, already_uses, already_results): (i64, i32, i64) = sqlx::query_as(
+            "SELECT \
+                 (SELECT count(*) FROM relay_members WHERE community_id=$1 AND pubkey=$2), \
+                 (SELECT use_count FROM relay_invites WHERE community_id=$1 AND token_hash=$3), \
+                 (SELECT count(*) FROM authorization_admission_results \
+                   WHERE community_id=$1 AND object_key=$4)",
+        )
+        .bind(domain.as_uuid())
+        .bind(already_member_keys.public_key().to_hex())
+        .bind(alternate_invite.as_slice())
+        .bind(alternate_target.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read already-member replay residue");
+        assert_eq!((already_members, already_uses, already_results), (1, 0, 2));
+
+        let concurrent_body = br#"{"code":"v2.concurrent"}"#;
+        let concurrent_first_keys = Keys::generate();
+        let concurrent_second_keys = Keys::generate();
+        let (concurrent_first_assertion, concurrent_first_proof) = verified_invite_evidence(
+            domain,
+            &concurrent_first_keys,
+            "concurrent-first-subject",
+            concurrent_target,
+            concurrent_body,
+            issued_at,
+        );
+        let (concurrent_second_assertion, concurrent_second_proof) = verified_invite_evidence(
+            domain,
+            &concurrent_second_keys,
+            "concurrent-second-subject",
+            concurrent_target,
+            concurrent_body,
+            issued_at,
+        );
+        let concurrent_resource = db
+            .resolve_canonical_invite_target(domain, concurrent_invite)
+            .await
+            .expect("resolve concurrent invitation");
+        let first_claim = db.commit_canonical_invite_claim(
+            concurrent_first_assertion,
+            concurrent_first_proof,
+            concurrent_resource,
+            concurrent_invite,
+            None,
+            Arc::new(TestInviteVerifierRechecker),
+        );
+        let second_claim = db.commit_canonical_invite_claim(
+            concurrent_second_assertion,
+            concurrent_second_proof,
+            concurrent_resource,
+            concurrent_invite,
+            None,
+            Arc::new(TestInviteVerifierRechecker),
+        );
+        let (first_claim, second_claim) = tokio::join!(first_claim, second_claim);
+        assert_eq!(
+            first_claim,
+            Ok(CanonicalInviteClaimResult::fresh(
+                CanonicalInviteClaimOutcome::Joined
+            ))
+        );
+        assert_eq!(
+            second_claim,
+            Ok(CanonicalInviteClaimResult::fresh(
+                CanonicalInviteClaimOutcome::Joined
+            ))
+        );
+        let (concurrent_members, concurrent_uses): (i64, i32) = sqlx::query_as(
+            "SELECT \
+             (SELECT count(*) FROM relay_members WHERE community_id=$1 AND pubkey IN ($2,$3)), \
+             (SELECT use_count FROM relay_invites WHERE community_id=$1 AND token_hash=$4)",
+        )
+        .bind(domain.as_uuid())
+        .bind(concurrent_first_keys.public_key().to_hex())
+        .bind(concurrent_second_keys.public_key().to_hex())
+        .bind(concurrent_invite.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read concurrent invite result");
+        assert_eq!((concurrent_members, concurrent_uses), (2, 2));
 
         let stale_keys = Keys::generate();
         let (stale_assertion, stale_proof) = verified_enrollment_evidence(
             domain,
             &stale_keys,
             "stale-policy-subject",
-            target,
+            alternate_target,
             request_fingerprint,
             transport_context,
         );
@@ -3718,7 +5854,7 @@ mod tests {
             stale_assertion.clone(),
             stale_proof.clone(),
             policy.clone(),
-            object,
+            alternate_object,
             [117; 32],
             Box::new(
                 CanonicalInviteClaimEffect::new(alternate_invite, None)
@@ -3758,7 +5894,7 @@ mod tests {
             .expect("commit concurrent restrictive policy");
         assert!(matches!(
             stale_commit.await.expect("join serialized stale admission"),
-            Err(AdmissionCommitError::AuthorizationDenied)
+            Err(AdmissionCommitError::RecordedAuthorizationDenied)
         ));
         assert!(matches!(
             crate::identity_enrollment::prepare_direct_enrollment(
@@ -3779,7 +5915,7 @@ mod tests {
              (SELECT use_count FROM relay_invites WHERE community_id=$1 AND token_hash=$2), \
              (SELECT count(*) FROM authorization_operation_receipts WHERE community_id=$1 AND operation_id IN ($3,$4)), \
              (SELECT count(*) FROM authorization_events WHERE community_id=$1 AND operation_id IN ($3,$4)), \
-             (SELECT count(*) FROM protected_object_authority WHERE community_id=$1 AND object_kind=1 AND object_key=$5)",
+             (SELECT count(*) FROM protected_object_authority WHERE community_id=$1 AND object_kind=9 AND object_key=$5)",
         )
         .bind(domain.as_uuid())
         .bind(invite_token.as_slice())
@@ -3798,8 +5934,9 @@ mod tests {
                 event_count,
                 authority_count,
             ),
-            (1, 1, 1, 2, 2, 1)
+            (5, 5, 1, 2, 2, 1)
         );
+
         pool.close().await;
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DROP DATABASE {database_name}"
@@ -3840,13 +5977,19 @@ mod tests {
         let actor = "11".repeat(32);
         let rollback_actor = "22".repeat(32);
         let capacity_actor = "33".repeat(32);
+        let banned_actor = "44".repeat(32);
+        let expired_actor = "55".repeat(32);
         let joined_token = [41_u8; 32];
         let rollback_token = [42_u8; 32];
         let capacity_token = [43_u8; 32];
+        let banned_token = [44_u8; 32];
+        let expired_token = [45_u8; 32];
         for (token, maximum) in [
             (joined_token, 2_i32),
             (rollback_token, 1_i32),
             (capacity_token, 1_i32),
+            (banned_token, 1_i32),
+            (expired_token, 1_i32),
         ] {
             sqlx::query(
                 "INSERT INTO relay_invites \
@@ -3860,6 +6003,44 @@ mod tests {
             .await
             .expect("insert invite");
         }
+        sqlx::query(
+            "UPDATE relay_invites SET expires_at=clock_timestamp()-INTERVAL '1 second' \
+             WHERE community_id=$1 AND token_hash=$2",
+        )
+        .bind(domain.as_uuid())
+        .bind(expired_token.as_slice())
+        .execute(&pool)
+        .await
+        .expect("expire denial fixture");
+        crate::moderation::ban_member(
+            &pool,
+            domain,
+            &hex::decode(&banned_actor).expect("banned actor bytes"),
+            &[99_u8; 32],
+            Some("canonical invite denial fixture"),
+            None,
+        )
+        .await
+        .expect("ban denial fixture");
+        let invite_resource = |token: [u8; 32]| {
+            let pool = pool.clone();
+            async move {
+                let invite_id: Uuid = sqlx::query_scalar(
+                    "SELECT id FROM relay_invites WHERE community_id=$1 AND token_hash=$2",
+                )
+                .bind(domain.as_uuid())
+                .bind(token.as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("resolve invite resource");
+                canonical_invite_resource_key(domain, invite_id)
+            }
+        };
+        let joined_resource = invite_resource(joined_token).await;
+        let rollback_resource = invite_resource(rollback_token).await;
+        let capacity_resource = invite_resource(capacity_token).await;
+        let banned_resource = invite_resource(banned_token).await;
+        let expired_resource = invite_resource(expired_token).await;
 
         let policy_version = "a1".repeat(32);
         let effect = CanonicalInviteClaimEffect::new(joined_token, Some(&policy_version))
@@ -3872,6 +6053,7 @@ mod tests {
             joined_token,
             Some(&policy_version),
             effect.intent_digest(),
+            joined_resource,
         )
         .await
         .expect("apply joined effect");
@@ -3889,6 +6071,7 @@ mod tests {
             joined_token,
             Some(&policy_version),
             effect.intent_digest(),
+            joined_resource,
         )
         .await
         .expect("apply already-member effect");
@@ -3910,6 +6093,44 @@ mod tests {
         .expect("read joined use count");
         assert_eq!(joined_count, 1);
 
+        for (denied_actor, denied_token, denied_resource) in [
+            (&banned_actor, banned_token, banned_resource),
+            (&expired_actor, expired_token, expired_resource),
+        ] {
+            let denied_effect =
+                CanonicalInviteClaimEffect::new(denied_token, None).expect("denied effect");
+            let mut denied_tx = pool.begin().await.expect("begin denied invite effect");
+            assert_eq!(
+                apply_canonical_invite_claim_tx(
+                    &mut denied_tx,
+                    domain,
+                    denied_actor,
+                    denied_token,
+                    None,
+                    denied_effect.intent_digest(),
+                    denied_resource,
+                )
+                .await,
+                Err(AdmissionCommitError::AuthorizationDenied)
+            );
+            denied_tx.rollback().await.expect("roll back denied invite");
+        }
+        let (denied_members, denied_uses): (i64, i64) = sqlx::query_as(
+            "SELECT \
+             (SELECT count(*) FROM relay_members WHERE community_id=$1 AND pubkey IN ($2,$3)), \
+             (SELECT sum(use_count) FROM relay_invites \
+               WHERE community_id=$1 AND token_hash IN ($4,$5))",
+        )
+        .bind(domain.as_uuid())
+        .bind(&banned_actor)
+        .bind(&expired_actor)
+        .bind(banned_token.as_slice())
+        .bind(expired_token.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read denied invite residue");
+        assert_eq!((denied_members, denied_uses), (0, 0));
+
         let rollback_effect =
             CanonicalInviteClaimEffect::new(rollback_token, None).expect("rollback effect");
         let mut rollback_tx = pool.begin().await.expect("begin rollback effect");
@@ -3921,6 +6142,7 @@ mod tests {
                 rollback_token,
                 Some("invalid-policy-version"),
                 rollback_effect.intent_digest(),
+                rollback_resource,
             )
             .await
             .expect_err("policy persistence failure must abort the effect"),
@@ -3952,6 +6174,7 @@ mod tests {
             capacity_token,
             None,
             capacity_effect.intent_digest(),
+            capacity_resource,
         )
         .await
         .expect("stage capacity rollback effect");
@@ -4007,8 +6230,7 @@ mod tests {
         let semantic_fingerprint = [53_u8; 32];
         let application_intent = [56_u8; 32];
         let application_effect = [57_u8; 32];
-        let object =
-            AdmissionObject::new(AdmissionObjectKind::Domain, [58; 32]).expect("test object");
+        let object = canonical_invite_admission_object([58; 32]).expect("test object");
         let persisted_result =
             AdmissionApplicationResult::invite_claim(CanonicalInviteClaimOutcome::AlreadyMember);
         let persisted_result_digest = canonical_admission_result_digest(
@@ -4098,7 +6320,7 @@ mod tests {
         .expect_err("persisted application result is immutable");
 
         let mut read_tx = pool.begin().await.expect("begin replay read");
-        let (replayed_receipt, replayed_result) = read_existing_receipt(
+        let replayed = read_existing_receipt(
             &mut read_tx,
             ExistingAdmissionLookup {
                 domain,
@@ -4113,6 +6335,10 @@ mod tests {
         .await
         .expect("read exact replay")
         .expect("persisted replay exists");
+        let ExistingAdmissionRecord::Allowed(replayed) = replayed else {
+            panic!("persisted allowed admission replayed as a denial")
+        };
+        let (replayed_receipt, replayed_result) = *replayed;
         assert_eq!(replayed_receipt.authorization_domain(), domain);
         assert_eq!(replayed_receipt.object(), object);
         assert_eq!(
@@ -4125,7 +6351,7 @@ mod tests {
                 CanonicalInviteClaimOutcome::AlreadyMember
             ))
         );
-        assert_eq!(
+        assert!(matches!(
             read_existing_receipt(
                 &mut read_tx,
                 ExistingAdmissionLookup {
@@ -4142,8 +6368,8 @@ mod tests {
             )
             .await,
             Err(AdmissionCommitError::IntentConflict)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             read_existing_receipt(
                 &mut read_tx,
                 ExistingAdmissionLookup {
@@ -4161,7 +6387,7 @@ mod tests {
             )
             .await,
             Err(AdmissionCommitError::IntentConflict)
-        );
+        ));
         read_tx.rollback().await.expect("close replay read");
         pool.close().await;
     }

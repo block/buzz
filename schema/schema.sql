@@ -298,7 +298,7 @@ CREATE TABLE IF NOT EXISTS authorization_admission_results (
     CONSTRAINT authorization_admission_results_application_type_check CHECK (application_type IS NULL OR octet_length(application_type) = 32 AND application_type <> decode(repeat('00'::text, 32), 'hex'::text)),
     CONSTRAINT authorization_admission_results_application_version_check CHECK (application_version > 0),
     CONSTRAINT authorization_admission_results_object_key_check CHECK (octet_length(object_key) = 32 AND object_key <> decode(repeat('00'::text, 32), 'hex'::text)),
-    CONSTRAINT authorization_admission_results_object_kind_check CHECK (object_kind >= 1 AND object_kind <= 6),
+    CONSTRAINT authorization_admission_results_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 9)),
     CONSTRAINT authorization_admission_results_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32),
     CONSTRAINT authorization_admission_results_semantic_fingerprint_check CHECK (octet_length(semantic_fingerprint) = 32 AND semantic_fingerprint <> decode(repeat('00'::text, 32), 'hex'::text))
 );
@@ -323,7 +323,7 @@ CREATE TABLE IF NOT EXISTS authorization_authority_epochs (
     CONSTRAINT authorization_authority_epochs_authority_epoch_check CHECK (authority_epoch > 0),
     CONSTRAINT authorization_authority_epochs_fence_check CHECK (octet_length(fence) = 32 AND fence <> decode(repeat('00'::text, 32), 'hex'::text)),
     CONSTRAINT authorization_authority_epochs_object_key_check CHECK (octet_length(object_key) = 32),
-    CONSTRAINT authorization_authority_epochs_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6)),
+    CONSTRAINT authorization_authority_epochs_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 9)),
     CONSTRAINT authorization_authority_epochs_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32)
 );
 
@@ -365,7 +365,7 @@ CREATE TABLE IF NOT EXISTS authorization_events (
     CONSTRAINT authorization_events_event_kind_check CHECK (event_kind IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14)),
     CONSTRAINT authorization_events_operation_id_check CHECK (operation_id <> '00000000-0000-0000-0000-000000000000'::uuid),
     CONSTRAINT authorization_events_outcome_code_check CHECK (outcome_code IN (1, 2, 3, 4, 5)),
-    CONSTRAINT authorization_events_reason_code_check CHECK (reason_code IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)),
+    CONSTRAINT authorization_events_reason_code_check CHECK (reason_code IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)),
     CONSTRAINT authorization_events_request_fingerprint_check CHECK (request_fingerprint IS NULL OR octet_length(request_fingerprint) = 32),
     CONSTRAINT authorization_events_schema_version_check CHECK (schema_version = 1),
     CONSTRAINT authorization_events_subject_fingerprint_check CHECK (subject_fingerprint IS NULL OR octet_length(subject_fingerprint) = 32)
@@ -478,20 +478,25 @@ CREATE TABLE IF NOT EXISTS authorization_operation_version_deltas (
 
 CREATE TABLE IF NOT EXISTS authorization_operator_denial_buckets (
     community_id uuid,
+    surface_kind smallint,
     denial_class smallint,
     action_kind smallint,
     slot smallint,
     window_generation bigint NOT NULL,
     window_started_at timestamptz NOT NULL,
     denial_count bigint NOT NULL,
+    lifetime_count bigint NOT NULL,
     last_denied_at timestamptz NOT NULL,
-    CONSTRAINT authorization_operator_denial_buckets_pkey PRIMARY KEY (community_id, denial_class, action_kind, slot),
+    CONSTRAINT authorization_operator_denial_buckets_pkey PRIMARY KEY (community_id, surface_kind, denial_class, action_kind, slot),
     CONSTRAINT authorization_operator_denial_buckets_community_id_fkey FOREIGN KEY (community_id) REFERENCES communities (id),
     CONSTRAINT authorization_operator_denial_buckets_action_kind_check CHECK (action_kind >= 1 AND action_kind <= 8),
-    CONSTRAINT authorization_operator_denial_buckets_check CHECK (window_started_at <= last_denied_at),
+    CONSTRAINT authorization_operator_denial_buckets_check CHECK (surface_kind = 1 AND action_kind >= 1 AND action_kind <= 8 OR surface_kind = 2 AND action_kind = 1 OR surface_kind = 3 AND action_kind = 2),
+    CONSTRAINT authorization_operator_denial_buckets_check1 CHECK (window_started_at <= last_denied_at),
     CONSTRAINT authorization_operator_denial_buckets_denial_class_check CHECK (denial_class >= 1 AND denial_class <= 8),
     CONSTRAINT authorization_operator_denial_buckets_denial_count_check CHECK (denial_count > 0),
+    CONSTRAINT authorization_operator_denial_buckets_lifetime_count_check CHECK (lifetime_count > 0),
     CONSTRAINT authorization_operator_denial_buckets_slot_check CHECK (slot >= 0 AND slot <= 11),
+    CONSTRAINT authorization_operator_denial_buckets_surface_kind_check CHECK (surface_kind >= 1 AND surface_kind <= 3),
     CONSTRAINT authorization_operator_denial_buckets_window_generation_check CHECK (window_generation >= 0)
 );
 
@@ -1872,6 +1877,10 @@ CREATE TABLE IF NOT EXISTS protected_publication_projection_outbox (
     application_type bytea NOT NULL,
     application_version smallint NOT NULL,
     application_effect_digest bytea NOT NULL,
+    authority_operation_id uuid,
+    authority_request_fingerprint bytea,
+    authority_epoch bigint,
+    authority_fence bytea,
     projection_kind smallint,
     projection_key text NOT NULL,
     staged_object_key text NOT NULL,
@@ -1889,6 +1898,7 @@ CREATE TABLE IF NOT EXISTS protected_publication_projection_outbox (
     CONSTRAINT protected_publication_project_community_id_operation_id_re_fkey FOREIGN KEY (community_id, operation_id, request_fingerprint) REFERENCES authorization_operation_receipts (community_id, operation_id, request_fingerprint) DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT protected_publication_projection_outbox_community_id_fkey FOREIGN KEY (community_id) REFERENCES communities (id),
     CONSTRAINT protected_publication_projectio_application_effect_digest_check CHECK (octet_length(application_effect_digest) = 32 AND application_effect_digest <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT protected_publication_projection_authority_binding CHECK ((authority_operation_id IS NULL AND authority_request_fingerprint IS NULL AND authority_epoch IS NULL AND authority_fence IS NULL) OR (authority_operation_id IS NOT NULL AND authority_operation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND authority_request_fingerprint IS NOT NULL AND octet_length(authority_request_fingerprint) = 32 AND authority_epoch IS NOT NULL AND authority_epoch > 0 AND authority_fence IS NOT NULL AND octet_length(authority_fence) = 32 AND authority_fence <> decode(repeat('00'::text, 32), 'hex'::text))),
     CONSTRAINT protected_publication_projectio_publication_result_digest_check CHECK (octet_length(publication_result_digest) = 32 AND publication_result_digest <> decode(repeat('00'::text, 32), 'hex'::text)),
     CONSTRAINT protected_publication_projection_outb_application_version_check CHECK (application_version > 0),
     CONSTRAINT protected_publication_projection_outb_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32 AND request_fingerprint <> decode(repeat('00'::text, 32), 'hex'::text)),
@@ -1907,6 +1917,12 @@ CREATE TABLE IF NOT EXISTS protected_publication_projection_outbox (
     CONSTRAINT protected_publication_projection_outbox_projection_kind_check CHECK (projection_kind IN (1, 2, 3)),
     CONSTRAINT protected_publication_projection_outbox_staged_object_key_check CHECK (octet_length(staged_object_key) >= 1 AND octet_length(staged_object_key) <= 2048)
 );
+
+--
+-- Name: protected_publication_projection_outbox_active_target; Type: INDEX; Schema: -; Owner: -
+--
+
+CREATE UNIQUE INDEX IF NOT EXISTS protected_publication_projection_outbox_active_target ON protected_publication_projection_outbox (community_id, projection_kind, projection_key) WHERE (delivery_state = 1);
 
 --
 -- Name: protected_publication_projection_outbox_pending; Type: INDEX; Schema: -; Owner: -
@@ -2883,7 +2899,7 @@ CREATE TABLE IF NOT EXISTS protected_object_authority (
     CONSTRAINT protected_object_authority_fence_check CHECK (octet_length(fence) = 32 AND fence <> decode(repeat('00'::text, 32), 'hex'::text)),
     CONSTRAINT protected_object_authority_invalidation_generation_check CHECK (invalidation_generation >= 0),
     CONSTRAINT protected_object_authority_object_key_check CHECK (octet_length(object_key) = 32),
-    CONSTRAINT protected_object_authority_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6)),
+    CONSTRAINT protected_object_authority_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 9)),
     CONSTRAINT protected_object_authority_owner_pubkey_check CHECK (owner_pubkey IS NULL OR octet_length(owner_pubkey) = 32),
     CONSTRAINT protected_object_authority_policy_revision_check CHECK (policy_revision > 0),
     CONSTRAINT protected_object_authority_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32)
@@ -2914,6 +2930,92 @@ BEGIN
             USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
+END;
+$$;
+
+--
+-- Name: authorization_denial_bucket_record_v1(uuid, smallint, smallint, smallint); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_denial_bucket_record_v1(
+    selected_community_id uuid,
+    selected_surface_kind smallint,
+    selected_denial_class smallint,
+    selected_action_kind smallint
+)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+STRICT
+AS $$
+DECLARE
+    authoritative_now TIMESTAMPTZ := clock_timestamp();
+    generation BIGINT;
+    selected_slot SMALLINT;
+    retained_count BIGINT;
+BEGIN
+    IF selected_surface_kind NOT BETWEEN 1 AND 3
+        OR selected_denial_class NOT BETWEEN 1 AND 8
+        OR selected_action_kind NOT BETWEEN 1 AND 8
+        OR (selected_surface_kind = 2 AND selected_action_kind <> 1)
+        OR (selected_surface_kind = 3 AND selected_action_kind <> 2)
+    THEN
+        RAISE EXCEPTION 'invalid denial bucket coordinate'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    generation := floor(extract(epoch FROM authoritative_now) / 300)::BIGINT;
+    selected_slot := (generation % 12)::SMALLINT;
+    INSERT INTO authorization_operator_denial_buckets (
+        community_id, surface_kind, denial_class, action_kind, slot,
+        window_generation, window_started_at, denial_count, lifetime_count,
+        last_denied_at
+    ) VALUES (
+        selected_community_id, selected_surface_kind, selected_denial_class,
+        selected_action_kind, selected_slot, generation,
+        to_timestamp(generation * 300), 1, 1, authoritative_now
+    )
+    ON CONFLICT (
+        community_id, surface_kind, denial_class, action_kind, slot
+    ) DO UPDATE SET
+        window_generation = GREATEST(
+            authorization_operator_denial_buckets.window_generation,
+            EXCLUDED.window_generation
+        ),
+        window_started_at = CASE
+            WHEN authorization_operator_denial_buckets.window_generation
+                <= EXCLUDED.window_generation
+            THEN EXCLUDED.window_started_at
+            ELSE authorization_operator_denial_buckets.window_started_at
+        END,
+        denial_count = CASE
+            WHEN authorization_operator_denial_buckets.window_generation
+                = EXCLUDED.window_generation
+            THEN CASE
+                WHEN authorization_operator_denial_buckets.denial_count
+                    = 9223372036854775807
+                THEN 9223372036854775807
+                ELSE authorization_operator_denial_buckets.denial_count + 1
+            END
+            WHEN authorization_operator_denial_buckets.window_generation
+                < EXCLUDED.window_generation
+            THEN 1
+            WHEN authorization_operator_denial_buckets.denial_count
+                = 9223372036854775807
+            THEN 9223372036854775807
+            ELSE authorization_operator_denial_buckets.denial_count + 1
+        END,
+        lifetime_count = CASE
+            WHEN authorization_operator_denial_buckets.lifetime_count
+                = 9223372036854775807
+            THEN 9223372036854775807
+            ELSE authorization_operator_denial_buckets.lifetime_count + 1
+        END,
+        last_denied_at = GREATEST(
+            authorization_operator_denial_buckets.last_denied_at,
+            EXCLUDED.last_denied_at
+        )
+    RETURNING denial_count INTO retained_count;
+    RETURN retained_count;
 END;
 $$;
 
@@ -3356,16 +3458,29 @@ VOLATILE
 AS $$
 BEGIN
     IF NEW.community_id IS DISTINCT FROM OLD.community_id
+        OR NEW.surface_kind IS DISTINCT FROM OLD.surface_kind
         OR NEW.denial_class IS DISTINCT FROM OLD.denial_class
         OR NEW.action_kind IS DISTINCT FROM OLD.action_kind
         OR NEW.slot IS DISTINCT FROM OLD.slot
         OR NEW.window_generation < OLD.window_generation
+        OR NEW.lifetime_count IS DISTINCT FROM (CASE
+            WHEN OLD.lifetime_count = 9223372036854775807
+            THEN 9223372036854775807
+            ELSE OLD.lifetime_count + 1
+        END)
         OR (NEW.window_generation = OLD.window_generation AND (
             NEW.window_started_at IS DISTINCT FROM OLD.window_started_at
-            OR NEW.denial_count < OLD.denial_count
+            OR NEW.denial_count IS DISTINCT FROM (CASE
+                WHEN OLD.denial_count = 9223372036854775807
+                THEN 9223372036854775807
+                ELSE OLD.denial_count + 1
+            END)
             OR NEW.last_denied_at < OLD.last_denied_at
         ))
-        OR (NEW.window_generation > OLD.window_generation AND NEW.denial_count <> 1)
+        OR (NEW.window_generation > OLD.window_generation AND (
+            NEW.denial_count <> 1
+            OR NEW.window_started_at <= OLD.window_started_at
+        ))
     THEN
         RAISE EXCEPTION 'operator denial bucket transition is invalid'
             USING ERRCODE = 'check_violation';
@@ -3384,50 +3499,14 @@ CREATE OR REPLACE FUNCTION authorization_operator_denial_bucket_record_v1(
     selected_action_kind smallint
 )
 RETURNS bigint
-LANGUAGE plpgsql
+LANGUAGE sql
 VOLATILE
 STRICT
 AS $$
-DECLARE
-    authoritative_now TIMESTAMPTZ := transaction_timestamp();
-    generation BIGINT;
-    selected_slot SMALLINT;
-    retained_count BIGINT;
-BEGIN
-    IF selected_denial_class NOT BETWEEN 1 AND 8
-        OR selected_action_kind NOT BETWEEN 1 AND 8
-    THEN
-        RAISE EXCEPTION 'invalid operator denial bucket coordinate'
-            USING ERRCODE = 'check_violation';
-    END IF;
-    generation := floor(extract(epoch FROM authoritative_now) / 300)::BIGINT;
-    selected_slot := (generation % 12)::SMALLINT;
-    INSERT INTO authorization_operator_denial_buckets (
-        community_id, denial_class, action_kind, slot,
-        window_generation, window_started_at, denial_count, last_denied_at
-    ) VALUES (
-        selected_community_id, selected_denial_class, selected_action_kind,
-        selected_slot, generation, to_timestamp(generation * 300), 1,
-        authoritative_now
-    )
-    ON CONFLICT (community_id, denial_class, action_kind, slot) DO UPDATE SET
-        window_generation = EXCLUDED.window_generation,
-        window_started_at = EXCLUDED.window_started_at,
-        denial_count = CASE
-            WHEN authorization_operator_denial_buckets.window_generation
-                = EXCLUDED.window_generation
-            THEN CASE
-                WHEN authorization_operator_denial_buckets.denial_count
-                    = 9223372036854775807
-                THEN 9223372036854775807
-                ELSE authorization_operator_denial_buckets.denial_count + 1
-            END
-            ELSE 1
-        END,
-        last_denied_at = EXCLUDED.last_denied_at
-    RETURNING denial_count INTO retained_count;
-    RETURN retained_count;
-END;
+    SELECT authorization_denial_bucket_record_v1(
+        selected_community_id, 1::SMALLINT,
+        selected_denial_class, selected_action_kind
+    );
 $$;
 
 --
@@ -4321,6 +4400,10 @@ BEGIN
         OR NEW.last_attempt_at IS NOT NULL
         OR NEW.delivered_at IS NOT NULL
         OR NEW.failure_code <> 0
+        OR NEW.authority_operation_id IS NOT NULL
+        OR NEW.authority_request_fingerprint IS NOT NULL
+        OR NEW.authority_epoch IS NOT NULL
+        OR NEW.authority_fence IS NOT NULL
     THEN
         RAISE EXCEPTION 'protected publication projection must start pending'
             USING ERRCODE = 'check_violation',
@@ -4336,8 +4419,6 @@ BEGIN
             jsonb_build_array(
                 'buzz:nip-fi:protected-publication-projection:v1',
                 NEW.community_id::TEXT,
-                NEW.object_kind,
-                encode(NEW.object_key, 'hex'),
                 NEW.projection_kind,
                 NEW.projection_key
             )::TEXT,
@@ -4360,14 +4441,41 @@ RETURNS trigger
 LANGUAGE plpgsql
 VOLATILE
 AS $$
+DECLARE
+    canonical_authority_operation_id UUID;
+    canonical_authority_request_fingerprint BYTEA;
+    canonical_authority_epoch BIGINT;
+    canonical_authority_fence BYTEA;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1
+    SELECT authority.operation_id,
+           authority.request_fingerprint,
+           authority.authority_epoch,
+           authority.fence
+      INTO canonical_authority_operation_id,
+           canonical_authority_request_fingerprint,
+           canonical_authority_epoch,
+           canonical_authority_fence
         FROM authorization_operation_receipts receipt
         JOIN authorization_admission_results admission
           ON admission.community_id = receipt.community_id
          AND admission.operation_id = receipt.operation_id
          AND admission.request_fingerprint = receipt.request_fingerprint
+        JOIN protected_object_authority authority
+          ON authority.community_id = admission.community_id
+         AND authority.object_kind = admission.object_kind
+         AND authority.object_key = admission.object_key
+        JOIN authorization_authority_epochs epoch
+          ON epoch.community_id = authority.community_id
+         AND epoch.object_kind = authority.object_kind
+         AND epoch.object_key = authority.object_key
+         AND epoch.authority_epoch = authority.authority_epoch
+         AND epoch.fence = authority.fence
+         AND epoch.operation_id = authority.operation_id
+         AND epoch.request_fingerprint = authority.request_fingerprint
+        JOIN authorization_operation_receipts authority_receipt
+          ON authority_receipt.community_id = authority.community_id
+         AND authority_receipt.operation_id = authority.operation_id
+         AND authority_receipt.request_fingerprint = authority.request_fingerprint
         WHERE receipt.community_id = NEW.community_id
           AND receipt.operation_id = NEW.operation_id
           AND receipt.request_fingerprint = NEW.request_fingerprint
@@ -4381,8 +4489,42 @@ BEGIN
           AND admission.application_version = NEW.application_version
           AND admission.application_effect_digest = NEW.application_effect_digest
           AND admission.application_result_digest = NEW.publication_result_digest
-    ) THEN
+          AND authority_receipt.operation_kind IN (1, 11)
+          AND authority_receipt.outcome_code = 1
+        FOR SHARE OF authority, epoch, authority_receipt;
+
+    IF canonical_authority_operation_id IS NULL THEN
         RAISE EXCEPTION 'protected publication projection requires exact applied receipt'
+            USING ERRCODE = 'foreign_key_violation',
+                  CONSTRAINT = 'protected_publication_projection_receipt';
+    END IF;
+
+    UPDATE protected_publication_projection_outbox projection
+       SET authority_operation_id = canonical_authority_operation_id,
+           authority_request_fingerprint = canonical_authority_request_fingerprint,
+           authority_epoch = canonical_authority_epoch,
+           authority_fence = canonical_authority_fence
+     WHERE projection.community_id = NEW.community_id
+       AND projection.operation_id = NEW.operation_id
+       AND projection.projection_kind = NEW.projection_kind
+       AND projection.authority_operation_id IS NULL
+       AND projection.authority_request_fingerprint IS NULL
+       AND projection.authority_epoch IS NULL
+       AND projection.authority_fence IS NULL;
+
+    IF NOT EXISTS (
+        SELECT 1
+          FROM protected_publication_projection_outbox projection
+         WHERE projection.community_id = NEW.community_id
+           AND projection.operation_id = NEW.operation_id
+           AND projection.projection_kind = NEW.projection_kind
+           AND projection.authority_operation_id = canonical_authority_operation_id
+           AND projection.authority_request_fingerprint =
+               canonical_authority_request_fingerprint
+           AND projection.authority_epoch = canonical_authority_epoch
+           AND projection.authority_fence = canonical_authority_fence
+    ) THEN
+        RAISE EXCEPTION 'protected publication projection authority binding is invalid'
             USING ERRCODE = 'foreign_key_violation',
                   CONSTRAINT = 'protected_publication_projection_receipt';
     END IF;
@@ -4400,6 +4542,42 @@ LANGUAGE plpgsql
 VOLATILE
 AS $$
 BEGIN
+    -- The deferred receipt guard owns the sole transition from an unbound
+    -- in-transaction row to its immutable canonical authority snapshot.
+    IF pg_trigger_depth() = 2
+        AND OLD.authority_operation_id IS NULL
+        AND OLD.authority_request_fingerprint IS NULL
+        AND OLD.authority_epoch IS NULL
+        AND OLD.authority_fence IS NULL
+        AND NEW.authority_operation_id IS NOT NULL
+        AND NEW.authority_request_fingerprint IS NOT NULL
+        AND NEW.authority_epoch IS NOT NULL
+        AND NEW.authority_fence IS NOT NULL
+        AND NEW.community_id IS NOT DISTINCT FROM OLD.community_id
+        AND NEW.operation_id IS NOT DISTINCT FROM OLD.operation_id
+        AND NEW.request_fingerprint IS NOT DISTINCT FROM OLD.request_fingerprint
+        AND NEW.publication_result_digest IS NOT DISTINCT FROM OLD.publication_result_digest
+        AND NEW.object_kind IS NOT DISTINCT FROM OLD.object_kind
+        AND NEW.object_key IS NOT DISTINCT FROM OLD.object_key
+        AND NEW.application_type IS NOT DISTINCT FROM OLD.application_type
+        AND NEW.application_version IS NOT DISTINCT FROM OLD.application_version
+        AND NEW.application_effect_digest IS NOT DISTINCT FROM OLD.application_effect_digest
+        AND NEW.projection_kind IS NOT DISTINCT FROM OLD.projection_kind
+        AND NEW.projection_key IS NOT DISTINCT FROM OLD.projection_key
+        AND NEW.staged_object_key IS NOT DISTINCT FROM OLD.staged_object_key
+        AND NEW.payload_digest IS NOT DISTINCT FROM OLD.payload_digest
+        AND NEW.delivery_state IS NOT DISTINCT FROM OLD.delivery_state
+        AND NEW.attempt_count IS NOT DISTINCT FROM OLD.attempt_count
+        AND NEW.next_attempt_at IS NOT DISTINCT FROM OLD.next_attempt_at
+        AND NEW.last_attempt_at IS NOT DISTINCT FROM OLD.last_attempt_at
+        AND NEW.delivered_at IS NOT DISTINCT FROM OLD.delivered_at
+        AND NEW.failure_code IS NOT DISTINCT FROM OLD.failure_code
+        AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at
+        AND NEW.publication_sequence IS NOT DISTINCT FROM OLD.publication_sequence
+    THEN
+        RETURN NEW;
+    END IF;
+
     IF NEW.community_id IS DISTINCT FROM OLD.community_id
         OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
         OR NEW.request_fingerprint IS DISTINCT FROM OLD.request_fingerprint
@@ -4409,6 +4587,10 @@ BEGIN
         OR NEW.application_type IS DISTINCT FROM OLD.application_type
         OR NEW.application_version IS DISTINCT FROM OLD.application_version
         OR NEW.application_effect_digest IS DISTINCT FROM OLD.application_effect_digest
+        OR NEW.authority_operation_id IS DISTINCT FROM OLD.authority_operation_id
+        OR NEW.authority_request_fingerprint IS DISTINCT FROM OLD.authority_request_fingerprint
+        OR NEW.authority_epoch IS DISTINCT FROM OLD.authority_epoch
+        OR NEW.authority_fence IS DISTINCT FROM OLD.authority_fence
         OR NEW.projection_kind IS DISTINCT FROM OLD.projection_kind
         OR NEW.projection_key IS DISTINCT FROM OLD.projection_key
         OR NEW.staged_object_key IS DISTINCT FROM OLD.staged_object_key

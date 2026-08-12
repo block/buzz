@@ -38,6 +38,56 @@ use crate::subscription::SubscriptionRegistry;
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
 
+/// Provider-neutral failure returned by the invite assertion adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InviteAssertionError {
+    /// The presented evidence did not satisfy the exact route coordinates.
+    Denied,
+    /// The configured verifier could not provide current authoritative state.
+    Unavailable,
+}
+
+/// Provider-neutral assertion verifier used by canonical invite admission.
+pub(crate) trait InviteAssertionVerifier: Send + Sync {
+    /// Verify one assertion against exact server-derived request coordinates.
+    #[allow(clippy::too_many_arguments)]
+    fn verify<'a>(
+        &'a self,
+        token: &'a str,
+        authorization_domain: CommunityId,
+        transport: buzz_auth::ProofTransport,
+        target_fingerprint: [u8; 32],
+        request_fingerprint: [u8; 32],
+        transport_context_fingerprint: [u8; 32],
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<buzz_auth::VerifiedFederatedAssertion, InviteAssertionError>>
+                + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Installed provider-neutral verifier and transaction-time rechecker.
+pub(crate) struct CanonicalInviteAuthority {
+    assertion_verifier: Arc<dyn InviteAssertionVerifier>,
+    final_rechecker: Arc<dyn buzz_db::authorization_admission::AdmissionVerifierRechecker>,
+}
+
+impl CanonicalInviteAuthority {
+    /// Borrow the verifier used before canonical preparation.
+    pub(crate) fn assertion_verifier(&self) -> &dyn InviteAssertionVerifier {
+        self.assertion_verifier.as_ref()
+    }
+
+    /// Clone the same authority's transaction-time verifier rechecker.
+    pub(crate) fn final_rechecker(
+        &self,
+    ) -> Arc<dyn buzz_db::authorization_admission::AdmissionVerifierRechecker> {
+        Arc::clone(&self.final_rechecker)
+    }
+}
+
 /// Leaves headroom under the process-wide drain deadline for a stalled writer.
 const RESTART_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 type SlidingWindowCounter = (u32, Instant);
@@ -723,6 +773,18 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Return the installed provider-neutral authority for invite admission.
+    pub(crate) fn canonical_invite_authority(&self) -> Option<CanonicalInviteAuthority> {
+        let service = self.corporate_identity.as_ref()?.clone();
+        let assertion_verifier: Arc<dyn InviteAssertionVerifier> = service.clone();
+        let final_rechecker: Arc<dyn buzz_db::authorization_admission::AdmissionVerifierRechecker> =
+            service;
+        Some(CanonicalInviteAuthority {
+            assertion_verifier,
+            final_rechecker,
+        })
+    }
+
     /// Constructs `AppState` from its component services.
     ///
     /// Returns `(state, audit_shutdown)`. The caller should call

@@ -173,6 +173,45 @@ impl CorporateIdentityService {
         }
     }
 
+    /// Verify one assertion against exact provider-free route coordinates.
+    pub(crate) async fn verify_route_assertion(
+        &self,
+        token: &str,
+        authorization_domain: CommunityId,
+        transport: ProofTransport,
+        target_fingerprint: [u8; 32],
+        request_fingerprint: [u8; 32],
+        transport_context_fingerprint: [u8; 32],
+    ) -> Result<buzz_auth::VerifiedFederatedAssertion, CorporateIdentityError> {
+        let header = decode_header(token)
+            .map_err(|e| CorporateIdentityError::InvalidJwt(format!("invalid JWT header: {e}")))?;
+        if !is_allowed_jwt_algorithm(header.alg) {
+            return Err(CorporateIdentityError::InvalidJwt(format!(
+                "unsupported JWT algorithm: {:?}",
+                header.alg
+            )));
+        }
+        let kid = header
+            .kid
+            .as_deref()
+            .ok_or(CorporateIdentityError::MissingKid)?;
+        let (jwk, generation) = self.jwk_snapshot_for_kid(kid).await?;
+        let key_set = CanonicalVerifierKeySet::new(generation, JwkSet { keys: vec![jwk] });
+        self.verifier
+            .as_ref()
+            .map_err(|error| CorporateIdentityError::InvalidJwt(error.code().to_owned()))?
+            .verify(
+                token,
+                &key_set,
+                authorization_domain,
+                transport,
+                target_fingerprint,
+                request_fingerprint,
+                transport_context_fingerprint,
+            )
+            .map_err(|error| CorporateIdentityError::InvalidJwt(error.code().to_owned()))
+    }
+
     /// Validate a JWT and extract the configured corporate identity claims.
     pub async fn validate_jwt(
         &self,
@@ -253,11 +292,9 @@ impl CorporateIdentityService {
         if verifier.policy_id() != stamp.policy_id() {
             return false;
         }
-        self.jwks
-            .read()
-            .await
-            .as_ref()
-            .is_some_and(|cached| cached.generation == stamp.key_generation())
+        self.jwks.read().await.as_ref().is_some_and(|cached| {
+            cached.generation == stamp.key_generation() && cached.expires_at > Instant::now()
+        })
     }
 
     async fn jwk_snapshot_for_kid(
@@ -358,6 +395,70 @@ impl CorporateIdentityService {
         }
         serde_json::from_slice::<JwkSet>(&body)
             .map_err(|e| CorporateIdentityError::Jwks(e.to_string()))
+    }
+}
+
+impl buzz_db::authorization_admission::AdmissionVerifierRechecker for CorporateIdentityService {
+    fn recheck<'a>(
+        &'a self,
+        expected: VerifierPolicyStamp,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), buzz_db::authorization_admission::AdmissionCommitError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if self.accepts_final_verifier_stamp(expected).await {
+                Ok(())
+            } else {
+                Err(buzz_db::authorization_admission::AdmissionCommitError::AuthorizationDenied)
+            }
+        })
+    }
+}
+
+impl crate::state::InviteAssertionVerifier for CorporateIdentityService {
+    fn verify<'a>(
+        &'a self,
+        token: &'a str,
+        authorization_domain: CommunityId,
+        transport: ProofTransport,
+        target_fingerprint: [u8; 32],
+        request_fingerprint: [u8; 32],
+        transport_context_fingerprint: [u8; 32],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        buzz_auth::VerifiedFederatedAssertion,
+                        crate::state::InviteAssertionError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.verify_route_assertion(
+                token,
+                authorization_domain,
+                transport,
+                target_fingerprint,
+                request_fingerprint,
+                transport_context_fingerprint,
+            )
+            .await
+            .map_err(|error| match error {
+                CorporateIdentityError::Jwks(_)
+                | CorporateIdentityError::Db(_)
+                | CorporateIdentityError::FoundationIntegrationRequired => {
+                    crate::state::InviteAssertionError::Unavailable
+                }
+                _ => crate::state::InviteAssertionError::Denied,
+            })
+        })
     }
 }
 
@@ -1866,6 +1967,28 @@ mod tests {
         ));
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn final_recheck_rejects_an_expired_key_generation() {
+        let service = CorporateIdentityService::new(test_config());
+        let generation = VerifierKeyGeneration::new(1).expect("positive generation");
+        let policy_id = service
+            .verifier
+            .as_ref()
+            .expect("test verifier policy")
+            .policy_id();
+        *service.jwks.write().await = Some(CachedJwks {
+            set: JwkSet { keys: Vec::new() },
+            generation,
+            expires_at: Instant::now() - Duration::from_secs(1),
+        });
+
+        assert!(
+            !service
+                .accepts_final_verifier_stamp(VerifierPolicyStamp::new(policy_id, generation))
+                .await
+        );
     }
 
     #[tokio::test]

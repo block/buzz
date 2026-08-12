@@ -188,6 +188,8 @@ pub struct Config {
     pub slow_client_grace_limit: u8,
     /// Authentication provider configuration.
     pub auth: buzz_auth::AuthConfig,
+    /// Canonical protected-admission rollout mode.
+    pub nip_fi_mode: buzz_auth::NipFiMode,
     /// Whether REST API requests must present a valid token. Independent of
     /// WebSocket protocol auth, which is *always* required by REQ/EVENT/COUNT.
     pub require_auth_token: bool,
@@ -881,6 +883,19 @@ impl Config {
         let auth = buzz_auth::AuthConfig {
             rate_limits: rate_limit_config_from_env()?,
         };
+        let nip_fi_mode = match std::env::var("BUZZ_NIP_FI_MODE") {
+            Ok(value) if value.eq_ignore_ascii_case("off") => buzz_auth::NipFiMode::Off,
+            Ok(value) if value.eq_ignore_ascii_case("enforce") => buzz_auth::NipFiMode::Enforce,
+            Ok(value) if value.eq_ignore_ascii_case("deny-protected") => {
+                buzz_auth::NipFiMode::DenyProtected
+            }
+            Err(std::env::VarError::NotPresent) => buzz_auth::NipFiMode::Off,
+            _ => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_NIP_FI_MODE must be off, enforce, or deny-protected".to_owned(),
+                ));
+            }
+        };
 
         if !require_auth_token {
             warn!(
@@ -1194,6 +1209,7 @@ impl Config {
             max_frame_bytes,
             slow_client_grace_limit,
             auth,
+            nip_fi_mode,
             require_auth_token,
             cors_origins,
             relay_private_key,

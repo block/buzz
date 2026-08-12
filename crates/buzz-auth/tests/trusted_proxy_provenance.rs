@@ -87,6 +87,11 @@ fn verifier() -> TrustedProxyProvenanceVerifier {
     .expect("valid verifier policy")
 }
 
+struct ProvenanceFreshness<'a> {
+    timestamp: u64,
+    nonce: &'a [u8],
+}
+
 fn sign_provenance(
     assertion: &str,
     method: &str,
@@ -96,6 +101,27 @@ fn sign_provenance(
     timestamp: u64,
     nonce: &[u8],
 ) -> String {
+    sign_provenance_in_domain(
+        DOMAIN_A,
+        assertion,
+        method,
+        authority,
+        path_and_query,
+        body,
+        ProvenanceFreshness { timestamp, nonce },
+    )
+}
+
+fn sign_provenance_in_domain(
+    authorization_domain: CommunityId,
+    assertion: &str,
+    method: &str,
+    authority: &str,
+    path_and_query: &str,
+    body: &[u8],
+    freshness: ProvenanceFreshness<'_>,
+) -> String {
+    let ProvenanceFreshness { timestamp, nonce } = freshness;
     let canonical_path = if path_and_query.is_empty() {
         "/".to_owned()
     } else if path_and_query.starts_with('?') {
@@ -111,6 +137,7 @@ fn sign_provenance(
         timestamp.to_be_bytes().as_slice(),
         nonce,
         &assertion_digest,
+        authorization_domain.as_uuid().as_bytes(),
         method.as_bytes(),
         authority.as_bytes(),
         canonical_path.as_bytes(),
@@ -231,6 +258,80 @@ async fn valid_provenance_seals_redacted_move_only_evidence() {
     assert_eq!(
         format!("{:?}", evidence.nonce_claim()),
         "TrustedProxyNonceClaim([REDACTED])"
+    );
+}
+
+#[tokio::test]
+async fn provenance_binds_authorization_domain_and_transport_context() {
+    let verifier = verifier();
+    let request_a = request("POST", "relay.example.com:443", "/events", b"body");
+    let request_b = request_in_domain(
+        DOMAIN_B,
+        "POST",
+        "relay.example.com:443",
+        "/events",
+        b"body",
+    );
+    let provenance_a = sign_provenance(
+        proxy_assertion(),
+        "POST",
+        "relay.example.com:443",
+        "/events",
+        b"body",
+        NOW,
+        &[0x29; 16],
+    );
+    let assertion = assertion_header(proxy_assertion());
+    let replay = ReplayReader::default();
+    let evidence_a = verifier
+        .verify(
+            &headers(&assertion, &provenance_a),
+            &request_a,
+            now(),
+            &replay,
+        )
+        .await
+        .expect("domain A provenance");
+
+    let unavailable = ReplayReader::default();
+    unavailable.make_unavailable();
+    assert_eq!(
+        verifier
+            .verify(
+                &headers(&assertion, &provenance_a),
+                &request_b,
+                now(),
+                &unavailable,
+            )
+            .await
+            .unwrap_err(),
+        TrustedProxyError::InvalidMac
+    );
+
+    let provenance_b = sign_provenance_in_domain(
+        DOMAIN_B,
+        proxy_assertion(),
+        "POST",
+        "relay.example.com:443",
+        "/events",
+        b"body",
+        ProvenanceFreshness {
+            timestamp: NOW,
+            nonce: &[0x29; 16],
+        },
+    );
+    let evidence_b = verifier
+        .verify(
+            &headers(&assertion, &provenance_b),
+            &request_b,
+            now(),
+            &replay,
+        )
+        .await
+        .expect("domain B provenance");
+    assert_ne!(
+        evidence_a.transport_context_fingerprint(),
+        evidence_b.transport_context_fingerprint()
     );
 }
 
@@ -519,6 +620,29 @@ async fn committed_nonce_and_unavailable_replay_state_fail_closed() {
     );
 
     let other_authority_request = request("GET", "other.example.com:443", "/same-nonce", b"");
+    let same_nonce_other_domain = sign_provenance_in_domain(
+        DOMAIN_B,
+        proxy_assertion(),
+        "GET",
+        "other.example.com:443",
+        "/same-nonce",
+        b"",
+        ProvenanceFreshness {
+            timestamp: NOW,
+            nonce: &[0x6a; 16],
+        },
+    );
+    let other_domain_request =
+        request_in_domain(DOMAIN_B, "GET", "other.example.com:443", "/same-nonce", b"");
+    verifier
+        .verify(
+            &headers(&assertion, &same_nonce_other_domain),
+            &other_domain_request,
+            now(),
+            &replay,
+        )
+        .await
+        .expect("the frozen replay key is isolated by authorization domain");
     let same_nonce_other_authority = sign_provenance(
         proxy_assertion(),
         "GET",
@@ -528,17 +652,6 @@ async fn committed_nonce_and_unavailable_replay_state_fail_closed() {
         NOW,
         &[0x6a; 16],
     );
-    let other_domain_request =
-        request_in_domain(DOMAIN_B, "GET", "other.example.com:443", "/same-nonce", b"");
-    verifier
-        .verify(
-            &headers(&assertion, &same_nonce_other_authority),
-            &other_domain_request,
-            now(),
-            &replay,
-        )
-        .await
-        .expect("the frozen replay key is isolated by authorization domain");
     assert_eq!(
         verifier
             .verify(

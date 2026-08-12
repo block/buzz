@@ -979,6 +979,32 @@ impl VerifiedFederatedAssertion {
     pub const fn attested_event_author_pubkey(&self) -> Option<PublicKey> {
         self.attested_event_author_pubkey
     }
+
+    /// Transport and exact request, target, and context coordinates sealed by the verifier.
+    pub const fn request_binding(&self) -> (ProofTransport, &[u8; 32], &[u8; 32], &[u8; 32]) {
+        (
+            self.transport,
+            &self.request_fingerprint,
+            &self.target_fingerprint,
+            &self.transport_context_fingerprint,
+        )
+    }
+
+    /// SHA-256 fingerprint of the exact verified assertion bytes.
+    pub const fn assertion_fingerprint(&self) -> &[u8; 32] {
+        &self.assertion_fingerprint
+    }
+
+    /// Inclusive not-before and exclusive expiry bounds sealed by the verifier.
+    pub const fn time_bounds(&self) -> (DateTime<Utc>, DateTime<Utc>) {
+        (self.not_before, self.expires_at)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_attested_event_author(mut self, author: PublicKey) -> Self {
+        self.attested_event_author_pubkey = Some(author);
+        self
+    }
 }
 
 impl fmt::Debug for VerifiedFederatedAssertion {
@@ -1487,6 +1513,9 @@ pub struct LocalBindingResolution(LocalBindingResolutionKind);
 
 #[derive(Clone)]
 enum LocalBindingResolutionKind {
+    BoundKey {
+        binding: ActiveLocalBinding,
+    },
     Direct {
         assertion: VerifiedFederatedAssertion,
         binding: ActiveLocalBinding,
@@ -1502,6 +1531,14 @@ enum LocalBindingResolutionKind {
 }
 
 impl LocalBindingResolution {
+    /// Bind a transport-verified event author to its authoritative active row.
+    ///
+    /// This assertion-free path is for operations whose exact signed request is
+    /// itself the proof. It never enrolls a key and never accepts delegation.
+    pub(crate) fn bound_key(binding: ActiveLocalBinding) -> Self {
+        Self(LocalBindingResolutionKind::BoundKey { binding })
+    }
+
     /// Bind an origin-sealed direct assertion to an authoritative storage row.
     pub fn direct(assertion: VerifiedFederatedAssertion, binding: ActiveLocalBinding) -> Self {
         Self(LocalBindingResolutionKind::Direct { assertion, binding })
@@ -1527,6 +1564,7 @@ impl LocalBindingResolution {
 impl fmt::Debug for LocalBindingResolution {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match &self.0 {
+            LocalBindingResolutionKind::BoundKey { .. } => "BoundKey([REDACTED])",
             LocalBindingResolutionKind::Direct { .. } => "Direct([REDACTED])",
             LocalBindingResolutionKind::Enrollment { .. } => "Enrollment([REDACTED])",
             LocalBindingResolutionKind::Delegated { .. } => "Delegated([REDACTED])",
@@ -1936,6 +1974,11 @@ pub struct PreparedAuthorization {
 }
 
 impl PreparedAuthorization {
+    /// Server-generated correlation identifier sealed into this preparation.
+    pub const fn correlation_id(&self) -> Uuid {
+        self.context.correlation_id()
+    }
+
     /// Clone the exact dependency tuple that authoritative storage and the
     /// verifier cache must recheck after all intervening I/O.
     pub fn recheck_request(&self) -> PreparedAuthorizationRecheck {
@@ -2110,6 +2153,33 @@ impl AuthorizationFinalizer {
             reason,
             verifier_stamp,
         ) = match resolution.0 {
+            LocalBindingResolutionKind::BoundKey { binding } => {
+                if binding.authorization_domain != input.authorization_domain
+                    || binding.event_author_pubkey != input.proof.actor_pubkey
+                    || input.proof.bound_assertion_fingerprint.is_some()
+                    || input.proof.delegation_conditions_fingerprint.is_some()
+                {
+                    return Err(AuthorizationError::BindingMismatch);
+                }
+                let expires_at = Self::effective_lease_upper_bound(
+                    authoritative_now,
+                    &[
+                        Some(input.proof.expires_at),
+                        binding.expires_at,
+                        Some(policy.expires_at),
+                    ],
+                )?;
+                (
+                    None,
+                    binding.binding_id,
+                    binding.binding_version,
+                    None,
+                    None,
+                    expires_at,
+                    AuthorizationReason::ExistingBinding,
+                    None,
+                )
+            }
             LocalBindingResolutionKind::Direct { assertion, binding } => {
                 if assertion.authorization_domain != input.authorization_domain
                     || binding.authorization_domain != input.authorization_domain

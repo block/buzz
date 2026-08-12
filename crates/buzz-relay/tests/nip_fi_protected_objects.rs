@@ -453,6 +453,7 @@ async fn same_domain_evidence_from_another_request_has_a_distinct_exact_binding(
     let evidence_a = verify_proxy_request(
         &verifier,
         &request_a,
+        domain,
         ProofTransport::Nip98,
         "/upload?slot=a",
         b"body-a",
@@ -462,6 +463,7 @@ async fn same_domain_evidence_from_another_request_has_a_distinct_exact_binding(
     let evidence_b = verify_proxy_request(
         &verifier,
         &request_b,
+        domain,
         ProofTransport::Blossom,
         "/upload?slot=b",
         b"body-b",
@@ -530,26 +532,25 @@ async fn repeated_same_target_publications_deliver_in_sequence_and_replay_is_ide
     let seed = insert_publication(&pool, community, object_key, &projection_key, 1, false)
         .await
         .expect("seed same-epoch authority");
-    sqlx::query(
-        "INSERT INTO authorization_authority_epochs \
-         (community_id, object_kind, object_key, authority_epoch, fence, \
-          operation_id, request_fingerprint) \
-         VALUES ($1, 3, $2, 7, $3, $4, $5)",
-    )
-    .bind(community.as_uuid())
-    .bind(object_key.to_vec())
-    .bind(nonzero_32(11).to_vec())
-    .bind(seed.operation)
-    .bind(seed.request.to_vec())
-    .execute(&pool)
-    .await
-    .expect("install unchanged authority epoch");
+    install_publication_authority_epoch(&pool, community, object_key, &seed)
+        .await
+        .expect("install unchanged authority epoch");
 
     let first = insert_publication(&pool, community, object_key, &projection_key, 2, true);
     let second = insert_publication(&pool, community, object_key, &projection_key, 3, true);
     let (first, second) = tokio::join!(first, second);
-    let first = first.expect("first concurrent publication");
-    let second = second.expect("second concurrent publication");
+    let (winner, loser) = match (first, second) {
+        (Ok(winner), Err(loser)) | (Err(loser), Ok(winner)) => (winner, loser),
+        (Ok(_), Ok(_)) => panic!("one exact target must have only one pending publication"),
+        (Err(first), Err(second)) => {
+            panic!("one concurrent publication must succeed: {first}; {second}")
+        }
+    };
+    assert_database_constraint(
+        &loser,
+        "23505",
+        "protected_publication_projection_outbox_active_target",
+    );
     let duplicate = sqlx::query(
         "INSERT INTO protected_publication_projection_outbox \
          (community_id, operation_id, request_fingerprint, publication_result_digest, \
@@ -559,24 +560,52 @@ async fn repeated_same_target_publications_deliver_in_sequence_and_replay_is_ide
          VALUES ($1, $2, $3, $4, 3, $5, $6, 1, $7, 3, $8, $9, $10)",
     )
     .bind(community.as_uuid())
-    .bind(first.operation)
-    .bind(first.request.to_vec())
-    .bind(first.result.to_vec())
+    .bind(winner.operation)
+    .bind(winner.request.to_vec())
+    .bind(winner.result.to_vec())
     .bind(object_key.to_vec())
-    .bind(first.application_type.to_vec())
-    .bind(first.application_effect.to_vec())
+    .bind(winner.application_type.to_vec())
+    .bind(winner.application_effect.to_vec())
     .bind(&projection_key)
     .bind("manifests/exact-replay")
-    .bind(first.payload.to_vec())
+    .bind(winner.payload.to_vec())
     .execute(&pool)
     .await;
-    assert!(
-        duplicate.is_err(),
-        "exact replay cannot create a second effect"
+    assert_database_constraint(
+        &duplicate.expect_err("exact replay cannot create a second effect"),
+        "23505",
+        "protected_publication_projection_outbox_pkey",
     );
 
-    let rows = sqlx::query(
-        "SELECT operation_id, delivery_state \
+    mark_delivered(&pool, community, winner.operation)
+        .await
+        .expect("deliver single-flight winner");
+    let successor = insert_publication(&pool, community, object_key, &projection_key, 4, true)
+        .await
+        .expect("terminal winner releases the exact target");
+    let successor_authority: (Uuid, Vec<u8>, i64, Vec<u8>) = sqlx::query_as(
+        "SELECT authority_operation_id, authority_request_fingerprint, \
+                authority_epoch, authority_fence \
+         FROM protected_publication_projection_outbox \
+         WHERE community_id = $1 AND operation_id = $2 AND projection_kind = 3",
+    )
+    .bind(community.as_uuid())
+    .bind(successor.operation)
+    .fetch_one(&pool)
+    .await
+    .expect("read retained same-epoch authority binding");
+    assert_eq!(
+        successor_authority,
+        (
+            seed.operation,
+            seed.request.to_vec(),
+            7,
+            nonzero_32(11).to_vec(),
+        )
+    );
+
+    let ordered = sqlx::query(
+        "SELECT operation_id, delivery_state, publication_sequence \
          FROM protected_publication_projection_outbox \
          WHERE community_id = $1 AND object_key = $2 AND projection_key = $3 \
          ORDER BY publication_sequence",
@@ -586,42 +615,22 @@ async fn repeated_same_target_publications_deliver_in_sequence_and_replay_is_ide
     .bind(&projection_key)
     .fetch_all(&pool)
     .await
-    .expect("read concurrent ordered outbox");
-    assert_eq!(rows.len(), 2);
-    let earlier = rows[0].get::<Uuid, _>("operation_id");
-    let later = rows[1].get::<Uuid, _>("operation_id");
-    assert_ne!(earlier, later);
-    assert!([first.operation, second.operation].contains(&earlier));
-    assert!([first.operation, second.operation].contains(&later));
-
-    let early = mark_delivered(&pool, community, later).await;
-    assert!(
-        early.is_err(),
-        "newer projection cannot pass pending predecessor"
+    .expect("read single-flight publication history");
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(ordered[0].get::<Uuid, _>("operation_id"), winner.operation);
+    assert_eq!(ordered[0].get::<i16, _>("delivery_state"), 2);
+    assert_eq!(
+        ordered[1].get::<Uuid, _>("operation_id"),
+        successor.operation
     );
-    mark_delivered(&pool, community, earlier)
+    assert_eq!(ordered[1].get::<i16, _>("delivery_state"), 1);
+    assert!(
+        ordered[0].get::<i64, _>("publication_sequence")
+            < ordered[1].get::<i64, _>("publication_sequence")
+    );
+    mark_delivered(&pool, community, successor.operation)
         .await
-        .expect("deliver first");
-    mark_delivered(&pool, community, later)
-        .await
-        .expect("deliver second");
-
-    let delivered = sqlx::query(
-        "SELECT operation_id, delivery_state \
-         FROM protected_publication_projection_outbox \
-         WHERE community_id = $1 AND object_key = $2 AND projection_key = $3 \
-         ORDER BY publication_sequence",
-    )
-    .bind(community.as_uuid())
-    .bind(object_key.to_vec())
-    .bind(&projection_key)
-    .fetch_all(&pool)
-    .await
-    .expect("read ordered outbox");
-    assert_eq!(delivered.len(), 2);
-    assert!(delivered
-        .iter()
-        .all(|row| row.get::<i16, _>("delivery_state") == 2));
+        .expect("deliver successor after target release");
 }
 
 #[tokio::test]
@@ -644,6 +653,13 @@ async fn uncommitted_lower_sequence_serializes_later_publication_and_delivery() 
     .await
     .expect("install interleaving audit capacity");
 
+    let seed = insert_publication(&pool, community, object_key, &projection_key, 3, false)
+        .await
+        .expect("seed interleaving authority");
+    install_publication_authority_epoch(&pool, community, object_key, &seed)
+        .await
+        .expect("install interleaving authority epoch");
+
     let mut lower_transaction = pool.begin().await.expect("begin lower publication");
     let lower = stage_publication(
         &mut lower_transaction,
@@ -659,7 +675,7 @@ async fn uncommitted_lower_sequence_serializes_later_publication_and_delivery() 
     let later_pool = pool.clone();
     let later_projection_key = projection_key.clone();
     let mut later_task = tokio::spawn(async move {
-        let later = insert_publication(
+        insert_publication(
             &later_pool,
             community,
             object_key,
@@ -667,9 +683,7 @@ async fn uncommitted_lower_sequence_serializes_later_publication_and_delivery() 
             5,
             true,
         )
-        .await?;
-        let delivery = mark_delivered(&later_pool, community, later.operation).await;
-        Ok::<_, sqlx::Error>((later, delivery))
+        .await
     });
 
     assert!(
@@ -697,15 +711,91 @@ async fn uncommitted_lower_sequence_serializes_later_publication_and_delivery() 
         .commit()
         .await
         .expect("commit lower publication");
-    let (later, premature_delivery) = tokio::time::timeout(Duration::from_secs(5), later_task)
+    let later_error = tokio::time::timeout(Duration::from_secs(5), later_task)
         .await
         .expect("later publication unblocks after lower commit")
         .expect("later task joins")
-        .expect("later publication commits");
-    assert!(
-        premature_delivery.is_err(),
-        "later delivery must observe and reject the committed pending predecessor"
+        .expect_err("committed pending predecessor must retain the exact target");
+    assert_database_constraint(
+        &later_error,
+        "23505",
+        "protected_publication_projection_outbox_active_target",
     );
+
+    let lower_sequence: i64 = sqlx::query_scalar(
+        "SELECT publication_sequence \
+         FROM protected_publication_projection_outbox \
+         WHERE community_id = $1 AND operation_id = $2 AND projection_kind = 3",
+    )
+    .bind(community.as_uuid())
+    .bind(lower.operation)
+    .fetch_one(&pool)
+    .await
+    .expect("read committed lower publication sequence");
+    mark_delivered(&pool, community, lower.operation)
+        .await
+        .expect("deliver committed predecessor");
+    let successor = insert_publication(&pool, community, object_key, &projection_key, 6, true)
+        .await
+        .expect("terminal predecessor releases the exact target");
+    let successor_sequence: i64 = sqlx::query_scalar(
+        "SELECT publication_sequence \
+         FROM protected_publication_projection_outbox \
+         WHERE community_id = $1 AND operation_id = $2 AND projection_kind = 3",
+    )
+    .bind(community.as_uuid())
+    .bind(successor.operation)
+    .fetch_one(&pool)
+    .await
+    .expect("read successor publication sequence");
+    assert!(lower_sequence < successor_sequence);
+    mark_delivered(&pool, community, successor.operation)
+        .await
+        .expect("deliver successor after target release");
+
+    let abort_projection_key = format!("{projection_key}/abort");
+    let mut abort_transaction = pool.begin().await.expect("begin aborted publication");
+    stage_publication(
+        &mut abort_transaction,
+        community,
+        object_key,
+        &abort_projection_key,
+        7,
+        true,
+    )
+    .await
+    .expect("stage publication that will abort");
+    let abort_pool = pool.clone();
+    let abort_waiter_key = abort_projection_key.clone();
+    let mut abort_waiter = tokio::spawn(async move {
+        insert_publication(
+            &abort_pool,
+            community,
+            object_key,
+            &abort_waiter_key,
+            8,
+            true,
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut abort_waiter)
+            .await
+            .is_err(),
+        "later publication must wait while the target allocator may still abort"
+    );
+    abort_transaction
+        .rollback()
+        .await
+        .expect("roll back lower publication");
+    let after_abort = tokio::time::timeout(Duration::from_secs(5), abort_waiter)
+        .await
+        .expect("later publication unblocks after lower rollback")
+        .expect("later task joins")
+        .expect("rollback releases the exact target");
+    mark_delivered(&pool, community, after_abort.operation)
+        .await
+        .expect("deliver publication admitted after lower rollback");
 
     let ordered = sqlx::query(
         "SELECT operation_id, publication_sequence \
@@ -721,18 +811,14 @@ async fn uncommitted_lower_sequence_serializes_later_publication_and_delivery() 
     .expect("read interleaved publication order");
     assert_eq!(ordered.len(), 2);
     assert_eq!(ordered[0].get::<Uuid, _>("operation_id"), lower.operation);
-    assert_eq!(ordered[1].get::<Uuid, _>("operation_id"), later.operation);
+    assert_eq!(
+        ordered[1].get::<Uuid, _>("operation_id"),
+        successor.operation
+    );
     assert!(
         ordered[0].get::<i64, _>("publication_sequence")
             < ordered[1].get::<i64, _>("publication_sequence")
     );
-
-    mark_delivered(&pool, community, lower.operation)
-        .await
-        .expect("deliver committed predecessor");
-    mark_delivered(&pool, community, later.operation)
-        .await
-        .expect("deliver later publication after predecessor");
 }
 
 #[tokio::test]
@@ -1235,13 +1321,15 @@ async fn canonical_moderation_is_atomic_target_bound_and_fresh_only() {
 async fn verify_proxy_request(
     verifier: &TrustedProxyProvenanceVerifier,
     request: &TrustedProxyRequest,
+    authorization_domain: CommunityId,
     transport: ProofTransport,
     path_and_query: &str,
     body: &[u8],
     nonce: &[u8],
 ) -> buzz_auth::SealedTransportEvidence {
     let assertion = format!("Bearer {}", proxy_assertion());
-    let provenance = sign_proxy_provenance(transport, path_and_query, body, nonce);
+    let provenance =
+        sign_proxy_provenance(authorization_domain, transport, path_and_query, body, nonce);
     verifier
         .verify(
             &[
@@ -1259,6 +1347,7 @@ async fn verify_proxy_request(
 }
 
 fn sign_proxy_provenance(
+    authorization_domain: CommunityId,
     transport: ProofTransport,
     path_and_query: &str,
     body: &[u8],
@@ -1277,6 +1366,7 @@ fn sign_proxy_provenance(
         PROXY_NOW.to_be_bytes().as_slice(),
         nonce,
         &assertion_digest,
+        authorization_domain.as_uuid().as_bytes(),
         b"POST".as_slice(),
         b"relay.example.com:443".as_slice(),
         path_and_query.as_bytes(),
@@ -1353,13 +1443,150 @@ async fn install_enrollment_domain(
     }
 }
 
+#[derive(Debug)]
 struct PublicationFixture {
     operation: Uuid,
     request: [u8; 32],
     application_type: [u8; 32],
     application_effect: [u8; 32],
+    receipt_result: [u8; 32],
     result: [u8; 32],
     payload: [u8; 32],
+}
+
+async fn install_publication_authority_epoch(
+    pool: &PgPool,
+    community: CommunityId,
+    object_key: [u8; 32],
+    fixture: &PublicationFixture,
+) -> Result<(), sqlx::Error> {
+    let enrollment_operation = Uuid::new_v4();
+    let enrollment_request = nonzero_32(12);
+    let enrollment_actor = nonzero_32(13);
+    let binding_id = Uuid::new_v4();
+    let history_id = Uuid::new_v4();
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO identity_enrollment_policies \
+         (community_id, policy_revision, enrollment_mode, policy_digest, effective_at) \
+         VALUES ($1, 1, 2, $2, transaction_timestamp())",
+    )
+    .bind(community.as_uuid())
+    .bind(nonzero_32(14).to_vec())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO authorization_operation_receipts \
+         (community_id, operation_id, request_fingerprint, operation_kind, \
+          actor_fingerprint, outcome_code, result_digest) \
+         VALUES ($1, $2, $3, 1, $4, 1, $5)",
+    )
+    .bind(community.as_uuid())
+    .bind(enrollment_operation)
+    .bind(enrollment_request.to_vec())
+    .bind(enrollment_actor.to_vec())
+    .bind(nonzero_32(19).to_vec())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO authorization_events \
+         (community_id, event_id, event_kind, outcome_code, reason_code, actor_kind, \
+          actor_fingerprint, operation_id, request_fingerprint, correlation_id, attempt_id, \
+          occurred_at, canonical_envelope, envelope_digest) \
+         VALUES ($1, $2, 1, 1, 1, 1, $3, $4, $5, $6, $7, \
+                 transaction_timestamp(), $8, $9)",
+    )
+    .bind(community.as_uuid())
+    .bind(Uuid::new_v4())
+    .bind(enrollment_actor.to_vec())
+    .bind(enrollment_operation)
+    .bind(enrollment_request.to_vec())
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(vec![1_u8])
+    .bind(nonzero_32(18).to_vec())
+    .execute(&mut *transaction)
+    .await?;
+    let binding_version: i64 = sqlx::query_scalar(
+        "INSERT INTO identity_bindings \
+         (community_id, binding_id, issuer, subject, principal_fingerprint, \
+          event_author_pubkey, binding_state, lifecycle_revision, binding_provenance, \
+          policy_revision, enrollment_evidence_digest, birth_history_id, \
+          creation_operation_id, creation_request_fingerprint) \
+         VALUES ($1, $2, 'https://issuer.example', $3, $4, $5, 1, 1, 2, 1, $6, $7, $8, $9) \
+         RETURNING binding_version",
+    )
+    .bind(community.as_uuid())
+    .bind(binding_id)
+    .bind(format!("projection-authority-{}", binding_id.simple()))
+    .bind(nonzero_32(15).to_vec())
+    .bind(enrollment_actor.to_vec())
+    .bind(nonzero_32(16).to_vec())
+    .bind(history_id)
+    .bind(enrollment_operation)
+    .bind(enrollment_request.to_vec())
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO identity_lifecycle_history \
+         (community_id, history_id, transition_kind, outcome_code, successor_binding_id, \
+          successor_binding_version, successor_lifecycle_revision, successor_state, \
+          operation_id, request_fingerprint, transition_digest) \
+         VALUES ($1, $2, 1, 1, $3, $4, 1, 1, $5, $6, $7)",
+    )
+    .bind(community.as_uuid())
+    .bind(history_id)
+    .bind(binding_id)
+    .bind(binding_version)
+    .bind(enrollment_operation)
+    .bind(enrollment_request.to_vec())
+    .bind(nonzero_32(17).to_vec())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO authorization_authority_epochs \
+         (community_id, object_kind, object_key, authority_epoch, fence, \
+          operation_id, request_fingerprint) \
+         VALUES ($1, 3, $2, 7, $3, $4, $5)",
+    )
+    .bind(community.as_uuid())
+    .bind(object_key.to_vec())
+    .bind(nonzero_32(11).to_vec())
+    .bind(fixture.operation)
+    .bind(fixture.request.to_vec())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO protected_object_authority \
+         (community_id, object_kind, object_key, capability, actor_pubkey, binding_id, \
+          binding_version, policy_revision, invalidation_generation, authority_epoch, \
+          fence, issued_at, expires_at, operation_id, request_fingerprint) \
+         VALUES ($1, 3, $2, 1, $3, $4, $5, 1, 0, 7, $6, transaction_timestamp(), \
+                 transaction_timestamp() + INTERVAL '5 minutes', $7, $8)",
+    )
+    .bind(community.as_uuid())
+    .bind(object_key.to_vec())
+    .bind(enrollment_actor.to_vec())
+    .bind(binding_id)
+    .bind(binding_version)
+    .bind(nonzero_32(11).to_vec())
+    .bind(fixture.operation)
+    .bind(fixture.request.to_vec())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+fn assert_database_constraint(error: &sqlx::Error, code: &str, constraint: &str) {
+    let database = error
+        .as_database_error()
+        .expect("expected PostgreSQL database error");
+    assert_eq!(database.code().as_deref(), Some(code));
+    assert_eq!(database.constraint(), Some(constraint));
 }
 
 async fn insert_publication(
@@ -1397,6 +1624,7 @@ async fn stage_publication(
         request: nonzero_32(sequence.saturating_add(30)),
         application_type: nonzero_32(sequence.saturating_add(35)),
         application_effect: nonzero_32(sequence.saturating_add(37)),
+        receipt_result: nonzero_32(sequence.saturating_add(39)),
         result: nonzero_32(sequence.saturating_add(40)),
         payload: nonzero_32(sequence.saturating_add(50)),
     };
@@ -1411,7 +1639,7 @@ async fn stage_publication(
     .bind(fixture.operation)
     .bind(fixture.request.to_vec())
     .bind(actor.to_vec())
-    .bind(fixture.result.to_vec())
+    .bind(fixture.receipt_result.to_vec())
     .execute(&mut *connection)
     .await?;
     sqlx::query(

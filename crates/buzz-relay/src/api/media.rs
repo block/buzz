@@ -738,7 +738,46 @@ pub(crate) struct AuthenticatedUpload {
     /// door in `bridge.rs`. Server-resolved, never client-supplied.
     tenant: TenantContext,
     route_mode: UploadRouteMode,
+    attribution: UploadAttributionSnapshot,
     _upload_permit: UploadPermit,
+}
+
+/// Mutable upload labels and network facts captured once at admission.
+///
+/// Fresh publication consumes these owned values after body processing. Exact
+/// replay must instead use its persisted first result; neither path re-reads a
+/// profile or request header after admission succeeds.
+struct UploadAttributionSnapshot(Option<UploadAttribution>);
+
+impl UploadAttributionSnapshot {
+    fn capture(
+        enabled: bool,
+        uploader_name: Option<String>,
+        upload_ip_header: &Option<String>,
+        upload_port_header: &Option<String>,
+        headers: &HeaderMap,
+    ) -> Self {
+        if !enabled {
+            return Self(None);
+        }
+
+        let header_value = |name: &Option<String>| {
+            name.as_deref()
+                .and_then(|header| headers.get(header))
+                .and_then(|value| value.to_str().ok())
+        };
+        let ip = header_value(upload_ip_header).and_then(buzz_media::parse_public_ip);
+        let port = ip.and(header_value(upload_port_header).and_then(buzz_media::parse_port));
+
+        Self(Some(UploadAttribution {
+            uploader_name,
+            net: UploadNetworkInfo { ip, port },
+        }))
+    }
+
+    fn into_attribution(self) -> Option<UploadAttribution> {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -985,11 +1024,14 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             })?;
         finalize_media_corporate_identity(state, &tenant, auth_event.pubkey, identity_proof)
             .await?;
+        let attribution =
+            snapshot_upload_attribution(state, &tenant, &auth_event.pubkey, headers).await;
 
         Ok(AuthenticatedUpload {
             auth_event,
             tenant,
             route_mode,
+            attribution,
             _upload_permit: upload_permit,
         })
     }
@@ -1007,19 +1049,20 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
 ///   socket address is never used; behind a sidecar it is meaningless, and a
 ///   wrong address is worse than none.
 /// - `net.port` (optional companion header) is only kept alongside a valid IP.
-async fn upload_attribution(
+async fn snapshot_upload_attribution(
     state: &AppState,
-    auth: &AuthenticatedUpload,
+    tenant: &TenantContext,
+    uploader: &nostr::PublicKey,
     headers: &HeaderMap,
-) -> Option<UploadAttribution> {
+) -> UploadAttributionSnapshot {
     let cfg = &state.config.media;
     if !cfg.upload_records_enabled {
-        return None;
+        return UploadAttributionSnapshot(None);
     }
 
     let uploader_name = state
         .db
-        .get_user(auth.tenant.community(), &auth.auth_event.pubkey.to_bytes())
+        .get_user(tenant.community(), &uploader.to_bytes())
         .await
         .ok()
         .flatten()
@@ -1027,18 +1070,13 @@ async fn upload_attribution(
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty());
 
-    let header_value = |name: &Option<String>| {
-        name.as_deref()
-            .and_then(|h| headers.get(h))
-            .and_then(|v| v.to_str().ok())
-    };
-    let ip = header_value(&cfg.upload_ip_header).and_then(buzz_media::parse_public_ip);
-    let port = ip.and(header_value(&cfg.upload_port_header).and_then(buzz_media::parse_port));
-
-    Some(UploadAttribution {
+    UploadAttributionSnapshot::capture(
+        true,
         uploader_name,
-        net: UploadNetworkInfo { ip, port },
-    })
+        &cfg.upload_ip_header,
+        &cfg.upload_port_header,
+        headers,
+    )
 }
 
 /// PUT `/upload` or the temporary media-only `/media/upload` alias.
@@ -1066,7 +1104,7 @@ pub async fn upload_blob(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<BlobDescriptor>, MediaError> {
-    let attribution = upload_attribution(&state, &auth, &headers).await;
+    let attribution = auth.attribution.into_attribution();
 
     if auth.route_mode == UploadRouteMode::LegacyMedia {
         metrics::counter!("buzz_media_legacy_upload_route_total").increment(1);
@@ -1929,6 +1967,7 @@ mod tests {
             PROXY_NOW.to_be_bytes().as_slice(),
             nonce,
             &assertion_digest,
+            domain.as_uuid().as_bytes(),
             b"POST".as_slice(),
             b"relay.example.com:443".as_slice(),
             path.as_bytes(),
@@ -1976,6 +2015,77 @@ mod tests {
             upload_route_mode("/media"),
             Err(MediaError::NotFound)
         ));
+    }
+
+    #[test]
+    fn upload_attribution_snapshot_owns_captured_values() {
+        let ip_header = Some("x-client-ip".to_owned());
+        let port_header = Some("x-client-port".to_owned());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-client-ip", "8.8.8.8".parse().expect("IP header"));
+        headers.insert("x-client-port", "443".parse().expect("port header"));
+        let mut mutable_name = "admitted name".to_owned();
+
+        let snapshot = UploadAttributionSnapshot::capture(
+            true,
+            Some(mutable_name.clone()),
+            &ip_header,
+            &port_header,
+            &headers,
+        );
+
+        mutable_name.replace_range(.., "later profile");
+        headers.insert(
+            "x-client-ip",
+            "1.1.1.1".parse().expect("replacement IP header"),
+        );
+        headers.insert(
+            "x-client-port",
+            "8443".parse().expect("replacement port header"),
+        );
+
+        let attribution = snapshot
+            .into_attribution()
+            .expect("enabled attribution snapshot");
+        assert_eq!(attribution.uploader_name.as_deref(), Some("admitted name"));
+        assert_eq!(
+            attribution.net.ip,
+            Some("8.8.8.8".parse().expect("expected IP"))
+        );
+        assert_eq!(attribution.net.port, Some(443));
+    }
+
+    #[test]
+    fn upload_attribution_disabled_captures_nothing() {
+        let headers = HeaderMap::new();
+        assert!(UploadAttributionSnapshot::capture(
+            false,
+            Some("unused".to_owned()),
+            &Some("x-client-ip".to_owned()),
+            &Some("x-client-port".to_owned()),
+            &headers,
+        )
+        .into_attribution()
+        .is_none());
+    }
+
+    #[test]
+    fn upload_attribution_snapshot_fails_empty_without_a_public_ip() {
+        let ip_header = Some("x-client-ip".to_owned());
+        let port_header = Some("x-client-port".to_owned());
+        for raw_ip in [None, Some("not-an-ip"), Some("10.0.0.1")] {
+            let mut headers = HeaderMap::new();
+            if let Some(raw_ip) = raw_ip {
+                headers.insert("x-client-ip", raw_ip.parse().expect("IP header"));
+            }
+            headers.insert("x-client-port", "443".parse().expect("port header"));
+
+            let attribution =
+                UploadAttributionSnapshot::capture(true, None, &ip_header, &port_header, &headers)
+                    .into_attribution()
+                    .expect("enabled attribution snapshot");
+            assert_eq!(attribution.net, UploadNetworkInfo::default());
+        }
     }
 
     #[test]

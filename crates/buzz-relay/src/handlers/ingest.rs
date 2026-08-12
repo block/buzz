@@ -108,6 +108,35 @@ pub enum HttpAuthMethod {
     DevPubkey,
 }
 
+/// Exact transport material retained only until a moderation command mints its
+/// purpose-sealed authorization proof.
+#[derive(Clone)]
+pub enum ModerationTransportEvidence {
+    /// Original payload-bound NIP-98 event and exact request bytes.
+    Nip98 {
+        /// Decoded signed NIP-98 event JSON.
+        authorization_event: Arc<str>,
+        /// Exact HTTP body authenticated by the payload tag.
+        body: axum::body::Bytes,
+    },
+    /// NIP-42-authenticated WebSocket origin. The submitted command event,
+    /// rather than connection scopes, supplies the operation-bound signature.
+    Nip42 {
+        /// Exact tenant WebSocket origin.
+        relay_url: Arc<str>,
+    },
+}
+
+impl std::fmt::Debug for ModerationTransportEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Nip98 { .. } => "Nip98([REDACTED])",
+            Self::Nip42 { .. } => "Nip42([REDACTED])",
+        };
+        formatter.write_str(name)
+    }
+}
+
 /// Authentication context for event ingestion — transport-neutral.
 #[derive(Debug, Clone)]
 pub enum IngestAuth {
@@ -121,6 +150,8 @@ pub enum IngestAuth {
         channel_ids: Option<Vec<Uuid>>,
         /// WebSocket connection identifier.
         conn_id: Uuid,
+        /// Exact command-proof transport material.
+        moderation_evidence: ModerationTransportEvidence,
     },
     /// HTTP bridge authenticated request (NIP-98 or dev X-Pubkey).
     Http {
@@ -130,6 +161,8 @@ pub enum IngestAuth {
         scopes: Vec<Scope>,
         /// How the HTTP request was authenticated.
         auth_method: HttpAuthMethod,
+        /// Exact command-proof material, present only for NIP-98 `/events`.
+        moderation_evidence: Option<ModerationTransportEvidence>,
     },
 }
 
@@ -177,6 +210,20 @@ impl IngestAuth {
     /// Whether this auth context is an HTTP request (not WebSocket).
     pub fn is_http(&self) -> bool {
         matches!(self, Self::Http { .. })
+    }
+
+    /// Borrow exact transport material for canonical moderation admission.
+    pub fn moderation_evidence(&self) -> Option<&ModerationTransportEvidence> {
+        match self {
+            Self::Nip42 {
+                moderation_evidence,
+                ..
+            } => Some(moderation_evidence),
+            Self::Http {
+                moderation_evidence,
+                ..
+            } => moderation_evidence.as_ref(),
+        }
     }
 }
 
@@ -2073,7 +2120,7 @@ async fn ingest_event_inner(
     // The handler independently checks the durable ban state before executing
     // any command, which also covers NIP-98 and missed live disconnects.
     if buzz_core::kind::is_moderation_command_kind(kind_u32) {
-        super::moderation_commands::handle_moderation_command(tenant, state, &event)
+        super::moderation_commands::handle_moderation_command(tenant, state, &event, &auth)
             .await
             .map_err(IngestError::Rejected)?;
         return Ok(IngestResult {
@@ -3197,6 +3244,7 @@ mod tests {
             pubkey: keys.public_key(),
             scopes: vec![Scope::MessagesWrite],
             auth_method: HttpAuthMethod::Nip98,
+            moderation_evidence: None,
         };
         let tracer = Arc::new(VecTracer::default());
         let abstract_state = state_for_request(&tenant, auth.pubkey());
@@ -3611,6 +3659,9 @@ mod tests {
             scopes: vec![],
             channel_ids: None,
             conn_id: Uuid::new_v4(),
+            moderation_evidence: ModerationTransportEvidence::Nip42 {
+                relay_url: "wss://relay.example".into(),
+            },
         };
 
         assert_ne!(principal.public_key(), envelope_signer.public_key());
@@ -3628,6 +3679,7 @@ mod tests {
             pubkey: keys.public_key(),
             scopes: vec![],
             auth_method: HttpAuthMethod::Nip98,
+            moderation_evidence: None,
         };
         assert!(
             http_auth.is_http(),
@@ -3644,6 +3696,9 @@ mod tests {
             scopes: vec![],
             channel_ids: None,
             conn_id: uuid::Uuid::new_v4(),
+            moderation_evidence: ModerationTransportEvidence::Nip42 {
+                relay_url: "wss://relay.example".into(),
+            },
         };
         assert!(
             !ws_auth.is_http(),

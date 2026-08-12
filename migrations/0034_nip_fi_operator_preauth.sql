@@ -281,51 +281,86 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql VOLATILE STRICT;
 
--- Fixed cardinality: eight closed denial classes x eight actions x twelve
--- rotating five-minute slots = at most 768 rows per server-owned domain.
+-- Keep rejected replay distinct from an accepted exact replay and from an
+-- operation-identity conflict. Migration 0030 intentionally reserved the
+-- original closed reason set; this migration extends the immutable event
+-- contract before any protected-denial events can use the new code.
+ALTER TABLE authorization_events
+    DROP CONSTRAINT authorization_events_reason_code_check;
+ALTER TABLE authorization_events
+    ADD CONSTRAINT authorization_events_reason_code_check CHECK (
+        reason_code IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+    );
+
+-- Fixed cardinality: eight operator actions plus one invite action plus one
+-- moderation action, each with eight denial classes and twelve rotating
+-- five-minute slots = at most 960 rows per server-owned domain. Buckets retain
+-- no actor, credential, target, request, or error detail.
 CREATE TABLE authorization_operator_denial_buckets (
     community_id UUID NOT NULL REFERENCES communities(id),
+    surface_kind SMALLINT NOT NULL CHECK (surface_kind BETWEEN 1 AND 3),
     denial_class SMALLINT NOT NULL CHECK (denial_class BETWEEN 1 AND 8),
     action_kind SMALLINT NOT NULL CHECK (action_kind BETWEEN 1 AND 8),
     slot SMALLINT NOT NULL CHECK (slot BETWEEN 0 AND 11),
     window_generation BIGINT NOT NULL CHECK (window_generation >= 0),
     window_started_at TIMESTAMPTZ NOT NULL,
     denial_count BIGINT NOT NULL CHECK (denial_count > 0),
+    lifetime_count BIGINT NOT NULL CHECK (lifetime_count > 0),
     last_denied_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (community_id, denial_class, action_kind, slot),
+    PRIMARY KEY (community_id, surface_kind, denial_class, action_kind, slot),
+    CHECK (
+        (surface_kind = 1 AND action_kind BETWEEN 1 AND 8)
+        OR (surface_kind = 2 AND action_kind = 1)
+        OR (surface_kind = 3 AND action_kind = 2)
+    ),
     CHECK (window_started_at <= last_denied_at)
 );
 
-CREATE FUNCTION authorization_operator_denial_bucket_record_v1(
+CREATE FUNCTION authorization_denial_bucket_record_v1(
     selected_community_id UUID,
+    selected_surface_kind SMALLINT,
     selected_denial_class SMALLINT,
     selected_action_kind SMALLINT
 ) RETURNS BIGINT AS $$
 DECLARE
-    authoritative_now TIMESTAMPTZ := transaction_timestamp();
+    authoritative_now TIMESTAMPTZ := clock_timestamp();
     generation BIGINT;
     selected_slot SMALLINT;
     retained_count BIGINT;
 BEGIN
-    IF selected_denial_class NOT BETWEEN 1 AND 8
+    IF selected_surface_kind NOT BETWEEN 1 AND 3
+        OR selected_denial_class NOT BETWEEN 1 AND 8
         OR selected_action_kind NOT BETWEEN 1 AND 8
+        OR (selected_surface_kind = 2 AND selected_action_kind <> 1)
+        OR (selected_surface_kind = 3 AND selected_action_kind <> 2)
     THEN
-        RAISE EXCEPTION 'invalid operator denial bucket coordinate'
+        RAISE EXCEPTION 'invalid denial bucket coordinate'
             USING ERRCODE = 'check_violation';
     END IF;
     generation := floor(extract(epoch FROM authoritative_now) / 300)::BIGINT;
     selected_slot := (generation % 12)::SMALLINT;
     INSERT INTO authorization_operator_denial_buckets (
-        community_id, denial_class, action_kind, slot,
-        window_generation, window_started_at, denial_count, last_denied_at
+        community_id, surface_kind, denial_class, action_kind, slot,
+        window_generation, window_started_at, denial_count, lifetime_count,
+        last_denied_at
     ) VALUES (
-        selected_community_id, selected_denial_class, selected_action_kind,
-        selected_slot, generation, to_timestamp(generation * 300), 1,
-        authoritative_now
+        selected_community_id, selected_surface_kind, selected_denial_class,
+        selected_action_kind, selected_slot, generation,
+        to_timestamp(generation * 300), 1, 1, authoritative_now
     )
-    ON CONFLICT (community_id, denial_class, action_kind, slot) DO UPDATE SET
-        window_generation = EXCLUDED.window_generation,
-        window_started_at = EXCLUDED.window_started_at,
+    ON CONFLICT (
+        community_id, surface_kind, denial_class, action_kind, slot
+    ) DO UPDATE SET
+        window_generation = GREATEST(
+            authorization_operator_denial_buckets.window_generation,
+            EXCLUDED.window_generation
+        ),
+        window_started_at = CASE
+            WHEN authorization_operator_denial_buckets.window_generation
+                <= EXCLUDED.window_generation
+            THEN EXCLUDED.window_started_at
+            ELSE authorization_operator_denial_buckets.window_started_at
+        END,
         denial_count = CASE
             WHEN authorization_operator_denial_buckets.window_generation
                 = EXCLUDED.window_generation
@@ -335,27 +370,66 @@ BEGIN
                 THEN 9223372036854775807
                 ELSE authorization_operator_denial_buckets.denial_count + 1
             END
-            ELSE 1
+            WHEN authorization_operator_denial_buckets.window_generation
+                < EXCLUDED.window_generation
+            THEN 1
+            WHEN authorization_operator_denial_buckets.denial_count
+                = 9223372036854775807
+            THEN 9223372036854775807
+            ELSE authorization_operator_denial_buckets.denial_count + 1
         END,
-        last_denied_at = EXCLUDED.last_denied_at
+        lifetime_count = CASE
+            WHEN authorization_operator_denial_buckets.lifetime_count
+                = 9223372036854775807
+            THEN 9223372036854775807
+            ELSE authorization_operator_denial_buckets.lifetime_count + 1
+        END,
+        last_denied_at = GREATEST(
+            authorization_operator_denial_buckets.last_denied_at,
+            EXCLUDED.last_denied_at
+        )
     RETURNING denial_count INTO retained_count;
     RETURN retained_count;
 END;
 $$ LANGUAGE plpgsql VOLATILE STRICT;
 
+CREATE FUNCTION authorization_operator_denial_bucket_record_v1(
+    selected_community_id UUID,
+    selected_denial_class SMALLINT,
+    selected_action_kind SMALLINT
+) RETURNS BIGINT AS $$
+    SELECT authorization_denial_bucket_record_v1(
+        selected_community_id, 1::SMALLINT,
+        selected_denial_class, selected_action_kind
+    );
+$$ LANGUAGE sql VOLATILE STRICT;
+
 CREATE FUNCTION authorization_operator_denial_bucket_guard_v1() RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.community_id IS DISTINCT FROM OLD.community_id
+        OR NEW.surface_kind IS DISTINCT FROM OLD.surface_kind
         OR NEW.denial_class IS DISTINCT FROM OLD.denial_class
         OR NEW.action_kind IS DISTINCT FROM OLD.action_kind
         OR NEW.slot IS DISTINCT FROM OLD.slot
         OR NEW.window_generation < OLD.window_generation
+        OR NEW.lifetime_count IS DISTINCT FROM (CASE
+            WHEN OLD.lifetime_count = 9223372036854775807
+            THEN 9223372036854775807
+            ELSE OLD.lifetime_count + 1
+        END)
         OR (NEW.window_generation = OLD.window_generation AND (
             NEW.window_started_at IS DISTINCT FROM OLD.window_started_at
-            OR NEW.denial_count < OLD.denial_count
+            OR NEW.denial_count IS DISTINCT FROM (CASE
+                WHEN OLD.denial_count = 9223372036854775807
+                THEN 9223372036854775807
+                ELSE OLD.denial_count + 1
+            END)
             OR NEW.last_denied_at < OLD.last_denied_at
         ))
-        OR (NEW.window_generation > OLD.window_generation AND NEW.denial_count <> 1)
+        OR (NEW.window_generation > OLD.window_generation AND (
+            NEW.denial_count <> 1
+            OR NEW.window_started_at <= OLD.window_started_at
+        ))
     THEN
         RAISE EXCEPTION 'operator denial bucket transition is invalid'
             USING ERRCODE = 'check_violation';

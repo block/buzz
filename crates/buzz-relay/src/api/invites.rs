@@ -403,6 +403,32 @@ pub async fn claim_invite(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Enforce => {
+            return claim_invite_enforced(state, headers, body).await;
+        }
+        buzz_auth::NipFiMode::DenyProtected => {
+            if let Some(raw_host) = headers
+                .get(axum::http::header::HOST)
+                .and_then(|value| value.to_str().ok())
+            {
+                if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+                    record_invite_denial(
+                        &state,
+                        tenant.community(),
+                        buzz_db::authorization_events::ProtectedDenialReason::ModeDenied,
+                    )
+                    .await?;
+                }
+            }
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "invite_authorization_unavailable",
+            ));
+        }
+        buzz_auth::NipFiMode::Off => {}
+    }
+
     let (tenant, pubkey, identity_proof) =
         authenticate(&state, &headers, "/api/invites/claim", &body).await?;
 
@@ -647,6 +673,444 @@ pub async fn claim_invite(
     })))
 }
 
+async fn claim_invite_enforced(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "invite_domain_not_found"))?;
+    let request: ClaimInviteRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                buzz_db::authorization_events::ProtectedDenialReason::InvalidProof,
+            )
+            .await?;
+            return Err(api_error(StatusCode::BAD_REQUEST, "invite_request_invalid"));
+        }
+    };
+    if !request.code.starts_with(V2_PREFIX) {
+        record_invite_denial(
+            &state,
+            tenant.community(),
+            buzz_db::authorization_events::ProtectedDenialReason::InvalidProof,
+        )
+        .await?;
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "invite_legacy_claim_disabled",
+        ));
+    }
+    if validate_v2_code(&request.code).is_err() {
+        record_invite_denial(
+            &state,
+            tenant.community(),
+            buzz_db::authorization_events::ProtectedDenialReason::InvalidProof,
+        )
+        .await?;
+        return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+    }
+
+    let invite_key = invite_token::derive_invite_key(&state.relay_keypair);
+    if let Some(policy) = &state.config.join_policy {
+        let Some(receipt) = request.policy_receipt.as_deref() else {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                buzz_db::authorization_events::ProtectedDenialReason::AuthorizationDenied,
+            )
+            .await?;
+            return Err(api_error(StatusCode::FORBIDDEN, "join_policy_required"));
+        };
+        if invite_token::verify_policy_acceptance(
+            &invite_key,
+            receipt,
+            &request.code,
+            &policy.version,
+        )
+        .is_err()
+        {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                buzz_db::authorization_events::ProtectedDenialReason::AuthorizationDenied,
+            )
+            .await?;
+            return Err(api_error(StatusCode::FORBIDDEN, "join_policy_required"));
+        }
+    }
+
+    let token_hash = hash_v2_code(&request.code);
+    let target = match state
+        .db
+        .resolve_canonical_invite_target(tenant.community(), token_hash)
+        .await
+    {
+        Ok(target) => target,
+        Err(commit_error) => {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                invite_denial_reason(commit_error),
+            )
+            .await?;
+            return Err(canonical_invite_error(commit_error));
+        }
+    };
+    let expected_url =
+        bridge::nip98_expected_url(&state.config.relay_url, &tenant, "/api/invites/claim");
+    let coordinates = match buzz_auth::Nip98InviteClaimCoordinates::new(
+        tenant.community(),
+        target.fingerprint(),
+        &expected_url,
+        &body,
+    ) {
+        Ok(coordinates) => coordinates,
+        Err(_) => {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                buzz_db::authorization_events::ProtectedDenialReason::InvalidProof,
+            )
+            .await?;
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "invite_authorization_denied",
+            ));
+        }
+    };
+    let event_json = match exact_nostr_authorization_event(&headers) {
+        Ok(event_json) => event_json,
+        Err(public_error) => {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                header_denial_reason(&headers, axum::http::header::AUTHORIZATION),
+            )
+            .await?;
+            return Err(public_error);
+        }
+    };
+    let assertion_token = match exact_federated_assertion(&headers) {
+        Ok(assertion) => assertion,
+        Err(public_error) => {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                header_denial_reason(&headers, buzz_auth::ASSERTION_HEADER_NAME),
+            )
+            .await?;
+            return Err(public_error);
+        }
+    };
+    let authority = match state.canonical_invite_authority() {
+        Some(authority) => authority,
+        None => {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                buzz_db::authorization_events::ProtectedDenialReason::DependencyUnavailable,
+            )
+            .await?;
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "invite_authorization_unavailable",
+            ));
+        }
+    };
+    let (request_fingerprint, target_fingerprint, transport_context) =
+        coordinates.request_binding();
+    let assertion = match authority
+        .assertion_verifier()
+        .verify(
+            &assertion_token,
+            tenant.community(),
+            buzz_auth::ProofTransport::Nip98,
+            *target_fingerprint,
+            *request_fingerprint,
+            *transport_context,
+        )
+        .await
+    {
+        Ok(assertion) => assertion,
+        Err(assertion_error) => {
+            let reason = match assertion_error {
+                crate::state::InviteAssertionError::Unavailable => {
+                    buzz_db::authorization_events::ProtectedDenialReason::DependencyUnavailable
+                }
+                crate::state::InviteAssertionError::Denied => {
+                    buzz_db::authorization_events::ProtectedDenialReason::AuthorizationDenied
+                }
+            };
+            record_invite_denial(&state, tenant.community(), reason).await?;
+            return Err(canonical_assertion_error(assertion_error));
+        }
+    };
+    let proof = match buzz_auth::verify_nip98_invite_claim_proof(
+        &event_json,
+        &coordinates,
+        &body,
+        &assertion,
+        chrono::Utc::now(),
+    ) {
+        Ok(proof) => proof,
+        Err(_) => {
+            record_invite_denial(
+                &state,
+                tenant.community(),
+                buzz_db::authorization_events::ProtectedDenialReason::InvalidProof,
+            )
+            .await?;
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "invite_authorization_denied",
+            ));
+        }
+    };
+    let actor = proof.actor_pubkey();
+    let verifier_rechecker = authority.final_rechecker();
+    let admission = match state
+        .db
+        .commit_canonical_invite_claim(
+            assertion,
+            proof,
+            target,
+            token_hash,
+            state
+                .config
+                .join_policy
+                .as_ref()
+                .map(|policy| policy.version.as_str()),
+            verifier_rechecker,
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(commit_error) => {
+            let fallback_reason = match commit_error {
+                buzz_db::authorization_admission::AdmissionCommitError::InvalidRequest => {
+                    Some(buzz_db::authorization_events::ProtectedDenialReason::InvalidProof)
+                }
+                buzz_db::authorization_admission::AdmissionCommitError::AuthorizationDenied => {
+                    Some(buzz_db::authorization_events::ProtectedDenialReason::AuthorizationDenied)
+                }
+                buzz_db::authorization_admission::AdmissionCommitError::IntentConflict
+                | buzz_db::authorization_admission::AdmissionCommitError::ReplayRejected => {
+                    Some(buzz_db::authorization_events::ProtectedDenialReason::ReplayConflict)
+                }
+                buzz_db::authorization_admission::AdmissionCommitError::AuditUnavailable
+                | buzz_db::authorization_admission::AdmissionCommitError::DependencyUnavailable => {
+                    Some(
+                        buzz_db::authorization_events::ProtectedDenialReason::DependencyUnavailable,
+                    )
+                }
+                _ => None,
+            };
+            if let Some(reason) = fallback_reason {
+                record_invite_denial(&state, tenant.community(), reason).await?;
+            }
+            return Err(canonical_invite_error(commit_error));
+        }
+    };
+    let actor_hex = actor.to_hex();
+    let disposition = admission.disposition();
+    match admission.outcome() {
+        buzz_db::authorization_admission::CanonicalInviteClaimOutcome::Joined => {
+            if should_publish_canonical_invite_side_effects(admission.outcome(), disposition) {
+                if let Err(error) = publish_nip43_member_added(&tenant, &state, &actor_hex).await {
+                    tracing::warn!(
+                        "failed to publish member-added delta after invite claim: {error}"
+                    );
+                }
+                if let Err(error) = publish_nip43_membership_list(&tenant, &state).await {
+                    tracing::warn!("failed to publish membership list after invite claim: {error}");
+                }
+            }
+            Ok(Json(serde_json::json!({
+                "status": "joined",
+                "community_id": tenant.community().to_string(),
+                "host": tenant.host(),
+                "role": "member",
+            })))
+        }
+        buzz_db::authorization_admission::CanonicalInviteClaimOutcome::AlreadyMember => {
+            Ok(Json(serde_json::json!({
+                "status": "already_member",
+                "community_id": tenant.community().to_string(),
+                "host": tenant.host(),
+                "role": "member",
+            })))
+        }
+    }
+}
+
+fn should_publish_canonical_invite_side_effects(
+    outcome: buzz_db::authorization_admission::CanonicalInviteClaimOutcome,
+    disposition: buzz_db::authorization_admission::CanonicalInviteClaimDisposition,
+) -> bool {
+    outcome == buzz_db::authorization_admission::CanonicalInviteClaimOutcome::Joined
+        && disposition == buzz_db::authorization_admission::CanonicalInviteClaimDisposition::Fresh
+}
+
+fn exact_nostr_authorization_event(
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    use base64::Engine as _;
+
+    let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
+    let value = values
+        .next()
+        .filter(|_| values.next().is_none())
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Nostr "))
+        .filter(|value| !value.is_empty() && value.len() <= 128 * 1024)
+        .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "invite_authorization_denied"))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_authorization_denied"))?;
+    if decoded.is_empty() || decoded.len() > 64 * 1024 {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "invite_authorization_denied",
+        ));
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_authorization_denied"))
+}
+
+fn exact_federated_assertion(headers: &HeaderMap) -> Result<String, (StatusCode, Json<Value>)> {
+    let mut values = headers.get_all(buzz_auth::ASSERTION_HEADER_NAME).iter();
+    let value = values
+        .next()
+        .filter(|_| values.next().is_none())
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64 * 1024
+                && value.split('.').count() == 3
+                && !value.contains(',')
+        })
+        .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "invite_authorization_denied"))?;
+    Ok(value.to_owned())
+}
+
+fn canonical_assertion_error(
+    error: crate::state::InviteAssertionError,
+) -> (StatusCode, Json<Value>) {
+    match error {
+        crate::state::InviteAssertionError::Unavailable => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invite_authorization_unavailable",
+        ),
+        crate::state::InviteAssertionError::Denied => {
+            api_error(StatusCode::FORBIDDEN, "invite_authorization_denied")
+        }
+    }
+}
+
+fn canonical_invite_error(
+    error: buzz_db::authorization_admission::AdmissionCommitError,
+) -> (StatusCode, Json<Value>) {
+    use buzz_db::authorization_admission::AdmissionCommitError;
+
+    match error {
+        AdmissionCommitError::ReplayRejected | AdmissionCommitError::RecordedReplayRejected => {
+            api_error(StatusCode::FORBIDDEN, "invite_authorization_replay")
+        }
+        AdmissionCommitError::InvalidRequest
+        | AdmissionCommitError::RecordedInvalidRequest
+        | AdmissionCommitError::AuthorizationDenied
+        | AdmissionCommitError::RecordedAuthorizationDenied
+        | AdmissionCommitError::IntentConflict
+        | AdmissionCommitError::RecordedIntentConflict => {
+            api_error(StatusCode::FORBIDDEN, "invite_authorization_denied")
+        }
+        AdmissionCommitError::AuditUnavailable
+        | AdmissionCommitError::RecordedAuditUnavailable
+        | AdmissionCommitError::DependencyUnavailable => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invite_authorization_unavailable",
+        ),
+    }
+}
+
+fn invite_denial_reason(
+    error: buzz_db::authorization_admission::AdmissionCommitError,
+) -> buzz_db::authorization_events::ProtectedDenialReason {
+    use buzz_db::authorization_admission::AdmissionCommitError;
+    use buzz_db::authorization_events::ProtectedDenialReason;
+
+    match error {
+        AdmissionCommitError::InvalidRequest | AdmissionCommitError::RecordedInvalidRequest => {
+            ProtectedDenialReason::InvalidProof
+        }
+        AdmissionCommitError::AuthorizationDenied
+        | AdmissionCommitError::RecordedAuthorizationDenied => {
+            ProtectedDenialReason::AuthorizationDenied
+        }
+        AdmissionCommitError::IntentConflict
+        | AdmissionCommitError::ReplayRejected
+        | AdmissionCommitError::RecordedIntentConflict
+        | AdmissionCommitError::RecordedReplayRejected => ProtectedDenialReason::ReplayConflict,
+        AdmissionCommitError::AuditUnavailable
+        | AdmissionCommitError::RecordedAuditUnavailable
+        | AdmissionCommitError::DependencyUnavailable => {
+            ProtectedDenialReason::DependencyUnavailable
+        }
+    }
+}
+
+fn header_denial_reason(
+    headers: &HeaderMap,
+    name: impl axum::http::header::AsHeaderName,
+) -> buzz_db::authorization_events::ProtectedDenialReason {
+    if headers.get_all(name).iter().next().is_none() {
+        buzz_db::authorization_events::ProtectedDenialReason::MissingProof
+    } else {
+        buzz_db::authorization_events::ProtectedDenialReason::InvalidProof
+    }
+}
+
+async fn record_invite_denial(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    reason: buzz_db::authorization_events::ProtectedDenialReason,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if state
+        .db
+        .record_protected_denial_bucket(
+            community,
+            buzz_db::authorization_events::ProtectedDenialSurface::InviteClaim,
+            reason,
+            buzz_db::authorization_events::ProtectedDenialAction::InviteClaim,
+        )
+        .await
+        .is_err()
+    {
+        let _ = state
+            .db
+            .latch_authorization_event_failure(
+                community,
+                buzz_db::authorization_events::AuthorizationAuditFailureCode::StorageUnavailable,
+            )
+            .await;
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invite_authorization_unavailable",
+        ));
+    }
+    Ok(())
+}
+
 /// Fixed-window rate limit on claim attempts, keyed by community and claimer
 /// pubkey so traffic for one tenant cannot consume another tenant's allowance.
 ///
@@ -776,6 +1240,138 @@ mod tests {
         cache.run_pending_tasks();
 
         assert!(cache.entry_count() <= capacity);
+    }
+
+    #[test]
+    fn canonical_invite_headers_require_one_exact_credential_each() {
+        let mut headers = axum::http::HeaderMap::new();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"{}");
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Nostr {encoded}")
+                .parse()
+                .expect("authorization header"),
+        );
+        headers.insert(
+            buzz_auth::ASSERTION_HEADER_NAME,
+            "Bearer first.second.third"
+                .parse()
+                .expect("assertion header"),
+        );
+        assert_eq!(
+            super::exact_nostr_authorization_event(&headers).expect("one Nostr proof"),
+            "{}"
+        );
+        assert_eq!(
+            super::exact_federated_assertion(&headers).expect("one assertion"),
+            "first.second.third"
+        );
+
+        headers.append(
+            header::AUTHORIZATION,
+            format!("Nostr {encoded}").parse().expect("duplicate proof"),
+        );
+        headers.append(
+            buzz_auth::ASSERTION_HEADER_NAME,
+            "Bearer other.second.third"
+                .parse()
+                .expect("duplicate assertion"),
+        );
+        assert!(super::exact_nostr_authorization_event(&headers).is_err());
+        assert!(super::exact_federated_assertion(&headers).is_err());
+    }
+
+    #[test]
+    fn canonical_invite_denials_have_stable_public_codes() {
+        let (denied_status, denied_body) = super::canonical_invite_error(
+            buzz_db::authorization_admission::AdmissionCommitError::AuthorizationDenied,
+        );
+        assert_eq!(denied_status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            denied_body.0.get("error").and_then(Value::as_str),
+            Some("invite_authorization_denied")
+        );
+
+        let (replay_status, replay_body) = super::canonical_invite_error(
+            buzz_db::authorization_admission::AdmissionCommitError::ReplayRejected,
+        );
+        assert_eq!(replay_status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            replay_body.0.get("error").and_then(Value::as_str),
+            Some("invite_authorization_replay")
+        );
+
+        let (conflict_status, conflict_body) = super::canonical_invite_error(
+            buzz_db::authorization_admission::AdmissionCommitError::IntentConflict,
+        );
+        assert_eq!(conflict_status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            conflict_body.0.get("error").and_then(Value::as_str),
+            Some("invite_authorization_denied")
+        );
+        for (recorded, expected) in [
+            (
+                buzz_db::authorization_admission::AdmissionCommitError::RecordedInvalidRequest,
+                "invite_authorization_denied",
+            ),
+            (
+                buzz_db::authorization_admission::AdmissionCommitError::RecordedAuthorizationDenied,
+                "invite_authorization_denied",
+            ),
+            (
+                buzz_db::authorization_admission::AdmissionCommitError::RecordedReplayRejected,
+                "invite_authorization_replay",
+            ),
+            (
+                buzz_db::authorization_admission::AdmissionCommitError::RecordedIntentConflict,
+                "invite_authorization_denied",
+            ),
+        ] {
+            let (status, body) = super::canonical_invite_error(recorded);
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(body.0.get("error").and_then(Value::as_str), Some(expected));
+        }
+
+        let (unavailable_status, unavailable_body) = super::canonical_invite_error(
+            buzz_db::authorization_admission::AdmissionCommitError::DependencyUnavailable,
+        );
+        assert_eq!(unavailable_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            unavailable_body.0.get("error").and_then(Value::as_str),
+            Some("invite_authorization_unavailable")
+        );
+        let (recorded_status, recorded_body) = super::canonical_invite_error(
+            buzz_db::authorization_admission::AdmissionCommitError::RecordedAuditUnavailable,
+        );
+        assert_eq!(recorded_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            recorded_body.0.get("error").and_then(Value::as_str),
+            Some("invite_authorization_unavailable")
+        );
+    }
+
+    #[test]
+    fn canonical_invite_publications_only_follow_a_fresh_join() {
+        use buzz_db::authorization_admission::{
+            CanonicalInviteClaimDisposition, CanonicalInviteClaimOutcome,
+        };
+
+        assert!(super::should_publish_canonical_invite_side_effects(
+            CanonicalInviteClaimOutcome::Joined,
+            CanonicalInviteClaimDisposition::Fresh,
+        ));
+        assert!(!super::should_publish_canonical_invite_side_effects(
+            CanonicalInviteClaimOutcome::Joined,
+            CanonicalInviteClaimDisposition::ExactReplay,
+        ));
+        assert!(!super::should_publish_canonical_invite_side_effects(
+            CanonicalInviteClaimOutcome::AlreadyMember,
+            CanonicalInviteClaimDisposition::Fresh,
+        ));
+        assert!(!super::should_publish_canonical_invite_side_effects(
+            CanonicalInviteClaimOutcome::AlreadyMember,
+            CanonicalInviteClaimDisposition::ExactReplay,
+        ));
     }
 
     fn nip98_auth_header(keys: &Keys, url: &str, body: &[u8]) -> String {
@@ -1075,6 +1671,138 @@ mod tests {
                 Some("invite_invalid")
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn canonical_modes_close_before_legacy_mutation_and_preserve_off_claims() {
+        let host = format!("invites-canonical-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup community")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed invite owner");
+        let code = mint_code(
+            state.clone(),
+            &host,
+            &owner,
+            serde_json::json!({ "max_uses": 1 }),
+        )
+        .await;
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+
+        let state_with_mode = |mode| {
+            let mut inner = (*state).clone();
+            let mut config = inner.config.as_ref().clone();
+            config.nip_fi_mode = mode;
+            inner.config = Arc::new(config);
+            Arc::new(inner)
+        };
+        let enforce = state_with_mode(buzz_auth::NipFiMode::Enforce);
+        let legacy = post_json(
+            enforce.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": "legacy" }).to_string(),
+        )
+        .await;
+        assert_eq!(legacy.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(legacy).await.get("error").and_then(Value::as_str),
+            Some("invite_legacy_claim_disabled")
+        );
+
+        let url = format!("https://{host}/api/invites/claim");
+        let authorization = nip98_auth_header(&joiner, &url, claim_body.as_bytes());
+        let unavailable = build_router(enforce)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/invites/claim")
+                    .header(header::HOST, &host)
+                    .header(header::AUTHORIZATION, authorization)
+                    .header(
+                        buzz_auth::ASSERTION_HEADER_NAME,
+                        "Bearer first.second.third",
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(claim_body.clone()))
+                    .expect("canonical invite request"),
+            )
+            .await
+            .expect("canonical unavailable response");
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            read_json(unavailable)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_authorization_unavailable")
+        );
+
+        let denied = post_json(
+            state_with_mode(buzz_auth::NipFiMode::DenyProtected),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body.clone(),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            read_json(denied).await.get("error").and_then(Value::as_str),
+            Some("invite_authorization_unavailable")
+        );
+
+        let evidence_pool = sqlx::PgPool::connect(&state.config.database_url)
+            .await
+            .expect("connect invite denial evidence pool");
+        let denial_buckets: Vec<(i16, i64)> = sqlx::query_as(
+            "SELECT denial_class,sum(denial_count)::BIGINT \
+             FROM authorization_operator_denial_buckets \
+             WHERE community_id=$1 AND surface_kind=2 AND action_kind=1 \
+             GROUP BY denial_class ORDER BY denial_class",
+        )
+        .bind(community.id.as_uuid())
+        .fetch_all(&evidence_pool)
+        .await
+        .expect("read durable invite denial buckets");
+        assert_eq!(denial_buckets, vec![(2, 1), (3, 1), (8, 1)]);
+
+        let off = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            claim_body,
+        )
+        .await;
+        assert_eq!(off.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(off).await.get("status").and_then(Value::as_str),
+            Some("joined")
+        );
+        let post_off_denials: i64 = sqlx::query_scalar(
+            "SELECT sum(denial_count)::BIGINT FROM authorization_operator_denial_buckets \
+             WHERE community_id=$1 AND surface_kind=2",
+        )
+        .bind(community.id.as_uuid())
+        .fetch_one(&evidence_pool)
+        .await
+        .expect("count invite denials after Off claim");
+        assert_eq!(post_off_denials, 3);
     }
 
     #[tokio::test]

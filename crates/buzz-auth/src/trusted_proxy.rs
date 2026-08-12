@@ -595,11 +595,12 @@ fn mac_input(
 ) -> Vec<u8> {
     let mut input = Vec::with_capacity(
         MAC_DOMAIN.len()
-            + 8 * 8
+            + 8 * 9
             + 8
             + 1
             + nonce.len()
             + assertion_digest.len()
+            + request.authorization_domain.as_uuid().as_bytes().len()
             + request.method.len()
             + request.authority.len()
             + request.path_and_query.len()
@@ -609,6 +610,10 @@ fn mac_input(
     append_length_prefixed(&mut input, &timestamp.to_be_bytes());
     append_length_prefixed(&mut input, nonce);
     append_length_prefixed(&mut input, assertion_digest);
+    append_length_prefixed(
+        &mut input,
+        request.authorization_domain.as_uuid().as_bytes(),
+    );
     append_length_prefixed(&mut input, request.method.as_bytes());
     append_length_prefixed(&mut input, request.authority.as_bytes());
     append_length_prefixed(&mut input, request.path_and_query.as_bytes());

@@ -723,6 +723,13 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         scopes,
         channel_ids,
         conn_id,
+        moderation_evidence: super::ingest::ModerationTransportEvidence::Nip42 {
+            relay_url: crate::api::bridge::nip42_expected_relay_url(
+                &state.config.relay_url,
+                &conn.tenant,
+            )
+            .into(),
+        },
     };
 
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
