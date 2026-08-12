@@ -4,8 +4,8 @@
 //!   1. Fetch the caller's own live head via `kinds:[30621] + authors:[self] + #d:[slug]`.
 //!   2. Mutate the tag set (strip `auth`, apply change).
 //!   3. Re-validate the full envelope through Layer A before submitting.
-//!   4. Set `created_at = head.created_at + 1` (never wall-clock) to avoid
-//!      overwriting a concurrently advancing head.
+//!   4. Set `created_at = max(now, head.created_at + 1)` so the replacement
+//!      dominates the observed head while remaining inside the relay window.
 //!
 //! Limitations recorded in this phase:
 //!   - Relay hints are read-preserved but not authored (`--repo` carries
@@ -120,13 +120,14 @@ async fn submit_project(client: &BuzzClient, builder: EventBuilder) -> Result<()
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
-/// Advance the `created_at` counter off an observed head.
+/// Advance past the observed head without falling outside the relay window.
 fn next_timestamp(head: &Event) -> Result<Timestamp, CliError> {
-    head.created_at
+    let after_head = head
+        .created_at
         .as_secs()
         .checked_add(1)
-        .map(Timestamp::from)
-        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))
+        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))?;
+    Ok(Timestamp::from(after_head.max(Timestamp::now().as_secs())))
 }
 
 /// Strip `auth` from a tag list and pass the resulting envelope through
@@ -1003,7 +1004,27 @@ mod tests {
         assert_eq!(
             next.as_secs(),
             far_future_ts.as_secs() + 1,
-            "tombstone must be strictly after head, even when head is far in the future"
+            "replacement must be strictly after head, even when head is far in the future"
+        );
+    }
+
+    #[test]
+    fn next_timestamp_uses_wall_clock_when_head_is_stale() {
+        let keys = nostr::Keys::generate();
+        let stale_ts = Timestamp::from(100u64);
+        let tags = vec![
+            make_test_tag(&["d", "platform"]),
+            make_test_tag(&["a", &format!("30617:{OWNER_HEX}:buzz")]),
+        ];
+        let builder = rebuild_project("", tags, stale_ts).expect("valid head envelope");
+        let head = builder.sign_with_keys(&keys).expect("sign");
+        let before = Timestamp::now().as_secs();
+
+        let next = next_timestamp(&head).expect("no overflow");
+
+        assert!(
+            next.as_secs() >= before,
+            "replacement timestamp must remain inside the relay acceptance window"
         );
     }
 
