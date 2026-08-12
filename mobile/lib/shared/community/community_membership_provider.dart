@@ -3,26 +3,47 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
 
-enum CommunityMemberRole { owner, admin, member }
+/// Role levels assigned by a community membership snapshot.
+enum CommunityMemberRole {
+  /// Full community ownership permissions.
+  owner,
 
+  /// Community administration permissions.
+  admin,
+
+  /// Standard community membership permissions.
+  member,
+}
+
+/// A member and their role in the active community.
 @immutable
 class CommunityMember {
+  /// Creates a community member.
   const CommunityMember({required this.pubkey, required this.role});
 
+  /// The member's normalized hexadecimal public key.
   final String pubkey;
+
+  /// The member's role in the community.
   final CommunityMemberRole role;
 }
 
+/// The latest membership list published by the active community.
 @immutable
 class CommunityMembershipSnapshot {
+  /// Creates a community membership snapshot.
   const CommunityMembershipSnapshot({
     required this.snapshotFound,
     required this.members,
   });
 
+  /// Whether the relay returned a membership snapshot event.
   final bool snapshotFound;
+
+  /// The valid members parsed from the latest snapshot.
   final List<CommunityMember> members;
 
+  /// Returns the role assigned to [pubkey], or `null` when it is not a member.
   CommunityMemberRole? roleFor(String? pubkey) {
     final normalized = pubkey?.trim().toLowerCase();
     if (normalized == null || normalized.isEmpty) return null;
@@ -32,6 +53,7 @@ class CommunityMembershipSnapshot {
     return null;
   }
 
+  /// The normalized public keys in this membership snapshot.
   Set<String> get pubkeys => {for (final member in members) member.pubkey};
 }
 
@@ -90,6 +112,7 @@ final communityMembershipProvider =
       return communityMembershipFromEvents(events);
     });
 
+/// The active user's role in the current community.
 final currentCommunityRoleProvider = Provider<AsyncValue<CommunityMemberRole?>>(
   (ref) {
     final pubkey = ref.watch(myPubkeyProvider);
@@ -99,5 +122,6 @@ final currentCommunityRoleProvider = Provider<AsyncValue<CommunityMemberRole?>>(
   },
 );
 
+/// Whether [role] is allowed to create community invitations.
 bool canManageCommunityInvites(CommunityMemberRole? role) =>
     role == CommunityMemberRole.owner || role == CommunityMemberRole.admin;

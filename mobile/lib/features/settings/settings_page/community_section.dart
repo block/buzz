@@ -7,8 +7,10 @@ class _CommunitySection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final role = ref.watch(currentCommunityRoleProvider).asData?.value;
-    if (!canManageCommunityInvites(role)) return const SizedBox.shrink();
+    final roleAsync = ref.watch(currentCommunityRoleProvider);
+    if (!roleAsync.hasError && !canManageCommunityInvites(roleAsync.value)) {
+      return const SizedBox.shrink();
+    }
 
     return AppListCard(
       label: 'Community',

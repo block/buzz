@@ -43,6 +43,41 @@ void main() {
     expect(find.text('Invite destination'), findsOneWidget);
   });
 
+  testWidgets('keeps invite navigation available when role lookup fails', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          currentCommunityRoleProvider.overrideWithValue(
+            AsyncError<CommunityMemberRole?>(
+              Exception('membership query failed'),
+              StackTrace.empty,
+            ),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            invitePageBuilder: (_) => const Text('Invite destination'),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Invite to community'), findsOneWidget);
+    await tester.tap(find.text('Invite to community'));
+    await tester.pumpAndSettle();
+    expect(find.text('Invite destination'), findsOneWidget);
+  });
+
   testWidgets('hides community invite navigation from plain members', (
     tester,
   ) async {
