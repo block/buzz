@@ -289,6 +289,90 @@ void main() {
       expect(otherChannelState.transcript, isEmpty);
     },
   );
+
+  test(
+    'unwraps batched observer frames before building the transcript',
+    () async {
+      final ownerKeychain = nostr.Keys.generate();
+      final agentKeychain = nostr.Keys.generate();
+      final relaySession = _RecordingRelaySession();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relaySession),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(nsec: ownerKeychain.nsec),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      const channelId = 'test-channel';
+      const turnId = 'turn-batched';
+      final key = (channelId: channelId, agentPubkey: agentKeychain.public);
+      container.read(observerSubscriptionProvider(key));
+      await Future<void>.delayed(Duration.zero);
+
+      final conversationKey = getConversationKey(
+        agentKeychain.secret,
+        ownerKeychain.public,
+      );
+      final encrypted = nip44Encrypt(
+        conversationKey,
+        jsonEncode({
+          'seq': 2,
+          'timestamp': '2026-08-12T06:00:01.000Z',
+          'kind': 'batch',
+          'channelId': channelId,
+          'turnId': turnId,
+          'payload': {
+            'events': [
+              {
+                'seq': 1,
+                'timestamp': '2026-08-12T06:00:00.000Z',
+                'kind': 'turn_started',
+                'channelId': channelId,
+                'turnId': turnId,
+                'payload': {
+                  'triggeringEventIds': ['0123456789abcdef'],
+                },
+              },
+              {
+                'seq': 2,
+                'timestamp': '2026-08-12T06:00:01.000Z',
+                'kind': 'session_resolved',
+                'channelId': channelId,
+                'turnId': turnId,
+                'payload': {
+                  'sessionId': 'session-batched',
+                  'isNewSession': true,
+                },
+              },
+            ],
+          },
+        }),
+      );
+      final event = nostr.Event.from(
+        kind: EventKind.agentObserverFrame,
+        content: encrypted,
+        tags: [
+          ['p', ownerKeychain.public],
+          ['agent', agentKeychain.public],
+          ['frame', 'telemetry'],
+        ],
+        secretKey: agentKeychain.secret,
+        verify: false,
+      );
+
+      relaySession.emit(NostrEvent.fromJson(event.toMap()));
+
+      final state = container.read(observerSubscriptionProvider(key));
+      expect(state.connection, ObserverConnectionState.open);
+      expect(state.transcript.map((item) => (item as LifecycleItem).title), [
+        'Turn started',
+        'Session ready',
+      ]);
+    },
+  );
 }
 
 class _RecordingRelaySession extends RelaySessionNotifier {

@@ -189,23 +189,23 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
       return;
     }
 
-    final frame = _decryptFrame(event, normalizedAgent, privHex);
-    if (frame == null) return;
+    final decryptedFrames = _decryptFrames(event, normalizedAgent, privHex);
+    if (decryptedFrames == null) return;
 
-    final dedupeKey = '${frame.seq}:${frame.timestamp}';
     final dedupeKeys = _dedupeKeysByAgent.putIfAbsent(
       normalizedAgent,
       () => <String>{},
     );
-    if (!dedupeKeys.add(dedupeKey)) {
-      return;
-    }
-
     final frames = _framesByAgent.putIfAbsent(
       normalizedAgent,
       () => <ObserverFrame>[],
     );
-    frames.add(frame);
+    for (final frame in decryptedFrames) {
+      final dedupeKey = '${frame.seq}:${frame.timestamp}';
+      if (dedupeKeys.add(dedupeKey)) {
+        frames.add(frame);
+      }
+    }
     frames.sort(_compareObserverFrames);
 
     if (frames.length > _maxObserverEvents) {
@@ -220,7 +220,7 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
     _emit(connection: ObserverConnectionState.open);
   }
 
-  ObserverFrame? _decryptFrame(
+  List<ObserverFrame>? _decryptFrames(
     NostrEvent event,
     String normalizedAgent,
     String privHex,
@@ -232,12 +232,27 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
       );
       final plaintext = nip44Decrypt(conversationKey, event.content);
       final json = jsonDecode(plaintext) as Map<String, dynamic>;
-      return ObserverFrame.fromJson(json);
+      return _unwrapObserverBatch(ObserverFrame.fromJson(json));
     } catch (error) {
       _errorMessage = 'Observer event decrypt failed: $error';
       _emit(connection: ObserverConnectionState.error);
       return null;
     }
+  }
+
+  static List<ObserverFrame> _unwrapObserverBatch(ObserverFrame frame) {
+    if (frame.kind != 'batch') return [frame];
+
+    final payload = frame.payload;
+    if (payload is! Map || payload['events'] is! List) return [frame];
+
+    final events = <ObserverFrame>[];
+    for (final value in payload['events'] as List) {
+      if (value is Map) {
+        events.add(ObserverFrame.fromJson(Map<String, dynamic>.from(value)));
+      }
+    }
+    return events.isEmpty ? [frame] : events;
   }
 
   void _emit({required ObserverConnectionState connection}) {
