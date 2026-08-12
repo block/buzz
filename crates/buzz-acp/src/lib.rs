@@ -66,6 +66,13 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Grace period between the TTL's graceful shutdown signal and a forced exit.
+///
+/// Long enough for in-flight prompts to drain on the normal shutdown path,
+/// short enough that a harness stuck somewhere that never observes the signal
+/// (for example the initial relay-connect retry loop) still terminates.
+const TTL_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -1604,6 +1611,28 @@ async fn tokio_main() -> Result<()> {
     let mut pool_ready = !config.lazy_pool;
     let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
 
+    // TTL deadline, fixed here — BEFORE the relay connect, which retries with
+    // backoff and can block for minutes. Both TTL stages key off this one
+    // absolute instant so the forced exit can never precede the graceful signal
+    // no matter where startup happens to be when the deadline lands.
+    let ttl_deadline = (config.ttl_secs > 0)
+        .then(|| tokio::time::Instant::now() + Duration::from_secs(config.ttl_secs));
+
+    // Hard backstop, armed before anything can block. The graceful path needs
+    // the main loop to be running and watching the shutdown channel; until then
+    // the signal lands with nobody listening. Without this, a harness stuck in
+    // the initial relay-connect retry loop ignores its TTL entirely.
+    if let Some(deadline) = ttl_deadline {
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline + TTL_SHUTDOWN_GRACE).await;
+            tracing::warn!(
+                grace_secs = TTL_SHUTDOWN_GRACE.as_secs(),
+                "TTL shutdown did not complete within the grace period — exiting"
+            );
+            std::process::exit(0);
+        });
+    }
+
     // Capture a startup watermark BEFORE connecting to the relay. This timestamp
     // is used for membership notification replay (via startup_watermark) and as
     // the initial subscribe_since for channels discovered at startup. The Subscribe
@@ -1942,6 +1971,26 @@ async fn tokio_main() -> Result<()> {
             use tokio::signal::unix::{signal, SignalKind};
             let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
             sigterm.recv().await;
+            let _ = tx.send(());
+        });
+    }
+
+    // TTL: a wall-clock cap on the whole process, not on a turn.
+    //
+    // Fires the same graceful shutdown as SIGTERM, so in-flight prompts drain
+    // normally. Without this, an ephemeral harness outlives whatever spawned it
+    // — and if it also self-prompts (`--heartbeat-interval`), it keeps issuing
+    // billable model calls with nobody on the other end. Backgrounded harnesses
+    // reparent to init, so "the session ended" does not stop them; only an
+    // explicit signal or this timer does.
+    // Graceful stage of the TTL: drain in-flight prompts the same way SIGTERM
+    // does. The forced-exit stage was already armed before the relay connect.
+    if let Some(deadline) = ttl_deadline {
+        let tx = shutdown_tx.clone();
+        let ttl_secs = config.ttl_secs;
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            tracing::info!(ttl_secs, "TTL reached — shutting down");
             let _ = tx.send(());
         });
     }
@@ -6248,6 +6297,7 @@ mod build_mcp_servers_tests {
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
+            ttl_secs: 0,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -6470,6 +6520,7 @@ mod error_outcome_emission_tests {
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
+            ttl_secs: 0,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
