@@ -1,0 +1,5 @@
+error: public Db method `omitted` is missing #[sqlite_backend(...)]
+ --> tests/ui/missing_marker.rs:7:12
+  |
+7 |     pub fn omitted(&self) {}
+  |            ^^^^^^^

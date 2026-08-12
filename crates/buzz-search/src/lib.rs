@@ -32,23 +32,39 @@ pub use query::{search, ChannelScope, SearchHit, SearchMode, SearchQuery, Search
 
 use sqlx::PgPool;
 
-/// Thin handle around a `PgPool` for community-scoped FTS.
-///
-/// Holds nothing the pool itself doesn't already own. The whole purpose of
-/// this type is a stable injection point for the relay's `AppState`.
+/// Search backend selected at startup.
+#[derive(Debug, Clone)]
+enum SearchBackend {
+    Postgres(PgPool),
+    Unsupported,
+}
+
+/// Stable search-service injection point.
 #[derive(Debug, Clone)]
 pub struct SearchService {
-    pool: PgPool,
+    backend: SearchBackend,
 }
 
 impl SearchService {
     /// Build a search service over an existing Postgres pool.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            backend: SearchBackend::Postgres(pool),
+        }
+    }
+
+    /// Build a backend that explicitly reports search as unsupported.
+    pub fn unsupported() -> Self {
+        Self {
+            backend: SearchBackend::Unsupported,
+        }
     }
 
     /// Execute a community-scoped FTS query.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-        query::search(&self.pool, query).await
+        match &self.backend {
+            SearchBackend::Postgres(pool) => query::search(pool, query).await,
+            SearchBackend::Unsupported => Err(SearchError::Unsupported),
+        }
     }
 }

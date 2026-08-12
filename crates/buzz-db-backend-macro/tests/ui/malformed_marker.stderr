@@ -1,0 +1,5 @@
+error: expected `implemented` or `unsupported = "reason"`
+ --> tests/ui/malformed_marker.rs:5:22
+  |
+5 |     #[sqlite_backend(sometimes)]
+  |                      ^^^^^^^^^

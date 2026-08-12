@@ -1,0 +1,5 @@
+error: unsupported reason must not be empty
+ --> tests/ui/empty_reason.rs:5:36
+  |
+5 |     #[sqlite_backend(unsupported = "  ")]
+  |                                    ^^^^

@@ -78,6 +78,60 @@ async fn run_rate_limit(
     }
 }
 
+/// Backend-neutral admission limiter selected once at relay startup.
+pub enum AdmissionRateLimiter {
+    /// Production Redis fixed-window counters.
+    Redis(RedisRateLimiter),
+    /// Process-local profile policy until bounded in-memory counters are installed.
+    ///
+    /// This is explicit rather than a fallback: callers must select it at startup.
+    Permissive,
+}
+
+impl AdmissionRateLimiter {
+    /// Creates the production Redis limiter.
+    pub fn redis(pool: deadpool_redis::Pool) -> Self {
+        Self::Redis(RedisRateLimiter::new(pool))
+    }
+
+    /// Creates the explicit permissive policy for a process-local relay.
+    pub fn permissive() -> Self {
+        Self::Permissive
+    }
+}
+
+impl RateLimiter for AdmissionRateLimiter {
+    async fn check_and_increment(
+        &self,
+        ctx: &TenantContext,
+        pubkey: &PublicKey,
+        limit_type: LimitType,
+        window_secs: u64,
+        limit: u64,
+    ) -> Result<RateLimitResult, AuthError> {
+        match self {
+            Self::Redis(limiter) => {
+                limiter
+                    .check_and_increment(ctx, pubkey, limit_type, window_secs, limit)
+                    .await
+            }
+            Self::Permissive => Ok(RateLimitResult::allowed(1, limit, window_secs)),
+        }
+    }
+
+    async fn check_ip_connection(
+        &self,
+        ip: &IpAddr,
+        window_secs: u64,
+        limit: u64,
+    ) -> Result<RateLimitResult, AuthError> {
+        match self {
+            Self::Redis(limiter) => limiter.check_ip_connection(ip, window_secs, limit).await,
+            Self::Permissive => Ok(RateLimitResult::allowed(1, limit, window_secs)),
+        }
+    }
+}
+
 /// Redis-backed rate limiter using fixed-window counters.
 ///
 /// Pubkey keys are community-scoped via `&TenantContext`:
@@ -117,5 +171,38 @@ impl RateLimiter for RedisRateLimiter {
     ) -> Result<RateLimitResult, AuthError> {
         let key = buzz_auth::rate_limit::ip_rate_limit_key(ip);
         run_rate_limit(&self.pool, &key, window_secs, limit).await
+    }
+}
+
+#[cfg(test)]
+mod admission_backend_tests {
+    use super::*;
+    use buzz_core::CommunityId;
+    use nostr::Keys;
+    use std::net::{IpAddr, Ipv4Addr};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn permissive_backend_allows_principal_and_ip_without_redis() {
+        let limiter = AdmissionRateLimiter::permissive();
+        let tenant =
+            TenantContext::resolved(CommunityId::from_uuid(Uuid::from_u128(1)), "local.invalid");
+        let principal = limiter
+            .check_and_increment(
+                &tenant,
+                &Keys::generate().public_key(),
+                LimitType::Messages,
+                60,
+                10,
+            )
+            .await
+            .expect("permissive principal policy");
+        let ip = limiter
+            .check_ip_connection(&IpAddr::V4(Ipv4Addr::LOCALHOST), 60, 10)
+            .await
+            .expect("permissive IP policy");
+
+        assert!(principal.allowed);
+        assert!(ip.allowed);
     }
 }

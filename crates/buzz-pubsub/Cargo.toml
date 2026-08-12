@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+dashmap = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 nostr = { workspace = true }

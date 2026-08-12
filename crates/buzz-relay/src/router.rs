@@ -46,9 +46,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(RequestBodyLimitLayer::new(media_body_limit))
         .with_state(state.clone());
 
-    let git_router = api::git::git_router(state.clone());
-
-    let git_policy_router = api::git::git_policy_router(state.clone());
+    // Git is deliberately unavailable in the single-node profile: its only
+    // durable backend is S3. Do not build its routes (or internal hook policy
+    // endpoint) until a local GitStore exists.
+    let git_enabled = !state.config.profile.is_single_node();
+    let git_router = git_enabled.then(|| api::git::git_router(state.clone()));
+    let git_policy_router = git_enabled.then(|| api::git::git_policy_router(state.clone()));
 
     let admin_enabled = state.config.admin.is_some();
     let admin_web_dir = state
@@ -133,10 +136,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // Merge — each sub-router carries its own body limit.
     // Metrics → Trace → CORS applied once over the combined router.
-    let mut merged = api_router
-        .merge(media_router)
-        .merge(git_router)
-        .merge(git_policy_router);
+    let mut merged = api_router.merge(media_router);
+    if let Some(git_router) = git_router {
+        merged = merged.merge(git_router);
+    }
+    if let Some(git_policy_router) = git_policy_router {
+        merged = merged.merge(git_policy_router);
+    }
     if let Some(admin_router) = admin_router {
         merged = merged.merge(admin_router);
     }
@@ -377,8 +383,11 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
     let check = async {
         let (pg_ok, redis_ok) = tokio::join!(state.db.ping(), async {
-            state.redis_pool.get().await.is_ok()
-        },);
+            match &state.redis_pool {
+                Some(pool) => pool.get().await.is_ok(),
+                None => true,
+            }
+        });
         (pg_ok, redis_ok)
     };
 

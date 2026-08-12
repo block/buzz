@@ -5,6 +5,7 @@ members = [
     "crates/buzz-conformance",
     "crates/buzz-push-gateway",
     "crates/buzz-db",
+    "crates/buzz-db-backend-macro",
     "crates/buzz-pubsub",
     "crates/buzz-auth",
     "crates/buzz-search",

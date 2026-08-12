@@ -153,6 +153,15 @@ async fn main() -> anyhow::Result<()> {
         "Config loaded"
     );
 
+    // Phase 1 constructor fence: never fall through to production's eager
+    // Postgres/Redis/S3 graph for a single-node profile. The local backend
+    // constructor replaces this explicit denial as its implementations land.
+    if config.profile.is_single_node() {
+        return Err(anyhow::anyhow!(
+            "BUZZ_PROFILE=single-node local backend bundle is not installed yet"
+        ));
+    }
+
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
     relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
@@ -468,7 +477,10 @@ async fn main() -> anyhow::Result<()> {
     // operator who asked for the mesh gets it or gets told why not.
     if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
         &state.config,
-        state.redis_pool.clone(),
+        state
+            .redis_pool
+            .clone()
+            .expect("production profile has Redis"),
         &state.relay_keypair,
         Arc::clone(&state.shutting_down),
     )
@@ -1013,11 +1025,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                let rs = pool_state.redis_pool.status();
-                metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
-                metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
-                metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
-                metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                if let Some(redis_pool) = &pool_state.redis_pool {
+                    let rs = redis_pool.status();
+                    metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
+                    metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
+                    metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
+                    metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                }
             }
         });
     }

@@ -24,7 +24,7 @@ use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
-use buzz_pubsub::rate_limiter::RedisRateLimiter;
+use buzz_pubsub::rate_limiter::AdmissionRateLimiter;
 use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
@@ -575,6 +575,29 @@ impl Default for ConnectionManager {
     }
 }
 
+/// Runtime backends injected at the application-state boundary.
+///
+/// Production construction remains in `main.rs`; the single-node profile supplies
+/// alternate implementations without adding backend checks to request handlers.
+pub struct AppBackends {
+    /// Database backend.
+    pub db: Db,
+    /// Redis health/command pool; absent for process-local profiles.
+    pub redis_pool: Option<deadpool_redis::Pool>,
+    /// Event and control-plane pub/sub.
+    pub pubsub: Arc<PubSubManager>,
+    /// Full-text search backend.
+    pub search: SearchService,
+    /// Media blob backend.
+    pub media_storage: MediaStorage,
+    /// Git object backend.
+    pub git_store: crate::api::git::store::GitStore,
+    /// NIP-98 replay fence.
+    pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
+    /// Admission rate limiter.
+    pub admission_rate_limiter: Arc<AdmissionRateLimiter>,
+}
+
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
 pub struct AppState {
@@ -582,8 +605,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Database connection pool.
     pub db: Db,
-    /// Redis pool for readiness health checks.
-    pub redis_pool: deadpool_redis::Pool,
+    /// Redis pool for readiness health checks; absent in single-node mode.
+    pub redis_pool: Option<deadpool_redis::Pool>,
     /// Audit event service, absent when audit logging is disabled.
     pub audit: Option<Arc<AuditService>>,
     /// Pub/sub manager for broadcasting events to subscribers.
@@ -673,7 +696,7 @@ pub struct AppState {
     /// cross-pod routing.
     pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
     /// Shared Redis-backed admission limits for ordinary HTTP and WebSocket work.
-    pub admission_rate_limiter: Arc<RedisRateLimiter>,
+    pub admission_rate_limiter: Arc<AdmissionRateLimiter>,
 
     /// Per-agent sliding-window rate limiter for observer frames (kind 24200).
     /// Key: (community_id, agent pubkey bytes). Value: (count, window_start).
@@ -738,6 +761,57 @@ impl AppState {
         relay_keypair: nostr::Keys,
         media_storage: MediaStorage,
     ) -> (Self, AuditShutdownHandle) {
+        let git_store = crate::api::git::store::GitStore::new(
+            &config.media.s3_endpoint,
+            &config.media.s3_access_key,
+            &config.media.s3_secret_key,
+            &config.media.s3_bucket,
+            &config.media.s3_region,
+            config.media.s3_addressing_style,
+        )
+        .expect("media storage was already constructed with this S3 config");
+        let nip98_replay: Arc<dyn Nip98ReplayGuard> =
+            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
+        let admission_rate_limiter = Arc::new(AdmissionRateLimiter::redis(redis_pool.clone()));
+        Self::new_with_backends(
+            config,
+            AppBackends {
+                db,
+                redis_pool: Some(redis_pool),
+                pubsub,
+                search,
+                media_storage,
+                git_store,
+                nip98_replay,
+                admission_rate_limiter,
+            },
+            audit,
+            auth,
+            workflow_engine,
+            relay_keypair,
+        )
+    }
+
+    /// Constructs state from an explicit backend bundle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_backends(
+        config: Config,
+        backends: AppBackends,
+        audit: impl Into<Option<AuditService>>,
+        auth: AuthService,
+        workflow_engine: Arc<WorkflowEngine>,
+        relay_keypair: nostr::Keys,
+    ) -> (Self, AuditShutdownHandle) {
+        let AppBackends {
+            db,
+            redis_pool,
+            pubsub,
+            search,
+            media_storage,
+            git_store,
+            nip98_replay,
+            admission_rate_limiter,
+        } = backends;
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
@@ -783,15 +857,6 @@ impl AppState {
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
-        let git_store = crate::api::git::store::GitStore::new(
-            &config.media.s3_endpoint,
-            &config.media.s3_access_key,
-            &config.media.s3_secret_key,
-            &config.media.s3_bucket,
-            &config.media.s3_region,
-            config.media.s3_addressing_style,
-        )
-        .expect("media storage was already constructed with this S3 config");
         let git_pack_cache = Arc::new(
             crate::api::git::pack_cache::GitPackCache::new(
                 &config.git_pack_cache_path,
@@ -800,9 +865,6 @@ impl AppState {
             )
             .expect("git pack cache path must be available"),
         );
-        let nip98_replay: Arc<dyn Nip98ReplayGuard> =
-            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
-        let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
         let state = Self {
             config: Arc::new(config),
