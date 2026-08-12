@@ -157,6 +157,30 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 
 Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
 
+### Discovery / @mention (kind:10100 agent profile)
+
+Buzz Desktop's mention autocomplete offers an externally-deployed (relay) agent
+only in channels its **kind:10100 agent-profile record** lists. When
+`BUZZ_ACP_PUBLISH_PROFILE=true`, the harness self-publishes that record on
+startup and **refreshes it automatically** whenever it joins or leaves a channel
+(via the membership-notification path) — so the agent stays `@mentionable` in
+every channel it belongs to with no manual bookkeeping. Without this, an
+externally-deployed agent has no discovery record and cannot be offered in
+Desktop's autocomplete.
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| — | `BUZZ_ACP_PUBLISH_PROFILE` | `false` | Publish/refresh the kind:10100 discovery record. Opt-in. |
+| — | `BUZZ_ACP_DISPLAY_NAME` | agent pubkey hex | Name shown in the record / used to resolve `@name`. |
+| — | `BUZZ_ACP_CHANNEL_ADD_POLICY` | `anyone` | `channel_add_policy` in the record: `anyone`, `owner_only`, `nobody`. |
+| — | `BUZZ_ACP_CAPABILITIES` | — | Comma-separated capability tags for display (e.g. `shell,file-edit,git`). |
+| — | `BUZZ_ACP_DISPLAY_ABOUT` | — | Optional bio/about text shown on the agent's profile. |
+
+The record's `respond_to` / `respond_to_allowlist` mirror the author-gate
+config. Desktop only offers a relay agent whose `respond_to` is `anyone`, or an
+`allowlist` that includes the viewer — so a `owner-only` agent, while it will
+still respond, is not surfaced in autocomplete even to its owner.
+
 Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
