@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   coalesceAgentAutocompleteCandidates,
+  filterAdmittedMentionPubkeys,
   filterCachedAgentSuggestions,
+  getAgentMentionAdmission,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInAllowedList,
@@ -307,7 +309,7 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
   );
 });
 
-test("shouldHideAgentFromMentions: shows member agents with unknown invocability (not in directory)", () => {
+test("shouldHideAgentFromMentions: hides member agents without an affirmative directory grant", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,
@@ -316,7 +318,7 @@ test("shouldHideAgentFromMentions: shows member agents with unknown invocability
       mentionableAgentPubkeys: new Set(),
       directoryAgentPubkeys: new Set(),
     }),
-    false,
+    true,
   );
 });
 
@@ -334,7 +336,7 @@ test("shouldHideAgentFromMentions: hides unknown member agents while directories
   );
 });
 
-test("shouldHideAgentFromMentions: shows mentionable member agents while directories load", () => {
+test("shouldHideAgentFromMentions: hides mentionable member agents while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,
@@ -344,7 +346,7 @@ test("shouldHideAgentFromMentions: shows mentionable member agents while directo
       directoryAgentPubkeys: new Set(),
       directoryReady: false,
     }),
-    false,
+    true,
   );
 });
 
@@ -362,7 +364,7 @@ test("shouldHideAgentFromMentions: shows non-agent members while directories loa
   );
 });
 
-test("shouldHideAgentFromMentions: shows unknown member agents after empty directories settle", () => {
+test("shouldHideAgentFromMentions: hides unknown member agents after empty directories settle", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,
@@ -372,7 +374,7 @@ test("shouldHideAgentFromMentions: shows unknown member agents after empty direc
       directoryAgentPubkeys: new Set(),
       directoryReady: true,
     }),
-    false,
+    true,
   );
 });
 
@@ -389,6 +391,58 @@ test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
       directoryAgentPubkeys: new Set([normalized]),
     }),
     true,
+  );
+});
+
+test("getAgentMentionAdmission: owner-only requires current verified ownership", () => {
+  const common = {
+    isAgent: true,
+    isManagedAgent: false,
+    pubkey: PUB_A,
+    currentPubkey: CURRENT_PUBKEY,
+    mentionableAgentPubkeys: new Set([PUB_A]),
+    directoryReady: true,
+    ownerOnly: true,
+  };
+
+  assert.equal(
+    getAgentMentionAdmission({ ...common, ownerPubkey: CURRENT_PUBKEY }),
+    "allow",
+  );
+  assert.equal(
+    getAgentMentionAdmission({ ...common, ownerPubkey: OTHER_OWNER_PUBKEY }),
+    "deny",
+  );
+  assert.equal(
+    getAgentMentionAdmission({ ...common, ownerPubkey: null }),
+    "unknown",
+  );
+});
+
+test("getAgentMentionAdmission: unresolved directory state stays unknown", () => {
+  assert.equal(
+    getAgentMentionAdmission({
+      isAgent: true,
+      isManagedAgent: false,
+      pubkey: PUB_A,
+      currentPubkey: CURRENT_PUBKEY,
+      ownerPubkey: CURRENT_PUBKEY,
+      mentionableAgentPubkeys: new Set([PUB_A]),
+      directoryReady: false,
+      ownerOnly: false,
+    }),
+    "unknown",
+  );
+});
+
+test("filterAdmittedMentionPubkeys: rechecks agent admission without dropping people", () => {
+  assert.deepEqual(
+    filterAdmittedMentionPubkeys(
+      [PUB_A, PUB_B, PUB_C],
+      new Set([PUB_A, PUB_B]),
+      new Set([PUB_B]),
+    ),
+    [PUB_B, PUB_C],
   );
 });
 

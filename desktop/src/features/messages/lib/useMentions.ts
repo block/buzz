@@ -5,6 +5,7 @@ import {
   useRelayAgentsQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
+import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import {
   useChannelMembersQuery,
   useChannelsQuery,
@@ -14,11 +15,14 @@ import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomple
 import {
   coalesceAgentAutocompleteCandidates,
   coalesceAutocompleteCandidatesByKey,
+  filterAdmittedMentionPubkeys,
   filterCachedAgentSuggestions,
+  getAdmittedAgentPubkeys,
+  getAgentIdentityPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInAllowedList,
   isAgentMentionChannelType,
+  rememberSelectedAgentPubkeys,
   shouldHideAgentFromMentions,
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
@@ -78,7 +82,6 @@ function appendUniqueName(current: string[], name: string): string[] {
     ? current
     : [...current, name];
 }
-
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -94,6 +97,7 @@ export function useMentions(
   const [selectedAgentMentionNames, setSelectedAgentMentionNames] =
     React.useState<string[]>([]);
   const selectedAgentMentionNamesRef = React.useRef<string[]>([]);
+  const selectedAgentMentionPubkeysRef = React.useRef<Set<string>>(new Set());
   selectedAgentMentionNamesRef.current = selectedAgentMentionNames;
   const mentionMapRef = React.useRef<Map<string, string>>(new Map());
   const personaMentionMapRef = React.useRef<Map<string, string>>(new Map());
@@ -112,16 +116,16 @@ export function useMentions(
   const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
+  const agentAccessOwnerOnlyQuery = useAgentAccessOwnerOnlyQuery();
   const managedAgentDirectoryReady =
-    managedAgentsQuery.data !== undefined ||
-    !managedAgentsQuery.isLoading ||
-    managedAgentsQuery.error !== null;
+    managedAgentsQuery.data !== undefined && managedAgentsQuery.error === null;
   const relayAgentDirectoryReady =
-    relayAgentsQuery.data !== undefined ||
-    !relayAgentsQuery.isLoading ||
-    relayAgentsQuery.error !== null;
+    relayAgentsQuery.data !== undefined && relayAgentsQuery.error === null;
+  const ownerPolicyReady =
+    agentAccessOwnerOnlyQuery.data !== undefined &&
+    agentAccessOwnerOnlyQuery.error === null;
   const agentDirectoriesReady =
-    managedAgentDirectoryReady && relayAgentDirectoryReady;
+    managedAgentDirectoryReady && relayAgentDirectoryReady && ownerPolicyReady;
   const canSearchGlobalUsers = canSearchGlobalPeople && agentDirectoriesReady;
   const userSearchQuery = useInfiniteUserSearchQuery(mentionQuery ?? "", {
     allowEmpty: true,
@@ -182,15 +186,6 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
-  const directoryAgentPubkeys = React.useMemo(
-    () =>
-      new Set(
-        (relayAgentsQuery.data ?? []).map((agent) =>
-          normalizePubkey(agent.pubkey),
-        ),
-      ),
-    [relayAgentsQuery.data],
-  );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
@@ -230,7 +225,10 @@ export function useMentions(
     }
     return lookup;
   }, [managedAgentsQuery.data, personasQuery.data]);
-  const knownAgentPubkeys = mentionableAgentPubkeys;
+  const knownAgentPubkeys = new Set([
+    ...mentionableAgentPubkeys,
+    ...managedAgentPubkeys,
+  ]);
   const activePersonas = React.useMemo(
     () => (personasQuery.data ?? []).filter((persona) => persona.isActive),
     [personasQuery.data],
@@ -248,30 +246,36 @@ export function useMentions(
       new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
     [members],
   );
+  const agentIdentityPubkeys = React.useMemo(
+    () =>
+      getAgentIdentityPubkeys({
+        managedAgentPubkeys,
+        relayAgents: relayAgentsQuery.data ?? [],
+        members: members ?? [],
+        profileIsAgent: (pubkey) => profiles?.[pubkey]?.isAgent === true,
+      }),
+    [managedAgentPubkeys, members, profiles, relayAgentsQuery.data],
+  );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
-
     const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
       const pubkey = normalizePubkey(candidate.pubkey);
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      // Channel members must reach the directory-aware policy below. A remote
-      // agent can be a real member before its relay directory entry is known.
-      if (
-        candidate.isMember !== true &&
-        !isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)
-      ) {
-        return;
-      }
       if (
         shouldHideAgentFromMentions({
           isAgent: candidate.isAgent === true,
-          isMember: candidate.isMember === true,
+          isManagedAgent: candidate.isManagedAgent === true,
           pubkey,
+          ownerPubkey: candidate.ownerPubkey,
+          currentPubkey,
           mentionableAgentPubkeys,
-          directoryAgentPubkeys,
-          directoryReady: agentDirectoriesReady,
+          directoryReady:
+            candidate.isManagedAgent === true
+              ? managedAgentDirectoryReady
+              : relayAgentDirectoryReady,
+          ownerOnly: agentAccessOwnerOnlyQuery.data,
         })
       ) {
         return;
@@ -281,7 +285,6 @@ export function useMentions(
         candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
         return;
       }
-
       candidatesByPubkey.set(pubkey, {
         ...current,
         avatarUrl: current.avatarUrl ?? candidate.avatarUrl ?? null,
@@ -346,7 +349,6 @@ export function useMentions(
             : null,
       });
     }
-
     for (const agent of relayAgentsQuery.data ?? []) {
       const pubkey = normalizePubkey(agent.pubkey);
       addCandidate({
@@ -361,7 +363,6 @@ export function useMentions(
         isAgent: true,
       });
     }
-
     for (const agent of managedAgentsQuery.data ?? []) {
       addCandidate({
         kind: "identity",
@@ -376,7 +377,6 @@ export function useMentions(
         ownerPubkey: currentPubkey,
       });
     }
-
     if (canSearchGlobalUsers) {
       for (const user of userSearchResults) {
         const pubkey = normalizePubkey(user.pubkey);
@@ -428,12 +428,12 @@ export function useMentions(
   }, [
     activePersonaById,
     activePersonas,
-    agentDirectoriesReady,
+    agentAccessOwnerOnlyQuery.data,
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
-    directoryAgentPubkeys,
     isArchivedDiscovery,
+    managedAgentDirectoryReady,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
@@ -443,9 +443,15 @@ export function useMentions(
     mentionableAgentPubkeys,
     personaNameByPubkey,
     profiles,
+    relayAgentDirectoryReady,
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
   ]);
+
+  const admittedAgentPubkeys = React.useMemo(
+    () => getAdmittedAgentPubkeys(mentionCandidates),
+    [mentionCandidates],
+  );
 
   const mentionCandidatesWithTeams = React.useMemo(
     () => [
@@ -657,6 +663,11 @@ export function useMentions(
         (suggestion.pubkey
           ? knownAgentPubkeys.has(normalizePubkey(suggestion.pubkey))
           : false);
+      rememberSelectedAgentPubkeys(
+        selectedAgentMentionPubkeysRef.current,
+        selectedMentions,
+        isAgentMention,
+      );
       if (isAgentMention) {
         setSelectedAgentMentionNames((current) => {
           const known = new Set(current.map((name) => name.toLowerCase()));
@@ -800,14 +811,23 @@ export function useMentions(
   );
 
   const extractMentionPubkeysForCurrentMentions = React.useCallback(
-    (text: string): string[] =>
-      extractMentionPubkeys({
+    (text: string): string[] => {
+      const extracted = extractMentionPubkeys({
         text,
         selectedMentions: mentionMapRef.current,
         selectedDisplayNames: personaMentionMapRef.current.keys(),
         memberCandidates: mentionCandidates,
-      }),
-    [mentionCandidates],
+      });
+      return filterAdmittedMentionPubkeys(
+        extracted,
+        new Set([
+          ...agentIdentityPubkeys,
+          ...selectedAgentMentionPubkeysRef.current,
+        ]),
+        admittedAgentPubkeys,
+      );
+    },
+    [admittedAgentPubkeys, agentIdentityPubkeys, mentionCandidates],
   );
 
   const extractMentionPersonas = React.useCallback(
