@@ -155,14 +155,20 @@ class ThreadDetailPage extends HookConsumerWidget {
           ? null
           : indexForReply(chronologicalIndex);
       if (targetIndex == null || didJumpToInitialMessage.value) return null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted || !itemScrollController.isAttached) return;
-        tailIntent.detach();
-        followsThreadTail.value = false;
-        pendingTailAlignment.value = null;
-        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
-        didJumpToInitialMessage.value = true;
-      });
+      didJumpToInitialMessage.value = true;
+      tailIntent.schedule(
+        allowed: true,
+        revalidate: () =>
+            context.mounted &&
+            itemScrollController.isAttached &&
+            !tailIntent.isDragging,
+        action: () {
+          tailIntent.detach();
+          followsThreadTail.value = false;
+          pendingTailAlignment.value = null;
+          itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
+        },
+      );
       return null;
     }, [initialMessageId, fetchedReplies, replies.length]);
 
@@ -182,6 +188,7 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     void queueTailRealignment({
       bool allowIdleDetached = false,
+      bool restoreFollow = false,
       bool animate = true,
     }) {
       if (!initialTailSettle.isComplete ||
@@ -202,6 +209,10 @@ class ThreadDetailPage extends HookConsumerWidget {
             ),
         action: () {
           final lastIndex = _threadTailIndex(replies.length);
+          if (restoreFollow) {
+            userOptedOutOfTailFollow.value = false;
+            followsThreadTail.value = true;
+          }
           if (animate) {
             itemScrollController.scrollTo(
               index: lastIndex,
@@ -265,7 +276,10 @@ class ThreadDetailPage extends HookConsumerWidget {
       if (!hasNewLocalReply && (userOptedOutOfTailFollow.value || !wasAtTail)) {
         return null;
       }
-      queueTailRealignment(allowIdleDetached: hasNewLocalReply);
+      queueTailRealignment(
+        allowIdleDetached: hasNewLocalReply,
+        restoreFollow: hasNewLocalReply,
+      );
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry]);
     final readState = ref.watch(readStateProvider);

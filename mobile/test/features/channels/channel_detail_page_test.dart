@@ -4397,6 +4397,75 @@ void main() {
       },
     );
 
+    testWidgets('active drag cancels a queued hydrated deep-link jump', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 35; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      final completer = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          pendingThreadReplies: {'thread-root': completer.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final provisional = formatTimeline([rootEvent, ...replies.take(30)]);
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: provisional.first,
+            allMessages: provisional,
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'reply-5',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final anchor = find.byKey(
+        const ValueKey('thread-message-group-thread-root'),
+      );
+      final anchorTop = tester.getTopLeft(anchor).dy;
+      completer.complete(replies);
+      await tester.pump();
+
+      // Authoritative hydration has queued the deep-link jump. A primary drag
+      // takes ownership before the shared deferred-intent boundary executes it.
+      tester
+          .widget<KeyboardDismissOnDrag>(find.byType(KeyboardDismissOnDrag))
+          .onUserScrollStart!();
+      await tester.pumpAndSettle();
+
+      expect(anchor, findsOneWidget);
+      expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+    });
+
     testWidgets('user drag invalidates an already queued hydration settle', (
       tester,
     ) async {
@@ -4863,6 +4932,29 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('thread-message-group-reply-local')),
+        findsOneWidget,
+      );
+
+      final laterRemoteReplies = [
+        for (var i = 0; i < 10; i++)
+          _textMsg(
+            id: 'reply-after-local-$i',
+            pubkey: 'bob',
+            content: List.filled(8, 'Tall remote reply $i').join('\n'),
+            createdAt: 1300 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      messagesNotifier.setMessages([
+        rootEvent,
+        localReply,
+        ...laterRemoteReplies,
+      ]);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-after-local-9')),
         findsOneWidget,
       );
     });
