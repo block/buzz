@@ -1,0 +1,217 @@
+"""The no-model property, asserted by AST — launchpad-26/buzz#116.
+
+The issue requires that the pre-flight make no model call. This module proves it
+by parsing the source and comparing every imported module name against an
+allowlist **written here**, so any new import fails by default rather than only
+the handful someone thought to name in a pattern.
+
+Why this is not a grep
+======================
+
+A grep reports every occurrence and leaves a human to sort the legitimate hits
+from the real ones. That is not a check that can fail. An allowlist inverts the
+burden: the check goes red on an import nobody anticipated.
+
+Three ways an import evades a naive scan, all closed here
+=========================================================
+
+**Traverse with ``ast.walk``, not ``tree.body``.** ``tree.body`` sees only
+top-level statements, so an ``import requests`` inside a function body is
+invisible to it. :meth:`Traversal.test_a_top_level_scan_misses_a_nested_import`
+demonstrates the difference on a sample rather than asserting it.
+
+**Collect ``Call`` nodes too.** ``importlib.import_module("openai")`` is a Call,
+never an Import — an import-name scan reports it as absent. One line, and the
+no-model rule is broken outright while every import-based check stays green.
+
+**``__import__("openai")`` needs no import statement at all**, so only the
+call-node rule can see it.
+
+This module deliberately **does not import** the modules it checks. It reads
+their source and parses it. An import-hygiene check that imports its subject
+cannot report on a subject whose new import is not installed: it dies at import
+time, and a suite that is red because a module could not load is not evidence
+that this check works. Keeping it source-only is what lets
+``mutation_harness.py`` inject ``import openai`` and show *this* control turning
+red.
+"""
+
+from __future__ import annotations
+
+import ast
+import os
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+#: Written here, not inferred. Anything else fails the check by default.
+ALLOWLIST: dict[str, frozenset[str]] = {
+    # The record. No I/O of any kind: no subprocess, no filesystem, no network.
+    "preflight_core.py": frozenset({"__future__", "re", "dataclasses", "typing"}),
+    # The fetch layer. subprocess is here and nowhere else, and it may only spawn gh.
+    "preflight_fetch.py": frozenset(
+        {
+            "__future__",
+            "argparse",
+            "json",
+            "re",
+            "subprocess",
+            "sys",
+            "dataclasses",
+            "typing",
+            "preflight_core",
+        }
+    ),
+}
+
+#: Calls that load code by name, bypassing every import statement.
+FORBIDDEN_CALLS = frozenset({"importlib.import_module", "__import__", "eval", "exec"})
+
+
+def source_of(name: str) -> str:
+    with open(os.path.join(HERE, name), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def dotted_name(node: ast.AST) -> str:
+    """`a.b.c` for an Attribute/Name chain, so a call can be named in full."""
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+    return ".".join(reversed(parts))
+
+
+def imported_modules(source: str) -> set[str]:
+    """Every module name imported anywhere in ``source``, nesting included."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):  # walk, never tree.body
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # a relative import names no external module
+                continue
+            if node.module:
+                found.add(node.module.split(".")[0])
+    return found
+
+
+def loader_calls(source: str) -> set[str]:
+    """Every call that loads code by name rather than by import statement."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            name = dotted_name(node.func)
+            if name in FORBIDDEN_CALLS or name.split(".")[-1] in {"import_module"}:
+                found.add(name)
+    return found
+
+
+class NoModelCall(unittest.TestCase):
+    def test_every_import_is_on_the_allowlist(self):
+        for name, allowed in ALLOWLIST.items():
+            with self.subTest(module=name):
+                found = imported_modules(source_of(name))
+                self.assertLessEqual(
+                    found,
+                    allowed,
+                    f"{name} imports {sorted(found - allowed)}, which is not on the allowlist. "
+                    "An import this check did not anticipate fails it by default — that is the point. "
+                    "If the import is legitimate, add it here and say why in the commit.",
+                )
+
+    def test_the_record_module_performs_no_io_at_all(self):
+        """No subprocess, no socket, no filesystem: the record is pure."""
+        found = imported_modules(source_of("preflight_core.py"))
+        for banned in ("subprocess", "socket", "os", "pathlib", "http", "urllib", "requests", "httpx"):
+            self.assertNotIn(banned, found)
+
+    def test_no_module_loads_code_by_name(self):
+        for name in ALLOWLIST:
+            with self.subTest(module=name):
+                self.assertEqual(
+                    loader_calls(source_of(name)),
+                    set(),
+                    "importlib.import_module or __import__ bypasses every import-name scan",
+                )
+
+    def test_no_model_sdk_is_reachable_from_either_module(self):
+        for name in ALLOWLIST:
+            with self.subTest(module=name):
+                found = imported_modules(source_of(name))
+                for sdk in ("openai", "anthropic", "google", "cohere", "mistralai", "litellm", "ollama"):
+                    self.assertNotIn(sdk, found)
+
+    def test_only_the_fetch_layer_may_spawn_anything(self):
+        """One spawn site, inside gh_runner, and it refuses any binary but gh.
+
+        Counted as call nodes rather than as text. A string count over the source
+        reads this module's own prose about ``subprocess.run`` as a second spawn
+        site — which is the grep-shaped failure this whole file argues against,
+        and it happened here first.
+        """
+        self.assertIn("subprocess", ALLOWLIST["preflight_fetch.py"])
+        self.assertNotIn("subprocess", ALLOWLIST["preflight_core.py"])
+
+        source = source_of("preflight_fetch.py")
+        tree = ast.parse(source)
+        spawns = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and dotted_name(node.func) == "subprocess.run"
+        ]
+        self.assertEqual(len(spawns), 1, "exactly one place in the tree starts a process")
+
+        runner = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "gh_runner"
+        )
+        self.assertTrue(
+            runner.lineno <= spawns[0].lineno <= runner.end_lineno,
+            "the spawn must be inside gh_runner, which is the seam controls replace",
+        )
+        self.assertIn('BINARY = "gh"', source)
+        self.assertIn("argv[0] != BINARY", source, "the spawn site must refuse any other binary")
+
+
+class Traversal(unittest.TestCase):
+    """The scan's own blind spots, demonstrated rather than asserted."""
+
+    NESTED = (
+        "import json\n"
+        "def fetch():\n"
+        "    import requests\n"
+        "    return requests\n"
+    )
+    BY_NAME = 'value = importlib.import_module("openai")\n'
+    DUNDER = 'value = __import__("openai")\n'
+
+    def test_a_top_level_scan_misses_a_nested_import(self):
+        top_level = {
+            alias.name
+            for node in ast.parse(self.NESTED).body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertEqual(top_level, {"json"}, "tree.body sees only the top level")
+        self.assertEqual(imported_modules(self.NESTED), {"json", "requests"}, "ast.walk sees both")
+
+    def test_an_import_name_scan_misses_a_call(self):
+        self.assertEqual(imported_modules(self.BY_NAME), set(), "no Import node exists to find")
+        self.assertEqual(loader_calls(self.BY_NAME), {"importlib.import_module"})
+
+    def test_dunder_import_needs_no_import_statement_at_all(self):
+        self.assertEqual(imported_modules(self.DUNDER), set())
+        self.assertEqual(loader_calls(self.DUNDER), {"__import__"})
+
+    def test_a_relative_import_is_not_mistaken_for_a_module(self):
+        self.assertEqual(imported_modules("from . import sibling\n"), set())
+
+
+if __name__ == "__main__":
+    unittest.main()
