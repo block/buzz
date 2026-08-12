@@ -546,6 +546,44 @@ void main() {
     },
   );
 
+  test(
+    'validated live-only admission precedes dedup and reconnect watermark',
+    () async {
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(socket);
+      final delivered = <NostrEvent>[];
+      var admit = false;
+
+      final subscribe = session.subscribeValidatedLiveOnly(
+        _channelFilter,
+        (_) => admit,
+        delivered.add,
+      );
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
+      final event = _event(createdAt: 30);
+
+      // A rejected copy must not poison this subscription's event-ID dedup.
+      session.debugHandleMessage(['EVENT', 'l-1', event.toJson()]);
+      session.debugFlushEventBuffer();
+      expect(delivered, isEmpty);
+
+      admit = true;
+      session.debugHandleMessage(['EVENT', 'l-1', event.toJson()]);
+      session.debugFlushEventBuffer();
+      expect(delivered.map((item) => item.id), [event.id]);
+
+      socket.messages.clear();
+      await session.debugReplayLiveSubscriptions();
+      final replayFilter = _reqs(socket).single[2] as Map<String, dynamic>;
+      expect(replayFilter, isNot(contains('since')));
+      expect(replayFilter, _channelFilter.toJson());
+
+      unsubscribe();
+    },
+  );
+
   test('delivers the same live event to each matching subscription', () async {
     final session = RelaySessionNotifier();
     final firstEvents = <NostrEvent>[];

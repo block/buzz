@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -35,6 +36,9 @@ class MembersSheet extends HookConsumerWidget {
     final userCache = ref.watch(userCacheProvider);
     final typingBotPubkeys = ref.watch(workingBotPubkeysProvider(channel.id));
     final statusCache = ref.watch(userStatusCacheProvider);
+    final agentOwners =
+        ref.watch(agentOwnersProvider).asData?.value ??
+        const <String, String>{};
 
     // Determine if the current user can manage members.
     final currentMember = allMembers.cast<ChannelMember?>().firstWhere(
@@ -58,6 +62,10 @@ class MembersSheet extends HookConsumerWidget {
           builder: (_) => AgentActivitySheet(
             channelId: channel.id,
             agentPubkey: bot.pubkey,
+            ownerPubkey: agentOwners[bot.pubkey.toLowerCase()],
+            currentPubkey: currentPubkey,
+            channelType: channel.channelType,
+            isCurrentMember: currentMember != null,
           ),
         );
       });

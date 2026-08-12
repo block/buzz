@@ -2,6 +2,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 
 void main() {
+  test('declares the shared agent activity summary kind', () {
+    expect(EventKind.agentActivitySummary, 24201);
+  });
+
   test('NostrFilter serializes and preserves authors', () {
     const filter = NostrFilter(
       kinds: [EventKind.readState],

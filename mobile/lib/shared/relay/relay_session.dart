@@ -18,6 +18,8 @@ import 'relay_provider.dart';
 import 'relay_rate_limit_gate.dart';
 import 'relay_socket.dart';
 
+part 'relay_session/live_subscription.dart';
+
 enum SessionStatus { disconnected, connecting, connected, reconnecting }
 
 @immutable
@@ -34,23 +36,6 @@ class _HistorySubscription {
   final Timer timeout;
 
   _HistorySubscription({required this.completer, required this.timeout});
-}
-
-class _LiveSubscription {
-  final NostrFilter filter;
-  final void Function(NostrEvent) onEvent;
-  final void Function(String message)? onClosed;
-  Completer<void>? readyCompleter;
-  int? lastSeenCreatedAt;
-  int closedRetryAttempt = 0;
-  Timer? closedRetryTimer;
-
-  _LiveSubscription({
-    required this.filter,
-    required this.onEvent,
-    this.onClosed,
-    this.readyCompleter,
-  });
 }
 
 class _ClosedRetry {
@@ -263,6 +248,29 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
+  }) => _subscribe(filter, onEvent, onClosed: onClosed);
+
+  /// Subscribes without historical reconnect replay and validates each event
+  /// before it can affect deduplication or reconnect state.
+  Future<void Function()> subscribeValidatedLiveOnly(
+    NostrFilter filter,
+    bool Function(NostrEvent) admitEvent,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) => _subscribe(
+    filter,
+    onEvent,
+    onClosed: onClosed,
+    admitEvent: admitEvent,
+    replayFromWatermark: false,
+  );
+
+  Future<void Function()> _subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    bool Function(NostrEvent)? admitEvent,
+    bool replayFromWatermark = true,
   }) async {
     if (_disposed) throw StateError('Relay session is disposed');
     final subId = _nextSubId('l');
@@ -272,6 +280,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       filter: filter,
       onEvent: onEvent,
       onClosed: onClosed,
+      admitEvent: admitEvent,
+      replayFromWatermark: replayFromWatermark,
       readyCompleter: readyCompleter,
     );
 
@@ -578,6 +588,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       !_disposed && generation == _connectionGeneration;
 
   NostrFilter _replayFilter(_LiveSubscription subscription) {
+    if (!subscription.replayFromWatermark) return subscription.filter;
     final since = subscription.lastSeenCreatedAt;
     return since == null
         ? subscription.filter
@@ -618,6 +629,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // Live subscriptions get batched.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
+      if (liveSub.admitEvent case final admitEvent?) {
+        bool admitted;
+        try {
+          admitted = admitEvent(event);
+        } catch (_) {
+          admitted = false;
+        }
+        if (!admitted) return;
+      }
       _resetClosedRetry(liveSub);
       // Track last seen timestamp for reconnect replay.
       if (liveSub.lastSeenCreatedAt == null ||
