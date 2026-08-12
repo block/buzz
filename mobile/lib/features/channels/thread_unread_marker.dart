@@ -3,8 +3,11 @@ import 'timeline_message.dart';
 /// Oldest reply the reader has not seen, or `null` when the thread is fully
 /// read. Mirrors desktop's `computeThreadUnreadMarker`.
 ///
-/// [openReadSnapshot] is the per-reply read timestamp frozen when the thread
-/// was opened, keyed by reply id. A reply is unread when it was forced unread,
+/// [openReadSnapshot] is the per-reply *effective* read timestamp frozen when
+/// the thread was opened, keyed by reply id — callers must fold the channel
+/// and thread markers in via `effectiveMessageReadAt` rather than reading a
+/// bare `msg:` marker, or a thread whose replies were only ever covered by the
+/// channel marker reads as entirely unread. A reply is unread when forced,
 /// when its snapshot value is `null` (never read), or when it is newer than
 /// that value. Replies missing from the snapshot are skipped: they were never
 /// observed at open time, so there is nothing to compare against.

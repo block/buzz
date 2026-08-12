@@ -29,6 +29,7 @@ import 'message_actions.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
+import '../../shared/read_state/message_read_state.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
@@ -164,16 +165,29 @@ class ThreadDetailPage extends HookConsumerWidget {
     }, [itemPositionsListener, replies.length]);
 
     Future<void> scrollToThreadLatest() async {
-      if (!itemScrollController.isAttached) return;
-      final lastIndex = replies.isEmpty
-          ? headIndex
-          : indexForReply(replies.length - 1);
+      if (!itemScrollController.isAttached || replies.isEmpty) return;
+      final lastIndex = indexForReply(replies.length - 1);
       followsThreadTail.value = true;
       pendingTailAlignment.value = null;
       await itemScrollController.scrollTo(
         index: lastIndex,
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOutCubic,
+      );
+      if (!context.mounted || !itemScrollController.isAttached) return;
+      // scrollTo's default alignment pins the item's LEADING edge to the top
+      // of the viewport. For a reply taller than the viewport the trailing
+      // edge is then still off screen — precisely the state
+      // threadTailIsVisible() reports as "not at the tail" — so the pill
+      // would stay up and a second tap would do nothing. Nudge by the
+      // measured overflow so the trailing edge lands on the viewport bottom.
+      final position = itemPositionsListener.itemPositions.value
+          .where((position) => position.index == lastIndex)
+          .firstOrNull;
+      if (position == null || position.itemTrailingEdge <= 1.001) return;
+      itemScrollController.jumpTo(
+        index: lastIndex,
+        alignment: position.itemLeadingEdge - (position.itemTrailingEdge - 1.0),
       );
     }
 
@@ -269,7 +283,18 @@ class ThreadDetailPage extends HookConsumerWidget {
       for (final reply in replies) {
         openReadSnapshot.value.putIfAbsent(
           reply.id,
-          () => readState.effectiveTimestamp(msgContextKey(reply.id)),
+          // Must be the folded resolver, not a bare msg: lookup. Opening a
+          // channel writes only the channel marker, so on a thread's first
+          // open every reply's own msg: marker is still null — a bare lookup
+          // would call the whole thread unread and resume at reply #1, while
+          // the long-press menu (isMessageUnread, same resolver) called it
+          // read.
+          () => effectiveMessageReadAt(
+            readState,
+            channelId: channelId,
+            messageId: reply.id,
+            threadRootId: queryRootId,
+          ),
         );
       }
     }
@@ -636,7 +661,9 @@ class ThreadDetailPage extends HookConsumerWidget {
                 ),
               ),
             ),
-          if (!isAtThreadTail.value)
+          // A thread with no replies has no "latest" to jump to; the head's
+          // own scroll position is not what this control means.
+          if (!isAtThreadTail.value && replies.isNotEmpty)
             Positioned(
               left: 0,
               right: 0,
