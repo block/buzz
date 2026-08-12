@@ -1340,6 +1340,7 @@ declare global {
     __BUZZ_E2E_MUTATE_CHANNEL__?: (opts: {
       channelId: string;
       channelType?: "stream" | "forum" | "dm";
+      description?: string;
       removeMemberPubkey?: string;
     }) => void;
     /**
@@ -10260,12 +10261,16 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_MUTATE_CHANNEL__ = ({
     channelId,
     channelType,
+    description,
     removeMemberPubkey,
   }) => {
     const channel = mockChannels.find((ch) => ch.id === channelId);
     if (!channel) return;
     if (channelType !== undefined) {
       channel.channel_type = channelType;
+    }
+    if (description !== undefined) {
+      channel.description = description;
     }
     if (removeMemberPubkey !== undefined) {
       channel.members = channel.members.filter(

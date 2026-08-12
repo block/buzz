@@ -14,6 +14,7 @@ import {
 } from "../helpers/bridge";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 const CACHED_PROFILE_LABELS_TAG = "@cached-profile-labels";
@@ -1366,6 +1367,55 @@ test("create stream with name and description", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
 });
 
+test("channel name values stay primary after their inputs blur", async ({
+  page,
+}) => {
+  async function expectPrimaryValueAfterBlur(
+    input: import("@playwright/test").Locator,
+    blurTarget: import("@playwright/test").Locator,
+  ) {
+    const placeholder = await input.getAttribute("placeholder");
+    const placeholderColor = placeholder
+      ? await input.evaluate(
+          (element) => window.getComputedStyle(element, "::placeholder").color,
+        )
+      : null;
+
+    await input.fill("primary-channel-name");
+    const focusedColor = await input.evaluate(
+      (element) => window.getComputedStyle(element).color,
+    );
+    await blurTarget.click();
+    const valueColor = await input.evaluate(
+      (element) => window.getComputedStyle(element).color,
+    );
+
+    expect(valueColor).toBe(focusedColor);
+    if (placeholderColor) {
+      expect(valueColor).not.toBe(placeholderColor);
+    }
+  }
+
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+  const createDialog = page.getByTestId("create-channel-dialog");
+  await expectPrimaryValueAfterBlur(
+    createDialog.getByTestId("create-channel-name"),
+    createDialog.getByTestId("create-channel-description"),
+  );
+  await createDialog.getByRole("button", { name: "Close" }).click();
+
+  await openChannelManagement(page, "general");
+  await openChannelEditDialog(page);
+  const editDialog = page.getByRole("dialog", {
+    name: /Edit (?:public|private) channel/,
+  });
+  await expectPrimaryValueAfterBlur(
+    editDialog.getByTestId("channel-management-name"),
+    editDialog.getByTestId("channel-management-description"),
+  );
+});
+
 test("create channel template selector matches the lifecycle controls", async ({
   page,
 }) => {
@@ -2493,6 +2543,240 @@ test("manage channel updates details", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("manage channel shows member avatars and owner-only row controls", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+
+  await expect(
+    page.getByTestId("channel-management-member-avatar-stack"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-member-avatar"),
+  ).toHaveCount(3);
+  await expect(
+    page.getByTestId("channel-management-member-avatar-overflow"),
+  ).toHaveText("+1");
+  await expect(page.getByTestId("channel-management-hero")).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-sheet").locator(".space-y-6").first(),
+  ).toBeVisible();
+  const detailsSection = page.getByTestId("channel-management-details");
+  const detailsTitle = detailsSection.getByRole("heading", {
+    exact: true,
+    level: 2,
+    name: "Details",
+  });
+  await expect(detailsTitle).toHaveClass(/text-xs/);
+  await expect(detailsTitle).toHaveClass(/text-muted-foreground\/70/);
+  await expect(
+    detailsSection.locator('[data-slot="panel-section-header"]'),
+  ).toHaveClass(/px-4/);
+  await expect(
+    detailsSection
+      .locator('[data-slot="panel-section-card"]')
+      .getByRole("heading", { exact: true, name: "Details" }),
+  ).toHaveCount(0);
+  const untitledChannelSections = [
+    page.getByTestId("channel-canvas-ingress-section"),
+    page.getByTestId("channel-management-actions"),
+  ];
+  for (const section of untitledChannelSections) {
+    await expect(
+      section.locator('[data-slot="panel-section-header"]'),
+    ).toHaveCount(0);
+  }
+  for (const rowTestId of [
+    "channel-management-type",
+    "channel-management-visibility",
+    "channel-management-member-count",
+    "channel-management-channel-id",
+  ]) {
+    await expect(
+      page
+        .getByTestId(rowTestId)
+        .locator(":scope > [data-slot='field-row-icon']"),
+    ).toHaveCount(0);
+  }
+  const leaveChannelRow = page.getByTestId("channel-management-leave");
+  await expect(
+    leaveChannelRow.locator(":scope > svg[data-slot='field-row-icon']"),
+  ).toHaveCount(1);
+  await expect(
+    leaveChannelRow.locator(":scope > span.rounded-full"),
+  ).toHaveCount(0);
+  const canvasInfo = page.getByTestId("channel-canvas-ingress-info");
+  await canvasInfo.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(
+    "Use the canvas as a shared space for notes, plans, and other channel information.",
+  );
+  const nameEdit = page.getByTestId("channel-management-edit");
+  await expect(nameEdit).toBeVisible();
+  const nameEditIcon = page.getByTestId("channel-management-edit-icon");
+  await expect(nameEditIcon).toHaveCSS("opacity", "0");
+  await nameEdit.hover();
+  await expect(nameEditIcon).toHaveCSS("opacity", "1");
+  await expect(
+    page.getByTestId("channel-management-edit-description"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-edit-channel-type"),
+  ).toHaveCSS("opacity", "0");
+  await expect(
+    page.getByTestId("channel-management-edit-visibility"),
+  ).toHaveCSS("opacity", "0");
+  await expect(page.getByTestId("channel-management-archive")).toBeVisible();
+  await expect(page.getByTestId("channel-management-delete")).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-copy-id-action"),
+  ).toHaveCount(0);
+  const layoutOrder = await page
+    .getByTestId("channel-management-sheet")
+    .locator(
+      "[data-testid='channel-management-member-count'], [data-testid='channel-management-channel-id'], [data-testid='channel-canvas-ingress'], [data-testid='channel-management-leave']",
+    )
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-testid")),
+    );
+  expect(layoutOrder).toEqual([
+    "channel-management-member-count",
+    "channel-management-channel-id",
+    "channel-canvas-ingress",
+    "channel-management-leave",
+  ]);
+
+  const channelIdRow = page.getByTestId("channel-management-channel-id");
+  const channelIdCopyStatus = page.getByTestId(
+    "channel-management-channel-id-copy-status",
+  );
+  await expect(channelIdRow.getByTitle(GENERAL_CHANNEL_ID)).toHaveText(
+    "9a1657ac…fb50",
+  );
+  await expect(channelIdCopyStatus).toHaveCSS("opacity", "0");
+  await channelIdRow.hover();
+  await expect(channelIdCopyStatus).toHaveCSS("opacity", "1");
+  await channelIdRow.click();
+  await expect(channelIdRow).toHaveAttribute("aria-label", "Channel ID copied");
+  await expect(channelIdCopyStatus).toHaveAttribute("data-copied", "true");
+
+  for (const editTrigger of [
+    nameEdit,
+    page.getByTestId("channel-management-description"),
+    page.getByTestId("channel-management-type"),
+    page.getByTestId("channel-management-visibility"),
+  ]) {
+    await editTrigger.click();
+    const editDialog = page.getByRole("dialog", {
+      name: /Edit (?:public|private) channel/,
+    });
+    await expect(editDialog).toBeVisible();
+    await expect(editDialog).toHaveClass(/data-\[state=open\]:animate-in/);
+    await expect(editDialog).toHaveClass(/data-\[state=open\]:fade-in-0/);
+    await expect(editDialog).toHaveClass(/data-\[state=open\]:zoom-in-95/);
+    await editDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(editDialog).not.toBeVisible();
+  }
+
+  await page.getByTestId("channel-management-member-count").click();
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  const membersDialog = page.getByTestId("members-sidebar");
+  await expect(membersDialog).toBeVisible();
+  await expect(membersDialog).toHaveClass(/data-\[state=open\]:animate-in/);
+  await expect(membersDialog).toHaveClass(/data-\[state=open\]:fade-in-0/);
+  await expect(membersDialog).toHaveClass(/data-\[state=open\]:zoom-in-95/);
+  await membersDialog.getByRole("button", { name: "Close" }).click();
+  await expect(membersDialog).not.toBeVisible();
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+
+  await page
+    .getByTestId("channel-management-sheet")
+    .getByTestId("auxiliary-panel-close")
+    .click();
+  await expect(page.getByTestId("channel-management-sheet")).not.toBeVisible();
+
+  await openChannelManagement(page, "random");
+
+  await expect(page.getByTestId("channel-management-edit")).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-edit-description"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-edit-channel-type"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-edit-visibility"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-archive")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-delete")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-leave")).toBeVisible();
+});
+
+test("direct message settings omit the channel name and empty actions card", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openChannelManagement(page, "alice-tyler");
+
+  await expect(page.getByTestId("channel-management-hero")).toBeVisible();
+  await expect(page.getByTestId("channel-management-name-row")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-description")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("channel-management-actions")).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("channel-management-details")
+      .locator('[data-slot="panel-section-card"]')
+      .getByRole("heading", { exact: true, name: "Details" }),
+  ).toHaveCount(0);
+});
+
+test("channel settings only prompt editors to add an empty description", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(
+    async ({ generalChannelId, randomChannelId }) => {
+      const bridge = window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+        __BUZZ_E2E_MUTATE_CHANNEL__?: (options: {
+          channelId: string;
+          description?: string;
+        }) => void;
+      };
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+        channelId: generalChannelId,
+        description: "",
+      });
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+        channelId: randomChannelId,
+        description: "",
+      });
+      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+    },
+    {
+      generalChannelId: GENERAL_CHANNEL_ID,
+      randomChannelId: RANDOM_CHANNEL_ID,
+    },
+  );
+
+  await openChannelManagement(page, "general");
+  await expect(page.getByTestId("channel-management-edit")).toBeVisible();
+  await expect(page.getByTestId("channel-management-description")).toHaveText(
+    "Add a description",
+  );
+  await closeChannelManagement(page);
+
+  await openChannelManagement(page, "random");
+
+  await expect(page.getByTestId("channel-management-edit")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-description")).toHaveCount(
+    0,
+  );
+});
+
 test("manage channel updates visibility and ephemeral lifecycle independently", async ({
   page,
 }) => {
@@ -2621,7 +2905,7 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
   await expect(page.getByTestId("channel-management-ttl")).toHaveCount(0);
 });
 
-test("manage channel keeps canvas near the top of the sheet", async ({
+test("manage channel places canvas between channel info and actions", async ({
   page,
 }) => {
   await page.goto("/");
@@ -2631,12 +2915,15 @@ test("manage channel keeps canvas near the top of the sheet", async ({
   const sheetBox = await sheet.boundingBox();
   const timelineBox = await page.getByTestId("message-timeline").boundingBox();
 
-  // Canvas ingress should appear before the channel metadata rows in the DOM.
+  // Canvas ingress separates the channel information from channel actions.
   const canvasBox = await sheet
     .getByTestId("channel-canvas-ingress")
     .boundingBox();
-  const nameBox = await sheet
-    .getByTestId("channel-management-name-row")
+  const channelIdBox = await sheet
+    .getByTestId("channel-management-channel-id")
+    .boundingBox();
+  const leaveBox = await sheet
+    .getByTestId("channel-management-leave")
     .boundingBox();
 
   expect(sheetBox).not.toBeNull();
@@ -2659,16 +2946,21 @@ test("manage channel keeps canvas near the top of the sheet", async ({
   }
   expect(narrowSheetBox.width).toBeGreaterThan(500);
   expect(canvasBox).not.toBeNull();
-  expect(nameBox).not.toBeNull();
-  expect(canvasBox?.y).toBeLessThan(nameBox?.y);
+  expect(channelIdBox).not.toBeNull();
+  expect(leaveBox).not.toBeNull();
+  expect(channelIdBox?.y).toBeLessThan(canvasBox?.y);
+  expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
 });
 
 async function seedHomeInboxMention(
   page: import("@playwright/test").Page,
   itemId: string,
   tags?: string[][],
+  { navigate = true }: { navigate?: boolean } = {},
 ) {
-  await page.goto("/");
+  if (navigate) {
+    await page.goto("/");
+  }
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(
     () =>
@@ -3495,6 +3787,58 @@ test("home inbox manage affordance opens management without leaving home", async
   }
   expect(narrowSheetBox.width).toBeGreaterThanOrEqual(narrowHomeBox.width - 1);
   await expect(page).not.toHaveURL(/#\/channels\//);
+});
+
+test("home channel settings keeps agent lifecycle actions scoped to the active community", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const agentPubkey = await addGenericAgent(
+    page,
+    "general",
+    `home-sidebar-agent-${Date.now()}`,
+  );
+  const baselineCommands = await readCommandLog(page);
+  const baselineRuntimeStopCount = commandCount(
+    baselineCommands,
+    "stop_managed_agent_runtime",
+  );
+  const baselineLegacyStopCount = commandCount(
+    baselineCommands,
+    "stop_managed_agent",
+  );
+
+  await page.getByRole("button", { exact: true, name: "Inbox" }).click();
+  await seedHomeInboxMention(
+    page,
+    "mock-feed-home-agent-lifecycle",
+    undefined,
+    { navigate: false },
+  );
+  await page
+    .getByTestId("home-inbox-detail")
+    .getByTestId("channel-management-trigger")
+    .click();
+  await page.getByTestId("channel-management-member-count").click();
+  await expect(page.getByTestId("members-sidebar")).toBeVisible();
+
+  const agentStatus = page.getByTestId(
+    `sidebar-managed-agent-status-${agentPubkey}`,
+  );
+  const agentAction = page.getByTestId(`sidebar-agent-action-${agentPubkey}`);
+  await expect(agentStatus).toContainText("Here");
+  await openMemberMenu(page, agentPubkey);
+  await expect(agentAction).toContainText("Stop");
+  await agentAction.click();
+  await expect(agentStatus).toContainText("Unavailable");
+
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "stop_managed_agent_runtime")).toBe(
+    baselineRuntimeStopCount + 1,
+  );
+  expect(commandCount(commands, "stop_managed_agent")).toBe(
+    baselineLegacyStopCount,
+  );
 });
 
 test("members sidebar virtualizes large channel rosters", async ({ page }) => {
