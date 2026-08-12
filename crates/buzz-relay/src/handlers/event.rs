@@ -705,16 +705,49 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        handle_ephemeral_event(
+        match buzz_deletion::store(&state.db)
+            .is_serving_active(conn.tenant.community())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                reject("restricted");
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "restricted: community writes are fenced",
+                ));
+                return;
+            }
+            Err(error) => {
+                reject("error");
+                tracing::warn!(%error, event_id = %event_id_hex, "failed to check ephemeral-event community lifecycle");
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "error: internal server error",
+                ));
+                return;
+            }
+        }
+        match handle_ephemeral_event(
             event,
             conn_id,
-            &event_id_hex,
             pubkey_bytes,
             auth_pubkey,
-            conn,
+            Arc::clone(&conn),
             state,
         )
-        .await;
+        .await
+        {
+            Ok(()) => {
+                conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+            }
+            Err(message) => {
+                reject("invalid");
+                conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            }
+        }
         return;
     }
 
@@ -762,33 +795,19 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
 async fn handle_ephemeral_event(
     event: Event,
     conn_id: uuid::Uuid,
-    event_id_hex: &str,
     pubkey_bytes: Vec<u8>,
     auth_pubkey: nostr::PublicKey,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
-) {
+) -> Result<(), String> {
     let event_clone = event.clone();
+    let event_id = event.id.to_hex();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
 
     match verify_result {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                &format!("invalid: {e}"),
-            ));
-            return;
-        }
-        Err(_) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "error: internal error",
-            ));
-            return;
-        }
+        Ok(Err(e)) => return Err(format!("invalid: {e}")),
+        Err(_) => return Err("error: internal error".to_string()),
     }
 
     // Special handling for presence events (kind:20001).
@@ -829,18 +848,8 @@ async fn handle_ephemeral_event(
 
     // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        if let Err(msg) = super::ingest::check_channel_membership(
-            &conn.tenant,
-            &state,
-            ch_id,
-            &pubkey_bytes,
-            None,
-        )
-        .await
-        {
-            conn.send(RelayMessage::ok(event_id_hex, false, &msg));
-            return;
-        }
+        super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes, None)
+            .await?;
 
         // Mark as local before Redis publish to prevent double-delivery when
         // the event comes back through the Redis subscriber loop.
@@ -854,7 +863,7 @@ async fn handle_ephemeral_event(
             state
                 .local_event_ids
                 .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral publish failed: {e}");
+            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral publish failed: {e}");
         }
 
         // Direct fan-out to local WS subscribers, through the guarded send path
@@ -882,7 +891,7 @@ async fn handle_ephemeral_event(
             state
                 .local_event_ids
                 .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral global publish failed: {e}");
+            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral global publish failed: {e}");
         }
 
         // Direct fan-out to local WS subscribers through the guarded send path.
@@ -893,7 +902,7 @@ async fn handle_ephemeral_event(
         fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
     }
 
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

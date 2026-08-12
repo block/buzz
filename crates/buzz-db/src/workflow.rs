@@ -602,6 +602,7 @@ pub async fn prune_scheduled_workflow_fires_before(
         r#"
         DELETE FROM scheduled_workflow_fires
         WHERE claimed_at < $1
+          AND community_write_allowed(community_id)
         "#,
     )
     .bind(older_than)

@@ -20,6 +20,8 @@
 //! newest timestamp and collide on the bumped second. run.sh serialization is
 //! the guard against parallel adds (e.g. `xargs -P`).
 
+mod deletions;
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -80,6 +82,11 @@ enum Command {
     ProductFeedback {
         #[command(subcommand)]
         command: ProductFeedbackCommand,
+    },
+    /// Durable CLI-only whole-community deletion control plane.
+    Deletions {
+        #[command(subcommand)]
+        command: deletions::DeletionsCommand,
     },
     /// Emit kind:39000/39002 events for channels missing them.
     ///
@@ -148,6 +155,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
+        Command::Deletions { command } => deletions::run(command).await,
         Command::ReconcileChannels { relay_key } => {
             reconcile_channels(relay_key).await?;
             Ok(0)
