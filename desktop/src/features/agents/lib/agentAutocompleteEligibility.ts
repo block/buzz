@@ -64,6 +64,17 @@ export function isAgentIdentityInManagedList(
   );
 }
 
+/** Keeps live channel members mentionable while excluding unmanaged relay-only identities. */
+export function isAgentIdentityEligibleForMentions(
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
+  managedAgentPubkeys: ReadonlySet<string>,
+) {
+  return (
+    candidate.isMember === true ||
+    isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+  );
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,

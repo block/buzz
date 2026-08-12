@@ -5,6 +5,7 @@ import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  isAgentIdentityEligibleForMentions,
   isAgentIdentityInManagedList,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
@@ -156,6 +157,25 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   assert.equal(
     isAgentIdentityInManagedList(
       { isAgent: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    false,
+  );
+});
+
+test("isAgentIdentityEligibleForMentions: keeps channel-member agents owned by someone else", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  assert.equal(
+    isAgentIdentityEligibleForMentions(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityEligibleForMentions(
+      { isAgent: true, isMember: false, pubkey: PUB_B },
       managedAgentPubkeys,
     ),
     false,
