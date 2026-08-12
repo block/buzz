@@ -5,7 +5,6 @@ import {
   isRenderedTimelineBehindHistoryPrepend,
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
-  selectTimelineRenderSource,
 } from "@/features/messages/lib/timelineSnapshot";
 import { preloadTimelineImages } from "@/features/messages/lib/timelineImagePreload";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -256,43 +255,7 @@ const MessageTimelineBase = React.forwardRef<
     liveSnapshot,
     EMPTY_TIMELINE_SNAPSHOT,
   );
-  // Only channels that arrived with cache, or whose cold rows have already
-  // committed through the deferred path, may bypass a mismatched snapshot.
-  // This preserves the markdown-parse concurrency gate on cold loads while
-  // making warm revisits paint immediately.
-  const requiresDeferredSettleRef = React.useRef(new Map<string, boolean>());
-  const snapshotChannelId = liveSnapshot.channelId;
-  if (snapshotChannelId) {
-    if (!requiresDeferredSettleRef.current.has(snapshotChannelId)) {
-      requiresDeferredSettleRef.current.set(snapshotChannelId, isLoading);
-    } else if (isLoading) {
-      requiresDeferredSettleRef.current.set(snapshotChannelId, true);
-    }
-    if (
-      !isLoading &&
-      deferredSnapshot.channelId === snapshotChannelId &&
-      messages.length > 0
-    ) {
-      requiresDeferredSettleRef.current.set(snapshotChannelId, false);
-    }
-  }
-  const canPaintLiveSnapshot =
-    !isLoading &&
-    messages.length > 0 &&
-    (snapshotChannelId === null ||
-      requiresDeferredSettleRef.current.get(snapshotChannelId) === false);
-  const renderSource = selectTimelineRenderSource({
-    deferredChannelId: deferredSnapshot.channelId,
-    liveChannelId: snapshotChannelId,
-    preferLiveSnapshot: canPaintLiveSnapshot,
-  });
-  const renderedSnapshot =
-    renderSource === "live"
-      ? liveSnapshot
-      : renderSource === "deferred"
-        ? deferredSnapshot
-        : EMPTY_TIMELINE_SNAPSHOT;
-  const deferredMessages = renderedSnapshot.messages;
+  const deferredMessages = deferredSnapshot.messages;
   useChannelRowsPaintedPerformanceMeasure(
     channelId ?? null,
     deferredMessages.length,
@@ -304,13 +267,11 @@ const MessageTimelineBase = React.forwardRef<
   React.useEffect(() => {
     preloadTimelineImages(messages, imagePreloadStateRef.current);
   }, [messages]);
-  const isDeferredSnapshotStale =
-    renderSource === null &&
-    isDeferredTimelineSnapshotStale({
-      deferredSnapshot,
-      liveSnapshot,
-    });
-  const isRenderPending = renderedSnapshot !== liveSnapshot;
+  const isDeferredSnapshotStale = isDeferredTimelineSnapshotStale({
+    deferredSnapshot,
+    liveSnapshot,
+  });
+  const isRenderPending = deferredSnapshot !== liveSnapshot;
   const scrollRestorationId = targetMessageId
     ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
     : `message-timeline:${channelId ?? "none"}`;
@@ -383,7 +344,7 @@ const MessageTimelineBase = React.forwardRef<
   } = useSettleGatedPrependMessages({
     channelId,
     messages: bufferedTimeline.messages,
-    meta: renderedSnapshot.historyExhausted,
+    meta: deferredSnapshot.historyExhausted,
     scrollElementRef: activeScrollContainerRef,
   });
 

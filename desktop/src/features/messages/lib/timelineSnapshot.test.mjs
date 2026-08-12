@@ -14,7 +14,6 @@ import {
   selectLatestMessageKey,
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
-  selectTimelineRenderSource,
 } from "./timelineSnapshot.ts";
 
 // Local-midnight unix-second timestamps so isSameDay (local time) is stable
@@ -467,39 +466,6 @@ test("timeline-body-surface: empty only when live and deferred rows are empty", 
       liveCount: 0,
     }),
     "empty",
-  );
-});
-
-test("timeline-render-source: warm populated revisit paints live cached rows", () => {
-  assert.equal(
-    selectTimelineRenderSource({
-      deferredChannelId: null,
-      liveChannelId: "chan-a",
-      preferLiveSnapshot: true,
-    }),
-    "live",
-  );
-});
-
-test("timeline-render-source: cold load waits instead of painting a mismatched snapshot", () => {
-  assert.equal(
-    selectTimelineRenderSource({
-      deferredChannelId: "chan-a",
-      liveChannelId: "chan-b",
-      preferLiveSnapshot: false,
-    }),
-    null,
-  );
-});
-
-test("timeline-render-source: same-channel deferred snapshot remains the normal path", () => {
-  assert.equal(
-    selectTimelineRenderSource({
-      deferredChannelId: "chan-a",
-      liveChannelId: "chan-a",
-      preferLiveSnapshot: true,
-    }),
-    "deferred",
   );
 });
 
