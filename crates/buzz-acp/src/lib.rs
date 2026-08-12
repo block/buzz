@@ -2757,8 +2757,10 @@ async fn tokio_main() -> Result<()> {
                     // A wake in flight (pool not yet ready) is covered by the
                     // pool_ready gate; respawn tasks and in-flight prompt tasks
                     // are the remaining "busy" signals. Never sleep mid-work:
-                    // an event queued at the boundary keeps `work_queued` true,
-                    // and the next iteration dispatches or re-wakes it.
+                    // `has_undispatched_work()` (not `has_flushable_work()`)
+                    // keeps `work_queued` true for a retry-throttled batch too,
+                    // so a failed turn awaiting backoff is never stranded — the
+                    // next iteration dispatches or re-wakes it.
                     if idle_pool_sleep_due(
                         pool_ready,
                         last_activity,
@@ -2766,7 +2768,7 @@ async fn tokio_main() -> Result<()> {
                         idle_pool_sleep_bound,
                         queue.has_in_flight() || heartbeat_in_flight,
                         !pool.join_set.is_empty(),
-                        queue.has_flushable_work(),
+                        queue.has_undispatched_work(),
                         !wake_tasks.is_empty() || !respawn_tasks.is_empty(),
                     ) {
                         tracing::info!(
