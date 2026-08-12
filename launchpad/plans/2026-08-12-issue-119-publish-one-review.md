@@ -93,17 +93,30 @@ the sibling worktrees — not against notes)
   orientation, never as evidence — this paragraph's warning has now fired twice,
   and the second time it was the signature rather than the line that moved.
 
-  `render_review` does NOT accept #117's records, and that is a design
+  `render_review` does NOT accept #117's ten-field records, and that is a design
   constraint, not a detail. It takes `findings: list[Finding]` and reads
   `.severity`, `.kind`, `.entry_point` and `.evidence` by ATTRIBUTE — the
   `contain.Finding` dataclass, not a JSON object — plus a `states: dict[str,
   str]` mapping entry point to fetch state, which it uses for its "Fetched and
-  empty" line. #117's envelope carries neither `kind` nor `evidence`, and no
-  stage in the chain emits `states` at all: `contain.render` returns
-  (document, findings, all_readable). So containment findings cannot reach #119
-  through the `reports` array, and STEP 7's input contract has to carry them
-  separately. This was found by review, not by the first draft, which assumed
-  composition would just work.
+  empty" line AND, since `e072fba55`, for the "Incomplete" banner. So containment
+  findings cannot reach #119 through the `reports` array, and STEP 7's input
+  contract carries them separately. This was found by review, not by the first
+  draft, which assumed composition would just work.
+  Two claims an earlier revision of this paragraph got WRONG, corrected here
+  rather than quietly dropped:
+    — "#117's envelope carries neither `kind` nor `evidence`." The `kind` half is
+      true: `kind` exists only on a containment finding, never on the ten-field
+      record. The `evidence` half is false. `evidence` is the TENTH field of that
+      record, RAW, and REQUIRED whenever `entry_point` is set. STEP 4 renders it,
+      and finding it absent from this plan's own field list is what STEP 4's
+      escaping rule exists to answer.
+    — "no stage in the chain emits `states` at all." #117 now emits
+      `containment.states` for ALL SEVEN entry points on every run. That is the
+      producer whose absence removed the `unreadable` keyword in the first place.
+  Both errors came from reading revision 3 of #117's contract; the contract is
+  now settled and both are fixed against it. Recorded because a verified section
+  that carries a false claim is worse than one that carries none — a later reader
+  trusts it by construction.
 
   A workflow already exists for the controls, is untracked, and is read-only.
   .github/workflows/launchpad-review-agent-controls.yml in #120's worktree runs
@@ -119,20 +132,48 @@ the sibling worktrees — not against notes)
   input is missing. #119's controls register there rather than inventing a second
   runner.
 
-  #117's output contract is written, and it is PROVISIONAL. It is at
-  launchpad/plans/2026-08-12-issue-117-review-dimensions.md in the
-  feat-review-agent-dimensions worktree. That file is UNCOMMITTED — `git ls-tree
-  -r origin/feat/review-agent-dimensions -- launchpad/` does not carry it — and
-  it has NOT been through serina:review-plan. #116's comparable plan took twelve
-  findings across two passes, three of them Blockers. This plan is written
-  against the contract at that revision, honouring its field names exactly:
-  finding fields `dimension`, `severity`, `anchor` (line|file|pr), `file`, `line`
-  (new-side, at head_sha), `defect`, `failure`, `finding_id`, `entry_point`; and
-  envelope fields `schema_version`, `dimension`, `pr`, `merge_base_sha`,
-  `head_sha`, `status` (complete|failed), `outcome` (findings|clean), `error`,
-  `findings`, `findings_count`, `completion_marker`. Severity is imported from
-  review.SEVERITY_ORDER, not redefined. Which steps break if a field moves is
-  named in OPEN, not left implicit.
+  #117's output contract is now SETTLED, and this plan is rewritten against it.
+  It is at launchpad/plans/2026-08-12-issue-117-review-dimensions.md in the
+  feat-review-agent-dimensions worktree, it has been through serina:review-plan
+  three times, and it carries a "CONTRACT CHANGES SINCE REVISION 3" block written
+  expressly so this plan's author could diff. It is still UNCOMMITTED, so it is a
+  settled decision rather than a settled ref.
+  TEN finding fields, per report envelope entry: `dimension`, `severity`,
+  `anchor` (line|file|pr), `file`, `line` (new-side, at head_sha), `defect`,
+  `failure`, `finding_id`, `entry_point`, `evidence`. ELEVEN envelope fields:
+  `schema_version`, `dimension`, `pr`, `merge_base_sha`, `head_sha`, `status`
+  (complete|failed), `outcome` (findings|clean), `error`, `findings`,
+  `findings_count`, `completion_marker`. And FIVE merged-document keys, which is
+  what #119 actually reads: `pr`, `merge_base_sha`, `head_sha`, `reports`,
+  `containment`.
+  WHERE CONTAINMENT FINDINGS LIVE is the settled part that decides STEP 4, and it
+  settled the way this plan already assumed. Quoting the contract: containment
+  findings "do NOT enter the `findings` array of any dimension report, and they
+  are NOT converted into the ten-field record. They travel as a TOP-LEVEL SIBLING
+  KEY of the merged document, named `containment`, carrying contain.Finding
+  verbatim in JSON" — `findings[]` of {severity, kind, entry_point, evidence} and
+  a `states` map of all seven entry points. The reserved "containment" dimension
+  slug an earlier revision proposed is WITHDRAWN, and no dimension may claim that
+  slug. So STEP 4's separate block is correct and stays.
+  Five changes from revision 3, and only two cost this plan anything:
+    1. the `containment` sibling key exists and has the shape STEP 4 specified —
+       this is the key OPEN said #117 must add, and it is added.
+    2. `evidence` is RAW, not post-escape. This one costs STEP 4 a rule: raw
+       attacker text now arrives in the document, on BOTH the containment block
+       and any ten-field finding carrying an `entry_point`.
+    3. `entry_point` is REQUIRED on an injection finding, with `evidence`
+       required alongside it — not optional as revision 3 had them. STEP 5's
+       cross-cutting clause in #117 is what produces those, so #119 will receive
+       them on ordinary dimension findings, not only in the containment block.
+    4. `finding_id` hashes seven inputs rather than five. #119 uses it only as a
+       sort tie-break, so this costs nothing.
+    5. the finding-field count is ten, not nine. Corrected above.
+  NOTHING IS RENAMED. This plan's OPEN correctly predicted that a rename would
+  cost STEPs 4, 5, 6, 10 and 12; no rename happened. What it did NOT predict is
+  an ADDITION, which is what actually broke it — see OPEN, which now registers
+  additions as well as renames and removals.
+  Severity is imported from review.SEVERITY_ORDER, not redefined, and STEP 4 no
+  longer subscripts it bare — see its ordering rule.
 
   #116's pre-flight record is enumerated but not built. origin/feat/review-agent-preflight
   carries only its plan file. Its record has seven top-level keys — pr,
@@ -177,10 +218,31 @@ STEP 1  Record what the review-lifecycle API actually does.                [inde
         Run under a human `gh auth` token, which is NOT the workflow credential —
         so this records what the endpoints do, and proves nothing about scopes.
         The scope question is STEP 9's and is not claimed here.
+        TWO MORE THINGS ARE RECORDED HERE, because this is the only step that
+        touches the live API and both are otherwise never captured at all:
+          fixtures/reviews-listing.json — the raw `GET /pulls/{n}/reviews`
+            response, saved as the UNMERGED per-page bodies with their `Link`
+            headers, not as one merged array. STEP 2 and STEP 10 both assert
+            against a recorded listing; neither can produce one, and a listing
+            hand-written to look like gh's output would test this plan's
+            assumption about gh rather than the code. Page one is padded to 30
+            entries so a second page genuinely exists.
+          whether an EDIT is observable to a human. After the PUT, capture the
+            pull request's timeline (`GET /issues/{n}/timeline`) and record
+            whether the edit appears in it at all. The whole strategy turns
+            "re-review on push" into a body edit, so if an edit produces no
+            timeline entry and no notification, every re-review after the first
+            is silent — the body is current and no reader is told. That is a
+            judgement call for #121, and it cannot be made without this
+            observation. Recording it costs one call; inferring it costs the
+            feature's entire value.
         done when: the fixture exists and contains four entries, each with a
         non-empty `status`, `body` and `command`; the POST entry's response has
         `state` "COMMENTED" and a numeric `id`; the PUT entry's status and the
-        DELETE entry's status are both recorded verbatim whatever they are; and
+        DELETE entry's status are both recorded verbatim whatever they are;
+        fixtures/reviews-listing.json exists, holds at least two page bodies, and
+        page one holds 30 entries; the timeline response after the PUT is saved
+        and the fixture states in one line whether the edit is visible in it; and
         the file states which of the two strategies in this plan's header the
         recorded statuses support.
 
@@ -192,11 +254,25 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
             not by author login: the workflow token posts as `github-actions[bot]`
             today and #110 commits to revisiting the identity later, so matching
             on the author would break at exactly the moment the credential moves.
+            publish.py OWNS the constant and publish_render RECEIVES it as
+            render_body's first argument. It must not import it, and publish.py
+            must not import publish_render at module level to hand it over: STEP 7
+            puts `main` in publish.py, so a top-level import each way is a
+            circular import and `python3 publish.py` dies with "cannot import
+            name ... from partially initialized module". Passing the marker in
+            also makes STEP 4 testable on its own with a sentinel value.
           find_existing(pr, repo) -> int | None — lists reviews and returns the id
-            of the OLDEST review whose body starts with MARKER, reporting the
+            of the NEWEST review whose body starts with MARKER, reporting the
             count when there is more than one rather than silently taking the
             first. More than one means a previous run raced or a strategy
             changed; that is a fact to surface, not to paper over.
+            NEWEST, not oldest, and the choice is load-bearing rather than
+            arbitrary. A submitted COMMENT review cannot be deleted, so once two
+            markers exist neither can be retired and one of them stays stale
+            forever. The one a human reaching the bottom of the timeline reads
+            LAST is the newest, so that is the one that must carry the current
+            body. Updating the oldest would leave the most recently-visible
+            review describing a commit the pull request no longer has.
             It PAGINATES — `gh api --paginate` — and asserts it reached the end
             of the listing. GET /pulls/{n}/reviews returns 30 per page, and a
             pull request accumulates reviews from every human as well as this
@@ -208,23 +284,56 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
             pagination fails part way, find_existing raises rather than returning
             None, because a partial listing is indistinguishable from an empty
             one at the call site.
+            THE PAGINATION SEAM, because otherwise the control for it cannot fail.
+            `gh` merges pages itself: measured on this fork, `gh api
+            "repos/launchpad-26/buzz/pulls?state=all&per_page=2" --paginate` over
+            five requests returns ONE flat JSON array that `json.load` accepts,
+            length 9. So a fixture holding gh's merged output is
+            indistinguishable from a single page of 31 entries, and an assertion
+            fed that fixture passes whether or not `--paginate` was ever sent.
+            find_existing therefore takes an injected `list_reviews(argv) ->
+            list[dict]` transport, defaulting to the real gh call. The stub in
+            STEP 10 receives the actual argv and serves STEP 1's page two ONLY
+            when `--paginate` is present in it. That is what makes "drop
+            --paginate" a mutation that fails rather than one that passes.
           post_or_update(pr, repo, body) -> (id, "created"|"updated") — PUT when
             find_existing returns an id, POST otherwise. The event is the literal
             "COMMENT", hardcoded at the single call site, and the function takes
             no event parameter at all. A parameter that could hold "APPROVE" is a
             parameter that one day will.
+            A FAILED PUT IS A HARD FAILURE AND NEVER FALLS BACK TO POST. If the
+            PUT returns any non-2xx — 403, 404, 410 — post_or_update raises with
+            the review id and the status in the message, and the workflow fails
+            loudly with no review updated. A fallback POST would create the second
+            review this entire issue exists to prevent, and it would do so on
+            exactly the run where something is already wrong. This is not
+            hypothetical: PUT on a review requires being its author, and #110
+            commits to revisiting the credential, so the identity move the
+            marker-over-author choice was designed to survive is precisely when
+            find_existing matches a review the new identity cannot edit. A human
+            retires the stale review by hand at that point; the tool does not
+            paper over it by posting another.
         Immediately before a POST, find_existing is called a second time. Two
         pushes seconds apart produce two workflow runs, and a check performed at
         the start of a run is stale by the time the run posts.
-        done when: `python3 -m py_compile launchpad/review-agent/publish.py`
-        succeeds; `grep -nE "APPROVE|REQUEST_CHANGES" publish.py` returns nothing;
+        done when: `python3 -c "import publish"` run from launchpad/review-agent/
+        succeeds — not `py_compile`, which compiles without resolving imports and
+        so would pass on the circular import the MARKER rule above exists to
+        prevent; `grep -nE "APPROVE|REQUEST_CHANGES" publish.py` returns nothing;
         `grep -c "def post_or_update" publish.py` is 1 and its signature has no
-        event parameter; against a recorded reviews listing with no marker
-        find_existing returns None, with one marker returns that id, and with two
-        markers returns the older id AND prints the duplicate count; against a
-        recorded TWO-PAGE listing carrying 30 unmarked reviews on page one and the
-        marker on page two it returns that id rather than None; and a recorded
-        listing whose second page returns an error causes a raise, not a None.
+        event parameter; `grep -n "^from publish_render\|^import publish_render"
+        publish.py` returns nothing, so the module-level cycle cannot exist;
+        against STEP 1's recorded listing with no marker find_existing returns
+        None, with one marker returns that id, and with two markers returns the
+        NEWER id AND prints the duplicate count; with the injected transport
+        serving page two only on `--paginate`, find_existing returns the marked id
+        from page two, and the same transport with `--paginate` absent from the
+        argv returns None — so the two cases differ and the assertion can fail;
+        `--paginate` is present in the default transport's argv, asserted on the
+        argv itself; a recorded listing whose second page returns an error causes a
+        raise, not a None; and a stubbed PUT returning 403 makes post_or_update
+        raise with the id and status in the message and issue NO POST, asserted on
+        the recorded transport calls.
 
 STEP 3  End to end on a throwaway pull request, with a stub body. [needs 2]  <- RUNS HERE
         The lifecycle is demonstrable before a single finding is rendered. Post a
@@ -243,17 +352,22 @@ STEP 3  End to end on a throwaway pull request, with a stub body. [needs 2]  <- 
 
 STEP 4  launchpad/review-agent/publish_render.py — the findings body.      [independent]
         A pure function
-        `render_body(reports, stages, containment, head_sha, merge_base_sha) -> str`.
-        No network, no subprocess, no posting.
-        `containment` is a SEPARATE argument, not an entry in `reports`, because
-        `review.render_review` cannot read #117's records — see ALREADY TRUE. Its
-        shape is `{findings: [{severity, kind, entry_point, evidence}], states:
-        {entry_point: state}}`, which is `contain.Finding` and
-        `fetch.Surface.state` in JSON. render_body reconstructs `contain.Finding`
-        objects from that block and passes them, with `states`, straight into
-        `review.render_review`, so the post-escape rendering rule in
-        CONTAINMENT.md is honoured by the code that already holds it rather than
-        reimplemented here.
+        `render_body(marker, reports, stages, containment, head_sha, merge_base_sha) -> str`.
+        No network, no subprocess, no posting. `marker` is passed in rather than
+        imported, per STEP 2 — this module must not import publish.py.
+        `containment` is a SEPARATE argument, not an entry in `reports`, and #117's
+        settled contract is now what says so rather than this plan's inference:
+        containment findings "do NOT enter the `findings` array of any dimension
+        report" and travel as a top-level sibling key. Its shape is
+        `{findings: [{severity, kind, entry_point, evidence}], states:
+        {entry_point: state}}` — the four raw `contain.Finding` fields, unrenamed,
+        and `fetch.Surface.state` for all seven entry points. render_body
+        reconstructs `contain.Finding` objects from that block and passes them,
+        with `states`, straight into `review.render_review`, which fences and
+        escapes each excerpt itself at review.py:71-73. Evidence is handed over
+        RAW and exactly once: #117 now guarantees raw, and pre-escaping it here
+        would escape it twice — a `~` publishing as `~~~~`, per #117's own
+        reasoning — so the excerpt would stop matching what the author wrote.
         The block carries NO `unreadable` key, and render_body passes no
         `unreadable=` argument — that keyword was removed in #120's `e072fba55`
         and passing it now raises TypeError. See ALREADY TRUE. Re-adding it here
@@ -269,10 +383,13 @@ STEP 4  launchpad/review-agent/publish_render.py — the findings body.      [in
         5's trigger for a MISSING block does not cover a PRESENT block with a thin
         `states` map, so the control must assert the map names all seven entry
         points, not merely that it exists.
-        This block does not exist upstream yet. #117's runner has the objects —
-        `contain.render` returns them — but emits them nowhere. Adding it is a
-        one-key change to #117's output and is recorded in OPEN as a dependency,
-        not assumed.
+        This block NOW EXISTS upstream, and that is the change that unblocked this
+        step. #117's contract settled it normatively — a top-level `containment`
+        key, present on EVERY run, carrying an empty `findings` array and a full
+        seven-key `states` map when nothing was found, "never a missing key". So a
+        missing block is reserved for the case where #117 genuinely could not
+        produce one, which is exactly the reading the incomplete rule below needs.
+        The dependency OPEN recorded is discharged, not assumed.
         A MISSING `containment` block is INCOMPLETE, never "no containment
         findings". CONTAINMENT.md's own reasoning is that a detected attempt which
         does not reach the review is worse than one never detected, because it
@@ -280,10 +397,23 @@ STEP 4  launchpad/review-agent/publish_render.py — the findings body.      [in
         never render as the "No containment findings" line, which is a positive
         claim. STEP 5 carries this as a trigger.
         Ordering: findings from every report are merged into one list and sorted
-        by `review.SEVERITY_ORDER[finding["severity"]]`, ties broken by
+        by `review.SEVERITY_ORDER.get(finding["severity"], 9)`, ties broken by
         (dimension, file or "", line or 0, finding_id) so the order is total and
         the body is byte-identical for identical input. SEVERITY_ORDER is
         IMPORTED from review.py; a second copy of a four-value ladder drifts.
+        `.get` WITH A DEFAULT, never a bare subscript, and review.py:62 already
+        does exactly this — `SEVERITY_ORDER.get(f.severity, 9)`. One finding
+        carrying a severity outside the ladder ("Info", or a lowercase "blocker"
+        from a model-authored report) raises KeyError inside the sort key, and a
+        KeyError here means publish.py exits non-zero having posted NOTHING. That
+        is total silence on a pull request that had findings — the failure #119's
+        clean-case criterion exists to prevent, arriving through the sort. #117's
+        validator refuses an out-of-ladder severity upstream, but STEP 7 is
+        deliberately agnostic about which stage produced the reports, so #119 must
+        not depend on that refusal. An unrecognised severity sorts last, renders
+        under the "malformed finding" heading below, AND triggers the incomplete
+        banner: the review cannot claim to be ordered by a ladder it could not
+        read.
         "Most severe first survives an update" is a property of construction, not
         of maintenance: the body is rebuilt from scratch on every run and nothing
         is ever appended to an existing one, so ordering cannot degrade across
@@ -297,28 +427,102 @@ STEP 4  launchpad/review-agent/publish_render.py — the findings body.      [in
         Every finding renders `defect` and `failure` as separate lines, because
         #119's criterion is "the concrete failure it allows" and a defect with no
         stated consequence is what lets an unfalsifiable finding through.
+        A DIMENSION FINDING CAN ALSO CARRY RAW ATTACKER TEXT, and this is the part
+        the containment block does not cover. #117's settled contract makes
+        `entry_point` REQUIRED on any finding whose defect is an injection attempt,
+        with `evidence` required alongside it and RAW — and #117's STEP 5 puts that
+        clause in all three dimensions, for the paraphrase cases detect.py misses.
+        So `reports[].findings[].evidence` will hold verbatim author-supplied text,
+        arriving through the ordinary findings path, not through the block that
+        `review.render_review` handles.
+        Two rules follow, and both are load-bearing:
+          RENDER IT. A finding with an `entry_point` renders that entry point and
+            its evidence. Dropping the excerpt is the detected-then-dropped case
+            CONTAINMENT.md calls worse than never detecting, and it would land on
+            exactly the 14 attack classes #117 was handed because detection misses
+            them.
+          FENCE AND ESCAPE IT WITH THE FUNCTIONS THAT ALREADY EXIST.
+            `review.fence_for(evidence)` sizes the fence longer than the longest
+            backtick run in the excerpt, and `contain.escape(evidence)`
+            neutralises the envelope delimiter. Both are IMPORTED, never
+            reimplemented — review.py:21-29 is explicit that attacker text
+            containing ``` "would therefore break out of a fixed three-backtick
+            fence and corrupt every following section of the review", and a fixed
+            fence here would do it in the one place a human is reading.
+        `defect` and `failure` pass through `contain.escape` too. They are
+        model-authored prose, but a model quoting the payload into its own defect
+        line moves the delimiter into a fresh position with fresh authority, which
+        is the whole reason the escape exists. The transform only touches the
+        escape character and the envelope token, so ordinary prose survives it
+        unchanged — it is cheap enough that there is no argument for skipping it.
         done when: given three report envelopes carrying findings of mixed
         severity, the output lists every Blocker before every High, every High
         before every Medium, and every Medium before every Low; two calls with
         the same input produce byte-identical strings; a finding with anchor "pr"
         and a non-null `file` appears under "malformed finding" and is still
-        present in the output; the body's first line is publish.py's MARKER;
-        `grep -n "SEVERITY_ORDER *=" publish_render.py` returns nothing; a
-        containment block carrying one Blocker finding produces a body containing
-        that finding's `kind`, its `entry_point`, and its evidence in ESCAPED form
-        — asserted by comparing against `contain.escape(evidence)`, not against
-        the raw string; and a run with `containment=None` produces the STEP 5
+        present in the output; a finding whose `severity` is "Info" appears under
+        "malformed finding", sorts last, does NOT raise, and triggers the
+        incomplete banner; the body's first line is the `marker` argument, asserted
+        with a sentinel value rather than with publish.py's constant, so this step
+        needs no import from publish.py; `grep -n "^from publish import\|^import
+        publish$" publish_render.py` returns nothing; `grep -n "SEVERITY_ORDER *="
+        publish_render.py` returns nothing; a containment block carrying one
+        Blocker finding produces a body containing that finding's `kind`, its
+        `entry_point`, and its evidence in ESCAPED form — asserted by comparing
+        against `contain.escape(evidence)`, not against the raw string; a
+        DIMENSION finding carrying an `entry_point` and an evidence string
+        containing a four-backtick run renders that evidence escaped and inside a
+        fence of at least five backticks, and the text following it is still
+        outside any code block — the assertion is on the fence length and on what
+        comes after, because a body that merely contains the excerpt is what a
+        broken fence also produces; `python3 -c "import pathlib,sys;
+        sys.exit(0 if chr(96)*3 not in
+        pathlib.Path('publish_render.py').read_text() else 1)"` exits 0, so no
+        fixed three-backtick fence is written into the module at all and the only
+        source of a fence is `review.fence_for`; and a run with
+        `containment=None` produces the STEP 5
         banner and does NOT contain the string "No containment findings".
 
 STEP 5  The incomplete case — an unfinished stage is never rendered as done. [needs 4]
         A `stages` manifest of {name, status, reason} entries accompanies the
         reports, covering stages that emit no envelope of their own — #116's
-        pre-flight and #118's adjudication. A review is INCOMPLETE when any of:
-        a stage in the manifest has status other than "complete"; a report has
-        `status: failed`; a report's `completion_marker` is absent, not the last
-        key, or carries the wrong dimension or nonce; `findings_count` does not
-        equal `len(findings)`; a dimension expected by the manifest produced no
-        report at all; or STEP 4's `containment` block is absent or unparseable.
+        pre-flight and #118's adjudication. A review is INCOMPLETE when any of
+        these TEN conditions holds. The count is stated because an earlier revision
+        listed six, called them seven in its own done-when and six again in STEP
+        12, and a builder told to test "each of the seven" over a six-item list
+        invents one or drops one:
+           (1) a stage in the manifest has status other than "complete"
+           (2) a report has `status: failed`
+           (3) a report's `completion_marker` is absent, or is not the last key
+           (4) a report's marker names a dimension other than that report's own
+               `dimension` field
+           (5) two reports' markers carry DIFFERENT nonces
+           (6) `findings_count` does not equal `len(findings)`
+           (7) a dimension named by the manifest produced no report at all
+           (8) a report has `status: complete` and no `outcome` — moved here from
+               STEP 6, which is where it was stated and where STEP 5 could not see
+               it
+           (9) the `containment` block is absent or unparseable
+          (10) `containment.states` does not name all seven entry points
+        On (5), and on what #119 CANNOT check. #117's marker is
+        BUZZ-DIMENSION-COMPLETE:{dimension}:{nonce} and the nonce is what makes it
+        unforgeable — but the nonce appears in NO field of the merged document and
+        in no field of the envelope, so a stage downstream has nothing to compare
+        it against. An earlier revision of this step said the marker is checked for
+        "the wrong dimension or nonce"; the dimension half is checkable against the
+        envelope's own `dimension`, and the nonce half is NOT, from this input.
+        What IS checkable is agreement: every report in one run carries the same
+        run nonce, so a single forged marker differs from its siblings and (5)
+        catches it. A run in which EVERY marker is forged is not detectable here at
+        all, and pretending otherwise would be the fail-open. That residual is
+        named in OPEN and flagged upstream rather than worked around.
+        On (10), because a present-but-thin map is the dangerous shape. STEP 4
+        derives nothing and `review.render_review` derives its "Incomplete" banner
+        from `states` against `UNREADABLE_STATES`. A map populated only for the
+        surfaces that succeeded makes every unreadable surface read as
+        absent-from-the-map rather than unreadable, and the banner never renders —
+        a review over three unreadable surfaces publishing as complete. Counting
+        the keys is the check; asserting the key exists is not.
         Incomplete renders as a banner at the TOP of the body, above the findings,
         naming every stage that did not finish and its reason. It is at the top
         because a reader who stops after the first finding must still have seen
@@ -327,12 +531,17 @@ STEP 5  The incomplete case — an unfinished stage is never rendered as done. [
         The default is incomplete. An input that cannot be classified — a report
         that will not parse, a manifest entry with no status — is incomplete, not
         complete. Absence of a failure signal is not evidence of success.
-        done when: for each of the seven conditions above, given an input
-        exhibiting only that condition, the body contains the incomplete banner
-        and names the offending stage or dimension; for an input exhibiting none
-        of them the banner is absent; a report whose `completion_marker` carries
-        another dimension's nonce is incomplete; and an unparseable report is
-        incomplete rather than raising.
+        done when: for each of the TEN conditions above, given an input exhibiting
+        ONLY that condition, the body contains the incomplete banner and names the
+        offending stage, dimension or entry point — ten inputs, ten assertions,
+        counted against the numbered list above rather than against the word
+        "every"; for an input exhibiting none of them the banner is absent, which
+        is the negative control that stops a banner that always fires from passing
+        all ten; a two-report input whose markers carry different nonces is
+        incomplete while the same input with matching nonces is not; a
+        `containment.states` map naming six entry points is incomplete while the
+        same map with seven is not; and an unparseable report is incomplete rather
+        than raising.
 
 STEP 6  The clean case — no findings still posts, and says so.               [needs 4]
         Every stage complete and every report `outcome: clean` renders an explicit
@@ -342,11 +551,13 @@ STEP 6  The clean case — no findings still posts, and says so.               [
         same code path as the findings path — there is no early return that skips
         publication.
         `outcome: clean` and an empty findings array are not the same input.
-        A report with `status: complete` and no `outcome` is incomplete per STEP 5,
-        not clean.
+        A report with `status: complete` and no `outcome` is incomplete — it is
+        condition (8) of STEP 5's list, which is where it now lives. It was stated
+        only here in an earlier revision, so STEP 5 enumerated six conditions while
+        two of its own done-whens counted seven, and the seventh was this sentence.
         done when: an all-clean input produces a body containing the head SHA, the
         name of every dimension in the manifest, and the no-findings sentence; that
-        body still carries the MARKER as its first line; `grep -n "return None"
+        body still carries the marker as its first line; `grep -n "return None"
         publish_render.py` shows no early return on the clean path; and an input
         with `status: complete` and no `outcome` produces the STEP 5 banner rather
         than the clean sentence.
@@ -359,9 +570,24 @@ STEP 7  Wire the renderer into the CLI.                                  [needs 
         calling post_or_update. A `--dry-run` prints the body and posts nothing.
         The document WRAPS #117's envelopes; it does not restate or rename a
         single field inside them, and `containment` is a sibling key precisely so
-        that it does not have to.
-        done when: `python3 publish.py --dry-run < fixture.json` exits 0 and
-        prints a body whose first line is the MARKER; the same fixture with
+        that it does not have to. #117's contract quotes this shape back — "`reports`
+        and `containment` mean here exactly what they mean there" — so the six keys
+        are fixed by agreement between two plans and are not #119's to extend.
+        `repo` IS NOT ONE OF THEM, and it has to come from somewhere. `find_existing`
+        and `post_or_update` both take it, #117's merged document does not carry it,
+        and adding it to the stdin document would break the shape #117 documents. So
+        it comes from a `--repo owner/name` flag, defaulting to `GITHUB_REPOSITORY`,
+        and publish.py EXITS NON-ZERO when neither is present. Not a hardcoded
+        `launchpad-26/buzz`: that is wrong the day the fork is renamed and unusable
+        from any other checkout. Not a silent `None` either — that builds the path
+        `repos/None/pulls/...`, which 404s in a way that reads like a missing pull
+        request. STEP 10's controls inject a transport, so neither mistake would be
+        caught by any control in this plan; the guard has to be in the code.
+        done when: `python3 publish.py --dry-run --repo launchpad-26/buzz <
+        fixture.json` exits 0 and prints a body whose first line is the MARKER;
+        the same command with `--repo` omitted and `GITHUB_REPOSITORY` unset exits
+        non-zero and names the missing repository, posting nothing; the same
+        fixture with
         `reports: []` and a manifest naming two dimensions exits 0 and prints the
         incomplete banner; the same fixture with `containment` removed exits 0 and
         prints the incomplete banner; malformed JSON on stdin exits non-zero and
@@ -411,7 +637,16 @@ STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control
             pull_request_target. This runs anywhere, needs no token, and catches
             a later widening in review.
           LIVE — with the workflow's own token, attempt one contents write:
-            create the ref `refs/heads/scope-probe-${{ github.run_id }}`. Assert
+            create the ref `refs/heads/scope-probe-<run id>`, where the run id is
+            read from `os.environ["GITHUB_RUN_ID"]` and the control FAILS with a
+            stated reason when that variable is absent. NOT the literal string
+            `${{ github.run_id }}`: that is an Actions expression, interpolated by
+            the workflow YAML and never by Python, so transcribing it into this
+            module produces a ref name containing spaces and braces. GitHub then
+            answers on ref-name validity before it evaluates permissions, the
+            control fails for a reason that has nothing to do with scope, and it
+            does so in the step BUDGET already names as the most expensive to
+            iterate on. Assert
             HTTP 403. Any other outcome is FAIL, including success, 404, and a
             rate-limit error — a probe that treats "some error happened" as proof
             of absent permission is fail-open, and would report PASS on a network
@@ -430,24 +665,37 @@ STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control
         response body pasted into the PR.
 
 STEP 10 launchpad/review-agent/check_publish_single.py — the behaviour controls. [needs 7]
-        Recorded inputs, no network, no model. Five assertions matching #119's
-        done-criteria one for one, and EVERY one of them carries a stated mutation
-        that must break it. A control never observed failing has not been shown to
-        test anything, and the temptation is to prove that only for the assertions
+        Recorded inputs, no network, no model. SEVEN assertions covering #119's
+        done-criteria, and EVERY one of them carries a stated mutation that must
+        break it. A control never observed failing has not been shown to test
+        anything, and the temptation is to prove that only for the assertions
         where it is easy — which leaves the load-bearing ones unproven.
+        Every recorded input here is STEP 1's, by path, and none is authored for
+        this step. An earlier revision cited "the recorded listing from STEP 1"
+        when STEP 1 produced only four operation responses, and "the recorded
+        two-page listing from STEP 2" when STEP 2 saved nothing — so both fixtures
+        would have been hand-written, and a hand-written listing tests this plan's
+        belief about gh rather than the code. STEP 1 now names both as
+        deliverables.
           (i)   the event published is COMMENT and the module contains no other
                 event string — the control asserts on the source, since a runtime
                 assertion cannot prove an absent branch.
                 Mutation: add the literal "APPROVE" to publish.py.
           (ii)  a second run over the same PR with a marker present issues a PUT
-                and no POST, using the recorded listing from STEP 1 and an
+                and no POST, over fixtures/reviews-listing.json from STEP 1 and an
                 injected transport that records calls instead of making them.
                 Mutation: make find_existing return None unconditionally. This is
                 the assertion the single-review invariant rests on, so it gets the
                 mutation proof first, not last.
-          (iii) find_existing paginates — the recorded two-page listing from STEP
-                2 yields the marked id.
-                Mutation: drop `--paginate` from the listing call.
+          (iii) find_existing paginates — the transport serves page two of STEP 1's
+                recorded listing ONLY when `--paginate` appears in the argv it is
+                handed, so the marked id on page two is reachable with the flag and
+                unreachable without it. The fixture is the UNMERGED page bodies:
+                `gh --paginate` merges pages into one array, measured, so a merged
+                fixture makes this assertion pass either way.
+                Mutation: drop `--paginate` from the listing call. With the
+                flag-aware transport the assertion then fails, which is the whole
+                point of building the seam.
           (iv)  severity order holds in the rendered body after an update whose
                 input has a NEW Blocker appended LAST in the reports array — the
                 Blocker still renders first.
@@ -455,9 +703,22 @@ STEP 10 launchpad/review-agent/check_publish_single.py — the behaviour control
           (v)   a clean input and an incomplete input both produce a body, and the
                 two bodies differ.
                 Mutation: remove the incomplete banner.
-        done when: all five assertions run offline and pass; each of the five
+          (vi)  a dimension finding whose `entry_point` is set and whose `evidence`
+                contains a four-backtick run renders inside a fence of at least
+                five backticks, escaped, with the following section still outside
+                any code block.
+                Mutation: replace `review.fence_for` with a fixed three-backtick
+                fence. The assertion must fail on the text AFTER the excerpt, not
+                on the excerpt itself — a broken fence still contains the excerpt,
+                so an assertion that only looks for it passes under the mutation.
+          (vii) a PUT that returns 403 raises and issues no POST.
+                Mutation: make post_or_update fall back to POST on a failed PUT.
+                This is the mutation that produces a second review, so it is the
+                one whose absence would be least visible: nothing else in this
+                suite would notice.
+        done when: all seven assertions run offline and pass; each of the seven
         stated mutations, applied one at a time, makes exactly its own assertion
-        fail and is then reverted; the recorded output of all five mutation runs is
+        fail and is then reverted; the recorded output of all seven mutation runs is
         saved for the PR body; and each assertion prints what it compared rather
         than only PASS.
 
@@ -471,19 +732,28 @@ STEP 11 Register both controls in run_controls.py.                       [needs 
 
 STEP 12 launchpad/review-agent/PUBLISHING.md, and the cross-references.     [needs 11]
         Normative, a sibling to CONTAINMENT.md and in the same voice. States: the
-        marker and why identification is by marker and not by author; that exactly
-        one review object exists per pull request and is updated in place; that
-        the head SHA lives in the body because `commit_id` is frozen at
-        submission; the incomplete rule and its six triggers; that the clean case
-        posts; the credential and its two controls; and the fork-skip behaviour.
+        marker, why identification is by marker and not by author, and that
+        publish.py owns it while publish_render receives it; that exactly one
+        review object exists per pull request and is updated in place, and that a
+        failed PUT raises rather than posting a second review; that when two
+        markers do exist it is the NEWEST that is kept current, because the oldest
+        cannot be deleted and the newest is what a reader sees last; that the head
+        SHA lives in the body because `commit_id` is frozen at submission; the
+        incomplete rule and its TEN triggers; that the clean case posts; that raw
+        evidence is fenced with `review.fence_for` and escaped with
+        `contain.escape`, never with a fixed fence; the credential and its two
+        controls; and the fork-skip behaviour.
         Cross-referenced from CONTAINMENT.md's "Contract for later stages" table
         and from #117's FINDINGS.md, so the three documents point at each other
         rather than diverging quietly.
         done when: PUBLISHING.md exists under launchpad/review-agent/; it names
-        the marker string, the seven incomplete triggers, the `containment` block
-        it requires from #117, and both controls by filename; CONTAINMENT.md's contract table has a row pointing at it; and it
-        records that #117's contract was honoured at the revision named in this
-        plan's ALREADY TRUE rather than implying a settled one.
+        the marker string, the TEN incomplete triggers, the two keys of the
+        `containment` block it consumes from #117 — `findings` and a seven-entry
+        `states` map, and no `unreadable` key — and both controls by filename;
+        CONTAINMENT.md's contract table has a row pointing at it; and it records
+        that #117's contract is SETTLED and names which revision, together with the
+        one thing #119 cannot verify from it (the marker nonce, see OPEN), so a
+        reader is not left to infer that everything upstream is checkable here.
 
 PARALLEL
   STEP 1 and STEP 4 may run as concurrent subagents. They share no file — STEP 1
@@ -503,9 +773,18 @@ PARALLEL
 GATES
   No verify gate is installed in this checkout, so every one of these is a manual
   invocation and none fires on its own.
-  serina:review-plan — on THIS file, before the first implementer is dispatched.
-    #116's comparable plan took twelve findings across two passes; assume this one
-    has defects that are cheaper to fix now than at STEP 10.
+  serina:review-plan — HAS RUN ONCE on this file, and this revision is the result
+    of it plus #117's contract settling. Fourteen findings: one Blocker, six High,
+    six Medium, one Low. The Blocker was WITHDRAWN — it concluded #117 had moved
+    containment inside `reports`, and #117 then settled it the other way, so the
+    separate block was right all along. Its residue was real, though: the plan's
+    ALREADY TRUE was asserting a nine-field record and no `evidence`, both wrong.
+    Of the other thirteen, eleven are fixed in this revision, one (finding 3, the
+    nonce) is fixed as far as this stage can and flagged upstream in OPEN, and one
+    (finding 13, whether an edit is visible to a human) is converted from an
+    unanswerable question into a STEP 1 observation. A second pass is available and
+    has not run; on both #116 and #117 the second pass found most of its findings
+    in the first pass's own fixes, so assume the same of this revision.
   serina:review-code — after STEP 7, and again after STEP 12. The first pass
     catches the lifecycle and renderer while they are still small; the second sees
     the workflow and the controls.
@@ -577,17 +856,29 @@ OPEN  Not for a builder to decide.
   is untestable without a trigger. If #116 lands an invocation workflow first,
   STEP 8's job should move into it and STEP 9's static assertion should follow
   it. That is a sequencing decision.
-  #117's contract is provisional, and these are the steps that change with it.
-  A rename or removal of `severity`, `anchor`, `file`, `line`, `defect`,
-  `failure` or `dimension` changes STEP 4. A change to `status`, `outcome`,
-  `error`, `completion_marker` or `findings_count` changes STEP 5, and `outcome`
-  alone also changes STEP 6. Either changes STEP 10's recorded inputs and STEP
-  12's prose. STEPs 1, 2, 3, 8, 9 and 11 are unaffected by any field rename,
-  because they operate on a body string and a credential and never look inside a
-  finding. `finding_id` is not used by #119 at all except as a tie-break in
-  STEP 4's sort, so #117's warning that it is unstable across a reworded `defect`
-  costs this issue nothing — the body is rebuilt wholesale on every run rather
-  than diffed against the previous one.
+  #117's contract is SETTLED, and these are the steps that change if it moves
+  again. A rename or removal of `severity`, `anchor`, `file`, `line`, `defect`,
+  `failure`, `dimension`, `entry_point` or `evidence` changes STEP 4. A change to
+  `status`, `outcome`, `error`, `completion_marker` or `findings_count` changes
+  STEP 5, and `outcome` alone also changes STEP 6. A change to the `containment`
+  block's two keys changes STEPs 4, 5 and 12. Either changes STEP 10's recorded
+  inputs and STEP 12's prose. STEPs 1, 2, 3, 8, 9 and 11 are unaffected by any
+  field rename, because they operate on a body string and a credential and never
+  look inside a finding. `finding_id` is not used by #119 at all except as a
+  tie-break in STEP 4's sort, so #117's warning that it is unstable across a
+  reworded `defect` costs this issue nothing — the body is rebuilt wholesale on
+  every run rather than diffed against the previous one.
+  AN ADDITION BELONGS IN THIS REGISTER TOO, and its absence is what actually cost
+  this plan a revision. The list above tracked renames and removals. #117 changed
+  by ADDING `evidence` as a tenth field and by ADDING the `containment` sibling
+  key — no rename, no removal — and this plan's ALREADY TRUE went on asserting
+  that neither existed, because nothing prompted a re-read. A field that appears
+  is as consequential as one that disappears: `evidence` arriving raw is the
+  reason STEP 4 now carries a fencing rule at all, and a plan that only watches
+  for subtraction will publish an unescaped payload while its register stays
+  green. So: a NEW field on the finding record, a NEW key on the envelope, or a
+  NEW key on the merged document changes STEP 4, and any of the three obliges a
+  re-read of the contract before STEP 4 is built rather than after.
   A concern with the contract, raised rather than worked around. #117 states that
   #118 re-rates severity and that "the reporting dimension's value must remain
   readable after adjudication rather than being overwritten in place" — but the
@@ -596,19 +887,43 @@ OPEN  Not for a builder to decide.
   two it is holding. Either the contract needs a second field or the sentence
   needs to go; this plan does not choose, and does not silently diverge, because
   #118 will honour the same contract.
-  A second concern, and this one is a hard dependency rather than a worry.
-  `contain.Finding` carries `kind` and `evidence`; #117's record has a field for
-  neither, and `review.render_review` additionally needs a `states` map that no
-  stage emits at all. So containment findings CANNOT travel inside `reports`,
-  and STEP 4 takes them as a separate `containment` block instead. That block
-  does not exist yet: #117's runner holds the objects — `contain.render` returns
-  them — and emits them nowhere. **#117 must add one key to its output before
-  #119 can publish a containment finding**, and until it does, every real
-  injection attempt renders as the STEP 5 incomplete banner rather than as the
-  attempt it was. That is the safe failure, not the intended one. Whether the fix
-  is a key on #117's output or a `kind`/`evidence` pair absorbed into the finding
-  record is a design call for #117 and #118 together; this plan does not choose,
-  and does not silently diverge.
+  The second concern is DISCHARGED, and recorded as discharged rather than
+  deleted. An earlier revision said "**#117 must add one key to its output before
+  #119 can publish a containment finding**", and that every real injection attempt
+  would render as the incomplete banner until it did. #117 has added it: a
+  top-level `containment` key carrying raw `contain.Finding` plus a seven-key
+  `states` map, present on every run. The design call this plan declined to make —
+  a sibling key versus a `kind`/`evidence` pair absorbed into the finding record —
+  went to the sibling key, which is what STEP 4 already assumed. Nothing here had
+  to change to accommodate it; what had to change was ALREADY TRUE's claim that
+  the key did not exist.
+
+  A NEW concern with the settled contract, flagged rather than worked around: the
+  marker nonce is unverifiable by this stage. #117 makes the completion marker
+  BUZZ-DIMENSION-COMPLETE:{dimension}:{nonce} and argues, correctly, that the
+  nonce is what stops a pull-request author typing a forged marker into their own
+  diff and a reviewer echoing it back. But the nonce is in no field of the finding
+  record, no field of the envelope, and none of the five merged-document keys — so
+  every stage after the runner receives markers it cannot check. #117's own
+  `validate(report)` has the same problem from the other side: it is specified to
+  reject a marker with the wrong nonce while taking one argument and reading a
+  document that does not carry one.
+  #119 does what it can: STEP 5 condition (5) rejects a run whose reports disagree
+  about the nonce, which catches any single forged marker, and this plan does NOT
+  claim to catch a run in which every marker is forged. The clean fix is upstream
+  and cheap — a `nonce` key on the merged document, which publishes nothing secret
+  because the markers already contain it — and it is #117's or #118's call, not a
+  builder's. Recorded here so that "the marker is unforgeable" is not read as a
+  property this stage enforces.
+
+  Whether `defect` and `failure` should be escaped at all is #119's call and this
+  plan has made it: yes, through `contain.escape`. They are model-authored prose
+  rather than author-supplied text, so no upstream contract requires it, and a
+  reader may reasonably think it is belt-and-braces. The argument for it is that a
+  model quoting an attacker's delimiter into its own defect line is the one path by
+  which the payload re-enters the document at full authority after containment has
+  done its job, and the transform touches only two characters. If a reviewer
+  disagrees, the place to change it is STEP 4's rule and STEP 12's prose together.
   The first draft of this plan assumed `review.render_review` would simply
   compose with #117's records. It does not — the function reads `.severity`,
   `.kind`, `.entry_point` and `.evidence` by attribute off `contain.Finding`.
