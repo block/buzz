@@ -77,6 +77,7 @@ export default defineConfig({
         "**/relay-connectivity.spec.ts",
         "**/unread-pill.spec.ts",
         "**/sidebar-more-unread-overlap.spec.ts",
+        "**/sidebar-snapshot.spec.ts",
         "**/home-collapsed-top-chrome.spec.ts",
         "**/top-chrome-zoom-clearance.spec.ts",
         "**/thread-unread.spec.ts",

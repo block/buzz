@@ -267,6 +267,11 @@ type MockBridgeOptions = {
   ensureStarterChannelsErrors?: string[];
   /** Reject successive mock `join_channel` calls, then resume. */
   joinChannelErrors?: string[];
+  channelsReadDelayMs?: number;
+  /** Return not-modified for this many reads before resuming full payloads. */
+  channelsNotModifiedResponses?: number;
+  /** When true, a matching knownHash returns a not-modified channel payload. */
+  honorChannelsKnownHash?: boolean;
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;
   feedReadError?: string;
