@@ -61,12 +61,24 @@ type ProfileSyncParams = Vec<(nostr::Keys, String, String, Option<String>, Optio
 
 /// Propagate a persona definition's behavioral-group edit to linked agent
 /// instances. Discrimination rule (mirrors the pool-name rule in
-/// [`propagate_persona_name_rename`]): an instance whose `respond_to` still
-/// equals the PRE-edit definition mode (`old_mode`) was inheriting → it
-/// adopts the new definition value; an instance carrying a different value
-/// holds an explicit instance-level override → preserved. Every linked
-/// instance's definition-mirror fields (`definition_respond_to` &c.) refresh
+/// [`propagate_persona_name_rename`]): an instance whose `respond_to` AND
+/// `respond_to_allowlist` still equal the PRE-edit definition values was
+/// inheriting → it adopts the new definition value; an instance carrying a
+/// different value holds an explicit instance-level override → preserved.
+/// The allowlist is part of the discriminant because mode alone cannot
+/// express a same-mode allowlist pin: an instance pinned to `allowlist` +
+/// `[X]` under a definition also in `allowlist` would otherwise read as
+/// "still inheriting" and lose its pin. Every linked instance's
+/// definition-mirror fields (`definition_respond_to` &c.) refresh
 /// regardless, so future mint/inspect paths see the current definition bytes.
+///
+/// A definition sitting in `allowlist` with an empty allowlist is skipped
+/// (mirrors refresh, gates do not change): `resolve_mint_behavioral_defaults`
+/// and `apply_persona_behavior` both reject that state at mint, so the
+/// cascade must not manufacture a record neither of them would ever produce.
+/// Skip, don't fail — the definition state is reachable through the
+/// person-picker (mode persists, members don't; issue #2501 defect 1) and a
+/// hard error here would wedge every other edit on the persona.
 ///
 /// Returns `true` when at least one linked record was touched (caller must
 /// persist the records store).
@@ -74,8 +86,38 @@ fn propagate_persona_behavior(
     records: &mut [ManagedAgentRecord],
     persona_id: &str,
     old_mode: crate::managed_agents::RespondTo,
+    old_allowlist: &[String],
     persona: &AgentDefinition,
 ) -> Result<bool, String> {
+    use crate::managed_agents::RespondTo;
+
+    // Parse before touching any record, so a bogus definition mode cannot
+    // half-apply mirror refreshes either (fail-loudly contract shared with
+    // `resolve_mint_behavioral_defaults`).
+    let new_mode = match persona.respond_to.as_deref() {
+        Some(wire) => RespondTo::parse_wire(wire)?,
+        None => RespondTo::default(),
+    };
+
+    // Effective allowlists as `apply_persona_behavior` stores them on
+    // records: non-allowlist modes store an empty list. Comparing against
+    // the definition's raw list would break inheritance detection whenever a
+    // non-allowlist definition carries residual allowlist entries, and
+    // writing the raw list would break the NEXT edit's detection the same
+    // way.
+    let inherited_allowlist: &[String] = if old_mode == RespondTo::Allowlist {
+        old_allowlist
+    } else {
+        &[]
+    };
+    let adopted_allowlist: &[String] = if new_mode == RespondTo::Allowlist {
+        &persona.respond_to_allowlist
+    } else {
+        &[]
+    };
+    let definition_adoptable =
+        new_mode != RespondTo::Allowlist || !persona.respond_to_allowlist.is_empty();
+
     let mut linked = false;
     for record in records.iter_mut() {
         if record.persona_id.as_deref() != Some(persona_id) {
@@ -87,17 +129,15 @@ fn propagate_persona_behavior(
         record.definition_respond_to_allowlist = persona.respond_to_allowlist.clone();
         record.definition_parallelism = persona.parallelism;
 
-        if record.respond_to == old_mode {
+        if definition_adoptable
+            && record.respond_to == old_mode
+            && record.respond_to_allowlist.as_slice() == inherited_allowlist
+        {
             // Still inheriting — adopt the new definition value as the
             // instance's effective gate. `None` on the definition means "no
-            // explicit mode": the harness default (owner-only) applies. The
-            // allowlist travels with the mode exactly as
-            // `apply_persona_behavior` stored it (empty for non-allowlist).
-            record.respond_to = match persona.respond_to.as_deref() {
-                Some(wire) => crate::managed_agents::RespondTo::parse_wire(wire)?,
-                None => crate::managed_agents::RespondTo::default(),
-            };
-            record.respond_to_allowlist = persona.respond_to_allowlist.clone();
+            // explicit mode": the harness default (owner-only) applies.
+            record.respond_to = new_mode;
+            record.respond_to_allowlist = adopted_allowlist.to_vec();
             if let Some(parallelism) = persona.parallelism {
                 record.parallelism = parallelism;
             }
@@ -209,7 +249,13 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                     .as_deref()
                     .and_then(|wire| crate::managed_agents::RespondTo::parse_wire(wire).ok())
                     .unwrap_or_default();
-                if propagate_persona_behavior(&mut records, &result.id, old_mode, &result)? {
+                if propagate_persona_behavior(
+                    &mut records,
+                    &result.id,
+                    old_mode,
+                    &old_respond_to_allowlist,
+                    &result,
+                )? {
                     save_managed_agents(&app, &records)?;
                 }
             }

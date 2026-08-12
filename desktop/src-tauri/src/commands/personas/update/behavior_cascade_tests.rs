@@ -108,6 +108,7 @@ fn behavior_edit_cascades_to_inheriting_instance() {
         &mut records,
         "persona-1",
         RespondTo::OwnerOnly,
+        &[],
         &updated,
     )
     .unwrap();
@@ -136,6 +137,7 @@ fn behavior_edit_preserves_instance_override() {
         &mut records,
         "persona-1",
         RespondTo::OwnerOnly, // pre-edit definition value
+        &[],
         &updated,
     )
     .unwrap();
@@ -171,6 +173,7 @@ fn behavior_edit_cascades_per_instance() {
         &mut records,
         "persona-1",
         RespondTo::OwnerOnly,
+        &[],
         &updated,
     )
     .unwrap();
@@ -200,6 +203,7 @@ fn behavior_clear_restores_default_on_inheriting_instance() {
         &mut records,
         "persona-1",
         RespondTo::Anyone, // pre-edit definition value
+        &[],
         &cleared,
     )
     .unwrap();
@@ -224,6 +228,7 @@ fn unknown_definition_mode_fails_loudly() {
         &mut records,
         "persona-1",
         RespondTo::OwnerOnly,
+        &[],
         &bogus,
     )
     .unwrap_err();
@@ -249,10 +254,114 @@ fn absent_definition_parallelism_preserves_instance_value() {
         &mut records,
         "persona-1",
         RespondTo::OwnerOnly,
+        &[],
         &updated,
     )
     .unwrap();
 
     assert_eq!(records[0].parallelism, 8);
     assert_eq!(records[0].definition_parallelism, None);
+}
+
+/// The mint guard, mirrored (per review on #4115): a definition sitting in
+/// `allowlist` with an empty allowlist is reachable today
+/// (`validate_respond_to_allowlist(&[])` returns `Ok(vec![])`, and the
+/// person-picker produces exactly that when the mode is written but the
+/// principals aren't — issue #2501 defect 1). `resolve_mint_behavioral_defaults`
+/// and `apply_persona_behavior` both reject `Allowlist` + `[]`, so the cascade
+/// must skip that instance rather than manufacture a record neither would ever
+/// produce — and skip, not fail: a hard error would wedge every other edit on
+/// the persona.
+#[test]
+fn empty_allowlist_definition_skips_adoption_without_failing() {
+    let mut records = vec![agent("persona-1", "A1", RespondTo::Anyone)];
+    let broken = persona(Some("allowlist"), vec![], None);
+
+    let touched = propagate_persona_behavior(
+        &mut records,
+        "persona-1",
+        RespondTo::Anyone, // pre-edit definition value; instance inherits it
+        &[],
+        &broken,
+    )
+    .unwrap();
+
+    assert!(touched, "mirror refresh still counts as a touch");
+    assert_eq!(
+        records[0].respond_to,
+        RespondTo::Anyone,
+        "inheriting instance must keep its current gate, not adopt Allowlist+[]"
+    );
+    assert!(records[0].respond_to_allowlist.is_empty());
+    // Mirrors still reflect the (broken) definition bytes for inspect paths.
+    assert_eq!(records[0].definition_respond_to.as_deref(), Some("allowlist"));
+    assert!(records[0].definition_respond_to_allowlist.is_empty());
+}
+
+/// The discriminant includes the allowlist (per review on #4115): an instance
+/// pinned to `allowlist` + `[X]` while the definition is ALSO in `allowlist`
+/// must not read as "still inheriting" — that pin is exactly what the
+/// per-instance `EditRespondToDialog` workaround writes, and a same-mode
+/// definition edit must not clobber it.
+#[test]
+fn same_mode_allowlist_pin_survives_definition_edit() {
+    let mut records = vec![
+        agent("persona-1", "Pinned", RespondTo::Allowlist),
+        agent("persona-1", "Inherit", RespondTo::Allowlist),
+    ];
+    records[0].respond_to_allowlist = vec!["x".repeat(64)]; // instance pin
+    records[1].respond_to_allowlist = vec!["a".repeat(64)]; // = old definition list
+    let updated = persona(
+        Some("allowlist"),
+        vec!["a".repeat(64), "b".repeat(64)],
+        None,
+    );
+
+    propagate_persona_behavior(
+        &mut records,
+        "persona-1",
+        RespondTo::Allowlist,   // pre-edit definition mode
+        &["a".repeat(64)],      // pre-edit definition allowlist
+        &updated,
+    )
+    .unwrap();
+
+    assert_eq!(
+        records[0].respond_to_allowlist,
+        vec!["x".repeat(64)],
+        "same-mode allowlist pin must survive a definition allowlist edit"
+    );
+    assert_eq!(
+        records[1].respond_to_allowlist,
+        vec!["a".repeat(64), "b".repeat(64)],
+        "instance matching the pre-edit definition list was inheriting and adopts"
+    );
+}
+
+/// The adopted allowlist keeps `apply_persona_behavior`'s asymmetry: a cascade
+/// to a non-allowlist mode stores an empty list even if the definition carries
+/// residual allowlist entries — otherwise the NEXT edit's inheritance
+/// detection (which compares against the effective stored list) would
+/// misclassify every inheriting instance as pinned.
+#[test]
+fn cascade_to_non_allowlist_mode_clears_stored_allowlist() {
+    let mut records = vec![agent("persona-1", "A1", RespondTo::Allowlist)];
+    records[0].respond_to_allowlist = vec!["a".repeat(64)];
+    let mut updated = persona(Some("anyone"), vec!["a".repeat(64)], None);
+    updated.respond_to_allowlist = vec!["a".repeat(64)]; // residual entries
+
+    propagate_persona_behavior(
+        &mut records,
+        "persona-1",
+        RespondTo::Allowlist,
+        &["a".repeat(64)],
+        &updated,
+    )
+    .unwrap();
+
+    assert_eq!(records[0].respond_to, RespondTo::Anyone);
+    assert!(
+        records[0].respond_to_allowlist.is_empty(),
+        "non-allowlist modes store an empty list, matching mint-time semantics"
+    );
 }
