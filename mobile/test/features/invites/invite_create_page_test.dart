@@ -281,6 +281,63 @@ void main() {
     expect(actions.memberInvites.single.$2, CommunityMemberRole.member);
   });
 
+  testWidgets('invite completion does not update state after page disposal', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 1100);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final actions = _FakeInviteActions()
+      ..memberInviteCompleter = Completer<void>();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          currentCommunityRoleProvider.overrideWithValue(
+            const AsyncData<CommunityMemberRole?>(CommunityMemberRole.admin),
+          ),
+          communityMembershipProvider.overrideWith(
+            (ref) async => const CommunityMembershipSnapshot(
+              snapshotFound: true,
+              members: [],
+            ),
+          ),
+          myPubkeyProvider.overrideWithValue(owner),
+          communityInviteProfileProvider.overrideWith(
+            (ref, pubkey) async => CommunityInviteDirectoryUser(pubkey: pubkey),
+          ),
+          communityInviteActionsProvider.overrideWithValue(actions),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const CommunityInvitePage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    const pastedPubkey =
+        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+    final npub = nostr.Nip19.encode(
+      prefix: nostr.Nip19Prefix.npub,
+      data: pastedPubkey,
+    );
+    await tester.enterText(
+      find.byKey(const Key('community-invite-search')),
+      npub,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-invite-submit')));
+    await tester.pump();
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    actions.memberInviteCompleter!.complete();
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('link settings remint with desktop expiry and use options', (
     tester,
   ) async {
@@ -363,6 +420,7 @@ void main() {
 class _FakeInviteActions implements CommunityInviteActions {
   final List<(int, int?)> mintRequests = [];
   final List<(List<String>, CommunityMemberRole)> memberInvites = [];
+  Completer<void>? memberInviteCompleter;
 
   @override
   Future<void> inviteMembers({
@@ -370,6 +428,7 @@ class _FakeInviteActions implements CommunityInviteActions {
     required CommunityMemberRole role,
   }) async {
     memberInvites.add((pubkeys.toList(), role));
+    await memberInviteCompleter?.future;
   }
 
   @override

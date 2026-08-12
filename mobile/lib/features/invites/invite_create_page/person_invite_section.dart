@@ -77,9 +77,13 @@ class _PersonInviteSection extends HookConsumerWidget {
           const SnackBar(content: Text('Invited to the community')),
         );
       } catch (error) {
-        submitError.value = _inviteErrorMessage(error);
+        if (context.mounted) {
+          submitError.value = _inviteErrorMessage(error);
+        }
       } finally {
-        isSubmitting.value = false;
+        if (context.mounted) {
+          isSubmitting.value = false;
+        }
       }
     }
 

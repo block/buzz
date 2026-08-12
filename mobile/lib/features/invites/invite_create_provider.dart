@@ -10,16 +10,23 @@ import 'package:share_plus/share_plus.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/relay/relay.dart';
 
+/// The default lifetime of a newly minted community invite link.
 const defaultCommunityInviteTtlSeconds = 3 * 24 * 60 * 60;
 
+/// A labeled value shown in a community invite settings sheet.
 @immutable
 class CommunityInviteOption<T> {
+  /// Creates an option with its user-facing [label] and submitted [value].
   const CommunityInviteOption({required this.label, required this.value});
 
+  /// The text presented for this option.
   final String label;
+
+  /// The value applied when this option is selected.
   final T value;
 }
 
+/// Supported community invite-link lifetimes.
 const communityInviteTtlOptions = [
   CommunityInviteOption(label: '1 day', value: 24 * 60 * 60),
   CommunityInviteOption(label: '3 days', value: 3 * 24 * 60 * 60),
@@ -27,6 +34,7 @@ const communityInviteTtlOptions = [
   CommunityInviteOption(label: '30 days', value: 30 * 24 * 60 * 60),
 ];
 
+/// Supported usage limits for a community invite link.
 const communityInviteMaxUseOptions = <CommunityInviteOption<int?>>[
   CommunityInviteOption(label: 'No limit', value: null),
   CommunityInviteOption(label: '1 use', value: 1),
@@ -36,8 +44,10 @@ const communityInviteMaxUseOptions = <CommunityInviteOption<int?>>[
   CommunityInviteOption(label: '25 uses', value: 25),
 ];
 
+/// A community invite link minted by the active relay.
 @immutable
 class MintedCommunityInvite {
+  /// Creates a parsed invite-link response.
   const MintedCommunityInvite({
     required this.code,
     required this.expiresAt,
@@ -46,12 +56,22 @@ class MintedCommunityInvite {
     required this.usesRemaining,
   });
 
+  /// The relay-issued invite code.
   final String code;
+
+  /// The invite's expiration time in Unix seconds.
   final int expiresAt;
+
+  /// The complete URL that recipients can open.
   final String url;
+
+  /// The total permitted uses, or null when unlimited.
   final int? maxUses;
+
+  /// The number of uses still available, or null when unlimited.
   final int? usesRemaining;
 
+  /// Parses a relay invite response.
   factory MintedCommunityInvite.fromJson(Map<String, dynamic> json) {
     return MintedCommunityInvite(
       code: json['code'] as String,
@@ -63,8 +83,10 @@ class MintedCommunityInvite {
   }
 }
 
+/// A relay directory identity that can be invited to a community.
 @immutable
 class CommunityInviteDirectoryUser {
+  /// Creates a directory identity for [pubkey] and optional profile metadata.
   const CommunityInviteDirectoryUser({
     required this.pubkey,
     this.displayName,
@@ -72,11 +94,19 @@ class CommunityInviteDirectoryUser {
     this.nip05Handle,
   });
 
+  /// The identity's lowercase hexadecimal Nostr public key.
   final String pubkey;
+
+  /// The profile's preferred display name, when published.
   final String? displayName;
+
+  /// The profile image URL, when published.
   final String? avatarUrl;
+
+  /// The profile's NIP-05 identifier, when published.
   final String? nip05Handle;
 
+  /// The best available human-readable identity label.
   String get label {
     final display = displayName?.trim();
     if (display != null && display.isNotEmpty) return display;
@@ -85,18 +115,22 @@ class CommunityInviteDirectoryUser {
     return shortCommunityInvitePubkey(pubkey);
   }
 
+  /// A supporting identity label distinct from [label].
   String get secondaryLabel {
     final nip05 = nip05Handle?.trim();
     if (nip05 != null && nip05.isNotEmpty && nip05 != label) return nip05;
     return pubkey.length > 16 ? '${pubkey.substring(0, 16)}…' : pubkey;
   }
 
+  /// The uppercase first character of [label], or `?` when unavailable.
   String get initial => label.isEmpty ? '?' : label[0].toUpperCase();
 }
 
+/// Abbreviates a hexadecimal public key for compact display.
 String shortCommunityInvitePubkey(String pubkey) =>
     pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
 
+/// Encodes and abbreviates a hexadecimal public key as an npub.
 String shortCommunityInviteNpub(String pubkey) {
   try {
     final npub = nostr.Nip19.encode(
@@ -111,6 +145,7 @@ String shortCommunityInviteNpub(String pubkey) {
   }
 }
 
+/// Parses a hexadecimal public key or npub, returning lowercase hex.
 String? parseCommunityInvitePubkey(String value) {
   final normalized = value.trim();
   final hexPattern = RegExp(r'^[0-9a-fA-F]{64}$');
@@ -127,6 +162,7 @@ String? parseCommunityInvitePubkey(String value) {
   }
 }
 
+/// Builds the Nostr tags for a kind:9030 community member invitation.
 @visibleForTesting
 List<List<String>> buildCommunityMemberInviteTags({
   required String pubkey,
@@ -136,19 +172,24 @@ List<List<String>> buildCommunityMemberInviteTags({
   ['role', role.name],
 ];
 
+/// Creates invite links and submits direct community member invitations.
 abstract class CommunityInviteActions {
+  /// Mints a community invite link with the requested limits.
   Future<MintedCommunityInvite> mintInvite({
     required int ttlSeconds,
     required int? maxUses,
   });
 
+  /// Invites each public key to the active community with [role].
   Future<void> inviteMembers({
     required Iterable<String> pubkeys,
     required CommunityMemberRole role,
   });
 }
 
+/// Relay-backed implementation of [CommunityInviteActions].
 class RelayCommunityInviteActions implements CommunityInviteActions {
+  /// Creates invite actions bound to the active relay and signing session.
   RelayCommunityInviteActions({
     required http.Client httpClient,
     required String baseUrl,
@@ -241,12 +282,14 @@ class RelayCommunityInviteActions implements CommunityInviteActions {
   }
 }
 
+/// Supplies the HTTP client used to mint community invite links.
 final communityInviteHttpClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
   ref.onDispose(client.close);
   return client;
 });
 
+/// Supplies invite operations bound to the current community session.
 final communityInviteActionsProvider = Provider<CommunityInviteActions>((ref) {
   final config = ref.watch(relayConfigProvider);
   final session = ref.read(relaySessionProvider.notifier);
@@ -310,6 +353,7 @@ final communityInviteProfileProvider = FutureProvider.autoDispose
       return CommunityInviteDirectoryUser(pubkey: normalized);
     });
 
+/// Lists inviteable relay identities, excluding the signed-in user.
 final communityInviteDirectoryProvider =
     FutureProvider.autoDispose<List<CommunityInviteDirectoryUser>>((ref) async {
       ref.watch(relayConfigProvider);
@@ -349,6 +393,7 @@ final communityInviteDirectoryProvider =
       return fallbackUsers;
     });
 
+/// Searches the active relay for inviteable identities matching a query.
 final communityInviteDirectorySearchProvider = FutureProvider.autoDispose
     .family<List<CommunityInviteDirectoryUser>, String>((ref, query) async {
       final trimmed = query.trim();
@@ -365,9 +410,11 @@ final communityInviteDirectorySearchProvider = FutureProvider.autoDispose
       ).where((user) => user.pubkey != currentPubkey).toList();
     });
 
+/// Shares [inviteUrl] from an optional platform anchor rectangle.
 typedef ShareCommunityInvite =
     Future<void> Function(String inviteUrl, Rect? sharePositionOrigin);
 
+/// Supplies the native share-sheet action for community invite links.
 final shareCommunityInviteProvider = Provider<ShareCommunityInvite>((ref) {
   return (inviteUrl, sharePositionOrigin) async {
     await SharePlus.instance.share(

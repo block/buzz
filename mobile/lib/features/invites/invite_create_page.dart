@@ -22,7 +22,9 @@ import 'invite_create_provider.dart';
 part 'invite_create_page/invite_link_section.dart';
 part 'invite_create_page/person_invite_section.dart';
 
+/// A page for authorized community members to create and send invitations.
 class CommunityInvitePage extends ConsumerWidget {
+  /// Creates the community invitation page.
   const CommunityInvitePage({super.key});
 
   @override
