@@ -7,9 +7,10 @@ use super::agent_env::build_buzz_agent_provider_defaults;
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        missing_command_message, normalize_agent_args, open_log_file,
+        permission_policy::resolve_effective_permission_policy, resolve_command, spawn_key_refusal,
+        KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -296,6 +297,9 @@ pub fn build_managed_agent_summary(
         .unwrap_or("")
         .to_string();
 
+    let (effective_permission_policy_summary, effective_permission_policy_source) =
+        resolve_effective_permission_policy(record, global_config);
+
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
@@ -338,6 +342,9 @@ pub fn build_managed_agent_summary(
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        permission_policy: effective_permission_policy_summary,
+        permission_policy_source: effective_permission_policy_source,
+        applied_permission_policy: record.applied_permission_policy,
     })
 }
 
@@ -773,6 +780,14 @@ pub fn spawn_agent_child(
         command.env_remove(key);
     }
 
+    // Inject BUZZ_ACP_PERMISSION_POLICY — resolved here so the running process
+    // and the UI-visible setting are always in sync.
+    let (effective_permission_policy, _) = resolve_effective_permission_policy(record, &global);
+    command.env(
+        "BUZZ_ACP_PERMISSION_POLICY",
+        effective_permission_policy.as_str(),
+    );
+
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
     // ── Git credential helper for Buzz relay ──────────────────────────
@@ -856,6 +871,7 @@ pub fn spawn_agent_child(
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),
             provider: effective_provider.as_deref(),
+            permission_policy: effective_permission_policy,
         },
     );
 

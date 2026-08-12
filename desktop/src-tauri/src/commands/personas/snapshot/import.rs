@@ -654,6 +654,8 @@ pub async fn confirm_agent_snapshot_import(
             relay_mesh: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
+            permission_policy: None,
+            applied_permission_policy: None,
         };
 
         records.push(record.clone());

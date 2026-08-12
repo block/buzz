@@ -305,6 +305,10 @@ export type ManagedAgentBackend =
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
 import type { RestartDiffEntry } from "./restartDiff";
+import type {
+  PermissionPolicy,
+  PermissionPolicySource,
+} from "./permissionPolicy";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
   pubkey: string;
@@ -384,15 +388,22 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
+  /** Effective permission policy at the last spawn. */
+  permissionPolicy: PermissionPolicy;
+  /** Where `permissionPolicy` came from: agent, global_default, or built_in. */
+  permissionPolicySource: PermissionPolicySource;
+  /** Policy active on the remote worker; non-null only after a successful deploy. Differs from `permissionPolicy` when drift exists. */
+  appliedPermissionPolicy: PermissionPolicy | null;
 };
 
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
-export type BackendProviderCandidate = {
-  id: string;
-  binaryPath: string;
-};
+export type {
+  PermissionPolicy,
+  PermissionPolicySource,
+  BackendProviderCandidate,
+} from "./permissionPolicy";
 
 export type BackendProviderProbeResult = {
   ok: boolean;
@@ -443,6 +454,8 @@ export type CreateManagedAgentInput = {
    */
   respondToAllowlist?: string[];
   relayMesh?: RelayMeshConfig;
+  /** Per-agent permission policy override. Omitted = inherit from global or built-in default. */
+  permissionPolicy?: PermissionPolicy;
 };
 
 export type CreateManagedAgentResponse = {
@@ -457,28 +470,11 @@ export type ManagedAgentLog = {
   logPath: string;
 };
 
-export type CancelManagedAgentTurnResult = {
-  status: "sent" | "no_active_turn";
-};
-
-/**
- * Outcome of a live `switch_model` control frame, surfaced asynchronously via
- * the agent's `control_result` observer frame. Busy path: `sent` (cancel +
- * requeue on the new model) or `turn_ending` (oneshot already consumed this
- * turn). Idle path: `switched`, `unsupported_model`, or `no_active_turn`.
- */
-export type SwitchManagedAgentModelStatus =
-  | "sent"
-  | "turn_ending"
-  | "switched"
-  | "unsupported_model"
-  | "no_active_turn";
-
-export type ControlResultFrame = {
-  type: "cancel_turn" | "switch_model";
-  status: string;
-  modelId?: string;
-};
+export type {
+  CancelManagedAgentTurnResult,
+  SwitchManagedAgentModelStatus,
+  ControlResultFrame,
+} from "./permissionPolicy";
 
 export type GitBashPrerequisite = {
   available: boolean;
@@ -706,6 +702,8 @@ export type UpdateManagedAgentInput = {
    * (validated & normalized server-side).
    */
   respondToAllowlist?: string[];
+  /** Absent = don't touch. `null` = clear to inherit. Remote: read-only. */
+  permissionPolicy?: PermissionPolicy | null;
 };
 export type AgentPersona = {
   id: string;
@@ -1012,6 +1010,8 @@ export type GlobalAgentConfig = {
   model: string | null;
   /** Preferred ACP runtime for agents without a persona-specific runtime. */
   preferred_runtime: string | null;
+  /** Fleet-wide policy fallback. `null` = no fleet default; `ask` applies. */
+  permission_policy: PermissionPolicy | null;
 };
 
 /**

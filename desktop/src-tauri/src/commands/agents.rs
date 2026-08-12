@@ -408,13 +408,8 @@ pub(super) async fn start_local_agent_with_preflight(
     if record.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
-    // Re-snapshot the persona onto the record at every spawn so the agent always
-    // starts with the current persona config (system_prompt, model, provider,
-    // runtime). This clears the "out of date" drift badge without requiring a
-    // delete+recreate. See `apply_persona_snapshot` for the precedence and
-    // env-override self-heal rules.
-    // Load personas once: used for snapshot application below and summary build
-    // at the end — avoids a second disk read for the same file in the same call.
+    // Re-snapshot the persona at every spawn (current persona config wins; clears
+    // drift badge). Load once — also used for summary build at the end.
     let personas = load_personas(app).unwrap_or_default();
     if let Some(persona_id) = record.persona_id.clone() {
         match personas.iter().find(|p| p.id == persona_id) {
@@ -480,12 +475,16 @@ async fn deploy_to_provider(
         .map_or_else(|| resolve_provider_binary(provider_id), Ok)?;
 
     let config_clone = config.clone();
+    // Enforce the deploy-receipt invariant BEFORE invoking the provider: the
+    // applied policy is the byte-identical value build_deploy_payload wrote, and
+    // a missing/unparseable one is a broken JSON-boundary invariant that must fail
+    // the deploy rather than silently stamp None and suppress the drift row.
+    let applied_policy = extract_applied_permission_policy(&agent_json)?;
     let deploy_result =
         tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config_clone))
             .await
             .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
-    // Persist result under lock.
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -498,14 +497,10 @@ async fn deploy_to_provider(
 
     match deploy_result {
         Ok(backend_agent_id) => {
-            rec.backend_agent_id = Some(backend_agent_id);
-            rec.last_started_at = Some(now_iso());
-            rec.updated_at = now_iso();
-            rec.last_error = None;
+            record_deploy_success(rec, backend_agent_id, applied_policy);
         }
         Err(ref e) => {
-            rec.last_error = Some(e.clone());
-            rec.updated_at = now_iso();
+            record_deploy_failure(rec, e);
             save_managed_agents(app, &records)?;
             return Err(e.clone());
         }
@@ -868,7 +863,6 @@ pub async fn create_managed_agent(
             model: effective_model.clone(),
             provider: effective_provider.clone(),
             persona_source_version: snapshot_source_version,
-            // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
             } else {
@@ -913,6 +907,8 @@ pub async fn create_managed_agent(
             } else {
                 relay_mesh.clone()
             },
+            permission_policy: None, // inherits global default or built-in `ask`
+            applied_permission_policy: None, // populated on first successful remote deploy
         };
 
         records.push(record);
@@ -1363,6 +1359,7 @@ use deploy::build_deploy_payload;
 use deploy::{deploy_payload_json, DeployProjections};
 #[cfg(test)]
 use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
+use deploy::{extract_applied_permission_policy, record_deploy_failure, record_deploy_success};
 
 #[path = "agents_profile.rs"]
 mod profile;

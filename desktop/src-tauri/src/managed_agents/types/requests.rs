@@ -253,6 +253,12 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. `null` = clear per-agent override (revert to
+    /// global/built-in). Present string = set per-agent override.
+    /// Remote deployed agents: rejected server-side (displayed read-only in UI).
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub permission_policy:
+        Option<Option<crate::managed_agents::permission_policy::PermissionPolicy>>,
 }
 
 #[cfg(test)]

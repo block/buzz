@@ -1465,9 +1465,8 @@ mod tests {
 
     #[test]
     fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
-        // A record whose env_vars explicitly set provider/model must win over
-        // any baked defaults. In OSS test builds the baked map is empty, so
-        // this test validates the user-env layer is present in the output.
+        // env_vars must win over baked defaults; in OSS builds the baked map is empty,
+        // so this verifies the user-env layer is present.
         let mut env_vars = BTreeMap::new();
         env_vars.insert("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string());
         env_vars.insert(
@@ -1475,7 +1474,6 @@ mod tests {
             "claude-opus-4-5".to_string(),
         );
 
-        // Minimal record: only the fields resolve_effective_agent_env reads.
         let record = crate::managed_agents::types::ManagedAgentRecord {
             pubkey: "test-pubkey".to_string(),
             name: "test-agent".to_string(),
@@ -1530,6 +1528,8 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            permission_policy: None,
+            applied_permission_policy: None,
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");

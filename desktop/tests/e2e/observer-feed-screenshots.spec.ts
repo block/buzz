@@ -275,8 +275,10 @@ test.describe("observer feed screenshots", () => {
       },
     ]);
 
-    // The permission row should show the "Approved (allow_once)" outcome.
-    await expect(feedPanel.getByText(/Approved.*allow_once/)).toBeVisible({
+    // The permission row shows the harness-provided option label ("Allow once"),
+    // not the raw ACP kind. The legacy non-ask path has no label map, so it
+    // falls back to the verb-only form: "Approved".
+    await expect(feedPanel.getByText("Approved")).toBeVisible({
       timeout: 5_000,
     });
     await settleAnimations(feedPanel);

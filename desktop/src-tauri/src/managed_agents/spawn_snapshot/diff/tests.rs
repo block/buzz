@@ -28,6 +28,7 @@ fn base() -> SpawnConfigSnapshot {
         idle_timeout_seconds: Some(600),
         max_turn_duration_seconds: Some(7200),
         parallelism: 1,
+        permission_policy: "ask".into(),
     }
 }
 
@@ -70,6 +71,9 @@ fn mutations() -> Vec<Mutation> {
             s.max_turn_duration_seconds = None
         }),
         ("parallelism", |s| s.parallelism = 8),
+        ("permission_policy", |s| {
+            s.permission_policy = "allow".into()
+        }),
     ]
 }
 

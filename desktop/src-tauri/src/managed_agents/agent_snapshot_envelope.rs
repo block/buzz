@@ -416,6 +416,8 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            permission_policy: None,
+            applied_permission_policy: None,
             agent_command_override: None,
             persona_source_version: None,
             provider: None,

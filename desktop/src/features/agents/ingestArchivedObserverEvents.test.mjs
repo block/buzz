@@ -1015,8 +1015,8 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
     // The row must carry the fully-resolved production label.
     assert.equal(
       permRows[0].outcome,
-      "Approved (allow_once)",
-      "permission row outcome must be the production-shaped label when request+response are in the combined window",
+      "Approved",
+      "permission row outcome must use verb-only fallback when no harness label flows through the legacy key path",
     );
   });
 

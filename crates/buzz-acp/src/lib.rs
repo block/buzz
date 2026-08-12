@@ -453,7 +453,19 @@ impl ObserverPublishQueue {
         // Pre-trim at enqueue so (a) byte accounting reflects what will ship
         // and (b) one oversized leaf cannot force every frame it touches into
         // whole-envelope elision downstream.
+        //
+        // Authorization frames must not be leaf-trimmed (NIP-AO §3 requires
+        // byte-for-byte reproduction). `fit_observer_event_to_budget` returns
+        // without mutating them; if they are still over-cap after that guard,
+        // suppress entirely rather than enqueue an over-budget frame.
         fit_observer_event_to_budget(&mut event);
+        if event.authorization.is_some() && serialized_len(&event) > OBSERVER_MAX_PLAINTEXT_LEN {
+            tracing::warn!(
+                kind = %event.kind,
+                "suppressing authorized observer frame at enqueue: over-cap after fit"
+            );
+            return;
+        }
         let bytes = serialized_len(&event);
         self.pending_bytes += bytes;
         self.events.push_back((bytes, source_events, event));
@@ -594,6 +606,7 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         session_id: last.session_id.clone(),
         turn_id: last.turn_id.clone(),
         started_at: last.started_at.clone(),
+        authorization: None,
         payload: serde_json::json!({
             "events": serde_json::to_value(events).unwrap_or_default(),
         }),
@@ -894,6 +907,19 @@ fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
         return;
     }
 
+    // Authorization frames carry byte-for-byte raw ACP that must not be
+    // rewritten — NIP-AO §3 requires the payload to be reproduced exactly as
+    // received. If the annotated event is still over-cap after the early-return
+    // above, suppress it entirely rather than mutate the ACP bytes.
+    if event.authorization.is_some() {
+        tracing::warn!(
+            kind = %event.kind,
+            "dropping authorized observer frame: annotated size exceeds cap \
+             and payload must not be trimmed"
+        );
+        return;
+    }
+
     // Raw size of the payload we are about to trim, captured before mutation so
     // the stub's `originalBytes` reports source bytes discarded, not serialized
     // overflow — consistent with the per-leaf marker's raw byte count.
@@ -1116,6 +1142,9 @@ fn handle_relay_observer_control_event(
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
         }
+        Some("permission_decision") => {
+            handle_permission_decision_control(&payload, pool, observer);
+        }
         _ => {
             tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
         }
@@ -1230,6 +1259,120 @@ fn handle_switch_model_control(
                 "type": "switch_model",
                 "status": status,
                 "modelId": model_id,
+            }),
+        );
+    }
+}
+
+/// Handle a `permission_decision` control frame.
+///
+/// Extracts `channelId`, `requestNonce`, and `optionId` from the payload and
+/// delivers a [`crate::acp::PermissionDecision`] to the in-flight read loop
+/// via the per-task `permission_decision_tx` mpsc channel.
+///
+/// If there is no in-flight task for the channel, or the sender is gone, the
+/// frame is dropped silently (the per-request 300s timeout will fail the entry
+/// closed on its own).
+fn handle_permission_decision_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let Some(channel_id) = payload
+        .get("channelId")
+        .and_then(|v| v.as_str())
+        .and_then(|v| v.parse::<Uuid>().ok())
+    else {
+        tracing::warn!("observer permission_decision control frame missing valid channelId");
+        return;
+    };
+
+    let Some(request_nonce) = payload
+        .get("requestNonce")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        tracing::warn!("observer permission_decision control frame missing requestNonce");
+        return;
+    };
+
+    let Some(option_id) = payload
+        .get("optionId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        tracing::warn!("observer permission_decision control frame missing optionId");
+        return;
+    };
+
+    let decision = crate::acp::PermissionDecision {
+        request_nonce: request_nonce.to_string(),
+        option_id: option_id.to_string(),
+    };
+
+    // Find the in-flight task for this channel and deliver via its mpsc.
+    let entry = pool
+        .task_map_mut()
+        .values_mut()
+        .find(|m| m.channel_id == Some(channel_id));
+
+    let status = if let Some(meta) = entry {
+        if let Some(tx) = &meta.permission_decision_tx {
+            match tx.try_send(decision) {
+                Ok(()) => {
+                    tracing::info!(
+                        channel = %channel_id,
+                        nonce = %request_nonce,
+                        option_id = %option_id,
+                        "permission_decision delivered to read loop"
+                    );
+                    "sent"
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        channel = %channel_id,
+                        "permission_decision channel full — dropping (will timeout)"
+                    );
+                    "channel_full"
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::warn!(
+                        channel = %channel_id,
+                        "permission_decision channel closed — read loop already exited"
+                    );
+                    "channel_closed"
+                }
+            }
+        } else {
+            tracing::warn!(
+                channel = %channel_id,
+                "permission_decision_tx not installed for in-flight task"
+            );
+            "no_channel"
+        }
+    } else {
+        tracing::warn!(
+            channel = %channel_id,
+            "permission_decision control frame for channel with no in-flight task"
+        );
+        "no_active_turn"
+    };
+
+    if let Some(observer) = observer {
+        observer.emit(
+            "control_result",
+            None,
+            &observer::ObserverContext {
+                channel_id: Some(channel_id.to_string()),
+                session_id: None,
+                turn_id: None,
+                started_at: None,
+            },
+            serde_json::json!({
+                "type": "permission_decision",
+                "status": status,
+                "requestNonce": request_nonce,
+                "optionId": option_id,
             }),
         );
     }
@@ -1835,7 +1978,7 @@ async fn tokio_main() -> Result<()> {
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
-        permission_mode: config.permission_mode,
+        permission_config: config.permission_config.clone(),
         agent_keys: config.keys.clone(),
         agent_owner_pubkey: startup_owner
             .as_deref()
@@ -1843,6 +1986,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        relay_event_publisher: Some(relay.event_publisher()),
     });
 
     if !config.memory_enabled {
@@ -3301,6 +3445,17 @@ fn dispatch_pending(
         agent.acp.install_steer_rx(rx);
         let steer_tx = Some(tx);
 
+        // Permission decision channel: delivers `permission_decision` control
+        // frames into the read loop's decision arm (spec §4). Installed
+        // per-session (the receiver is taken by the read loop and dropped
+        // when the turn ends; the next turn installs a fresh pair). Capacity
+        // matches PERMISSION_MAP_CAP so each pending entry gets a slot.
+        let (perm_tx, perm_rx) = tokio::sync::mpsc::channel::<crate::acp::PermissionDecision>(
+            crate::acp::PERMISSION_MAP_CAP,
+        );
+        agent.acp.install_permission_decision_rx(perm_rx);
+        let permission_decision_tx = Some(perm_tx);
+
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
@@ -3329,6 +3484,7 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
+                permission_decision_tx,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -3736,6 +3892,10 @@ fn handle_prompt_result(
                     | acp::AcpError::WriteTimeout(_)
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
+                    // A poisoned process wrote a partial permission response
+                    // and must NOT be returned to the pool — the pipe state is
+                    // uncertain and re-use would corrupt the next turn's writes.
+                    | acp::AcpError::PermissionPoisoned
             );
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
@@ -3965,6 +4125,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
+            permission_decision_tx: None,
             successful_steer_deliveries: HashSet::new(),
         },
     );
@@ -4743,6 +4904,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -5252,6 +5414,7 @@ mod observer_publish_queue_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            authorization: None,
             payload: serde_json::json!({ "seq": seq }),
         }
     }
@@ -6120,6 +6283,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            authorization: None,
             payload: serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -6148,6 +6312,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            authorization: None,
             payload: serde_json::json!({ "type": "turn_started" }),
         }
     }
@@ -6243,7 +6408,11 @@ mod build_mcp_servers_tests {
             memory_enabled: false,
             model: None,
             session_title: None,
-            permission_mode: config::PermissionMode::BypassPermissions,
+            permission_config: config::ResolvedPermissionConfig::resolve(
+                config::PermissionPolicy::Reject,
+                None,
+            )
+            .expect("test config"),
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
@@ -6465,7 +6634,11 @@ mod error_outcome_emission_tests {
             memory_enabled: false,
             model: None,
             session_title: None,
-            permission_mode: config::PermissionMode::BypassPermissions,
+            permission_config: config::ResolvedPermissionConfig::resolve(
+                config::PermissionPolicy::Reject,
+                None,
+            )
+            .expect("test config"),
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
@@ -6542,6 +6715,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: steer_event_id.into(),
@@ -6614,6 +6788,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: "stale-event".into(),
@@ -6729,6 +6904,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::from([
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: "stale-event".into(),
@@ -6794,6 +6970,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -6871,6 +7048,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -6964,6 +7142,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_decision_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -7056,6 +7235,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_decision_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -7162,6 +7342,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    permission_decision_tx: None,
                     successful_steer_deliveries: HashSet::new(),
                 },
             );
@@ -7239,6 +7420,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -7334,6 +7516,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -7451,6 +7634,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -7591,6 +7775,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -7780,6 +7965,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -7866,6 +8052,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                permission_decision_tx: None,
                 successful_steer_deliveries: HashSet::new(),
             },
         );
@@ -7929,6 +8116,7 @@ mod observer_payload_trim_tests {
             session_id: Some("sess-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            authorization: None,
             payload,
         }
     }
@@ -8161,5 +8349,42 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+
+    /// Authorized observer frames must never be leaf-trimmed or stubbed.
+    /// `fit_observer_event_to_budget` must leave the payload untouched when
+    /// `authorization` is present, even if the serialized frame is over-cap.
+    #[test]
+    fn test_authorized_frame_payload_is_never_trimmed() {
+        // Build an over-cap authorized frame (big payload, authorization present).
+        let big = "x".repeat(OBSERVER_MAX_PLAINTEXT_LEN + 1000);
+        let mut event = event_with_payload(
+            "acp_read",
+            serde_json::json!({ "method": "session/request_permission", "body": big }),
+        );
+        event.authorization = Some(crate::observer::AuthorizationEnvelope {
+            request_nonce: "test-nonce".to_string(),
+            actionable: true,
+            reason: None,
+        });
+
+        let payload_before = event.payload.clone();
+        assert!(
+            serialized(&event).len() > OBSERVER_MAX_PLAINTEXT_LEN,
+            "precondition: authorized frame is over-cap"
+        );
+
+        fit_observer_event_to_budget(&mut event);
+
+        // Payload must be byte-for-byte identical — no leaf trim, no stub.
+        assert_eq!(
+            event.payload, payload_before,
+            "authorized frame payload must not be mutated by fit_observer_event_to_budget"
+        );
+        // Authorization envelope must still be present and intact.
+        assert!(
+            event.authorization.is_some(),
+            "authorization envelope must survive fit_observer_event_to_budget"
+        );
     }
 }

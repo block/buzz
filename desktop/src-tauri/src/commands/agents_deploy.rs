@@ -46,6 +46,10 @@ pub(crate) fn resolve_deploy_model_provider(
 /// `descriptor.env` is the authoritative six-layer environment. Policy values
 /// are deliberately separate because providers apply them below that layered
 /// environment, preserving the local spawn's power-user override semantics.
+///
+/// `effective_permission_policy` is the already-resolved per-agent → global →
+/// built-in policy. Pass it from the caller so that this function does not need
+/// the global config; tests can pass `None` to get the built-in default.
 pub(super) fn build_launch_block(
     record: &ManagedAgentRecord,
     descriptor: &crate::managed_agents::readiness::EffectiveHarnessDescriptor,
@@ -53,6 +57,7 @@ pub(super) fn build_launch_block(
     effective_prompt: Option<&str>,
     effective_model: Option<&str>,
     owner_pubkey: &str,
+    effective_permission_policy: Option<crate::managed_agents::permission_policy::PermissionPolicy>,
 ) -> serde_json::Value {
     use crate::managed_agents::{
         known_acp_runtime, resolve_session_title, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
@@ -99,6 +104,20 @@ pub(super) fn build_launch_block(
         crate::managed_agents::spawn_snapshot::effective_team_instructions(record, teams)
     {
         policy_env.insert("BUZZ_ACP_TEAM_INSTRUCTIONS".into(), value);
+    }
+
+    // Permission policy: use the caller-resolved value (per-agent → global →
+    // built-in), falling back to the built-in default if the caller did not
+    // provide one. Tests pass `None`; production callers pass the result of
+    // `resolve_effective_permission_policy(record, global_config)`.
+    {
+        let policy = effective_permission_policy.unwrap_or_else(
+            crate::managed_agents::permission_policy::PermissionPolicy::desktop_default,
+        );
+        policy_env.insert(
+            "BUZZ_ACP_PERMISSION_POLICY".into(),
+            policy.as_str().to_string(),
+        );
     }
 
     serde_json::json!({
@@ -149,6 +168,10 @@ pub(super) fn build_deploy_payload(
         crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
             .map_err(|error| crate::managed_agents::user_facing_harness_error(&error))?;
     let owner_pubkey = super::workspace_owner_hex(state)?;
+    let (effective_policy, _) =
+        crate::managed_agents::permission_policy::resolve_effective_permission_policy(
+            record, &global,
+        );
     let launch = build_launch_block(
         record,
         &descriptor,
@@ -156,6 +179,7 @@ pub(super) fn build_deploy_payload(
         effective.system_prompt.value.as_deref(),
         effective.model.value.as_deref(),
         &owner_pubkey,
+        Some(effective_policy),
     );
 
     let effective_parallelism =
@@ -216,6 +240,50 @@ pub(super) fn deploy_payload_json(
     })
 }
 
+use crate::managed_agents::permission_policy::PermissionPolicy;
+
+/// Extract the applied permission policy from a deploy payload — the byte-identical
+/// value `build_deploy_payload` wrote into `launch.policy_env`, not a recompute.
+///
+/// The key is unconditionally present in every payload `build_deploy_payload`
+/// produces (it falls back to `desktop_default`), so a missing or unparseable
+/// value is a broken invariant on the JSON boundary, not a legacy shape. Callers
+/// must fail the deploy rather than stamping a silent `None` that would suppress
+/// the drift row and defeat the field's purpose.
+pub(super) fn extract_applied_permission_policy(
+    agent_json: &serde_json::Value,
+) -> Result<PermissionPolicy, String> {
+    let raw = agent_json["launch"]["policy_env"]["BUZZ_ACP_PERMISSION_POLICY"]
+        .as_str()
+        .ok_or("deploy payload is missing launch.policy_env.BUZZ_ACP_PERMISSION_POLICY")?;
+    serde_json::from_value(serde_json::Value::String(raw.to_string()))
+        .map_err(|_| format!("deploy payload has unrecognized permission policy {raw:?}"))
+}
+
+/// Record the outcome of a successful provider deploy. Stamps the confirmed
+/// receipt: `applied_permission_policy` is the exact value that was sent, so a
+/// later global-default flip is detectable as drift against the live worker.
+pub(super) fn record_deploy_success(
+    record: &mut ManagedAgentRecord,
+    backend_agent_id: String,
+    applied_policy: PermissionPolicy,
+) {
+    record.backend_agent_id = Some(backend_agent_id);
+    record.last_started_at = Some(crate::util::now_iso());
+    record.updated_at = crate::util::now_iso();
+    record.last_error = None;
+    record.applied_permission_policy = Some(applied_policy);
+}
+
+/// Record a failed provider deploy. The previous `applied_permission_policy` is
+/// intentionally retained: it is the last confirmed deployment receipt, the old
+/// worker may still be running that policy, and `last_error` records the failed
+/// new attempt. Clearing it would destroy known truth.
+pub(super) fn record_deploy_failure(record: &mut ManagedAgentRecord, error: &str) {
+    record.last_error = Some(error.to_string());
+    record.updated_at = crate::util::now_iso();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +335,7 @@ mod tests {
             Some("prompt"),
             Some("model"),
             "owner-hex",
+            None,
         );
 
         assert_eq!(launch["command"], "goose");
@@ -305,7 +374,7 @@ mod tests {
             env: BTreeMap::new(),
         };
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
 
         assert_eq!(
             launch["policy_env"]["BUZZ_ACP_AGENTS"],
@@ -327,7 +396,7 @@ mod tests {
             env: BTreeMap::new(),
         };
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
 
         assert_eq!(
             launch["policy_env"]["BUZZ_ACP_AGENTS"], "8",
@@ -357,7 +426,7 @@ mod tests {
         };
         let cap = crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM;
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
         let effective_parallelism =
             crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
         let payload = deploy_payload_json(
@@ -402,7 +471,7 @@ mod tests {
             env: BTreeMap::new(),
         };
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
         let effective_parallelism =
             crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
         let payload = deploy_payload_json(
@@ -448,7 +517,7 @@ mod tests {
         };
         let cap = crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM;
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
         let effective_parallelism =
             crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
         let payload = deploy_payload_json(
@@ -474,5 +543,176 @@ mod tests {
             payload["parallelism"], cap,
             "legacy top-level parallelism must match launch.policy_env — both must be {cap}"
         );
+    }
+
+    /// `build_launch_block` with an explicit `allow` policy injects `allow`.
+    #[test]
+    fn launch_block_explicit_allow_policy_injected() {
+        let record = record();
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let launch = build_launch_block(
+            &record,
+            &descriptor,
+            &[],
+            None,
+            None,
+            "owner-hex",
+            Some(crate::managed_agents::permission_policy::PermissionPolicy::Allow),
+        );
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_PERMISSION_POLICY"], "allow",
+            "explicit allow policy must be injected into policy_env"
+        );
+    }
+
+    /// `build_launch_block` with `None` (test callers / no global) falls back to
+    /// the built-in desktop default (`ask`).
+    #[test]
+    fn launch_block_none_policy_falls_back_to_built_in_ask() {
+        let record = record();
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_PERMISSION_POLICY"], "ask",
+            "None effective_permission_policy must fall back to built-in ask"
+        );
+    }
+
+    /// Production deploy path: global `allow` override is respected when the
+    /// record has no per-agent policy, matching the local-spawn resolver.
+    #[test]
+    fn launch_block_global_allow_policy_used_when_record_has_none() {
+        let mut record = record();
+        record.permission_policy = None;
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let global = crate::managed_agents::global_config::GlobalAgentConfig {
+            permission_policy: Some(
+                crate::managed_agents::permission_policy::PermissionPolicy::Allow,
+            ),
+            ..Default::default()
+        };
+        let (effective_policy, _) =
+            crate::managed_agents::permission_policy::resolve_effective_permission_policy(
+                &record, &global,
+            );
+        let launch = build_launch_block(
+            &record,
+            &descriptor,
+            &[],
+            None,
+            None,
+            "owner-hex",
+            Some(effective_policy),
+        );
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_PERMISSION_POLICY"], "allow",
+            "global allow policy must be injected when record has no per-agent policy"
+        );
+    }
+
+    // ── Deploy-receipt invariant + applied-policy state transitions ──────────
+
+    /// A payload built by `build_launch_block` always carries the policy key, and
+    /// `extract_applied_permission_policy` reads back the byte-identical value —
+    /// not a recompute. This is the receipt the deploy path stamps.
+    #[test]
+    fn extract_applied_policy_reads_the_exact_sent_value() {
+        let record = record();
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let launch = build_launch_block(
+            &record,
+            &descriptor,
+            &[],
+            None,
+            None,
+            "owner-hex",
+            Some(PermissionPolicy::Allow),
+        );
+        let payload = serde_json::json!({ "launch": launch });
+        assert_eq!(
+            extract_applied_permission_policy(&payload),
+            Ok(PermissionPolicy::Allow),
+            "extract must return the exact policy the payload carries"
+        );
+    }
+
+    /// A payload missing the policy key is a broken invariant: extraction errors
+    /// so the deploy fails before the provider is invoked, never stamping None.
+    #[test]
+    fn extract_applied_policy_missing_key_errors() {
+        let payload = serde_json::json!({ "launch": { "policy_env": {} } });
+        assert!(
+            extract_applied_permission_policy(&payload).is_err(),
+            "missing policy key must error, not silently stamp None"
+        );
+    }
+
+    /// A payload whose policy value is not a recognized enum variant errors —
+    /// the deploy fails before the provider is invoked.
+    #[test]
+    fn extract_applied_policy_unparseable_value_errors() {
+        let payload = serde_json::json!({
+            "launch": { "policy_env": { "BUZZ_ACP_PERMISSION_POLICY": "bogus" } }
+        });
+        assert!(
+            extract_applied_permission_policy(&payload).is_err(),
+            "unrecognized policy value must error, not silently stamp None"
+        );
+    }
+
+    /// Successful deploy stamps the exact sent value as the confirmed receipt and
+    /// clears any prior error.
+    #[test]
+    fn record_deploy_success_stamps_exact_sent_value() {
+        let mut rec = record();
+        rec.last_error = Some("stale error".into());
+        record_deploy_success(&mut rec, "backend-1".into(), PermissionPolicy::Allow);
+        assert_eq!(rec.backend_agent_id.as_deref(), Some("backend-1"));
+        assert_eq!(rec.applied_permission_policy, Some(PermissionPolicy::Allow));
+        assert_eq!(rec.last_error, None);
+    }
+
+    /// Successful redeploy overwrites the applied receipt with the new sent value.
+    #[test]
+    fn record_deploy_success_redeploy_updates_applied_value() {
+        let mut rec = record();
+        record_deploy_success(&mut rec, "backend-1".into(), PermissionPolicy::Allow);
+        record_deploy_success(&mut rec, "backend-1".into(), PermissionPolicy::Reject);
+        assert_eq!(
+            rec.applied_permission_policy,
+            Some(PermissionPolicy::Reject),
+            "redeploy must update the applied receipt to the new sent value"
+        );
+    }
+
+    /// Failed redeploy retains the last confirmed applied policy — the old worker
+    /// may still be running it — while recording the new error.
+    #[test]
+    fn record_deploy_failure_retains_last_confirmed_applied_value() {
+        let mut rec = record();
+        record_deploy_success(&mut rec, "backend-1".into(), PermissionPolicy::Allow);
+        record_deploy_failure(&mut rec, "provider unreachable");
+        assert_eq!(
+            rec.applied_permission_policy,
+            Some(PermissionPolicy::Allow),
+            "failed redeploy must retain the last confirmed applied policy"
+        );
+        assert_eq!(rec.last_error.as_deref(), Some("provider unreachable"));
     }
 }

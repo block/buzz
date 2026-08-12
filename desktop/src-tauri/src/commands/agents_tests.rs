@@ -58,6 +58,8 @@ fn bare_agent_record(
         source_team_persona_slug: None,
         catalog_source: None,
         relay_mesh: None,
+        permission_policy: None,
+        applied_permission_policy: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
@@ -482,6 +484,7 @@ fn deploy_payload_matches_the_shared_full_launch_fixture() {
         None,
         Some("gpt-5"),
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
     );
     let agent = deploy_payload_json(
         &record,

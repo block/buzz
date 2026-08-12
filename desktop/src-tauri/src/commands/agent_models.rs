@@ -20,9 +20,9 @@ use crate::{
         build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
         find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
         load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
-        resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
-        AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
-        DEFAULT_ACP_COMMAND,
+        permission_policy::apply_permission_policy_update, resolve_command, save_managed_agents,
+        sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo, AgentModelsResponse,
+        UpdateManagedAgentRequest, UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -846,12 +846,11 @@ pub async fn update_managed_agent(
             );
         }
         record.respond_to = prospective_mode;
-        // Preserve the persisted allowlist across mode toggles — only replace
-        // when the caller explicitly supplied a new list.
         if input.respond_to_allowlist.is_some() {
             record.respond_to_allowlist = prospective_allowlist;
         }
 
+        apply_permission_policy_update(record, input.permission_policy)?;
         record.updated_at = now_iso();
 
         save_managed_agents(&app, &records)?;

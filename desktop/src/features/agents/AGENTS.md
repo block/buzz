@@ -171,6 +171,27 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+12. **A remote deploy's permission policy has two truths: desired and applied.**
+   The *desired* policy is recomputed on every summary from the mutable agent
+   record + global config (`resolve_effective_permission_policy`). The *applied*
+   policy is the byte-identical value that was sent to the provider at deploy
+   time, persisted on the record as `applied_permission_policy` and re-exposed on
+   the summary — never recomputed. Flipping the global default after a deploy
+   changes desired but not applied, so the remote worker keeps running the policy
+   it was launched with until a redeploy. **Stamp the applied value at the single
+   deploy choke point** (`deploy_to_provider`): `extract_applied_permission_policy`
+   reads it from `launch.policy_env.BUZZ_ACP_PERMISSION_POLICY` and **must run
+   before the provider is invoked** — a missing or unparseable value is a broken
+   payload invariant that fails the deploy, never a silent `None` (a silent `None`
+   would suppress the drift row and defeat the field). **A failed redeploy retains
+   the last confirmed applied value** (`record_deploy_failure` leaves it untouched)
+   — the old worker may still be running it, and `last_error` records the new
+   attempt; clearing it would destroy known truth. **Legacy fail-quiet:** a record
+   with `applied_permission_policy` absent (pre-feature, or provider-selected but
+   never deployed) shows no drift row. `AgentPermissionPolicyField` renders the
+   amber "applied X · desired Y — redeploy required" row only when the agent is
+   remotely deployed (`backend.type === "provider"` **and** `backendAgentId !==
+   null`) **and** applied is non-null **and** applied differs from desired.
 
 ## The tests that enforce this
 
@@ -198,6 +219,16 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- Rust: `commands/agents_deploy.rs` tests pin the applied-policy deploy receipt —
+  `extract_applied_permission_policy` reads the exact sent value and errors on a
+  missing/unparseable one; `record_deploy_success` stamps it and a redeploy
+  updates it; `record_deploy_failure` retains the last confirmed value.
+- Rust: `managed_agents/permission_policy.rs` pins the resolver-level drift — a
+  post-deploy global flip diverges desired from the persisted applied receipt.
+- `ui/AgentPermissionPolicyField.render.test.mjs` — the drift row: shown for
+  remote+drift with both values and "redeploy required"; hidden when applied
+  equals desired, when applied is absent, for local agents, and for a
+  provider-selected-but-undeployed agent.
 
 ## Keep this file true
 
