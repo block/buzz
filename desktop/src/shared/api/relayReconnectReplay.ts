@@ -194,8 +194,9 @@ export async function replayLiveSubscriptions({
         entry[1].mode === "live",
     )
     .map(([subId, subscription]) => {
+      const strictLiveOnly = subscription.reconnectMode === "live-only";
       const cursorSince =
-        subscription.lastSeenCreatedAt === undefined
+        strictLiveOnly || subscription.lastSeenCreatedAt === undefined
           ? undefined
           : Math.max(
               0,
@@ -205,8 +206,9 @@ export async function replayLiveSubscriptions({
       // over the cursor: live events kept advancing `lastSeenCreatedAt`
       // while the older window stayed unresolved, and starting from the
       // cursor would skip it permanently.
-      const replaySince =
-        cursorSince === undefined
+      const replaySince = strictLiveOnly
+        ? undefined
+        : cursorSince === undefined
           ? subscription.pendingReplaySince
           : Math.min(cursorSince, subscription.pendingReplaySince ?? Infinity);
       const shouldPageReplay =

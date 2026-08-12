@@ -9,6 +9,8 @@ import {
 import { toast } from "sonner";
 
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
+import { resolveAgentActivityMode } from "@/features/agents/sharedAgentActivity";
+import { SharedAgentActivityPanel } from "@/features/agents/SharedAgentActivityPanel";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
   mergeObserverEventWindows,
@@ -61,6 +63,7 @@ import { useLoadArchivedObserverEvents } from "@/features/agents/ui/useObserverE
 import { useLoadOlderOnScroll } from "@/features/messages/ui/useLoadOlderOnScroll";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
@@ -84,6 +87,57 @@ type AgentSessionThreadPanelProps = {
 };
 
 export function AgentSessionThreadPanel({
+  agent,
+  canInterruptTurn,
+  channel,
+  channelId = null,
+  profiles,
+  ...props
+}: AgentSessionThreadPanelProps) {
+  const sessionChannelId = channelId ?? channel?.id ?? null;
+  const channelsQuery = useChannelsQuery({
+    enabled: Boolean(sessionChannelId),
+  });
+  const identityQuery = useIdentityQuery();
+  const resolvedChannel = React.useMemo(() => {
+    if (!sessionChannelId) return null;
+    if (channel?.id === sessionChannelId) return channel;
+    return (
+      channelsQuery.data?.find((entry) => entry.id === sessionChannelId) ?? null
+    );
+  }, [channel, channelsQuery.data, sessionChannelId]);
+  const profile = profiles?.[normalizePubkey(agent.pubkey)] ?? null;
+  const mode = resolveAgentActivityMode({
+    agentOwnerPubkey: profile?.ownerPubkey,
+    currentPubkey: identityQuery.data?.pubkey,
+    channel: resolvedChannel,
+  });
+
+  if (mode !== "owner") {
+    return (
+      <SharedAgentActivityPanel
+        {...props}
+        agent={agent}
+        channel={resolvedChannel}
+        mode={mode}
+        profiles={profiles}
+      />
+    );
+  }
+
+  return (
+    <OwnerAgentSessionThreadPanel
+      {...props}
+      agent={agent}
+      canInterruptTurn={canInterruptTurn}
+      channel={resolvedChannel ?? channel}
+      channelId={channelId}
+      profiles={profiles}
+    />
+  );
+}
+
+function OwnerAgentSessionThreadPanel({
   agent,
   canInterruptTurn,
   channel,
