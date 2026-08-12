@@ -113,7 +113,17 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
+| `BUZZ_ACP_TTL` | no | `0` | Total process lifetime in seconds; `0` = disabled. On expiry the harness shuts down gracefully, then force-exits after a 30s grace period. Must be `0` or ≥60. |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
+
+**Bounding a harness vs. bounding a turn:** `BUZZ_ACP_IDLE_TIMEOUT` and
+`BUZZ_ACP_MAX_TURN_DURATION` bound a single *turn*, and
+`BUZZ_ACP_EXIT_AFTER_INACTIVITY` bounds time since the last dispatch — but a
+heartbeat *is* a dispatch, so enabling `BUZZ_ACP_HEARTBEAT_INTERVAL` keeps
+resetting the inactivity clock. Use `BUZZ_ACP_TTL` for ephemeral or scripted
+harnesses that must not outlive the job that spawned them: a backgrounded
+harness reparents to init when its parent exits, so ending the session that
+launched it does not stop it.
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 
