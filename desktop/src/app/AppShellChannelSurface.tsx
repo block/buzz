@@ -4,7 +4,7 @@ import { HuddleRoomHeader, HuddleStartingView } from "@/features/huddle";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
-import { SidebarInset } from "@/shared/ui/sidebar";
+import { SidebarInset, useSidebar } from "@/shared/ui/sidebar";
 
 type AppShellChannelSurfaceProps = {
   children: React.ReactNode;
@@ -21,6 +21,8 @@ export function AppShellChannelSurface({
   mainInsetRef,
   terminal,
 }: AppShellChannelSurfaceProps) {
+  const { state: sidebarState } = useSidebar();
+
   return (
     <MainInsetProvider mainInsetRef={mainInsetRef}>
       <SidebarInset
@@ -36,7 +38,11 @@ export function AppShellChannelSurface({
         style={chromeCssVarDefaults as React.CSSProperties}
       >
         {isHuddleRoom && !isHuddleRoomStarting ? <HuddleRoomHeader /> : null}
-        <BuzzTheme.ContentSurface terminal={terminal} unframed={isHuddleRoom}>
+        <BuzzTheme.ContentSurface
+          insetLeft={sidebarState === "collapsed"}
+          terminal={terminal}
+          unframed={isHuddleRoom}
+        >
           {isHuddleRoomStarting ? <HuddleStartingView /> : children}
         </BuzzTheme.ContentSurface>
       </SidebarInset>
