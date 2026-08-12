@@ -21,17 +21,20 @@ const _typingThrottleMs = 3000;
 
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
+  final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
   bool _wasVisible;
 
   _ComposerKeyboardMetricsObserver({
     required this.view,
+    required this.onKeyboardShown,
     required this.onKeyboardHidden,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
   @override
   void didChangeMetrics() {
     final isVisible = view.viewInsets.bottom > 0;
+    if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();
     _wasVisible = isVisible;
   }

@@ -20,6 +20,7 @@ import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
+import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -1145,8 +1146,22 @@ void main() {
       expect(aliceUsername.style?.fontSize, messageMetadataTextStyle.fontSize);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
       expect(aliceUsername.style?.height, messageMetadataTextStyle.height);
-      expect(aliceTimestamp.style?.fontSize, messageMetadataTextStyle.fontSize);
+      expect(
+        aliceTimestamp.style?.fontSize,
+        messageTimestampTextStyle.fontSize,
+      );
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
+      expect(
+        aliceTimestamp.style?.fontSize,
+        lessThan(aliceText.style!.fontSize!),
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('message-row-msg1')),
+          matching: find.text('·'),
+        ),
+        findsNothing,
+      );
       final helloContent = findRichText('Hello world!');
       final helloText = tester.widget<RichText>(helloContent);
       expect(
@@ -2490,6 +2505,87 @@ void main() {
         findsNothing,
       );
     });
+
+    testWidgets(
+      'keeps the Latest gap stable above the Android composer and keyboard',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+          addTearDown(tester.view.reset);
+
+          final initialMessages = [
+            for (var i = 0; i < 40; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ];
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: initialMessages,
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final messageList = find.byKey(
+            const ValueKey('channel-message-list'),
+          );
+          final messageListElement = tester.element(messageList);
+          UserScrollNotification(
+            metrics: FixedScrollMetrics(
+              minScrollExtent: 0,
+              maxScrollExtent: 100,
+              pixels: 0,
+              viewportDimension: 100,
+              axisDirection: AxisDirection.down,
+              devicePixelRatio: 1,
+            ),
+            context: messageListElement,
+            direction: ScrollDirection.reverse,
+          ).dispatch(messageListElement);
+          tester
+              .widget<ScrollablePositionedList>(messageList)
+              .itemScrollController!
+              .jumpTo(index: 39);
+          await tester.pumpAndSettle();
+
+          final latestSurface = find.byKey(
+            const ValueKey('channel-jump-to-latest-surface'),
+          );
+          final composerDock = find.byKey(
+            const ValueKey('channel-composer-dock'),
+          );
+          double latestGap() =>
+              tester.getTopLeft(composerDock).dy -
+              tester.getBottomLeft(latestSurface).dy;
+
+          final collapsedGap = latestGap();
+          expect(collapsedGap, closeTo(Grid.xs, 0.5));
+
+          await tester.tap(find.text('Message #general'));
+          await tester.pump();
+          await tester.pump();
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          await tester.pump();
+          await tester.pump(androidImeMetricsSettleDelay);
+          await tester.pumpAndSettle();
+
+          expect(find.byType(TextField), findsOneWidget);
+          expect(latestGap(), closeTo(collapsedGap, 0.5));
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
 
     testWidgets(
       'keeps follow mode off while a tall newest message stays visible',
@@ -4292,6 +4388,20 @@ void main() {
           .dy;
       expect(headY, lessThan(oldestReplyY));
       expect(oldestReplyY, lessThan(newestReplyY));
+      final threadTimestamp = tester.widget<Text>(
+        find.byKey(const ValueKey('thread-message-timestamp-thread-root')),
+      );
+      expect(
+        threadTimestamp.style?.fontSize,
+        messageTimestampTextStyle.fontSize,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('thread-message-row-thread-root')),
+          matching: find.text('·'),
+        ),
+        findsNothing,
+      );
     });
 
     testWidgets('thread keeps its tail above a growing composer dock', (
@@ -4376,11 +4486,89 @@ void main() {
       // that metrics change too.
       tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       addTearDown(tester.view.reset);
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(androidImeMetricsSettleDelay);
+      await tester.pump();
 
       expect(
         tester.getBottomLeft(latestReply).dy,
         lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+      );
+      expect(
+        tester
+            .state<ScrollableState>(
+              find
+                  .descendant(
+                    of: find.byKey(const ValueKey('thread-message-list')),
+                    matching: find.byType(Scrollable),
+                  )
+                  .first,
+            )
+            .position
+            .isScrollingNotifier
+            .value,
+        isFalse,
+        reason: 'Keyboard layout correction must not start a scroll animation.',
+      );
+    });
+
+    testWidgets('short thread keeps its head stable when the keyboard opens', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'A short thread',
+        createdAt: 1000,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: const {'thread-root': []},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final head = find.byKey(
+        const ValueKey('thread-message-group-thread-root'),
+      );
+      final initialHeadY = tester.getTopLeft(head).dy;
+      expect(initialHeadY, lessThan(300));
+
+      await tester.tap(find.text('Reply in thread…').hitTestable());
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump();
+      await tester.pump(androidImeMetricsSettleDelay);
+      await tester.pump();
+
+      expect(
+        tester.getTopLeft(head).dy,
+        closeTo(initialHeadY, 1),
+        reason: 'A fully visible short thread should remain head-anchored.',
       );
     });
 
@@ -5113,6 +5301,10 @@ void main() {
         expect(
           find.byKey(const ValueKey('thread-message-group-thread-root')),
           findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
         );
 
         completer.complete(replies);
@@ -5988,7 +6180,7 @@ void main() {
           await tester.pumpAndSettle();
         }
         expect(
-          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          find.byKey(const ValueKey('thread-jump-to-latest')),
           findsNothing,
         );
         final visibleBeforeResize = tester
@@ -6051,7 +6243,7 @@ void main() {
     );
 
     testWidgets(
-      'deep-linking an older reply does not resume tail following on keyboard resize',
+      'deep-link stays put through passive resize until composer focus follows tail',
       (tester) async {
         tester.view.physicalSize = const Size(400, 800);
         tester.view.devicePixelRatio = 1;
@@ -6115,13 +6307,427 @@ void main() {
           const ValueKey('thread-message-group-reply-5'),
         );
         expect(target, findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsOneWidget,
+        );
 
-        await tester.tap(find.text('Reply in thread…').hitTestable());
-        await tester.pumpAndSettle();
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         await tester.pumpAndSettle();
 
         expect(target, findsOneWidget);
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('iOS composer focus and Latest fully reveal the final reply', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      tester.view.viewPadding = const FakeViewPadding(bottom: 20);
+      addTearDown(tester.view.reset);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Reply in thread…').hitTestable());
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pumpAndSettle();
+
+      final latestReply = find.byKey(
+        const ValueKey('thread-message-group-reply-29'),
+      );
+      final composerSurface = find.byKey(const ValueKey('composer-surface'));
+      final focusedReplyBottom = tester.getBottomLeft(latestReply).dy;
+      final composerTop = tester.getTopLeft(composerSurface).dy;
+
+      final list = find.byKey(const ValueKey('thread-message-list'));
+      final listElement = tester.element(list);
+      ScrollStartNotification(
+        metrics: FixedScrollMetrics(
+          minScrollExtent: 0,
+          maxScrollExtent: 100,
+          pixels: 0,
+          viewportDimension: 100,
+          axisDirection: AxisDirection.down,
+          devicePixelRatio: 1,
+        ),
+        context: listElement,
+        dragDetails: DragStartDetails(),
+      ).dispatch(listElement);
+      tester
+          .widget<ScrollablePositionedList>(list)
+          .itemScrollController!
+          .jumpTo(index: 5);
+      await tester.pumpAndSettle();
+      final latestButton = find.byKey(const ValueKey('thread-jump-to-latest'));
+      final latestButtonWasVisible = latestButton.evaluate().length == 1;
+      await tester.tap(latestButton);
+      await tester.pumpAndSettle();
+      final latestReplyBottom = tester.getBottomLeft(latestReply).dy;
+      debugDefaultTargetPlatformOverride = previousPlatform;
+
+      expect(
+        focusedReplyBottom,
+        lessThanOrEqualTo(composerTop),
+        reason: 'Focusing the composer must retain the final reply above it.',
+      );
+      expect(latestButtonWasVisible, isTrue);
+      expect(
+        latestReplyBottom,
+        lessThanOrEqualTo(composerTop),
+        reason: 'Latest must reveal the final reply above the iOS composer.',
+      );
+    });
+
+    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+      testWidgets(
+        'thread composer focus returns to the tail on ${platform.name}',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = platform;
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 20);
+          addTearDown(tester.view.reset);
+
+          final rootEvent = _textMsg(
+            id: 'thread-root',
+            pubkey: 'alice',
+            content: 'Thread root',
+            createdAt: 1000,
+          );
+          final replies = [
+            for (var i = 0; i < 30; i++)
+              _textMsg(
+                id: 'reply-$i',
+                pubkey: 'bob',
+                content: 'Reply $i',
+                createdAt: 1100 + i,
+                extraTags: const [
+                  ['e', 'thread-root', '', 'reply'],
+                ],
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [rootEvent],
+              threadReplies: {'thread-root': replies},
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final threadHead = formatTimeline([rootEvent]).single;
+          Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: threadHead,
+                allMessages: [threadHead],
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: true,
+                isArchived: false,
+                initialMessageId: 'reply-5',
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('thread-jump-to-latest')),
+            findsOneWidget,
+          );
+
+          await tester.tap(find.text('Reply in thread…').hitTestable());
+          await tester.pump();
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          await tester.pump();
+          if (platform == TargetPlatform.android) {
+            await tester.pump(androidImeMetricsSettleDelay);
+          }
+          await tester.pumpAndSettle();
+
+          final latestReply = find.byKey(
+            const ValueKey('thread-message-group-reply-29'),
+          );
+          final composerSurface = find.byKey(
+            const ValueKey('composer-surface'),
+          );
+          final focusNode = tester
+              .widget<TextField>(find.byType(TextField))
+              .focusNode!;
+          final latestReplyBottom = tester.getBottomLeft(latestReply).dy;
+          final composerTop = tester.getTopLeft(composerSurface).dy;
+          final latestButtonIsVisible = find
+              .byKey(const ValueKey('thread-jump-to-latest'))
+              .evaluate()
+              .isNotEmpty;
+          debugDefaultTargetPlatformOverride = previousPlatform;
+
+          expect(focusNode.hasFocus, isTrue);
+          expect(latestReplyBottom, lessThanOrEqualTo(composerTop));
+          expect(latestButtonIsVisible, isFalse);
+        },
+      );
+    }
+
+    testWidgets(
+      'thread shows Latest after browsing history and returns to tail',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
+
+        await tester.drag(list, const Offset(0, 500));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsOneWidget,
+        );
+
+        final threadScrollable = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        await tester.tap(find.byKey(const ValueKey('thread-jump-to-latest')));
+        await tester.pump(const Duration(milliseconds: 50));
+
+        expect(
+          threadScrollable.position.isScrollingNotifier.value,
+          isTrue,
+          reason: 'An explicit Latest tap should retain its navigation motion.',
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
+        final settledTailY = tester
+            .getTopLeft(find.byKey(const ValueKey('thread-tail-anchor')))
+            .dy;
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(
+          tester
+              .getTopLeft(find.byKey(const ValueKey('thread-tail-anchor')))
+              .dy,
+          closeTo(settledTailY, 0.5),
+          reason: 'Latest must not be followed by a corrective rebound.',
+        );
+      },
+    );
+
+    testWidgets(
+      'a newly sent thread reply follows the tail without animation',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 20; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            messagesNotifier: messagesNotifier,
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Me'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        final threadScrollable = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        final localReply = _textMsg(
+          id: 'reply-local',
+          pubkey: 'self',
+          content: 'My new reply',
+          createdAt: 2000,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        );
+
+        messagesNotifier.setMessages([rootEvent, localReply]);
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-local')),
+          findsOneWidget,
+        );
+        expect(
+          threadScrollable.position.isScrollingNotifier.value,
+          isFalse,
+          reason: 'Reply-driven tail correction must be instant.',
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
       },
     );
 
