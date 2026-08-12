@@ -113,8 +113,7 @@ pub(crate) struct EffectiveHarnessDescriptor {
 /// persona) references a runtime id that no longer exists in the registry —
 /// the same typed error produced by `try_record_agent_command`.  Callers that
 /// cannot meaningfully continue with a dangling id (e.g. `spawn_agent_child`)
-/// propagate the error; callers that degrade gracefully may use
-/// `.unwrap_or_else(|_| …)`.
+/// propagate the error; callers that degrade gracefully may use `.unwrap_or_else(|_| …)`.
 ///
 /// Does NOT require an `AppHandle` so it is fully unit-testable.
 ///
@@ -1500,6 +1499,7 @@ mod tests {
             env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
+            resume_on_restart: true,
             runtime_pid: None,
             backend: Default::default(),
             backend_agent_id: None,

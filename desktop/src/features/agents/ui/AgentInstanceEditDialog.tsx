@@ -24,7 +24,10 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
+import {
+  setManagedAgentAutoRestart,
+  setManagedAgentResumeOnRestart,
+} from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   ADVANCED_FIELDS_MOTION_TRANSITION,
@@ -145,6 +148,9 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  const [resumeOnRestart, setResumeOnRestart] = React.useState(
+    agent.resumeOnRestart,
+  );
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -194,6 +200,7 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      setResumeOnRestart(agent.resumeOnRestart);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
@@ -729,20 +736,17 @@ export function AgentInstanceEditDialog({
 
       const result = await updateMutation.mutateAsync(input);
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
-        // Standalone setter (mirrors start-on-app-launch) — not part of
-        // UpdateManagedAgentInput, so the frozen update shape stays frozen.
         await setManagedAgentAutoRestart(
           agent.pubkey,
           autoRestartOnConfigChange,
         );
       }
+      if (resumeOnRestart !== agent.resumeOnRestart) {
+        await setManagedAgentResumeOnRestart(agent.pubkey, resumeOnRestart);
+      }
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
       handleOpenChange(false);
       onUpdated?.(result.agent);
-      // The auto-restart policy deliberately never fires for a stopped or
-      // failing agent (a broken agent must not auto-loop), so an edit meant
-      // to FIX one silently waits for a manual start. Offer that start
-      // explicitly instead of relying on the user to know the policy.
       if (!isManagedAgentActive(result.agent)) {
         const startedName = result.agent.name;
         toast(`${startedName} saved while stopped.`, {
@@ -767,7 +771,6 @@ export function AgentInstanceEditDialog({
     }
   }
 
-  // Model and provider field derived state
   const normalizedConfig = configSurfaceQuery.data?.normalized;
   const modelRequired = isMissingRequiredDropdownField(
     normalizedConfig?.model,
@@ -807,7 +810,6 @@ export function AgentInstanceEditDialog({
     status: modelDiscoveryStatus,
   });
 
-  // Provider field derived state
   const trimmedProvider = provider.trim();
   const hideProviderIds = React.useMemo(
     () =>
@@ -946,7 +948,6 @@ export function AgentInstanceEditDialog({
             />
             <RunOnSummarySection backend={agent.backend} />
 
-            {/* Provider (runtime) */}
             <div className="space-y-1.5">
               <label
                 className="text-sm font-medium text-foreground"
@@ -1007,7 +1008,6 @@ export function AgentInstanceEditDialog({
                 </div>
               </div>
             ) : null}
-            {/* LLM provider */}
             {llmProviderFieldVisible ? (
               <div className="space-y-1.5">
                 <label
@@ -1076,7 +1076,6 @@ export function AgentInstanceEditDialog({
               />
             ) : null}
 
-            {/* Model */}
             <div className="space-y-1.5">
               <label
                 className="text-sm font-medium text-foreground"
@@ -1143,7 +1142,6 @@ export function AgentInstanceEditDialog({
               returnFocusRef={aiDefaultsTriggerRef}
             />
 
-            {/* Advanced settings */}
             <div className="space-y-3">
               <button
                 aria-expanded={showAdvancedFields}
@@ -1199,6 +1197,7 @@ export function AgentInstanceEditDialog({
                       requiredEnvKeys={advancedRequiredEnvKeys}
                       catalogStatus={runtimeCatalogStatus}
                       selectedRuntime={prospectiveRuntime}
+                      resumeOnRestart={resumeOnRestart}
                       systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
@@ -1206,6 +1205,7 @@ export function AgentInstanceEditDialog({
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}
+                      onResumeOnRestartChange={setResumeOnRestart}
                       onSystemPromptChange={setSystemPrompt}
                     />
                   </motion.div>
@@ -1213,7 +1213,6 @@ export function AgentInstanceEditDialog({
               </AnimatePresence>
             </div>
 
-            {/* Error */}
             {updateMutation.error instanceof Error ? (
               <p className="text-sm text-destructive">
                 {updateMutation.error.message}

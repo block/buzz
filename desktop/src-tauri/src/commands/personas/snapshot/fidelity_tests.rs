@@ -36,6 +36,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
+        resume_on_restart: true,
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,

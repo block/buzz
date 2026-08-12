@@ -148,13 +148,13 @@ pub fn build_managed_agent_summary(
         // Two-axis status model for remote agents:
         //
         //   Control-plane (this field): "deployed" = provider has been invoked and
-        //   returned a backend_agent_id. "not_deployed" = no deploy call yet (or it
-        //   failed). This axis tracks whether infrastructure *exists*, not whether
-        //   the process is currently running.
+        //   returned a backend_agent_id. "not_deployed" = no deploy call yet (or
+        //   it failed). Tracks whether infrastructure *exists*, not whether the
+        //   process is currently running.
         //
-        //   Live axis (relay presence, polled by frontend): online/away/offline.
-        //   Shown as a PresenceDot next to the agent name. This is the real-time
-        //   signal for whether the harness is connected.
+        //   Live axis (relay presence, polled by frontend): online/away/offline,
+        //   shown as a PresenceDot next to the agent name — the real-time signal
+        //   for whether the harness is connected.
         //
         // After !shutdown the agent goes offline (presence) but stays "deployed"
         // (infrastructure still exists). This is intentional — the provider may
@@ -241,7 +241,6 @@ pub fn build_managed_agent_summary(
     // Global config drives both the prospective snapshot and the descriptor
     // env layering below — the caller loads it once and passes it in, so
     // list-style callers pay one disk read per call rather than one per record.
-
     // The prospective side is computed only for a tracked pair: it costs a
     // teams-store read, and an unstamped agent has nothing to compare against.
     let tracked_spawn = pair_key.as_ref().zip(pair_runtime).map(|(key, runtime)| {
@@ -335,6 +334,7 @@ pub fn build_managed_agent_summary(
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
+        resume_on_restart: record.resume_on_restart,
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
@@ -554,12 +554,8 @@ pub fn spawn_agent_child(
     // readiness predicate, and if anything is missing, serialize the payload
     // into BUZZ_ACP_SETUP_PAYLOAD.  buzz-acp detects this env var on startup
     // and enters the minimal setup-listener mode instead of the agent pool.
-    //
-    // SECURITY: BUZZ_ACP_SETUP_PAYLOAD is in RESERVED_ENV_KEYS so user env
-    // cannot set it, but we also explicitly remove it after writing user env
-    // to guard against the parent-process environment. We then set it only
-    // when desktop has computed NotReady — the desktop is the sole readiness
-    // source and buzz-acp only transports the payload.
+    // SECURITY: the key is in RESERVED_ENV_KEYS, and desktop is the sole
+    // readiness source — buzz-acp only transports the payload.
     //
     // The JSON format mirrors `setup_mode::SetupPayload` in buzz-acp:
     //   { "agent_name": "...", "agent_pubkey": "...", "requirements": [{ "surface": "...", ... }] }
@@ -650,9 +646,8 @@ pub fn spawn_agent_child(
         //   2. This env_remove() clears any ambient parent-process value
         //      inherited by std::process::Command before we conditionally
         //      set the desktop-computed trusted value below.
-        // Note: merged_user_env() is written further below in this function;
-        // ordering relative to that call is NOT what makes this safe — the
-        // reserved-key strip (guard 1) handles user env regardless of order.
+        // Guard 1 handles user env regardless of where merged_user_env() is
+        // written relative to this call, so ordering is NOT what makes it safe.
         command.env_remove("BUZZ_ACP_SETUP_PAYLOAD");
 
         // Set the payload only when desktop computed NotReady.
@@ -674,6 +669,8 @@ pub fn spawn_agent_child(
     if let Some(max_dur) = record.max_turn_duration_seconds {
         command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
     }
+    // Reserved and emitted unconditionally: the saved toggle is authoritative.
+    super::env_vars::apply_resume_env(&mut command, record.resume_on_restart);
     let acp_n = super::acp_agents_value(effective_command, record.parallelism);
     command.env("BUZZ_ACP_AGENTS", acp_n);
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
@@ -698,10 +695,10 @@ pub fn spawn_agent_child(
     // instances never consult the record's own model/provider/prompt bytes;
     // definition-less instances fall back to their own fields, then global.
     //
-    // Derive the mesh decision BEFORE moving fields out — `relay_mesh_model_id`
-    // is the single authoritative gate; the mesh-llm block below MUST use it
-    // rather than re-deriving from `effective_provider` to keep preflight and
-    // spawn semantics in lock-step (see `EffectiveAgentConfig::relay_mesh_model_id`).
+    // Derive the mesh decision BEFORE moving fields out — `relay_mesh_model_id` is
+    // the single authoritative gate; the mesh-llm block below MUST use it rather
+    // than re-deriving from `effective_provider`, keeping preflight and spawn
+    // semantics in lock-step (see `EffectiveAgentConfig::relay_mesh_model_id`).
     #[cfg(feature = "mesh-llm")]
     let mesh_model_id = effective_cfg.relay_mesh_model_id();
     let effective_prompt = effective_cfg.system_prompt.value;
@@ -777,13 +774,13 @@ pub fn spawn_agent_child(
 
     // ── Git credential helper for Buzz relay ──────────────────────────
     //
-    // Agents need to clone/push repos hosted on the Buzz relay's git
-    // server, which authenticates via NIP-98. The `git-credential-nostr`
-    // binary signs auth events using the agent's nostr key.
+    // Agents need to clone/push repos hosted on the Buzz relay's git server,
+    // which authenticates via NIP-98. The `git-credential-nostr` binary signs
+    // auth events using the agent's nostr key.
     //
-    // We configure git via GIT_CONFIG_COUNT env vars (ephemeral, no
-    // filesystem writes) scoped to the relay's git URL so we don't
-    // interfere with other remotes (e.g. GitHub).
+    // We configure git via GIT_CONFIG_COUNT env vars (ephemeral, no filesystem
+    // writes) scoped to the relay's git URL so we don't interfere with other
+    // remotes (e.g. GitHub).
     //
     // NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY — keep in sync.
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
@@ -816,8 +813,8 @@ pub fn spawn_agent_child(
     // baked floor → runtime metadata → definition env (harness author defaults) →
     // global → live persona → per-agent, with reserved-key and malformed-key filtering
     // applied. Writing it last lets user-provided values win over every Buzz-set env
-    // written above — reserved keys were already stripped from descriptor.env so they
-    // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
+    // written above — reserved keys were already stripped, so they cannot clobber
+    // BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
@@ -887,11 +884,10 @@ pub fn spawn_agent_child(
     // Stamp the adapter availability for runtimes with a version gate (codex
     // only). The summary builder compares this against the current cached value
     // to detect out-of-band adapter changes after spawn (Phase-2 badge fallback).
-    // Non-codex runtimes get `None` — nothing changes for them.
-    // When the cache is cold (e.g. Doctor just installed and cleared the cache),
-    // `adapter_availability_cached()` returns `None`, so the stamp is `None` and
-    // the drift check is skipped until discovery warms the cache — preventing a
-    // false restart badge immediately after auto-restart.
+    // Non-codex runtimes get `None` — nothing changes for them. A cold cache
+    // (e.g. Doctor just installed and cleared it) also stamps `None`, skipping
+    // the drift check until discovery warms it — this prevents a false restart
+    // badge immediately after auto-restart.
     let spawned_adapter_availability = if runtime_meta.is_some_and(|r| r.id == "codex") {
         super::adapter_availability_cached()
     } else {

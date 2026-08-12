@@ -182,6 +182,7 @@ fn local_agent() -> ManagedAgentRecord {
         env_vars: BTreeMap::from([("API_KEY".to_string(), "localsecret".to_string())]),
         start_on_app_launch: true,
         auto_restart_on_config_change: true,
+        resume_on_restart: true,
         runtime_pid: Some(1234),
         backend: crate::managed_agents::BackendKind::Provider {
             id: "buzz-backend".to_string(),

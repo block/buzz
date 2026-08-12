@@ -50,6 +50,20 @@ export async function setManagedAgentAutoRestart(
   return fromRawManagedAgent(response);
 }
 
+export async function setManagedAgentResumeOnRestart(
+  pubkey: string,
+  resumeOnRestart: boolean,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "set_managed_agent_resume_on_restart",
+    {
+      pubkey,
+      resumeOnRestart,
+    },
+  );
+  return fromRawManagedAgent(response);
+}
+
 export async function listManagedAgentRuntimes(): Promise<
   ManagedAgentRuntimeStatus[]
 > {

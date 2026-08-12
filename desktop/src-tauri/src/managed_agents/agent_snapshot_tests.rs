@@ -40,6 +40,7 @@ fn minimal_record() -> ManagedAgentRecord {
         },
         start_on_app_launch: true,
         auto_restart_on_config_change: true,
+        resume_on_restart: true,
         runtime_pid: Some(12345), // MUST NOT appear
         backend: BackendKind::Provider {
             // MUST NOT appear — carries a provider secret

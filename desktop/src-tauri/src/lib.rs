@@ -400,8 +400,7 @@ pub fn run() {
             }
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
-            // events via `huddle::emit_huddle_state` without threading the handle
-            // through every call site.
+            // events via `huddle::emit_huddle_state` without threading every call site.
             if let Ok(mut guard) = state.app_handle.lock() {
                 *guard = Some(app_handle.clone());
             }
@@ -769,6 +768,7 @@ pub fn run() {
             set_agent_managed_profiles,
             set_managed_agent_start_on_app_launch,
             set_managed_agent_auto_restart,
+            set_managed_agent_resume_on_restart,
             delete_managed_agent,
             get_managed_agent_log,
             get_agent_models,

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::{
-    display_invalid_key, is_derived_provider_model_key, is_reserved_env_key,
+    apply_resume_env, display_invalid_key, is_derived_provider_model_key, is_reserved_env_key,
     is_well_formed_env_key, merged_user_env, validate_user_env_keys,
     DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
@@ -500,4 +500,88 @@ fn deploy_model_precedence_none_when_both_absent() {
 
     let effective = persona_model.clone().or(record_model.clone());
     assert_eq!(effective, None);
+}
+
+// ── resume_on_restart spawn-env precedence ──────────────────────────────
+//
+// BUZZ_ACP_RESUME_ON_RESTART is reserved — users must not override it via
+// the env-vars editor — and the desktop emits it unconditionally so the
+// UI toggle is the sole control plane in both directions.
+
+#[test]
+fn resume_on_restart_is_reserved_and_stripped_from_user_env() {
+    // A user saving BUZZ_ACP_RESUME_ON_RESTART in the env-vars editor must
+    // have it rejected at validation time AND stripped at spawn time as a
+    // defense-in-depth guard for older on-disk records.
+    assert!(
+        is_reserved_env_key("BUZZ_ACP_RESUME_ON_RESTART"),
+        "BUZZ_ACP_RESUME_ON_RESTART must be reserved"
+    );
+
+    // Even if a legacy record somehow carries the key, merged_user_env must
+    // strip it before it reaches Command::env.
+    let agent = map(&[
+        ("BUZZ_ACP_RESUME_ON_RESTART", "true"),
+        ("ANTHROPIC_API_KEY", "ok"),
+    ]);
+    let merged = merged_user_env(&BTreeMap::new(), &agent);
+    assert!(
+        !merged.contains_key("BUZZ_ACP_RESUME_ON_RESTART"),
+        "reserved key must not survive merged_user_env"
+    );
+    assert_eq!(
+        merged.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("ok"),
+        "unrelated key must pass through"
+    );
+}
+
+#[test]
+fn resume_env_toggle_off_writes_false_overriding_ambient() {
+    // When the UI toggle is OFF, the child must see "false" even when the
+    // desktop process itself has BUZZ_ACP_RESUME_ON_RESTART=true in its env
+    // (ambient parent leak). Routes through the production `apply_resume_env`
+    // helper called by `spawn_agent_child`; regresses if that call is removed
+    // or reverts to conditional emission.
+    let mut cmd = std::process::Command::new("true");
+
+    // Simulate ambient parent-process env (std::process::Command inherits
+    // from the parent; cmd.env overwrites in the same priority order).
+    cmd.env("BUZZ_ACP_RESUME_ON_RESTART", "true"); // ambient "on"
+
+    apply_resume_env(&mut cmd, false);
+
+    let resume_val = cmd
+        .get_envs()
+        .find(|(k, _)| *k == "BUZZ_ACP_RESUME_ON_RESTART")
+        .and_then(|(_, v)| v)
+        .map(|v| v.to_string_lossy().into_owned());
+    assert_eq!(
+        resume_val.as_deref(),
+        Some("false"),
+        "toggle off must write false even when ambient env says true"
+    );
+}
+
+#[test]
+fn resume_env_toggle_on_writes_true_overriding_ambient() {
+    // When the UI toggle is ON, the child must see "true" even when the
+    // desktop process has BUZZ_ACP_RESUME_ON_RESTART=false in its env.
+    // Routes through the production `apply_resume_env` helper.
+    let mut cmd = std::process::Command::new("true");
+
+    cmd.env("BUZZ_ACP_RESUME_ON_RESTART", "false"); // ambient "off"
+
+    apply_resume_env(&mut cmd, true);
+
+    let resume_val = cmd
+        .get_envs()
+        .find(|(k, _)| *k == "BUZZ_ACP_RESUME_ON_RESTART")
+        .and_then(|(_, v)| v)
+        .map(|v| v.to_string_lossy().into_owned());
+    assert_eq!(
+        resume_val.as_deref(),
+        Some("true"),
+        "toggle on must write true even when ambient env says false"
+    );
 }

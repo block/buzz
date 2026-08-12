@@ -95,6 +95,7 @@ export type MockManagedAgentSeed = {
   needsRestart?: boolean;
   restartDiff?: Array<{ field: string; change: unknown }>;
   autoRestartOnConfigChange?: boolean;
+  resumeOnRestart?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
   /** Per-agent env vars seeded into the mock store. */
@@ -862,6 +863,7 @@ type RawManagedAgent = {
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
+  resume_on_restart?: boolean;
   backend:
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
@@ -1694,6 +1696,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
+    resume_on_restart: agent.resume_on_restart ?? true,
     backend: agent.backend ?? { type: "local" as const },
     backend_agent_id: agent.backend_agent_id ?? null,
     respond_to: agent.respond_to ?? "owner-only",
@@ -2248,6 +2251,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     auto_restart_on_config_change: seed.autoRestartOnConfigChange ?? true,
+    resume_on_restart: seed.resumeOnRestart ?? true,
     backend: seed.backend ?? { type: "local" },
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
@@ -8462,6 +8466,7 @@ async function handleCreateManagedAgent(
     log_path: `/tmp/mock-agent-${pubkey}.log`,
     start_on_app_launch: args.input.startOnAppLaunch ?? true,
     auto_restart_on_config_change: true,
+    resume_on_restart: true,
     backend: args.input.backend ?? { type: "local" as const },
     backend_agent_id: null,
     respond_to: mintRespondTo,
@@ -8687,6 +8692,16 @@ async function handleSetManagedAgentAutoRestart(args: {
 }): Promise<RawManagedAgent> {
   const agent = getMockManagedAgent(args.pubkey);
   agent.auto_restart_on_config_change = args.autoRestartOnConfigChange;
+  agent.updated_at = new Date().toISOString();
+  return cloneManagedAgent(agent);
+}
+
+async function handleSetManagedAgentResumeOnRestart(args: {
+  pubkey: string;
+  resumeOnRestart: boolean;
+}): Promise<RawManagedAgent> {
+  const agent = getMockManagedAgent(args.pubkey);
+  agent.resume_on_restart = args.resumeOnRestart;
   agent.updated_at = new Date().toISOString();
   return cloneManagedAgent(agent);
 }
@@ -12327,6 +12342,10 @@ export function maybeInstallE2eTauriMocks() {
       case "set_managed_agent_auto_restart":
         return handleSetManagedAgentAutoRestart(
           payload as Parameters<typeof handleSetManagedAgentAutoRestart>[0],
+        );
+      case "set_managed_agent_resume_on_restart":
+        return handleSetManagedAgentResumeOnRestart(
+          payload as Parameters<typeof handleSetManagedAgentResumeOnRestart>[0],
         );
       case "set_managed_agent_start_on_app_launch":
         return handleSetManagedAgentStartOnAppLaunch(

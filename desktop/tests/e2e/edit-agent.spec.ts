@@ -352,16 +352,14 @@ test.describe("edit agent dialog", () => {
     ).toBeVisible();
   });
 
-  test("profile Edit routes persona-linked agents to the definition editor", async ({
+  test("profile Edit routes to the instance editor for a persona-linked managed agent", async ({
     page,
   }) => {
-    // Routing pin for handleEditAgent (UserProfilePanel): when the agent has
-    // a resolvable non-built-in persona, the Edit quick action opens the
-    // DEFINITION editor (persona dialog), not EditAgentDialog. The instance
-    // editor (and its inherit-runtime toggle) is reachable for persona-linked
-    // agents only via the requestOpenEditAgent event (ConfigNudgeCard) — no
-    // plain UI path — so its inherit-toggle behavior is covered by B3b's
-    // component-level pinning test, not e2e.
+    // Routing guard for handleEditAgent (UserProfilePanel): when the agent has
+    // a resolvable persona AND a managed instance, the Edit quick action opens
+    // the INSTANCE editor (edit-agent-dialog), not the definition editor. This
+    // is the path that makes the resume-on-restart toggle (and other
+    // instance-level Advanced settings) reachable for definition-backed agents.
     await installMockBridge(page, {
       managedAgents: [
         {
@@ -384,7 +382,6 @@ test.describe("edit agent dialog", () => {
     await page.goto("/");
     await page.getByTestId("open-agents-view").click();
 
-    // Persona-linked agents render grouped under the persona's card name.
     const agentButton = page.getByRole("button", {
       name: "Edit E2E Persona agent profile",
     });
@@ -396,14 +393,58 @@ test.describe("edit agent dialog", () => {
     });
     await page.getByTestId("user-profile-edit-agent").click();
 
-    // Definition editor opens; the instance editor does not.
+    // Instance editor opens; the definition editor does not.
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("persona-dialog")).not.toBeVisible();
+  });
+
+  test("profile Edit routes to the definition editor for a definition-only (unstarted) persona", async ({
+    page,
+  }) => {
+    // Regression guard: when a persona has no managed instance yet (the user
+    // has not started the agent), clicking Edit must still open the definition
+    // editor (persona-dialog), not silently do nothing. With the unconditional
+    // fix from decdb3ee, handleEditAgent called setEditAgentOpen(true) even
+    // when managedAgent was undefined; the instance dialog gates on
+    // `canEditAgent && managedAgent` (UserProfilePanel.tsx:892), so the result
+    // was a no-op click with no dialog appearing.
+    const DEFINITION_ONLY_PERSONA_ID = "persona-definition-only-e2e";
+    await installMockBridge(page, {
+      managedAgents: [],
+      personas: [
+        {
+          id: DEFINITION_ONLY_PERSONA_ID,
+          displayName: "Definition Only Persona",
+          systemPrompt: "No instance yet.",
+        },
+      ],
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+
+    // Definition-only personas render as their own row in the agents view.
+    const personaRow = page.getByTestId(
+      `persona-agent-row-${DEFINITION_ONLY_PERSONA_ID}`,
+    );
+    await expect(personaRow).toBeVisible({ timeout: 10_000 });
+    await personaRow.click();
+
+    await expect(page.getByTestId("user-profile-panel")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+
+    // Definition editor opens; the instance editor does not (no managedAgent).
     await expect(page.getByTestId("persona-dialog")).toBeVisible({
       timeout: 10_000,
     });
     await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
     // And it is the persona's record that's being edited.
     await expect(page.locator("#persona-display-name")).toHaveValue(
-      "Edit E2E Persona",
+      "Definition Only Persona",
     );
   });
 });

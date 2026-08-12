@@ -349,6 +349,7 @@ fn bare_record() -> ManagedAgentRecord {
         catalog_source: None,
         relay_mesh: None,
         auto_restart_on_config_change: false,
+        resume_on_restart: true,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,

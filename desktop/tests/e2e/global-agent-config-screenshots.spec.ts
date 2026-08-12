@@ -852,6 +852,14 @@ test.describe("global agent config screenshots", () => {
     });
     await page.getByTestId("user-profile-edit-agent").click();
 
+    // Under the fixed routing, a persona-linked managed agent opens the
+    // instance editor first. Navigate to the definition dialog via the
+    // linked-definition escape ("Edit avatar") inside the instance editor.
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByRole("button", { name: "Edit avatar" }).click();
+
     // The definition dialog opens in EDIT mode ("Save changes"), seeded from
     // the persona — confirm it's the edit path, not create.
     await expect(page.getByTestId("persona-dialog")).toBeVisible({
@@ -942,6 +950,14 @@ test.describe("global agent config screenshots", () => {
       timeout: 10_000,
     });
     await page.getByTestId("user-profile-edit-agent").click();
+
+    // Under the fixed routing, a persona-linked managed agent opens the
+    // instance editor first. Navigate to the definition dialog via the
+    // linked-definition escape ("Edit avatar") inside the instance editor.
+    await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByRole("button", { name: "Edit avatar" }).click();
 
     // Confirm the real EDIT dialog, seeded from the persona.
     await expect(page.getByTestId("persona-dialog")).toBeVisible({

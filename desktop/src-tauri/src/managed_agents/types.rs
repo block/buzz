@@ -122,6 +122,7 @@ impl AgentDefinition {
             env_vars: self.env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
+            resume_on_restart: true,
             runtime_pid: None,
             backend: BackendKind::default(),
             backend_agent_id: None,
@@ -222,10 +223,9 @@ pub struct ManagedAgentRecord {
     /// storage layer blanks this before writing JSON once the key is safely in
     /// the keyring, and re-hydrates it from the keyring on load.
     ///
-    /// It is only serialized inline (the `0o600` JSON fallback) when the
-    /// keyring is unreachable — `skip_serializing_if` keeps it out of JSON in
-    /// the normal keyring-backed case. `default` also lets an old build parse a
-    /// store whose inline key was already migrated out and blanked.
+    /// It is only serialized inline (the `0o600` JSON fallback) when the keyring
+    /// is unreachable — `skip_serializing_if` keeps it out of JSON otherwise, and
+    /// `default` lets an old build parse a store whose inline key was migrated out.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub private_key_nsec: String,
     /// NIP-OA auth tag JSON. Computed at agent creation time.
@@ -245,13 +245,13 @@ pub struct ManagedAgentRecord {
     pub avatar_url: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
-    /// Explicit per-instance harness pin. `None` (the default) means inherit
-    /// the harness from the linked persona's `runtime`, so persona harness
-    /// edits propagate on the next spawn — mirroring the opt-in `model`
-    /// override. `Some` is set only when the user deliberately picks a harness
-    /// that diverges from the persona. Resolved via `effective_agent_command`;
-    /// `agent_command` above is the create-time snapshot kept for avatar/legacy
-    /// derivations and is not authoritative for spawn.
+    /// Explicit per-instance harness pin. `None` (the default) inherits the
+    /// harness from the linked persona's `runtime`, so persona harness edits
+    /// propagate on the next spawn — mirroring the opt-in `model` override.
+    /// `Some` is set only when the user deliberately picks a harness that
+    /// diverges from the persona. Resolved via `effective_agent_command`
+    /// (`agent_command` above is a create-time snapshot for avatar/legacy
+    /// derivations, not authoritative for spawn).
     #[serde(default)]
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
@@ -260,9 +260,8 @@ pub struct ManagedAgentRecord {
     /// (`known_acp_runtime`) — and no longer written by updates. Kept for
     /// serde compatibility with existing stores.
     pub mcp_command: String,
-    /// Deprecated: `BUZZ_ACP_TURN_TIMEOUT` is ignored by the harness and the
-    /// desktop no longer emits or edits it. Kept for serde compatibility with
-    /// existing stores; use `idle_timeout_seconds` or
+    /// Deprecated: `BUZZ_ACP_TURN_TIMEOUT` is ignored by the harness and the desktop no
+    /// longer emits or edits it. Kept for serde compat; use `idle_timeout_seconds` or
     /// `max_turn_duration_seconds` for turn-length control.
     pub turn_timeout_seconds: u64,
     /// Idle timeout in seconds (`BUZZ_ACP_IDLE_TIMEOUT`): how long the agent
@@ -276,29 +275,23 @@ pub struct ManagedAgentRecord {
     #[serde(default = "default_agent_parallelism")]
     pub parallelism: u32,
     pub system_prompt: Option<String>,
-    /// Desired LLM model ID. Matches AgentModelInfo.id from discovery.
-    /// The harness re-discovers the correct ACP switching metadata at session
-    /// creation by matching this ID against the fresh session/new response.
-    /// For a linked instance this is a legacy/display snapshot only — spawn
-    /// and deploy resolve the effective model from the definition, never
-    /// from this field (see `effective_config::resolve_effective_config`).
-    /// For a definition-less instance this field is authoritative.
+    /// Desired LLM model ID. Matches `AgentModelInfo.id` from discovery; the harness
+    /// re-discovers the correct ACP switching metadata on session creation. For a linked
+    /// instance this is a legacy/display snapshot — spawn and deploy resolve from the
+    /// definition (see `effective_config::resolve_effective_config`). For a
+    /// definition-less instance this field is authoritative.
     #[serde(default)]
     pub model: Option<String>,
-    /// LLM inference provider. For a linked instance this is a legacy/display
-    /// snapshot only — spawn and deploy resolve the effective provider from
-    /// the definition, never from this field (see
-    /// `effective_config::resolve_effective_config`). For a definition-less
-    /// instance this field is authoritative. `#[serde(default)]` so
-    /// pre-existing records deserialize as `None` and get backfilled on
-    /// first load.
+    /// LLM inference provider. Like `model` above, a linked instance's value is a
+    /// legacy/display snapshot — spawn and deploy resolve from the definition. For a
+    /// definition-less instance this field is authoritative. `#[serde(default)]` so
+    /// pre-existing records deserialize as `None` and backfill on first load.
     #[serde(default)]
     pub provider: Option<String>,
-    /// Content hash of the persona at the time this agent was created — the
-    /// `persona_content_hash` of the snapshot in `system_prompt` / `model` /
-    /// `provider` / `env_vars`. The Agents menu compares it against the linked
-    /// persona's current hash to flag a stale (out-of-date) instance. `None`
-    /// for non-persona agents and for pre-existing records pending backfill.
+    /// Content hash of the persona at this agent's creation time (snapshot of
+    /// `system_prompt`/`model`/`provider`/`env_vars`). The Agents menu compares it
+    /// against the linked persona's current hash to flag a stale instance. `None` for
+    /// non-persona agents and pre-existing records pending backfill.
     #[serde(default)]
     pub persona_source_version: Option<String>,
     /// Environment variables injected at spawn time. Layered as: desktop
@@ -314,6 +307,10 @@ pub struct ManagedAgentRecord {
     /// frontend only fires when the agent is idle, connected, and local.
     #[serde(default = "default_auto_restart_on_config_change")]
     pub auto_restart_on_config_change: bool,
+    /// Replay the durable pending-turn ledger on harness boot so a crash or app
+    /// update does not drop in-flight work (`BUZZ_ACP_RESUME_ON_RESTART`).
+    #[serde(default = "default_resume_on_restart")]
+    pub resume_on_restart: bool,
     #[serde(default)]
     pub runtime_pid: Option<u32>,
     #[serde(default)]
@@ -365,16 +362,15 @@ pub struct ManagedAgentRecord {
     /// Absorbed from `AgentDefinition.runtime` — the preferred ACP runtime ID
     /// (e.g. 'goose', 'claude'). Record-first command resolution reads this
     /// before falling back to legacy persona lookup; populated by the store
-    /// migration and at create time, and re-mirrored from the linked
-    /// definition at every snapshot apply (`apply_persona_snapshot`).
+    /// migration and at create time, and re-mirrored from the linked definition
+    /// at every snapshot apply (`apply_persona_snapshot`).
     ///
     /// `None` means "inherit from the linked definition" (the Inherit sentinel
     /// clears it). Serialization then omits the key, so boot-time
     /// `materialize_agent_runtimes` re-inserts a mirror of the definition's
     /// current runtime on the next launch — behaviorally identical, because
     /// every apply site re-mirrors the live definition anyway. A literal
-    /// `"runtime": null` in the store (key present, e.g. hand-edited) is
-    /// honored: materialization skips it and it deserializes to `None`.
+    /// `"runtime": null` (hand-edited) is honored: materialization skips it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Pool of short thematic names for clones of this agent. Absorbed from
@@ -412,11 +408,11 @@ pub struct ManagedAgentRecord {
     /// NIP-AP definition-level behavioral defaults, absorbed from
     /// `AgentDefinition` in WIRE shape (kebab-case string / optional u32),
     /// distinct from the instance-side `respond_to`/`respond_to_allowlist`/
-    /// `parallelism` fields above: these are what a *definition* advertises
-    /// and are copied onto instances at mint time only. Wire shape (not the
+    /// `parallelism` fields above: these are what a *definition* advertises and
+    /// are copied onto instances at mint time only. Wire shape (not the
     /// `RespondTo` enum) so absent-ness and unknown future mode strings
-    /// round-trip byte-identically through the store — parsed/validated
-    /// solely at the mint boundary.
+    /// round-trip byte-identically through the store — parsed/validated solely
+    /// at the mint boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_respond_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -495,25 +491,23 @@ pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,
-    /// The record's harness/runtime id (mirror of `ManagedAgentRecord.runtime`).
-    /// Lets the UI count agents referencing a harness definition (e.g. in the
+    /// The record's harness/runtime id (mirror of `ManagedAgentRecord.runtime`). Lets
+    /// the UI count agents referencing a harness definition (e.g. in the
     /// delete-confirmation flow). `None` = inherit from the linked persona.
     pub runtime: Option<String>,
     pub team_id: Option<String>,
     pub relay_url: String,
     pub acp_command: String,
     pub agent_command: String,
-    /// Mirrors `ManagedAgentRecord.agent_command_override`: `Some` when the user
-    /// has explicitly pinned this instance's harness, `None` when it inherits
-    /// from the persona. Lets the Edit dialog seed "Inherit from persona" vs a
-    /// concrete pin (`agent_command` above is the resolved/effective command).
+    /// Mirrors `ManagedAgentRecord.agent_command_override`: `Some` when the user has
+    /// explicitly pinned this instance's harness, `None` when it inherits from the
+    /// persona (`agent_command` above is the resolved/effective command).
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
-    /// Catalog-derived from the effective harness (not the record's stored
-    /// field), so the UI always shows what a spawn would actually use.
+    /// Catalog-derived from the effective harness (not the stored field), so the UI
+    /// always shows what a spawn would actually use.
     pub mcp_command: String,
-    /// Deprecated passthrough of the stored record value; the harness ignores
-    /// it. Kept for wire compatibility.
+    /// Deprecated passthrough; the harness ignores it. Kept for wire compatibility.
     pub turn_timeout_seconds: u64,
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
@@ -537,8 +531,8 @@ pub struct ManagedAgentSummary {
     /// Distinct from out-of-date: there is no current persona to respawn into.
     /// An orphaned agent also cannot be (re)started — `spawn_agent_child`
     /// refuses it (see `effective_config::resolve_effective_config`'s
-    /// `OrphanedInstance` arm via `require_resolved`) — so the UI
-    /// should surface that it's stuck, not merely stale.
+    /// `OrphanedInstance` arm via `require_resolved`) — so the UI should
+    /// surface that it's stuck, not merely stale.
     pub persona_orphaned: bool,
     /// `true` when the running process's spawn config no longer matches
     /// what a spawn would use today. Derived from `restart_diff` — lit
@@ -563,6 +557,7 @@ pub struct ManagedAgentSummary {
     pub last_error_code: Option<i64>,
     pub start_on_app_launch: bool,
     pub auto_restart_on_config_change: bool,
+    pub resume_on_restart: bool,
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
@@ -820,6 +815,10 @@ fn default_start_on_app_launch() -> bool {
 }
 
 fn default_auto_restart_on_config_change() -> bool {
+    true
+}
+
+fn default_resume_on_restart() -> bool {
     true
 }
 
