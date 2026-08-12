@@ -348,6 +348,7 @@ mod tests {
             "push_gateway_delivery_request_replays",
             "product_feedback",
             "replica_heartbeat",
+            "community_host_aliases",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -561,7 +562,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 28);
+        assert_eq!(migrations.len(), 29);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -946,6 +947,13 @@ mod tests {
             long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
         );
         assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
+
+        assert_eq!(migrations[28].version, 29);
+        let host_aliases = migrations[28].sql.as_str();
+        assert!(host_aliases.contains("CREATE TABLE community_host_aliases"));
+        assert!(host_aliases.contains("REFERENCES communities(id) ON DELETE CASCADE"));
+        assert!(host_aliases.contains("idx_community_host_aliases_lower_host"));
+        assert!(host_aliases.contains("('community_host_aliases'"));
     }
 
     #[test]
