@@ -1,9 +1,16 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test, type Locator } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
+
+const LINK_PREVIEW_IMAGE = readFileSync(
+  new URL("../fixtures/github-pr-5629-og.png", import.meta.url),
+);
+const LINK_PREVIEW_IMAGE_DATA_URL = `data:image/png;base64,${LINK_PREVIEW_IMAGE.toString("base64")}`;
 
 async function waitForReadyComposerSnapshots(
   page: import("@playwright/test").Page,
@@ -208,8 +215,7 @@ test.beforeEach(async ({ page }, testInfo) => {
                       siteName: "GitHub",
                       description:
                         "A polished, stable preview for shared links.",
-                      imageDataUrl:
-                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                      imageDataUrl: LINK_PREVIEW_IMAGE_DATA_URL,
                       imageDomain: "opengraph.githubassets.com",
                       faviconDataUrl:
                         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -1224,6 +1230,12 @@ test("compact link preview image geometry truncates long titles to one line", as
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?geometry=1";
+  await page.route("http://localhost:3000/media/*.png", (route) =>
+    route.fulfill({
+      body: LINK_PREVIEW_IMAGE,
+      contentType: "image/png",
+    }),
+  );
   await page.setViewportSize({ width: 800, height: 700 });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -1235,6 +1247,13 @@ test("compact link preview image geometry truncates long titles to one line", as
   const card = row.locator('[data-link-preview="github-pull-request"]');
   const thumbnail = card.locator("[data-link-preview-thumbnail]");
   const title = card.locator('[data-slot="attachment-title"]');
+  const image = thumbnail.locator("img");
+  await expect(card).toHaveAttribute("data-image-state", "image");
+  await expect(image).toBeVisible();
+  await expect
+    .poll(() => image.evaluate((element) => element.naturalWidth))
+    .toBeGreaterThan(0);
+  await expect(card).toHaveCSS("height", "64px");
   await expect(thumbnail).toHaveCSS("height", "64px");
   await expect(thumbnail).toHaveCSS("width", "104px");
   await expect(title).toHaveText(

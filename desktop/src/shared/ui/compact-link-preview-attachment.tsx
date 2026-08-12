@@ -79,7 +79,7 @@ export function CompactLinkPreviewAttachment({
         className={cn(
           "w-full bg-transparent no-underline shadow-none hover:bg-transparent",
           reserveImage
-            ? "h-21 min-h-21 max-h-21 gap-0 border-0 p-0 hover:border-transparent"
+            ? "gap-0 border-0 px-0 py-0 hover:border-transparent"
             : "rounded-none border-0 border-l-[3px] border-border px-0 py-1 pl-3 hover:border-border",
         )}
         data-image-state={preview.imageState}
@@ -89,7 +89,7 @@ export function CompactLinkPreviewAttachment({
         {reserveImage ? (
           <AttachmentMedia
             aria-hidden={showImage ? undefined : "true"}
-            className="aspect-auto h-16 min-h-16 max-h-16 w-26 min-w-26 max-w-26 rounded-xl bg-muted"
+            className="aspect-auto h-16 w-26 rounded-xl bg-muted"
             data-link-preview-thumbnail=""
             variant="image"
           >
@@ -110,7 +110,7 @@ export function CompactLinkPreviewAttachment({
             )}
           </AttachmentMedia>
         ) : null}
-        <AttachmentContent className={reserveImage ? "px-2 py-2" : undefined}>
+        <AttachmentContent className={reserveImage ? "px-2 py-1.5" : undefined}>
           <a
             className="relative z-20 flex w-fit max-w-full min-w-0 items-center gap-1.5 text-xs font-normal leading-4 text-muted-foreground/70 group-hover/attachment:underline"
             data-link-preview-hostname=""
