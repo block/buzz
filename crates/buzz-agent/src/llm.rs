@@ -1135,7 +1135,7 @@ fn map_stop(s: Option<&str>) -> ProviderStop {
     match s {
         Some("end_turn" | "stop") => ProviderStop::EndTurn,
         Some("tool_use" | "tool_calls") => ProviderStop::ToolUse,
-        Some("max_tokens" | "length") => ProviderStop::MaxTokens,
+        Some("max_tokens" | "length" | "model_context_window_exceeded") => ProviderStop::MaxTokens,
         Some("refusal" | "content_filter") => ProviderStop::Refusal,
         _ => ProviderStop::Other,
     }
@@ -3103,6 +3103,17 @@ mod tests {
         assert_eq!(r.stop, ProviderStop::MaxTokens);
         assert_eq!(r.text, "partial text");
         assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn anthropic_context_window_exhaustion_is_truncation() {
+        let v = serde_json::json!({
+            "stop_reason": "model_context_window_exceeded",
+            "content": [{"type": "text", "text": "partial text"}],
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert_eq!(r.text, "partial text");
     }
 
     #[test]
