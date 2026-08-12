@@ -18,8 +18,10 @@ import {
   describeRange,
   formatCoverageDate,
   formatEstimatedCostUsd,
+  formatModelCacheBreakdown,
   formatTokenCountCompact,
   formatTokenCountExact,
+  hasKnownCacheData,
   isPartialField,
   isUnknownField,
   parseTokenCount,
@@ -218,6 +220,8 @@ function AgentUsageFocusedTotals({
 
   // Display total for the Total tokens stat.
   const displayTotal = deriveDisplayTotal(agent.usage);
+  const { cacheReadTokens, cacheWriteTokens, freshInputTokens } = agent.usage;
+  const showCacheBreakdown = hasKnownCacheData(agent.usage);
 
   return (
     <Card className="space-y-4 p-6" data-testid="agent-usage-focused-totals">
@@ -236,6 +240,34 @@ function AgentUsageFocusedTotals({
         />
       </div>
 
+      {showCacheBreakdown ? (
+        <div
+          className="space-y-2 border-t border-border pt-4"
+          data-testid="agent-usage-focused-cache"
+        >
+          <h3 className="text-sm font-medium text-foreground">
+            Input breakdown
+          </h3>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+            <TokenStat
+              field={cacheReadTokens}
+              label="Cache read"
+              testId="agent-usage-focused-cache-read-value"
+            />
+            <TokenStat
+              field={cacheWriteTokens}
+              label="Cache write"
+              testId="agent-usage-focused-cache-write-value"
+            />
+            <TokenStat
+              field={freshInputTokens}
+              label="Fresh input"
+              testId="agent-usage-focused-fresh-input-value"
+            />
+          </div>
+        </div>
+      ) : null}
+
       {agent.buckets.length > 0 ? (
         <div
           className="space-y-2 border-t border-border pt-4"
@@ -253,35 +285,10 @@ function AgentUsageFocusedTotals({
         >
           <h3 className="text-sm font-medium text-foreground">By model</h3>
           {models.map((model) => (
-            <div
-              className="flex items-center justify-between gap-3 text-sm"
+            <FocusedModelRow
               key={`${model.harness ?? ""}:${model.model ?? "unknown"}`}
-            >
-              <span className="min-w-0 truncate text-muted-foreground">
-                {model.model ?? "Unknown model"}
-                {model.harness !== null ? (
-                  <span
-                    className="ml-1.5 text-xs text-muted-foreground/70"
-                    data-testid="agent-usage-model-harness-label"
-                  >
-                    {model.harness}
-                  </span>
-                ) : null}
-              </span>
-              <span className="shrink-0 font-medium text-foreground">
-                {isUnknownField(model.usage.totalTokens)
-                  ? formatModelIndependentFields(model)
-                  : formatTokenCountExact(
-                      parseTokenCount(model.usage.totalTokens.value) ?? 0n,
-                    )}
-                {isPartialField(model.usage.totalTokens) ||
-                isModelIoPartial(model) ? (
-                  <Badge className="ml-2" variant="outline">
-                    Partial
-                  </Badge>
-                ) : null}
-              </span>
-            </div>
+              model={model}
+            />
           ))}
         </div>
       ) : null}
@@ -318,9 +325,11 @@ function AgentUsageFocusedTotals({
 function TokenStat({
   field,
   label,
+  testId,
 }: {
   field: { value: string | null; incomplete: boolean };
   label: string;
+  testId?: string;
 }) {
   const parsed = parseTokenCount(field.value);
   return (
@@ -328,6 +337,7 @@ function TokenStat({
       display={parsed !== null ? formatTokenCountExact(parsed) : null}
       isPartial={isPartialField(field)}
       label={label}
+      testId={testId}
     />
   );
 }
@@ -398,6 +408,55 @@ function formatCoverageRange(coverage: AgentUsageSeries["coverage"]): string {
     return `reported ${formatCoverageDate(firstReportedAt)}`;
   }
   return `${formatCoverageDate(firstReportedAt)} – ${formatCoverageDate(lastReportedAt)}`;
+}
+
+/**
+ * One "By model" row: the model/harness label with its display total and
+ * Partial badge, plus a muted cache/fresh-input breakdown line beneath it
+ * when any cache subset is known. The breakdown is computed once and omitted
+ * entirely when no subset was reported, so old-harness models read no
+ * differently than before.
+ */
+function FocusedModelRow({ model }: { model: AgentUsageModel }) {
+  const cacheBreakdown = formatModelCacheBreakdown(model);
+  return (
+    <div className="space-y-0.5">
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="min-w-0 truncate text-muted-foreground">
+          {model.model ?? "Unknown model"}
+          {model.harness !== null ? (
+            <span
+              className="ml-1.5 text-xs text-muted-foreground/70"
+              data-testid="agent-usage-model-harness-label"
+            >
+              {model.harness}
+            </span>
+          ) : null}
+        </span>
+        <span className="shrink-0 font-medium text-foreground">
+          {isUnknownField(model.usage.totalTokens)
+            ? formatModelIndependentFields(model)
+            : formatTokenCountExact(
+                parseTokenCount(model.usage.totalTokens.value) ?? 0n,
+              )}
+          {isPartialField(model.usage.totalTokens) ||
+          isModelIoPartial(model) ? (
+            <Badge className="ml-2" variant="outline">
+              Partial
+            </Badge>
+          ) : null}
+        </span>
+      </div>
+      {cacheBreakdown !== null ? (
+        <p
+          className="text-xs text-muted-foreground/70"
+          data-testid="agent-usage-model-cache-breakdown"
+        >
+          {cacheBreakdown}
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 /**

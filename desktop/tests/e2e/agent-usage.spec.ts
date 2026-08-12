@@ -55,6 +55,9 @@ function reportedUsage(
     outputTokens: string | null;
     totalTokens: string | null;
     estimatedCostUsd: number | null;
+    cacheReadTokens: string | null;
+    cacheWriteTokens: string | null;
+    freshInputTokens: string | null;
   }> = {},
 ) {
   return {
@@ -62,9 +65,9 @@ function reportedUsage(
     inputTokens: usageField(overrides.inputTokens ?? null),
     outputTokens: usageField(overrides.outputTokens ?? null),
     totalTokens: usageField(overrides.totalTokens ?? null),
-    cacheReadTokens: usageField(null),
-    cacheWriteTokens: usageField(null),
-    freshInputTokens: usageField(null),
+    cacheReadTokens: usageField(overrides.cacheReadTokens ?? null),
+    cacheWriteTokens: usageField(overrides.cacheWriteTokens ?? null),
+    freshInputTokens: usageField(overrides.freshInputTokens ?? null),
   };
 }
 
@@ -990,6 +993,159 @@ test("focused view renders the unknown-intervals and invalid-reports caveats und
     ).toBeVisible();
     await expect(
       page.getByTestId("agent-usage-focused-unknown-intervals-caveat"),
+    ).toHaveCount(0);
+  });
+});
+
+test("the focused view shows the cache/fresh-input breakdown with exact totals and a per-model line when cache data is present", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openAgentsView(page);
+
+  const agentPubkey = await addGenericAgent(page, "general", "Cache Bot");
+  await seedSeries(
+    page,
+    mockUsageSeries({
+      agents: [
+        mockAgentUsage(agentPubkey, {
+          models: [
+            {
+              harness: "claude-code",
+              hasUnknownUsage: false,
+              model: "claude-opus",
+              reportCount: 1,
+              usage: reportedUsage({
+                totalTokens: "12000",
+                inputTokens: "10000",
+                outputTokens: "2000",
+                cacheReadTokens: "6000",
+                cacheWriteTokens: "1500",
+                freshInputTokens: "2500",
+              }),
+            },
+          ],
+          usage: reportedUsage({
+            inputTokens: "10000",
+            outputTokens: "2000",
+            totalTokens: "12000",
+            cacheReadTokens: "6000",
+            cacheWriteTokens: "1500",
+            freshInputTokens: "2500",
+          }),
+        }),
+      ],
+    }),
+  );
+
+  await page.getByTestId(`agent-usage-row-${agentPubkey}`).click();
+  await expect(page.getByTestId("agent-usage-focused-view")).toBeVisible();
+
+  // Input-breakdown subsection: three exact stats, none rendered as zero.
+  const cache = page.getByTestId("agent-usage-focused-cache");
+  await expect(cache).toBeVisible();
+  await expect(cache).toContainText("Cache read");
+  await expect(
+    page.getByTestId("agent-usage-focused-cache-read-value"),
+  ).toHaveText("6,000");
+  await expect(
+    page.getByTestId("agent-usage-focused-cache-write-value"),
+  ).toHaveText("1,500");
+  await expect(
+    page.getByTestId("agent-usage-focused-fresh-input-value"),
+  ).toHaveText("2,500");
+  // No Partial badge when every shown cache field is a complete value.
+  await expect(cache.getByText("Partial", { exact: true })).toHaveCount(0);
+
+  // Per-model breakdown line carries the same subsets, compact-formatted.
+  const modelCache = page.getByTestId("agent-usage-model-cache-breakdown");
+  await expect(modelCache).toContainText("Cache read 6K");
+  await expect(modelCache).toContainText("Cache write 1.5K");
+  await expect(modelCache).toContainText("Fresh 2.5K");
+});
+
+test("the focused view marks a known-but-incomplete cache field Partial, omits absent subsets, and hides the breakdown entirely when no cache data exists", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openAgentsView(page);
+
+  const agentPubkey = await addGenericAgent(
+    page,
+    "general",
+    "Partial Cache Bot",
+  );
+
+  await test.step("mixed cache completeness → Partial on the lower bound, absent fresh-input shows em-dash", async () => {
+    await seedSeries(
+      page,
+      mockUsageSeries({
+        agents: [
+          mockAgentUsage(agentPubkey, {
+            usage: {
+              estimatedCostUsd: costField(null),
+              inputTokens: usageField("10000"),
+              outputTokens: usageField("2000"),
+              totalTokens: usageField("12000"),
+              // Known but incomplete (Will's mixed-window shape) → Partial.
+              cacheReadTokens: usageField("6000", true),
+              // Absent → must render "—", never 0.
+              cacheWriteTokens: usageField(null),
+              // Fail-closed: fresh input cannot be derived → unknown → "—".
+              freshInputTokens: usageField(null, true),
+            },
+          }),
+        ],
+      }),
+    );
+
+    await page.getByTestId(`agent-usage-row-${agentPubkey}`).click();
+    const cache = page.getByTestId("agent-usage-focused-cache");
+    await expect(cache).toBeVisible();
+    // Cache read: known lower bound → value plus Partial badge.
+    await expect(
+      page.getByTestId("agent-usage-focused-cache-read-value"),
+    ).toHaveText("6,000");
+    await expect(cache.getByText("Partial", { exact: true })).toBeVisible();
+    // Cache write + fresh input are unknown → em-dash, never zero.
+    await expect(
+      page.getByTestId("agent-usage-focused-cache-write-value"),
+    ).toHaveText("—");
+    await expect(
+      page.getByTestId("agent-usage-focused-fresh-input-value"),
+    ).toHaveText("—");
+  });
+
+  await test.step("no cache data at all → the breakdown subsection is absent", async () => {
+    await seedSeries(
+      page,
+      mockUsageSeries({
+        agents: [
+          mockAgentUsage(agentPubkey, {
+            // Old-harness shape: i/o known, every cache subset absent.
+            usage: reportedUsage({
+              inputTokens: "10000",
+              outputTokens: "2000",
+              totalTokens: "12000",
+            }),
+          }),
+        ],
+      }),
+    );
+    await page.evaluate(() =>
+      (
+        window as Window & {
+          __BUZZ_E2E_QUERY_CLIENT__?: {
+            invalidateQueries: () => Promise<void>;
+          };
+        }
+      ).__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries(),
+    );
+    await page.getByTestId(`agent-usage-row-${agentPubkey}`).click();
+    await expect(page.getByTestId("agent-usage-focused-totals")).toBeVisible();
+    await expect(page.getByTestId("agent-usage-focused-cache")).toHaveCount(0);
+    await expect(
+      page.getByTestId("agent-usage-model-cache-breakdown"),
     ).toHaveCount(0);
   });
 });

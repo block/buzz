@@ -13,8 +13,10 @@ import {
   formatCoverageDate,
   formatEstimatedCostUsd,
   formatLocalDate,
+  formatModelCacheBreakdown,
   formatTokenCountCompact,
   formatTokenCountExact,
+  hasKnownCacheData,
   isPartialField,
   isUnknownField,
   MAX_RANGE_DAYS,
@@ -441,6 +443,85 @@ test("isPartialField and isUnknownField classify usage fields correctly", () => 
   );
   assert.equal(isUnknownField(usageField({ value: null })), true);
   assert.equal(isUnknownField(usageField({ value: "0" })), false);
+});
+
+// ── formatModelCacheBreakdown / hasKnownCacheData ────────────────────────────
+
+test("hasKnownCacheData is true iff any cache subset carries a known value", () => {
+  assert.equal(hasKnownCacheData(reportedUsage()), false, "all absent → false");
+  for (const field of [
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "freshInputTokens",
+  ]) {
+    assert.equal(
+      hasKnownCacheData(reportedUsage({ [field]: usageField({ value: "0" }) })),
+      true,
+      `a known ${field} (even zero) → true`,
+    );
+  }
+  // A field that is incomplete but has no value is still unknown, not known.
+  assert.equal(
+    hasKnownCacheData(
+      reportedUsage({
+        cacheReadTokens: usageField({ value: null, incomplete: true }),
+      }),
+    ),
+    false,
+    "incomplete with null value is unknown, not known",
+  );
+});
+
+test("formatModelCacheBreakdown omits absent subsets, never renders them as zero, and marks a known lower bound Partial", () => {
+  const build = (overrides) =>
+    modelUsage("m", null, { usage: reportedUsage(overrides) });
+
+  // No cache data at all → null, so the caller omits the line entirely.
+  assert.equal(formatModelCacheBreakdown(build({})), null);
+
+  // Each known subset appears compact-formatted; absent ones are omitted
+  // rather than shown as "0".
+  assert.equal(
+    formatModelCacheBreakdown(
+      build({
+        cacheReadTokens: usageField({ value: "1500" }),
+        cacheWriteTokens: usageField({ value: "300" }),
+        freshInputTokens: usageField({ value: "1200000" }),
+      }),
+    ),
+    "Cache read 1.5K · Cache write 300 · Fresh 1.2M",
+  );
+
+  // Only cache-read known — the other two are unknown and omitted, not zero.
+  assert.equal(
+    formatModelCacheBreakdown(
+      build({ cacheReadTokens: usageField({ value: "800" }) }),
+    ),
+    "Cache read 800",
+  );
+
+  // An incomplete known field appends a single trailing Partial marker.
+  assert.equal(
+    formatModelCacheBreakdown(
+      build({
+        cacheReadTokens: usageField({ value: "800", incomplete: true }),
+        cacheWriteTokens: usageField({ value: "200" }),
+      }),
+    ),
+    "Cache read 800 · Cache write 200 · Partial",
+  );
+
+  // An incomplete field with NO value carries no known lower bound: it is
+  // omitted and does not trigger Partial on its own.
+  assert.equal(
+    formatModelCacheBreakdown(
+      build({
+        cacheReadTokens: usageField({ value: "800" }),
+        cacheWriteTokens: usageField({ value: null, incomplete: true }),
+      }),
+    ),
+    "Cache read 800",
+  );
 });
 
 // ── sumKnownBucketTotals ──────────────────────────────────────────────────────

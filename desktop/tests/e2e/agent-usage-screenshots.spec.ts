@@ -24,6 +24,9 @@ function reportedUsage(
     outputTokens: string | null;
     totalTokens: string | null;
     estimatedCostUsd: number | null;
+    cacheReadTokens: string | null;
+    cacheWriteTokens: string | null;
+    freshInputTokens: string | null;
   }> = {},
 ) {
   return {
@@ -31,9 +34,9 @@ function reportedUsage(
     inputTokens: usageField(overrides.inputTokens ?? null),
     outputTokens: usageField(overrides.outputTokens ?? null),
     totalTokens: usageField(overrides.totalTokens ?? null),
-    cacheReadTokens: usageField(null),
-    cacheWriteTokens: usageField(null),
-    freshInputTokens: usageField(null),
+    cacheReadTokens: usageField(overrides.cacheReadTokens ?? null),
+    cacheWriteTokens: usageField(overrides.cacheWriteTokens ?? null),
+    freshInputTokens: usageField(overrides.freshInputTokens ?? null),
   };
 }
 
@@ -296,6 +299,9 @@ test.describe("agent usage screenshots", () => {
                   inputTokens: "2100",
                   outputTokens: "700",
                   estimatedCostUsd: 0.35,
+                  cacheReadTokens: "1400",
+                  cacheWriteTokens: "300",
+                  freshInputTokens: "400",
                 }),
               },
               {
@@ -308,6 +314,9 @@ test.describe("agent usage screenshots", () => {
                   inputTokens: "600",
                   outputTokens: "200",
                   estimatedCostUsd: 0.04,
+                  cacheReadTokens: "350",
+                  cacheWriteTokens: "50",
+                  freshInputTokens: "200",
                 }),
               },
             ],
@@ -316,6 +325,9 @@ test.describe("agent usage screenshots", () => {
               inputTokens: "2700",
               outputTokens: "900",
               totalTokens: "3600",
+              cacheReadTokens: "1750",
+              cacheWriteTokens: "350",
+              freshInputTokens: "600",
             }),
           }),
         ],

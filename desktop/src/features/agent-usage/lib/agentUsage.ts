@@ -535,6 +535,57 @@ export function isUnknownField(field: UsageField | CostField): boolean {
 }
 
 /**
+ * Compact per-model input breakdown for the focused view: the cache-read,
+ * cache-write, and fresh-input subsets of input, each shown only when known
+ * (`value !== null`) and never as zero. Returns `null` when no subset is
+ * known at all, so the caller omits the line entirely rather than printing
+ * three unknowns. A trailing ` · Partial` marks that at least one shown field
+ * is a known-but-incomplete lower bound — matching the row's Partial badge and
+ * {@link deriveUsageIngressTrailing}'s text convention. Absent (`null`) fields
+ * are simply omitted, never marked Partial (they carry no known lower bound).
+ */
+export function formatModelCacheBreakdown(
+  model: AgentUsageModel,
+): string | null {
+  const { cacheReadTokens, cacheWriteTokens, freshInputTokens } = model.usage;
+  const parts: string[] = [];
+  const push = (label: string, field: UsageField) => {
+    const parsed = parseTokenCount(field.value);
+    if (parsed !== null) {
+      parts.push(`${label} ${formatTokenCountCompact(parsed)}`);
+    }
+  };
+  push("Cache read", cacheReadTokens);
+  push("Cache write", cacheWriteTokens);
+  push("Fresh", freshInputTokens);
+  if (parts.length === 0) return null;
+  const partial =
+    isPartialField(cacheReadTokens) ||
+    isPartialField(cacheWriteTokens) ||
+    isPartialField(freshInputTokens);
+  return partial ? `${parts.join(" · ")} · Partial` : parts.join(" · ");
+}
+
+/**
+ * True when a usage scope has any known cache-read, cache-write, or
+ * fresh-input value — the gate for showing the focused view's input-breakdown
+ * subsection. When every cache subset is unknown (old-harness data that never
+ * reported cache tokens), the subsection is omitted rather than rendering a
+ * row of "—", which keeps absence honest without visual noise.
+ */
+export function hasKnownCacheData(usage: {
+  cacheReadTokens: UsageField;
+  cacheWriteTokens: UsageField;
+  freshInputTokens: UsageField;
+}): boolean {
+  return (
+    !isUnknownField(usage.cacheReadTokens) ||
+    !isUnknownField(usage.cacheWriteTokens) ||
+    !isUnknownField(usage.freshInputTokens)
+  );
+}
+
+/**
  * Truthful trailing summary for the profile Info-tab Usage ingress row
  * (plan:328): the viewer's own agent's 7-day known total, `Partial` when
  * incomplete, `Input/output reported` when only those fields are known,
