@@ -1178,6 +1178,12 @@ fn validate_agent_activity_delivery_envelope(
     Ok(event_channel_id)
 }
 
+fn agent_activity_publish_result<E>(published: Result<i64, E>) -> Result<(), &'static str> {
+    published
+        .map(|_| ())
+        .map_err(|_| "error: temporary agent activity fan-out failure")
+}
+
 /// Re-authorize a kind-24201 producer at the final delivery seam shared by
 /// relay-local and Redis fan-out. All lookups are fresh and fail closed.
 async fn authorize_agent_activity_delivery(
@@ -1328,11 +1334,11 @@ async fn handle_agent_activity_event(
     }
 
     state.mark_local_event(community_id, &event.id);
-    if let Err(error) = state
+    let published = state
         .pubsub
         .publish_event(&conn.tenant, EventTopic::Channel(channel_id), &event)
-        .await
-    {
+        .await;
+    if let Err(error) = &published {
         state
             .local_event_ids
             .invalidate(&(community_id, event.id.to_bytes()));
@@ -1342,6 +1348,10 @@ async fn handle_agent_activity_event(
             %channel_id,
             "agent activity publish failed: {error}"
         );
+    }
+    if let Err(message) = agent_activity_publish_result(published) {
+        conn.send(RelayMessage::ok(event_id_hex, false, message));
+        return;
     }
 
     let stored = StoredEvent::new(event, Some(channel_id));
@@ -1870,6 +1880,15 @@ mod tests {
             now
         )
         .is_err());
+    }
+
+    #[test]
+    fn agent_activity_redis_failure_is_negative_and_retryable() {
+        assert_eq!(
+            super::agent_activity_publish_result::<()>(Err(())),
+            Err("error: temporary agent activity fan-out failure")
+        );
+        assert_eq!(super::agent_activity_publish_result::<()>(Ok(1)), Ok(()));
     }
 
     #[test]

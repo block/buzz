@@ -2793,7 +2793,8 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected — triggering reconnect");
                         return false;
                     }
-                    let retryable_activity = !accepted && message.starts_with("rate-limited:");
+                    let retryable_activity =
+                        !accepted && shared_activity_negative_ok_is_retryable(&message);
                     let was_activity =
                         state.acknowledge_activity_frame(&event_id, accepted, retryable_activity);
                     if was_activity && retryable_activity {
@@ -4405,6 +4406,11 @@ struct OkResponse {
     event_id: String,
     accepted: bool,
     message: String,
+}
+
+fn shared_activity_negative_ok_is_retryable(message: &str) -> bool {
+    message.starts_with("rate-limited:")
+        || message == "error: temporary agent activity fan-out failure"
 }
 
 /// Wait for the first `OK` message from the relay (used after sending AUTH).
@@ -6853,6 +6859,22 @@ mod tests {
         assert!(state.activity_in_flight.is_empty());
         assert_eq!(state.activity_rejected, 2);
         assert_eq!(state.activity_retried, 1);
+    }
+
+    #[test]
+    fn temporary_fanout_negative_ok_is_retryable() {
+        assert!(shared_activity_negative_ok_is_retryable(
+            "error: temporary agent activity fan-out failure"
+        ));
+        assert!(shared_activity_negative_ok_is_retryable(
+            "rate-limited: agent activity rate exceeded"
+        ));
+        assert!(!shared_activity_negative_ok_is_retryable(
+            "restricted: not a channel member"
+        ));
+        assert!(!shared_activity_negative_ok_is_retryable(
+            "invalid: malformed activity"
+        ));
     }
 
     #[test]
