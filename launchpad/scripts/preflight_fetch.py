@@ -12,8 +12,8 @@ answers from recorded fixtures, so the whole surface — including each way a fe
 can fail — is exercisable with no network. Hardcoding ``subprocess.run(["gh",
 ...])` at each call site would make that impossible without a rewrite.
 
-Seven reads, five of them required
-==================================
+Eight reads, five of them required
+=================================
 
 ============  ======================================================  =========
 name          call                                                    kind
@@ -25,6 +25,7 @@ checks        GraphQL ``statusCheckRollup`` with ``isRequired``        required
 tree          ``GET /repos/{o}/{r}/git/trees/{head}?recursive=1``      required
 branch_rules  ``GET /repos/{o}/{r}/rules/branches/{base}``             skip-only
 org_rulesets  ``GET /orgs/{o}/rulesets``                              skip-only
+closing_refs  GraphQL ``closingIssuesReferences``                      skip-only
 ============  ======================================================  =========
 
 ``compare`` is taken **by SHA**, ``base.sha...head.sha``, never by base branch
@@ -175,6 +176,16 @@ def _read(name: str, endpoint: str, argv: list[str], runner: Runner) -> Read:
     return Read(name, data=data, endpoint=endpoint)
 
 
+#: GitHub's own answer to what a PR closes. The only reliable one: a pattern over
+#: the body reports a reference written inside code, misses second and later
+#: references, and says a PR closes an issue when its base is not the default
+#: branch and merging it will close nothing.
+CLOSING_QUERY = """
+query($owner:String!,$repo:String!,$pr:Int!){
+  repository(owner:$owner,name:$repo){
+    pullRequest(number:$pr){closingIssuesReferences(first:50){nodes{number}}}}}
+"""
+
 CHECKS_QUERY = """
 query($owner:String!,$repo:String!,$pr:Int!){
   repository(owner:$owner,name:$repo){
@@ -216,6 +227,19 @@ def fetch_all(number: int, repo: str, runner: Runner) -> dict[str, Read]:
             "-f", f"repo={name}",
             "-F", f"pr={number}",
             "-f", f"query={CHECKS_QUERY}",
+        ],
+        runner,
+    )
+
+    reads["closing_refs"] = _read(
+        "closing_refs",
+        "graphql:closingIssuesReferences",
+        [
+            BINARY, "api", "graphql",
+            "-f", f"owner={owner}",
+            "-f", f"repo={name}",
+            "-F", f"pr={number}",
+            "-f", f"query={CLOSING_QUERY}",
         ],
         runner,
     )

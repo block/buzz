@@ -14,7 +14,8 @@ to the record means adding it to this list in the same commit.**
 
 ==================  ========================================================
 ``pr``              number, title, body, labels, base_ref, head_sha
-``closing_issue``   present, keyword, issue_number
+``closing_issue``   present, keyword, issue_numbers, source, text_disagrees,
+                    text_issue_numbers
 ``diff``            merge_base_sha, head_sha, files[path, added, removed, status]
 ``checks``          [name, workflow, status, conclusion, required, details_url]
 ``required_gate``   configured, source_endpoint
@@ -77,6 +78,10 @@ criterion this script has.
     repo-level rules for the base branch. Readable and empty is a *fact*: it
     means no gate is configured, reported as ``configured: false`` naming the
     endpoint that said so, never as a silent zero
+``closing_refs``
+    GitHub's own answer to what the PR closes. Unreadable yields
+    ``closing_issue.present: None`` — unknown, never False, because "we could not
+    ask" and "it closes nothing" differ on whether the board updates on merge
 *a path with no ancestor rules file at all*
     a real answer, not a failure
 
@@ -133,7 +138,7 @@ SKIP_REASONS: dict[str, str] = {
 REQUIRED_INPUTS = ("pr", "meta", "compare", "checks", "tree")
 
 #: Inputs whose absence is a reportable state, not a failure.
-SKIP_ONLY_INPUTS = ("branch_rules", "org_rulesets")
+SKIP_ONLY_INPUTS = ("branch_rules", "org_rulesets", "closing_refs")
 
 #: The record's top-level fields, in order. STEP 2 of the plan fixes this list.
 RECORD_FIELDS = (
@@ -260,13 +265,34 @@ def build_pr(pr: Read, meta: Read, skips: Skips) -> dict[str, Any] | None:
     }
 
 
-def build_closing_issue(meta: Read, skips: Skips) -> dict[str, Any] | None:
-    """Whether the body carries a closing keyword GitHub would act on.
+def build_closing_issue(meta: Read, closing_refs: Read, skips: Skips) -> dict[str, Any] | None:
+    """Whether merging this PR would close an issue — asked of GitHub, not of a regex.
 
-    HTML comments are stripped **first**, in the PR-body check's order: an
-    unfilled ``<!-- Fixes #1234 -->`` template placeholder closes nothing, and
-    reporting it as present would tell a reviewer the board updates on merge when
-    it will not.
+    **GitHub decides.** ``closingIssuesReferences`` is the only reliable answer,
+    and a pattern over the body disagrees with it in both directions on real pull
+    requests in this repository:
+
+    - PR 86's body writes one ``Closes #79``; GitHub reports #79 **and** #91, so a
+      first-match regex under-reports what the merge will do.
+    - PR 92's body writes a visible ``Closes #n`` and GitHub reports **nothing**,
+      because the PR's base was not the default branch — merging it would close
+      no issue at all.
+    - A reference written inside code is ignored by GitHub and matched by a
+      regex. CommonMark has more code forms than a pattern enumerates; four of
+      them defeated the launchpad PR-body check (launchpad-26/buzz#125).
+
+    The body is still read, for two things a reference list cannot give: **which
+    keyword** the author wrote, and whether the text and GitHub **disagree**. A
+    disagreement is reportable signal — it is exactly the shape of #125 — so it
+    is recorded rather than resolved silently.
+
+    HTML comments are stripped before the text is scanned, in the PR-body check's
+    order, so an unfilled ``<!-- Fixes #1234 -->`` placeholder is not read as a
+    reference by the text half either.
+
+    An unreadable ``closingIssuesReferences`` yields ``present: None`` — unknown.
+    Never False. "We could not ask" and "it closes nothing" are different facts,
+    and only one of them means the board will not update.
     """
     if not meta.ok:
         skips.add("closing_issue", meta)
@@ -282,16 +308,51 @@ def build_closing_issue(meta: Read, skips: Skips) -> dict[str, Any] | None:
         return None
 
     visible = HTML_COMMENT.sub("", body)
-    match = CLOSING_KEYWORD.search(visible)
-    if match is None:
-        # A body with no keyword is a readable, complete answer: present false.
-        # Absence of a keyword is a finding for a later stage, not a failed read.
-        return {"present": False, "keyword": None, "issue_number": None}
-    return {
-        "present": True,
-        "keyword": match.group(1),
-        "issue_number": int(match.group(2)),
+    matches = list(CLOSING_KEYWORD.finditer(visible))
+    keyword = matches[0].group(1) if matches else None
+    text_numbers = sorted({int(m.group(2)) for m in matches})
+
+    section: dict[str, Any] = {
+        "present": None,
+        "keyword": keyword,
+        "issue_numbers": None,
+        "source": None,
+        "text_disagrees": None,
+        "text_issue_numbers": text_numbers,
     }
+
+    if not closing_refs.ok:
+        skips.add("closing_issue.closing_refs", closing_refs)
+        section["source"] = "unresolved: GitHub's own answer could not be read"
+        return section
+
+    nodes = _get(
+        closing_refs.data,
+        "data", "repository", "pullRequest", "closingIssuesReferences", "nodes",
+    )
+    if not isinstance(nodes, list):
+        skips.add(
+            "closing_issue.closing_refs",
+            Read(
+                "closing_refs",
+                skip=MALFORMED,
+                detail="closingIssuesReferences.nodes is not a list",
+                endpoint=closing_refs.endpoint,
+            ),
+        )
+        section["source"] = "unresolved: GitHub's own answer could not be read"
+        return section
+
+    numbers = sorted({n["number"] for n in nodes if isinstance(n, Mapping) and "number" in n})
+    section.update(
+        {
+            "present": bool(numbers),
+            "issue_numbers": numbers,
+            "source": "graphql:closingIssuesReferences",
+            "text_disagrees": set(numbers) != set(text_numbers),
+        }
+    )
+    return section
 
 
 def build_diff(compare: Read, pr_section: Mapping[str, Any] | None, skips: Skips) -> dict[str, Any] | None:
@@ -561,7 +622,11 @@ def build_record(reads: Mapping[str, Read]) -> dict[str, Any]:
 
     skips = Skips()
     pr_section = build_pr(reads["pr"], reads["meta"], skips)
-    closing = build_closing_issue(reads["meta"], skips)
+    closing = build_closing_issue(
+        reads["meta"],
+        reads.get("closing_refs", Read("closing_refs", skip=UNREACHABLE, detail="not attempted")),
+        skips,
+    )
     diff_section = build_diff(reads["compare"], pr_section, skips)
     checks_section = build_checks(reads["checks"], skips)
     gate = build_required_gate(
@@ -597,7 +662,7 @@ def is_fatal(skip_entry: Mapping[str, str]) -> bool:
     field cannot become non-fatal by accident of its name.
     """
     field_name = skip_entry["field"]
-    if field_name == "required_gate.org_rulesets":
+    if field_name in ("required_gate.org_rulesets", "closing_issue.closing_refs"):
         return False
     if field_name.startswith("nearest_rules[") and skip_entry["reason"] == EMPTY:
         return False

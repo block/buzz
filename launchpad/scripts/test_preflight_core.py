@@ -40,6 +40,7 @@ ENDPOINTS = {
     "tree": "GET /repos/{o}/{r}/git/trees/{head}?recursive=1",
     "branch_rules": "GET /repos/{o}/{r}/rules/branches/{base}",
     "org_rulesets": "GET /orgs/{o}/rulesets",
+    "closing_refs": "graphql:closingIssuesReferences",
 }
 
 #: PR 86, everything readable. The baseline every degradation is measured against.
@@ -106,6 +107,7 @@ class FakeGh:
         "compare": "pr86-compare.json",
         "tree": "pr86-tree.json",
         "branch_rules": "rules-branches-launchpad.json",
+        "closing_refs": "pr86-closing-refs.json",
     }
 
     @staticmethod
@@ -114,7 +116,12 @@ class FakeGh:
             return "meta"
         target = argv[2] if len(argv) > 2 else ""
         if target == "graphql":
-            return "checks"
+            query = " ".join(argv)
+            if "closingIssuesReferences" in query:
+                return "closing_refs"
+            if "statusCheckRollup" in query:
+                return "checks"
+            raise AssertionError(f"unrecognised graphql query: {query[:120]}")
         if "/compare/" in target:
             return "compare"
         if "/git/trees/" in target:
@@ -304,6 +311,104 @@ class RecordShape(unittest.TestCase):
     def test_an_unenumerated_skip_reason_is_refused(self):
         with self.assertRaises(ValueError):
             core.Read("pr", skip="probably-fine")
+
+
+class ClosingIssue(unittest.TestCase):
+    """STEP 4 — GitHub decides what a PR closes; the text supplies the keyword.
+
+    Every control here is driven by a recorded response, and each of the three
+    closing-refs fixtures exists because the text and GitHub disagree in a
+    different direction.
+    """
+
+    def closing(self, meta: str, refs: str | None) -> dict:
+        overrides = {"meta": core.Read("meta", data=fixture(meta), endpoint=ENDPOINTS["meta"])}
+        if refs is not None:
+            overrides["closing_refs"] = core.Read(
+                "closing_refs", data=fixture(refs), endpoint="graphql:closingIssuesReferences"
+            )
+        return core.build_record(reads(**overrides))["closing_issue"]
+
+    def test_a_visible_keyword_is_reported_with_the_keyword_used(self):
+        section = self.closing("pr86-meta.json", "pr86-closing-refs.json")
+        self.assertTrue(section["present"])
+        self.assertEqual(section["keyword"], "Closes")
+        self.assertEqual(section["source"], "graphql:closingIssuesReferences")
+
+    def test_every_reference_is_collected_not_only_the_first(self):
+        """PR 86 closes two issues, and the plan's `re.search` would report one.
+
+        This is the control that pins the implementation off first-match: it
+        reproduces what a single search returns and requires the record to hold
+        more than that.
+        """
+        section = self.closing("pr86-meta.json", "pr86-closing-refs.json")
+        self.assertEqual(section["issue_numbers"], [79, 91], "GitHub's answer")
+        self.assertEqual(section["text_issue_numbers"], [79, 91], "and every keyword in the body")
+
+        body = core.HTML_COMMENT.sub("", fixture("pr86-meta.json")["body"])
+        first_only = [int(core.CLOSING_KEYWORD.search(body).group(2))]
+        self.assertEqual(first_only, [79])
+        self.assertNotEqual(
+            section["text_issue_numbers"],
+            first_only,
+            "a first-match regex reports one of the two issues this PR closes",
+        )
+        self.assertFalse(section["text_disagrees"], "on PR 86 the body and GitHub do agree")
+
+    def test_a_keyword_that_closes_nothing_is_not_reported_as_present(self):
+        """PR 92's base was not the default branch, so merging closes no issue."""
+        section = self.closing("pr92-meta.json", "pr92-closing-refs.json")
+        self.assertFalse(section["present"])
+        self.assertEqual(section["issue_numbers"], [])
+        self.assertTrue(section["text_issue_numbers"], "the body really does carry a keyword")
+        self.assertTrue(section["text_disagrees"])
+
+    def test_a_keyword_only_inside_an_html_comment_is_not_present(self):
+        """An unfilled <!-- Fixes #1234 --> placeholder closes nothing."""
+        section = self.closing("upstream5695-meta.json", "upstream5695-closing-refs.json")
+        self.assertFalse(section["present"])
+        self.assertEqual(section["issue_numbers"], [])
+        self.assertEqual(
+            section["text_issue_numbers"], [], "comments are stripped before the text is scanned"
+        )
+        self.assertFalse(section["text_disagrees"], "both halves agree it closes nothing")
+        self.assertIsNone(section["keyword"])
+
+    def test_the_commented_out_keyword_is_really_in_the_fixture(self):
+        """Otherwise the control above passes for the wrong reason."""
+        body = fixture("upstream5695-meta.json")["body"]
+        self.assertRegex(body, r"(?is)<!--[^>]*fixes\s+#\d+")
+        self.assertNotRegex(
+            core.HTML_COMMENT.sub("", body),
+            r"(?i)\b(closes|fixes|resolves)\s+#\d+",
+            "outside its comments this body has no keyword at all",
+        )
+
+    def test_an_unreadable_github_answer_is_unknown_and_never_false(self):
+        """"We could not ask" must not read as "it closes nothing"."""
+        section = core.build_record(
+            reads(closing_refs=unreadable("closing_refs", core.FORBIDDEN))
+        )["closing_issue"]
+        self.assertIsNone(section["present"], "unknown, not False")
+        self.assertIsNone(section["issue_numbers"])
+        self.assertIn("unresolved", section["source"])
+        self.assertEqual(section["keyword"], "Closes", "the text half still reports what it saw")
+
+    def test_an_unreadable_github_answer_records_a_skip_but_exits_zero(self):
+        code, out, err = run_cli(["86"], FakeGh(fail={"closing_refs": FORBIDDEN_RESULT}))
+        self.assertEqual(code, 0, err)
+        record = json.loads(out)
+        skips = {s["field"]: s["reason"] for s in record["skips"]}
+        self.assertEqual(skips.get("closing_issue.closing_refs"), core.FORBIDDEN)
+        self.assertIsNone(record["closing_issue"]["present"])
+
+    def test_a_malformed_github_answer_is_unknown_too(self):
+        section = core.build_record(
+            reads(closing_refs=core.Read("closing_refs", data={"data": {"repository": None}}))
+        )["closing_issue"]
+        self.assertIsNone(section["present"])
+        self.assertIn("unresolved", section["source"])
 
 
 class CliShell(unittest.TestCase):
