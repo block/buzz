@@ -171,6 +171,11 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+12. **CLI readiness uses the child PATH.** Login probes must resolve the CLI
+   from the same augmented PATH used by the managed-agent child. The desktop's
+   ambient PATH may contain an older wrapper that resolves a different package
+   manager prefix and falsely reports that an otherwise healthy CLI is logged
+   out.
 
 ## The tests that enforce this
 

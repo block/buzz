@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::managed_agents::runtime::build_augmented_path;
 
@@ -19,6 +19,42 @@ pub(crate) fn augmented_path() -> Option<String> {
         crate::managed_agents::login_shell_path(),
         nvm_bin,
     )
+}
+
+/// Resolve a login-probe command with the same PATH precedence used by the
+/// managed-agent child process.
+///
+/// The desktop process may have a stale shim earlier on its ambient PATH than
+/// the actual CLI selected by [`augmented_path`]. Probing that shim can report
+/// a false logged-out state even though the spawned harness would use a healthy
+/// authenticated CLI. Prefer the child PATH on Unix, then fall back to the
+/// normal command resolver for explicit paths and platform-specific shims.
+pub(crate) fn resolve_probe_command(
+    command: &str,
+    augmented_path: Option<&str>,
+) -> Option<PathBuf> {
+    #[cfg(not(windows))]
+    if !command.contains(std::path::MAIN_SEPARATOR) {
+        if let Some(path) = augmented_path {
+            for directory in std::env::split_paths(path) {
+                let candidate = directory.join(command);
+                if is_executable_file(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    crate::managed_agents::resolve_command(command)
+}
+
+#[cfg(not(windows))]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// Outcome of a CLI login-status probe.
@@ -161,6 +197,31 @@ mod tests {
         assert!(
             marker_path.exists(),
             "the fake node from the injected PATH should have run"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_probe_command_prefers_augmented_child_path() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let preferred_dir = temp.path().join("preferred-bin");
+        fs::create_dir_all(&preferred_dir).expect("preferred dir");
+        let preferred = preferred_dir.join("fake-codex");
+        fs::write(&preferred, "#!/bin/sh\nexit 0\n").expect("write preferred command");
+        fs::set_permissions(&preferred, fs::Permissions::from_mode(0o755))
+            .expect("chmod preferred command");
+        let augmented = std::env::join_paths([preferred_dir.as_path()])
+            .expect("join augmented PATH")
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(
+            super::resolve_probe_command("fake-codex", Some(&augmented)),
+            Some(preferred),
+            "readiness must resolve the same command selected by the child PATH"
         );
     }
 
