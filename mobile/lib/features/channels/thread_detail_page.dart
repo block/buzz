@@ -23,6 +23,7 @@ import 'compose_bar.dart';
 import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
+import 'jump_to_latest_button.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
@@ -138,9 +139,20 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
     }
 
+    // Pure-geometry "is the newest reply on screen" signal. Distinct from
+    // [followsThreadTail], which means "auto-scroll is armed" and is set true
+    // on the first frame from the short route snapshot — so it never reports
+    // scrolled-away on a long thread and cannot drive the jump-to-latest pill.
+    final isAtThreadTail = useState(true);
+
     useEffect(() {
       void onPositionsChanged() {
-        if (threadTailIsVisible()) followsThreadTail.value = true;
+        // An empty position set means the list has not laid out yet; treating
+        // that as "scrolled away" would flash the pill on open.
+        if (itemPositionsListener.itemPositions.value.isEmpty) return;
+        final atTail = threadTailIsVisible();
+        if (atTail) followsThreadTail.value = true;
+        isAtThreadTail.value = atTail;
       }
 
       itemPositionsListener.itemPositions.addListener(onPositionsChanged);
@@ -148,6 +160,20 @@ class ThreadDetailPage extends HookConsumerWidget {
         onPositionsChanged,
       );
     }, [itemPositionsListener, replies.length]);
+
+    Future<void> scrollToThreadLatest() async {
+      if (!itemScrollController.isAttached) return;
+      final lastIndex = replies.isEmpty
+          ? headIndex
+          : indexForReply(replies.length - 1);
+      followsThreadTail.value = true;
+      pendingTailAlignment.value = null;
+      await itemScrollController.scrollTo(
+        index: lastIndex,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+    }
 
     useEffect(() {
       final messageId = initialMessageId;
@@ -548,6 +574,19 @@ class ThreadDetailPage extends HookConsumerWidget {
                           ),
                     ),
                   ],
+                ),
+              ),
+            ),
+          if (!isAtThreadTail.value)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: composerDockHeight.value + Grid.xs,
+              child: Center(
+                child: JumpToLatestButton(
+                  key: const ValueKey('thread-jump-to-latest'),
+                  surfaceKey: const ValueKey('thread-jump-to-latest-surface'),
+                  onPressed: scrollToThreadLatest,
                 ),
               ),
             ),
