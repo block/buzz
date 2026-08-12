@@ -93,12 +93,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     RelayRateLimitGate? rateLimitGate,
     RelayTimerFactory retryTimerFactory = Timer.new,
     Future<void> Function(Duration) replayDelay = Future.delayed,
+    Duration resumeProbeTimeout = const Duration(seconds: 3),
   }) : _httpClient = httpClient,
        _socketFactory = socketFactory,
        _now = now ?? DateTime.now,
        _rateLimitGate = rateLimitGate ?? RelayRateLimitGate(),
        _retryTimerFactory = retryTimerFactory,
-       _replayDelay = replayDelay;
+       _replayDelay = replayDelay,
+       _resumeProbeTimeout = resumeProbeTimeout;
 
   final http.Client? _httpClient;
   final RelaySocketFactory _socketFactory;
@@ -106,6 +108,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final RelayRateLimitGate _rateLimitGate;
   final RelayTimerFactory _retryTimerFactory;
   final Future<void> Function(Duration) _replayDelay;
+  final Duration _resumeProbeTimeout;
 
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
@@ -397,6 +400,25 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     await _connect(config);
   }
 
+  /// Liveness probe after resume: a minimal REQ that resolves on EOSE. On
+  /// timeout or error the socket is presumed dead and we reconnect (live
+  /// subscriptions replay with the usual since-skew).
+  Future<void> _verifyConnectionAfterResume(int connectionGeneration) async {
+    try {
+      await fetchHistory(
+        const NostrFilter(kinds: [39000], limit: 1),
+        timeout: _resumeProbeTimeout,
+      );
+    } catch (_) {
+      if (_disposed || _paused) return;
+      if (connectionGeneration != _connectionGeneration || !_socketConnected) {
+        return;
+      }
+      if (state.status != SessionStatus.connected) return;
+      await reconnect();
+    }
+  }
+
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundedAt = _now();
@@ -427,6 +449,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         _now().difference(backgroundedAt) >= _backgroundGraceDuration;
     if (!backgroundedLongEnoughToRequireReconnect &&
         state.status == SessionStatus.connected) {
+      // Even after a short background stint the transport can be half-open:
+      // iOS may drop the network on screen lock or rebind NAT on a
+      // Wi-Fi/cellular switch without a close frame ever reaching us. If we
+      // trust the flag here, the session is a zombie — live subscriptions
+      // stay silent until the user force-kills the app. Verify with a cheap
+      // REQ/EOSE round-trip instead; any failure forces a reconnect, which
+      // replays live subscriptions.
+      unawaited(_verifyConnectionAfterResume(_connectionGeneration));
       return;
     }
 
