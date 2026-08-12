@@ -11,8 +11,8 @@ import {
 
 /**
  * First-run-per-version splash: shows a short changelog grouped by version
- * the first time this install launches a build whose `DEV_BUILD_LABEL` it
- * hasn't recorded as seen yet, then stays dismissed for that label. Fully
+ * the first time this install launches a build whose real app version it
+ * hasn't recorded as seen yet, then stays dismissed for that version. Fully
  * self-contained — mount once near the top of the authenticated app shell,
  * no props required.
  *
@@ -44,7 +44,7 @@ export function WhatsNewModal() {
           {entries.map((entry) => (
             <div key={entry.version} className="flex flex-col gap-1.5">
               <p className="text-sm font-medium text-muted-foreground">
-                {entry.version}
+                0.5.5-{entry.version}
               </p>
               <ul className="list-disc space-y-1 pl-5 text-sm">
                 {entry.bullets.map((bullet) => (

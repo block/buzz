@@ -1,6 +1,6 @@
 /**
- * Local, per-device record of the last `DEV_BUILD_LABEL` value the current
- * install has shown the "What's new" splash for. Deliberately plain
+ * Local, per-device record of the last app version the current install has
+ * shown the "What's new" splash for. Deliberately plain
  * `window.localStorage` (matching the pattern used elsewhere in this app,
  * e.g. `features/sidebar/lib/channelSortPreference.ts` and
  * `features/onboarding/welcome.ts`) rather than a new Tauri store or SQLite

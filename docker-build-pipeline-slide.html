@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Buzz Relay — Docker Multi-Stage Build</title>
+<style>
+  :root {
+    --navy: #1E2761;
+    --ice: #CADCFC;
+    --ice-deep: #A9C4EE;
+    --white: #FFFFFF;
+    --ink: #1B1F2A;
+    --muted: #5B6472;
+    --rule: #E3E8F2;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #DDE3EE;
+    font-family: Arial, Helvetica, sans-serif;
+    color: var(--ink);
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  .slide {
+    width: 1280px;
+    height: 720px;
+    background: var(--white);
+    position: relative;
+    padding: 44px 56px 34px 56px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 6px 28px rgba(20, 30, 60, 0.18);
+  }
+
+  /* Header */
+  .kicker {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--navy);
+    margin-bottom: 8px;
+  }
+  h1 {
+    font-size: 30px;
+    font-weight: 700;
+    color: var(--navy);
+    line-height: 1.15;
+    max-width: 980px;
+  }
+  .subtitle {
+    margin-top: 8px;
+    font-size: 14px;
+    color: var(--muted);
+    max-width: 980px;
+    line-height: 1.45;
+  }
+
+  /* Pipeline */
+  .pipeline {
+    margin-top: 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .row-label {
+    width: 108px;
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .track {
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    flex: 1;
+  }
+  .box {
+    background: var(--ice);
+    border-radius: 8px;
+    padding: 12px 14px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-height: 62px;
+  }
+  .box .name {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--navy);
+    font-family: 'Courier New', monospace;
+  }
+  .box .desc {
+    font-size: 11.5px;
+    color: #2B3660;
+    margin-top: 3px;
+    line-height: 1.3;
+  }
+  .box.wide { flex: 1; }
+  .box.dark {
+    background: var(--navy);
+  }
+  .box.dark .name { color: var(--white); }
+  .box.dark .desc { color: var(--ice); }
+  .arrow {
+    flex-shrink: 0;
+    width: 20px;
+    text-align: center;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--navy);
+    align-self: center;
+  }
+  .spacer-box {
+    flex: 1;
+    visibility: hidden;
+  }
+
+  .merge-note {
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    margin: 2px 0;
+    font-style: italic;
+  }
+
+  /* Insights */
+  .insights {
+    margin-top: auto;
+    padding-top: 18px;
+    border-top: 1px solid var(--rule);
+    display: flex;
+    gap: 28px;
+  }
+  .insight {
+    flex: 1;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .insight .num {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--navy);
+    color: var(--white);
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .insight .headline {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--navy);
+    line-height: 1.3;
+  }
+  .insight .body {
+    font-size: 11.5px;
+    color: var(--muted);
+    line-height: 1.4;
+    margin-top: 3px;
+  }
+
+  .footer {
+    margin-top: 16px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 10.5px;
+    color: #8A93A3;
+  }
+</style>
+</head>
+<body>
+  <div class="slide">
+    <div class="kicker">Buzz Relay — Build Architecture</div>
+    <h1>One Dockerfile assembles two independent build tracks into a single runtime image</h1>
+    <div class="subtitle">
+      Rust binaries (buzz-relay, buzz-admin, buzz-pair-relay) and the web bundle (pnpm + vite) build in parallel, then converge into a debian-slim runtime published as ghcr.io/block/buzz.
+    </div>
+
+    <div class="pipeline">
+      <div class="row">
+        <div class="row-label">Rust track</div>
+        <div class="track">
+          <div class="box">
+            <div class="name">chef</div>
+            <div class="desc">rust:1.95 base + cargo-chef install</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="box">
+            <div class="name">planner</div>
+            <div class="desc">Computes recipe.json from manifests only</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="box">
+            <div class="name">builder</div>
+            <div class="desc">Cooks cached deps, builds 3 binaries</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="box">
+            <div class="name">stripped&#8209;binaries</div>
+            <div class="desc">Strips relay / admin / pair&#8209;relay</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-label">Web track<br><span style="font-weight:400; text-transform:none; font-size:10px;">(parallel)</span></div>
+        <div class="track">
+          <div class="box wide">
+            <div class="name">web-builder</div>
+            <div class="desc">node:24-slim · pnpm install --frozen-lockfile · builds web/dist and admin-web/dist independently of the Rust layers</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="merge-note">↓ &nbsp; both tracks copied into &nbsp; ↓</div>
+
+      <div class="row">
+        <div class="row-label">Assembly</div>
+        <div class="track">
+          <div class="box dark wide">
+            <div class="name">runtime-base</div>
+            <div class="desc">debian:bookworm-slim + ca-certificates, git, openssl · non-root buzz:buzz user · web + admin-web assets copied in</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-label">Published targets</div>
+        <div class="track">
+          <div class="box">
+            <div class="name">runtime-debug</div>
+            <div class="desc">Line-table debug info retained, for native profiling · tag: debug-*</div>
+          </div>
+          <div class="box dark">
+            <div class="name">runtime</div>
+            <div class="desc">Stripped binaries · default build target · published release tags</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="insights">
+      <div class="insight">
+        <div class="num">1</div>
+        <div>
+          <div class="headline">Dependency layer caching cuts rebuild time</div>
+          <div class="body">recipe.json is derived from manifests alone, so the builder re-cooks dependencies only when Cargo.toml or Cargo.lock changes — not on every source edit.</div>
+        </div>
+      </div>
+      <div class="insight">
+        <div class="num">2</div>
+        <div>
+          <div class="headline">Web build cannot invalidate the Rust cache</div>
+          <div class="body">pnpm/vite run as a fully independent stage, so a front-end change never busts the cached Rust dependency layers, and vice versa.</div>
+        </div>
+      </div>
+      <div class="insight">
+        <div class="num">3</div>
+        <div>
+          <div class="headline">Debug and production binaries cannot drift</div>
+          <div class="body">runtime-debug and runtime strip the same optimized ELF output, so profiler-visible code and shipped code are generated identically.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <span>Ports: 3000 app (WS + REST) &middot; 8080 liveness/readiness &middot; 9102 metrics</span>
+      <span>ghcr.io/block/buzz</span>
+    </div>
+  </div>
+</body>
+</html>

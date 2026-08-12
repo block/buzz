@@ -1,7 +1,7 @@
 name: Release Buzz desktop
 
 # Builds, signs, and publishes a new Buzz desktop release whenever a version
-# tag (e.g. `v0.5.6-k2v5`) is pushed. Existing installs with the Tauri
+# tag (e.g. `v0.5.5-5`) is pushed. Existing installs with the Tauri
 # updater configured (see desktop/src-tauri/tauri.conf.json's
 # `plugins.updater.endpoints`) poll this repo's GitHub Releases and prompt
 # users to update automatically once a release lands here — no more manually
