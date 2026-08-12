@@ -78,7 +78,7 @@ String _channelMemberSnapshotKey({
 class _ChannelMembersSnapshotCache {
   final _membersByKey = <String, List<ChannelMember>>{};
 
-  List<ChannelMember> read({
+  List<ChannelMember>? read({
     required String relayBaseUrl,
     required String? pubkey,
     required String channelId,
@@ -87,8 +87,7 @@ class _ChannelMembersSnapshotCache {
         relayBaseUrl: relayBaseUrl,
         pubkey: pubkey,
         channelId: channelId,
-      )] ??
-      const [];
+      )];
 
   void write({
     required String relayBaseUrl,
@@ -487,11 +486,9 @@ final channelMembersProvider = FutureProvider.autoDispose
       final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
       final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
       final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
-
-      // Keep the current AsyncData value through reconnecting/connecting
-      // transitions. Invalidating only when the session becomes connected
-      // avoids publishing AsyncData([]) to every member-data consumer while
-      // the refresh is waiting for the socket.
+      // Re-fetch only after reconnect completes. During the disconnected
+      // interval this provider has no session dependency, so its current value
+      // remains visible to every consumer rather than becoming AsyncData([]).
       ref.listen(relaySessionProvider, (previous, next) {
         if (next.status == SessionStatus.connected &&
             previous?.status != SessionStatus.connected) {
@@ -500,11 +497,25 @@ final channelMembersProvider = FutureProvider.autoDispose
       });
       final sessionState = ref.read(relaySessionProvider);
       if (sessionState.status != SessionStatus.connected) {
-        return snapshotCache.read(
+        final cachedMembers = snapshotCache.read(
           relayBaseUrl: relayBaseUrl,
           pubkey: pubkey,
           channelId: channelId,
         );
+        if (cachedMembers != null) return cachedMembers;
+        final channelListMembers = ref
+            .read(channelsProvider.notifier)
+            .cachedMembersForChannel(channelId);
+        if (channelListMembers.isNotEmpty) {
+          snapshotCache.write(
+            relayBaseUrl: relayBaseUrl,
+            pubkey: pubkey,
+            channelId: channelId,
+            members: channelListMembers,
+          );
+          return channelListMembers;
+        }
+        return const [];
       }
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
