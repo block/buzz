@@ -8,8 +8,8 @@
 
 use buzz_core::{
     kind::{
-        AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_MEMBER_ADDED_NOTIFICATION,
-        KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
+        AUTHOR_ONLY_KINDS, KIND_AGENT_ACTIVITY_SUMMARY, KIND_AGENT_TURN_METRIC,
+        KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
     },
     CommunityId,
 };
@@ -1311,6 +1311,75 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
         "expected exactly 1 hit (the kind:9 control), got {} (kinds={kinds:?})",
         result.hits.len(),
     );
+
+    teardown(pool, &schema).await;
+}
+
+/// Populated installations may retain the pre-allowlist generated-column
+/// expression until scheduled maintenance. Even when such a legacy expression
+/// indexes an accidentally persisted activity row, the query itself must keep
+/// the live-only kind out of search results.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn live_only_activity_is_query_excluded_on_legacy_search_schema() {
+    let (pool, schema) = setup().await;
+    pool.execute("ALTER TABLE events DROP COLUMN search_tsv")
+        .await
+        .expect("drop fresh-install search column");
+    pool.execute(
+        "ALTER TABLE events ADD COLUMN search_tsv TSVECTOR GENERATED ALWAYS AS \
+         (to_tsvector('simple', content)) STORED",
+    )
+    .await
+    .expect("model populated legacy search expression");
+    pool.execute("CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv)")
+        .await
+        .expect("recreate search index");
+
+    let community = mk_community(&pool, "live-only-search.example").await;
+    let token = "liveonly_search_oracle_marker";
+    let control_id = rand_bytes32();
+    insert_event(
+        &pool,
+        community,
+        control_id,
+        rand_bytes32(),
+        9,
+        token,
+        None,
+        1_700_000_000,
+    )
+    .await;
+    insert_event(
+        &pool,
+        community,
+        rand_bytes32(),
+        rand_bytes32(),
+        KIND_AGENT_ACTIVITY_SUMMARY as i32,
+        token,
+        None,
+        1_700_000_001,
+    )
+    .await;
+
+    let result = SearchService::new(pool.clone())
+        .search(&SearchQuery {
+            community,
+            q: token.into(),
+            channel_scope: ChannelScope::Any,
+            kinds: None,
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+            mode: buzz_search::SearchMode::FullText,
+        })
+        .await
+        .expect("search legacy schema");
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].event_id, control_id);
+    assert_eq!(result.hits[0].kind, 9);
 
     teardown(pool, &schema).await;
 }

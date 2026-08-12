@@ -486,7 +486,8 @@ spawn**, and the provider applies it mechanically.
                                 // (resolve_effective_harness_descriptor)
   "policy_env":   {str: str},   // overridable behavior defaults (tier 1, below):
                                 // runtime default_env (e.g. GOOSE_MODE=auto),
-                                // BUZZ_ACP_RELAY_OBSERVER, BUZZ_ACP_LAZY_POOL=true,
+                                // BUZZ_ACP_RELAY_OBSERVER, BUZZ_ACP_RELAY_ACTIVITY,
+                                // BUZZ_ACP_LAZY_POOL=true,
                                 // BUZZ_ACP_SESSION_TITLE (resolved),
                                 // BUZZ_ACP_TEAM_INSTRUCTIONS, BUZZ_ACP_MODEL,
                                 // MCP_HOOK_SERVERS=* (mcp_hooks runtimes only)
@@ -1606,7 +1607,8 @@ Desktop- and harness-side, discovered during this design:
    `agent_args` serialize as blank/empty — a different command line than the
    identical local agent; (c) no `owner_pubkey` — a null-`auth_tag` agent
    cannot match `!shutdown` (it *answers* it), stranding §Stop; (d) spawn
-   policy (`BUZZ_ACP_RELAY_OBSERVER`, runtime `default_env` such as
+   policy (`BUZZ_ACP_RELAY_OBSERVER`, `BUZZ_ACP_RELAY_ACTIVITY`, runtime
+   `default_env` such as
    `GOOSE_MODE=auto`, team instructions, session title, lazy-pool selection)
    is absent — remote pods run different observer/approval semantics
    (`BUZZ_ACP_DEDUP`/`BUZZ_ACP_MULTIPLE_EVENT_HANDLING` are *not* on this

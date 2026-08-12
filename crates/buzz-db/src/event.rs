@@ -10,8 +10,8 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_i32, is_ephemeral, is_parameterized_replaceable, KIND_AUTH, KIND_EVENT_REMINDER,
-    KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
+    event_kind_i32, is_ephemeral, is_parameterized_replaceable, KIND_AGENT_ACTIVITY_SUMMARY,
+    KIND_AUTH, KIND_EVENT_REMINDER, KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -23,6 +23,26 @@ use crate::error::{DbError, Result};
 /// This is the value the relay advertises as NIP-11 `limitation.max_limit`, so
 /// the advertised ceiling and the enforced one cannot drift.
 pub const DEFAULT_MAX_PAGE_LIMIT: i64 = 1_000;
+
+/// Ephemeral-only kinds that must be invisible on every historical DB surface,
+/// including wildcard queries and aggregate counts, even if a legacy/corrupt
+/// row exists despite ingest's no-storage invariant.
+const fn historical_query_excluded_kinds() -> &'static [i32] {
+    &[KIND_AGENT_ACTIVITY_SUMMARY as i32]
+}
+
+#[cfg(test)]
+mod live_only_history_tests {
+    use super::*;
+
+    #[test]
+    fn shared_agent_activity_is_always_excluded_from_history() {
+        assert_eq!(
+            historical_query_excluded_kinds(),
+            &[KIND_AGENT_ACTIVITY_SUMMARY as i32]
+        );
+    }
+}
 
 /// Optional filters for [`query_events`].
 #[derive(Debug, Clone)]
@@ -397,6 +417,13 @@ pub(crate) async fn query_events_on(
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
 
+    qb.push(format!(" AND {col_prefix}kind NOT IN ("));
+    let mut excluded = qb.separated(", ");
+    for kind in historical_query_excluded_kinds() {
+        excluded.push_bind(*kind);
+    }
+    qb.push(")");
+
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))
             .push_bind(ch);
@@ -577,6 +604,13 @@ pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<S
     let pubkey_bytes: Vec<u8> = row.try_get("pubkey")?;
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let kind_i32: i32 = row.try_get("kind")?;
+    if historical_query_excluded_kinds().contains(&kind_i32) {
+        tracing::warn!(
+            kind = kind_i32,
+            "suppressed live-only event found in historical storage"
+        );
+        return Ok(None);
+    }
     let tags_json: serde_json::Value = row.try_get("tags")?;
     let content: String = row.try_get("content")?;
     let sig_bytes: Vec<u8> = row.try_get("sig")?;
@@ -662,6 +696,13 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     };
 
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
+
+    qb.push(format!(" AND {col_prefix}kind NOT IN ("));
+    let mut excluded = qb.separated(", ");
+    for kind in historical_query_excluded_kinds() {
+        excluded.push_bind(*kind);
+    }
+    qb.push(")");
 
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))
@@ -905,11 +946,12 @@ pub async fn get_last_message_at(
 ) -> Result<Option<DateTime<Utc>>> {
     let row = sqlx::query(
         "SELECT created_at FROM events \
-         WHERE community_id = $1 AND channel_id = $2 AND deleted_at IS NULL \
+         WHERE community_id = $1 AND channel_id = $2 AND kind <> $3 AND deleted_at IS NULL \
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
+    .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
     .fetch_optional(pool)
     .await?;
 
@@ -937,7 +979,9 @@ pub async fn get_last_message_at_bulk(
          WHERE community_id = ",
     );
     qb.push_bind(community_id.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND channel_id IN (");
+    qb.push(" AND deleted_at IS NULL AND kind <> ");
+    qb.push_bind(KIND_AGENT_ACTIVITY_SUMMARY as i32);
+    qb.push(" AND channel_id IN (");
     let mut sep = qb.separated(", ");
     for id in channel_ids {
         sep.push_bind(*id);
@@ -967,10 +1011,12 @@ pub async fn get_event_by_id(
 ) -> Result<Option<StoredEvent>> {
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+         FROM events WHERE community_id = $1 AND id = $2 AND kind <> $3 \
+         AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
+    .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
     .fetch_optional(pool)
     .await?;
 
@@ -1023,10 +1069,12 @@ pub async fn get_event_by_id_including_deleted(
 ) -> Result<Option<StoredEvent>> {
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 ORDER BY created_at DESC LIMIT 1",
+         FROM events WHERE community_id = $1 AND id = $2 AND kind <> $3 \
+         ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
+    .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
     .fetch_optional(pool)
     .await?;
 
@@ -1070,7 +1118,9 @@ pub(crate) async fn get_events_by_ids_on(
          FROM events WHERE community_id = ",
     );
     qb.push_bind(community_id.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND id IN (");
+    qb.push(" AND deleted_at IS NULL AND kind <> ");
+    qb.push_bind(KIND_AGENT_ACTIVITY_SUMMARY as i32);
+    qb.push(" AND id IN (");
     let mut sep = qb.separated(", ");
     for id in ids {
         sep.push_bind(id.to_vec());
@@ -1322,11 +1372,12 @@ pub async fn insert_reaction_event_with_thread_metadata(
 
     let target_row = sqlx::query(
         "SELECT created_at FROM events \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+         WHERE community_id = $1 AND id = $2 AND kind <> $3 AND deleted_at IS NULL \
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(target_event_id)
+    .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -1815,6 +1866,168 @@ mod tests {
         .await
         .expect("count stored events");
         assert_eq!(stored as usize, N);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_shared_activity_rows_are_invisible_to_all_history_surfaces() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel_id = make_test_channel(&pool, community_uuid, None).await;
+        let keys = Keys::generate();
+        let control = EventBuilder::new(Kind::Custom(9), "visible history control")
+            .custom_created_at(nostr::Timestamp::from(1_800_000_000))
+            .sign_with_keys(&keys)
+            .expect("sign visible control row");
+        insert_event(&pool, community, &control, Some(channel_id))
+            .await
+            .expect("insert visible control row");
+        let activity = EventBuilder::new(
+            Kind::Custom(KIND_AGENT_ACTIVITY_SUMMARY as u16),
+            r#"{"v":1,"activity_id":"00000000-0000-4000-8000-000000000001","occurred_at":1800000100,"class":"turn","status":"active"}"#,
+        )
+        .custom_created_at(nostr::Timestamp::from(1_800_000_100))
+        .sign_with_keys(&keys)
+        .expect("sign legacy activity row");
+
+        // Bypass Rust ingest deliberately to model a legacy/corrupt row that
+        // predates the no-storage invariant. Historical reads, metadata, and
+        // history-derived mutations must all behave as though it never existed.
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),$9)",
+        )
+        .bind(community_uuid)
+        .bind(activity.id.as_bytes().as_slice())
+        .bind(activity.pubkey.as_bytes().as_slice())
+        .bind(DateTime::from_timestamp(activity.created_at.as_secs() as i64, 0).unwrap())
+        .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
+        .bind(serde_json::to_value(&activity.tags).unwrap())
+        .bind(&activity.content)
+        .bind(activity.sig.serialize().as_slice())
+        .bind(channel_id)
+        .execute(&pool)
+        .await
+        .expect("insert legacy shared activity directly");
+
+        let physical_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND id = $2 AND kind = $3",
+        )
+        .bind(community_uuid)
+        .bind(activity.id.as_bytes().as_slice())
+        .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
+        .fetch_one(&pool)
+        .await
+        .expect("count physical legacy row");
+        assert_eq!(physical_rows, 1, "fixture must exist physically");
+
+        assert!(
+            get_event_by_id(&pool, community, activity.id.as_bytes())
+                .await
+                .expect("direct ID historical lookup")
+                .is_none(),
+            "live-only activity must be hidden from direct ID lookup"
+        );
+        assert!(
+            get_event_by_id_including_deleted(&pool, community, activity.id.as_bytes())
+                .await
+                .expect("including-deleted historical lookup")
+                .is_none(),
+            "live-only activity must be hidden from audit lookup"
+        );
+        assert!(
+            get_events_by_ids(&pool, community, &[activity.id.as_bytes()])
+                .await
+                .expect("batch ID historical lookup")
+                .is_empty(),
+            "live-only activity must be hidden from batch ID lookup"
+        );
+
+        let wildcard = EventQuery::for_community(community);
+        let visible = query_events(&pool, &wildcard)
+            .await
+            .expect("wildcard historical query");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].event.id, control.id);
+        assert_eq!(
+            count_events(&pool, &wildcard)
+                .await
+                .expect("wildcard historical count"),
+            1
+        );
+
+        let direct = EventQuery {
+            kinds: Some(vec![KIND_AGENT_ACTIVITY_SUMMARY as i32]),
+            ids: Some(vec![activity.id.as_bytes().to_vec()]),
+            ..EventQuery::for_community(community)
+        };
+        assert!(query_events(&pool, &direct)
+            .await
+            .expect("direct activity historical query")
+            .is_empty());
+        assert_eq!(
+            count_events(&pool, &direct)
+                .await
+                .expect("direct activity historical count"),
+            0
+        );
+
+        let control_time = DateTime::from_timestamp(control.created_at.as_secs() as i64, 0)
+            .expect("control timestamp");
+        assert_eq!(
+            get_last_message_at(&pool, community, channel_id)
+                .await
+                .expect("single channel last-message metadata"),
+            Some(control_time),
+            "live-only activity must not advance channel metadata"
+        );
+        assert_eq!(
+            get_last_message_at_bulk(&pool, community, &[channel_id])
+                .await
+                .expect("bulk channel last-message metadata")
+                .get(&channel_id),
+            Some(&control_time),
+            "live-only activity must not advance bulk channel metadata"
+        );
+
+        let reaction = EventBuilder::new(Kind::Custom(7), "+")
+            .custom_created_at(nostr::Timestamp::from(1_800_000_200))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign reaction probe");
+        let outcome = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &reaction,
+            Some(channel_id),
+            None,
+            activity.id.as_bytes(),
+            reaction.pubkey.as_bytes(),
+            "+",
+        )
+        .await
+        .expect("probe reaction target lookup");
+        assert!(
+            matches!(outcome, ReactionEventInsertOutcome::TargetMissing),
+            "live-only activity must not be usable as a historical reaction target"
+        );
+
+        sqlx::query("DELETE FROM events WHERE community_id = $1")
+            .bind(community_uuid)
+            .execute(&pool)
+            .await
+            .expect("delete event fixtures");
+        sqlx::query("DELETE FROM channels WHERE community_id = $1")
+            .bind(community_uuid)
+            .execute(&pool)
+            .await
+            .expect("delete channel fixture");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_uuid)
+            .execute(&pool)
+            .await
+            .expect("delete test community");
     }
 
     #[tokio::test]

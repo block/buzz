@@ -9,6 +9,8 @@ use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use uuid::Uuid;
 
+use buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY;
+
 use crate::error::Result;
 
 /// Maximum rows accepted by one admin query.
@@ -174,6 +176,7 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
             WHERE r.target_kind = 'event'
               AND e.community_id = r.community_id
               AND e.id = r.target_event_id
+              AND e.kind <> $2
             ORDER BY e.created_at DESC
             LIMIT 1
         ) target ON TRUE
@@ -181,6 +184,7 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
         "#,
     )
     .bind(report_id)
+    .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
     .fetch_optional(pool)
     .await?;
     row.map(|row| {
@@ -315,6 +319,7 @@ mod tests {
         community_id: Uuid,
         event_id: &[u8],
         author: &[u8],
+        kind: i32,
         content: &str,
         deleted_at: Option<DateTime<Utc>>,
     ) {
@@ -322,13 +327,14 @@ mod tests {
             r#"
             INSERT INTO events (
                 community_id, id, pubkey, created_at, kind, tags, content, sig, deleted_at
-            ) VALUES ($1, $2, $3, $4, 9, '[]'::jsonb, $5, $6, $7)
+            ) VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, $6, $7, $8)
             "#,
         )
         .bind(community_id)
         .bind(event_id)
         .bind(author)
         .bind(Utc::now())
+        .bind(kind)
         .bind(content)
         .bind(vec![3_u8; 64])
         .bind(deleted_at)
@@ -409,6 +415,7 @@ mod tests {
             report_community,
             &event_id,
             &[5_u8; 32],
+            9,
             "reported message",
             Some(deleted_at),
         )
@@ -418,6 +425,7 @@ mod tests {
             other_community,
             &event_id,
             &[6_u8; 32],
+            9,
             "wrong tenant message",
             None,
         )
@@ -484,5 +492,49 @@ mod tests {
         assert!(detail.message.is_none());
 
         delete_report_fixture(&pool, community_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn report_detail_never_exposes_live_only_activity_content() {
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool, "live-only-event").await;
+        let event_id = vec![9_u8; 32];
+        insert_event(
+            &pool,
+            community_id,
+            &event_id,
+            &[5_u8; 32],
+            buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as i32,
+            "must never leave the live activity plane",
+            None,
+        )
+        .await;
+        let report_id = insert_event_report(&pool, community_id, &event_id).await;
+
+        let detail = get_report(&pool, report_id)
+            .await
+            .expect("query report")
+            .expect("report exists");
+        assert!(
+            detail.message.is_none(),
+            "admin/audit detail must not disclose a physically seeded live-only row"
+        );
+
+        sqlx::query("DELETE FROM moderation_reports WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("delete report fixture");
+        sqlx::query("DELETE FROM events WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("delete event fixture");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("delete community fixture");
     }
 }

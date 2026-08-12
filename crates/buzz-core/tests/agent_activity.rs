@@ -89,6 +89,23 @@ fn unknown_or_sensitive_fields_are_rejected_instead_of_ignored() {
 }
 
 #[test]
+fn explicit_null_optional_fields_are_rejected_canonically() {
+    let cases = [
+        r#"{"version":1,"activities":[{"activityId":"63ca9483-c457-4b24-88de-1f14fa97c499","occurredAt":"2024-08-12T08:39:49Z","activityClass":"turn","status":"started","toolKind":null}]}"#,
+        r#"{"version":1,"activities":[{"activityId":"63ca9483-c457-4b24-88de-1f14fa97c499","occurredAt":"2024-08-12T08:39:49Z","activityClass":"turn","status":"completed","durationMs":null}]}"#,
+        r#"{"version":1,"activities":[{"activityId":"63ca9483-c457-4b24-88de-1f14fa97c499","occurredAt":"2024-08-12T08:39:49Z","activityClass":"turn","status":"completed","usage":null}]}"#,
+        r#"{"version":1,"activities":[{"activityId":"63ca9483-c457-4b24-88de-1f14fa97c499","occurredAt":"2024-08-12T08:39:49Z","activityClass":"usage","status":"completed","usage":{"inputTokens":null,"totalTokens":1}}]}"#,
+    ];
+
+    for content in cases {
+        assert!(
+            AgentActivityFrame::parse(content).is_err(),
+            "explicit null must not be treated as an omitted optional field: {content}"
+        );
+    }
+}
+
+#[test]
 fn invalid_class_specific_fields_fail_closed() {
     let mut bad_tool = turn(AgentActivityStatus::Running);
     bad_tool.activity_class = AgentActivityClass::Tool;

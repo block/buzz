@@ -13,6 +13,8 @@ const MAX_TRACKED_TURNS: usize = 256;
 const MAX_RAW_ID_BYTES: usize = 128;
 /// A global two-second cadence caps summary traffic at 30 events/minute.
 pub(crate) const ACTIVITY_PUBLISH_TICK: Duration = Duration::from_secs(2);
+/// Shutdown draining stays below the relay's 10 frames/second admission limit.
+const ACTIVITY_SHUTDOWN_PUBLISH_INTERVAL: Duration = Duration::from_millis(125);
 
 pub(crate) struct ProjectedActivity {
     pub(crate) channel_id: Uuid,
@@ -422,12 +424,14 @@ pub(crate) struct ActivityPublishQueue {
 }
 
 impl ActivityPublishQueue {
-    pub(crate) fn ingest(&mut self, projected: ProjectedActivity) {
+    /// Queue a sanitized activity update, returning `false` if accepting it
+    /// caused any queued update to be dropped.
+    pub(crate) fn ingest(&mut self, projected: ProjectedActivity) -> bool {
         let bytes = match serde_json::to_vec(&projected.activity) {
             Ok(serialized) => serialized.len(),
             Err(error) => {
                 tracing::warn!("failed to size sanitized agent activity: {error}");
-                return;
+                return false;
             }
         };
         let channel_id = projected.channel_id;
@@ -457,14 +461,14 @@ impl ActivityPublishQueue {
                 activity: projected.activity,
             });
         } else {
-            return;
+            return false;
         }
         self.pending_items += 1;
         self.pending_bytes += bytes;
-        self.enforce_bounds();
+        self.enforce_bounds()
     }
 
-    fn enforce_bounds(&mut self) {
+    fn enforce_bounds(&mut self) -> bool {
         let mut dropped_items = 0u64;
         let mut dropped_bytes = 0u64;
         while self.channels.len() > ACTIVITY_PENDING_MAX_CHANNELS
@@ -499,6 +503,7 @@ impl ActivityPublishQueue {
                 "agent activity queue over bound; dropped oldest updates"
             );
         }
+        dropped_items == 0
     }
 
     fn oldest_item(&self) -> Option<(Uuid, usize)> {
@@ -579,30 +584,78 @@ impl ActivityPublishQueue {
     }
 }
 
+pub(crate) struct RelayActivityPublisherTask {
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: tokio::task::JoinHandle<bool>,
+}
+
+impl RelayActivityPublisherTask {
+    #[cfg(test)]
+    pub(crate) fn abort(self) {
+        self.handle.abort();
+    }
+
+    /// Stop intake, drain already-delivered updates, and enqueue sanitized
+    /// frames into the relay transport before returning.
+    pub(crate) async fn shutdown(mut self, timeout: Duration) -> bool {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        let abort_handle = self.handle.abort_handle();
+        match tokio::time::timeout(timeout, self.handle).await {
+            Ok(Ok(drained)) => drained,
+            Ok(Err(error)) => {
+                tracing::warn!("agent activity publisher exited during shutdown: {error}");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("agent activity publisher drain timed out; aborting");
+                abort_handle.abort();
+                false
+            }
+        }
+    }
+}
+
 pub(crate) fn spawn_relay_activity_publisher(
     observer: crate::observer::ObserverHandle,
     publisher: crate::relay::RelayEventPublisher,
     keys: nostr::Keys,
     agent_pubkey_hex: String,
     channel_info: crate::pool::ChannelInfoResolver,
-) -> tokio::task::JoinHandle<()> {
+) -> RelayActivityPublisherTask {
     // Subscribe synchronously so activity emitted immediately after this call is
     // live input, while pre-existing snapshot entries remain intentionally absent.
     let rx = observer.subscribe();
-    tokio::spawn(async move {
-        run_relay_activity_publisher(rx, publisher, keys, agent_pubkey_hex, channel_info).await;
-    })
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        run_relay_activity_publisher(
+            rx,
+            shutdown_rx,
+            publisher,
+            keys,
+            agent_pubkey_hex,
+            channel_info,
+        )
+        .await
+    });
+    RelayActivityPublisherTask {
+        shutdown_tx: Some(shutdown_tx),
+        handle,
+    }
 }
 
 async fn run_relay_activity_publisher(
     mut rx: tokio::sync::broadcast::Receiver<crate::observer::ObserverEvent>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     publisher: crate::relay::RelayEventPublisher,
     keys: nostr::Keys,
     agent_pubkey_hex: String,
     channel_info: crate::pool::ChannelInfoResolver,
-) {
+) -> bool {
     let mut projector = ActivityProjector::default();
     let mut queue = ActivityPublishQueue::default();
+    let mut all_enqueued = true;
     let mut publish_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + ACTIVITY_PUBLISH_TICK,
         ACTIVITY_PUBLISH_TICK,
@@ -612,14 +665,50 @@ async fn run_relay_activity_publisher(
 
     loop {
         tokio::select! {
+            _ = &mut shutdown_rx => {
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => {
+                            if let Some(projected) = projector.project(&event) {
+                                all_enqueued &= queue.ingest(projected);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(count)) => {
+                            all_enqueued = false;
+                            tracing::warn!(
+                                dropped = count,
+                                "agent activity publisher lagged during shutdown"
+                            );
+                        }
+                        Err(
+                            tokio::sync::broadcast::error::TryRecvError::Empty
+                            | tokio::sync::broadcast::error::TryRecvError::Closed,
+                        ) => break,
+                    }
+                }
+                while !queue.is_empty() {
+                    all_enqueued &= publish_next_activity_frame(
+                        &mut queue,
+                        &publisher,
+                        &keys,
+                        &agent_pubkey_hex,
+                        &channel_info,
+                    ).await;
+                    if !queue.is_empty() {
+                        tokio::time::sleep(ACTIVITY_SHUTDOWN_PUBLISH_INTERVAL).await;
+                    }
+                }
+                break;
+            }
             result = rx.recv(), if !closed => {
                 match result {
                     Ok(event) => {
                         if let Some(projected) = projector.project(&event) {
-                            queue.ingest(projected);
+                            all_enqueued &= queue.ingest(projected);
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        all_enqueued = false;
                         tracing::warn!(dropped = count, "agent activity publisher lagged");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -628,32 +717,44 @@ async fn run_relay_activity_publisher(
                 }
             }
             _ = publish_tick.tick() => {
-                if let Some((channel_id, frame)) = queue.next_frame() {
-                    let channel_type = channel_info
-                        .resolve(channel_id)
-                        .await
-                        .map(|info| info.channel_type);
-                    if is_shared_activity_channel_type(channel_type.as_deref()) {
-                        publish_activity_frame(
-                            &publisher,
-                            &keys,
-                            &agent_pubkey_hex,
-                            channel_id,
-                            frame,
-                        )
-                        .await;
-                    } else {
-                        tracing::debug!(
-                            channel_id = %channel_id,
-                            "sanitized agent activity suppressed for non-shared channel"
-                        );
-                    }
-                }
+                all_enqueued &= publish_next_activity_frame(
+                    &mut queue,
+                    &publisher,
+                    &keys,
+                    &agent_pubkey_hex,
+                    &channel_info,
+                ).await;
                 if closed && queue.is_empty() {
                     break;
                 }
             }
         }
+    }
+    all_enqueued
+}
+
+async fn publish_next_activity_frame(
+    queue: &mut ActivityPublishQueue,
+    publisher: &crate::relay::RelayEventPublisher,
+    keys: &nostr::Keys,
+    agent_pubkey_hex: &str,
+    channel_info: &crate::pool::ChannelInfoResolver,
+) -> bool {
+    let Some((channel_id, frame)) = queue.next_frame() else {
+        return true;
+    };
+    let channel_type = channel_info
+        .resolve(channel_id)
+        .await
+        .map(|info| info.channel_type);
+    if is_shared_activity_channel_type(channel_type.as_deref()) {
+        publish_activity_frame(publisher, keys, agent_pubkey_hex, channel_id, frame).await
+    } else {
+        tracing::debug!(
+            channel_id = %channel_id,
+            "sanitized agent activity suppressed for non-shared channel"
+        );
+        true
     }
 }
 
@@ -667,26 +768,31 @@ async fn publish_activity_frame(
     agent_pubkey_hex: &str,
     channel_id: Uuid,
     frame: AgentActivityFrame,
-) {
+) -> bool {
     let builder = match buzz_sdk::build_agent_activity_summary(channel_id, agent_pubkey_hex, &frame)
     {
         Ok(builder) => builder,
         Err(error) => {
             tracing::warn!("failed to build sanitized agent activity: {error}");
-            return;
+            return false;
         }
     };
     let signed = match builder.sign_with_keys(keys) {
         Ok(event) => event,
         Err(error) => {
             tracing::warn!("failed to sign sanitized agent activity: {error}");
-            return;
+            return false;
         }
     };
-    if let Err(error) = publisher.publish_event(signed).await {
-        // Summary publication is telemetry: relay failure must never surface to
-        // or delay the prompt task that generated it.
-        tracing::warn!("sanitized agent activity dropped: {error}");
+    match publisher.publish_event(signed).await {
+        Ok(()) => true,
+        Err(error) => {
+            // Summary publication is telemetry: relay failure must never surface to
+            // or delay the prompt task that generated it, but shutdown must report
+            // that not every produced frame reached the relay transport.
+            tracing::warn!("sanitized agent activity dropped: {error}");
+            false
+        }
     }
 }
 
@@ -1296,6 +1402,30 @@ mod tests {
     }
 
     #[test]
+    fn activity_queue_overflow_is_reported_to_caller() {
+        let channel_id = Uuid::from_u128(42);
+        let mut queue = ActivityPublishQueue::default();
+        for index in 0..ACTIVITY_PENDING_MAX_ITEMS {
+            assert!(
+                queue.ingest(ProjectedActivity {
+                    channel_id,
+                    activity: test_turn_activity(index as u128 + 1),
+                }),
+                "items within the queue bound must be accepted without loss"
+            );
+        }
+
+        assert!(
+            !queue.ingest(ProjectedActivity {
+                channel_id,
+                activity: test_turn_activity(ACTIVITY_PENDING_MAX_ITEMS as u128 + 1),
+            }),
+            "evicting a queued update must be reported to the publisher"
+        );
+        assert_eq!(queue.dropped_items, 1);
+    }
+
+    #[test]
     fn activity_frames_use_core_limits_and_rotate_channels_fairly() {
         let channel_a = Uuid::from_u128(1);
         let channel_b = Uuid::from_u128(2);
@@ -1458,6 +1588,148 @@ mod tests {
             .any(|tag| { tag.as_slice() == ["h".to_string(), forum_id.to_string()] }));
         assert!(published.try_recv().is_err());
         handle.abort();
+    }
+
+    fn activity_test_resolver(channel_id: Uuid) -> crate::pool::ChannelInfoResolver {
+        crate::pool::ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "stream".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url: "http://127.0.0.1:9".into(),
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        )
+    }
+
+    fn emit_terminal_activity(observer: &crate::observer::ObserverHandle, channel_id: Uuid) {
+        let context = crate::observer::context_for(
+            Some(channel_id),
+            Some("raw-session-secret".into()),
+            Some("raw-turn-secret".into()),
+        );
+        observer.emit(
+            "turn_started",
+            Some(0),
+            &context,
+            serde_json::json!({"prompt": "SECRET"}),
+        );
+        observer.emit(
+            "agent_activity_turn_terminal",
+            Some(0),
+            &context,
+            serde_json::json!({"status": "completed", "result": "SECRET"}),
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_publish_slot_is_a_successful_noop() {
+        let channel_id = Uuid::from_u128(200);
+        let mut queue = ActivityPublishQueue::default();
+        let publisher = crate::relay::RelayEventPublisher::disconnected_test_publisher();
+        let keys = nostr::Keys::generate();
+
+        assert!(
+            publish_next_activity_frame(
+                &mut queue,
+                &publisher,
+                &keys,
+                &keys.public_key().to_hex(),
+                &activity_test_resolver(channel_id),
+            )
+            .await,
+            "no queued frame means there was no enqueue failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_drains_latest_terminal_update_before_exit() {
+        let channel_id = Uuid::from_u128(201);
+        let observer = crate::observer::ObserverHandle::in_process();
+        let (publisher, mut published) = crate::relay::RelayEventPublisher::test_pair();
+        let keys = nostr::Keys::generate();
+        let task = spawn_relay_activity_publisher(
+            observer.clone(),
+            publisher,
+            keys.clone(),
+            keys.public_key().to_hex(),
+            activity_test_resolver(channel_id),
+        );
+        emit_terminal_activity(&observer, channel_id);
+
+        assert!(
+            task.shutdown(Duration::from_secs(2)).await,
+            "activity publisher must drain cleanly"
+        );
+        let event = published.recv().await.expect("terminal frame published");
+        let frame = AgentActivityFrame::parse(&event.content).expect("valid safe frame");
+        assert_eq!(frame.activities.len(), 1);
+        assert_eq!(frame.activities[0].status, AgentActivityStatus::Completed);
+        assert!(!event.content.contains("SECRET"));
+        assert!(published.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_reports_closed_relay_command_channel() {
+        let channel_id = Uuid::from_u128(202);
+        let observer = crate::observer::ObserverHandle::in_process();
+        let publisher = crate::relay::RelayEventPublisher::disconnected_test_publisher();
+        let keys = nostr::Keys::generate();
+        let task = spawn_relay_activity_publisher(
+            observer.clone(),
+            publisher,
+            keys.clone(),
+            keys.public_key().to_hex(),
+            activity_test_resolver(channel_id),
+        );
+        emit_terminal_activity(&observer, channel_id);
+
+        assert!(
+            !task.shutdown(Duration::from_secs(2)).await,
+            "a closed relay command channel must make the publisher drain fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_reports_observer_bus_lag() {
+        let channel_id = Uuid::from_u128(203);
+        let (tx, rx) = tokio::sync::broadcast::channel(1);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let keys = nostr::Keys::generate();
+        let publisher = crate::relay::RelayEventPublisher::test_pair().0;
+        for turn_id in ["turn-a", "turn-b"] {
+            assert!(tx
+                .send(observer_event(
+                    "ignored",
+                    channel_id,
+                    turn_id,
+                    serde_json::json!({}),
+                ))
+                .is_ok());
+        }
+        shutdown_tx.send(()).expect("publisher shutdown receiver");
+
+        let drained = run_relay_activity_publisher(
+            rx,
+            shutdown_rx,
+            publisher,
+            keys.clone(),
+            keys.public_key().to_hex(),
+            activity_test_resolver(channel_id),
+        )
+        .await;
+
+        assert!(
+            !drained,
+            "broadcast lag dropped observer activity and must make the drain visibly fail"
+        );
     }
 
     #[test]

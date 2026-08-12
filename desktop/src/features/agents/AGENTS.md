@@ -171,6 +171,11 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+12. **Managed-agent launch policy enables both relay planes.** Local and
+    provider-backed launches set `BUZZ_ACP_RELAY_OBSERVER=true` for private
+    owner telemetry and `BUZZ_ACP_RELAY_ACTIVITY=true` for the separate
+    member-safe activity publisher. Keep those switches explicit and adjacent;
+    neither plane may silently imply or replace the other.
 
 ## The tests that enforce this
 
@@ -196,6 +201,8 @@ with a TypeScript lookup table or an id comparison in a component.
   restoration, zero-write Skip, Next save failure/retry, navigation, and
   successful-empty vs failed optional-model discovery.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
+- `src/testing/managedAgentActivityLaunch.contract.test.mjs` plus the provider
+  wire fixture pin explicit local and remote enablement of both relay planes.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
 

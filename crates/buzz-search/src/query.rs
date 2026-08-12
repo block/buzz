@@ -11,7 +11,7 @@
 use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
-use buzz_core::CommunityId;
+use buzz_core::{kind::KIND_AGENT_ACTIVITY_SUMMARY, CommunityId};
 use buzz_datastore_tracing::datastore_span;
 
 use crate::error::SearchError;
@@ -207,6 +207,7 @@ fn normalized_search_text(q: &str) -> Option<String> {
 ///      <mode-specific tsquery> AS query
 /// WHERE community_id = $ctx
 ///   AND deleted_at IS NULL
+///   AND kind <> 24201
 ///   AND search_tsv @@ query
 ///   [+ channel scope, kinds, authors, since, until]
 /// ORDER BY rank DESC, created_at DESC, id
@@ -250,7 +251,9 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     push_tsquery(&mut qb, query.mode, &search_text);
     qb.push(" AS query) AS search_query WHERE community_id = ");
     qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
+    qb.push(" AND deleted_at IS NULL AND kind <> ");
+    qb.push_bind(KIND_AGENT_ACTIVITY_SUMMARY as i32);
+    qb.push(" AND search_tsv @@ search_query.query");
 
     // Channel scope — see `ChannelScope` doc for the four-case mapping. The
     // emitted SQL fragments are identical to the legacy 2x2 tuple for the

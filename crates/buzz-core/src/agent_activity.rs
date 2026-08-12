@@ -5,7 +5,7 @@
 //! a closed, channel-scoped projection suitable for current channel members.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -111,14 +111,34 @@ pub struct AgentActivity {
     /// Closed lifecycle status.
     pub status: AgentActivityStatus,
     /// Safe tool category. Present only for tool activity.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tool_kind: Option<AgentActivityToolKind>,
     /// Bounded elapsed duration. Present only for terminal turn/tool updates.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub duration_ms: Option<u64>,
     /// Per-turn token counts. Present only for completed usage updates.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub usage: Option<AgentActivityUsage>,
+}
+
+fn deserialize_non_null_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 impl AgentActivity {
@@ -257,19 +277,39 @@ pub enum AgentActivityToolKind {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentActivityUsage {
     /// Input tokens for this turn.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub input_tokens: Option<u64>,
     /// Output tokens for this turn.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub output_tokens: Option<u64>,
     /// Total tokens for this turn.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub total_tokens: Option<u64>,
     /// Cache-read tokens for this turn.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache_read_tokens: Option<u64>,
     /// Cache-write tokens for this turn.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache_write_tokens: Option<u64>,
 }
 

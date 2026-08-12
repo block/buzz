@@ -475,6 +475,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Publish sanitized member-visible activity summaries over the relay.
+    /// This is independent of the encrypted owner-only observer feed.
+    #[arg(long, env = "BUZZ_ACP_RELAY_ACTIVITY", default_value_t = false)]
+    pub relay_activity: bool,
+
     /// Exit after this many seconds with no dispatched events and no turn in flight.
     /// 0 disables inactivity self-termination.
     #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
@@ -563,6 +568,8 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Whether to publish sanitized member-visible activity summaries.
+    pub relay_activity: bool,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
@@ -1117,6 +1124,7 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            relay_activity: args.relay_activity,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
@@ -1489,6 +1497,7 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            relay_activity: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
@@ -2188,6 +2197,19 @@ channels = "ALL"
     fn test_turn_liveness_one_rejected() {
         let err = validate_turn_liveness(1).unwrap_err();
         assert!(err.to_string().contains("turn liveness interval must be 0"));
+    }
+
+    #[test]
+    fn relay_activity_is_an_explicit_owner_observer_independent_switch() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert!(!default.relay_observer);
+        assert!(!default.relay_activity);
+
+        let activity_only =
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--relay-activity"]);
+        assert!(!activity_only.relay_observer);
+        assert!(activity_only.relay_activity);
     }
 
     #[test]

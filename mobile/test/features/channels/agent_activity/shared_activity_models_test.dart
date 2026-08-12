@@ -117,6 +117,35 @@ void main() {
       }
     });
 
+    test('rejects explicit null for every optional field', () {
+      for (final field in ['toolKind', 'durationMs', 'usage']) {
+        final candidate = activity()..[field] = null;
+        expect(
+          () => parseSharedActivityFrame(frame([candidate])),
+          throwsFormatException,
+          reason: field,
+        );
+      }
+      for (final field in [
+        'inputTokens',
+        'outputTokens',
+        'totalTokens',
+        'cacheReadTokens',
+        'cacheWriteTokens',
+      ]) {
+        final candidate = activity(
+          activityClass: 'usage',
+          status: 'completed',
+          usage: {field: null},
+        );
+        expect(
+          () => parseSharedActivityFrame(frame([candidate])),
+          throwsFormatException,
+          reason: field,
+        );
+      }
+    });
+
     test('enforces version, byte, count, duration, and usage bounds', () {
       expect(
         () => parseSharedActivityFrame(

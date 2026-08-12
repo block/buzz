@@ -775,6 +775,7 @@ pub fn spawn_agent_child(
     }
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
+    command.env("BUZZ_ACP_RELAY_ACTIVITY", "true");
 
     // ── Git credential helper for Buzz relay ──────────────────────────
     //

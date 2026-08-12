@@ -1184,6 +1184,10 @@ fn agent_activity_publish_result<E>(published: Result<i64, E>) -> Result<(), &'s
         .map_err(|_| "error: temporary agent activity fan-out failure")
 }
 
+fn agent_activity_serving_state_allowed<E>(state: Result<bool, E>) -> bool {
+    matches!(state, Ok(true))
+}
+
 /// Re-authorize a kind-24201 producer at the final delivery seam shared by
 /// relay-local and Redis fan-out. All lookups are fresh and fail closed.
 async fn authorize_agent_activity_delivery(
@@ -1191,6 +1195,15 @@ async fn authorize_agent_activity_delivery(
     community_id: CommunityId,
     stored_event: &StoredEvent,
 ) -> Option<(uuid::Uuid, String, String)> {
+    if !agent_activity_serving_state_allowed(
+        buzz_deletion::store(&state.db)
+            .is_serving_active(community_id)
+            .await,
+    ) {
+        warn!("agent activity delivery rejected by community lifecycle fence");
+        return None;
+    }
+
     let routed_channel_id = stored_event.channel_id;
     let event = stored_event.event.clone();
     let now = chrono::Utc::now().timestamp();
@@ -1279,6 +1292,31 @@ async fn handle_agent_activity_event(
     }
 
     let community_id = conn.tenant.community();
+    match buzz_deletion::store(&state.db)
+        .is_serving_active(community_id)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            reject("restricted");
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "restricted: community writes are fenced",
+            ));
+            return;
+        }
+        Err(error) => {
+            reject("error");
+            warn!(conn_id = %conn_id, "agent activity lifecycle lookup failed: {error}");
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "error: internal server error",
+            ));
+            return;
+        }
+    }
     let agent_bytes = event.pubkey.to_bytes().to_vec();
     let (policy, member, channel) = tokio::join!(
         state
@@ -1889,6 +1927,86 @@ mod tests {
             Err("error: temporary agent activity fan-out failure")
         );
         assert_eq!(super::agent_activity_publish_result::<()>(Ok(1)), Ok(()));
+    }
+
+    #[test]
+    fn agent_activity_serving_state_fails_closed() {
+        assert!(super::agent_activity_serving_state_allowed::<&str>(Ok(
+            true
+        )));
+        assert!(!super::agent_activity_serving_state_allowed::<&str>(Ok(
+            false
+        )));
+        assert!(!super::agent_activity_serving_state_allowed(Err(
+            "database unavailable"
+        )));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_activity_serving_fence_tracks_real_community_lifecycle() {
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:***@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        db.migrate().await.expect("migrate test DB");
+        let store = buzz_deletion::store(&db);
+        let host = format!("activity-fence-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+
+        assert!(super::agent_activity_serving_state_allowed(
+            store.is_serving_active(community).await
+        ));
+        let mut tx = pool.begin().await.expect("begin lifecycle transition");
+        sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true)")
+            .bind(community.as_uuid().to_string())
+            .execute(&mut *tx)
+            .await
+            .expect("set executor community");
+        sqlx::query("SELECT set_config('buzz.deletion_fence_generation', '0', true)")
+            .execute(&mut *tx)
+            .await
+            .expect("set executor generation");
+        sqlx::query(
+            "UPDATE communities SET deletion_state = 'quiescing', archived_at = now() WHERE id = $1",
+        )
+        .bind(community.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .expect("quiesce test community");
+        tx.commit().await.expect("commit lifecycle transition");
+        assert!(!super::agent_activity_serving_state_allowed(
+            store.is_serving_active(community).await
+        ));
+
+        let mut tx = pool.begin().await.expect("begin lifecycle cleanup");
+        sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true)")
+            .bind(community.as_uuid().to_string())
+            .execute(&mut *tx)
+            .await
+            .expect("set cleanup community");
+        sqlx::query("SELECT set_config('buzz.deletion_fence_generation', '0', true)")
+            .execute(&mut *tx)
+            .await
+            .expect("set cleanup generation");
+        sqlx::query(
+            "UPDATE communities SET deletion_state = 'active', archived_at = NULL WHERE id = $1",
+        )
+        .bind(community.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .expect("restore test community");
+        tx.commit().await.expect("commit lifecycle cleanup");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("delete test community");
     }
 
     #[test]

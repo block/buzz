@@ -13,6 +13,7 @@
 //! to Prometheus labels and calls `metrics::gauge!(...).set(...)`.
 
 use crate::error::Result;
+use buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -275,8 +276,10 @@ pub async fn active_user_counts(
             ON u.community_id = e.community_id AND u.pubkey = e.pubkey
         WHERE e.created_at >= NOW() - INTERVAL '{interval_sql}'
           AND e.deleted_at IS NULL
+          AND e.kind <> {live_only_kind}
         GROUP BY e.community_id
-        "#
+        "#,
+        live_only_kind = KIND_AGENT_ACTIVITY_SUMMARY
     );
     let rows = sqlx::query_as::<_, (Uuid, i64, i64, i64)>(sqlx::AssertSqlSafe(sql))
         .fetch_all(pool)
@@ -364,7 +367,10 @@ mod tests {
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     async fn get_pool() -> PgPool {
-        PgPool::connect(TEST_DB_URL)
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        PgPool::connect(&database_url)
             .await
             .expect("connect to test DB")
     }
@@ -664,6 +670,36 @@ mod tests {
         assert_eq!(
             row.unknown, 1,
             "profileless poster must land in unknown, not human"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_active_user_counts_excludes_live_only_activity_publishers() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let agent_pk = random_pubkey();
+        insert_user(&pool, comm_uuid, &agent_pk, true).await;
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at) \
+             VALUES ($1,$2,$3,NOW(),$4,'[]','', $5,NOW())",
+        )
+        .bind(comm_uuid)
+        .bind(random_pubkey())
+        .bind(&agent_pk)
+        .bind(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as i32)
+        .bind(vec![0_u8; 64])
+        .execute(&pool)
+        .await
+        .expect("seed live-only activity row");
+
+        let counts = active_user_counts(&pool, "1 day")
+            .await
+            .expect("active_user_counts");
+        assert!(
+            counts.iter().all(|row| row.community_id != comm_uuid),
+            "live-only activity must not create historical active-user metadata"
         );
     }
 

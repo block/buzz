@@ -73,6 +73,7 @@ pub(super) fn build_launch_block(
         }
     }
     policy_env.insert("BUZZ_ACP_RELAY_OBSERVER".into(), "true".into());
+    policy_env.insert("BUZZ_ACP_RELAY_ACTIVITY".into(), "true".into());
     policy_env.insert("BUZZ_ACP_LAZY_POOL".into(), "true".into());
     policy_env.insert(
         "BUZZ_ACP_AGENTS".into(),
@@ -277,6 +278,7 @@ mod tests {
         assert_eq!(launch["policy_env"]["GOOSE_MODE"], "auto");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_LAZY_POOL"], "true");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_RELAY_OBSERVER"], "true");
+        assert_eq!(launch["policy_env"]["BUZZ_ACP_RELAY_ACTIVITY"], "true");
         assert_eq!(
             launch["policy_env"]["BUZZ_ACP_TEAM_INSTRUCTIONS"],
             "Coordinate"

@@ -118,6 +118,10 @@ const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 const GATED_ACTIVITY_QUEUE_CAP: usize = 120;
 const ACTIVITY_EVENT_MAX_AGE_SECS: u64 = 240;
 const ACTIVITY_SEEN_ID_LIMIT: usize = GATED_ACTIVITY_QUEUE_CAP * 2;
+/// Bounded period for a healthy socket to send and acknowledge already-enqueued
+/// member-safe activity before process shutdown. This never extends an event's
+/// live-only freshness window.
+const ACTIVITY_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
 
 use std::time::Instant;
 
@@ -128,7 +132,7 @@ use buzz_core::kind::{
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
@@ -546,6 +550,9 @@ enum RelayCommand {
     Unsubscribe { channel_id: Uuid },
     /// Reconnect to the relay (re-authenticate and resubscribe).
     Reconnect,
+    /// Wait boundedly for already-enqueued kind-24201 frames to reach a terminal
+    /// relay acknowledgment. The caller logs a negative result before closing.
+    FlushActivity { completion: oneshot::Sender<bool> },
     /// Shut down the background task.
     Shutdown,
     /// Subscribe to global membership notifications.
@@ -603,6 +610,14 @@ impl RelayEventPublisher {
             })
             .await
             .map_err(|_| RelayError::ConnectionClosed)
+    }
+
+    /// Test-only publisher whose receiving half is already closed.
+    #[cfg(test)]
+    pub(crate) fn disconnected_test_publisher() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<RelayCommand>(1);
+        drop(cmd_rx);
+        Self { cmd_tx }
     }
 
     /// Test-only publisher pair: published events are forwarded to the
@@ -930,10 +945,33 @@ impl HarnessRelay {
 }
 
 impl HarnessRelay {
-    /// Graceful async shutdown — sends Shutdown command and waits up to 5s for
-    /// the background task to finish. Use this from async contexts instead of
-    /// relying on `Drop` (which aborts immediately).
+    /// Graceful async shutdown. First places a FIFO barrier behind all activity
+    /// publisher commands and waits boundedly for kind-24201 terminal relay
+    /// acknowledgments, then closes the socket and waits up to 5s for the
+    /// background task. Failure to drain is explicit rather than silent.
     pub async fn shutdown(mut self) {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let drain_queued = self
+            .cmd_tx
+            .send(RelayCommand::FlushActivity {
+                completion: completion_tx,
+            })
+            .await
+            .is_ok();
+        let drained = drain_queued
+            && matches!(
+                tokio::time::timeout(
+                    ACTIVITY_SHUTDOWN_DRAIN_TIMEOUT + Duration::from_secs(1),
+                    completion_rx,
+                )
+                .await,
+                Ok(Ok(true))
+            );
+        if !drained {
+            tracing::warn!(
+                "member-safe activity did not receive terminal relay acknowledgment before shutdown"
+            );
+        }
         let _ = self.cmd_tx.send(RelayCommand::Shutdown).await;
         if let Some(handle) = self.bg_handle.take() {
             let abort_handle = handle.abort_handle();
@@ -1091,6 +1129,8 @@ struct BgState {
     activity_dropped: u64,
     activity_expired: u64,
     activity_rejected: u64,
+    /// Rejections that cannot be retried or later resolved by an accepted ACK.
+    activity_terminal_rejected: u64,
     activity_retried: u64,
     /// Bounded terminal-ID tombstones. A signed activity event that has already
     /// been admitted cannot regain retry eligibility after a terminal ACK.
@@ -1142,6 +1182,7 @@ impl BgState {
             activity_dropped: 0,
             activity_expired: 0,
             activity_rejected: 0,
+            activity_terminal_rejected: 0,
             activity_retried: 0,
             activity_seen_ids: TwoGenDedup::new(ACTIVITY_SEEN_ID_LIMIT),
             activity_retry_attempted: HashSet::new(),
@@ -1545,6 +1586,7 @@ impl BgState {
             if retryable && Self::activity_event_is_fresh(&event) {
                 let _ = self.queue_activity_retry(event);
             } else {
+                self.activity_terminal_rejected += 1;
                 self.cleanup_activity_id(event_id);
             }
         }
@@ -1609,6 +1651,11 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
         },
         // Already reconnecting — redundant.
         RelayCommand::Reconnect => {}
+        // A disconnected/reconnecting path cannot prove terminal relay
+        // acknowledgment within the caller's shutdown window.
+        RelayCommand::FlushActivity { completion } => {
+            let _ = completion.send(false);
+        }
         // Callers MUST handle Shutdown before calling this function.
         RelayCommand::Shutdown => {
             debug_assert!(
@@ -1650,6 +1697,9 @@ fn retain_deferred_command_intent(
     while let Some(cmd) = deferred_commands.pop_front() {
         match cmd {
             RelayCommand::Shutdown | RelayCommand::Reconnect => {}
+            RelayCommand::FlushActivity { completion } => {
+                let _ = completion.send(false);
+            }
             cmd => retain_failed_command_intent(state, cmd),
         }
     }
@@ -1866,10 +1916,10 @@ async fn execute_connected_command(
             true
         }
         // Control-flow commands — callers handle these before dispatching.
-        RelayCommand::Shutdown | RelayCommand::Reconnect => {
+        RelayCommand::Shutdown | RelayCommand::Reconnect | RelayCommand::FlushActivity { .. } => {
             debug_assert!(
                 false,
-                "Shutdown/Reconnect must be handled by caller, not execute_connected_command"
+                "control-flow commands must be handled by caller, not execute_connected_command"
             );
             true
         }
@@ -2309,6 +2359,21 @@ async fn run_background_task(
                                last_pong = Instant::now();
                                connected_since = Instant::now();
                                stable_logged = false;
+                           }
+                           Some(RelayCommand::FlushActivity { completion }) => {
+                               let drained = drain_shared_activity_before_shutdown(
+                                   &mut ws,
+                                   &mut state,
+                                   &event_tx,
+                                   &observer_control_tx,
+                                   &keys,
+                                   &relay_url,
+                                   &agent_pubkey_hex,
+                                   auth_tag.as_ref(),
+                                   ACTIVITY_SHUTDOWN_DRAIN_TIMEOUT,
+                               )
+                               .await;
+                               let _ = completion.send(drained);
                            }
                            Some(RelayCommand::Shutdown) | None => {
                                debug!("background task shutting down — sending close frame");
@@ -3106,6 +3171,91 @@ async fn drain_gated_activity_pending(
     Ok(sent)
 }
 
+/// Bounded shutdown barrier for member-safe activity.
+///
+/// The command carrying this barrier sits behind every frame already enqueued by
+/// the activity publisher, so the connected loop has admitted those frames into
+/// `BgState` before entering here. We preserve normal pacing, freshness, ACK,
+/// retry, and rate-gate semantics while continuing to service relay messages.
+/// A timeout, socket loss, expiry, overflow, or rejection is reported as an
+/// explicit failed drain; no event is persisted or made eligible for history.
+#[allow(clippy::too_many_arguments)]
+async fn drain_shared_activity_before_shutdown(
+    ws: &mut WsStream,
+    state: &mut BgState,
+    event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+    observer_control_tx: &mpsc::Sender<Event>,
+    keys: &Keys,
+    relay_url: &str,
+    agent_pubkey_hex: &str,
+    auth_tag: Option<&nostr::Tag>,
+    max_wait: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + max_wait;
+    let terminal_rejected_before = state.activity_terminal_rejected;
+    let dropped_before = state.activity_dropped;
+    let expired_before = state.activity_expired;
+    let failed_before_barrier =
+        terminal_rejected_before > 0 || dropped_before > 0 || expired_before > 0;
+    let mut next_send = tokio::time::Instant::now();
+
+    loop {
+        state.expire_stale_activity();
+        let failed = failed_before_barrier
+            || state.activity_terminal_rejected != terminal_rejected_before
+            || state.activity_dropped != dropped_before
+            || state.activity_expired != expired_before;
+        if state.gated_activity_pending.is_empty() && state.activity_in_flight.is_empty() {
+            return !failed;
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+
+        let gate = state.check_rate_gate();
+        if !state.gated_activity_pending.is_empty() && gate.is_none() && now >= next_send {
+            match drain_gated_activity_pending(ws, state, 1).await {
+                Ok(sent) => {
+                    if sent > 0 {
+                        next_send = tokio::time::Instant::now() + REQ_PACING_INTERVAL;
+                    }
+                }
+                Err(_) => return false,
+            }
+            continue;
+        }
+
+        let wake_at = gate
+            .or_else(|| (!state.gated_activity_pending.is_empty()).then_some(next_send))
+            .map_or(deadline, |wake| wake.min(deadline));
+        tokio::select! {
+            raw = ws.next() => {
+                let Some(Ok(message)) = raw else {
+                    return false;
+                };
+                if !handle_ws_message(
+                    message,
+                    ws,
+                    event_tx,
+                    observer_control_tx,
+                    state,
+                    keys,
+                    relay_url,
+                    agent_pubkey_hex,
+                    auth_tag,
+                )
+                .await
+                {
+                    return false;
+                }
+            }
+            _ = tokio::time::sleep_until(wake_at) => {}
+        }
+    }
+}
+
 /// Drain parked observer telemetry frames once the rate-limit gate clears.
 ///
 /// Called by the main loop pacing timer. Sends at most `budget` frames without
@@ -3311,6 +3461,12 @@ async fn drain_commands(
         match cmd {
             RelayCommand::Reconnect => {
                 debug!("drained stale Reconnect after reconnect");
+            }
+            RelayCommand::FlushActivity { completion } => {
+                // Reconnect replay cannot prove terminal ACK semantics for a
+                // shutdown barrier. Report failure; the owner logs it before
+                // issuing the final close instead of silently discarding state.
+                let _ = completion.send(false);
             }
             RelayCommand::Shutdown => {
                 debug!("shutdown received during post-reconnect drain");
@@ -6816,6 +6972,187 @@ mod tests {
             .collect();
         assert_eq!(ids, [rejected.id, later.id]);
         assert!(state.observer_in_flight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_drain_allows_resolved_transient_retry() {
+        let (mut client, _server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        state.activity_rejected = 1;
+        state.activity_retried = 1;
+        let keys = Keys::generate();
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+
+        let drained = drain_shared_activity_before_shutdown(
+            &mut client,
+            &mut state,
+            &event_tx,
+            &observer_control_tx,
+            &keys,
+            "ws://test.invalid",
+            "agent-pubkey",
+            None,
+            Duration::from_millis(40),
+        )
+        .await;
+
+        assert!(
+            drained,
+            "a retryable rejection that later succeeded must not poison shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_drain_reports_pre_barrier_rejection() {
+        let (mut client, _server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        state.activity_rejected = 1;
+        state.activity_terminal_rejected = 1;
+        let keys = Keys::generate();
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+
+        let drained = drain_shared_activity_before_shutdown(
+            &mut client,
+            &mut state,
+            &event_tx,
+            &observer_control_tx,
+            &keys,
+            "ws://test.invalid",
+            "agent-pubkey",
+            None,
+            Duration::from_millis(40),
+        )
+        .await;
+
+        assert!(
+            !drained,
+            "a terminal rejection processed before the FIFO barrier must remain visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_drain_waits_for_shared_activity_ack() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+        let activity_id = activity.id.to_hex();
+        assert!(state.park_gated_activity_frame(Box::new(activity)));
+
+        let server_task = tokio::spawn(async move {
+            let frame = next_test_frame(&mut server).await;
+            assert_eq!(frame[0], "EVENT");
+            assert_eq!(frame[1]["id"], activity_id);
+            server
+                .send(Message::Text(
+                    json!(["OK", activity_id, true, ""]).to_string().into(),
+                ))
+                .await
+                .expect("ack shared activity");
+        });
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+
+        let drained = drain_shared_activity_before_shutdown(
+            &mut client,
+            &mut state,
+            &event_tx,
+            &observer_control_tx,
+            &keys,
+            "ws://test.invalid",
+            "agent-pubkey",
+            None,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(drained, "accepted shared activity must drain before close");
+        assert!(state.gated_activity_pending.is_empty());
+        assert!(state.activity_in_flight.is_empty());
+        server_task.await.expect("join relay ACK task");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_drain_reports_negative_ack() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+        let activity_id = activity.id.to_hex();
+        assert!(state.park_gated_activity_frame(Box::new(activity)));
+
+        let server_task = tokio::spawn(async move {
+            let frame = next_test_frame(&mut server).await;
+            assert_eq!(frame[0], "EVENT");
+            server
+                .send(Message::Text(
+                    json!(["OK", activity_id, false, "restricted: denied"])
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("reject shared activity");
+        });
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+
+        let drained = drain_shared_activity_before_shutdown(
+            &mut client,
+            &mut state,
+            &event_tx,
+            &observer_control_tx,
+            &keys,
+            "ws://test.invalid",
+            "agent-pubkey",
+            None,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(!drained, "negative relay OK must fail the shutdown barrier");
+        assert!(state.gated_activity_pending.is_empty());
+        assert!(state.activity_in_flight.is_empty());
+        assert_eq!(state.activity_rejected, 1);
+        assert_eq!(state.activity_terminal_rejected, 1);
+        server_task.await.expect("join relay rejection task");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_drain_times_out_without_ack() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+        assert!(state.park_gated_activity_frame(Box::new(activity)));
+
+        let server_task = tokio::spawn(async move {
+            let frame = next_test_frame(&mut server).await;
+            assert_eq!(frame[0], "EVENT");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let started = tokio::time::Instant::now();
+
+        let drained = drain_shared_activity_before_shutdown(
+            &mut client,
+            &mut state,
+            &event_tx,
+            &observer_control_tx,
+            &keys,
+            "ws://test.invalid",
+            "agent-pubkey",
+            None,
+            Duration::from_millis(40),
+        )
+        .await;
+
+        assert!(!drained, "missing relay OK must fail the shutdown barrier");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(state.activity_in_flight.len(), 1);
+        server_task.abort();
     }
 
     #[test]

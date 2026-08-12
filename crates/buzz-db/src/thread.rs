@@ -4,7 +4,7 @@
 //! nested threads. The `thread_metadata` table is populated when events are
 //! ingested and updated as replies arrive or are deleted.
 
-use buzz_core::StoredEvent;
+use buzz_core::{kind::KIND_AGENT_ACTIVITY_SUMMARY, StoredEvent};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -394,7 +394,7 @@ pub(crate) async fn get_thread_replies_on(
 
     // Build the query dynamically based on optional filters.
     // Track the next positional parameter index.
-    let mut param_idx = 3u32; // $1 is community_id, $2 is root_event_id
+    let mut param_idx = 4u32; // $1 community, $2 root, $3 live-only exclusion
     let mut sql = String::from(
         r#"
         SELECT
@@ -421,6 +421,7 @@ pub(crate) async fn get_thread_replies_on(
         WHERE tm.community_id = $1
           AND tm.root_event_id = $2
           AND e.deleted_at IS NULL
+          AND e.kind <> $3
         "#,
     );
 
@@ -453,7 +454,8 @@ pub(crate) async fn get_thread_replies_on(
 
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
-        .bind(root_event_id);
+        .bind(root_event_id)
+        .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32);
 
     if let Some(dl) = depth_limit {
         q = q.bind(dl as i32);
@@ -517,14 +519,20 @@ pub async fn get_thread_summary(
 ) -> Result<Option<ThreadSummary>> {
     let row = sqlx::query(
         r#"
-        SELECT reply_count, descendant_count, last_reply_at
-        FROM thread_metadata
-        WHERE community_id = $1 AND event_id = $2
+        SELECT tm.reply_count, tm.descendant_count, tm.last_reply_at
+        FROM thread_metadata tm
+        JOIN events e
+          ON e.community_id = tm.community_id
+         AND e.created_at = tm.event_created_at
+         AND e.id = tm.event_id
+        WHERE tm.community_id = $1 AND tm.event_id = $2
+          AND e.kind <> $3
         LIMIT 1
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(event_id)
+    .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
     .fetch_optional(pool)
     .await?;
 
@@ -550,6 +558,7 @@ pub async fn get_thread_summary(
             WHERE tm.community_id = $1
               AND tm.root_event_id = $2
               AND e.deleted_at IS NULL
+              AND e.kind <> $3
             GROUP BY e.pubkey
         ) sub
         ORDER BY last_seen DESC
@@ -558,6 +567,7 @@ pub async fn get_thread_summary(
     )
     .bind(community_id.as_uuid())
     .bind(event_id)
+    .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
     .fetch_all(pool)
     .await?;
 
@@ -619,7 +629,7 @@ pub(crate) async fn get_channel_window_on(
     cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
 ) -> Result<ChannelWindow> {
-    let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
+    let mut param_idx = 4u32; // $1 community, $2 channel, $3 live-only exclusion
     let mut sql = String::from(
         r#"
         SELECT
@@ -643,6 +653,7 @@ pub(crate) async fn get_channel_window_on(
         WHERE e.community_id = $1
           AND e.channel_id = $2
           AND e.deleted_at IS NULL
+          AND e.kind <> $3
           AND (
                 tm.depth IS NULL
              OR tm.depth = 0
@@ -679,7 +690,8 @@ pub(crate) async fn get_channel_window_on(
 
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
-        .bind(channel_id);
+        .bind(channel_id)
+        .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32);
     if let Some((ts, id)) = &cursor {
         q = q.bind(*ts).bind(id.clone());
     }
@@ -763,6 +775,7 @@ pub(crate) async fn get_channel_window_on(
                 WHERE tm.community_id = $1
                   AND tm.root_event_id = ANY($2)
                   AND e.deleted_at IS NULL
+                  AND e.kind <> $3
                 GROUP BY tm.root_event_id, e.pubkey
             ) sub
             WHERE rn <= 10
@@ -771,6 +784,7 @@ pub(crate) async fn get_channel_window_on(
         )
         .bind(community_id.as_uuid())
         .bind(&roots)
+        .bind(KIND_AGENT_ACTIVITY_SUMMARY as i32)
         .fetch_all(&mut *conn)
         .await?;
 
@@ -1665,6 +1679,89 @@ mod tests {
         let mut expected_sorted = expected_ids.clone();
         expected_sorted.sort();
         assert_eq!(unique, expected_sorted, "paged set != inserted tied set");
+    }
+
+    /// A physically present live-only activity row must not consume a channel
+    /// window slot or influence `has_more`/cursor metadata. This models legacy
+    /// or out-of-band corruption by bypassing the normal no-storage ingest path.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_excludes_live_only_activity_before_pagination() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-live-only-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let control = EventBuilder::new(Kind::Custom(9), "visible control")
+            .custom_created_at(nostr::Timestamp::from(1_800_000_000))
+            .sign_with_keys(&author)
+            .expect("sign control");
+        insert_root(&pool, community, channel.id, &control).await;
+
+        let activity = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as u16),
+            r#"{"v":1,"activity_id":"00000000-0000-4000-8000-000000000002","occurred_at":1800000100,"class":"turn","status":"active"}"#,
+        )
+        .custom_created_at(nostr::Timestamp::from(1_800_000_100))
+        .sign_with_keys(&author)
+        .expect("sign activity fixture");
+        let activity_at = event_created_at(&activity);
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),$9)",
+        )
+        .bind(community.as_uuid())
+        .bind(activity.id.as_bytes().as_slice())
+        .bind(activity.pubkey.as_bytes().as_slice())
+        .bind(activity_at)
+        .bind(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as i32)
+        .bind(serde_json::to_value(&activity.tags).expect("serialize tags"))
+        .bind(&activity.content)
+        .bind(activity.sig.serialize().as_slice())
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("seed physical live-only row");
+        sqlx::query(
+            "INSERT INTO thread_metadata \
+             (community_id,event_created_at,event_id,channel_id,depth,broadcast) \
+             VALUES ($1,$2,$3,$4,0,true)",
+        )
+        .bind(community.as_uuid())
+        .bind(activity_at)
+        .bind(activity.id.as_bytes().as_slice())
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("seed live-only metadata row");
+
+        let window = get_channel_window(&pool, community, channel.id, 1, None, None)
+            .await
+            .expect("fetch live-only-safe window");
+        assert_eq!(window.rows.len(), 1, "control row must fill the page");
+        assert_eq!(window.rows[0].stored_event.event.id, control.id);
+        assert!(
+            !window.has_more,
+            "hidden live-only rows are not pagination evidence"
+        );
+        assert!(window.next_cursor.is_none());
+        assert!(
+            get_thread_summary(&pool, community, activity.id.as_bytes())
+                .await
+                .expect("live-only thread summary lookup")
+                .is_none(),
+            "live-only rows must not expose thread metadata"
+        );
     }
 
     /// The exact-multiple final page: when the channel's row count is an

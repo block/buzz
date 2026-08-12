@@ -164,6 +164,50 @@ test("enforces closed class/status/field combinations", () => {
   }
 });
 
+test("rejects explicit null for every optional field", () => {
+  for (const field of ["toolKind", "durationMs", "usage"]) {
+    assert.equal(
+      parse(
+        signedEvent({
+          content: JSON.stringify({
+            version: 1,
+            activities: [activity({ [field]: null })],
+          }),
+        }),
+      ),
+      null,
+      field,
+    );
+  }
+  for (const field of [
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+  ]) {
+    assert.equal(
+      parse(
+        signedEvent({
+          content: JSON.stringify({
+            version: 1,
+            activities: [
+              activity({
+                activityClass: "usage",
+                status: "completed",
+                toolKind: undefined,
+                usage: { [field]: null },
+              }),
+            ],
+          }),
+        }),
+      ),
+      null,
+      field,
+    );
+  }
+});
+
 test("merges lifecycle updates by opaque id and keeps a bounded newest window", () => {
   const first = activity({ occurredAt: "2027-01-15T08:00:00Z" });
   const completed = activity({
