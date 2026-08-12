@@ -1,5 +1,6 @@
 use super::{
-    pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url, PairingRelay,
+    pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_payload_relay_url,
+    resolve_pairing_relay_url, PairingRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -101,4 +102,24 @@ fn main_relay_pairing_uses_main_relay_url() {
     .expect("resolve main pairing relay");
 
     assert_eq!(resolved, "wss://sprout-oss.stage.blox.sqprod.co");
+}
+
+#[test]
+fn pairing_payload_can_use_public_relay_without_changing_active_workspace() {
+    let resolved = resolve_pairing_payload_relay_url(
+        "https://workspace-relay.internal.example:8443",
+        Some("https://buzz.example.com/"),
+    )
+    .expect("resolve pairing payload relay");
+
+    assert_eq!(resolved, "https://buzz.example.com");
+}
+
+#[test]
+fn pairing_payload_defaults_to_active_workspace_relay() {
+    let resolved =
+        resolve_pairing_payload_relay_url("https://workspace-relay.internal.example:8443", None)
+            .expect("resolve active relay");
+
+    assert_eq!(resolved, "https://workspace-relay.internal.example:8443");
 }

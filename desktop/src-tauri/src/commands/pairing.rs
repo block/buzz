@@ -129,6 +129,7 @@ async fn start_pairing_session(
 
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);
+    let payload_relay_url = pairing_payload_relay_url(&http_url)?;
     let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
     let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
     let mut qr_uri = encode_qr(&qr_payload);
@@ -143,7 +144,7 @@ async fn start_pairing_session(
             .to_bech32()
             .map_err(|e| format!("encode nsec: {e}"))?;
         let payload_json = serde_json::json!({
-            "relayUrl": http_url,
+            "relayUrl": payload_relay_url,
             "pubkey": keys.public_key().to_hex(),
             "nsec": nsec,
         });
@@ -669,6 +670,28 @@ enum PairingRelay {
     Configured(String),
     LegacyPath,
     MainRelay,
+}
+
+fn pairing_payload_relay_url(current_relay_url: &str) -> Result<String, String> {
+    let configured = std::env::var("BUZZ_PAIRING_PAYLOAD_RELAY_URL")
+        .ok()
+        .or_else(|| {
+            option_env!("BUZZ_DESKTOP_BUILD_PAIRING_PAYLOAD_RELAY_URL").map(str::to_string)
+        });
+    resolve_pairing_payload_relay_url(current_relay_url, configured.as_deref())
+}
+
+fn resolve_pairing_payload_relay_url(
+    current_relay_url: &str,
+    configured: Option<&str>,
+) -> Result<String, String> {
+    let candidate = configured.unwrap_or(current_relay_url);
+    let parsed = url::Url::parse(candidate)
+        .map_err(|e| format!("invalid pairing payload relay URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("pairing payload relay URL must be an absolute HTTP(S) URL".to_string());
+    }
+    Ok(candidate.trim_end_matches('/').to_string())
 }
 
 /// Prefer the relay-advertised dedicated pairing URL. The legacy `/pair`

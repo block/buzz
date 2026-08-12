@@ -46,6 +46,22 @@ keypair.
 
 Run `./run.sh backup-hint` for the backup checklist.
 
+### Dedicated pairing relay
+
+The `pairing-relay` service runs `buzz-pair-relay` and publishes it on
+loopback at `BUZZ_PAIRING_PORT` (default 3500). To let mobile devices pair
+from outside the network the main relay is served on, front that port with a
+TLS proxy on a hostname the device can resolve, and set
+`BUZZ_PAIRING_RELAY_URL` to the public `wss://` URL so the relay advertises
+it to desktop clients. If the pairing hostname differs from the relay's
+canonical host, add it to `community_host_aliases` so it resolves to the same
+community.
+
+The desktop pairing QR payload defaults to the active workspace relay URL;
+set `BUZZ_PAIRING_PAYLOAD_RELAY_URL` (or bake
+`BUZZ_BUILD_PAIRING_PAYLOAD_RELAY_URL` at build time) when the mobile device
+should connect back through a different public hostname.
+
 ## Validation
 
 Before sharing an install link publicly, verify a fresh install with:

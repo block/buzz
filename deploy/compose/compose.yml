@@ -48,6 +48,29 @@ services:
     networks:
       - buzz-net
 
+  pairing-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    ports:
+      - "127.0.0.1:${BUZZ_PAIRING_PORT:-3500}:5000"
+    # Probe the websocket handshake over /dev/tcp because the runtime image has
+    # bash but no curl/wget/socat.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000; printf \"GET /pair HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: Upgrade\\r\\nUpgrade: websocket\\r\\nSec-WebSocket-Version: 13\\r\\nSec-WebSocket-Key: SGVsbG9Xb3JsZDEyMzQ1Ng==\\r\\n\\r\\n\" >&3; IFS= read -r status <&3; [[ \"$$status\" == *\"101 Switching Protocols\"* ]]'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
   postgres:
     image: postgres:17-alpine
     environment:

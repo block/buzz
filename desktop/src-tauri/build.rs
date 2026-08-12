@@ -18,6 +18,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_RELAY_RECONNECT_CMD");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_PAIRING_PAYLOAD_RELAY_URL");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
 
     // Explicit owner-only agent-access capability. Release packaging sets this
@@ -32,6 +33,16 @@ fn main() {
 
     if let Ok(relay_http) = std::env::var("BUZZ_RELAY_HTTP") {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_RELAY_HTTP={relay_http}");
+    }
+
+    if let Ok(relay_url) = std::env::var("BUZZ_BUILD_PAIRING_PAYLOAD_RELAY_URL") {
+        let parsed = url::Url::parse(&relay_url)
+            .unwrap_or_else(|e| panic!("BUZZ_BUILD_PAIRING_PAYLOAD_RELAY_URL is invalid: {e}"));
+        assert!(
+            matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+            "BUZZ_BUILD_PAIRING_PAYLOAD_RELAY_URL must be an absolute HTTP(S) URL"
+        );
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_PAIRING_PAYLOAD_RELAY_URL={relay_url}");
     }
 
     if let Ok(provider) = std::env::var("BUZZ_BUILD_BUZZ_AGENT_PROVIDER") {

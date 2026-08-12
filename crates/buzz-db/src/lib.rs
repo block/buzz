@@ -1217,10 +1217,17 @@ impl Db {
     ) -> Result<Option<CommunityRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
+            SELECT c.id, c.host
+            FROM communities c
+            WHERE lower(c.host) = lower($1)
+              AND c.archived_at IS NULL
+            UNION ALL
+            SELECT c.id, c.host
+            FROM community_host_aliases a
+            JOIN communities c ON c.id = a.community_id
+            WHERE lower(a.host) = lower($1)
+              AND c.archived_at IS NULL
+            LIMIT 1
             "#,
         )
         .bind(normalized_host)
@@ -6196,6 +6203,36 @@ mod tests {
             .expect("lookup stored-case host")
             .expect("community found by stored-case host");
         assert_eq!(found.id, CommunityId::from_uuid(id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn lookup_community_by_host_resolves_alias_to_canonical_community() {
+        let db = setup_db().await;
+        let id = Uuid::new_v4();
+        let canonical_host = format!("canonical-{}.example", id.simple());
+        let alias_host = format!("alias-{}.example", id.simple());
+
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&canonical_host)
+            .execute(&db.pool)
+            .await
+            .expect("insert canonical community host");
+        sqlx::query("INSERT INTO community_host_aliases (host, community_id) VALUES ($1, $2)")
+            .bind(alias_host.to_uppercase())
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .expect("insert mixed-case alias host");
+
+        let found = db
+            .lookup_community_by_host(&alias_host)
+            .await
+            .expect("lookup alias")
+            .expect("community found by alias");
+        assert_eq!(found.id, CommunityId::from_uuid(id));
+        assert_eq!(found.host, canonical_host);
     }
 
     #[tokio::test]
