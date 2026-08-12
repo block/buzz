@@ -17,8 +17,10 @@ use crate::{
     util::now_iso,
 };
 
+pub(super) mod deploy_receipt;
 pub(super) mod payload_digest;
 
+use deploy_receipt::AmbiguousDeployReceipt;
 use payload_digest::{deploy_input_digest, digest_parts};
 
 type DeployLocks = StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
@@ -293,6 +295,20 @@ pub(super) struct DeploySnapshot {
     pub(super) payload: serde_json::Value,
 }
 
+/// What one store transaction did: the value `apply` returned, whether a save
+/// was performed, and the error if the save was attempted and failed.
+///
+/// A failed save is *not* folded into the outer `Err`, because when the
+/// provider call already succeeded the difference matters: the outer `Err` is
+/// "nothing happened", while a save error is "something happened remotely and
+/// this app did not record it" — the ambiguous-success case that owes a
+/// durable receipt.
+pub(super) struct StoreOutcome<R> {
+    pub(super) result: R,
+    pub(super) saved: bool,
+    pub(super) save_error: Option<String>,
+}
+
 /// How a finished provider call was bound to the store state found on
 /// completion. Computed by [`bind_completion`].
 #[derive(Debug)]
@@ -488,7 +504,18 @@ pub(super) trait DeployEffects {
     /// returns `true`. `apply`'s second argument re-resolves a record's full
     /// deploy input digest, so the completion can compare inputs that live
     /// outside the agent row.
-    fn with_store<R>(&mut self, apply: &mut CompletionApply<'_, R>) -> Result<R, String>;
+    fn with_store<R>(
+        &mut self,
+        apply: &mut CompletionApply<'_, R>,
+    ) -> Result<StoreOutcome<R>, String>;
+
+    /// Persist a durable record of a deploy the provider accepted and the
+    /// store failed to save.
+    fn record_ambiguous_success(&mut self, receipt: &AmbiguousDeployReceipt) -> Result<(), String>;
+
+    /// Drop any ambiguous-success receipt for `pubkey`: the store has just
+    /// recorded a known outcome for this agent, so the ambiguity is resolved.
+    fn clear_ambiguous_success(&mut self, pubkey: &str);
 
     /// Build the success value from the freshly persisted record.
     fn success(&mut self, record: &ManagedAgentRecord) -> Result<Self::Success, String>;
@@ -512,12 +539,78 @@ pub(super) async fn run_deploy<E: DeployEffects>(
     let deploy_result = effects.deploy(&snapshot).await;
 
     let captured = &snapshot.captured;
-    let outcome = effects.with_store(&mut |records, resolve_digest| {
+    let store = effects.with_store(&mut |records, resolve_digest| {
         bind_completion(records, pubkey, captured, resolve_digest, &deploy_result)
     })?;
+    let StoreOutcome {
+        result: outcome,
+        saved,
+        save_error,
+    } = store;
+
+    if let Some(save_error) = save_error {
+        return Err(unrecorded_completion(
+            effects,
+            pubkey,
+            captured,
+            &deploy_result,
+            save_error,
+        ));
+    }
+    if saved {
+        effects.clear_ambiguous_success(pubkey);
+    }
 
     let record = completion_result(outcome, deploy_result)?;
     effects.success(&record)
+}
+
+/// The store write that should have recorded a finished provider call failed.
+///
+/// When the provider call *also* failed, the only thing lost is a local
+/// `last_error` stamp and the provider's error is what the owner needs, so it
+/// is surfaced with the save failure appended. When the provider call
+/// succeeded, this is the ambiguous-success case: something is running (or
+/// converging) remotely that this app has no record of asking for, so a
+/// durable receipt is written before the error is returned. Returns the
+/// message for the owner.
+fn unrecorded_completion<E: DeployEffects>(
+    effects: &mut E,
+    pubkey: &str,
+    captured: &CapturedDeploy,
+    deploy_result: &Result<String, String>,
+    save_error: String,
+) -> String {
+    let backend_agent_id = match deploy_result {
+        Err(error) => {
+            return format!("{error} (and the result could not be saved: {save_error})");
+        }
+        Ok(backend_agent_id) => backend_agent_id.clone(),
+    };
+
+    let receipt = AmbiguousDeployReceipt {
+        pubkey: pubkey.to_string(),
+        provider_id: captured.provider_id.clone(),
+        backend_agent_id,
+        payload_digest: captured.payload_digest.clone(),
+        captured_updated_at: captured.updated_at.clone(),
+        save_error: save_error.clone(),
+        observed_at: now_iso(),
+    };
+    match effects.record_ambiguous_success(&receipt) {
+        Ok(()) => format!(
+            "The provider accepted the deploy but Buzz could not save the result: {save_error}. \
+             The agent may be deployed with the settings that were just sent while this app's \
+             record does not show it — a receipt of what was sent was saved so it can be \
+             reconciled later."
+        ),
+        Err(receipt_error) => format!(
+            "The provider accepted the deploy but Buzz could not save the result: {save_error}. \
+             The agent may be deployed with the settings that were just sent while this app's \
+             record does not show it, and the receipt of what was sent could not be saved \
+             either: {receipt_error}"
+        ),
+    }
 }
 
 /// Validate `record` as a plain deploy target (create/start/reconcile): any
@@ -555,6 +648,23 @@ impl DeployEffects for CommandDeployEffects<'_> {
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        // Read side of the ambiguous-success receipt: a deploy for an agent
+        // whose last one was never recorded says so in the app log, where it
+        // is legible next to whatever this deploy goes on to do.
+        for receipt in deploy_receipt::read_deploy_receipts(self.app)
+            .iter()
+            .filter(|receipt| receipt.pubkey == pubkey)
+        {
+            eprintln!(
+                "buzz-desktop: agent {pubkey} has an unrecorded deploy from {} (provider {}, \
+                 deployment {}, input digest {}) — the provider may be running it; this deploy \
+                 supersedes it",
+                receipt.observed_at,
+                receipt.provider_id,
+                receipt.backend_agent_id,
+                receipt.payload_digest
+            );
+        }
         let payload = super::build_deploy_payload(self.app, self.state, record)?;
         let captured = (self.target)(pubkey, record, &payload)?;
         Ok(DeploySnapshot { captured, payload })
@@ -564,7 +674,10 @@ impl DeployEffects for CommandDeployEffects<'_> {
         call_provider_deploy(&snapshot.captured, snapshot.payload.clone()).await?
     }
 
-    fn with_store<R>(&mut self, apply: &mut CompletionApply<'_, R>) -> Result<R, String> {
+    fn with_store<R>(
+        &mut self,
+        apply: &mut CompletionApply<'_, R>,
+    ) -> Result<StoreOutcome<R>, String> {
         let _store_guard = self
             .state
             .managed_agents_store_lock
@@ -582,10 +695,24 @@ impl DeployEffects for CommandDeployEffects<'_> {
             deploy_input_digest(record, &payload)
         };
         let (save, result) = apply(&mut records, &resolve_digest);
-        if save {
-            save_managed_agents(self.app, &records)?;
-        }
-        Ok(result)
+        let save_error = if save {
+            save_managed_agents(self.app, &records).err()
+        } else {
+            None
+        };
+        Ok(StoreOutcome {
+            result,
+            saved: save && save_error.is_none(),
+            save_error,
+        })
+    }
+
+    fn record_ambiguous_success(&mut self, receipt: &AmbiguousDeployReceipt) -> Result<(), String> {
+        deploy_receipt::write_deploy_receipt(self.app, receipt)
+    }
+
+    fn clear_ambiguous_success(&mut self, pubkey: &str) {
+        deploy_receipt::clear_deploy_receipt(self.app, pubkey);
     }
 
     fn success(&mut self, record: &ManagedAgentRecord) -> Result<ManagedAgentSummary, String> {

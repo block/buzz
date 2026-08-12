@@ -1,5 +1,5 @@
-//! Redeploy orchestration races: per-agent serialization and completion
-//! binding.
+//! Redeploy orchestration races: per-agent serialization, completion binding,
+//! and the two ways a completion can fail to be recorded.
 //!
 //! These drive the real decision logic (`provider_access::run_deploy` /
 //! `bind_completion`) through an in-memory store and a fake provider gated on
@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use super::provider_access;
 use super::tests::bare_agent_record;
 use crate::managed_agents::ManagedAgentRecord;
+use provider_access::deploy_receipt::AmbiguousDeployReceipt;
 
 fn provider_backed_record(pubkey: &str, model: &str, updated_at: &str) -> ManagedAgentRecord {
     use crate::managed_agents::BackendKind;
@@ -73,9 +74,14 @@ struct FakeDeployEffects {
     world: World,
     sent: Arc<Mutex<Vec<String>>>,
     saves: Arc<Mutex<u32>>,
+    /// Receipts written by the ambiguous-success path, standing in for the
+    /// `deploy-receipts` directory.
+    receipts: Arc<Mutex<Vec<AmbiguousDeployReceipt>>>,
     started: Option<tokio::sync::oneshot::Sender<()>>,
     release: Option<tokio::sync::oneshot::Receiver<()>>,
     result: Result<String, String>,
+    /// Simulates a store write that fails after the provider already answered.
+    save_fails_with: Option<String>,
     /// Simulates a payload that can no longer be resolved on completion.
     world_unresolvable: bool,
 }
@@ -91,9 +97,11 @@ impl FakeDeployEffects {
             world: world.clone(),
             sent: Arc::new(Mutex::new(Vec::new())),
             saves: Arc::new(Mutex::new(0)),
+            receipts: Arc::new(Mutex::new(Vec::new())),
             started: None,
             release: None,
             result,
+            save_fails_with: None,
             world_unresolvable: false,
         }
     }
@@ -152,7 +160,7 @@ impl provider_access::DeployEffects for FakeDeployEffects {
     fn with_store<R>(
         &mut self,
         apply: &mut provider_access::CompletionApply<'_, R>,
-    ) -> Result<R, String> {
+    ) -> Result<provider_access::StoreOutcome<R>, String> {
         let mut store = self.store.lock().unwrap();
         let world = self.world.clone();
         let unresolvable = self.world_unresolvable;
@@ -165,11 +173,39 @@ impl provider_access::DeployEffects for FakeDeployEffects {
                 &fake_payload(record, &world.read()),
             )
         };
-        let (save, result) = apply(&mut store, &resolve_digest);
-        if save {
+        // Load-modify-save, like the real effects: `apply` mutates a *copy*,
+        // and the copy only reaches the store when the save succeeds. Mutating
+        // the live store in place would make a failed save still change the
+        // store, which is precisely the state the ambiguous-success receipt
+        // exists to describe the absence of.
+        let mut records = store.clone();
+        let (save, result) = apply(&mut records, &resolve_digest);
+        let save_error = if save {
+            self.save_fails_with.clone()
+        } else {
+            None
+        };
+        if save && save_error.is_none() {
+            *store = records;
             *self.saves.lock().unwrap() += 1;
         }
-        Ok(result)
+        Ok(provider_access::StoreOutcome {
+            result,
+            saved: save && save_error.is_none(),
+            save_error,
+        })
+    }
+
+    fn record_ambiguous_success(&mut self, receipt: &AmbiguousDeployReceipt) -> Result<(), String> {
+        self.receipts.lock().unwrap().push(receipt.clone());
+        Ok(())
+    }
+
+    fn clear_ambiguous_success(&mut self, pubkey: &str) {
+        self.receipts
+            .lock()
+            .unwrap()
+            .retain(|receipt| receipt.pubkey != pubkey);
     }
 
     fn success(&mut self, record: &ManagedAgentRecord) -> Result<ManagedAgentRecord, String> {
@@ -276,6 +312,7 @@ async fn persona_change_mid_deploy_is_not_applied_current() {
 
     let mut effects = FakeDeployEffects::new(&store, &world, Ok("deploy-a".to_string()))
         .gated(started_tx, release_rx);
+    let receipts = effects.receipts.clone();
     let task = tokio::spawn(async move { provider_access::run_deploy(pubkey, &mut effects).await });
     started_rx.await.expect("redeploy entered the provider");
 
@@ -302,6 +339,7 @@ async fn persona_change_mid_deploy_is_not_applied_current() {
     let record = store.lock().unwrap()[0].clone();
     assert_eq!(record.backend_agent_id.as_deref(), Some("deploy-a"));
     assert!(record.last_started_at.is_some());
+    assert!(receipts.lock().unwrap().is_empty(), "nothing was ambiguous");
 }
 
 /// The same world change, arriving *before* the deploy rather than during it,
@@ -543,6 +581,120 @@ async fn provider_failure_does_not_stamp_a_switched_backend() {
         store.lock().unwrap()[0].last_error,
         None,
         "one provider's failure was stamped onto another provider's record"
+    );
+}
+
+/// The provider accepted the deploy and the store write failed: the app has no
+/// record of a deployment that may be live. A durable receipt records what was
+/// sent, and the owner is told plainly.
+#[tokio::test]
+async fn a_provider_success_the_store_could_not_save_leaves_a_receipt() {
+    let pubkey = "ambiguous-agent";
+    let store = Arc::new(Mutex::new(vec![provider_backed_record(
+        pubkey, "model-v1", "t1",
+    )]));
+    let world = World::new("persona-v1");
+
+    let mut effects = FakeDeployEffects::new(&store, &world, Ok("deploy-a".to_string()));
+    effects.save_fails_with = Some("no space left on device".to_string());
+    let receipts = effects.receipts.clone();
+
+    let error = provider_access::run_deploy(pubkey, &mut effects)
+        .await
+        .expect_err("an unsaved deploy is not a success");
+    assert!(
+        error.contains("could not save the result")
+            && error.contains("no space left on device")
+            && error.contains("receipt"),
+        "unexpected error: {error}"
+    );
+
+    let receipts = receipts.lock().unwrap();
+    assert_eq!(receipts.len(), 1, "no durable receipt was written");
+    let receipt = &receipts[0];
+    assert_eq!(receipt.pubkey, pubkey);
+    assert_eq!(receipt.provider_id, "provider");
+    assert_eq!(
+        receipt.backend_agent_id, "deploy-a",
+        "the receipt must name the deployment the store never recorded"
+    );
+    assert_eq!(receipt.captured_updated_at, "t1");
+    assert_eq!(receipt.save_error, "no space left on device");
+    // The digest is the one that was sent, so a later reader can compare it
+    // against what the store holds. Take the record out from under the guard
+    // first: two `store.lock()` calls in one expression are two live guards on
+    // a non-reentrant mutex held by the same thread, which deadlocks.
+    let stored = store.lock().unwrap()[0].clone();
+    let expected = provider_access::payload_digest::deploy_input_digest(
+        &stored,
+        &fake_payload(&stored, "persona-v1"),
+    )
+    .expect("digest");
+    assert_eq!(receipt.payload_digest, expected);
+    assert!(!receipt.observed_at.is_empty());
+
+    // The whole point of the receipt: the store does *not* know about this
+    // deployment, so the record must still be exactly the pre-deploy one.
+    assert_eq!(stored.backend_agent_id.as_deref(), Some("existing"));
+    assert_eq!(stored.updated_at, "t1");
+    assert_eq!(stored.last_started_at, None);
+}
+
+/// A provider failure whose store write also fails is *not* ambiguous —
+/// nothing is running that the store does not know about — so it gets no
+/// receipt, and both errors reach the owner.
+#[tokio::test]
+async fn a_failed_deploy_the_store_could_not_save_leaves_no_receipt() {
+    let pubkey = "failed-unsaved-agent";
+    let store = Arc::new(Mutex::new(vec![provider_backed_record(
+        pubkey, "model-v1", "t1",
+    )]));
+    let world = World::new("persona-v1");
+
+    let mut effects = FakeDeployEffects::new(&store, &world, Err("image pull failed".to_string()));
+    effects.save_fails_with = Some("read-only file system".to_string());
+    let receipts = effects.receipts.clone();
+
+    let error = provider_access::run_deploy(pubkey, &mut effects)
+        .await
+        .expect_err("a failed deploy is not success");
+    assert!(
+        error.contains("image pull failed") && error.contains("read-only file system"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        receipts.lock().unwrap().is_empty(),
+        "a failed deploy left an ambiguous-success receipt"
+    );
+}
+
+/// The next deploy that *does* save resolves the ambiguity, so the receipt is
+/// dropped — a receipt on disk always means an outcome the store still does
+/// not reflect.
+#[tokio::test]
+async fn a_saved_completion_clears_an_earlier_receipt() {
+    let pubkey = "reconciled-agent";
+    let store = Arc::new(Mutex::new(vec![provider_backed_record(
+        pubkey, "model-v1", "t1",
+    )]));
+    let world = World::new("persona-v1");
+
+    let mut effects = FakeDeployEffects::new(&store, &world, Ok("deploy-a".to_string()));
+    effects.save_fails_with = Some("no space left on device".to_string());
+    let receipts = effects.receipts.clone();
+    let _ = provider_access::run_deploy(pubkey, &mut effects).await;
+    assert_eq!(receipts.lock().unwrap().len(), 1);
+
+    // Second attempt, store healthy again.
+    let mut effects = FakeDeployEffects::new(&store, &world, Ok("deploy-b".to_string()));
+    effects.receipts = receipts.clone();
+    provider_access::run_deploy(pubkey, &mut effects)
+        .await
+        .expect("the retry lands");
+
+    assert!(
+        receipts.lock().unwrap().is_empty(),
+        "a recorded completion left the stale receipt behind"
     );
 }
 
