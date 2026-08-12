@@ -191,6 +191,12 @@ test("persistent agents transition atomically before Enter-send resolves", async
       endsWithSpace: true,
       atDocumentEnd: true,
     });
+
+  // Exercise the reported contract, not just its selection prerequisites:
+  // immediate typing after restoration must remain outside the mention chip.
+  await input.pressSequentially("testing");
+  await expect(input).toHaveText("@Morgarita testing");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
 });
 
 test("timeline agent send remains one-shot and returns to the placeholder", async ({
