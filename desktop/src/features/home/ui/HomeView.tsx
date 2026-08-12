@@ -63,7 +63,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { deleteMessage } from "@/shared/api/tauri";
-import type { HomeFeedResponse } from "@/shared/api/types";
+import type { Channel, HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -74,6 +74,7 @@ import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/Aux
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { Button } from "@/shared/ui/button";
+import { HomeMembersSidebarOverlay } from "./HomeMembersSidebarOverlay";
 
 const INBOX_SEARCH_KEYS = [
   "item",
@@ -168,6 +169,9 @@ export function HomeView({
   } | null>(null);
   const selectedEventId = urlSelectedItemId ?? autoSelectedEventId;
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
+    null,
+  );
+  const [membersChannel, setMembersChannel] = React.useState<Channel | null>(
     null,
   );
   const { goChannel } = useAppNavigation();
@@ -299,9 +303,6 @@ export function HomeView({
     homeInboxWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
 
   const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
-  // Inbox detail renders the active DM as a conversation. Keep its cache live
-  // so an agent's NIP-10 reply arrives here instead of only in its activity
-  // transcript.
   useChannelSubscription(
     selectedChannel?.channelType === "dm" ? selectedChannel : null,
   );
@@ -849,9 +850,7 @@ export function HomeView({
                 const itemToReply = selectedItem;
                 setIsSendingReply(true);
                 try {
-                  // Use the same path as the channel composer so DM
-                  // participants are addressed and the shared window cache
-                  // stays authoritative across Inbox and conversation views.
+                  // Keep Inbox sends on the channel composer's shared path.
                   const sent = await sendMessageMutation.mutateAsync({
                     content,
                     mediaTags,
@@ -861,28 +860,23 @@ export function HomeView({
                     channelId,
                   });
                   const thread = getThreadReference(sent.tags);
-                  const parentDepth = thread.parentId
-                    ? (contextMessages.find(
-                        (message) => message.id === thread.parentId,
-                      )?.depth ?? 0)
-                    : -1;
                   const reply: InboxReply = {
-                    authorLabel: currentPubkey
-                      ? resolveUserLabel({
-                          currentPubkey,
-                          profiles: feedProfiles,
-                          pubkey: sent.pubkey,
-                        })
-                      : "You",
+                    authorLabel: resolveUserLabel({
+                      currentPubkey: identity?.pubkey,
+                      profiles: feedProfiles,
+                      pubkey: sent.pubkey,
+                    }),
                     authorPubkey: sent.pubkey,
                     avatarUrl:
-                      currentPubkey && feedProfiles
-                        ? (feedProfiles[currentPubkey.trim().toLowerCase()]
-                            ?.avatarUrl ?? null)
-                        : null,
+                      feedProfiles?.[normalizePubkey(sent.pubkey)]?.avatarUrl ??
+                      null,
                     content: sent.content,
                     createdAt: sent.created_at,
-                    depth: thread.parentId ? parentDepth + 1 : 0,
+                    depth: thread.parentId
+                      ? (contextMessages.find(
+                          (message) => message.id === thread.parentId,
+                        )?.depth ?? 0) + 1
+                      : 0,
                     fullTimestampLabel: formatInboxFullTimestamp(
                       sent.created_at,
                     ),
@@ -983,6 +977,7 @@ export function HomeView({
                 channel={managedChannel}
                 currentPubkey={currentPubkey}
                 layout="split"
+                onOpenMembers={() => setMembersChannel(managedChannel)}
                 onOpenChange={(nextOpen) => {
                   if (!nextOpen) {
                     setManagedChannelId(null);
@@ -994,6 +989,11 @@ export function HomeView({
           ) : null}
         </div>
       </div>
+      <HomeMembersSidebarOverlay
+        channel={membersChannel}
+        currentPubkey={currentPubkey}
+        onClose={() => setMembersChannel(null)}
+      />
     </ProfilePanelProvider>
   );
 }

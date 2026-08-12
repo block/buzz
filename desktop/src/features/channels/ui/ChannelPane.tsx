@@ -762,6 +762,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             key="channel-management-panel"
             onChannelManagementDeleted={onChannelManagementDeleted}
             onCloseChannelManagement={onCloseChannelManagement}
+            onOpenMembers={onOpenMembers}
             onResetThreadPanelWidth={onResetThreadPanelWidth}
             onThreadPanelResizeStart={onThreadPanelResizeStart}
             threadPanelWidthPx={threadPanelWidthPx}

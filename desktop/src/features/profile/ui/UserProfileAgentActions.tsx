@@ -6,23 +6,12 @@ import {
   Download,
   Power,
   Settings,
-  Trash2,
 } from "lucide-react";
 
 import type { IdentityArchiveActions } from "@/features/identity-archive/hooks";
 import { ArchiveConfirmDialog } from "@/features/profile/ui/ArchiveConfirmDialog";
 import type { ManagedAgent } from "@/shared/api/types";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/shared/ui/alert-dialog";
-import { Button, buttonVariants } from "@/shared/ui/button";
+import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,7 +26,6 @@ export function UserProfileAgentSettingsMenu({
   isPending,
   isBot = false,
   managedAgent,
-  onDelete,
   onDuplicatePersona,
   onExportPersona,
   onToggleAutoStart,
@@ -47,14 +35,12 @@ export function UserProfileAgentSettingsMenu({
   isPending: boolean;
   isBot?: boolean;
   managedAgent?: ManagedAgent;
-  onDelete?: () => void;
   onDuplicatePersona?: () => void;
   onExportPersona?: () => void;
   onToggleAutoStart?: () => void;
   personaActionKey?: string;
 }) {
   const [archiveConfirmOpen, setArchiveConfirmOpen] = React.useState(false);
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false);
   const actionKey = managedAgent?.pubkey ?? "persona-draft";
   const personaKey = personaActionKey ?? actionKey;
   const canToggleAutoStart =
@@ -66,11 +52,8 @@ export function UserProfileAgentSettingsMenu({
   const hasArchiveAction =
     archiveActions?.canArchive === true &&
     archiveActions.isArchived !== undefined;
-  const shouldConfirmAgentDelete =
-    managedAgent !== undefined && onDelete !== undefined;
-  const hasManageActions = hasArchiveAction || Boolean(onDelete);
   const hasActions =
-    canToggleAutoStart || hasPrimaryActions || hasManageActions;
+    canToggleAutoStart || hasPrimaryActions || hasArchiveAction;
 
   if (!hasActions) {
     return null;
@@ -142,7 +125,7 @@ export function UserProfileAgentSettingsMenu({
               Export
             </DropdownMenuItem>
           ) : null}
-          {hasManageActions && (canToggleAutoStart || hasPrimaryActions) ? (
+          {hasArchiveAction && (canToggleAutoStart || hasPrimaryActions) ? (
             <DropdownMenuSeparator />
           ) : null}
           {hasArchiveAction && archiveActions ? (
@@ -166,24 +149,6 @@ export function UserProfileAgentSettingsMenu({
               </DropdownMenuItem>
             )
           ) : null}
-          {onDelete && hasArchiveAction ? <DropdownMenuSeparator /> : null}
-          {onDelete ? (
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              data-testid={`user-profile-agent-delete-${actionKey}`}
-              disabled={isPending}
-              onSelect={() => {
-                if (shouldConfirmAgentDelete) {
-                  setDeleteConfirmOpen(true);
-                  return;
-                }
-                onDelete();
-              }}
-            >
-              <Trash2 className="h-4 w-4" />
-              Delete agent
-            </DropdownMenuItem>
-          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
       {hasArchiveAction && archiveActions ? (
@@ -198,32 +163,17 @@ export function UserProfileAgentSettingsMenu({
           open={archiveConfirmOpen}
         />
       ) : null}
-      {shouldConfirmAgentDelete ? (
-        <AgentDeleteConfirmDialog
-          agent={managedAgent}
-          isPending={isPending}
-          onConfirm={() => {
-            setDeleteConfirmOpen(false);
-            onDelete();
-          }}
-          onOpenChange={setDeleteConfirmOpen}
-          open={deleteConfirmOpen}
-        />
-      ) : null}
     </>
   );
 }
 
 export function UserProfileAgentSettingsMenuSlot({
   archiveActions,
-  canDeletePersona,
   canInstantiateAgent,
   canManagePersona,
   isAgentActionPending,
   isBot,
   managedAgent,
-  onDeleteAgent,
-  onDeletePersona,
   onDuplicatePersona,
   onExportPersona,
   onToggleAutoStart,
@@ -231,14 +181,11 @@ export function UserProfileAgentSettingsMenuSlot({
   viewerIsOwner,
 }: {
   archiveActions: IdentityArchiveActions;
-  canDeletePersona: boolean;
   canInstantiateAgent: boolean;
   canManagePersona: boolean;
   isAgentActionPending: boolean;
   isBot: boolean;
   managedAgent?: ManagedAgent;
-  onDeleteAgent: () => void;
-  onDeletePersona: () => void;
   onDuplicatePersona: () => void;
   onExportPersona: () => void;
   onToggleAutoStart: () => void;
@@ -250,11 +197,12 @@ export function UserProfileAgentSettingsMenuSlot({
   const settingsActionPending =
     isAgentActionPending || archiveActions.isPending;
   const sharedProps = {
-    archiveActions: canShowArchiveAction ? archiveActions : undefined,
+    archiveActions: !isBot && canShowArchiveAction ? archiveActions : undefined,
     isBot,
     isPending: settingsActionPending,
-    onDuplicatePersona: canManagePersona ? onDuplicatePersona : undefined,
-    onExportPersona: canManagePersona ? onExportPersona : undefined,
+    onDuplicatePersona:
+      !isBot && canManagePersona ? onDuplicatePersona : undefined,
+    onExportPersona: !isBot && canManagePersona ? onExportPersona : undefined,
     personaActionKey,
   };
 
@@ -263,22 +211,16 @@ export function UserProfileAgentSettingsMenuSlot({
       <UserProfileAgentSettingsMenu
         {...sharedProps}
         managedAgent={managedAgent}
-        onDelete={onDeleteAgent}
         onToggleAutoStart={onToggleAutoStart}
       />
     );
   }
 
   if (canInstantiateAgent) {
-    return (
-      <UserProfileAgentSettingsMenu
-        {...sharedProps}
-        onDelete={canDeletePersona ? onDeletePersona : undefined}
-      />
-    );
+    return <UserProfileAgentSettingsMenu {...sharedProps} />;
   }
 
-  if (canShowArchiveAction) {
+  if (canShowArchiveAction && !isBot) {
     return (
       <UserProfileAgentSettingsMenu
         archiveActions={archiveActions}
@@ -289,65 +231,4 @@ export function UserProfileAgentSettingsMenuSlot({
   }
 
   return null;
-}
-
-function AgentDeleteConfirmDialog({
-  agent,
-  isPending,
-  onConfirm,
-  onOpenChange,
-  open,
-}: {
-  agent: ManagedAgent;
-  isPending: boolean;
-  onConfirm: () => void;
-  onOpenChange: (open: boolean) => void;
-  open: boolean;
-}) {
-  const isProviderAgent = agent.backend.type === "provider";
-
-  return (
-    <AlertDialog onOpenChange={onOpenChange} open={open}>
-      <AlertDialogContent data-testid="agent-delete-confirm-dialog">
-        <AlertDialogHeader>
-          <AlertDialogTitle>Delete this agent?</AlertDialogTitle>
-          <AlertDialogDescription>
-            Deleting this agent stops and removes the agent from this community.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
-          <li>Removes the local management record and saved agent key</li>
-          <li>Removes the agent from every channel it belongs to</li>
-          <li>
-            Archives the agent&apos;s identity on the relay so it no longer
-            appears in member lists or mention suggestions
-          </li>
-          <li>
-            {isProviderAgent
-              ? "Requests remote deletion; if it is online, Buzz first sends a shutdown command when possible. If the deployment cannot be reached through a channel, the remote process may keep running without local management."
-              : "Stops any local agent process before deleting the record"}
-          </li>
-        </ul>
-        <p className="text-sm text-muted-foreground">
-          You can also archive this agent from the profile settings menu if you
-          want to hide the agent instead of removing it.
-        </p>
-        <AlertDialogFooter>
-          <AlertDialogCancel asChild>
-            <Button type="button" variant="outline">
-              Cancel
-            </Button>
-          </AlertDialogCancel>
-          <AlertDialogAction
-            className={buttonVariants({ variant: "destructive" })}
-            data-testid="agent-delete-confirm-action"
-            disabled={isPending}
-            onClick={onConfirm}
-          >
-            {isPending ? "Deleting..." : "Delete agent"}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
 }

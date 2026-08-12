@@ -221,13 +221,13 @@ test.describe("channel controls", () => {
     ).toBeEnabled();
   });
 
-  test("05 — sticky footer pins lifecycle buttons", async ({ page }) => {
+  test("05 — owner actions live in the settings list", async ({ page }) => {
     await installMockBridge(page);
     await openManagementSheet(page);
 
-    const footer = page.getByTestId("channel-management-footer");
-    await expect(footer).toBeVisible();
+    await expect(page.getByTestId("channel-management-footer")).toHaveCount(0);
     await expect(page.getByTestId("channel-management-archive")).toBeVisible();
+    await expect(page.getByTestId("channel-management-delete")).toBeVisible();
     await settle(page);
   });
 
