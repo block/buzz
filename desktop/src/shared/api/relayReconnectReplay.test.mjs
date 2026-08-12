@@ -141,6 +141,32 @@ test("live-only subscriptions do not page reconnect history", () => {
   assert.equal(shouldPageReconnectReplay(filter), false);
 });
 
+test("strict live-only subscriptions reconnect without adding a cursor", async () => {
+  resetGate();
+  const originalFilter = {
+    kinds: [24_201],
+    authors: ["aa".repeat(32)],
+    "#h": ["36411e44-0e2d-4cfe-bd6e-567eb169db9f"],
+    limit: 0,
+  };
+  const subscription = {
+    mode: "live",
+    filter: originalFilter,
+    onEvent: () => {},
+    reconnectMode: "live-only",
+    lastSeenCreatedAt: 123,
+  };
+  const sent = [];
+
+  await replayLiveSubscriptions({
+    subscriptions: new Map([["activity", subscription]]),
+    sendRaw: async (payload) => sent.push(payload),
+    requestHistory: async () => assert.fail("strict live-only must not fetch"),
+  });
+
+  assert.deepEqual(sent, [["REQ", "activity", originalFilter]]);
+});
+
 test("reconnect replay keeps the stricter existing since window", () => {
   const filter = {
     kinds: [9],

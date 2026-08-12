@@ -77,6 +77,7 @@ function recoverLiveSubscriptionFromClosed({
   subscription.resolveReady = undefined;
 
   const closedClass = classifyRelayClosed(message);
+  subscription.onClosed?.(message, closedClass === "terminal");
 
   if (closedClass === "terminal") {
     // Auth/access/filter failure — permanently remove the subscription so it
@@ -134,6 +135,12 @@ export function prepareSubscriptionEvent(
     return false;
   }
   if (subscription.mode === "first") {
+    return false;
+  }
+  try {
+    if (subscription.admitEvent && !subscription.admitEvent(event))
+      return false;
+  } catch {
     return false;
   }
   subscription.closedRetryAttempt = 0;

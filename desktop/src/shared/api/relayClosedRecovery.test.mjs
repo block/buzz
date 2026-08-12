@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   handleRelayClosed,
   handleSubscriptionEose,
+  prepareSubscriptionEvent,
 } from "./relayClosedRecovery.ts";
 import {
   requestFirstEventGated,
@@ -321,6 +322,53 @@ test("production CLOSED handler removes terminal live subscriptions", () => {
   });
   assert.equal(subscriptions.has("live-1"), false);
   assert.equal(readyCalls, 1);
+});
+
+test("terminal CLOSED notifies the persistent revocation callback", () => {
+  const closed = [];
+  const subscriptions = new Map([
+    [
+      "activity",
+      {
+        mode: "live",
+        filter: { kinds: [24_201], limit: 0 },
+        onEvent: () => {},
+        onClosed: (message, terminal) => closed.push({ message, terminal }),
+      },
+    ],
+  ]);
+
+  handleRelayClosed({
+    subscriptions,
+    subId: "activity",
+    message: "restricted: access revoked",
+    sendReq: () => Promise.resolve(),
+  });
+
+  assert.deepEqual(closed, [
+    { message: "restricted: access revoked", terminal: true },
+  ]);
+  assert.equal(subscriptions.has("activity"), false);
+});
+
+test("rejected live events cannot advance replay state", () => {
+  const subscription = {
+    mode: "live",
+    filter: { kinds: [24_201], limit: 0 },
+    onEvent: () => {},
+    admitEvent: () => false,
+  };
+  const admitted = prepareSubscriptionEvent(subscription, {
+    id: "bad",
+    pubkey: "aa".repeat(32),
+    created_at: 9_999_999,
+    kind: 24_201,
+    tags: [],
+    content: "{}",
+    sig: "bad",
+  });
+  assert.equal(admitted, false);
+  assert.equal(subscription.lastSeenCreatedAt, undefined);
 });
 
 // ── Rate-limited CLOSED core behaviour (F5) ───────────────────────────────────
