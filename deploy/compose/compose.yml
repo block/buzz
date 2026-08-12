@@ -105,8 +105,15 @@ services:
   # Ephemeral NIP-AB device-pairing relay (kind 24134). Separate from the main
   # relay on purpose: a device mid-pairing holds a fresh ephemeral key that is
   # not a relay member yet, so it cannot pass BUZZ_REQUIRE_RELAY_MEMBERSHIP.
-  # No persistence, no auth, no history. Published on loopback only; the reverse
-  # proxy terminates TLS and routes /pair here (see Caddyfile).
+  # No persistence, no auth, no history.
+  #
+  # Published on loopback only. It has no auth by design, so exposing it on a
+  # public interface is not an acceptable default; a reverse proxy on this host
+  # reaches it at 127.0.0.1:5000 and compose.caddy.yml unpublishes it entirely.
+  # Override with BUZZ_PAIR_RELAY_PORT — see README.md § Device pairing.
+  #
+  # The relay advertises BUZZ_PAIRING_RELAY_URL from .env via its env_file, so
+  # this service needs no wiring into the relay's environment block.
   pairing-relay:
     image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
     # The image ENTRYPOINT is buzz-relay, so this must override entrypoint, not
