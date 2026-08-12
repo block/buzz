@@ -70,11 +70,19 @@ launchpad/
 **Never move or rename upstream files.** Upstream is ~3,800 files and we merge from it
 regularly; a rename turns every future merge into manual work.
 
-Two deliberate exceptions, both in `.github/`, both accepted knowingly:
+Three deliberate exceptions, all accepted knowingly:
 
 - `.github/ISSUE_TEMPLATE/` — our templates replace upstream's, which pointed
   contributors at `block/buzz`.
 - `.github/PULL_REQUEST_TEMPLATE.md` — one added section.
+- **Deployment image provenance** — five named files (`deploy/compose/compose.yml`,
+  `deploy/compose/.env.example`, `deploy/compose/README.md`, `Dockerfile`,
+  `.github/workflows/docker.yml`) carry Launchpad values so the fork deploys its own
+  build rather than Block's. The list is closed; the reasoning and the rejected
+  alternative are in
+  [`decisions/ADR-0005-launchpad-deployment-boundary.md`](decisions/ADR-0005-launchpad-deployment-boundary.md).
+  **This is settled — do not raise it as a §3 violation in review.** Adding a sixth file
+  is a change to that record, not a call to make in a pull request.
 
 New workflows go in `.github/workflows/` (GitHub requires it) and **must** be named
 `launchpad-*.yml` so they never collide with upstream's.
