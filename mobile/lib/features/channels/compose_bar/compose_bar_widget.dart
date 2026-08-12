@@ -878,14 +878,9 @@ class ComposeBar extends HookConsumerWidget {
       if (defaultTargetPlatform == TargetPlatform.android) {
         androidImeFallbackTimer.value?.cancel();
         if (appView.viewInsets.bottom > 0) {
-          // The observer starts with the current inset state, so it will not
-          // emit a hidden-to-shown transition when this composer is mounted
-          // while another field already has the IME open.
           androidImeTransitionStarted.value = true;
         } else {
           androidImeTransitionStarted.value = false;
-          // Hardware keyboards do not produce bottom-inset metrics. Keep that
-          // path usable without making the onscreen composer outrun the IME.
           androidImeFallbackTimer.value = Timer(
             const Duration(milliseconds: 250),
             () {
@@ -963,8 +958,7 @@ class ComposeBar extends HookConsumerWidget {
       );
     }
 
-    // Suggestions and attachments live in the overlay so showing them cannot
-    // reflow the composer. Both stay anchored just above the capsule.
+    // Suggestions and attachments live in the overlay.
     final hasPendingUploads = uploadingCount.value > 0;
     return _ComposerDockFrame(
       expansionAnimation: composerExpansionController,
