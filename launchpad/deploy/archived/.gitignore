@@ -31,3 +31,6 @@ measurements/
 *.log
 
 .DS_Store
+
+# Local-only log watcher that pokes the reviewer pane. Never committed.
+.log-watcher.sh
