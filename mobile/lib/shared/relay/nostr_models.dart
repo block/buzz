@@ -10,6 +10,8 @@ abstract final class EventKind {
   static const contactList = 3;
   static const deletion = 5;
   static const reaction = 7;
+  static const relayAdminAddMember = 9030;
+  static const relayMembership = 13534;
   static const streamMessage = 9;
   static const nip29DeleteEvent = 9005;
   static const presenceUpdate = 20001;

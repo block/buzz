@@ -10,6 +10,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
+import '../../shared/community/community_membership_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -21,16 +22,19 @@ import 'accent_picker_page.dart';
 import 'theme_picker_page.dart';
 
 part 'settings_page/appearance_section.dart';
+part 'settings_page/community_section.dart';
 part 'settings_page/connection_section.dart';
 
 class SettingsPage extends HookConsumerWidget {
   const SettingsPage({
     super.key,
     required this.profileHeader,
+    required this.invitePageBuilder,
     required this.identityRecoveryPageBuilder,
   });
 
   final Widget profileHeader;
+  final WidgetBuilder invitePageBuilder;
   final WidgetBuilder identityRecoveryPageBuilder;
 
   @override
@@ -71,6 +75,7 @@ class SettingsPage extends HookConsumerWidget {
               padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
               children: [
                 profileHeader,
+                _CommunitySection(invitePageBuilder: invitePageBuilder),
                 const _AppearanceSection(),
                 _ConnectionSection(
                   identityRecoveryPageBuilder: identityRecoveryPageBuilder,

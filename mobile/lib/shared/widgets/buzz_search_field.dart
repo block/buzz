@@ -1,42 +1,60 @@
-part of '../search_page.dart';
+import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-const _searchIdleIconSize = 26.0;
-const _searchCompactIconSize = 18.0;
-const _searchFieldHint = 'Search messages, channels, and people';
-const _searchIdleIconInset = Grid.xxs;
-const _searchIdleTextInset =
+import '../theme/theme.dart';
+
+const double buzzSearchIdleFieldHeight = 45;
+const double buzzSearchIdleTextSize = 15;
+const double _searchIdleIconSize = 26;
+const double _searchCompactIconSize = 18;
+const double _searchIdleIconInset = Grid.xxs;
+const double _searchIdleTextInset =
     _searchIdleIconInset + _searchIdleIconSize + Grid.xxs;
-const _searchCompactTextInset =
+const double _searchCompactTextInset =
     _searchIdleIconInset + _searchCompactIconSize + Grid.xxs;
 
-class _SearchMotionField extends StatelessWidget {
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final Color iconColor;
-  final Color inputColor;
-  final Color placeholderColor;
-  final Color surfaceColor;
-  final bool isSearchEditing;
-  final bool reduceMotion;
-  final Duration motionDuration;
-  final VoidCallback onTap;
-  final ValueChanged<String> onChanged;
-  final ValueChanged<String> onSubmitted;
-
-  const _SearchMotionField({
+/// Buzz's global-search text field treatment, shared by search-like inputs.
+class BuzzSearchField extends StatelessWidget {
+  const BuzzSearchField({
     required this.controller,
     required this.focusNode,
+    required this.hintText,
     required this.iconColor,
     required this.inputColor,
     required this.placeholderColor,
     required this.surfaceColor,
-    required this.isSearchEditing,
+    required this.isEditing,
     required this.reduceMotion,
     required this.motionDuration,
     required this.onTap,
     required this.onChanged,
     required this.onSubmitted,
+    this.fieldKey = const Key('search-field'),
+    this.autocorrect = true,
+    this.enableSuggestions = true,
+    this.enabled = true,
+    this.textInputAction = TextInputAction.search,
+    super.key,
   });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final String hintText;
+  final Color iconColor;
+  final Color inputColor;
+  final Color placeholderColor;
+  final Color surfaceColor;
+  final bool isEditing;
+  final bool reduceMotion;
+  final Duration motionDuration;
+  final VoidCallback onTap;
+  final ValueChanged<String> onChanged;
+  final ValueChanged<String> onSubmitted;
+  final Key fieldKey;
+  final bool autocorrect;
+  final bool enableSuggestions;
+  final bool enabled;
+  final TextInputAction textInputAction;
 
   @override
   Widget build(BuildContext context) => DecoratedBox(
@@ -52,33 +70,36 @@ class _SearchMotionField extends StatelessWidget {
             child: SizedBox(
               width: double.infinity,
               child: TextField(
-                key: const Key('search-field'),
+                key: fieldKey,
                 controller: controller,
                 focusNode: focusNode,
+                autocorrect: autocorrect,
+                enableSuggestions: enableSuggestions,
+                enabled: enabled,
                 decoration: InputDecoration(
-                  hintText: isSearchEditing ? null : _searchFieldHint,
+                  hintText: isEditing ? null : hintText,
                   hintStyle: searchInputTextStyle.copyWith(
                     color: placeholderColor,
-                    fontSize: _searchIdleTextSize,
-                    height: 20 / _searchIdleTextSize,
+                    fontSize: buzzSearchIdleTextSize,
+                    height: 20 / buzzSearchIdleTextSize,
                   ),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
                   focusedBorder: InputBorder.none,
                   isDense: true,
                   contentPadding: EdgeInsets.only(
-                    left: isSearchEditing
+                    left: isEditing
                         ? _searchCompactTextInset
                         : _searchIdleTextInset,
                     right: Grid.xxs,
-                    top: isSearchEditing ? _searchFieldVerticalPadding : 0,
-                    bottom: isSearchEditing ? _searchFieldVerticalPadding : 0,
+                    top: isEditing ? Grid.xxs : 0,
+                    bottom: isEditing ? Grid.xxs : 0,
                   ),
                 ),
                 style: searchInputTextStyle.copyWith(color: inputColor),
                 textAlignVertical: TextAlignVertical.center,
                 textAlign: TextAlign.start,
-                textInputAction: TextInputAction.search,
+                textInputAction: textInputAction,
                 onTap: onTap,
                 onChanged: onChanged,
                 onSubmitted: onSubmitted,
@@ -94,7 +115,7 @@ class _SearchMotionField extends StatelessWidget {
               child: AnimatedScale(
                 duration: reduceMotion ? Duration.zero : motionDuration,
                 curve: Curves.easeInOutCubic,
-                scale: isSearchEditing
+                scale: isEditing
                     ? _searchCompactIconSize / _searchIdleIconSize
                     : 1,
                 child: Icon(
