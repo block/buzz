@@ -8,6 +8,7 @@ export default defineConfig({
   testMatch: [
     "**/release-smoke.spec.ts",
     "**/dm-history-live-regression.spec.ts",
+    "**/foreground-responsiveness-regression.spec.ts",
   ],
   timeout: 10 * 60_000,
   retries: 0,
