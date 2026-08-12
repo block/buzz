@@ -231,7 +231,7 @@ test("foreground paints and handles a sidebar action before resume fetches", asy
 
   const firstResumeFetch = index("resume-fetch-start");
   if (firstResumeFetch !== -1) {
-    expect(firstResumeFetch).toBeGreaterThan(index("interaction-dispatched"));
+    expect(firstResumeFetch).toBeGreaterThan(index("interaction-committed"));
   }
 
   await originalHasFocus.dispose();
