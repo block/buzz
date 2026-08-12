@@ -86,6 +86,17 @@ _GRAPHQL_ABSENT = re.compile(
     re.I,
 )
 
+#: GraphQL error `type` -> the reason it means. Checked in this order, because a
+#: response can carry several errors and the most specific failure should win.
+#: Mapping everything but FORBIDDEN onto `malformed` would report a definite
+#: "this does not exist" as a response nobody could parse.
+GRAPHQL_ERROR_REASONS = {
+    "FORBIDDEN": FORBIDDEN,
+    "NOT_FOUND": ABSENT,
+    "RATE_LIMITED": UNREACHABLE,
+    "SERVICE_UNAVAILABLE": UNREACHABLE,
+}
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -105,10 +116,22 @@ def gh_runner(argv: list[str]) -> RunResult:
         raise ValueError(f"the pre-flight may only spawn {BINARY!r}, not {argv[:1]!r}")
     try:
         proc = subprocess.run(argv, capture_output=True, timeout=60, check=False)
-    except FileNotFoundError:
-        return RunResult(127, "", f"{BINARY} is not installed")
     except subprocess.TimeoutExpired:
         return RunResult(124, "", f"{BINARY} timed out after 60s")
+    except OSError as exc:
+        # Every OSError, not only FileNotFoundError. An uncaught one exits 1 with
+        # a traceback, and 1 is this tool's "usage error" code — so a broken gh
+        # install would tell a caller its arguments were bad. Three reproduced
+        # triggers, none of them a missing binary:
+        #   EACCES  a gh on PATH that is not executable
+        #   EACCES  a *directory* named gh on PATH
+        #   ENOEXEC a gh that is executable but not a runnable binary — a
+        #           truncated download or the wrong architecture, which is the
+        #           plausible one in practice
+        # A non-executable gh with a working gh later on PATH is harmless:
+        # CPython keeps walking PATH and only reports the saved EACCES if no
+        # entry succeeds.
+        return RunResult(127, "", f"cannot run {BINARY}: {type(exc).__name__}: {exc}")
     return RunResult(
         proc.returncode,
         proc.stdout.decode("utf-8", "replace"),
@@ -163,14 +186,32 @@ def _read(name: str, endpoint: str, argv: list[str], runner: Runner) -> Read:
     except json.JSONDecodeError as exc:
         return Read(name, skip=MALFORMED, detail=f"not JSON: {exc}", endpoint=endpoint)
 
-    # GraphQL answers 200 with an errors array. A FORBIDDEN error there is a
-    # scope problem wearing a success status code.
+    # An errors array arriving with a SUCCESSFUL exit code — a failure wearing a
+    # success's clothes.
+    #
+    # `gh` never does this: it exits non-zero whenever the response carries
+    # errors, including the partial case where some aliases resolved and others
+    # did not, so through the real binary this branch is unreachable and a
+    # nonexistent PR is classified `absent` from gh's prose instead. Verified
+    # against gh 2.93.0.
+    #
+    # It is kept for the INJECTED runner, which is the documented extension point
+    # (see INTERFACE.md on adopting #120's fetch.fetch_all): a runner that speaks
+    # to GitHub directly rather than through gh returns HTTP 200 with an errors
+    # body and a zero status, and without this the errors array would be handed
+    # on as if it were data. Both halves — the guard and the type mapping — are
+    # driven by controls through a fake runner, because nothing else can drive
+    # them.
     if isinstance(data, Mapping) and data.get("errors"):
         types = {e.get("type") for e in data["errors"] if isinstance(e, Mapping)}
         messages = "; ".join(
             str(e.get("message", "")) for e in data["errors"] if isinstance(e, Mapping)
         )
-        reason = FORBIDDEN if "FORBIDDEN" in types else MALFORMED
+        reason = MALFORMED
+        for error_type, mapped in GRAPHQL_ERROR_REASONS.items():
+            if error_type in types:
+                reason = mapped
+                break
         return Read(name, skip=reason, detail=f"graphql errors: {messages}", endpoint=endpoint)
 
     return Read(name, data=data, endpoint=endpoint)

@@ -204,10 +204,6 @@ class Skips:
             }
         )
 
-    def reasons(self) -> set[str]:
-        return {e["reason"] for e in self.entries}
-
-
 class RecordError(Exception):
     """A REQUIRED input could not be read. The caller must exit non-zero."""
 
@@ -359,7 +355,7 @@ def build_closing_issue(meta: Read, closing_refs: Read, skips: Skips) -> dict[st
     return section
 
 
-def build_diff(compare: Read, pr_section: Mapping[str, Any] | None, skips: Skips) -> dict[str, Any] | None:
+def build_diff(compare: Read, head_sha: str | None, skips: Skips) -> dict[str, Any] | None:
     """Per-file counts against the **merge base**, not the base branch tip.
 
     ``baseRefOid`` is the current tip of the base branch, not the commit the head
@@ -371,6 +367,22 @@ def build_diff(compare: Read, pr_section: Mapping[str, Any] | None, skips: Skips
     """
     if not compare.ok:
         skips.add("diff", compare)
+        return None
+
+    if not head_sha:
+        # An unpinned diff is not a trustworthy diff: head_sha is what ties the
+        # file list to the commit pair it was read at. Taking it as a plain
+        # argument, rather than reaching into an optional pr section, means this
+        # invariant is enforced here instead of by every caller's discipline.
+        skips.add(
+            "diff",
+            Read(
+                "pr",
+                skip=MALFORMED,
+                detail="no head sha to pin the comparison to",
+                endpoint=compare.endpoint,
+            ),
+        )
         return None
 
     merge_base = _get(compare.data, "merge_base_commit", "sha")
@@ -411,7 +423,7 @@ def build_diff(compare: Read, pr_section: Mapping[str, Any] | None, skips: Skips
         "merge_base_sha": merge_base,
         # The head sha the comparison was actually taken at, so the record is
         # pinned to the commit pair it read rather than to whatever HEAD is now.
-        "head_sha": _get(pr_section or {}, "head_sha"),
+        "head_sha": head_sha,
         "files": entries,
     }
 
@@ -632,8 +644,18 @@ def build_nearest_rules(
         )
         return None
 
+    # Blobs only. A git *directory* named AGENTS.md is legal, and so is a
+    # submodule (type "commit"); either would satisfy a path-only match and be
+    # reported as a resolved rules file that cannot be read — while also
+    # suppressing the SKIP-ONLY "no ancestor rules file" entry that is the truth.
+    # Entries with no type recorded are kept, because a projection that dropped
+    # the field should not silently drop the file with it.
     tree_paths = frozenset(
-        p for p in (_get(e, "path") for e in entries) if isinstance(p, str)
+        path
+        for path, kind in (
+            (_get(e, "path"), _get(e, "type", default="blob")) for e in entries
+        )
+        if isinstance(path, str) and kind == "blob"
     )
 
     resolved: dict[str, dict[str, str | None]] = {}
@@ -672,7 +694,9 @@ def build_record(reads: Mapping[str, Read]) -> dict[str, Any]:
         reads.get("closing_refs", Read("closing_refs", skip=UNREACHABLE, detail="not attempted")),
         skips,
     )
-    diff_section = build_diff(reads["compare"], pr_section, skips)
+    diff_section = build_diff(
+        reads["compare"], (pr_section or {}).get("head_sha"), skips
+    )
     checks_section = build_checks(reads["checks"], skips)
     gate = build_required_gate(
         reads.get("branch_rules", Read("branch_rules", skip=UNREACHABLE, detail="not attempted")),

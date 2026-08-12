@@ -461,7 +461,7 @@ class MergeBaseDiff(unittest.TestCase):
         skips = core.Skips()
         diff = core.build_diff(
             core.Read("compare", data=compare, endpoint=ENDPOINTS["compare"]),
-            {"head_sha": pr["head"]["sha"]},
+            pr["head"]["sha"],
             skips,
         )
         self.assertEqual(diff["merge_base_sha"], compare["merge_base_commit"]["sha"])
@@ -477,10 +477,28 @@ class MergeBaseDiff(unittest.TestCase):
         self.assertEqual(record["diff"]["head_sha"], fixture("pr86-pr.json")["head"]["sha"])
         self.assertEqual(record["diff"]["head_sha"], record["pr"]["head_sha"])
 
+    def test_a_diff_with_no_head_sha_to_pin_it_is_a_skip(self):
+        """An unpinned diff is not a trustworthy diff.
+
+        Reported by a reviewer and then refuted as unreachable — every route that
+        loses the head sha already exits 2. Hardened anyway, because build_diff is
+        a public pure function INTERFACE.md invites the next stage to call, and the
+        invariant now lives in the function instead of in caller discipline.
+        """
+        skips = core.Skips()
+        diff = core.build_diff(
+            core.Read("compare", data=fixture("pr86-compare.json"), endpoint=ENDPOINTS["compare"]),
+            None,
+            skips,
+        )
+        self.assertIsNone(diff)
+        self.assertEqual(skips.entries[0]["field"], "diff")
+        self.assertIn("head sha", skips.entries[0]["detail"])
+
     def test_a_compare_without_a_merge_base_is_a_skip_not_an_empty_diff(self):
         broken = {k: v for k, v in fixture("pr86-compare.json").items() if k != "merge_base_commit"}
         skips = core.Skips()
-        diff = core.build_diff(core.Read("compare", data=broken), {"head_sha": "abc"}, skips)
+        diff = core.build_diff(core.Read("compare", data=broken), "abc", skips)
         self.assertIsNone(diff)
         self.assertEqual(skips.entries[0]["reason"], core.MALFORMED)
 
@@ -645,6 +663,47 @@ class NearestRules(unittest.TestCase):
         self.assertEqual(entry["reason"], core.EMPTY)
         self.assertFalse(core.is_fatal(entry), "having no rules file is a fact, not a failure")
 
+    def test_a_directory_named_agents_md_is_not_a_rules_file(self):
+        """A git tree entry can be a directory or a submodule, not just a blob.
+
+        Matching on the path alone reports a rules file that cannot be read — and
+        suppresses the SKIP-ONLY "no ancestor rules file" entry, which is the
+        truth. The recorded tree-truncated.json fixture carries real `type: tree`
+        entries, so this is a shape the API does return.
+        """
+        self.assertTrue(
+            any(e.get("type") == "tree" for e in fixture("tree-truncated.json")["tree"]),
+            "the API really does return directory entries",
+        )
+        tree = {
+            "sha": "0" * 40,
+            "truncated": False,
+            "tree": [
+                {"path": "launchpad/AGENTS.md", "type": "tree"},
+                {"path": "vendor/CLAUDE.md", "type": "commit"},
+            ],
+        }
+        resolved, skips = self.resolve(["launchpad/thing.py", "vendor/thing.py"], tree=tree)
+        self.assertEqual(resolved["launchpad/thing.py"], {"AGENTS.md": None, "CLAUDE.md": None})
+        self.assertEqual(resolved["vendor/thing.py"], {"AGENTS.md": None, "CLAUDE.md": None})
+        self.assertEqual(
+            [s["reason"] for s in skips.entries],
+            [core.EMPTY, core.EMPTY],
+            "and the no-rules-file fact must still be reported",
+        )
+
+    def test_a_blob_is_still_resolved_when_the_type_is_recorded(self):
+        tree = {"sha": "0" * 40, "truncated": False,
+                "tree": [{"path": "launchpad/AGENTS.md", "type": "blob"}]}
+        resolved, _ = self.resolve(["launchpad/thing.py"], tree=tree)
+        self.assertEqual(resolved["launchpad/thing.py"]["AGENTS.md"], "launchpad/AGENTS.md")
+
+    def test_an_entry_with_no_recorded_type_is_kept(self):
+        """A projection that dropped the field must not drop the file with it."""
+        tree = {"sha": "0" * 40, "truncated": False, "tree": [{"path": "launchpad/AGENTS.md"}]}
+        resolved, _ = self.resolve(["launchpad/thing.py"], tree=tree)
+        self.assertEqual(resolved["launchpad/thing.py"]["AGENTS.md"], "launchpad/AGENTS.md")
+
     def test_every_changed_path_in_a_real_run_is_resolved(self):
         record = core.build_record(reads())
         self.assertEqual(
@@ -800,7 +859,7 @@ class ExitContract(unittest.TestCase):
             with self.subTest(required=name):
                 skips = core.Skips()
                 if name == "compare":
-                    value = core.build_diff(unreadable("compare", core.ABSENT), {"head_sha": "x"}, skips)
+                    value = core.build_diff(unreadable("compare", core.ABSENT), "x", skips)
                 elif name == "checks":
                     value = core.build_checks(unreadable("checks", core.ABSENT), skips)
                 else:
@@ -963,6 +1022,141 @@ class AbsenceIsNeverAValue(unittest.TestCase):
         )
 
 
+class FailureClassification(unittest.TestCase):
+    """Drive `_classify_failure` and `_read` with the text gh really emits.
+
+    These exist because a review proved the alternative was hollow: every control
+    asserting that org rulesets skip as `forbidden` hand-built a Read with
+    ``skip=FORBIDDEN`` already in it, so deleting the reclassification from
+    `_classify_failure` left all 80 controls green. A control that asserts an
+    answer it supplied itself tests nothing. Whole-function mutation does not
+    catch it either — it fails everything indiscriminately and proves nothing
+    about one branch.
+    """
+
+    def classify(self, name: str, stderr: str, returncode: int = 1):
+        return fetch._classify_failure(name, fetch.RunResult(returncode, "", stderr))
+
+    def test_a_404_on_org_rulesets_is_forbidden_not_absent(self):
+        """The one this suite got wrong: a 404 here hides access."""
+        reason, detail = self.classify("org_rulesets", "gh: Not Found (HTTP 404)")
+        self.assertEqual(reason, core.FORBIDDEN)
+        self.assertIn("admin:org", detail)
+
+    def test_a_404_on_anything_else_is_absent(self):
+        for name in ("pr", "compare", "tree", "branch_rules"):
+            with self.subTest(read=name):
+                reason, _ = self.classify(name, "gh: Not Found (HTTP 404)")
+                self.assertEqual(reason, core.ABSENT)
+
+    def test_401_and_403_are_forbidden(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                reason, _ = self.classify("compare", f"gh: Not accessible (HTTP {status})")
+                self.assertEqual(reason, core.FORBIDDEN)
+
+    def test_a_5xx_carrying_a_message_is_unreachable_not_malformed(self):
+        """"Retry" and "the shape is unusable" are different instructions."""
+        for status in (500, 502, 503):
+            with self.subTest(status=status):
+                reason, _ = self.classify("tree", f"gh: Server Error (HTTP {status})")
+                self.assertEqual(reason, core.UNREACHABLE)
+
+    def test_a_bodyless_5xx_reaches_the_same_answer_by_the_fallback(self):
+        """gh prints no (HTTP nnn) when the response had no JSON message."""
+        reason, _ = self.classify("tree", "gh: HTTP 502")
+        self.assertEqual(reason, core.UNREACHABLE)
+
+    def test_an_unexpected_4xx_is_malformed(self):
+        reason, _ = self.classify("compare", "gh: Unprocessable (HTTP 422)")
+        self.assertEqual(reason, core.MALFORMED)
+
+    def test_the_runners_own_failures_are_unreachable(self):
+        for code, text in ((127, "cannot run gh: PermissionError"), (124, "gh timed out after 60s")):
+            with self.subTest(returncode=code):
+                reason, _ = self.classify("pr", text, returncode=code)
+                self.assertEqual(reason, core.UNREACHABLE)
+
+    def test_prose_absence_with_no_status_is_absent(self):
+        reason, _ = self.classify(
+            "meta", "GraphQL: Could not resolve to a PullRequest with the number of 999999."
+        )
+        self.assertEqual(reason, core.ABSENT)
+
+    def test_an_unrecognised_failure_is_unreachable_not_absent(self):
+        """The safe default: we do not know that the thing is missing."""
+        reason, _ = self.classify("pr", "gh: something nobody has seen before")
+        self.assertEqual(reason, core.UNREACHABLE)
+
+    def test_org_rulesets_reason_holds_end_to_end_through_the_real_classifier(self):
+        """The fake feeds the real 404 text; nothing hand-builds this answer."""
+        fake = FakeGh()
+        code, out, err = run_cli(["86"], fake)
+        self.assertEqual(code, 0, err)
+        org_call = next(a for a in fake.calls if a[2].startswith("orgs/"))
+        self.assertEqual(org_call, ["gh", "api", "orgs/launchpad-26/rulesets"])
+        entry = next(
+            s for s in json.loads(out)["skips"] if s["field"] == "required_gate.org_rulesets"
+        )
+        self.assertEqual(entry["reason"], core.FORBIDDEN, "a scope failure must not read as absence")
+        self.assertIn("admin:org", entry["detail"])
+
+    def test_a_5xx_holds_end_to_end_too(self):
+        code, _, err = run_cli(
+            ["86"], FakeGh(fail={"tree": fetch.RunResult(1, "", "gh: Server Error (HTTP 503)")})
+        )
+        self.assertEqual(code, 2)
+        entry = next(s for s in json.loads(err)["skips"] if s["field"] == "nearest_rules")
+        self.assertEqual(entry["reason"], core.UNREACHABLE)
+
+
+class InBandGraphqlErrors(unittest.TestCase):
+    """A zero exit code carrying an errors array — only an injected runner can.
+
+    gh exits non-zero whenever the response carries errors, so through the real
+    binary this is unreachable and absence arrives as prose instead. It is kept
+    for the injected runner INTERFACE.md documents (adopting #120's fetch_all),
+    and these are the only controls that can drive it.
+    """
+
+    def read_with(self, payload: dict) -> core.Read:
+        return fetch._read(
+            "checks", "graphql:test", ["gh", "api", "graphql"],
+            lambda argv: fetch.RunResult(0, json.dumps(payload), ""),
+        )
+
+    def test_an_errors_array_is_never_handed_on_as_data(self):
+        read = self.read_with({"data": None, "errors": [{"message": "boom"}]})
+        self.assertFalse(read.ok, "errors arriving with exit 0 must not become a value")
+        self.assertIsNone(read.data)
+        self.assertIn("boom", read.detail)
+
+    def test_each_error_type_maps_to_its_own_reason(self):
+        expected = {
+            "FORBIDDEN": core.FORBIDDEN,
+            "NOT_FOUND": core.ABSENT,
+            "RATE_LIMITED": core.UNREACHABLE,
+            "SERVICE_UNAVAILABLE": core.UNREACHABLE,
+        }
+        self.assertEqual(expected, fetch.GRAPHQL_ERROR_REASONS, "the mapping is written, not inferred")
+        for error_type, reason in expected.items():
+            with self.subTest(type=error_type):
+                read = self.read_with({"errors": [{"type": error_type, "message": "x"}]})
+                self.assertEqual(read.skip, reason)
+
+    def test_an_unknown_error_type_is_malformed(self):
+        read = self.read_with({"errors": [{"type": "SOMETHING_NEW", "message": "x"}]})
+        self.assertEqual(read.skip, core.MALFORMED)
+
+    def test_a_typeless_error_is_malformed_not_silently_accepted(self):
+        read = self.read_with({"errors": [{"message": "no type field at all"}]})
+        self.assertEqual(read.skip, core.MALFORMED)
+
+    def test_a_clean_response_is_still_data(self):
+        read = self.read_with({"data": {"repository": None}})
+        self.assertTrue(read.ok)
+
+
 class NoNetwork(unittest.TestCase):
     """STEP 9 — the suite cannot reach GitHub even if a control tried to."""
 
@@ -979,6 +1173,63 @@ class NoNetwork(unittest.TestCase):
             fetch.subprocess.run = original
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["pr"]["number"], 86)
+
+    def test_a_broken_gh_install_is_classified_not_a_traceback(self):
+        """PermissionError and ENOEXEC used to escape and exit 1 — the usage code.
+
+        Reproduced three ways before this control existed: a non-executable gh, a
+        directory named gh, and a gh that is executable but not a runnable binary
+        (a truncated download or the wrong architecture). All three exit 1 with a
+        traceback if the runner catches only FileNotFoundError.
+        """
+        cases = {
+            "PermissionError": PermissionError(13, "Permission denied", "gh"),
+            "ENOEXEC": OSError(8, "Exec format error", "gh"),
+            "FileNotFoundError": FileNotFoundError(2, "No such file or directory", "gh"),
+        }
+        original = fetch.subprocess.run
+        try:
+            for label, error in cases.items():
+                with self.subTest(failure=label):
+                    def raise_it(*args, **kwargs):
+                        raise error
+
+                    fetch.subprocess.run = raise_it
+                    result = fetch.gh_runner(["gh", "--version"])
+                    self.assertEqual(result.returncode, 127)
+                    reason, _ = fetch._classify_failure("pr", result)
+                    self.assertEqual(reason, core.UNREACHABLE, "never absent: we could not ask")
+        finally:
+            fetch.subprocess.run = original
+
+    def test_a_broken_gh_install_exits_2_and_not_the_usage_code(self):
+        def raise_it(*args, **kwargs):
+            raise OSError(8, "Exec format error", "gh")
+
+        original = fetch.subprocess.run
+        fetch.subprocess.run = raise_it
+        try:
+            code, out, err = run_cli(["86"], fetch.gh_runner)
+        finally:
+            fetch.subprocess.run = original
+        self.assertEqual(code, 2, "2 means a required input was unreadable; 1 would mean bad arguments")
+        self.assertEqual(out, "")
+        self.assertEqual(
+            {s["reason"] for s in json.loads(err)["skips"]}, {core.UNREACHABLE}
+        )
+
+    def test_a_timeout_is_unreachable(self):
+        def raise_it(*args, **kwargs):
+            raise fetch.subprocess.TimeoutExpired(cmd="gh", timeout=60)
+
+        original = fetch.subprocess.run
+        fetch.subprocess.run = raise_it
+        try:
+            result = fetch.gh_runner(["gh", "--version"])
+        finally:
+            fetch.subprocess.run = original
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(fetch._classify_failure("pr", result)[0], core.UNREACHABLE)
 
     def test_the_real_runner_refuses_any_binary_but_gh(self):
         with self.assertRaises(ValueError):
