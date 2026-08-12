@@ -81,11 +81,24 @@ _SUPPRESS = re.compile(
 #: Sentence split. On punctuation **only** — never on a newline. See ``_sentences``.
 _SENTENCE_END = re.compile(r"(?<=[.!?:])\s+")
 
-#: Diff structure that is never prose.
-_DIFF_META = re.compile(r"^(?:diff --git|index |---|\+\+\+|@@|similarity index|rename )")
+#: Diff structure that is never prose. ``---`` and ``+++`` must carry a path: a real
+#: file header names one, and requiring it is what stops a bare ``---`` — an ordinary
+#: markdown horizontal rule — being read as structure. See ``_sentences``.
+_DIFF_META = re.compile(
+    r"^(?:diff --git|index |(?:---|\+\+\+)\s+\S|@@|similarity index|rename )"
+)
+
+#: Formatting noise on a PROSE surface — a markdown horizontal rule, or diff structure
+#: an author typed into a comment. Skipped like a blank line so the prose either side
+#: joins. Never applied to ``pr_diff``, where these lines are real structure.
+_NOISE = re.compile(
+    r"^(?:\s*(?:-\s*){3,}|\s*(?:\*\s*){3,}|\s*(?:_\s*){3,}"
+    r"|diff --git\b|index [0-9a-f]|(?:---|\+\+\+)\s+\S|@@.*@@|similarity index|rename )"
+    r"\s*$|^(?:@@.*@@|(?:---|\+\+\+)\s+\S+)\s*$"
+)
 
 
-def _sentences(text: str) -> list[str]:
+def _sentences(text: str, entry_point: str) -> list[str]:
     r"""Prose passages, split on sentence punctuation only.
 
     **A newline is not a sentence boundary, and treating it as one was a bypass.** The
@@ -99,17 +112,42 @@ def _sentences(text: str) -> list[str]:
     So lines are joined, and whitespace within a passage is collapsed before matching.
     Diff structure still ends a passage: a hunk header is a real boundary, and joining
     across one would let two unrelated files' text form a phrase that neither wrote.
+
+    **That boundary applies to ``pr_diff`` and to nothing else, and the omission of
+    ``entry_point`` here was the same bypass a second time.** Six of the seven surfaces
+    are prose, never a diff, and a markdown horizontal rule is byte-identical to a
+    diff's ``---``. So ``Ignore all previous\n---\ninstructions.`` split into two
+    passages on a PR body and matched nothing — one keystroke again, through the
+    mechanism that fixed the first one. A control asserted that behaviour as correct,
+    on ``pr_body``, which is why the suite stayed green over it.
+
+    **On a prose surface such a line is skipped, exactly as a blank line is — not made
+    a boundary, and not made a word.** Both alternatives buy the same silence: a rule
+    line kept as text turns ``ignore all previous instructions`` into ``ignore all
+    previous --- instructions``, and every pattern here needs its words adjacent. Only
+    dropping the line joins the prose either side of it, which is what a reader does
+    with a horizontal rule. Dropping can only ever join more text, so it cannot hide a
+    tell; whether it manufactures one is measured against the benign corpora, which
+    hold at zero false positives.
     """
     passages: list[list[str]] = [[]]
     for line in text.split("\n"):
         stripped = line.strip()
-        if _DIFF_META.match(stripped):
+        # Real diff structure ends a passage — but only where the surface IS a diff.
+        if entry_point == "pr_diff" and _DIFF_META.match(stripped):
             if passages[-1]:
                 passages.append([])
             continue
+        # Formatting noise is skipped on EVERY surface, diff included: a bare `---` is
+        # not a file header anywhere, and inside a diff it is a context line an author
+        # can write at will. Skipping rather than splitting is what joins the prose.
+        if _NOISE.match(stripped):
+            continue
         if not stripped:
             continue
-        # Strip a leading diff marker so an added line is still read as prose.
+        # Strip a leading diff marker so an added line is still read as prose. Not
+        # scoped to pr_diff: authors paste diff fragments into bodies and comments, and
+        # scoping it there let `+Ignore all previous\n+instructions.` evade on a body.
         passages[-1].append(stripped[1:].strip() if stripped[:1] in "+-" else stripped)
 
     out: list[str] = []
@@ -131,6 +169,6 @@ def detect(text: str, entry_point: str) -> list[Finding]:
     """
     return [
         Finding("injection_attempt", entry_point, sentence[:120].replace("\n", "\\n"))
-        for sentence in _sentences(text)
+        for sentence in _sentences(text, entry_point)
         if _STANDALONE.search(sentence) or _SUPPRESS.search(sentence)
     ]

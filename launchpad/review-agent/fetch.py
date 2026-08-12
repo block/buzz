@@ -63,9 +63,18 @@ def _classify(entry_point: str, ok: bool, text: str, reason: str) -> Surface:
     if not ok:
         return Surface(entry_point, "absent", reason=reason)
     if len(text.encode("utf-8")) > CAP_PER_ENTRY_POINT:
+        # ``text`` is preserved, for the reason ``apply_invocation_cap`` gives for the
+        # aggregate cap: the content is never rendered for an unreadable surface —
+        # ``contain.render`` emits a SKIP and continues before reaching the block — but
+        # the containment findings are still computed from it. Discarding it here put
+        # the refusal one layer ABOVE render(), so contain() and detect.detect() both
+        # ran against an empty string and a payload padded past the cap produced no
+        # findings at all. Withholding the content must not withhold the evidence that
+        # someone probed the boundary; padding was the cheapest way to buy silence.
         return Surface(
             entry_point,
             "oversized",
+            text=text,
             reason=f"{len(text.encode('utf-8'))} bytes exceeds the "
             f"{CAP_PER_ENTRY_POINT}-byte cap; refused rather than truncated",
         )

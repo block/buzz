@@ -193,6 +193,37 @@ noticed because every fixture was written on one line. The measured recall below
 therefore true only of an author who did not wrap. A hunk header still ends a passage,
 so text is never joined across two files.
 
+**And the boundary that fixed it reopened it, on every surface.** Diff structure ended a
+passage on *all seven* entry points, because the splitter never took one — so a markdown
+horizontal rule, byte-identical to a diff's `---`, split a phrase on a PR body or a
+comment and matched nothing. The same keystroke, through the mechanism that closed it.
+A control asserted that behaviour as an invariant, naming `pr_body`, which is why the
+suite stayed green over it.
+
+Two rules now, and the distinction is the whole fix. Real diff structure ends a passage
+**only in `pr_diff`**, the one surface that can contain a diff — and `---`/`+++` count as
+structure only when they carry a path, since a real file header names one. Formatting
+noise — a bare horizontal rule, or diff metadata an author typed into prose — is
+**skipped like a blank line, on every surface**, so the prose either side joins. Skipping
+rather than splitting is the point, and the reason is the same one the newline bypass
+turned on: every rule here needs its words adjacent, so a rule line *kept as a word*
+wedges three dashes into the middle of the phrase and defeats the match exactly as
+splitting did. Dropping the line is the only treatment that joins what an author wrote —
+which is also what a reader does with a horizontal rule.
+
+Dropping can only ever join more text, so it cannot hide a tell; whether it manufactures
+one is a false-positive question, and the benign corpora answer it at zero. **This
+paragraph is written without the example sentence in it, and the first draft of it was
+not** — the zero-false-positive control failed on this file, again, for the reason the
+warning above gives. Describe the shape; do not write it out.
+
+The measured recall did not move: 28 of 35, the same 7 misses, all the one paraphrase
+payload. **That is the finding, not a reassurance.** The matrix is 5 payloads × 7 entry
+points and every payload is a single line, so a line-broken variant of a *caught* payload
+was never in it — this bypass could not have been measured by the number that certifies
+this layer. The line-broken variants live in `check_invariants.py` instead, and that is
+where a new evasion shape belongs until the matrix grows a wrapping dimension.
+
 **Why it is not broader.** Telling an attack from a *description* of an attack is the
 use–mention problem. This document contains the sentence "A diff that 'asks' the agent
 to skip review is itself a Blocker finding"; an attack contains "do not report the
