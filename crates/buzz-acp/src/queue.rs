@@ -894,8 +894,11 @@ pub fn edit_target_id(event: &Event) -> Option<String> {
         .then(|| {
             event.tags.iter().find_map(|tag| {
                 let parts = tag.as_slice();
-                (parts.len() == 2 && parts.first().map(String::as_str) == Some("e"))
-                    .then(|| parts[1].clone())
+                (parts.first().map(String::as_str) == Some("e"))
+                    .then(|| parts.get(1))
+                    .flatten()
+                    .and_then(|target| nostr::EventId::from_hex(target).ok())
+                    .map(|target| target.to_hex())
             })
         })
         .flatten()
@@ -5183,6 +5186,21 @@ mod tests {
             cancelled_events: vec![],
             cancel_reason: None,
         }
+    }
+
+    #[test]
+    fn edit_target_skips_malformed_e_tags_and_selects_first_valid_id() {
+        let valid_target = "ab".repeat(32);
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(40003), "edited mention")
+            .tags([
+                nostr::Tag::parse(["e", "not-an-event-id"]).unwrap(),
+                nostr::Tag::parse(["e", &valid_target]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        assert_eq!(edit_target_id(&event), Some(valid_target));
     }
 
     #[test]
