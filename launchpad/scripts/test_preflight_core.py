@@ -10,6 +10,8 @@ from the live API by ``testdata/record.sh``; see ``testdata/README.md``.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -19,6 +21,7 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import preflight_core as core  # noqa: E402  (after the sys.path insert, deliberately)
+import preflight_fetch as fetch  # noqa: E402
 
 TESTDATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata")
 
@@ -73,6 +76,86 @@ def reads(**overrides: core.Read) -> dict[str, core.Read]:
 
 def unreadable(name: str, reason: str) -> core.Read:
     return core.Read(name, skip=reason, detail=f"forced {reason}", endpoint=ENDPOINTS[name])
+
+
+# --------------------------------------------------------------------------- #
+# The fake runner. Every control that drives the CLI goes through this, so no
+# control needs the network and each individual call can be made to fail.
+# --------------------------------------------------------------------------- #
+
+
+class FakeGh:
+    """Answer ``gh`` calls from recorded fixtures, and remember every call made.
+
+    ``fail`` forces one read to a given (returncode, stdout, stderr) so a control
+    can break exactly one call and leave the other six working — which is the
+    only way to show that *this* input is the one whose failure is fatal.
+    """
+
+    def __init__(self, fail: dict[str, fetch.RunResult] | None = None, payloads: dict[str, object] | None = None):
+        self.fail = fail or {}
+        self.payloads = payloads or {}
+        self.calls: list[list[str]] = []
+        self.binaries: list[str] = []
+
+    #: fixture per read for a fully-readable PR 86 run
+    FIXTURES = {
+        "pr": "pr86-pr.json",
+        "meta": "pr86-meta.json",
+        "checks": "pr86-checks.json",
+        "compare": "pr86-compare.json",
+        "tree": "pr86-tree.json",
+        "branch_rules": "rules-branches-launchpad.json",
+    }
+
+    @staticmethod
+    def classify(argv: list[str]) -> str:
+        if argv[1:3] == ["pr", "view"]:
+            return "meta"
+        target = argv[2] if len(argv) > 2 else ""
+        if target == "graphql":
+            return "checks"
+        if "/compare/" in target:
+            return "compare"
+        if "/git/trees/" in target:
+            return "tree"
+        if "/rules/branches/" in target:
+            return "branch_rules"
+        if target.startswith("orgs/"):
+            return "org_rulesets"
+        if "/pulls/" in target:
+            return "pr"
+        raise AssertionError(f"the fake runner does not know this call: {argv}")
+
+    def __call__(self, argv: list[str]) -> fetch.RunResult:
+        self.calls.append(argv)
+        self.binaries.append(argv[0])
+        if argv[0] != "gh":
+            # Not raising: a control asserts on `binaries`, and a runner that
+            # threw here would hide the argv from the assertion.
+            return fetch.RunResult(127, "", f"refusing to spawn {argv[0]!r}")
+        name = self.classify(argv)
+        if name in self.fail:
+            return self.fail[name]
+        if name in self.payloads:
+            return fetch.RunResult(0, json.dumps(self.payloads[name]), "")
+        if name == "org_rulesets":
+            # The state this token is really in: a 404 that hides access.
+            return fetch.RunResult(1, "", "gh: Not Found (HTTP 404)")
+        return fetch.RunResult(0, json.dumps(fixture(self.FIXTURES[name])), "")
+
+
+def run_cli(argv: list[str], runner) -> tuple[int, str, str]:
+    """Drive the CLI in-process and capture its streams and exit code."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = fetch.main(argv, runner=runner)
+    return code, out.getvalue(), err.getvalue()
+
+
+NOT_FOUND = fetch.RunResult(1, "", "gh: Not Found (HTTP 404)")
+FORBIDDEN_RESULT = fetch.RunResult(1, "", "gh: Resource not accessible (HTTP 403)")
+GARBAGE = fetch.RunResult(0, "<html>502 upstream</html>", "")
 
 
 def rollup_contexts(recorded: dict) -> list[dict]:
@@ -221,6 +304,73 @@ class RecordShape(unittest.TestCase):
     def test_an_unenumerated_skip_reason_is_refused(self):
         with self.assertRaises(ValueError):
             core.Read("pr", skip="probably-fine")
+
+
+class CliShell(unittest.TestCase):
+    """STEP 3 — the CLI prints a record, and refuses to print a broken one."""
+
+    def test_a_readable_pr_prints_the_record_and_exits_zero(self):
+        code, out, err = run_cli(["86"], FakeGh())
+        self.assertEqual(code, 0, err)
+        record = json.loads(out)
+        self.assertEqual(tuple(record), core.RECORD_FIELDS)
+        self.assertEqual(record["pr"]["number"], 86)
+        self.assertEqual(len(record["checks"]), len(rollup_contexts(fixture("pr86-checks.json"))))
+
+    def test_an_absent_pr_exits_non_zero_and_prints_no_record(self):
+        code, out, err = run_cli(["999999"], FakeGh(fail={"pr": NOT_FOUND}))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "", "stdout must stay empty so a caller never pipes a holed record")
+        self.assertEqual(json.loads(err)["skips"][0]["reason"], core.ABSENT)
+
+    def test_the_runner_is_injected_so_no_control_touches_the_network(self):
+        """The default runner is the real gh; every control replaces it."""
+        fake = FakeGh()
+        run_cli(["86"], fake)
+        self.assertGreater(len(fake.calls), 0)
+        self.assertEqual(set(fake.binaries), {"gh"})
+
+    def test_dependent_calls_are_not_attempted_when_the_pr_read_fails(self):
+        """No base.sha means compare and tree cannot be called at all."""
+        fake = FakeGh(fail={"pr": NOT_FOUND})
+        run_cli(["999999"], fake)
+        made = {FakeGh.classify(argv) for argv in fake.calls}
+        self.assertNotIn("compare", made)
+        self.assertNotIn("tree", made)
+
+    def test_compare_is_taken_by_sha_not_by_branch_name(self):
+        """By name it answers 200 with zero files once the base tip moves past the head."""
+        fake = FakeGh()
+        run_cli(["86"], fake)
+        compare = next(a for a in fake.calls if "/compare/" in a[2])
+        base, _, head = compare[2].partition("...")
+        pr = fixture("pr86-pr.json")
+        self.assertTrue(base.endswith(pr["base"]["sha"]), compare[2])
+        self.assertEqual(head, pr["head"]["sha"])
+        self.assertNotIn("launchpad...", compare[2])
+
+    def test_graphql_prose_absence_is_absent_not_unreachable(self):
+        """`gh pr view 999999` reports absence with no HTTP status attached."""
+        graphql_404 = fetch.RunResult(
+            1, "", "GraphQL: Could not resolve to a PullRequest with the number of 999999."
+        )
+        code, out, err = run_cli(["999999"], FakeGh(fail={"meta": graphql_404}))
+        self.assertNotEqual(code, 0)
+        reasons = {s["reason"] for s in json.loads(err)["skips"]}
+        self.assertIn(core.ABSENT, reasons)
+        self.assertNotIn(core.UNREACHABLE, reasons)
+
+    def test_help_names_the_taxonomy_and_the_exit_contract(self):
+        text = fetch.build_parser().format_help()
+        for reason in core.SKIP_REASONS:
+            self.assertIn(reason, text)
+        for name in core.REQUIRED_INPUTS:
+            self.assertIn(name, text)
+        for name in core.SKIP_ONLY_INPUTS:
+            self.assertIn(name, text)
+        self.assertIn("exits 2", text.lower(), "--help must say what a required-input failure does")
+        self.assertIn("exit codes", text.lower())
+        self.assertIn("truncated: true", text.lower(), "--help must name the partial-tree trap")
 
 
 if __name__ == "__main__":
