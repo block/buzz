@@ -909,6 +909,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             tray_menu::clear_tray_agent_activity,
             #[cfg(target_os = "macos")]
+            tray_menu::set_hide_dock_icon_on_close,
+            #[cfg(target_os = "macos")]
             tray_menu::requeue_tray_actions,
             #[cfg(target_os = "macos")]
             tray_menu::take_tray_actions,
@@ -940,6 +942,7 @@ pub fn run() {
                     eprintln!("buzz-desktop: failed to hide main window: {error}");
                 }
             }
+            tray_menu::hide_dock_icon_after_close(app_handle);
         }
         RunEvent::WindowEvent {
             label,
