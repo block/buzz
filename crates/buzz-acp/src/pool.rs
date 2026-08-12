@@ -2119,6 +2119,7 @@ pub async fn run_prompt_task(
         "turn starting for {}",
         prompt_label(&source)
     );
+    let reply_check_since = nostr::Timestamp::now();
 
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
@@ -2257,6 +2258,14 @@ pub async fn run_prompt_task(
                                 "control signal arrived but turn already completed — treating as success"
                             );
                         }
+                        recover_missing_agent_reply(
+                            &mut agent,
+                            &ctx,
+                            &source,
+                            batch.as_ref(),
+                            reply_check_since,
+                        )
+                        .await;
                         if let PromptSource::Channel(cid) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
                             agent.state.mark_channel_delivery_success(
@@ -2298,6 +2307,17 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            if matches!(stop_reason, StopReason::EndTurn) {
+                recover_missing_agent_reply(
+                    &mut agent,
+                    &ctx,
+                    &source,
+                    batch.as_ref(),
+                    reply_check_since,
+                )
+                .await;
+            }
 
             if let PromptSource::Channel(cid) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
@@ -4156,6 +4176,196 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+const FALLBACK_REPLY_MAX_BYTES: usize = 64 * 1024;
+
+fn fallback_reply_content(content: &str) -> &str {
+    if content.len() <= FALLBACK_REPLY_MAX_BYTES {
+        return content;
+    }
+    let mut end = FALLBACK_REPLY_MAX_BYTES;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
+}
+
+fn fallback_reply_thread_ref(
+    triggering_event: &nostr::Event,
+    is_dm: bool,
+) -> Option<buzz_sdk::ThreadRef> {
+    let thread = crate::queue::parse_thread_tags(triggering_event);
+    if let Some(root) = thread.root_event_id {
+        let root_event_id = nostr::EventId::from_hex(&root).ok()?;
+        return Some(buzz_sdk::ThreadRef {
+            root_event_id,
+            parent_event_id: triggering_event.id,
+        });
+    }
+    if is_dm {
+        return None;
+    }
+    Some(buzz_sdk::ThreadRef {
+        root_event_id: triggering_event.id,
+        parent_event_id: triggering_event.id,
+    })
+}
+
+fn agent_channel_message_filter(
+    author: nostr::PublicKey,
+    channel_id: Uuid,
+    since: nostr::Timestamp,
+) -> nostr::Filter {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let channel = channel_id.to_string();
+    nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_DIFF as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_FORUM_POST as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_FORUM_COMMENT as u16),
+        ])
+        .author(author)
+        .custom_tags(h_tag, [channel.as_str()])
+        .since(since)
+        .limit(1)
+}
+
+async fn agent_published_channel_message_since(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    since: nostr::Timestamp,
+) -> Result<bool, crate::relay::RelayError> {
+    let filter = agent_channel_message_filter(rest.keys.public_key(), channel_id, since);
+    let response = rest.query(&[filter]).await?;
+    Ok(response.as_array().is_some_and(|events| !events.is_empty()))
+}
+
+/// Recover an external ACP answer that reached the Activity transcript but was
+/// never published as a channel message.
+///
+/// The model still owns ordinary publishing through `buzz messages send`.
+/// Querying for a message from this agent inside the active turn prevents the
+/// safety net from duplicating a successful explicit send.
+async fn ensure_agent_reply_published(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    triggering_event: &nostr::Event,
+    is_dm: bool,
+    since: nostr::Timestamp,
+    content: &str,
+) -> bool {
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        agent_published_channel_message_since(rest, channel_id, since),
+    )
+    .await
+    {
+        Ok(Ok(true)) => return false,
+        Ok(Ok(false)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(
+                channel = %channel_id,
+                "reply safety check failed; skipping recovery to avoid a duplicate: {error}"
+            );
+            return false;
+        }
+        Err(_) => {
+            tracing::warn!(
+                channel = %channel_id,
+                "reply safety check timed out; skipping recovery to avoid a duplicate"
+            );
+            return false;
+        }
+    }
+
+    let content = fallback_reply_content(content);
+    if content.trim().is_empty() {
+        return false;
+    }
+    let thread_ref = fallback_reply_thread_ref(triggering_event, is_dm);
+    let builder =
+        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::warn!(channel = %channel_id, "reply recovery build failed: {error}");
+                return false;
+            }
+        };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, "reply recovery sign failed: {error}");
+            return false;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {
+            tracing::info!(
+                channel = %channel_id,
+                event_id = %event.id,
+                "published captured ACP answer after the agent omitted buzz messages send"
+            );
+            true
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(channel = %channel_id, "reply recovery publish failed: {error}");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(channel = %channel_id, "reply recovery publish timed out");
+            false
+        }
+    }
+}
+
+async fn recover_missing_agent_reply(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    source: &PromptSource,
+    batch: Option<&FlushBatch>,
+    since: nostr::Timestamp,
+) {
+    let PromptSource::Channel(channel_id) = source else {
+        return;
+    };
+    let Some(batch) = batch else {
+        return;
+    };
+    let Some(content) = agent.acp.take_final_agent_message() else {
+        return;
+    };
+    let Some(triggering_event) = batch.events.last().map(|item| &item.event) else {
+        return;
+    };
+    let is_dm = ctx
+        .channel_info
+        .resolve(*channel_id)
+        .await
+        .as_ref()
+        .is_some_and(|channel| channel.channel_type == "dm");
+    if ensure_agent_reply_published(
+        &ctx.rest_client,
+        *channel_id,
+        triggering_event,
+        is_dm,
+        since,
+        &content,
+    )
+    .await
+    {
+        agent.acp.observe(
+            "fallback_reply_published",
+            serde_json::json!({
+                "channelId": channel_id,
+                "triggeringEventId": triggering_event.id.to_hex(),
+            }),
+        );
+    }
+}
+
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
 ///
 /// Queries kind:7 reactions by our pubkey targeting the event, finds the matching
@@ -4276,6 +4486,121 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn fallback_reply_content_truncates_on_utf8_boundary() {
+        let content = format!("{}🐝", "a".repeat(FALLBACK_REPLY_MAX_BYTES - 1));
+        let truncated = fallback_reply_content(&content);
+
+        assert_eq!(truncated.len(), FALLBACK_REPLY_MAX_BYTES - 1);
+        assert!(truncated.chars().all(|character| character == 'a'));
+    }
+
+    #[test]
+    fn fallback_reply_thread_ref_keeps_top_level_dm_flat() {
+        let event = EventBuilder::new(Kind::Custom(9), "hello")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+
+        assert!(fallback_reply_thread_ref(&event, true).is_none());
+
+        let channel_reply = fallback_reply_thread_ref(&event, false).unwrap();
+        assert_eq!(channel_reply.root_event_id, event.id);
+        assert_eq!(channel_reply.parent_event_id, event.id);
+    }
+
+    #[test]
+    fn fallback_reply_thread_ref_replies_to_trigger_inside_existing_thread() {
+        let keys = Keys::generate();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let root_hex = root.id.to_hex();
+        let root_tag = Tag::parse(["e", root_hex.as_str(), "", "root"]).unwrap();
+        let reply_tag = Tag::parse(["e", root_hex.as_str(), "", "reply"]).unwrap();
+        let trigger = EventBuilder::new(Kind::Custom(9), "follow-up")
+            .tags([root_tag, reply_tag])
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let thread_ref = fallback_reply_thread_ref(&trigger, true).unwrap();
+        assert_eq!(thread_ref.root_event_id, root.id);
+        assert_eq!(thread_ref.parent_event_id, trigger.id);
+    }
+
+    #[test]
+    fn agent_channel_message_filter_limits_duplicate_check_to_this_turn() {
+        let keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let filter = agent_channel_message_filter(
+            keys.public_key(),
+            channel_id,
+            Timestamp::from_secs(1_765_000_000),
+        );
+        let value = serde_json::to_value(filter).unwrap();
+
+        assert_eq!(value["authors"], json!([keys.public_key().to_hex()]));
+        assert_eq!(value["#h"], json!([channel_id.to_string()]));
+        assert_eq!(value["since"], json!(1_765_000_000));
+        assert_eq!(value["limit"], json!(1));
+        assert_eq!(value["kinds"], json!([9, 40002, 40008, 45001, 45003]));
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_reply_publishes_when_turn_has_no_visible_message() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let submitted = Arc::new(AtomicBool::new(false));
+        let server_submitted = Arc::clone(&submitted);
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0; 16 * 1024];
+                let bytes_read = socket.read(&mut request).await.unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes_read]);
+                let body = if request.starts_with("POST /query ") {
+                    "[]"
+                } else if request.starts_with("POST /events ") {
+                    server_submitted.store(true, Ordering::SeqCst);
+                    "{}"
+                } else {
+                    "{}"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let rest = crate::relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let trigger = EventBuilder::new(Kind::Custom(9), "question")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+
+        let recovered = ensure_agent_reply_published(
+            &rest,
+            Uuid::new_v4(),
+            &trigger,
+            true,
+            Timestamp::now(),
+            "recovered answer",
+        )
+        .await;
+
+        assert!(recovered);
+        assert!(submitted.load(Ordering::SeqCst));
+        server.abort();
+    }
 
     fn test_mcp_server() -> McpServer {
         McpServer {
