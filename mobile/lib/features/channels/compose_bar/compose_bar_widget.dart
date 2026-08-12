@@ -122,7 +122,7 @@ class ComposeBar extends HookConsumerWidget {
 
     final appView = View.of(context);
     useEffect(() {
-      final observer = _ComposerKeyboardMetricsObserver(
+      final observer = ComposerKeyboardMetricsObserver(
         view: appView,
         onKeyboardHidden: () {
           collapseComposer();
@@ -130,7 +130,10 @@ class ComposeBar extends HookConsumerWidget {
         },
       );
       WidgetsBinding.instance.addObserver(observer);
-      return () => WidgetsBinding.instance.removeObserver(observer);
+      return () {
+        WidgetsBinding.instance.removeObserver(observer);
+        observer.dispose();
+      };
     }, [appView, focusNode]);
     final resolvedHint =
         hintText ??

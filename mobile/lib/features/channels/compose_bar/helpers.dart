@@ -2,12 +2,23 @@ part of '../compose_bar.dart';
 
 const _typingThrottleMs = 3000;
 
-class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
+/// Switching input methods — most visibly tapping the keyboard's voice-typing
+/// key, which swaps the system keyboard for the speech IME — drops the bottom
+/// inset to zero for a frame or two while the new IME attaches. Treating that
+/// dip as "keyboard hidden" collapsed the composer and unfocused it, and since
+/// the `TextField` is only mounted while expanded, the incoming IME had no
+/// input connection left to dictate into. Wait for the inset to *stay* at zero
+/// before believing it.
+const _keyboardHiddenSettleDelay = Duration(milliseconds: 300);
+
+@visibleForTesting
+class ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardHidden;
   bool _wasVisible;
+  Timer? _hiddenSettleTimer;
 
-  _ComposerKeyboardMetricsObserver({
+  ComposerKeyboardMetricsObserver({
     required this.view,
     required this.onKeyboardHidden,
   }) : _wasVisible = view.viewInsets.bottom > 0;
@@ -15,8 +26,22 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   @override
   void didChangeMetrics() {
     final isVisible = view.viewInsets.bottom > 0;
-    if (_wasVisible && !isVisible) onKeyboardHidden();
+    if (isVisible) {
+      _hiddenSettleTimer?.cancel();
+      _hiddenSettleTimer = null;
+    } else if (_wasVisible && _hiddenSettleTimer == null) {
+      _hiddenSettleTimer = Timer(_keyboardHiddenSettleDelay, () {
+        _hiddenSettleTimer = null;
+        if (view.viewInsets.bottom > 0) return;
+        onKeyboardHidden();
+      });
+    }
     _wasVisible = isVisible;
+  }
+
+  void dispose() {
+    _hiddenSettleTimer?.cancel();
+    _hiddenSettleTimer = null;
   }
 }
 
