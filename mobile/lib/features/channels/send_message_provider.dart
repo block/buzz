@@ -16,6 +16,7 @@ class SendMessage {
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
   final bool Function()? _isDeliveryValid;
+  final Future<bool> Function(String channelId)? _resolveIsDirectMessage;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -27,13 +28,15 @@ class SendMessage {
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
     bool Function()? isDeliveryValid,
+    Future<bool> Function(String channelId)? resolveIsDirectMessage,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage,
-       _isDeliveryValid = isDeliveryValid;
+       _isDeliveryValid = isDeliveryValid,
+       _resolveIsDirectMessage = resolveIsDirectMessage;
 
   /// Send a text message to a channel.
   ///
@@ -41,13 +44,19 @@ class SendMessage {
   /// If [rootEventId] is null it defaults to [parentEventId] (direct reply to
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
-  /// relay-validated `imeta` tags and NIP-30 `emoji` tags.
+  /// relay-validated `imeta` tags and NIP-30 `emoji` tags. Direct-message
+  /// callers can pass [isDirectMessage] and cached
+  /// [directMessageRecipientPubkeys]; otherwise the provider resolves the
+  /// channel and its members. Agent wakeups and human notifications rely on
+  /// recipient `p` tags even without an explicit `@mention` in the content.
   Future<void> call({
     required String channelId,
     required String content,
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    bool? isDirectMessage,
+    List<String> directMessageRecipientPubkeys = const [],
     List<List<String>> mediaTags = const [],
   }) async {
     _ensureDeliveryValid();
@@ -56,14 +65,37 @@ class SendMessage {
     final resolvedMentions =
         mentionPubkeys ?? await _resolveMentions(content, channelId);
     final authorPubkey = _signedEventRelay.pubkey;
+    final sendsDirectMessage =
+        isDirectMessage ?? await _channelIsDirectMessage(channelId);
 
-    // Normalize mentions: lowercase, deduplicate, exclude self (matching
-    // the desktop's normalizeMentionPubkeys).
+    final recipients = <String>[
+      ...resolvedMentions,
+      if (sendsDirectMessage) ...directMessageRecipientPubkeys,
+    ];
+
+    // A newly discovered DM can briefly lack cached participant pubkeys. Fall
+    // back to the authoritative member list so its first plain message still
+    // addresses the other participant. Failure remains non-fatal: publishing
+    // the message is preferable to losing it because recipient metadata is
+    // temporarily unavailable.
+    if (sendsDirectMessage && directMessageRecipientPubkeys.isEmpty) {
+      try {
+        recipients.addAll(
+          (await _fetchMembers(channelId)).map((member) => member.pubkey),
+        );
+      } catch (_) {
+        // Non-fatal — publish with any explicit mentions already resolved.
+      }
+    }
+
+    // Normalize recipients: lowercase, deduplicate, exclude self (matching
+    // the desktop's messageMentionPubkeys/normalizeMentionPubkeys path).
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
+      for (final pk in recipients)
+        if (pk.isNotEmpty && seenMentions.add(pk.toLowerCase()))
+          pk.toLowerCase(),
     ];
 
     final tags = <List<String>>[
@@ -99,6 +131,16 @@ class SendMessage {
       throw StateError(
         'Message delivery cancelled because the active community changed',
       );
+    }
+  }
+
+  Future<bool> _channelIsDirectMessage(String channelId) async {
+    final resolve = _resolveIsDirectMessage;
+    if (resolve == null) return false;
+    try {
+      return await resolve(channelId);
+    } catch (_) {
+      return false;
     }
   }
 
@@ -192,6 +234,11 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     removeLocalMessage: (channelId, eventId) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .removeLocalMessage(eventId),
+    resolveIsDirectMessage: (channelId) async =>
+        (await ref.read(
+          channelDetailsProvider(channelId).future,
+        )).channelType ==
+        'dm',
     isDeliveryValid: () {
       final currentConfig = ref.read(relayConfigProvider);
       return currentConfig.baseUrl == config.baseUrl &&
