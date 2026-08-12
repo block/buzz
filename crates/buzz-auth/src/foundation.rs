@@ -22,11 +22,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Hard implementation ceiling for one domain's retained audit events.
-pub const HARD_MAX_AUTHORIZATION_EVENTS_PER_DOMAIN: u64 = 10_000;
+pub const HARD_MAX_AUTHORIZATION_EVENTS_PER_DOMAIN: u64 = 1_000_000;
 /// Hard implementation ceiling for one domain's retained canonical bytes.
-pub const HARD_MAX_AUTHORIZATION_EVENT_BYTES_PER_DOMAIN: u64 = 16 << 20;
+pub const HARD_MAX_AUTHORIZATION_EVENT_BYTES_PER_DOMAIN: u64 = 4_294_967_296;
 /// Hard implementation ceiling for one canonical event envelope.
-pub const HARD_MAX_AUTHORIZATION_EVENT_ENVELOPE_BYTES: u32 = 16 << 10;
+pub const HARD_MAX_AUTHORIZATION_EVENT_ENVELOPE_BYTES: u32 = 65_536;
 
 /// Minimal stock NIP-FI operating modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2484,26 +2484,49 @@ mod tests {
             AuthorizationAuditConfig::new(NipFiMode::Off, Some(fixture)),
             Err(AuthorizationAuditConfigError::UnexpectedEventCapacity)
         );
+    }
+
+    #[test]
+    fn audit_capacity_accepts_exact_hard_maxima_and_rejects_each_successor() {
+        let exact_maxima = AuthorizationEventCapacityPolicy::new(
+            HARD_MAX_AUTHORIZATION_EVENTS_PER_DOMAIN,
+            HARD_MAX_AUTHORIZATION_EVENT_BYTES_PER_DOMAIN,
+            HARD_MAX_AUTHORIZATION_EVENT_ENVELOPE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            exact_maxima.max_events_per_domain(),
+            HARD_MAX_AUTHORIZATION_EVENTS_PER_DOMAIN
+        );
+        assert_eq!(
+            exact_maxima.max_bytes_per_domain(),
+            HARD_MAX_AUTHORIZATION_EVENT_BYTES_PER_DOMAIN
+        );
+        assert_eq!(
+            exact_maxima.max_envelope_bytes(),
+            HARD_MAX_AUTHORIZATION_EVENT_ENVELOPE_BYTES
+        );
+
         assert_eq!(
             AuthorizationEventCapacityPolicy::new(
                 HARD_MAX_AUTHORIZATION_EVENTS_PER_DOMAIN + 1,
-                16 << 20,
-                16 << 10,
+                HARD_MAX_AUTHORIZATION_EVENT_BYTES_PER_DOMAIN,
+                HARD_MAX_AUTHORIZATION_EVENT_ENVELOPE_BYTES,
             ),
             Err(AuthorizationEventCapacityPolicyError::EventCount)
         );
         assert_eq!(
             AuthorizationEventCapacityPolicy::new(
-                10_000,
+                HARD_MAX_AUTHORIZATION_EVENTS_PER_DOMAIN,
                 HARD_MAX_AUTHORIZATION_EVENT_BYTES_PER_DOMAIN + 1,
-                16 << 10,
+                HARD_MAX_AUTHORIZATION_EVENT_ENVELOPE_BYTES,
             ),
             Err(AuthorizationEventCapacityPolicyError::DomainBytes)
         );
         assert_eq!(
             AuthorizationEventCapacityPolicy::new(
-                10_000,
-                16 << 20,
+                HARD_MAX_AUTHORIZATION_EVENTS_PER_DOMAIN,
+                HARD_MAX_AUTHORIZATION_EVENT_BYTES_PER_DOMAIN,
                 HARD_MAX_AUTHORIZATION_EVENT_ENVELOPE_BYTES + 1,
             ),
             Err(AuthorizationEventCapacityPolicyError::EnvelopeBytes)
