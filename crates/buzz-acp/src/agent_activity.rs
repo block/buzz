@@ -1354,6 +1354,7 @@ mod tests {
                     crate::relay::ChannelInfo {
                         name: "stream".into(),
                         channel_type: "stream".into(),
+                        description: None,
                     },
                 ),
                 (
@@ -1361,6 +1362,7 @@ mod tests {
                     crate::relay::ChannelInfo {
                         name: "forum".into(),
                         channel_type: "forum".into(),
+                        description: None,
                     },
                 ),
                 (
@@ -1368,6 +1370,7 @@ mod tests {
                     crate::relay::ChannelInfo {
                         name: "dm".into(),
                         channel_type: "dm".into(),
+                        description: None,
                     },
                 ),
             ]),

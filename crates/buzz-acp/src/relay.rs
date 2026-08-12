@@ -113,12 +113,17 @@ const DRAIN_BUDGET_PER_ITER: usize = 1;
 /// (`gated_observer_dropped`). Note each dropped frame may carry a whole batch
 /// of events, so event-level loss is larger than the frame count.
 const GATED_OBSERVER_QUEUE_CAP: usize = 256;
+/// Shared activity is live-only. Keep at most four minutes of the producer's
+/// global 2-second cadence, and expire it before the relay's ±5-minute fence.
+const GATED_ACTIVITY_QUEUE_CAP: usize = 120;
+const ACTIVITY_EVENT_MAX_AGE_SECS: u64 = 240;
+const ACTIVITY_SEEN_ID_LIMIT: usize = GATED_ACTIVITY_QUEUE_CAP * 2;
 
 use std::time::Instant;
 
 use buzz_core::kind::{
-    KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_TYPING_INDICATOR,
+    KIND_AGENT_ACTIVITY_SUMMARY, KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
@@ -1077,6 +1082,26 @@ struct BgState {
     /// Frames evicted from the bounded pending/in-flight observer buffers since
     /// summary log. Makes overflow loss visible instead of silent.
     gated_observer_dropped: u64,
+    /// Fresh kind-24201 frames parked while disconnected or rate-gated. This is
+    /// memory-only and age-bounded: shared activity must never become history.
+    gated_activity_pending: VecDeque<Box<Event>>,
+    /// Kind-24201 frames sent on the socket and awaiting the relay OK.
+    activity_in_flight: VecDeque<Box<Event>>,
+    /// Visible loss accounting for the bounded live-only activity transport.
+    activity_dropped: u64,
+    activity_expired: u64,
+    activity_rejected: u64,
+    activity_retried: u64,
+    /// Bounded terminal-ID tombstones. A signed activity event that has already
+    /// been admitted cannot regain retry eligibility after a terminal ACK.
+    activity_seen_ids: TwoGenDedup,
+    /// Event IDs that have consumed their single transient negative-OK retry.
+    activity_retry_attempted: HashSet<String>,
+    /// Stable first-admission order for every retained activity ID. This map is
+    /// bounded by the aggregate pending + in-flight cap and lets transitions
+    /// preserve FIFO independently of ACK arrival order.
+    activity_sequence: HashMap<String, u64>,
+    activity_next_sequence: u64,
     /// Channels whose REQ failed during `resubscribe_after_reconnect`.
     ///
     /// A single failed channel REQ is parked here instead of aborting the whole
@@ -1112,6 +1137,16 @@ impl BgState {
             gated_observer_pending: VecDeque::new(),
             observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
+            gated_activity_pending: VecDeque::new(),
+            activity_in_flight: VecDeque::new(),
+            activity_dropped: 0,
+            activity_expired: 0,
+            activity_rejected: 0,
+            activity_retried: 0,
+            activity_seen_ids: TwoGenDedup::new(ACTIVITY_SEEN_ID_LIMIT),
+            activity_retry_attempted: HashSet::new(),
+            activity_sequence: HashMap::new(),
+            activity_next_sequence: 0,
             resubscribe_retry: HashSet::new(),
             backoff_step: 0,
         }
@@ -1186,8 +1221,7 @@ impl BgState {
     /// Returns the gate deadline that was set.
     fn set_rate_limit_gate(&mut self, retry_secs: u64) -> tokio::time::Instant {
         let secs = if retry_secs < 2 { 5 } else { retry_secs };
-        let base = Duration::from_secs(secs);
-        let deadline = tokio::time::Instant::now() + jittered_duration(base);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
         let gate = match self.rate_limit_gate {
             Some(existing) if existing > deadline => existing,
             _ => deadline,
@@ -1261,6 +1295,261 @@ impl BgState {
             self.observer_in_flight.remove(index);
         }
     }
+
+    fn activity_event_is_fresh(event: &Event) -> bool {
+        unix_now_secs().abs_diff(event.created_at.as_secs()) <= ACTIVITY_EVENT_MAX_AGE_SECS
+    }
+
+    fn activity_is_retained(&self, event_id: &str) -> bool {
+        self.activity_sequence.contains_key(event_id)
+    }
+
+    fn register_activity_id(&mut self, event_id: &str) {
+        if self.activity_sequence.contains_key(event_id) {
+            return;
+        }
+        let sequence = self.activity_next_sequence;
+        self.activity_next_sequence = self
+            .activity_next_sequence
+            .checked_add(1)
+            .expect("shared activity admission sequence exhausted");
+        self.activity_sequence.insert(event_id.to_owned(), sequence);
+    }
+
+    fn admit_activity_id(&mut self, event_id: &str) -> bool {
+        if self.activity_is_retained(event_id)
+            || !self.activity_seen_ids.insert(event_id.to_owned())
+        {
+            return false;
+        }
+        self.enforce_activity_bound();
+        self.register_activity_id(event_id);
+        true
+    }
+
+    fn cleanup_activity_id(&mut self, event_id: &str) {
+        self.activity_retry_attempted.remove(event_id);
+        self.activity_sequence.remove(event_id);
+    }
+
+    fn remove_activity_copies(&mut self, event_id: &str) -> Option<Box<Event>> {
+        let mut retained = self
+            .gated_activity_pending
+            .iter()
+            .position(|event| event.id.to_hex() == event_id)
+            .and_then(|index| self.gated_activity_pending.remove(index));
+        if retained.is_none() {
+            retained = self
+                .activity_in_flight
+                .iter()
+                .position(|event| event.id.to_hex() == event_id)
+                .and_then(|index| self.activity_in_flight.remove(index));
+        }
+        self.gated_activity_pending
+            .retain(|event| event.id.to_hex() != event_id);
+        self.activity_in_flight
+            .retain(|event| event.id.to_hex() != event_id);
+        retained
+    }
+
+    fn insert_activity_pending_in_order(&mut self, event: Box<Event>) {
+        let event_id = event.id.to_hex();
+        let sequence = self
+            .activity_sequence
+            .get(&event_id)
+            .copied()
+            .expect("retained activity has an admission sequence");
+        let index = self
+            .gated_activity_pending
+            .iter()
+            .position(|pending| {
+                self.activity_sequence
+                    .get(&pending.id.to_hex())
+                    .copied()
+                    .unwrap_or(u64::MAX)
+                    > sequence
+            })
+            .unwrap_or(self.gated_activity_pending.len());
+        self.gated_activity_pending.insert(index, event);
+    }
+
+    fn expire_stale_activity(&mut self) {
+        let expired_ids: HashSet<String> = self
+            .gated_activity_pending
+            .iter()
+            .chain(self.activity_in_flight.iter())
+            .filter(|event| !Self::activity_event_is_fresh(event))
+            .map(|event| event.id.to_hex())
+            .collect();
+        let expired = expired_ids.len();
+        for event_id in expired_ids {
+            self.remove_activity_copies(&event_id);
+            self.cleanup_activity_id(&event_id);
+        }
+        if expired > 0 {
+            self.activity_expired += expired as u64;
+            warn!(
+                expired,
+                expired_total = self.activity_expired,
+                "stale shared activity expired before relay delivery"
+            );
+        }
+    }
+
+    fn enforce_activity_bound(&mut self) {
+        while self.gated_activity_pending.len() + self.activity_in_flight.len()
+            >= GATED_ACTIVITY_QUEUE_CAP
+        {
+            let oldest_id = self
+                .gated_activity_pending
+                .iter()
+                .chain(self.activity_in_flight.iter())
+                .min_by_key(|event| {
+                    self.activity_sequence
+                        .get(&event.id.to_hex())
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .map(|event| event.id.to_hex());
+            let Some(oldest_id) = oldest_id else {
+                break;
+            };
+            self.remove_activity_copies(&oldest_id);
+            self.cleanup_activity_id(&oldest_id);
+            self.activity_dropped += 1;
+            warn!(
+                dropped_total = self.activity_dropped,
+                "shared activity transport queue full — dropped oldest frame"
+            );
+        }
+    }
+
+    fn park_gated_activity_frame(&mut self, event: Box<Event>) -> bool {
+        self.expire_stale_activity();
+        let event_id = event.id.to_hex();
+        if !Self::activity_event_is_fresh(&event) {
+            self.cleanup_activity_id(&event_id);
+            self.activity_expired += 1;
+            warn!(
+                expired_total = self.activity_expired,
+                "stale shared activity discarded before queueing"
+            );
+            return false;
+        }
+        if !self.admit_activity_id(&event_id) {
+            return false;
+        }
+        self.gated_activity_pending.push_back(event);
+        true
+    }
+
+    fn queue_activity_retry(&mut self, event: Box<Event>) -> bool {
+        let event_id = event.id.to_hex();
+        if !Self::activity_event_is_fresh(&event) {
+            self.cleanup_activity_id(&event_id);
+            self.activity_expired += 1;
+            warn!(
+                expired_total = self.activity_expired,
+                "stale shared activity discarded instead of retrying"
+            );
+            return false;
+        }
+        if !self.activity_retry_attempted.insert(event_id.clone()) {
+            self.remove_activity_copies(&event_id);
+            self.cleanup_activity_id(&event_id);
+            self.activity_dropped += 1;
+            warn!(
+                dropped_total = self.activity_dropped,
+                "shared activity exhausted its bounded delivery retry"
+            );
+            return false;
+        }
+        if !self.activity_is_retained(&event_id) {
+            return false;
+        }
+        self.insert_activity_pending_in_order(event);
+        self.activity_retried += 1;
+        warn!(
+            retried_total = self.activity_retried,
+            "shared activity queued for its single bounded fresh retry"
+        );
+        true
+    }
+
+    fn track_activity_in_flight(&mut self, event: Box<Event>) -> bool {
+        self.expire_stale_activity();
+        let event_id = event.id.to_hex();
+        if !Self::activity_event_is_fresh(&event) {
+            self.cleanup_activity_id(&event_id);
+            self.activity_expired += 1;
+            warn!(
+                expired_total = self.activity_expired,
+                "shared activity expired immediately after socket write"
+            );
+            return false;
+        }
+        if self
+            .gated_activity_pending
+            .iter()
+            .chain(self.activity_in_flight.iter())
+            .any(|retained| retained.id.to_hex() == event_id)
+        {
+            return false;
+        }
+        if !self.activity_is_retained(&event_id) && !self.admit_activity_id(&event_id) {
+            return false;
+        }
+        self.activity_in_flight.push_back(event);
+        true
+    }
+
+    fn requeue_activity_in_flight(&mut self) {
+        self.expire_stale_activity();
+        let unresolved: Vec<Box<Event>> = self.activity_in_flight.drain(..).collect();
+        for event in unresolved {
+            let _ = self.queue_activity_retry(event);
+        }
+    }
+
+    fn acknowledge_activity_frame(
+        &mut self,
+        event_id: &str,
+        accepted: bool,
+        retryable: bool,
+    ) -> bool {
+        let pending_retry = self.activity_retry_attempted.contains(event_id)
+            && self
+                .gated_activity_pending
+                .iter()
+                .any(|event| event.id.to_hex() == event_id && Self::activity_event_is_fresh(event));
+        if !accepted && retryable && pending_retry {
+            self.activity_rejected += 1;
+            warn!(
+                rejected_total = self.activity_rejected,
+                "relay transiently rejected shared activity; scheduled retry retained"
+            );
+            return true;
+        }
+
+        let Some(event) = self.remove_activity_copies(event_id) else {
+            return false;
+        };
+        if accepted {
+            self.cleanup_activity_id(event_id);
+        } else {
+            self.activity_rejected += 1;
+            warn!(
+                rejected_total = self.activity_rejected,
+                "relay rejected sanitized shared activity"
+            );
+            if retryable && Self::activity_event_is_fresh(&event) {
+                let _ = self.queue_activity_retry(event);
+            } else {
+                self.cleanup_activity_id(event_id);
+            }
+        }
+        true
+    }
 }
 
 /// Record a command's intent in state while disconnected (no WebSocket).
@@ -1308,15 +1597,16 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
                 state.membership_last_seen = Some(ts);
             }
         }
-        // Observer telemetry frames are durable: park them (bounded, visible
-        // overflow) so they are delivered by the post-reconnect drain. Other
-        // ephemeral publishes (typing indicators) are meaningless while
-        // disconnected and are dropped.
-        RelayCommand::PublishEvent { event } => {
-            if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME {
-                state.park_gated_observer_frame(event);
+        // Observer telemetry is durable. Shared activity is live-only but gets
+        // a short, memory-only reconnect window. Typing indicators remain
+        // disposable while disconnected.
+        RelayCommand::PublishEvent { event } => match event.kind.as_u16() as u32 {
+            KIND_AGENT_OBSERVER_FRAME => state.park_gated_observer_frame(event),
+            KIND_AGENT_ACTIVITY_SUMMARY => {
+                let _ = state.park_gated_activity_frame(event);
             }
-        }
+            _ => {}
+        },
         // Already reconnecting — redundant.
         RelayCommand::Reconnect => {}
         // Callers MUST handle Shutdown before calling this function.
@@ -1337,12 +1627,13 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
 /// `Shutdown` and `Reconnect` are handled by the caller.
 fn retain_failed_command_intent(state: &mut BgState, cmd: RelayCommand) {
     match cmd {
-        RelayCommand::PublishEvent { event }
-            if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME =>
-        {
-            state.park_gated_observer_frame(event);
-        }
-        RelayCommand::PublishEvent { .. } => {}
+        RelayCommand::PublishEvent { event } => match event.kind.as_u16() as u32 {
+            KIND_AGENT_OBSERVER_FRAME => state.park_gated_observer_frame(event),
+            KIND_AGENT_ACTIVITY_SUMMARY => {
+                let _ = state.park_gated_activity_frame(event);
+            }
+            _ => {}
+        },
         cmd => apply_command_to_state(state, cmd),
     }
 }
@@ -1497,44 +1788,72 @@ async fn execute_connected_command(
             }
         }
         RelayCommand::PublishEvent { event } => {
-            // Observer telemetry frames (kind 24200) are durable telemetry, not
-            // droppable ephemera: park them while the rate-limit gate is armed —
-            // and while earlier parked frames are still draining, so relative
-            // order is preserved — then let the main-loop drain deliver them
-            // one per pacing tick once the gate clears.
-            if event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME
-                && (state.check_rate_gate().is_some() || !state.gated_observer_pending.is_empty())
+            let kind = event.kind.as_u16() as u32;
+            let is_observer = kind == KIND_AGENT_OBSERVER_FRAME;
+            let is_activity = kind == KIND_AGENT_ACTIVITY_SUMMARY;
+
+            // Observer telemetry is durable. Shared activity is short-lived but
+            // must survive its own transient quota gate or disconnect while fresh.
+            // Each telemetry class preserves order only within its own stream.
+            let has_same_kind_backlog = (is_observer && !state.gated_observer_pending.is_empty())
+                || (is_activity && !state.gated_activity_pending.is_empty());
+            if (is_observer || is_activity)
+                && (state.check_rate_gate().is_some() || has_same_kind_backlog)
             {
-                debug!(
-                    pending = state.gated_observer_pending.len(),
-                    "rate-gated: parking observer frame for paced drain"
-                );
-                state.park_gated_observer_frame(event);
+                if is_observer {
+                    debug!(
+                        pending = state.gated_observer_pending.len(),
+                        "rate-gated: parking observer frame for paced drain"
+                    );
+                    state.park_gated_observer_frame(event);
+                } else {
+                    debug!(
+                        pending = state.gated_activity_pending.len(),
+                        "rate-gated: parking shared activity for paced drain"
+                    );
+                    let _ = state.park_gated_activity_frame(event);
+                }
                 return true;
             }
             // Drop remaining ephemeral publishes while rate-gated. Stale typing
             // indicators are worthless and sending them would consume admission
             // budget the relay already rejected us on.
-            //
-            // INVARIANT: apart from observer frames (parked above), the WS publish
-            // path carries only ephemeral kinds (typing indicators). The silent
-            // drop-while-gated relies on that invariant. If a future caller
-            // publishes durable events through this path, it must extend the
-            // kind guard above to avoid silently discarding user data.
             if state.check_rate_gate().is_some() {
                 debug!("rate-gated: dropping ephemeral PublishEvent (typing indicator)");
                 return true;
             }
-            // Best-effort: log a send failure but don't trigger reconnect — the
-            // next ping or read will detect the dead socket. A failed observer
-            // frame is parked so the post-reconnect drain redelivers it.
-            let is_observer = event.kind.as_u16() as u32 == KIND_AGENT_OBSERVER_FRAME;
+
+            // Enforce the local live-only cutoff at the final write boundary. A
+            // post-write check is too late because the relay may already have
+            // received a stale activity frame.
+            if is_activity && !BgState::activity_event_is_fresh(&event) {
+                state.cleanup_activity_id(&event.id.to_hex());
+                state.activity_expired += 1;
+                warn!(
+                    expired_total = state.activity_expired,
+                    "stale shared activity discarded before socket write"
+                );
+                return true;
+            }
+            if is_activity && !state.admit_activity_id(&event.id.to_hex()) {
+                debug!("duplicate sanitized shared activity suppressed before socket write");
+                return true;
+            }
+
+            // Track both telemetry classes until the relay's OK. A failed socket
+            // write is queued in-memory for a paced retry; shared activity expires.
             if send_publish_event_frame(ws, &event).await {
                 if is_observer {
                     state.track_observer_in_flight(event);
+                } else if is_activity {
+                    state.track_activity_in_flight(event);
+                    info!("sanitized shared activity sent; awaiting relay acknowledgment");
                 }
             } else if is_observer {
                 state.park_gated_observer_frame(event);
+            } else if is_activity {
+                let _ = state.queue_activity_retry(event);
+                return false;
             }
             true
         }
@@ -1656,6 +1975,10 @@ async fn run_background_task(
     let mut drain_pacing_next: Option<tokio::time::Instant> = None;
 
     loop {
+        // The ping/select loop wakes periodically even when no turns arrive, so
+        // unacknowledged live-only activity cannot remain resident indefinitely.
+        state.expire_stale_activity();
+
         if state.proactive_resubscribe_needed {
             state.proactive_resubscribe_needed = false;
             info!("proactive resubscribe triggered by backpressure event loss");
@@ -1735,6 +2058,7 @@ async fn run_background_task(
         // Drain pending subs, one REQ per pacing tick within the relay's
         // admission window.
         let drain_window_open = drain_pacing_next.is_none_or(|t| tokio::time::Instant::now() >= t);
+        let mut activity_drain_failed = false;
         if drain_window_open {
             let mut budget = DRAIN_BUDGET_PER_ITER;
             let mut any_sent = false;
@@ -1793,16 +2117,38 @@ async fn run_background_task(
                 }
             }
 
+            // Preserve the established owner-observer drain priority. Shared
+            // activity is separately freshness-bounded and drains from any
+            // remaining budget.
             if budget > 0 && !state.gated_observer_pending.is_empty() {
                 let sent = drain_gated_observer_pending(&mut ws, &mut state, budget).await;
+                budget = budget.saturating_sub(sent);
                 if sent > 0 {
                     any_sent = true;
                 }
             }
 
+            if budget > 0 && !state.gated_activity_pending.is_empty() {
+                match drain_gated_activity_pending(&mut ws, &mut state, budget).await {
+                    Ok(sent) => {
+                        if sent > 0 {
+                            any_sent = true;
+                        }
+                    }
+                    Err(sent) => {
+                        if sent > 0 {
+                            any_sent = true;
+                        }
+                        activity_drain_failed = true;
+                    }
+                }
+            }
+
             if any_sent {
                 drain_pacing_next = Some(tokio::time::Instant::now() + REQ_PACING_INTERVAL);
-            } else if !state.gated_observer_pending.is_empty() {
+            } else if !state.gated_observer_pending.is_empty()
+                || !state.gated_activity_pending.is_empty()
+            {
                 // Nothing sent because the gate is still armed. Arm the pacing
                 // timer to the gate deadline so parked observer frames drain
                 // promptly even when no other traffic wakes the select loop.
@@ -1810,6 +2156,60 @@ async fn run_background_task(
                     .check_rate_gate()
                     .or_else(|| Some(tokio::time::Instant::now() + REQ_PACING_INTERVAL));
             }
+        }
+
+        if activity_drain_failed {
+            warn!("shared activity drain write failed — reconnecting before retry");
+            let _ = event_tx.try_send(None);
+            match try_autonomous_reconnect(
+                &mut ws,
+                &mut cmd_rx,
+                &mut state,
+                &keys,
+                &relay_url,
+                &agent_pubkey_hex,
+                &event_tx,
+                &observer_control_tx,
+                auth_tag.as_ref(),
+            )
+            .await
+            {
+                ReconnectOutcome::Shutdown => return,
+                ReconnectOutcome::Ok => {
+                    if matches!(
+                        drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex,)
+                            .await,
+                        ReconnectOutcome::Shutdown
+                    ) {
+                        return;
+                    }
+                }
+                ReconnectOutcome::Failed => {
+                    if matches!(
+                        wait_for_reconnect(
+                            &mut ws,
+                            &mut cmd_rx,
+                            &mut state,
+                            &keys,
+                            &relay_url,
+                            &agent_pubkey_hex,
+                            &event_tx,
+                            &observer_control_tx,
+                            true,
+                            auth_tag.as_ref(),
+                        )
+                        .await,
+                        ReconnectOutcome::Shutdown
+                    ) {
+                        return;
+                    }
+                }
+            }
+            ping_sent = false;
+            last_pong = Instant::now();
+            connected_since = Instant::now();
+            stable_logged = false;
+            continue;
         }
 
         tokio::select! {
@@ -2229,6 +2629,7 @@ async fn handle_ws_message(
                         let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
                         let deadline = state.set_rate_limit_gate(secs);
                         state.requeue_observer_in_flight();
+                        state.requeue_activity_in_flight();
                         warn!(
                             "rate-limit gate armed via NOTICE until ~{:.1}s from now",
                             deadline
@@ -2389,11 +2790,24 @@ async fn handle_ws_message(
                 } => {
                     if !accepted && message.starts_with("auth") {
                         // AUTH OK with accepted=false means auth was rejected.
-                        warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
+                        warn!("mid-session AUTH rejected — triggering reconnect");
                         return false;
                     }
+                    let retryable_activity = !accepted && message.starts_with("rate-limited:");
+                    let was_activity =
+                        state.acknowledge_activity_frame(&event_id, accepted, retryable_activity);
+                    if was_activity && retryable_activity {
+                        let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
+                        state.set_rate_limit_gate(secs);
+                    }
                     state.acknowledge_observer_frame(&event_id);
-                    debug!("OK for event {event_id}: accepted={accepted} message={message}");
+                    if was_activity {
+                        if accepted {
+                            info!("relay accepted sanitized shared activity");
+                        }
+                    } else {
+                        debug!(accepted, "relay OK received for non-activity event");
+                    }
                 }
             }
             true
@@ -2637,8 +3051,7 @@ async fn resubscribe_after_reconnect(
 
 /// Send a signed EVENT frame on the live socket. Returns `false` on send failure.
 ///
-/// Best-effort at the socket level: a failure is logged but does not trigger
-/// reconnect — the next ping or read will detect the dead socket.
+/// Callers decide whether a failed write is droppable or requires reconnect.
 async fn send_publish_event_frame(ws: &mut WsStream, event: &Event) -> bool {
     let msg = json!(["EVENT", event]);
     if let Ok(text) = serde_json::to_string(&msg) {
@@ -2649,6 +3062,37 @@ async fn send_publish_event_frame(ws: &mut WsStream, event: &Event) -> bool {
         }
     }
     true
+}
+
+/// Drain fresh shared activity after a transient disconnect or quota gate.
+/// Frames are memory-only and expire before the relay's freshness boundary.
+async fn drain_gated_activity_pending(
+    ws: &mut WsStream,
+    state: &mut BgState,
+    budget: usize,
+) -> Result<usize, usize> {
+    state.expire_stale_activity();
+    let mut sent = 0;
+    while sent < budget {
+        if state.check_rate_gate().is_some() {
+            break;
+        }
+        let Some(event) = state.gated_activity_pending.pop_front() else {
+            break;
+        };
+        if !BgState::activity_event_is_fresh(&event) {
+            state.cleanup_activity_id(&event.id.to_hex());
+            state.activity_expired += 1;
+            continue;
+        }
+        if !send_publish_event_frame(ws, &event).await {
+            let _ = state.queue_activity_retry(event);
+            return Err(sent);
+        }
+        state.track_activity_in_flight(event);
+        sent += 1;
+    }
+    Ok(sent)
 }
 
 /// Drain parked observer telemetry frames once the rate-limit gate clears.
@@ -2933,6 +3377,7 @@ async fn try_autonomous_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    state.requeue_activity_in_flight();
     // 5 attempts, up to 16s base backoff. Shares delay values with the
     // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS) —
     // see its doc comment for how the two loops consume the array differently.
@@ -3063,6 +3508,7 @@ async fn wait_for_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    state.requeue_activity_in_flight();
     if !skip_drain {
         // Drain commands until we get Reconnect (or Shutdown).
         // Other commands update state so reconnect reflects latest intent.
@@ -5806,7 +6252,23 @@ mod tests {
         );
     }
 
-    /// set_rate_limit_gate arms the gate with jittered expiry from the hint.
+    /// A relay retry hint is a strict not-before deadline. The gate must not
+    /// reopen early through negative jitter.
+    #[tokio::test(start_paused = true)]
+    async fn rate_limit_gate_never_reopens_before_relay_hint() {
+        let mut state = BgState::new();
+        let now = tokio::time::Instant::now();
+
+        let deadline = state.set_rate_limit_gate(5);
+        assert_eq!(deadline, now + Duration::from_secs(5));
+
+        tokio::time::advance(Duration::from_millis(4_999)).await;
+        assert!(state.check_rate_gate().is_some());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(state.check_rate_gate().is_none());
+    }
+
+    /// set_rate_limit_gate arms the gate with expiry from the relay hint.
     /// check_rate_gate returns Some while active and lazily clears on expiry.
     #[tokio::test(start_paused = true)]
     async fn rate_limit_gate_set_and_expiry() {
@@ -5823,7 +6285,7 @@ mod tests {
             "gate must be active immediately after arming"
         );
 
-        // Advance virtual time past the max jitter (1.2 × 5 s = 6 s).
+        // Advance virtual time past the exact five-second deadline.
         tokio::time::advance(Duration::from_secs(7)).await;
 
         assert!(
@@ -5873,6 +6335,292 @@ mod tests {
         .expect("build test observer frame")
         .sign_with_keys(keys)
         .expect("sign test observer frame")
+    }
+
+    fn make_shared_activity_frame(keys: &Keys, created_at_secs: u64) -> Event {
+        EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as u16),
+            r#"{"version":1,"activities":[]}"#,
+        )
+        .tags([
+            Tag::parse(["h", &Uuid::new_v4().to_string()]).expect("channel tag"),
+            Tag::parse(["agent", &keys.public_key().to_hex()]).expect("agent tag"),
+        ])
+        .custom_created_at(nostr::Timestamp::from(created_at_secs))
+        .sign_with_keys(keys)
+        .expect("sign shared activity frame")
+    }
+
+    /// Shared activity is live-only but not droppable like a typing indicator:
+    /// a rate gate must park a fresh frame, then pace it onto the wire.
+    #[tokio::test]
+    async fn gated_shared_activity_is_parked_then_drained_while_typing_is_dropped() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        state.rate_limit_gate = Some(tokio::time::Instant::now() + Duration::from_millis(150));
+
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(activity.clone()),
+                },
+            )
+            .await
+        );
+        assert_eq!(state.gated_activity_pending.len(), 1);
+
+        let typing = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
+            .tags([Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap()])
+            .sign_with_keys(&keys)
+            .expect("sign typing indicator");
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(typing),
+                },
+            )
+            .await
+        );
+        assert_eq!(state.gated_activity_pending.len(), 1);
+        assert!(timeout(Duration::from_millis(50), server.next())
+            .await
+            .is_err());
+
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        assert_eq!(
+            drain_gated_activity_pending(&mut client, &mut state, 1).await,
+            Ok(1)
+        );
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[0], "EVENT");
+        assert_eq!(frame[1]["id"], activity.id.to_hex());
+        assert_eq!(
+            frame[1]["kind"],
+            u64::from(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY)
+        );
+    }
+
+    /// Commands consumed while disconnected must retain fresh activity intent,
+    /// but must continue dropping typing indicators.
+    #[test]
+    fn disconnected_shared_activity_is_bounded_and_typing_remains_droppable() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::PublishEvent {
+                event: Box::new(activity),
+            },
+        );
+        let typing = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
+            .tags([Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap()])
+            .sign_with_keys(&keys)
+            .expect("sign typing indicator");
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::PublishEvent {
+                event: Box::new(typing),
+            },
+        );
+        assert_eq!(state.gated_activity_pending.len(), 1);
+    }
+
+    /// A live-only activity frame must expire locally before the relay's strict
+    /// freshness boundary rather than being replayed as stale history.
+    #[test]
+    fn stale_shared_activity_expires_instead_of_entering_reconnect_queue() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let stale = make_shared_activity_frame(
+            &keys,
+            unix_now_secs().saturating_sub(ACTIVITY_EVENT_MAX_AGE_SECS + 1),
+        );
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::PublishEvent {
+                event: Box::new(stale),
+            },
+        );
+        assert!(state.gated_activity_pending.is_empty());
+        assert_eq!(state.activity_expired, 1);
+    }
+
+    /// Freshness is enforced at the final write boundary, including the direct
+    /// no-backlog fast path. A stale frame must never reach the relay socket.
+    #[tokio::test]
+    async fn stale_shared_activity_is_rejected_before_immediate_socket_write() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let stale = make_shared_activity_frame(
+            &keys,
+            unix_now_secs().saturating_sub(ACTIVITY_EVENT_MAX_AGE_SECS + 1),
+        );
+
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(stale),
+                },
+            )
+            .await
+        );
+
+        assert!(
+            timeout(Duration::from_millis(50), server.next())
+                .await
+                .is_err(),
+            "stale shared activity must be rejected before the socket write"
+        );
+        assert!(state.gated_activity_pending.is_empty());
+        assert!(state.activity_in_flight.is_empty());
+        assert_eq!(state.activity_expired, 1);
+    }
+
+    /// A failed write consumes the activity frame's single ambiguity retry, but
+    /// that retry must wait for a replacement connection. Returning success here
+    /// would let the main-loop drain resend on the same suspect socket.
+    #[tokio::test]
+    async fn activity_socket_write_failure_queues_one_retry_and_requires_reconnect() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+
+        client.close(None).await.expect("close client websocket");
+        let _ = timeout(Duration::from_secs(1), server.next()).await;
+
+        assert!(
+            !execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(activity),
+                },
+            )
+            .await,
+            "a failed activity write must force a new transport generation"
+        );
+        assert_eq!(state.gated_activity_pending.len(), 1);
+        assert!(state.activity_in_flight.is_empty());
+        assert_eq!(state.activity_retried, 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_activity_id_is_suppressed_before_a_second_socket_write() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(activity.clone()),
+                },
+            )
+            .await
+        );
+        let first = next_test_frame(&mut server).await;
+        assert_eq!(first[1]["id"], activity.id.to_hex());
+
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(activity),
+                },
+            )
+            .await
+        );
+        assert!(
+            timeout(Duration::from_millis(50), server.next())
+                .await
+                .is_err(),
+            "a retained event ID must not be written twice"
+        );
+        assert_eq!(state.activity_in_flight.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn acknowledged_duplicate_activity_id_is_suppressed_before_socket_write() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(activity.clone()),
+                },
+            )
+            .await
+        );
+        let _ = next_test_frame(&mut server).await;
+        assert!(state.acknowledge_activity_frame(&activity.id.to_hex(), true, false));
+
+        assert!(
+            execute_connected_command(
+                &mut client,
+                &mut state,
+                "agent-pubkey",
+                RelayCommand::PublishEvent {
+                    event: Box::new(activity),
+                },
+            )
+            .await
+        );
+        assert!(
+            timeout(Duration::from_millis(50), server.next())
+                .await
+                .is_err(),
+            "an acknowledged activity ID must be suppressed before a new socket write"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_activity_drain_reports_transport_failure_for_reconnect() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        assert!(
+            state.park_gated_activity_frame(Box::new(make_shared_activity_frame(
+                &keys,
+                unix_now_secs()
+            )))
+        );
+
+        client.close(None).await.expect("close client websocket");
+        let _ = timeout(Duration::from_secs(1), server.next()).await;
+
+        assert_eq!(
+            drain_gated_activity_pending(&mut client, &mut state, 1).await,
+            Err(0)
+        );
+        assert_eq!(state.gated_activity_pending.len(), 1);
+        assert_eq!(state.activity_retried, 1);
     }
 
     /// While the rate-limit gate is armed, an observer frame (kind 24200) is
@@ -6027,6 +6775,260 @@ mod tests {
         assert!(state.observer_in_flight.is_empty());
     }
 
+    #[test]
+    fn activity_ok_retires_and_negative_ok_is_visible_without_retry_storm() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let accepted = make_shared_activity_frame(&keys, unix_now_secs());
+        let rejected = make_shared_activity_frame(&keys, unix_now_secs());
+
+        state.track_activity_in_flight(Box::new(accepted.clone()));
+        state.track_activity_in_flight(Box::new(rejected.clone()));
+        assert!(state.acknowledge_activity_frame(&accepted.id.to_hex(), true, false));
+        assert!(state.acknowledge_activity_frame(&rejected.id.to_hex(), false, false));
+
+        assert!(state.activity_in_flight.is_empty());
+        assert!(state.gated_activity_pending.is_empty());
+        assert_eq!(state.activity_rejected, 1);
+        assert_eq!(state.activity_retried, 0);
+        assert!(!state.acknowledge_activity_frame("unknown", false, true));
+        assert_eq!(state.activity_rejected, 1);
+    }
+
+    #[test]
+    fn rate_limited_activity_negative_ok_gets_one_bounded_fresh_retry() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+        state.track_activity_in_flight(Box::new(activity.clone()));
+
+        assert!(state.acknowledge_activity_frame(&activity.id.to_hex(), false, true));
+        assert!(state.activity_in_flight.is_empty());
+        assert_eq!(state.gated_activity_pending.len(), 1);
+        assert_eq!(state.activity_rejected, 1);
+        assert_eq!(state.activity_retried, 1);
+
+        // A second transient rejection is retired, not retried forever.
+        let retry = state.gated_activity_pending.pop_front().unwrap();
+        state.track_activity_in_flight(retry);
+        assert!(state.acknowledge_activity_frame(&activity.id.to_hex(), false, true));
+        assert!(state.gated_activity_pending.is_empty());
+        assert!(state.activity_in_flight.is_empty());
+        assert_eq!(state.activity_rejected, 2);
+        assert_eq!(state.activity_retried, 1);
+    }
+
+    #[test]
+    fn activity_retry_stays_ahead_of_newer_pending_frames() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let older = make_shared_activity_frame(&keys, unix_now_secs());
+        let newer = make_shared_activity_frame(&keys, unix_now_secs());
+
+        state.track_activity_in_flight(Box::new(older.clone()));
+        assert!(state.park_gated_activity_frame(Box::new(newer.clone())));
+        assert!(state.acknowledge_activity_frame(&older.id.to_hex(), false, true));
+
+        let ids: Vec<_> = state
+            .gated_activity_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(ids, [older.id, newer.id]);
+    }
+
+    #[test]
+    fn activity_retries_preserve_original_order_when_acks_arrive_in_send_order() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let first = make_shared_activity_frame(&keys, unix_now_secs());
+        let second = make_shared_activity_frame(&keys, unix_now_secs());
+
+        state.track_activity_in_flight(Box::new(first.clone()));
+        state.track_activity_in_flight(Box::new(second.clone()));
+        assert!(state.acknowledge_activity_frame(&first.id.to_hex(), false, true));
+        assert!(state.acknowledge_activity_frame(&second.id.to_hex(), false, true));
+
+        let ids: Vec<_> = state
+            .gated_activity_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(ids, [first.id, second.id]);
+    }
+
+    #[test]
+    fn duplicate_activity_id_has_only_one_retained_copy_and_one_ack_retires_it() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+
+        assert!(state.park_gated_activity_frame(Box::new(activity.clone())));
+        assert!(!state.park_gated_activity_frame(Box::new(activity.clone())));
+        assert_eq!(state.gated_activity_pending.len(), 1);
+        assert!(state.acknowledge_activity_frame(&activity.id.to_hex(), true, false));
+        assert!(state.gated_activity_pending.is_empty());
+        assert!(state.activity_in_flight.is_empty());
+        assert!(!state
+            .activity_retry_attempted
+            .contains(&activity.id.to_hex()));
+        assert!(
+            !state.park_gated_activity_frame(Box::new(activity)),
+            "a terminally acknowledged event ID must not regain admission or retry eligibility"
+        );
+    }
+
+    #[test]
+    fn activity_capacity_evicts_global_oldest_across_pending_and_in_flight() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let oldest = make_shared_activity_frame(&keys, unix_now_secs());
+        state.track_activity_in_flight(Box::new(oldest.clone()));
+
+        for _ in 1..GATED_ACTIVITY_QUEUE_CAP {
+            assert!(
+                state.park_gated_activity_frame(Box::new(make_shared_activity_frame(
+                    &keys,
+                    unix_now_secs(),
+                )))
+            );
+        }
+        assert_eq!(
+            state.gated_activity_pending.len() + state.activity_in_flight.len(),
+            GATED_ACTIVITY_QUEUE_CAP
+        );
+
+        assert!(
+            state.park_gated_activity_frame(Box::new(make_shared_activity_frame(
+                &keys,
+                unix_now_secs()
+            )))
+        );
+        assert!(!state
+            .activity_in_flight
+            .iter()
+            .any(|event| event.id == oldest.id));
+        assert_eq!(
+            state.gated_activity_pending.len() + state.activity_in_flight.len(),
+            GATED_ACTIVITY_QUEUE_CAP
+        );
+        assert_eq!(state.activity_dropped, 1);
+    }
+
+    #[test]
+    fn activity_reconnect_requeues_only_fresh_frames_in_original_order() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let first = make_shared_activity_frame(&keys, unix_now_secs());
+        let stale = make_shared_activity_frame(
+            &keys,
+            unix_now_secs().saturating_sub(ACTIVITY_EVENT_MAX_AGE_SECS + 1),
+        );
+        let second = make_shared_activity_frame(&keys, unix_now_secs());
+
+        state.track_activity_in_flight(Box::new(first.clone()));
+        // Insert directly to model an event that aged while awaiting OK.
+        state.activity_in_flight.push_back(Box::new(stale));
+        state.track_activity_in_flight(Box::new(second.clone()));
+        state.requeue_activity_in_flight();
+
+        let ids: Vec<_> = state
+            .gated_activity_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(ids, [first.id, second.id]);
+        assert!(state.activity_in_flight.is_empty());
+        assert_eq!(state.activity_expired, 1);
+        assert_eq!(state.activity_retried, 2);
+    }
+
+    #[test]
+    fn activity_transport_ambiguity_allows_only_one_retry_across_reconnects() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+
+        state.track_activity_in_flight(Box::new(activity));
+        state.requeue_activity_in_flight();
+        assert_eq!(state.gated_activity_pending.len(), 1);
+        assert_eq!(state.activity_retried, 1);
+
+        let retry = state.gated_activity_pending.pop_front().unwrap();
+        state.track_activity_in_flight(retry);
+        state.requeue_activity_in_flight();
+
+        assert!(state.gated_activity_pending.is_empty());
+        assert!(state.activity_in_flight.is_empty());
+        assert_eq!(state.activity_retried, 1);
+        assert_eq!(state.activity_dropped, 1);
+    }
+
+    #[test]
+    fn late_positive_ok_retires_activity_parked_after_transport_ambiguity() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+
+        state.track_activity_in_flight(Box::new(activity.clone()));
+        state.requeue_activity_in_flight();
+        assert_eq!(state.gated_activity_pending.len(), 1);
+
+        assert!(state.acknowledge_activity_frame(&activity.id.to_hex(), true, false));
+        assert!(state.gated_activity_pending.is_empty());
+        assert!(state.activity_in_flight.is_empty());
+        assert!(!state
+            .activity_retry_attempted
+            .contains(&activity.id.to_hex()));
+    }
+
+    #[test]
+    fn late_retryable_rejection_preserves_the_single_scheduled_retry() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let activity = make_shared_activity_frame(&keys, unix_now_secs());
+
+        state.track_activity_in_flight(Box::new(activity.clone()));
+        state.requeue_activity_in_flight();
+        assert_eq!(state.activity_retried, 1);
+
+        assert!(state.acknowledge_activity_frame(&activity.id.to_hex(), false, true));
+        assert_eq!(state.gated_activity_pending.len(), 1);
+        assert_eq!(state.activity_retried, 1);
+        assert_eq!(state.activity_rejected, 1);
+    }
+
+    /// The oldest activity frame is dropped first when the memory-only transport
+    /// bound is reached; loss is counted rather than silently expanding state.
+    #[test]
+    fn shared_activity_transport_queue_is_bounded_with_visible_oldest_drop() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let first = make_shared_activity_frame(&keys, unix_now_secs());
+        assert!(state.park_gated_activity_frame(Box::new(first.clone())));
+        for _ in 1..GATED_ACTIVITY_QUEUE_CAP {
+            assert!(
+                state.park_gated_activity_frame(Box::new(make_shared_activity_frame(
+                    &keys,
+                    unix_now_secs(),
+                )))
+            );
+        }
+        let overflow = make_shared_activity_frame(&keys, unix_now_secs());
+        assert!(state.park_gated_activity_frame(Box::new(overflow.clone())));
+
+        assert_eq!(state.gated_activity_pending.len(), GATED_ACTIVITY_QUEUE_CAP);
+        assert_eq!(state.activity_dropped, 1);
+        assert!(!state
+            .gated_activity_pending
+            .iter()
+            .any(|event| event.id == first.id));
+        assert_eq!(
+            state.gated_activity_pending.back().map(|event| event.id),
+            Some(overflow.id)
+        );
+    }
+
     /// The parked-frame queue is bounded: overflow evicts the oldest frame and
     /// counts it; the drain resets the counter after logging the summary.
     #[tokio::test]
@@ -6158,7 +7160,7 @@ mod tests {
             "gate must be active while membership sub is pending"
         );
 
-        // Advance past the gate (max jitter: 1.2 × 5s = 6s).
+        // Advance past the exact five-second gate.
         tokio::time::advance(Duration::from_secs(7)).await;
 
         assert!(
