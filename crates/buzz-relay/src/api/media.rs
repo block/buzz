@@ -586,6 +586,12 @@ fn validate_media_path(sha256_ext: &str) -> Result<(), MediaError> {
 /// additional range requests.
 const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 
+/// Upper bound for the range-GET fallback's full-object download. A backend
+/// that rejects range requests (400/416) forces us to fetch the whole object
+/// to serve a slice; above this size that trade is worse than failing, and
+/// the error propagates instead. Mirrors #3894's 16 MiB stream-skip cap.
+const RANGE_FALLBACK_MAX_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
+
 /// GET /media/{sha256_ext} — Blossom BUD-01 serve blob, with HTTP 206 range support.
 ///
 /// `sha256_ext` is either:
@@ -728,12 +734,19 @@ pub(crate) async fn serve_blob_for_tenant(
 
                     // Try S3-native range GET first (efficient — only the
                     // requested slice is transferred). Fall back to full
-                    // download + in-memory slice if the backend rejects the
-                    // range request (e.g. some R2 edge cases).
+                    // download + in-memory slice ONLY when the backend
+                    // rejected the range request itself (400/416, e.g. some
+                    // R2 edge cases) AND the object is small enough to fetch
+                    // whole. Auth failures and server errors propagate: the
+                    // full GET would fail the same way, and falling back on
+                    // them would turn every misconfiguration into a
+                    // full-object download per request. Same bounded-fallback
+                    // contract as #3894's stream-skip cap.
                     let chunk = match state.media_storage.get_range(&key, start, end).await {
                         Ok(bytes) => bytes,
-                        Err(range_err @ MediaError::NotFound) => return Err(range_err),
-                        Err(range_err) => {
+                        Err(range_err @ MediaError::RangeUnsupported { .. })
+                            if total <= RANGE_FALLBACK_MAX_OBJECT_BYTES =>
+                        {
                             tracing::warn!(
                                 error = %range_err,
                                 key,
@@ -753,6 +766,10 @@ pub(crate) async fn serve_blob_for_tenant(
                             }
                             full[start_usize..end_usize].to_vec()
                         }
+                        // NotFound, auth failures, server errors, and
+                        // range-rejection on an object too large to fetch
+                        // whole all propagate untouched.
+                        Err(other) => return Err(other),
                     };
                     let content_range = format!("bytes {start}-{end}/{total}");
 
@@ -1396,6 +1413,27 @@ mod tests {
     #[test]
     fn test_parse_byte_range_zero_start() {
         assert_eq!(parse_byte_range("bytes=0-0", 1000), Some((0, 0)));
+    }
+
+    /// The fallback runs only for backend range-rejection (400/416) on
+    /// objects small enough to fetch whole — an auth failure or 5xx must
+    /// propagate, not trigger a full-object download per request (review on
+    /// #4079; same bounded-fallback contract as #3894).
+    #[test]
+    fn test_range_fallback_error_classes() {
+        let rejected = MediaError::RangeUnsupported { code: 416 };
+        let auth = MediaError::StorageError("s3 range GET failed (HTTP 403): denied".into());
+        let small = RANGE_FALLBACK_MAX_OBJECT_BYTES;
+        let large = RANGE_FALLBACK_MAX_OBJECT_BYTES + 1;
+
+        let should_fallback = |err: &MediaError, total: u64| {
+            matches!(err, MediaError::RangeUnsupported { .. })
+                && total <= RANGE_FALLBACK_MAX_OBJECT_BYTES
+        };
+        assert!(should_fallback(&rejected, small));
+        assert!(!should_fallback(&rejected, large), "oversize object must propagate");
+        assert!(!should_fallback(&auth, small), "auth/server errors must propagate");
+        assert!(!should_fallback(&MediaError::NotFound, small));
     }
 
     /// Validates the fallback slice math used when S3-native range GET fails

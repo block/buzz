@@ -135,10 +135,15 @@ impl MediaStorage {
                     end,
                     "s3 range GET failed"
                 );
-                if code == 416 {
-                    Err(MediaError::StorageError(format!(
-                        "range not satisfiable (HTTP 416): {body}"
-                    )))
+                if code == 400 || code == 416 {
+                    // The backend rejected the RANGE REQUEST itself (R2 &c.
+                    // return 400/416 where AWS S3 serves the slice). Only this
+                    // class is a candidate for the full-download fallback:
+                    // auth failures (401/403) and server errors (5xx) would
+                    // fail the full GET too, and falling back on them turns
+                    // every misconfiguration into a full-object scan per
+                    // request (review on #4079; same contract as #3894).
+                    Err(MediaError::RangeUnsupported { code })
                 } else {
                     Err(MediaError::StorageError(format!(
                         "s3 range GET failed (HTTP {code}): {body}"
