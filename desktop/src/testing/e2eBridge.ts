@@ -313,6 +313,10 @@ type E2eConfig = {
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
+    /** Return not-modified for this many reads before resuming full payloads. */
+    channelsNotModifiedResponses?: number;
+    /** When true, a matching knownHash returns a not-modified channel payload. */
+    honorChannelsKnownHash?: boolean;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
     feedReadError?: string;
@@ -5709,7 +5713,10 @@ function buildLastMessages(
   return map;
 }
 
-async function handleGetChannels(config: E2eConfig | undefined) {
+async function handleGetChannels(
+  payload: unknown,
+  config: E2eConfig | undefined,
+) {
   const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
   if (channelsReadDelayMs > 0) {
     await new Promise((resolve) =>
@@ -5726,15 +5733,25 @@ async function handleGetChannels(config: E2eConfig | undefined) {
 
   const identity = getIdentity(config);
   if (!identity) {
-    // The hash is constant ("mock-hash") and channels are always returned in
-    // full — the not-modified short-circuit is intentionally never exercised
-    // here: mock channel data mutates during tests (last_message_at updates on
-    // message emission) while the hash never changes, so honoring knownHash
-    // would wrongly short-circuit after mutations.
+    // The hash is constant ("mock-hash") and full lists remain the default:
+    // mock channel data mutates during tests while the hash does not. Focused
+    // snapshot specs can opt into the not-modified branch explicitly.
     const channels = listMockChannels(config);
+    const hash = "mock-hash";
+    const knownHash = (payload as { knownHash?: unknown } | null)?.knownHash;
+    const forcedNotModified =
+      (config?.mock?.channelsNotModifiedResponses ?? 0) > 0;
+    if (forcedNotModified && config?.mock) {
+      config.mock.channelsNotModifiedResponses =
+        (config.mock.channelsNotModifiedResponses ?? 1) - 1;
+    }
     return {
-      hash: "mock-hash",
-      channels,
+      hash,
+      channels:
+        forcedNotModified ||
+        (config?.mock?.honorChannelsKnownHash && knownHash === hash)
+          ? null
+          : channels,
       last_messages: buildLastMessages(channels),
     };
   }
@@ -11939,7 +11956,7 @@ export function maybeInstallE2eTauriMocks() {
         // invocation's completion. Later reads pass through and cannot join it.
         const deferred = deferNextChannelsRead;
         deferNextChannelsRead = false;
-        const channels = handleGetChannels(activeConfig);
+        const channels = handleGetChannels(payload, activeConfig);
         if (deferred) {
           await new Promise<void>((resolve) => {
             deferredChannelsReadResolve = resolve;
