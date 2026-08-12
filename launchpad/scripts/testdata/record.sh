@@ -27,11 +27,16 @@ say() { printf '  %-34s %s\n' "$1" "$2"; }
 # PR 86 — the everything-is-readable case. Its check list is the reason the
 # record carries checks as a list: three of its checks share the name "check",
 # so any name-keyed map silently drops two of them.
-PR86_HEAD=$(gh pr view 86 --repo "$REPO" --json headRefOid -q .headRefOid)
-PR86_BASE=$(gh pr view 86 --repo "$REPO" --json baseRefName -q .baseRefName)
-
 gh api "repos/$REPO/pulls/86" > pr86-pr.json
 say pr86-pr.json "the PR itself (identity: base ref, head sha)"
+
+# Compare BY SHA, base.sha...head.sha — never by base branch NAME. A branch name
+# resolves to its tip today, and for a merged PR the tip already contains the
+# head, so `compare/launchpad...{head}` answers with ZERO files: a real PR
+# rendered as a PR that changed nothing. Recorded here the wrong way once, and
+# the empty file list is what caught it.
+PR86_HEAD=$(jq -r .head.sha pr86-pr.json)
+PR86_BASE=$(jq -r .base.sha pr86-pr.json)
 
 gh pr view 86 --repo "$REPO" --json title,body,labels > pr86-meta.json
 say pr86-meta.json "title, body, labels"
@@ -107,12 +112,12 @@ DIVERGENT=""
 for n in $(gh pr list --repo "$UP" --state open --limit 40 --json number -q '.[].number'); do
   base_oid=$(gh pr view "$n" --repo "$UP" --json baseRefOid -q .baseRefOid)
   head_oid=$(gh pr view "$n" --repo "$UP" --json headRefOid -q .headRefOid)
-  base_ref=$(gh pr view "$n" --repo "$UP" --json baseRefName -q .baseRefName)
-  mb=$(gh api "repos/$UP/compare/$base_ref...$head_oid" -q .merge_base_commit.sha 2>/dev/null) || continue
+  base_sha=$(gh api "repos/$UP/pulls/$n" -q .base.sha)
+  mb=$(gh api "repos/$UP/compare/$base_sha...$head_oid" -q .merge_base_commit.sha 2>/dev/null) || continue
   if [ -n "$mb" ] && [ "$mb" != "$base_oid" ]; then
     DIVERGENT="$n"
     gh api "repos/$UP/pulls/$n" > upstream-divergent-pr.json
-    gh api "repos/$UP/compare/$base_ref...$head_oid" \
+    gh api "repos/$UP/compare/$base_sha...$head_oid" \
       | jq '{base_commit, merge_base_commit, status, ahead_by, behind_by, total_commits,
              files: [.files[] | {sha, filename, status, additions, deletions, changes}]}' \
       > upstream-divergent-compare.json
@@ -125,13 +130,15 @@ say upstream-divergent-compare.json "its compare, files projected"
 
 # ------------------------------------------------------- fixture (vii), ADD
 # PR 14 adds AGENTS.md and launchpad/AGENTS.md. Real, merged, in this fork.
-PR14_HEAD=$(gh pr view 14 --repo "$REPO" --json headRefOid -q .headRefOid)
-PR14_BASE=$(gh pr view 14 --repo "$REPO" --json baseRefName -q .baseRefName)
+gh api "repos/$REPO/pulls/14" > pr14-pr.json
+PR14_HEAD=$(jq -r .head.sha pr14-pr.json)
+PR14_BASE=$(jq -r .base.sha pr14-pr.json)
 gh api "repos/$REPO/compare/$PR14_BASE...$PR14_HEAD" \
   | jq '{base_commit: {sha: .base_commit.sha}, merge_base_commit: {sha: .merge_base_commit.sha},
-         status, files: [.files[] | {filename, status, additions, deletions}]}' > pr14-compare.json
+         status, ahead_by, behind_by, files: [.files[] | {filename, status, additions, deletions}]}' > pr14-compare.json
 gh api "repos/$REPO/git/trees/$PR14_HEAD?recursive=1" \
   | jq '{sha, url, truncated, tree: [.tree[] | select(.path | endswith(".md"))]}' > pr14-tree.json
+say pr14-pr.json "PR 14 identity"
 say pr14-compare.json "rules-file ADD — real, PR 14"
 say pr14-tree.json "its head tree, *.md entries"
 
@@ -142,11 +149,12 @@ say pr14-tree.json "its head tree, *.md entries"
 # record-delete-fixture.sh, so this script never opens a PR as a side effect.
 if [ -f delete-pr.number ]; then
   DEL=$(cat delete-pr.number)
-  DEL_HEAD=$(gh pr view "$DEL" --repo "$REPO" --json headRefOid -q .headRefOid)
-  DEL_BASE=$(gh pr view "$DEL" --repo "$REPO" --json baseRefName -q .baseRefName)
+  gh api "repos/$REPO/pulls/$DEL" > prdelete-pr.json
+  DEL_HEAD=$(jq -r .head.sha prdelete-pr.json)
+  DEL_BASE=$(jq -r .base.sha prdelete-pr.json)
   gh api "repos/$REPO/compare/$DEL_BASE...$DEL_HEAD" \
     | jq '{base_commit: {sha: .base_commit.sha}, merge_base_commit: {sha: .merge_base_commit.sha},
-           status, files: [.files[] | {filename, status, additions, deletions}]}' > prdelete-compare.json
+           status, ahead_by, behind_by, files: [.files[] | {filename, status, additions, deletions}]}' > prdelete-compare.json
   gh api "repos/$REPO/git/trees/$DEL_HEAD?recursive=1" \
     | jq '{sha, url, truncated, tree: [.tree[] | select(.path | endswith(".md"))]}' > prdelete-tree.json
   say prdelete-compare.json "rules-file DELETE — throwaway PR $DEL"
