@@ -1,6 +1,7 @@
 import { MessageSquareText } from "lucide-react";
 import * as React from "react";
 
+import { useChannelMembersQuery } from "@/features/channels/hooks";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
@@ -52,6 +53,7 @@ export function ForumView({
   const postsScrollRef = React.useRef<HTMLDivElement>(null);
 
   const profileQuery = useProfileQuery();
+  const membersQuery = useChannelMembersQuery(channel.id);
   const postsQuery = useForumPostsQuery(channel);
   const threadQuery = useForumThreadQuery(
     selectedPostId ? channel.id : null,
@@ -67,7 +69,9 @@ export function ForumView({
 
   const posts = postsQuery.data?.posts ?? [];
 
-  // Collect all pubkeys from posts and thread for profile resolution.
+  // Collect channel members as well as post/thread identities. The composer
+  // needs verified owner metadata for same-owner remote agents even before
+  // they have authored or been mentioned in a forum post.
   // Mentioned pubkeys (`p`/`mention` tags) must be included too: mention
   // chips resolve names from this same lookup, and a mentioned user who
   // never authored a post would otherwise render as a dead chip.
@@ -81,6 +85,9 @@ export function ForumView({
         }
       }
     };
+    for (const member of membersQuery.data ?? []) {
+      pubkeys.add(member.pubkey);
+    }
     for (const post of posts) {
       pubkeys.add(post.pubkey);
       addMentionPubkeys(post.tags);
@@ -99,7 +106,7 @@ export function ForumView({
       }
     }
     return [...pubkeys];
-  }, [posts, threadQuery.data]);
+  }, [membersQuery.data, posts, threadQuery.data]);
 
   const profilesQuery = useUsersBatchQuery(allPubkeys, {
     enabled: allPubkeys.length > 0,

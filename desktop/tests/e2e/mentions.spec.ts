@@ -8,6 +8,7 @@ import {
 
 const MOCK_VIEWER_PUBKEY = "deadbeef".repeat(8);
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -31,6 +32,8 @@ const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
+const OWNED_REMOTE_CHANNEL_AGENT_PUBKEY =
+  "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
@@ -66,6 +69,81 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
       ).__BUZZ_E2E_COMMAND_LOG__ ?? []
     );
   });
+}
+
+async function invokeMockCommand<T>(
+  page: import("@playwright/test").Page,
+  command: string,
+  payload?: Record<string, unknown>,
+) {
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+  );
+  return page.evaluate(
+    async ({ command, payload }) => {
+      const bridgeWindow = window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+        __BUZZ_E2E_QUERY_CLIENT__?: {
+          invalidateQueries: () => Promise<void>;
+        };
+      };
+      const invoke = bridgeWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      const result = await invoke(command, payload);
+      await bridgeWindow.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries();
+      return result as T;
+    },
+    { command, payload },
+  );
+}
+
+async function waitForMentionSearch(
+  page: import("@playwright/test").Page,
+  query: string,
+) {
+  await expect
+    .poll(async () =>
+      (await readCommandPayloadLog(page)).some(
+        (entry) =>
+          entry.command === "search_users" &&
+          (entry.payload as { query?: string }).query === query,
+      ),
+    )
+    .toBe(true);
+
+  await expect
+    .poll(() =>
+      page.evaluate((normalizedQuery) => {
+        const queryClient = (
+          window as Window & {
+            __BUZZ_E2E_QUERY_CLIENT__?: {
+              getQueryState: (queryKey: readonly unknown[]) =>
+                | {
+                    dataUpdatedAt: number;
+                    fetchStatus: string;
+                  }
+                | undefined;
+            };
+          }
+        ).__BUZZ_E2E_QUERY_CLIENT__;
+        const state = queryClient?.getQueryState([
+          "user-search",
+          "infinite",
+          normalizedQuery,
+          50,
+        ]);
+        return state?.fetchStatus === "idle" && state.dataUpdatedAt > 0;
+      }, query.trim().toLowerCase()),
+    )
+    .toBe(true);
 }
 
 async function readOutgoingMentionPubkeys(
@@ -844,22 +922,205 @@ test("other-owned agents without a shared channel are hidden from mentions", asy
   await input.fill("@mira");
 
   const dropdown = autocomplete(page);
-  await expect(dropdown).not.toBeVisible();
+  await waitForMentionSearch(page, "mira");
+  await expect(
+    dropdown.getByTestId(`mention-suggestion-${PROFILE_ONLY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
   await expect(input.locator(".mention-chip")).toHaveCount(0);
 });
 
-test("stale channel-member agents absent from managed and relay directories stay hidden", async ({
+test("same-owner remote channel agents send to their existing pubkey without local lifecycle work", async ({
   page,
 }) => {
-  await installMockBridge(page, { userSearchDelayMs: 1_000 });
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: REUSABLE_PERSONA_AGENT_PUBKEY,
+        name: "nadia",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
 
   const input = page.getByTestId("message-input");
-  await input.fill("@mira");
+  await input.fill("Ask @nad");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  const dropdown = autocomplete(page);
+  const remoteRow = dropdown.getByTestId(
+    `mention-suggestion-${OWNED_REMOTE_CHANNEL_AGENT_PUBKEY}`,
+  );
+  await expect(remoteRow).toBeVisible();
+  await expect(remoteRow.getByText("nadia", { exact: true })).toBeVisible();
+  await remoteRow.click();
+  await page.keyboard.type("if you are available");
+
+  const baselineCommands = await readCommandLog(page);
+  const content = "Ask @nadia if you are available";
+  await page.getByTestId("send-message").click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toEqual([OWNED_REMOTE_CHANNEL_AGENT_PUBKEY]);
+
+  const commands = await readCommandLog(page);
+  for (const command of [
+    "create_managed_agent",
+    "start_managed_agent",
+    "add_channel_members",
+    "add_agent_to_huddle",
+  ]) {
+    expect(commandCount(commands, command), command).toBe(
+      commandCount(baselineCommands, command),
+    );
+  }
+});
+
+test("same-owner remote agents stay unavailable even when present in DMs", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: TEST_IDENTITIES.outsider.pubkey,
+        displayName: "nadia human",
+        isAgent: false,
+      },
+    ],
+  });
+  await page.goto("/");
+  const dm = await invokeMockCommand<{ id: string }>(page, "open_dm", {
+    pubkeys: [
+      TEST_IDENTITIES.outsider.pubkey,
+      OWNED_REMOTE_CHANNEL_AGENT_PUBKEY,
+    ],
+  });
+  const dmLink = page.locator(`[data-channel-id="${dm.id}"]`);
+  await expect(dmLink).toBeVisible();
+  await dmLink.click();
+  await expect(
+    page.locator("[data-active='true'][data-channel-id]"),
+  ).toHaveAttribute("data-channel-id", dm.id);
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@nadia");
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${TEST_IDENTITIES.outsider.pubkey}`,
+    ),
+  ).toBeVisible();
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${OWNED_REMOTE_CHANNEL_AGENT_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
+});
+
+test("same-owner remote channel agents respect an explicit nobody policy", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OWNED_REMOTE_CHANNEL_AGENT_PUBKEY,
+        name: "nadia",
+        respondTo: "nobody",
+        channelNames: ["agents"],
+      },
+    ],
+    userSearchDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  await page.getByTestId("message-input").fill("@nadia");
+  await waitForMentionSearch(page, "nadia");
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${OWNED_REMOTE_CHANNEL_AGENT_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
+});
+
+test("same-owner remote channel agents join an active Huddle without starting locally", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    huddle: {
+      parentChannelId: AGENTS_CHANNEL_ID,
+      ephemeralChannelId: "owned-agent-huddle",
+      phase: "active",
+      members: [{ pubkey: MOCK_VIEWER_PUBKEY, role: "owner" }],
+    },
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @nad");
+  await autocomplete(page)
+    .getByTestId(`mention-suggestion-${OWNED_REMOTE_CHANNEL_AGENT_PUBKEY}`)
+    .click();
+  await page.keyboard.type("to join the Huddle");
+
+  const baselineCommands = await readCommandLog(page);
+  const baselinePayloads = await readCommandPayloadLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () =>
+      (await readCommandPayloadLog(page))
+        .slice(baselinePayloads.length)
+        .find((entry) => entry.command === "sync_agents_to_active_huddle"),
+    )
+    .toMatchObject({
+      payload: {
+        channelId: AGENTS_CHANNEL_ID,
+        agentPubkeys: [OWNED_REMOTE_CHANNEL_AGENT_PUBKEY],
+      },
+    });
+
+  const commands = await readCommandLog(page);
+  for (const command of [
+    "create_managed_agent",
+    "start_managed_agent",
+    "add_channel_members",
+    "add_agent_to_huddle",
+  ]) {
+    expect(commandCount(commands, command), command).toBe(
+      commandCount(baselineCommands, command),
+    );
+  }
+});
+
+test("same-owner remote channel agents wait for the relay directory before admission", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    agentListDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@nadia");
+
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${OWNED_REMOTE_CHANNEL_AGENT_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${OWNED_REMOTE_CHANNEL_AGENT_PUBKEY}`,
+    ),
+  ).toBeVisible({ timeout: 3_000 });
 });
 
 test("managed relay agents are visible in channel mentions regardless of relay policy", async ({
@@ -903,7 +1164,12 @@ test("relay-only shared agents stay hidden from DM mentions", async ({
 
   await page.getByTestId("message-input").fill("@alice");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  await waitForMentionSearch(page, "alice");
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toHaveCount(0);
 });
 
 test("cached relay-agent suggestions are removed when channel authorization disappears", async ({
@@ -966,6 +1232,33 @@ test("relay-only shared agents appear in forum mentions", async ({ page }) => {
 
   await expect(
     page.getByTestId("mention-autocomplete").getByText("quinn"),
+  ).toBeVisible();
+});
+
+test("same-owner remote forum agents appear before authoring a post", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const forumChannelId = await page
+    .getByTestId("channel-watercooler")
+    .getAttribute("data-channel-id");
+  if (!forumChannelId) throw new Error("Watercooler channel id missing.");
+
+  await invokeMockCommand(page, "add_channel_members", {
+    channelId: forumChannelId,
+    pubkeys: [OWNED_REMOTE_CHANNEL_AGENT_PUBKEY],
+    role: "bot",
+  });
+  await page.getByTestId("channel-watercooler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
+  await page.getByRole("button", { name: "Start a new post..." }).click();
+
+  await page.getByTestId("message-input").fill("@nadia");
+
+  await expect(
+    page
+      .getByTestId("mention-autocomplete")
+      .getByTestId(`mention-suggestion-${OWNED_REMOTE_CHANNEL_AGENT_PUBKEY}`),
   ).toBeVisible();
 });
 
