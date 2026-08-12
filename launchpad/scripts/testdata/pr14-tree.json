@@ -1,0 +1,879 @@
+{
+  "sha": "f266e81204dff5e1111ff7f4ff58ef431906ab2c",
+  "url": "https://api.github.com/repos/launchpad-26/buzz/git/trees/f266e81204dff5e1111ff7f4ff58ef431906ab2c",
+  "truncated": false,
+  "tree": [
+    {
+      "path": ".agents/skills/desktop-screenshot/SKILL.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "1c6f8ccbd331e627ccf407f8d13d1855d40c4a7b",
+      "size": 65,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/1c6f8ccbd331e627ccf407f8d13d1855d40c4a7b"
+    },
+    {
+      "path": ".agents/skills/sprout-cli/SKILL.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "091795a0d44351523ca4e35eac0d74516ab88c25",
+      "size": 59,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/091795a0d44351523ca4e35eac0d74516ab88c25"
+    },
+    {
+      "path": ".claude/skills/desktop-screenshot/SKILL.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "1c6f8ccbd331e627ccf407f8d13d1855d40c4a7b",
+      "size": 65,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/1c6f8ccbd331e627ccf407f8d13d1855d40c4a7b"
+    },
+    {
+      "path": ".claude/skills/sprout-cli/SKILL.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "091795a0d44351523ca4e35eac0d74516ab88c25",
+      "size": 59,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/091795a0d44351523ca4e35eac0d74516ab88c25"
+    },
+    {
+      "path": ".codex/skills/desktop-screenshot/SKILL.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "1c6f8ccbd331e627ccf407f8d13d1855d40c4a7b",
+      "size": 65,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/1c6f8ccbd331e627ccf407f8d13d1855d40c4a7b"
+    },
+    {
+      "path": ".codex/skills/sprout-cli/SKILL.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "091795a0d44351523ca4e35eac0d74516ab88c25",
+      "size": 59,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/091795a0d44351523ca4e35eac0d74516ab88c25"
+    },
+    {
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b9adbdda312fa9640c7b16904d9f154fce0cd914",
+      "size": 578,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/b9adbdda312fa9640c7b16904d9f154fce0cd914"
+    },
+    {
+      "path": ".goose/skills/desktop-screenshot/SKILL.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "1c6f8ccbd331e627ccf407f8d13d1855d40c4a7b",
+      "size": 65,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/1c6f8ccbd331e627ccf407f8d13d1855d40c4a7b"
+    },
+    {
+      "path": ".goose/skills/sprout-cli/SKILL.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "091795a0d44351523ca4e35eac0d74516ab88c25",
+      "size": 59,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/091795a0d44351523ca4e35eac0d74516ab88c25"
+    },
+    {
+      "path": "AGENTS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "06a3620478920b8f0ec18e67180534a314145962",
+      "size": 29879,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/06a3620478920b8f0ec18e67180534a314145962"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "892082d96c6da9bed8a1b7305ea7c7034e5315db",
+      "size": 45578,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/892082d96c6da9bed8a1b7305ea7c7034e5315db"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "171f260d3e9edb12b991f102f6d874cc6cace722",
+      "size": 245184,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/171f260d3e9edb12b991f102f6d874cc6cace722"
+    },
+    {
+      "path": "CLAUDE.md",
+      "mode": "120000",
+      "type": "blob",
+      "sha": "47dc3e3d863cfb5727b87d785d09abf9743c0a72",
+      "size": 9,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/47dc3e3d863cfb5727b87d785d09abf9743c0a72"
+    },
+    {
+      "path": "CODE_OF_CONDUCT.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2bc369a3cf426b62e24666c73e3d7c70eab62f3",
+      "size": 5496,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/a2bc369a3cf426b62e24666c73e3d7c70eab62f3"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "db0aea637fea3a6fda23165d44d57fad350fe517",
+      "size": 19053,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/db0aea637fea3a6fda23165d44d57fad350fe517"
+    },
+    {
+      "path": "GOVERNANCE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4af3958eedafeccc3669161f3cd8bbe443dfa0f6",
+      "size": 127,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/4af3958eedafeccc3669161f3cd8bbe443dfa0f6"
+    },
+    {
+      "path": "NOSTR.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cce70f2f77f8aa0ebf77783a5d3edf9a1f6ea6a9",
+      "size": 19578,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/cce70f2f77f8aa0ebf77783a5d3edf9a1f6ea6a9"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "56439f00bc1565ce7aca273a886eecdc12df5c1d",
+      "size": 15945,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/56439f00bc1565ce7aca273a886eecdc12df5c1d"
+    },
+    {
+      "path": "RELEASING.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "53d580556191ad40f2197e3797cfe536087b1e34",
+      "size": 15023,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/53d580556191ad40f2197e3797cfe536087b1e34"
+    },
+    {
+      "path": "SECURITY.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "09ea73022b311594060dabde5d291c09865ffbf3",
+      "size": 5316,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/09ea73022b311594060dabde5d291c09865ffbf3"
+    },
+    {
+      "path": "TESTING.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "764b86d408c3edc0c3f04e0277ac5f4f225b407f",
+      "size": 16473,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/764b86d408c3edc0c3f04e0277ac5f4f225b407f"
+    },
+    {
+      "path": "VISION.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "66a106bdebc5e751ee39babb56056d0d7572cf1a",
+      "size": 12934,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/66a106bdebc5e751ee39babb56056d0d7572cf1a"
+    },
+    {
+      "path": "VISION_ACTIVITY.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d1d1e0ac5c22b5a990bb18e15d433ea4553fc8ef",
+      "size": 5208,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/d1d1e0ac5c22b5a990bb18e15d433ea4553fc8ef"
+    },
+    {
+      "path": "VISION_AGENT.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2b2597c8d2b542241f19e6e7cfff110c97188935",
+      "size": 4501,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/2b2597c8d2b542241f19e6e7cfff110c97188935"
+    },
+    {
+      "path": "VISION_MESH.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d1354d50fee00cf7de0ea981c58973c406ec69f7",
+      "size": 4607,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/d1354d50fee00cf7de0ea981c58973c406ec69f7"
+    },
+    {
+      "path": "VISION_MODERATION.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "45d3ab86fd03c2f3dfd8d89374a663a47e00d45b",
+      "size": 7378,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/45d3ab86fd03c2f3dfd8d89374a663a47e00d45b"
+    },
+    {
+      "path": "VISION_PROJECTS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8601b87829eb3743671c1ed7cbebba42902a8d86",
+      "size": 15808,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/8601b87829eb3743671c1ed7cbebba42902a8d86"
+    },
+    {
+      "path": "VISION_REMOTE_AGENTS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4b187f355a5dd65ab7b7b1b598c62bead7a7e804",
+      "size": 8922,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/4b187f355a5dd65ab7b7b1b598c62bead7a7e804"
+    },
+    {
+      "path": "VISION_SOVEREIGN.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "77362b3f7e2f4cf9cc8b61837c5125c55e797244",
+      "size": 13541,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/77362b3f7e2f4cf9cc8b61837c5125c55e797244"
+    },
+    {
+      "path": "benchmarks/harbor-buzz-orchestra/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0358c954e7d7b78c9a7bc05bec43c436059a6df0",
+      "size": 6342,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/0358c954e7d7b78c9a7bc05bec43c436059a6df0"
+    },
+    {
+      "path": "benchmarks/harbor-buzz-orchestra/personas/orchestrator-m1.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d248806e4ec3414df6aa07fb0d2a8479f0560a7c",
+      "size": 1936,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/d248806e4ec3414df6aa07fb0d2a8479f0560a7c"
+    },
+    {
+      "path": "benchmarks/harbor-buzz-orchestra/personas/orchestrator-tb.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c1dbd7b79578f2b0cabafc610f8b6bddbd8aedc2",
+      "size": 2424,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/c1dbd7b79578f2b0cabafc610f8b6bddbd8aedc2"
+    },
+    {
+      "path": "benchmarks/harbor-buzz-orchestra/personas/worker-m1.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "442d7b874d0f293ebe5b6f73813793b26fee4a6b",
+      "size": 1777,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/442d7b874d0f293ebe5b6f73813793b26fee4a6b"
+    },
+    {
+      "path": "benchmarks/harbor-buzz-orchestra/personas/worker-tb.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "49a9125a17bb9885ce31c0e3edb9e4766fe5b838",
+      "size": 1684,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/49a9125a17bb9885ce31c0e3edb9e4766fe5b838"
+    },
+    {
+      "path": "benchmarks/harbor-buzz-orchestra/testbed/endpoints/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f8d2a560bf275232d3c81e722563001ff5bd6865",
+      "size": 1190,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/f8d2a560bf275232d3c81e722563001ff5bd6865"
+    },
+    {
+      "path": "bin/README.hermit.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e889550ba4cbc92a720527042e5f6e7a303bfcbc",
+      "size": 270,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/e889550ba4cbc92a720527042e5f6e7a303bfcbc"
+    },
+    {
+      "path": "crates/buzz-acp/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e6164b02dd3ef1e0d9d63571b7f863fb7ade07d9",
+      "size": 18083,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/e6164b02dd3ef1e0d9d63571b7f863fb7ade07d9"
+    },
+    {
+      "path": "crates/buzz-acp/src/base_prompt.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1d85221f113e41f8a098fa13efaad413b8788512",
+      "size": 15007,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/1d85221f113e41f8a098fa13efaad413b8788512"
+    },
+    {
+      "path": "crates/buzz-agent/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5d942777d5e5b0b38a767d56ae7ec7b2bb505aad",
+      "size": 22677,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/5d942777d5e5b0b38a767d56ae7ec7b2bb505aad"
+    },
+    {
+      "path": "crates/buzz-backend-kubernetes/tests/fixtures/provider-wire/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "56a972f89420cebfcb74cfd73598d9ff90c9a7f1",
+      "size": 2323,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/56a972f89420cebfcb74cfd73598d9ff90c9a7f1"
+    },
+    {
+      "path": "crates/buzz-cli/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2dcdce6d2104b1ba6ddef3bcb1ccac467fc8e3f",
+      "size": 6553,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/a2dcdce6d2104b1ba6ddef3bcb1ccac467fc8e3f"
+    },
+    {
+      "path": "crates/buzz-cli/TESTING.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "77234b7faab6966bdf6429da9f17fa05a05463a9",
+      "size": 20746,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/77234b7faab6966bdf6429da9f17fa05a05463a9"
+    },
+    {
+      "path": "crates/buzz-conformance/LIMITS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "37f0f28d3ee728f5ff633784bed6bbbe791ad6ec",
+      "size": 5767,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/37f0f28d3ee728f5ff633784bed6bbbe791ad6ec"
+    },
+    {
+      "path": "crates/buzz-conformance/TRACE_SCHEMA.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c1dca674d559e5daf58576cb305ef9b9251b6fde",
+      "size": 6969,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/c1dca674d559e5daf58576cb305ef9b9251b6fde"
+    },
+    {
+      "path": "crates/buzz-core/src/pairing/NIP-AB.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fc8f69245e80fb710e95694ea28dbe286047da6d",
+      "size": 54727,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/fc8f69245e80fb710e95694ea28dbe286047da6d"
+    },
+    {
+      "path": "crates/buzz-media/tests/fixtures/android/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b0b06bb0607d985b5c0a9e7d6c4360b55131cf17",
+      "size": 3067,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/b0b06bb0607d985b5c0a9e7d6c4360b55131cf17"
+    },
+    {
+      "path": "crates/buzz-media/tests/fixtures/ios/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2f6d5f5e256a3f0e9e40508c1668ae150a09e61e",
+      "size": 2209,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/2f6d5f5e256a3f0e9e40508c1668ae150a09e61e"
+    },
+    {
+      "path": "crates/buzz-pairing-cli/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4f9fd1e530943ce732c22244725522bb210ab4b4",
+      "size": 5016,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/4f9fd1e530943ce732c22244725522bb210ab4b4"
+    },
+    {
+      "path": "crates/buzz-persona/PERSONA_PACK_SPEC.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cb3a7d1c05a74495c929a677f6dc2125561cb409",
+      "size": 47257,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/cb3a7d1c05a74495c929a677f6dc2125561cb409"
+    },
+    {
+      "path": "crates/buzz-relay/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c0d6ab9ccd56d8f3565c1604978cf36a6af799db",
+      "size": 7745,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/c0d6ab9ccd56d8f3565c1604978cf36a6af799db"
+    },
+    {
+      "path": "crates/git-credential-nostr/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "827f8d55a330d508cc870113d680b981acd1f696",
+      "size": 2482,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/827f8d55a330d508cc870113d680b981acd1f696"
+    },
+    {
+      "path": "crates/git-sign-nostr/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "908682fd7fe4e037e0f8e64812db8d234f86bbd8",
+      "size": 1345,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/908682fd7fe4e037e0f8e64812db8d234f86bbd8"
+    },
+    {
+      "path": "deploy/charts/buzz/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b2778df28b57d11f3ec5a179a9b1b442079e7903",
+      "size": 12342,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/b2778df28b57d11f3ec5a179a9b1b442079e7903"
+    },
+    {
+      "path": "deploy/compose/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bb0e63fe15d1c540fe0fe6fa76a25045df36952a",
+      "size": 2338,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/bb0e63fe15d1c540fe0fe6fa76a25045df36952a"
+    },
+    {
+      "path": "desktop/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d53698a9d04fca2636b0475d126acb4f7c152730",
+      "size": 627,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/d53698a9d04fca2636b0475d126acb4f7c152730"
+    },
+    {
+      "path": "desktop/public/harness-logos/CREDITS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "716c43e1ae32eca14f4ec19daf0b60c3751fa580",
+      "size": 3597,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/716c43e1ae32eca14f4ec19daf0b60c3751fa580"
+    },
+    {
+      "path": "desktop/scripts/texture-card/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1de2addce99cf2a340013a83ca82e4a0a4511a54",
+      "size": 1014,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/1de2addce99cf2a340013a83ca82e4a0a4511a54"
+    },
+    {
+      "path": "desktop/src-tauri/resources/pocket-voices/NOTICE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9cc515dea3c733f540a707c34f94d273261700dc",
+      "size": 2133,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/9cc515dea3c733f540a707c34f94d273261700dc"
+    },
+    {
+      "path": "desktop/src-tauri/src/managed_agents/nest_agents.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7cb7489b85291e0d2cf9d72eb5b1a9fd878e12c7",
+      "size": 3620,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/7cb7489b85291e0d2cf9d72eb5b1a9fd878e12c7"
+    },
+    {
+      "path": "desktop/src-tauri/src/managed_agents/nest_skill.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "79a5ea301d467444fafe53bb137b2c5f86be58b3",
+      "size": 11014,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/79a5ea301d467444fafe53bb137b2c5f86be58b3"
+    },
+    {
+      "path": "desktop/src-tauri/src/managed_agents/screenshot_skill.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "361e747fe28b62e3ae80772cccf8e35eb4c46e69",
+      "size": 3726,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/361e747fe28b62e3ae80772cccf8e35eb4c46e69"
+    },
+    {
+      "path": "desktop/src/features/agents/AGENTS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b929dbb613190e384866b10ae16025cdd9eefbed",
+      "size": 13613,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/b929dbb613190e384866b10ae16025cdd9eefbed"
+    },
+    {
+      "path": "docs/MCP_DRIVEN_HOOKS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6812a5b9a6c47d536b0d315d90eb81579991dac8",
+      "size": 4775,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/6812a5b9a6c47d536b0d315d90eb81579991dac8"
+    },
+    {
+      "path": "docs/admin/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e51566fb292ee430f61010065b4c6e04a6f851db",
+      "size": 3174,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/e51566fb292ee430f61010065b4c6e04a6f851db"
+    },
+    {
+      "path": "docs/bridge-channel-window.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "42f1d82835e176e7e438a5b75c1020c2ce67751b",
+      "size": 6250,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/42f1d82835e176e7e438a5b75c1020c2ce67751b"
+    },
+    {
+      "path": "docs/buzz-entity-links.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "df32037898e93c608d7e474f6eb925ca2c81d4ab",
+      "size": 12939,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/df32037898e93c608d7e474f6eb925ca2c81d4ab"
+    },
+    {
+      "path": "docs/buzz-shared-compute-dev.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3712bb7965d9f4cdbcb18b6016888508a463eafb",
+      "size": 6842,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/3712bb7965d9f4cdbcb18b6016888508a463eafb"
+    },
+    {
+      "path": "docs/formal/STATEFUL_GATEWAY.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "77b472619a59d053b9d3318264eba8fa7f43f9de",
+      "size": 1268,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/77b472619a59d053b9d3318264eba8fa7f43f9de"
+    },
+    {
+      "path": "docs/formal/nip-pl/NOTE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0cb70a54ad91d31d64c49bdb57b9d2ee464123db",
+      "size": 2196,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/0cb70a54ad91d31d64c49bdb57b9d2ee464123db"
+    },
+    {
+      "path": "docs/formal/nip-rs-unread/NOTE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7472c3dca3a93c33793e98b01266173723ba9383",
+      "size": 39649,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/7472c3dca3a93c33793e98b01266173723ba9383"
+    },
+    {
+      "path": "docs/git-on-object-storage.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1d87720edc7fed73de31151fe6cf36141c163999",
+      "size": 36714,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/1d87720edc7fed73de31151fe6cf36141c163999"
+    },
+    {
+      "path": "docs/linux-rendering-troubleshooting.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1e09ef1aca519e92fa6f0e0972be5d66f482f459",
+      "size": 6775,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/1e09ef1aca519e92fa6f0e0972be5d66f482f459"
+    },
+    {
+      "path": "docs/multi-tenant-conformance.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3cd56066eb6d260ea307c5eae8ad94a5bdfaba8f",
+      "size": 16743,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/3cd56066eb6d260ea307c5eae8ad94a5bdfaba8f"
+    },
+    {
+      "path": "docs/multi-tenant-relay.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "85de728b12c63df1f8b1aa00fa8cf4bf282c2bea",
+      "size": 74264,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/85de728b12c63df1f8b1aa00fa8cf4bf282c2bea"
+    },
+    {
+      "path": "docs/nips/NIP-AA.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "920ee7851087e716058a44eda97d2060c00522a9",
+      "size": 22346,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/920ee7851087e716058a44eda97d2060c00522a9"
+    },
+    {
+      "path": "docs/nips/NIP-AE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c24078d8a45672a282d9e2f7f0069f6fa4356d8d",
+      "size": 21677,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/c24078d8a45672a282d9e2f7f0069f6fa4356d8d"
+    },
+    {
+      "path": "docs/nips/NIP-AM.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "794a6722d54550a0786921e0580f70b3b3e6e14c",
+      "size": 13973,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/794a6722d54550a0786921e0580f70b3b3e6e14c"
+    },
+    {
+      "path": "docs/nips/NIP-AO.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "36adea04871c830e38717c1badf149150b7b781e",
+      "size": 9972,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/36adea04871c830e38717c1badf149150b7b781e"
+    },
+    {
+      "path": "docs/nips/NIP-AP.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ad23d92282dbba3ba9ee4d60e4d8ebf6e1150c9d",
+      "size": 25710,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/ad23d92282dbba3ba9ee4d60e4d8ebf6e1150c9d"
+    },
+    {
+      "path": "docs/nips/NIP-CW.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f21b63405b2d240677207a6696813bd5a0844364",
+      "size": 21151,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/f21b63405b2d240677207a6696813bd5a0844364"
+    },
+    {
+      "path": "docs/nips/NIP-DV.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2efba0ba659c14c7ef43590b9e79bae79513e43d",
+      "size": 11390,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/2efba0ba659c14c7ef43590b9e79bae79513e43d"
+    },
+    {
+      "path": "docs/nips/NIP-ER.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f384ff7ef6c9c01611a86937aad341ed328f3d07",
+      "size": 19511,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/f384ff7ef6c9c01611a86937aad341ed328f3d07"
+    },
+    {
+      "path": "docs/nips/NIP-GS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7ef37bcc276f3566a994db5861178b16db641ba7",
+      "size": 38515,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/7ef37bcc276f3566a994db5861178b16db641ba7"
+    },
+    {
+      "path": "docs/nips/NIP-IA.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "28b2cfa52d479f4f28465a9fbe0b2f5db9d6b390",
+      "size": 39959,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/28b2cfa52d479f4f28465a9fbe0b2f5db9d6b390"
+    },
+    {
+      "path": "docs/nips/NIP-MP.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "14936d2a7cd38affdc8002e3b92785048ca8c967",
+      "size": 41745,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/14936d2a7cd38affdc8002e3b92785048ca8c967"
+    },
+    {
+      "path": "docs/nips/NIP-OA.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d148841440effe97533deab1471f9cfb5dfdbae9",
+      "size": 9096,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/d148841440effe97533deab1471f9cfb5dfdbae9"
+    },
+    {
+      "path": "docs/nips/NIP-PL.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "08fa6ca34d9b504b8a19819d489fe0446c5ff85d",
+      "size": 47748,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/08fa6ca34d9b504b8a19819d489fe0446c5ff85d"
+    },
+    {
+      "path": "docs/nips/NIP-PMA.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "82592b1eca059755cfddefc49ef7bf8b161737e0",
+      "size": 5870,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/82592b1eca059755cfddefc49ef7bf8b161737e0"
+    },
+    {
+      "path": "docs/nips/NIP-RS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6a095df60ab672f09df192ab3dcbc69c6b69df1e",
+      "size": 73928,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/6a095df60ab672f09df192ab3dcbc69c6b69df1e"
+    },
+    {
+      "path": "docs/nips/NIP-WP.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ebaf612de9d2ffe703468593c55854304993e8fb",
+      "size": 6741,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/ebaf612de9d2ffe703468593c55854304993e8fb"
+    },
+    {
+      "path": "docs/push-gateway-deployment.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "63c63355a1140ba0d1a50dafb70f36380f2246ad",
+      "size": 13855,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/63c63355a1140ba0d1a50dafb70f36380f2246ad"
+    },
+    {
+      "path": "docs/remote-agents.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "45289ef910af7379a20b66f91ece0e49c3ed4aaa",
+      "size": 114647,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/45289ef910af7379a20b66f91ece0e49c3ed4aaa"
+    },
+    {
+      "path": "docs/welcome-kickoff-silent-failures.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "58a4a5fa9580dc5cb1453edc9ee35d295e5c5fe7",
+      "size": 27131,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/58a4a5fa9580dc5cb1453edc9ee35d295e5c5fe7"
+    },
+    {
+      "path": "examples/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8649ba360ddad538a5940499ebf153c17db6ac3d",
+      "size": 912,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/8649ba360ddad538a5940499ebf153c17db6ac3d"
+    },
+    {
+      "path": "examples/countdown-bot/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "09b3c135200a12b6f8330c483f4773bb943722b0",
+      "size": 4025,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/09b3c135200a12b6f8330c483f4773bb943722b0"
+    },
+    {
+      "path": "examples/meadow-core/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3eedd1391eace6b6ac32224ef60a66ece9f104cc",
+      "size": 1767,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/3eedd1391eace6b6ac32224ef60a66ece9f104cc"
+    },
+    {
+      "path": "examples/meadow-core/agents/bana.persona.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "19b8b975ac7794e8fd72968112aa5a7f51e53e73",
+      "size": 1557,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/19b8b975ac7794e8fd72968112aa5a7f51e53e73"
+    },
+    {
+      "path": "examples/meadow-core/agents/lev.persona.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5963eedd563d56763ab648f0d3c8fde411959916",
+      "size": 1509,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/5963eedd563d56763ab648f0d3c8fde411959916"
+    },
+    {
+      "path": "examples/meadow-core/agents/skip.persona.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a3897991a4548afa1dae190866974e2883b1f262",
+      "size": 1458,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/a3897991a4548afa1dae190866974e2883b1f262"
+    },
+    {
+      "path": "examples/meadow-core/instructions.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4517467c0cfe4a27701d315f0189dd5f19db1e7f",
+      "size": 538,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/4517467c0cfe4a27701d315f0189dd5f19db1e7f"
+    },
+    {
+      "path": "examples/meadow-core/skills/github-research/SKILL.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b940e55a890d9ee3b5de9bb95f81d16e70717b65",
+      "size": 1445,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/b940e55a890d9ee3b5de9bb95f81d16e70717b65"
+    },
+    {
+      "path": "launchpad/AGENTS.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f2183732930e627cbe33823eb849a23aee694771",
+      "size": 10253,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/f2183732930e627cbe33823eb849a23aee694771"
+    },
+    {
+      "path": "launchpad/AGENT_PR_TEMPLATE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "501f37ef40fa427294e8269870c7f31451c85c06",
+      "size": 3258,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/501f37ef40fa427294e8269870c7f31451c85c06"
+    },
+    {
+      "path": "launchpad/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f46e384c75001dea5ec9035d4e57ac506d800a3f",
+      "size": 6384,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/f46e384c75001dea5ec9035d4e57ac506d800a3f"
+    },
+    {
+      "path": "mobile/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "08421f4d9d009fe4ba2ca3a74c3e991b5d7db723",
+      "size": 6785,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/08421f4d9d009fe4ba2ca3a74c3e991b5d7db723"
+    },
+    {
+      "path": "mobile/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ada0568e28a21626ba1da6c40f8ab3749627820f",
+      "size": 3663,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/ada0568e28a21626ba1da6c40f8ab3749627820f"
+    },
+    {
+      "path": "mobile/ios/Runner/Assets.xcassets/LaunchImage.imageset/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "89c2725b70f1882be97f5214fafe22d27a0ec01e",
+      "size": 336,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/89c2725b70f1882be97f5214fafe22d27a0ec01e"
+    },
+    {
+      "path": "perf/RELAY_BUS_SCALING.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "835ab4fe5e9eef35486a0591551413eab08d3055",
+      "size": 3043,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/835ab4fe5e9eef35486a0591551413eab08d3055"
+    },
+    {
+      "path": "scripts/cutover/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "27388bdaa2b95418ac93b7baf130ea178eaa4f48",
+      "size": 3836,
+      "url": "https://api.github.com/repos/launchpad-26/buzz/git/blobs/27388bdaa2b95418ac93b7baf130ea178eaa4f48"
+    }
+  ]
+}

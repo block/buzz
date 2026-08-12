@@ -1,0 +1,119 @@
+{
+  "base_commit": {
+    "sha": "e14f5fafb9cc13890530f019556a343b02997c34"
+  },
+  "merge_base_commit": {
+    "sha": "bbcb677a7b37b433dd005447cea7a2f9fe07274c"
+  },
+  "status": "diverged",
+  "files": [
+    {
+      "filename": ".github/ISSUE_TEMPLATE/01-prd.yml",
+      "status": "added",
+      "additions": 78,
+      "deletions": 0
+    },
+    {
+      "filename": ".github/ISSUE_TEMPLATE/02-task.yml",
+      "status": "added",
+      "additions": 70,
+      "deletions": 0
+    },
+    {
+      "filename": ".github/ISSUE_TEMPLATE/03-enhancement.yml",
+      "status": "added",
+      "additions": 71,
+      "deletions": 0
+    },
+    {
+      "filename": ".github/ISSUE_TEMPLATE/04-bug.yml",
+      "status": "added",
+      "additions": 82,
+      "deletions": 0
+    },
+    {
+      "filename": ".github/ISSUE_TEMPLATE/05-adr.yml",
+      "status": "added",
+      "additions": 85,
+      "deletions": 0
+    },
+    {
+      "filename": ".github/ISSUE_TEMPLATE/06-agent-workflow.yml",
+      "status": "added",
+      "additions": 110,
+      "deletions": 0
+    },
+    {
+      "filename": ".github/ISSUE_TEMPLATE/bug-report.md",
+      "status": "removed",
+      "additions": 0,
+      "deletions": 24
+    },
+    {
+      "filename": ".github/ISSUE_TEMPLATE/config.yml",
+      "status": "modified",
+      "additions": 11,
+      "deletions": 1
+    },
+    {
+      "filename": ".github/ISSUE_TEMPLATE/feature-request.md",
+      "status": "removed",
+      "additions": 0,
+      "deletions": 21
+    },
+    {
+      "filename": ".github/PULL_REQUEST_TEMPLATE.md",
+      "status": "modified",
+      "additions": 11,
+      "deletions": 1
+    },
+    {
+      "filename": ".github/workflows/launchpad-issue-check.yml",
+      "status": "added",
+      "additions": 89,
+      "deletions": 0
+    },
+    {
+      "filename": ".github/workflows/launchpad-pr-check.yml",
+      "status": "added",
+      "additions": 80,
+      "deletions": 0
+    },
+    {
+      "filename": "AGENTS.md",
+      "status": "modified",
+      "additions": 22,
+      "deletions": 0
+    },
+    {
+      "filename": "launchpad/AGENTS.md",
+      "status": "added",
+      "additions": 244,
+      "deletions": 0
+    },
+    {
+      "filename": "launchpad/AGENT_PR_TEMPLATE.md",
+      "status": "added",
+      "additions": 83,
+      "deletions": 0
+    },
+    {
+      "filename": "launchpad/README.md",
+      "status": "added",
+      "additions": 154,
+      "deletions": 0
+    },
+    {
+      "filename": "launchpad/labels.yml",
+      "status": "added",
+      "additions": 55,
+      "deletions": 0
+    },
+    {
+      "filename": "launchpad/sync-labels.sh",
+      "status": "added",
+      "additions": 44,
+      "deletions": 0
+    }
+  ]
+}
