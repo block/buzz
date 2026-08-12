@@ -1,6 +1,8 @@
 # Hardening specification — Buzz relay, dev VM and production VPS
 
-**Status:** specification only. Nothing here is implemented. This is the document the hardening
+**Status:** specification. Nothing in Parts B–E is implemented; **§A.3 is the one exception** — it
+was implemented on 2026-08-12, and executing it reversed part of its own argument (see §A.3.2,
+§A.3.3). This is the document the hardening
 Ansible roles are written against, in the same way
 [`dev-deployment-SOP.md`](./dev-deployment-SOP.md) is the document `docker` and `compose-bundle`
 are written against. If a role does something this document does not describe, one of the two is
@@ -79,10 +81,10 @@ Everything in Part B and Part C, with no exceptions and no dev carve-outs:
 | Variable | Dev VM | Production VPS |
 |---|---|---|
 | `buzz_domain` | `buzz-vm.test` | the cohort's real domain |
-| `buzz_relay_url` | `wss://buzz-vm.test` | `wss://<real domain>` |
-| `buzz_tls_mode` | `internal` (Caddy's local CA) | `acme` (Let's Encrypt) |
+| `buzz_relay_url` | `ws://buzz-vm.test:3000` (default) — `wss://buzz-vm.test:8443` under the experimental TLS profile | `wss://<real domain>` |
+| `buzz_tls_mode` | `none` (default) — `internal` (Caddy's local CA) under the experimental TLS profile | `acme` (Let's Encrypt) |
 | `buzz_acme_email` | unset | the cohort's ops address |
-| `buzz_admin_host` | `admin.buzz-vm.test` | **unset** — see §B1 |
+| `buzz_admin_host` | `admin.buzz-vm.test:3000` (default) — `admin.buzz-vm.test:8443` under the experimental TLS profile | **unset** — see §B1 |
 | `buzz_auto_migrate` | `true` | `false` — see §B6 |
 | `buzz_max_connections` | measured VM ceiling | measured VPS ceiling — see §B9 |
 | `buzz_backup_target` | a local directory | object storage with Object Lock |
@@ -92,7 +94,16 @@ Nine values. That is the whole difference. Note `buzz_admin_host` and `buzz_auto
 two where **dev is deliberately more permissive**, and both are called out in Part B with the reason;
 everything else is the same setting pointed at a different place.
 
-### A.3 The one change to the SOP that buys the most parity
+**Amended 2026-08-12.** The first three rows now carry two dev values each. The plaintext value is
+the **default** cohort dev path; the `8443`/`tls internal` value belongs to the **experimental,
+opt-in** TLS profile. §A.3.3 records why, and §A.3.2 records the constraint that forced it. The
+`buzz_relay_url` row was already one of the nine variables, so neither choice costs parity the model
+had not already conceded — but `buzz_tls_mode` differing by *mode* rather than by value is a wider
+gap than the original table implied, and §A.3.3 states what is given up.
+
+### A.3 Caddy in dev — the original argument, and the limit found by executing it
+
+#### A.3.1 The original argument (2026-08-11), retained
 
 **Run Caddy in dev too, with `tls internal`.**
 
@@ -107,14 +118,93 @@ sets `relay: ports: !reset []`, which **removes the relay's published port entir
 in dev via `BUZZ_COMPOSE_TLS=true` with a cohort-owned Caddyfile using `tls internal`:
 
 - makes the dev and prod Compose file sets identical
-- makes both `wss://`, on 443, through a reverse proxy
+- makes both `wss://`, through a reverse proxy
 - deletes the port-3000 exposure from §B2 in dev as well as prod
 - exercises the Caddy config, the header set, and the admin vhost split in dev
 - removes the `ws://` special case from Step 12.1
 
 `../AGENTS.md` already anticipates this — "Cohort-owned overrides (for example a `tls internal`
-Caddyfile) live here, not there." This spec assumes it. The cost is one extra port forward
-(`443`) on the VM and trusting Caddy's local CA root on your own machine.
+Caddyfile) live here, not there." The cost is port forwards for 80/443 on the VM and trusting
+Caddy's local CA root on your own machine.
+
+**Only the last item of that list is withdrawn.** The other four were executed on 2026-08-12 and
+held: reverse proxying, SNI, hostname routing, the admin vhost split, the Compose file set and the
+closure of published port 3000 are all genuinely exercised by a private-CA dev deployment. What does
+not follow is the fifth item — §A.3.2 is why.
+
+#### A.3.2 Amendment 2026-08-12 — the boundary the argument has
+
+We implemented it, and executing it revealed a limit:
+
+> **Private-CA development exercises WSS proxy mechanics, but *not* production-equivalent
+> certificate trust.**
+
+That is the whole correction, and it is narrower than it first looks. It is the **same code path**
+with different certificate inputs — not a different one. An earlier draft overstated it, claiming
+production would never exercise this path at all; that claim was rejected on review and the sentence
+quoted above is the agreed formulation. State the limit as certificate *trust*, never as code path.
+
+**The mechanism.** The desktop app resolves TLS trust **differently per transport**:
+
+| Transport | Crate | Root store | Against a private CA |
+|---|---|---|---|
+| HTTP bridge | `reqwest` | `rustls-platform-verifier` → the macOS keychain | **succeeds** once the CA is trusted in the keychain |
+| Native WebSocket | `tokio-tungstenite`, built with `rustls-tls-webpki-roots` (`desktop/src-tauri/Cargo.toml:86`) | an empty root store extended only with the compiled-in Mozilla set | **aborts during certificate verification** |
+
+So against a private CA the app **reads** — over the HTTP bridge, plus a local cache — while
+**every send silently fails**, and the UI reports "can't reach the relay" while it is actively
+reading from it. That failure mode is worse than a clean refusal, because the visible symptom
+(content on screen) contradicts the visible error.
+
+**Evidence, gathered 2026-08-12:**
+
+- the Cargo feature flag itself: `tokio-tungstenite = { version = "0.29", features =
+  ["rustls-tls-webpki-roots"] }` (`desktop/src-tauri/Cargo.toml:86`)
+- `Cargo.lock` shows `reqwest` as the **only** consumer of `rustls-platform-verifier`
+- `openssl s_client` against the Mozilla bundle returns
+  `verify error:num=20 unable to get local issuer certificate`, while `curl` against system trust
+  returns `200` with `ssl_verify_result=0` — same endpoint, two answers, which is the split above
+- a packet capture showing TCP established and a 261-byte ClientHello with **no session formed**
+
+**What this is not.** It was **not** established to be a defect. The `webpki-roots` choice appears
+incidental — it entered with a huddle-audio commit ("Replace LiveKit with WebSocket Opus audio
+relay") — there is no ADR or code comment defining an intended trust contract, and the project's
+documented dev path is plaintext `ws://`, which sidesteps TLS entirely. We deviated from the
+documented path and found a latent incompatibility **in our own topology**. The open clarification
+question — what trust contract the desktop client intends for its WebSocket transport — is tracked
+as **issue #108**.
+
+**Untested inference, flagged as such.** It is *plausible* that a user behind a corporate
+TLS-interception proxy would hit the same wall against a *production* relay, because such a proxy
+also presents a privately-issued certificate. **Nobody has tested that**, and it must not be
+asserted as fact anywhere downstream of this document until someone does.
+
+A one-line dependency change (swapping the `tokio-tungstenite` feature to the platform verifier) was
+applied, verified to fix it, and then **deliberately reverted** for governance reasons: the file is
+upstream-owned, the fork rule forbids editing upstream-owned files, and the blast radius is wider
+than first assumed — four `tokio-tungstenite` consumers in the workspace, not one.
+
+#### A.3.3 The decision now in force
+
+| | Path | Status |
+|---|---|---|
+| **Default** | plaintext `ws://buzz-vm.test:3000` | **Authoritative** cohort dev path. Documented and verified 2026-08-11. This is what the SOP, the chunks and the roles target. |
+| **Opt-in** | Caddy + `tls internal` on `8443` | **Experimental profile.** Retained for admin-vhost testing, reverse-proxy validation, and future `wss://` once a public DNS-01 certificate exists. **Not desktop-app compatible** — see §A.3.2. |
+
+Two consequences for the rest of this document:
+
+- §A.2's `buzz_domain`-adjacent rows now carry two dev values each: the default plaintext value
+  first, the experimental profile's `8443`/`tls internal` value second. Where a role, an inventory
+  file or a runbook cites "the dev value" without qualification, it means the default.
+- §B2's "`BUZZ_COMPOSE_TLS=true` on both targets" is a **production** control. The dev VM's port 3000
+  is forwarded from `127.0.0.1` only, so the §B2 exposure does not exist there — same property, the
+  §A parity model's "different mechanism" case.
+
+The parity that plaintext dev gives up is certificate trust and the Caddyfile's header/timeout
+policy. Those are prod-only controls that Part D must assert **against prod**, and §B10's Caddyfile
+work is not rehearsed by the default dev path. That is a real cost, stated here rather than hidden:
+the experimental profile exists so it can be rehearsed deliberately, by someone who has read §A.3.2
+and is not relying on the desktop app for the test.
 
 ---
 
@@ -204,10 +294,39 @@ it is serving the internet.
 
 **Required control.**
 
-1. **`BUZZ_COMPOSE_TLS=true` on both targets**, and the role's Compose invocation must be
+1. **`BUZZ_COMPOSE_TLS=true` in production**, and the role's Compose invocation must be
    `-f compose.yml -f compose.caddy.yml -f compose.cohort.yml`. `compose.caddy.yml`'s
    `relay: ports: !reset []` is the *only* thing that closes 3000 — it is not optional hardening, it
    is the control.
+
+   > **Amended 2026-08-12 — approved carve-out.** This originally read "on both targets". The
+   > exception below is the *only* permitted departure, and it is deliberately narrow. It was drafted
+   > by a second reviewer, approved by the repo owner, and is reproduced verbatim so it cannot drift
+   > into something looser through paraphrase.
+   >
+   > **Production invariant:** `buzz_tls_mode: none` is prohibited on every VPS, cloud host, bridged
+   > VM, host-only VM, or publicly reachable target. Production must enable Caddy with
+   > `BUZZ_COMPOSE_TLS=true`; `compose.caddy.yml` must remove the relay's published port, and only the
+   > declared TLS ingress ports may be externally reachable. **Automation must fail before changing
+   > the host if a non-dev inventory selects `none`.**
+   >
+   > **Sole development exception:** the `dev-vm` VirtualBox NAT target may use `buzz_tls_mode: none`
+   > and publish guest port 3000 **only when the corresponding host NAT forward is bound exactly to
+   > `127.0.0.1:3000`**. This is a development accessibility control, not production parity.
+   > Verification must assert the loopback-bound forward **and must demonstrate that port 3000 is
+   > unreachable from another machine**. If either property cannot be established, deployment fails
+   > closed.
+   >
+   > This exception does not permit plaintext operation on production, staging, a LAN-accessible VM,
+   > or any host whose network exposure is not controlled by the specified loopback-only NAT forward.
+   >
+   > Two consequences for implementation, both of which Part D must assert: the fail-closed check on
+   > non-dev inventories selecting `none` is a *precondition*, not a post-check — it runs before any
+   > host change; and "unreachable from another machine" is an off-host assertion, so it cannot be
+   > satisfied by `ss`/`netstat` on the target, for the same reason §B2's own `nmap` guidance exists.
+   >
+   > Dev may still enable the experimental TLS profile to rehearse the production control — that is
+   > what the profile is for — but it cannot be rehearsed *with the desktop app* (§A.3.2).
 2. **Belt and braces:** in `compose.cohort.yml`, bind any port that must stay published to loopback
    —`"127.0.0.1:3000:3000"` rather than `"3000:3000"`. A loopback-bound published port is not
    reachable off-host regardless of what iptables does.
@@ -438,7 +557,10 @@ here, not in `deploy/compose/`), with:
   Nostr clients, and a WebSocket to apps on the *same* address (SOP Step 10), so a naive header or
   routing rule can break one surface while the others still work. Test all three after any Caddyfile
   change
-- `tls internal` in dev, ACME in prod — the `buzz_tls_mode` variable from §A.2
+- ACME in prod; `tls internal` in dev **only under the experimental profile** — the `buzz_tls_mode`
+  variable from §A.2, whose dev default is now `none` (§A.3.3). This Caddyfile therefore gets no
+  routine dev rehearsal, which is the main cost of the plaintext default and the main reason to keep
+  the experimental profile alive
 - a decision on which paths are exposed at all: git smart HTTP, `/hooks/{id}` webhooks, and Blossom
   media are separate surfaces. If the community does not use git over HTTP, do not proxy it
 
@@ -771,8 +893,10 @@ prod risk:
    §B6). Two variable values.
 4. Extend `scripts/resolve-image-tag.sh` to capture the digest (§B12) — the manifest call already
    happens.
-5. Add the Caddy-in-dev change to the SOP (§A.3), which is where the parity model actually gets
-   built.
+5. ~~Add the Caddy-in-dev change to the SOP (§A.3), which is where the parity model actually gets
+   built.~~ **Done and then partly reversed, 2026-08-12.** The SOP now documents plaintext as the
+   default dev path and Caddy + `tls internal` as an experimental, opt-in, **not desktop-compatible**
+   profile (§A.3.3). What remains owed is keeping the SOP's own prose consistent with that split.
 
 **Then #5, in this order** — access before firewall, because getting locked out mid-sequence is the
 failure mode:
@@ -793,10 +917,15 @@ failure mode:
 
 The SOP is the specification, so these belong there rather than only here:
 
-1. **Step 9.5 / Step 13** — the restart command omits `compose.caddy.yml`. As written it is the
-   plaintext-relay-on-3000 path (§B2). This is the most important correction.
-2. **Steps 9.4, 9.6, 10, 12.1** — reframe around Caddy + `tls internal` + `wss://` (§A.3), which
-   removes the `ws://` special case and makes dev exercise prod's code path.
+1. **Step 9.5 / Step 13** — the restart command omits `compose.caddy.yml`. **Amended 2026-08-12:**
+   for the **dev** VM that is now correct, because plaintext on a loopback-forwarded 3000 is the
+   default path (§A.3.3) and the §B2 exposure is a production one. The correction stands where it
+   was always the point — the **production** invocation must carry all three files (§B2).
+2. ~~**Steps 9.4, 9.6, 10, 12.1** — reframe around Caddy + `tls internal` + `wss://` (§A.3).~~
+   **Withdrawn 2026-08-12.** Those steps keep their `ws://`/`:3000` values, which are the default
+   path. What they need instead is a pointer to the experimental TLS profile and its constraint —
+   that a private CA leaves the desktop app able to read and unable to send (§A.3.2). The SOP's
+   `AMENDMENT 2026-08-12` block carries that.
 3. **Step 9.6** — add a note that `admin data: [] <- 200` with no credentials is *the expected result
    of a Host-header-only check*, correct on a loopback VM and an unauthenticated disclosure on a
    public one, with a pointer to §B1. Right now it reads as a clean pass.
@@ -812,10 +941,16 @@ The SOP is the specification, so these belong there rather than only here:
    anywhere (§C1).
 
 The SOP's closing "what has and has not been proven" section is the most valuable thing in it. Keep
-that convention here: nothing in this document has been executed. Part B's findings are read from
-source and cited; Part C's configurations are from the research doc as corrected by its gap analysis;
-the `!override` network syntax in §B5 is the one snippet flagged as needing verification on the
-pinned Compose version.
+that convention here. **As first written, nothing in this document had been executed.** That is still
+true of Parts B, C, D and E: Part B's findings are read from source and cited; Part C's
+configurations are from the research doc as corrected by its gap analysis; the `!override` network
+syntax in §B5 is the one snippet flagged as needing verification on the pinned Compose version.
+
+**The exception, as of 2026-08-12, is §A.3.** It was implemented, executed, and partly reversed by
+what execution showed. §A.3.2's per-transport trust split, its four pieces of evidence, and the
+plaintext-default decision in §A.3.3 come from running it, not from reading it. The one claim in
+§A.3.2 that is explicitly **not** verified is the corporate-TLS-interception inference, which is
+labelled as an inference where it appears and must stay labelled.
 
 ---
 
@@ -836,6 +971,19 @@ pinned Compose version.
 - `deploy/compose/run.sh` — `BUZZ_COMPOSE_TLS` default false, `require_env`, `backup-hint`
 - `deploy/compose/Caddyfile`, `.env.example` — four-line proxy config; no TLS switch set
 - `launchpad/deploy/AGENTS.md`, `ansible/README.md`, `runbooks/dev-deployment-SOP.md`
+
+**Read and executed 2026-08-12, for §A.3.2:**
+
+- `desktop/src-tauri/Cargo.toml:86` — `tokio-tungstenite` built with `rustls-tls-webpki-roots`, so
+  the native WebSocket transport verifies against the compiled-in Mozilla root set only
+- `Cargo.toml:123` — the same feature selection at workspace level; four `tokio-tungstenite`
+  consumers in total, which is why the one-line fix was reverted rather than kept
+- `Cargo.lock` — `reqwest` is the only consumer of `rustls-platform-verifier`, which is the crate
+  that reaches the macOS keychain
+- `openssl s_client` (Mozilla bundle) → `verify error:num=20 unable to get local issuer certificate`;
+  `curl` (system trust) → `200`, `ssl_verify_result=0`; packet capture → TCP established, 261-byte
+  ClientHello, no session
+- Open clarification question on the intended trust contract: **issue #108**
 
 **External, verified 2026-08-11** (see `Research/hardening-linux-servers-gap-analysis.md` for the
 full list):

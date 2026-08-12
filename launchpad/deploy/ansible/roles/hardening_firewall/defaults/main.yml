@@ -25,6 +25,18 @@ hardening_firewall_ufw_bin: /usr/sbin/ufw
 # on 80/443 rather than publishing the relay on 3000. Guest-side ports stay 80/443;
 # the host forwards 8080->80 and 8443->443 because macOS forbids non-root binding
 # below 1024. The guest firewall therefore knows nothing about 8080/8443.
+#
+# LEFT MODE-INDEPENDENT DELIBERATELY, and 3000 is deliberately NOT added for the
+# plaintext path. Two reasons, and the second is the important one:
+#   1. Under the carve-out the relay is published on 127.0.0.1 inside the guest, and
+#      ufw's before-rules unconditionally ACCEPT traffic on `lo` — so a `ufw allow
+#      3000` would be a rule that governs nothing.
+#   2. More to the point, ufw DOES NOT GOVERN DOCKER'S PUBLISHED PORTS AT ALL (see the
+#      long comment above the §B2 assertion in tasks/main.yml). Adding 3000 here would
+#      read as "the firewall permits the relay", which is a false statement about a
+#      control that is not doing that work. The control is the bind address.
+# Opening 80/443 on the plaintext path is harmless — nothing listens there — and
+# keeping one list means the firewall's shape does not change between topologies.
 hardening_firewall_allow_in:
   - 22/tcp
   - 80/tcp
@@ -75,9 +87,35 @@ hardening_firewall_wildcard_addresses:
 # These are the GUEST-side published ports. Decision 4's host-side 8080/8443 forwards are a
 # VirtualBox NAT concern and never appear in `docker compose ps`.
 # Prod can narrow this — drop 80 if nothing needs the ACME/redirect vhost.
-hardening_firewall_public_ingress_ports:
-  - 80
-  - 443
+#
+# MODE-AWARE, and note which way round. On the plaintext dev path the list is EMPTY, not
+# `[3000]`: there is no reverse proxy, so nothing at all is supposed to be on a wildcard
+# address, and the relay's 3000 is permitted only on loopback — which this assertion never
+# sees, because it only inspects wildcard-bound publishers. Putting 3000 in this list would
+# make `0.0.0.0:3000` — the exact exposure hardening-spec §B2 is about — pass the check.
+# The loopback binding is asserted separately and positively, further down tasks/main.yml.
+hardening_firewall_public_ingress_ports: >-
+  {{ [] if not (buzz_tls_enabled | default(true) | bool) else [80, 443] }}
+
+# ---------------------------------------------------------------------------
+# hardening-spec §B2's approved dev carve-out — the positive half
+# ---------------------------------------------------------------------------
+#
+# Ports the plaintext path IS allowed to publish, and the only addresses they may be bound
+# to. Empty under every TLS mode, where the relay publishes nothing and Caddy's 80/443 are
+# the intended wildcard ingress.
+#
+# The exception is conditional: plaintext is permitted "only when the corresponding host NAT
+# forward is bound exactly to 127.0.0.1:3000", and verification "must assert the
+# loopback-bound forward and must demonstrate that port 3000 is unreachable from another
+# machine. If either property cannot be established, deployment fails closed." This role can
+# only establish the guest-side half — the forward itself and the off-host demonstration
+# belong to scripts/verify.sh, which runs on the machine where VBoxManage exists.
+hardening_firewall_loopback_published_ports: >-
+  {{ [3000] if not (buzz_tls_enabled | default(true) | bool) else [] }}
+
+hardening_firewall_loopback_addresses: >-
+  {{ buzz_loopback_addresses | default(['127.0.0.1', '::1', '[::1]']) }}
 
 # Where the compose bundle landed (SOP Step 8.1). Defaults track a shared
 # `buzz_compose_dir` / `buzz_compose_files` if the compose-bundle role or group_vars
@@ -85,9 +123,14 @@ hardening_firewall_public_ingress_ports:
 hardening_firewall_compose_dir: "{{ buzz_compose_dir | default('/opt/buzz/compose') }}"
 hardening_firewall_compose_env_file: "{{ buzz_compose_env_file | default('.env') }}"
 
-# The three-file invocation from hardening-spec §B2 required control 1. compose.caddy.yml
-# is what carries `relay: ports: !reset []`; omitting it is how the plaintext-relay-on-3000
-# path comes back.
+# DERIVED from buzz_tls_mode via buzz_compose_files (group_vars/all.yml) — three files under
+# a TLS mode, two on the plaintext default. compose.caddy.yml is what carries
+# `relay: ports: !reset []` (hardening-spec §B2 required control 1); omitting it while a TLS
+# mode is selected is how the plaintext-relay-on-3000 path comes back, which is what the
+# assertion at the end of tasks/main.yml exists to catch.
+#
+# The fallback is the CLOSED three-file set, matching all.yml's production default, so a
+# target missing the group var fails toward Caddy rather than toward plaintext.
 hardening_firewall_compose_files: >-
   {{ buzz_compose_files
      | default(['compose.yml', 'compose.caddy.yml', 'compose.cohort.yml']) }}

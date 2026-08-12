@@ -1,0 +1,35 @@
+---
+# tls_mode_guard — defaults
+#
+# The fail-closed precondition for hardening-spec.md §B2's approved carve-out. See
+# tasks/main.yml for the invariant it enforces and why it is a PRECONDITION rather
+# than a post-check.
+
+# How "is this the dev VM?" is decided.
+#
+# GROUP MEMBERSHIP, NOT HOSTNAME MATCHING, and that choice is load-bearing. A
+# hostname test is defeated by anything that looks like the dev VM's name — a
+# `buzz-vm.test` DNS entry pointed at a VPS, a bridged VM given the same hostname,
+# an inventory alias. Group membership is a property of the inventory the operator
+# deliberately wrote, it is visible in `ansible-inventory --graph`, and hosts.yml
+# puts exactly one host in it. hosts.local.yml (the VPS, gitignored) declares its own
+# group and therefore is NOT in `dev` unless someone types the word.
+tls_mode_guard_dev_group: dev
+
+# The second, independent condition on the carve-out, and the one that catches the
+# case group membership cannot: a host that IS in the `dev` group but is not a
+# VirtualBox NAT target.
+#
+# The approved wording prohibits `none` on "every VPS, cloud host, bridged VM,
+# host-only VM, or publicly reachable target" — a bridged VM dropped into the `dev`
+# group is exactly that, and the group name would say `dev` while the machine sat on
+# the LAN. What actually distinguishes the sanctioned target is that Ansible reaches
+# it through the loopback-bound NAT forward (`ssh,tcp,127.0.0.1,2222,,22` from
+# virtual-box/build-vps-clone.sh), so the connection address is the discriminator.
+#
+# Overridable only to add spellings of loopback. Adding a routable address here
+# defeats the control and is the same act as setting `buzz_tls_mode: none` on a VPS.
+tls_mode_guard_loopback_addresses:
+  - "127.0.0.1"
+  - "::1"
+  - "localhost"

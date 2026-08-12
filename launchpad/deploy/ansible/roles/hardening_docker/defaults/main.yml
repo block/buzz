@@ -68,16 +68,26 @@ hardening_docker_forbidden_keys:
 hardening_docker_compose_dir: /opt/buzz/compose
 hardening_docker_compose_env_file: .env
 
-# All three files, per deployment decision 3 (the TLS-corrected path, hardening-spec sec-A.3 and
-# sec-B2): compose.caddy.yml is what sets `relay: ports: !reset []` and removes the relay's
-# published port 3000 entirely. Omit it from this list and the recreate re-publishes 3000.
+# DERIVED, NOT TYPED OUT. `buzz_compose_files` (inventory/group_vars/all.yml) is the one
+# definition of the `-f` set, and it follows from `buzz_tls_mode`: two files on the plaintext dev
+# default (compose.yml + compose.cohort.yml), three under `internal`/`acme` where compose.caddy.yml
+# is what sets `relay: ports: !reset []` and removes the relay's published port 3000 entirely
+# (deployment decision 3; hardening-spec sec-A.3 and sec-B2).
+#
+# This list was previously hardcoded to all three, which made the recreate below act on a DIFFERENT
+# stack from the one every other role deploys whenever the mode was `none`: the -f set named a
+# compose.caddy.yml that the bundle check above then reported missing, and a recreate that did run
+# would have re-pointed the relay behind a Caddy that is not part of that topology. Two sources of
+# truth for the file set is the failure; there is now one.
+#
+# The fallback matches all.yml's production default (`acme`), so a target that somehow lacks the
+# group var still gets the CLOSED three-file set rather than the open one.
 #
 # The list intentionally does not name an agent compose file: SOP Steps 14-16 are out of scope, and
 # in any case Step 15 appends the agent service to compose.cohort.yml, so it is already covered.
-hardening_docker_compose_files:
-  - compose.yml
-  - compose.caddy.yml
-  - compose.cohort.yml
+hardening_docker_compose_files: >-
+  {{ buzz_compose_files
+     | default(['compose.yml', 'compose.caddy.yml', 'compose.cohort.yml']) }}
 
 # The container the verification reads. `buzz-prod` is COMPOSE_PROJECT_NAME from
 # deploy/compose/compose.yml (SOP Step 8, Step 13.7).

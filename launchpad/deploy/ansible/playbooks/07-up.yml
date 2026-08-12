@@ -26,4 +26,9 @@
         fail_msg: "{{ buzz_compose_dir }}/.env is missing — run chunk 06 first."
 
   roles:
+    # FIRST, ON EVERY PLAY IN THIS TREE. The pre_tasks above are read-only (stat +
+    # assert), so this is still ahead of every host change — hardening-spec.md §B2
+    # requires the plaintext check to be a precondition, and this play starts the
+    # stack.
+    - role: tls_mode_guard
     - role: relay_up

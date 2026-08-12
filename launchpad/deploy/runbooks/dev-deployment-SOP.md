@@ -27,24 +27,44 @@ does not describe, one of the two is wrong. Keep them in step.
 
 ---
 
-## AMENDMENT 2026-08-12 — this document now specifies the TLS path
+## AMENDMENT 2026-08-12 — plaintext is the default; the TLS path is experimental
 
-**Read this before Step 7, Step 9, Step 10 or Step 12.** The automation in
-[`../runbooks/chunks/`](./chunks/) implements the amended values below, and they have been executed
-and verified. The step-by-step prose further down still shows the older plaintext-on-3000 values in
-places; **where the two disagree, this amendment wins.**
+**Read this before Step 7, Step 9, Step 10 or Step 12.**
 
-**What changed and why.** Steps 8–12 originally published the relay directly on port 3000 over
-plaintext HTTP and told you to type `ws://`. [`hardening-spec.md`](./hardening-spec.md) §B2 identifies
-that as a defect rather than a simplification — the restart command omits `compose.caddy.yml`, whose
-`ports: !reset []` is *the only thing* that stops the relay publishing 3000, and `ufw` cannot close a
-Docker-published port. §A.3 adds that running Caddy in dev is the single change that buys the most
-production parity: identical Compose file sets, `wss://` through a reverse proxy, and the admin vhost
-split all exercised before they matter.
+**This block previously declared the TLS path authoritative. That is reversed.** Steps 8–12 as
+written — the relay published on port 3000, `ws://buzz-vm.test:3000`, no Caddy — are **the
+authoritative cohort dev path**, documented and verified 2026-08-11. Where the prose below and this
+block agree, that is not an accident.
 
-**The amended dev values** (see [`../ansible/inventory/group_vars/dev.yml`](../ansible/inventory/group_vars/dev.yml)):
+**Why the reversal.** [`hardening-spec.md`](./hardening-spec.md) §A.3 argued that running Caddy in
+dev with `tls internal` was the single change that bought the most production parity: identical
+Compose file sets, `wss://` through a reverse proxy, the admin vhost split exercised before it
+matters. We implemented it, and executing it found the limit — recorded in full at §A.3.2 and in this
+document's honesty section:
 
-| Setting | Was | Now |
+> **Private-CA development exercises WSS proxy mechanics, but *not* production-equivalent
+> certificate trust.**
+
+Concretely, against Caddy's `tls internal` CA the desktop app **can read and cannot send**. Its HTTP
+bridge verifies TLS against the macOS keychain and succeeds; its native WebSocket verifies against a
+compiled-in Mozilla root set and aborts. The window fills with content while telling you it cannot
+reach the relay. See the honesty section, "The desktop app's TLS trust differs per transport", for
+the evidence and the source lines.
+
+**The two profiles.**
+
+| | Address | Compose files | VM port forwards | Status |
+|---|---|---|---|---|
+| **Default — plaintext** | `ws://buzz-vm.test:3000` | `compose.yml` + `compose.cohort.yml` | `2222`, `3000` | Authoritative. What every step below assumes, and the only path Step 12 supports. |
+| **Experimental — TLS** | `wss://buzz-vm.test:8443` | **plus `compose.caddy.yml`** | `2222`, `8080→80`, `8443→443` | Opt-in. **Not desktop-app compatible.** |
+
+The experimental profile exists for three things: testing the admin vhost split, validating the
+reverse proxy and its header/timeout policy, and a future real `wss://` once a public DNS-01
+certificate exists. It is **not** a better dev environment, and it is not a step you should take
+because it sounds more production-like. If you enable it, these values change together (see
+[`../ansible/inventory/group_vars/dev.yml`](../ansible/inventory/group_vars/dev.yml)):
+
+| Setting | Default | Experimental TLS profile |
 |---|---|---|
 | `RELAY_URL` | `ws://buzz-vm.test:3000` | `wss://buzz-vm.test:8443` |
 | Community host | `buzz-vm.test:3000` | `buzz-vm.test:8443` |
@@ -52,38 +72,61 @@ split all exercised before they matter.
 | `BUZZ_MEDIA_SERVER_DOMAIN` | `buzz-vm.test:3000` | `buzz-vm.test:8443` |
 | `BUZZ_CORS_ORIGINS` | `http://buzz-vm.test:3000` | `https://buzz-vm.test:8443` |
 | `BUZZ_ADMIN_HOST` | `admin.buzz-vm.test:3000` | `admin.buzz-vm.test:8443` |
-| Compose files | `compose.yml` + `compose.cohort.yml` | **plus `compose.caddy.yml`** |
-| VM port forwards | `2222`, `3000` | `2222`, **`8080→80`, `8443→443`** |
-| Desktop app address (Step 12.3) | `ws://buzz-vm.test:3000` | `wss://buzz-vm.test:8443` |
+| Desktop app address (Step 12.3) | `ws://buzz-vm.test:3000` | **do not** — the app cannot send over it |
 
-**Why 8443 and not 443.** Caddy binds 80/443 *inside* the guest, exactly as on the VPS, so container
-configuration is byte-identical to production. But macOS refuses to let a non-root process bind a host
-port below 1024, and VirtualBox host-only networking — which would have given the guest its own IP and
-a real 443 — is unavailable because `/dev/vboxnetctl` does not exist (the network kext is not loaded).
-So the *host* side of each forward is high. The relay preserves any non-default port in its community
-host and strips only a trailing `:443`/`:80`, which is why dev's community carries `:8443` and
-production's is a bare domain. `buzz_relay_url` was already one of the nine dev/prod variables in
-§A.2, so this costs no parity the model had not already conceded.
+**Why 8443 and not 443**, if you do enable it. Caddy binds 80/443 *inside* the guest, exactly as on
+the VPS, so container configuration is byte-identical to production. But macOS refuses to let a
+non-root process bind a host port below 1024, and VirtualBox host-only networking — which would have
+given the guest its own IP and a real 443 — is unavailable because `/dev/vboxnetctl` does not exist
+(the network kext is not loaded). So the *host* side of each forward is high. The relay preserves any
+non-default port in its community host and strips only a trailing `:443`/`:80`, which is why the
+profile's community carries `:8443` and production's is a bare domain.
 
-**Four traps found by executing this path.** None appears anywhere else in this document:
+**What the TLS attempt is still worth: seven traps it found.** The first three apply only when you
+run the experimental profile. **The last four are independent of TLS and apply to the default path.**
+None appears anywhere else in this document.
 
 1. **The WebSocket check must force HTTP/1.1.** Over TLS, `curl` negotiates HTTP/2 via ALPN, and
    HTTP/2 removed the `Connection: Upgrade` mechanism — so the relay sees a plain GET and answers
    `200` with the NIP-11 document. Verified: the identical request returns `101` with `--http1.1` and
-   `200` without it. Step 8.2's test is correct as written *only* because it runs over plaintext; add
-   `--http1.1` the moment it goes through Caddy.
+   `200` without it. Step 8.2's test is correct as written *because* it runs over plaintext; add
+   `--http1.1` the moment anything goes through Caddy.
 2. **Capture only the status code from that check.** A successful upgrade leaves the socket open and
    `curl` then emits raw WebSocket frames, which are not valid UTF-8. Anything that deserializes the
    output (Ansible, `jq`) fails on it despite the relay behaving perfectly.
 3. **Caddy declares no healthcheck**, so `docker compose ps --format json` reports `Health: ""` for it
    while `up --wait` prints `Healthy`. A check demanding `healthy` for every service fails on a good
    stack.
-4. **Step 17 item 27's secret scan fails on a clean checkout.** `git grep -nE 'sk-or-v1-|OPENROUTER_API_KEY=sk'`
-   matches this document's own prose, `crates/buzz-agent/README.md`, and
-   `desktop/src-tauri/src/commands/agent_models_tests.rs` — which uses `sk-or-v1-secret-key-12345` as
-   a fixture in a test *for secret redaction*. Scope the scan and match real key shapes instead.
+4. **Step 17 item 27's secret scan fails on a clean checkout.**
+   `git grep -nE 'sk-or-v1-|OPENROUTER_API_KEY=sk'` matches this document's own prose,
+   `crates/buzz-agent/README.md`, and `desktop/src-tauri/src/commands/agent_models_tests.rs` — which
+   uses `sk-or-v1-secret-key-12345` as a fixture in a test *for secret redaction*. Scope the scan and
+   match real key shapes instead. (A check that cries wolf every run gets ignored, which is worse than
+   no check.)
+5. **`cmake` is a hard requirement of the Step 12 desktop build, and nothing warns you up front.**
+   `aws-lc-sys` — present in both `Cargo.lock` and `desktop/src-tauri/Cargo.lock`, alongside
+   `zstd-sys` and `libsqlite3-sys` — builds AWS-LC through CMake, so without it the build dies deep
+   inside a C compile rather than at a dependency check. Hermit supplies it; **if you skip Hermit on
+   macOS** (Step 0.6's Intel-pnpm path does), `brew install cmake` — verified 2026-08-12, cmake 4.4.2
+   at `/usr/local/bin/cmake`. Step 12's preamble already names CMake and NASM for Windows; this is the
+   macOS half of the same requirement.
+6. **Step 12.2 understates `BUZZ_SHARE_IDENTITY`, and says nothing about `BUZZ_RELAY_URL`.** The step
+   tells you `BUZZ_SHARE_IDENTITY=1` "governs related identity-sharing behaviour, but is **not** the
+   mechanism". The source disagrees: `is_shared_identity()`
+   (`desktop/src-tauri/src/commands/identity.rs:80-88`) is true only when `BUZZ_SHARE_IDENTITY == "1"`
+   **and** `BUZZ_PRIVATE_KEY` parses, and `sync_shared_agent_data` (`src/migration.rs:762-775`) gates
+   on the same pair. Export **both**, as the step's command already does — the prose explaining it is
+   what is wrong. Separately, `BUZZ_RELAY_URL` is read by the app itself
+   (`desktop/src-tauri/src/relay.rs:26-30`, precedence: workspace override > env var > build-time var
+   > default), so a stale `BUZZ_RELAY_URL` left in the launching shell — from the Step 14 agent work,
+   for instance — silently overrides the address you typed in Step 12.3.
+7. **The sshd ordering trap is confirmed on this image, not merely reasoned about.** Verified
+   2026-08-12: `/etc/ssh/sshd_config.d/` contains `01-dev-parity.conf`, `50-cloud-init.conf` **and**
+   `60-cloudimg-settings.conf`, with `60-` setting `PermitRootLogin prohibit-password`. A
+   `99-hardening.conf` therefore loses to both `50-` and `60-`, which is exactly why Step 13.3 writes
+   `00-hardening.conf` and verifies with `sshd -T` rather than by checking the file exists.
 
-**Two further corrections, from `hardening-spec.md` Part G:**
+**Three further corrections, from `hardening-spec.md` Part G:**
 
 - **Step 7.3 lists `BUZZ_AUTO_MIGRATE=true` under "leave these alone — they are already correct."**
   Correct for a throwaway VM; **wrong for production**, where upstream's own `compose.yml` defaults it
@@ -98,9 +141,12 @@ production's is a bare domain. `buzz_relay_url` was already one of the nine dev/
   losing or changing it breaks signature verification for every message the relay ever signed, and the
   answer to a suspected compromise is a new community, not a new key (§B8).
 
-**Still owed.** The prose in Steps 7.3, 8.1–8.3, 9.2–9.4, 10 and 12.3 has not been rewritten
-line-by-line; it still shows `:3000` and `ws://` in examples. Treat those as illustrations of the
-mechanism, take the values from the table above, and finish the reconciliation.
+**Still owed.** Nothing about `:3000` or `ws://` — those values in Steps 7.3, 8.1–8.3, 9.2–9.4, 10
+and 12.3 are **correct** and are the default path; the previous version of this block told you to
+override them, and that instruction is withdrawn. What is owed is the other direction: those steps
+carry no pointer to the experimental TLS profile or its constraint, so a reader who enables it from
+[`../ansible/`](../ansible/) or [`./chunks/`](./chunks/) meets the desktop failure with nothing in
+the step to explain it. Add the pointer where the profile changes a value.
 
 ---
 
@@ -2905,6 +2951,49 @@ swap, using `ghcr.io/block/buzz:sha-96ae141`:
 All of that was on **macOS**, using `scp` for both file transfers (verified, including that dotfiles
 like `.env.example` come across and that `run.sh` keeps its executable bit).
 
+**Newly discovered constraint, 2026-08-12 — the desktop app's TLS trust differs per transport.**
+This is why the `AMENDMENT 2026-08-12` block at the top of this document reverses its own earlier
+position and keeps plaintext `ws://buzz-vm.test:3000` as the default path.
+
+Running the relay behind Caddy with `tls internal` — a **private** certificate authority — produces
+a desktop app that **reads but cannot send**:
+
+| Transport | Crate | Root store | Against a private CA |
+|---|---|---|---|
+| HTTP bridge | `reqwest` | `rustls-platform-verifier` → the macOS keychain | **succeeds** once the CA is trusted in the keychain |
+| Native WebSocket | `tokio-tungstenite`, built with `rustls-tls-webpki-roots` (`desktop/src-tauri/Cargo.toml:86`) | an empty root store extended only with the compiled-in Mozilla set | **aborts during certificate verification** |
+
+The app therefore keeps showing content — from the HTTP bridge and a local cache — while every send
+fails silently and the UI reports that it cannot reach the relay. The visible symptom contradicts the
+visible error, which is what makes this expensive to diagnose from the app.
+
+Proven by, all on 2026-08-12: the Cargo feature flag above; `Cargo.lock` showing `reqwest` as the
+**only** consumer of `rustls-platform-verifier`; `openssl s_client` returning
+`verify error:num=20 unable to get local issuer certificate` against the Mozilla bundle while `curl`
+returns `200` with `ssl_verify_result=0` against system trust; and a packet capture showing TCP
+established and a 261-byte ClientHello with no session formed.
+
+The precise statement of the limit, and the one that should be quoted rather than paraphrased:
+**private-CA development exercises WSS proxy mechanics, but *not* production-equivalent certificate
+trust.** It is the same code path with different certificate inputs — not a different code path.
+
+**This has not been established to be a defect, and this document does not call it one.** The
+`webpki-roots` feature selection appears incidental (it arrived with a huddle-audio commit, "Replace
+LiveKit with WebSocket Opus audio relay"), no ADR or code comment defines an intended trust contract
+for the WebSocket transport, and the project's documented dev path is plaintext `ws://`, which
+sidesteps TLS entirely. We deviated from the documented path and found a latent incompatibility in
+our own topology. The open clarification question is **issue #108**.
+
+A one-line dependency change was applied, verified to fix it, and then **deliberately reverted**:
+`desktop/src-tauri/Cargo.toml` is upstream-owned, the fork rule forbids editing upstream-owned files,
+and the blast radius is wider than assumed — four `tokio-tungstenite` consumers in the workspace, not
+one.
+
+**Untested inference, and it must stay labelled as one wherever it is repeated:** a user behind a
+corporate TLS-interception proxy would *plausibly* hit the same wall against a **production** relay,
+since such a proxy also presents a privately-issued certificate. Nobody has tested that. Do not
+assert it.
+
 **Windows has not been run at all.** The Windows instructions were written from documented behaviour,
 not from execution. Every **On Windows** block in this document is unverified, and these are the
 places most likely to need correcting:
@@ -2926,8 +3015,12 @@ has been verified.
 
 - **Step 12, the desktop app.** The `wss://` behaviour was confirmed by reading the source
   (`desktop/src/features/communities/communityStorage.ts:140`), but the app has not been built or
-  launched, and no client has connected. The Tauri build may need Xcode command line tools that
-  this document does not mention.
+  launched on the plaintext path, and no client has connected over `ws://buzz-vm.test:3000`. The
+  Tauri build may need Xcode command line tools that this document does not mention — and `cmake`,
+  which it now does (amendment trap 5). What *has* been executed, on 2026-08-12, is the build itself
+  and the app's behaviour against the **experimental TLS profile**, which is where the trust-store
+  constraint above was found; that tells you nothing about the default path except that the build
+  works.
 - **Step 11, approving members.** No key has been added and no connection by a non-owner has been
   attempted. Whether an unapproved key is actually refused — and what that refusal looks like — is
   untested. It happens during authentication, *after* the WebSocket connects, so a `101` alone does
@@ -3037,6 +3130,11 @@ and are recorded here so nobody re-opens them:
 
 **Still genuinely open:**
 
+- **What trust contract the desktop client intends for its WebSocket transport — issue #108.** Until
+  that is answered, the experimental TLS profile stays experimental, and any `wss://` dev path needs
+  a certificate from a CA in the Mozilla root set (a public DNS-01 certificate), not a private one.
+  Also open, and explicitly untested: whether a corporate TLS-interception proxy reproduces the same
+  failure against a production relay.
 - **Which sprig build to pin.** `main` moves. Nobody has yet established a `sha-` tag known to work
   with a given relay build. Pin one as soon as a working pair is confirmed, and record both here.
 - **Everything from Step 13 onwards remains unexecuted**, including all five fixes listed below. They

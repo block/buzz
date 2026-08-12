@@ -180,7 +180,18 @@
   failed_when: change_me.rc == 0
   # grep exits 1 when it matches nothing, which is the success case here.
 
+# Rendered and validated ONLY under a TLS mode. On `none` there is no Caddy in the
+# compose file set at all (group_vars/all.yml derives buzz_compose_files from
+# buzz_tls_mode), so a Caddyfile would configure a service that does not exist — and
+# the `validate:` below would still pull caddy:2-alpine and run a container on every
+# run to check it. Skipping is the honest outcome, not a shortcut: nothing reads the
+# file on this path.
+#
+# Switching a host from `none` to `internal`/`acme` therefore requires a re-run of
+# this chunk to produce the Caddyfile. That is already required for other reasons —
+# changing RELAY_URL against a live stack seeds a second community (group_vars/dev.yml).
 - name: Render the cohort Caddyfile
+  when: buzz_tls_enabled | bool
   ansible.builtin.template:
     src: Caddyfile.cohort.j2
     dest: "{{ buzz_cohort_dir }}/Caddyfile"
@@ -189,6 +200,15 @@
     mode: "0644"
     validate: "docker run --rm -i -v %s:/tmp/Caddyfile:ro caddy:2-alpine caddy validate --config /tmp/Caddyfile --adapter caddyfile"
   notify: Restart caddy
+
+- name: Note that the Caddyfile is deliberately absent on the plaintext path
+  when: not buzz_tls_enabled | bool
+  ansible.builtin.debug:
+    msg: >-
+      buzz_tls_mode is 'none': no reverse proxy is deployed, so no Caddyfile is
+      rendered and none is validated. buzz_compose_files resolves to
+      {{ buzz_compose_files | join(', ') }}. Set buzz_tls_mode to 'internal' (dev
+      rehearsal) or 'acme' (production) and re-run this chunk to get one.
 
 - name: Render compose.cohort.yml
   ansible.builtin.template:
@@ -199,32 +219,80 @@
     mode: "0644"
   notify: Recreate stack
 
-- name: Verify the three compose files merge cleanly
+# The `-f` set is whatever buzz_compose_files resolves to — two files on the
+# plaintext default, three under a TLS mode. Never hardcode the list here: a
+# different set silently validates a different stack from the one that gets deployed.
+- name: Verify the compose file set merges cleanly
   ansible.builtin.command:
     cmd: "docker compose --env-file .env {{ buzz_compose_files | map('regex_replace', '^', '-f ') | join(' ') }} config --format json"
     chdir: "{{ buzz_compose_dir }}"
   register: compose_config
   changed_when: false
 
-- name: Assert the relay publishes no host port
-  # compose.caddy.yml's `ports: !reset []` is the ONLY thing that closes 3000,
-  # and hardening-spec.md §B2 is explicit that it is the control, not optional
-  # hardening. If a future edit drops compose.caddy.yml from buzz_compose_files
-  # this assertion is what catches it — ufw cannot, because Docker's rules are
-  # evaluated first.
-  #
-  # Parse the merged structure; do NOT substring-match the rendered document.
-  # An earlier version tested for '0.0.0.0:3000' anywhere in the output and
-  # failed against a correctly-configured stack, because compose.yml sets
-  # `BUZZ_BIND_ADDR: 0.0.0.0:3000` as an ENVIRONMENT VARIABLE. That string is
-  # supposed to be there — it is the address the relay binds INSIDE its network
-  # namespace, which says nothing about host publishing.
+# PARSE THE MERGED STRUCTURE; DO NOT SUBSTRING-MATCH THE RENDERED DOCUMENT.
+# An earlier version tested for '0.0.0.0:3000' anywhere in the output and failed
+# against a correctly-configured stack, because compose.yml sets
+# `BUZZ_BIND_ADDR: 0.0.0.0:3000` as an ENVIRONMENT VARIABLE. That string is supposed
+# to be there — it is the address the relay binds INSIDE its network namespace, which
+# says nothing about host publishing. `config --format json` renders each published
+# port as an object ({target, published, protocol, mode, host_ip}), so the host IP
+# and the port are separate fields and can be asserted on directly.
+- name: Extract the relay's merged published ports
+  ansible.builtin.set_fact:
+    buzz_relay_merged_ports: "{{ (compose_config.stdout | from_json).services.relay.ports | default([], true) }}"
+
+- name: Assert the relay publishes no host port (TLS modes)
+  # compose.caddy.yml's `ports: !reset []` is the ONLY thing that closes 3000, and
+  # hardening-spec.md §B2 is explicit that it is the control, not optional hardening.
+  # If a future edit drops compose.caddy.yml from buzz_compose_files while a TLS mode
+  # is selected, this assertion is what catches it — ufw cannot, because Docker's
+  # rules are evaluated first.
+  when: buzz_tls_enabled | bool
   ansible.builtin.assert:
     that:
-      - (compose_config.stdout | from_json).services.relay.ports | default([], true) | length == 0
+      - buzz_relay_merged_ports | length == 0
     fail_msg: >-
-      The merged config publishes the relay on
-      {{ (compose_config.stdout | from_json).services.relay.ports | default([], true) }}.
+      The merged config publishes the relay on {{ buzz_relay_merged_ports }}.
       compose.caddy.yml is probably missing from buzz_compose_files — its
       `ports: !reset []` is the control that closes 3000 (hardening-spec.md §B2).
     success_msg: relay publishes no host port; only Caddy is reachable
+
+- name: Assert the relay publishes exactly one loopback-bound port (plaintext carve-out)
+  # The mirror image of the assertion above, and it is not a relaxation of it — it is
+  # the enforcement of what hardening-spec.md §B2 permits INSTEAD, on the one target
+  # the exception covers. With no proxy there is nothing to unpublish 3000, so the
+  # control becomes the bind ADDRESS: "a loopback-bound published port is not
+  # reachable off-host regardless of what iptables does" (§B2 required control 2).
+  #
+  # Three separate properties, because two of them alone would pass a real exposure:
+  #   - exactly one entry: a second, wildcard entry alongside a loopback one is the
+  #     Compose ports-append behaviour compose.cohort.yml's `!override` exists to
+  #     prevent, and it publishes 3000 to the world while a "127.0.0.1" is visible in
+  #     the output;
+  #   - host_ip is loopback: `default('', true)` is deliberate — Compose OMITS the
+  #     key entirely for an unbound publish, and an omitted key means 0.0.0.0, which
+  #     must fail rather than read as "no wildcard found";
+  #   - the port is the declared one: anything else is an undeclared listener.
+  #
+  # `published` is a STRING in `config --format json` output and an int in
+  # `ps --format json`; both are compared as strings here.
+  when: not buzz_tls_enabled | bool
+  vars:
+    buzz_relay_port_entry: "{{ buzz_relay_merged_ports | first | default({}, true) }}"
+  ansible.builtin.assert:
+    that:
+      - buzz_relay_merged_ports | length == 1
+      - buzz_relay_port_entry.host_ip | default('', true) in buzz_loopback_addresses
+      - buzz_relay_port_entry.published | default('', true) | string == buzz_plaintext_publish_port
+      - buzz_relay_port_entry.target | default('', true) | string == '3000'
+    fail_msg: >-
+      hardening-spec.md §B2's plaintext carve-out is not satisfied. The merged config
+      publishes the relay as {{ buzz_relay_merged_ports }}, and the exception requires
+      exactly one entry bound to {{ buzz_plaintext_publish_ip }}:{{ buzz_plaintext_publish_port }}.
+      An absent host_ip means 0.0.0.0 — a relay served in plaintext on every
+      interface, which ufw cannot close because Docker's chain is evaluated first.
+      Check compose.cohort.yml's `ports: !override`: without `!override`, Compose
+      APPENDS upstream compose.yml's "${BUZZ_HTTP_PORT:-3000}:3000" and you get both.
+    success_msg: >-
+      relay published on {{ buzz_plaintext_publish_ip }}:{{ buzz_plaintext_publish_port }}
+      only (§B2 dev exception); no wildcard bind

@@ -7,10 +7,54 @@
  # automatically, so it is always explicit.
  #
  # Everything here is additive. deploy/compose/ stays untouched (AGENTS.md rule 1).
+ #
+ # TWO TOPOLOGIES, ONE VARIABLE. This template renders differently for each value of
+ # buzz_tls_mode, and the parts that differ are exactly the parts that would fail at
+ # `docker compose config` if they did not:
+ #
+ #   none (dev default)  compose.yml + compose.cohort.yml. NO `caddy:` block —
+ #                       compose.caddy.yml is the file that defines Caddy's image, so
+ #                       a `caddy:` block here without it makes the merge fail with
+ #                       "service must include image or build". The relay keeps a
+ #                       published port, rebound to loopback (see below).
+ #   internal / acme     all three files. The `caddy:` block below points Caddy at
+ #                       the cohort Caddyfile, and compose.caddy.yml's
+ #                       `ports: !reset []` closes the relay's 3000.
+ #
+ # The network alias is emitted in BOTH modes and is not part of the switch: the
+ # relay refuses any Host that is not its seeded community, so anything dialling it
+ # from inside the Docker network needs the community name to resolve — proxy or no
+ # proxy.
 -#}
 ---
 services:
   relay:
+{% if not buzz_tls_enabled | bool %}
+    # PLAINTEXT DEV CARVE-OUT — hardening-spec.md §B2 required control 2, verbatim:
+    # "in compose.cohort.yml, bind any port that must stay published to loopback —
+    # `"127.0.0.1:3000:3000"` rather than `"3000:3000"`. A loopback-bound published
+    # port is not reachable off-host regardless of what iptables does."
+    #
+    # This is the whole reason the exception is allowed to exist. With no Caddy there
+    # is no `ports: !reset []` to close 3000, and ufw cannot substitute for it —
+    # Docker writes its rules into the DOCKER chain, which is evaluated BEFORE ufw's,
+    # so `ufw deny 3000` on a wildcard-published port closes nothing. Restricting the
+    # bind address is the control that replaces it.
+    #
+    # `!override` IS REQUIRED, not stylistic. Compose merges `ports` by APPENDING and
+    # de-duplicates on (target, published, protocol, mode) — host IP is not part of
+    # that key. Without it, upstream compose.yml's `"${BUZZ_HTTP_PORT:-3000}:3000"`
+    # survives alongside this entry and the relay ends up published on 0.0.0.0:3000
+    # AND 127.0.0.1:3000, which is the exposure this block exists to remove.
+    # (Compose >= 2.24.4; measured 2.40.3 — the same floor `!reset` needs.)
+    #
+    # Production never reaches this branch: buzz_tls_mode is `acme` by default and
+    # roles/tls_mode_guard fails the run before any host change if a non-dev
+    # inventory selects `none`.
+    ports: !override
+      - "{{ buzz_plaintext_publish_ip }}:{{ buzz_plaintext_publish_port }}:3000"
+
+{% endif %}
     # Makes `{{ buzz_domain }}` resolve to the relay from inside the Docker
     # network. Container DNS consults neither the guest's nor the host's
     # /etc/hosts, and `.test` never resolves publicly — so without this alias
@@ -24,8 +68,15 @@ services:
 {% if buzz_admin_host | length > 0 %}
           - {{ buzz_admin_host | regex_replace(':[0-9]+$', '') }}
 {% endif %}
+{% if buzz_tls_enabled | bool %}
 
   caddy:
+    # EMITTED ONLY UNDER A TLS MODE. compose.caddy.yml is what defines this service's
+    # image, and buzz_compose_files only includes that file when buzz_tls_mode is not
+    # `none`. Emitting the block unconditionally made `docker compose config` fail on
+    # the plaintext default with "service 'caddy' has neither an image nor a build
+    # context specified" — a merge-time error, so nothing downstream ever ran.
+    #
     # Point Caddy at the cohort-owned Caddyfile instead of upstream's four-line
     # one. compose.caddy.yml mounts ./Caddyfile relative to the compose
     # directory; this replaces that single entry.
@@ -43,3 +94,4 @@ services:
     mem_limit: 256m
     security_opt:
       - "no-new-privileges:true"
+{% endif %}

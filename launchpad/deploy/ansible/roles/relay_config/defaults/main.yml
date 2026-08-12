@@ -25,10 +25,26 @@ buzz_env_settings:
   BUZZ_AUTO_MIGRATE: "{{ buzz_auto_migrate | lower }}"
 
   # --- TLS ---
-  # Set even though we pass an explicit -f list, so that anyone who reaches for
-  # upstream's run.sh gets Caddy too rather than a plaintext relay on 3000.
-  # hardening-spec.md §B2 required control 1.
-  BUZZ_COMPOSE_TLS: "true"
+  # Tracks buzz_tls_mode, and it has to.
+  #
+  # Under a TLS mode this is `true` even though we pass an explicit -f list, so that
+  # anyone who reaches for upstream's run.sh gets Caddy too rather than a plaintext
+  # relay on 3000 — hardening-spec.md §B2 required control 1. That is the whole
+  # reason the line exists.
+  #
+  # Under `none` it MUST be false, and pinning it to "true" there is not the safe
+  # choice it looks like: run.sh would add compose.caddy.yml, whose `ports: !reset
+  # []` unpublishes the relay, and then start a Caddy that has no Caddyfile — this
+  # role only renders one for TLS modes, and upstream's `./Caddyfile` bind mount does
+  # not exist in the compose directory. The result is not "more secure", it is a
+  # stack with no reachable listener at all, arriving through a command nobody in
+  # this tree runs. `false` makes run.sh describe the topology that is actually
+  # deployed.
+  #
+  # Production cannot reach the false branch: buzz_tls_mode defaults to `acme` and
+  # roles/tls_mode_guard fails the run before any host change if a non-dev inventory
+  # selects `none`.
+  BUZZ_COMPOSE_TLS: "{{ buzz_tls_enabled | bool | lower }}"
   # Guest-side ports, unchanged from production. The host-side 8080/8443 forwards
   # are a VirtualBox concern and appear nowhere in the container configuration.
   CADDY_HTTP_PORT: "80"

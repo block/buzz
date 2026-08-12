@@ -30,12 +30,12 @@ disagree, the SOP settles it and both get corrected.
 | 00 | preflight ([doc](./00-preflight.md)) | HOST | Every host-side check that must pass before the VM is built; read-only, changes nothing | 0.2, 0.3, 0.4, 1, 3.2 (plus a warning-only look ahead at Step 10) | `virtual-box/preflight.sh` |
 | 01 | base-image | HOST | Downloads and checksums the Ubuntu 24.04 noble cloud OVA into `~/vm-images/` | 1 | `virtual-box/fetch-image.sh` |
 | 02 | vm-create | HOST | **Destroys and rebuilds** `buzz-dev` — import, resize, CPU/RAM, NAT forwards, cloud-init seed, first boot | 2, 3, 4 | `virtual-box/build-vps-clone.sh` |
-| 03 | host-dns ([doc](./03-host-dns.md)) | HOST | Job 1: the two `/etc/hosts` entries. Job 2 (`--ca-only`): fetch Caddy's local CA and print the trust command | 10, and the client-address half of 12.3 | `virtual-box/host-dns.sh` |
+| 03 | host-dns ([doc](./03-host-dns.md)) | HOST | Job 1 (required): the two `/etc/hosts` entries. Job 2 (`--ca-only`, **experimental TLS profile only**): fetch Caddy's local CA and print the trust command | 10, and the client-address half of 12.3 | `virtual-box/host-dns.sh` |
 | 04 | docker ([doc](./04-docker.md)) | TARGET | Installs `docker.io`, `docker-compose-v2`, `containerd` from the Ubuntu archive; asserts Compose ≥ 2.24.4 | 5, 5.1, 5.2 (5.3's snapshot is host-side) | `ansible/playbooks/04-docker.yml` |
 | 05 | bundle ([doc](./05-compose-bundle.md)) | TARGET | Copies the seven upstream `deploy/compose/` files to `/opt/buzz/compose/` and records the resolved image pin | 6 (6.1, 6.2, 6.3, 6.4) | `ansible/playbooks/05-bundle.yml` |
-| 06 | config | TARGET | Generates secrets on the target, renders `.env` (0600, root) and the cohort overrides — `compose.cohort.yml` and the `tls internal` Caddyfile | 7 (TLS-corrected) | `ansible/playbooks/06-config.yml` |
-| 07 | up | TARGET | Brings the stack up on all three compose files (Caddy included) and verifies the community, the WebSocket upgrade and all four surfaces | 8, 9 (TLS-corrected) | `ansible/playbooks/07-up.yml` |
-| 08 | desktop ([doc](./08-desktop.md)) | MANUAL | Builds and launches the Tauri desktop app as the owner and connects it to the relay. GUI — not scriptable | 12 | `runbooks/chunks/08-desktop.md` |
+| 06 | config ([doc](./06-config.md)) | TARGET | Generates secrets on the target, renders `.env` (0600, root) and the cohort overrides — `compose.cohort.yml` and the Caddyfile the experimental profile mounts | 7 | `ansible/playbooks/06-config.yml` |
+| 07 | up ([doc](./07-up.md)) | TARGET | Brings the stack up on the compose set `buzz_compose_files` resolves to and verifies the community, the WebSocket upgrade and all four surfaces | 8, 9 | `ansible/playbooks/07-up.yml` |
+| 08 | desktop ([doc](./08-desktop.md)) | MANUAL | Builds and launches the Tauri desktop app as the owner and connects it to `ws://buzz-vm.test:3000`. GUI — not scriptable | 12 | `runbooks/chunks/08-desktop.md` |
 | 09 | members | TARGET | Approves pubkeys on the relay roster, one at a time | 11 | `ansible/playbooks/09-members.yml` |
 | 10 | harden | TARGET | The dev-VM hardening subset: SSH policy, ingress firewall, kernel parameters, unattended upgrades, Docker daemon | 13 | `ansible/playbooks/10-harden.yml` |
 | 11 | verify | BOTH | The full verification suite — the checklist, run as assertions rather than by eye | 17 | `scripts/verify.sh` |
@@ -60,8 +60,8 @@ The numbers are the running order, with three constraints the numbers do **not**
                                                                                                    │
    ┌───────────────────────────────────────────────────────────────────────────────────────────────┘
    │
-   ├─► 03 host-dns  job 2 (--ca-only + trust the CA)   ← REQUIRES 07: Caddy mints the CA on first start
-   ├─► 08 desktop (manual)                             ← REQUIRES 03 job 2, or Tauri refuses the wss:// connection
+   ├─► 03 host-dns  job 2 (--ca-only + trust the CA)   ← EXPERIMENTAL TLS PROFILE ONLY; requires 07 (Caddy mints the CA on first start)
+   ├─► 08 desktop (manual)                             ← needs only 03 job 1; the app cannot use the TLS profile at all (#108)
    ├─► 09 members                                      ← REQUIRES 07: buzz-admin resolves the community seeded at startup
    │
    ├─► snapshot `buzz-working`                         ← SOP 13.1. Two of chunk 10's plays can lock you out
@@ -71,16 +71,21 @@ The numbers are the running order, with three constraints the numbers do **not**
 
 The three constraints, stated plainly:
 
-1. **Chunk 03 runs twice.** Job 1 (the `/etc/hosts` entries) can run before the VM exists. Job 2
-   (`--ca-only`) **cannot run until chunk 07 has started Caddy at least once**, because the `tls
-   internal` root CA does not exist until then — before that the script exits `3` (SOP Step 10;
-   hardening-spec.md §A.3).
+1. **Chunk 03 runs once on the default path, twice on the experimental one.** Job 1 (the
+   `/etc/hosts` entries) can run before the VM exists and is all the plaintext default needs. Job 2
+   (`--ca-only`) belongs to the Caddy + `tls internal` profile and **cannot run until chunk 07 has
+   started Caddy at least once**, because the local root CA does not exist until then — before that
+   the script exits `3` (SOP Step 10; hardening-spec.md §A.3).
 2. **Chunk 09 cannot run until chunk 07 has seeded the community.** There is no seeding command —
    the relay creates the community from `RELAY_URL` at startup, and the roster tool looks it up. Run
    it early and you get `RELAY_URL host '...' is not mapped to a community` (SOP Step 11;
    [`../relay-build-list.md`](../relay-build-list.md)).
 3. **Chunk 10 must run only after a snapshot exists.** SOP Step 13.1 names it `buzz-working`, and it
    is the only undo for the SSH-policy and firewall plays: `./deploy snapshot buzz-working`.
+
+The desktop app in chunk 08 no longer depends on chunk 03 job 2, and that is a decision rather than a
+simplification: the app cannot connect to a relay behind a private CA at all (issue #108), so the
+dependency was replaced by using the plaintext default rather than satisfied.
 
 Two softer orderings worth knowing: chunk 08 is the last thing that needs the pre-hardening state
 (nothing in Step 13 breaks it, but debugging a GUI client against a freshly firewalled host is a
@@ -116,13 +121,16 @@ IMAGE="${TAG%:*}@${DIGEST}"
 ( cd ansible && ansible-playbook playbooks/06-config.yml --limit dev-vm \
     -e "buzz_image=$IMAGE" )
 
-./deploy run 07                   # stack up, Caddy included, verified
+./deploy run 07                   # stack up (compose.yml + compose.cohort.yml), verified
 
-# Chunk 03 again, now that Caddy has minted its CA. The script prints this
-# second command with the absolute path filled in; it never runs it itself.
-./virtual-box/host-dns.sh --ca-only
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \
-  ~/vm-images/buzz-dev-caddy-root.crt
+# ONLY under the experimental Caddy + `tls internal` profile: chunk 03 again, now
+# that Caddy has minted its CA. The script prints this second command with the
+# absolute path filled in; it never runs it itself. Skip both lines on the
+# default path — there is no TLS to trust, and trusting this CA would not make
+# the desktop app work anyway (#108).
+# ./virtual-box/host-dns.sh --ca-only
+# sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \
+#   ~/vm-images/buzz-dev-caddy-root.crt
 
 ./deploy run 09                   # roster
 ./deploy snapshot buzz-working    # SOP 13.1 — the undo for chunk 10
@@ -153,9 +161,10 @@ follow, all of them things you would otherwise discover at the failure:
   `buzz_image` — deliberately, since a guessed pin pairs a relay binary with configuration it was
   never built against (`ansible/roles/compose_bundle/defaults/main.yml`). `./deploy run` has no way
   to pass `-e`. Use the explicit `ansible-playbook` lines above.
-- It runs **03 once, with no arguments**, so the CA is never fetched and never trusted, and it runs
-  **10 with no snapshot**. The entrypoint cannot express either — there is no `./deploy run 03
-  --ca-only` — so both are manual steps in the sequence above.
+- It runs **03 once, with no arguments**, and **10 with no snapshot**. The first is now correct for
+  the default path (job 1 is all it needs); under the experimental TLS profile the CA is still never
+  fetched and never trusted, and the entrypoint cannot express `./deploy run 03 --ca-only`. The
+  snapshot has no entrypoint form either. Both remain manual steps in the sequence above.
 
 Treat `run all` as a convergence check on an already-deployed host (run it twice; the second run
 should change nothing), not as the clean-deploy path.
@@ -187,23 +196,65 @@ default-deny **egress**, split internal/external container networks, module blac
 resource limits, `auditd` and sudo I/O logging, authenticated time, and Part E backups. Do not read
 a green chunk 10 as "production-hardened."
 
-One more deliberate divergence from the SOP's literal text, because it changes commands rather than
-scope: **the chunks implement the TLS-corrected path**, not the SOP's plaintext-relay-on-3000 path.
-Caddy runs in dev with `tls internal`, `compose.caddy.yml`'s `ports: !reset []` removes the relay's
-published 3000 entirely, and the host forwards 8080→80 and 8443→443 because macOS forbids a
-non-root bind below 1024. Guest-side ports stay 80/443, so container configuration is identical to
-production. The dev canonical values are in
-[`../../ansible/inventory/group_vars/dev.yml`](../../ansible/inventory/group_vars/dev.yml). This is specified by
-hardening-spec.md §A.3 and §B2 and listed as owed SOP edits in its Part G items 1–2 — **and those
-SOP edits have not landed.** Under "the SOP changes first" that edit is a debt, not a licence: the
-SOP still says `ws://buzz-vm.test:3000` in Steps 7.3, 10 and 12.3.
+## Two topologies: the supported one and the research one
+
+**The default is the SOP's own plaintext path — `ws://buzz-vm.test:3000`, no Caddy — and it is the
+daily supported development environment.** The relay is reached directly on 3000 through a NAT
+forward `127.0.0.1:3000 → guest 3000`, the community is `buzz-vm.test:3000` with the port preserved,
+and the desktop app connects to that address. This is the path the SOP documents in Steps 7.3, 10 and
+12.3, and it was verified working on 2026-08-11.
+
+**Caddy + `tls internal` is retained as an explicitly experimental, opt-in profile — and it is not
+desktop-app compatible.** It remains the only place we exercise the admin vhost split, the
+reverse-proxy configuration, and `wss://` end to end, and it is the groundwork for a real public
+certificate later, so it is kept rather than deleted. Under it Caddy runs with `tls internal`,
+`compose.caddy.yml`'s `ports: !reset []` removes the relay's published 3000 entirely, and the host
+forwards 8080→80 and 8443→443 because macOS forbids a non-root bind below 1024 — guest-side ports
+stay 80/443, so container configuration is identical to production. It is specified by
+hardening-spec.md §A.3 and §B2.
+
+What it cannot do is carry the desktop app. The app's native WebSocket (`tokio-tungstenite`, built
+with `rustls-tls-webpki-roots`) trusts only the compiled-in Mozilla root set, while its HTTP bridge
+(`reqwest` via `rustls-platform-verifier`) uses the macOS keychain. Against a private CA the HTTP
+half succeeds and every WebSocket dial fails, so the app reads and cannot send — a trust-store
+difference between two clients in one binary, established with `openssl s_client` and packet capture,
+tracked as issue **#108**. Trusting the CA in the System keychain does not change it. A one-line
+dependency change resolves it and was deliberately reverted, because it edits an upstream-owned file
+against this fork's governance rule and the intended trust behaviour was never agreed with upstream.
+
+The canonical dev values, and the one-line switch between the two profiles, are in
+[`../../ansible/inventory/group_vars/dev.yml`](../../ansible/inventory/group_vars/dev.yml);
+`buzz_compose_files` is derived from `buzz_tls_mode` in
+[`../../ansible/inventory/group_vars/all.yml`](../../ansible/inventory/group_vars/all.yml).
+**Production is never `none`** — `compose.caddy.yml`'s `ports: !reset []` is §B2's required control
+1 and `ufw` cannot substitute for it, because Docker's rules are evaluated first.
+
+**The Ansible roles still encode the experimental topology, and that is an open debt.** `relay_config`
+renders and validates a Caddyfile unconditionally, `compose.cohort.yml.j2` always emits a `caddy:`
+service block, and both `relay_config` and `relay_up` assert that the relay publishes no host port and
+probe every surface over `https://…:443`. All of that is correct for the experimental profile and
+fails on the plaintext default, where the relay legitimately publishes 3000. Re-scoping those
+assertions changes a stated security control, so under "the SOP changes first" hardening-spec.md §B2
+must carry the dev carve-out before the roles follow. Until then chunks 06 and 07 run the experimental
+profile, and the default path is driven by SOP Steps 7–9 directly.
 
 ## Provenance
 
 Following the SOP's own honesty convention, and split so the two halves cannot be confused: what has
 actually been executed, then what has not. Nothing in the second list is a claim of verification.
 
-### Verified by execution on 2026-08-12
+**Read every TLS item below as "verified for the experimental profile".** The Caddy + `tls internal`
+topology is verified for the relay, browsers and `curl`, and explicitly **not** for the desktop app.
+The plaintext default's own verification is the first list item.
+
+### Verified by execution on 2026-08-11 — the default path
+
+- **`ws://buzz-vm.test:3000` works.** The plaintext relay path, as the SOP documents it in Steps 7.3,
+  10 and 12.3, was verified working on this date. It is the reason it is the default rather than the
+  fallback. Its verification predates the chunked Ansible path, so it was executed from the SOP's own
+  commands and **not** through chunks 06/07 — see "Still not verified".
+
+### Verified by execution on 2026-08-12 — the experimental TLS profile
 
 On a freshly built `buzz-dev` (1 vCPU / 1.9 GiB / 496 MB swap / 20 GB disk), macOS Intel host,
 image `ghcr.io/block/buzz:sha-96ae141`, restored to the `pristine` snapshot first:
@@ -213,9 +264,10 @@ image `ghcr.io/block/buzz:sha-96ae141`, restored to the `pristine` snapshot firs
 - **Convergence holds for every Ansible chunk.** A second run of 04, 05, 06, 07, 09 and 10 each
   reports `changed=0` — the requirement from `ansible/README.md` "Convergence", Ruling 11 and issue
   #36. Chunk 10's second run is `ok=97 changed=0 failed=0`.
-- **The TLS-corrected path works end to end.** Caddy with `tls internal` fronts the relay, the
-  community seeds as `buzz-vm.test:8443` with the port preserved, and a WebSocket upgrade through
-  Caddy returns `101`.
+- **The TLS profile works end to end for relay, browser and `curl` — but not for the desktop app.**
+  Caddy with `tls internal` fronts the relay, the community seeds as `buzz-vm.test:8443` with the port
+  preserved, and a WebSocket upgrade through Caddy returns `101`. The desktop app is the documented
+  exception (issue #108, below).
 - **`compose.caddy.yml`'s `ports: !reset []` provably closes 3000** — `docker compose ps` shows the
   relay with `3000/tcp` exposed and **no published host port**; only Caddy publishes 80/443.
 - **All four surfaces answer through Caddy**: web bundle `200 text/html`, NIP-11 `200
@@ -306,21 +358,36 @@ Four traps were found by execution and are now encoded in the chunks; none is in
 - **No production inventory or `group_vars/prod.yml` exists**, so five required-but-empty variables in
   `group_vars/all.yml` (`buzz_domain`, `buzz_relay_url`, `buzz_acme_email`, `buzz_max_connections`,
   `buzz_backup_target`) have nowhere to be set. No play can run against a VPS today.
-- **A client HAS now connected successfully, as the owner.** Observed 2026-08-12 after setting
-  `BUZZ_DEV_KEYRING_SERVICE`: the app authenticated as `RELAY_OWNER_PUBKEY` (`2cf82270…`), the relay
-  logged sustained NIP-98 `HTTP bridge request` entries under that pubkey and **no refusals**, and
-  onboarding produced 6 kind:39000 channels with 6 matching kind:39002 memberships. Still not done:
-  **posting a message** — the event store holds no kind:9 or kind:40002, so SOP Step 17 item 18
-  remains unproven and chunk 08 is not yet fully closed.
-- **Transport details, proven earlier the same day.** Observed 2026-08-12:
-  the desktop app reached the relay over `wss://buzz-vm.test:8443`, and the relay logged
-  `WebSocket connection established` from `172.18.0.6` — Caddy's address inside `buzz-net`, so the
-  connection necessarily completed a TLS handshake against the `tls internal` certificate and was
-  proxied through. **Tauri's Rust TLS stack does accept the Caddy local CA once it is trusted in the
-  System keychain**, and the mechanism is visible in the build: `rustls-platform-verifier v0.7.0`
-  compiles in, so verification consults the macOS keychain. Chunk 03's `curl` check was therefore
-  necessary *and* sufficient. Still unproven: creating the `agent-test` channel and posting a
-  message, because the connection was refused at the auth step below before reaching that point.
+- **A client HAS now connected successfully, as the owner — over the HTTP bridge only.** Observed
+  2026-08-12 against the experimental TLS profile after setting `BUZZ_DEV_KEYRING_SERVICE`: the app
+  authenticated as `RELAY_OWNER_PUBKEY` (`2cf82270…`), the relay logged sustained NIP-98 `HTTP bridge
+  request` entries under that pubkey and **no refusals**, and onboarding produced 6 kind:39000
+  channels with 6 matching kind:39002 memberships. Still not done: **posting a message** — the event
+  store holds no kind:9 or kind:40002, so SOP Step 17 item 18 remains unproven and chunk 08 is not yet
+  fully closed. In hindsight this is the exact signature of #108: reads travel over the bridge, writes
+  need the WebSocket, and the WebSocket never connected.
+- **Neither chunk 06 nor chunk 07 has been executed against the plaintext default.** They currently
+  render a Caddyfile unconditionally, always emit a `caddy:` service block, and assert the relay
+  publishes no host port — all correct for the experimental profile and all failing on the default,
+  where the relay legitimately publishes 3000. See "Two topologies" above; the roles follow once
+  hardening-spec.md §B2 carries the dev carve-out.
+- **The `relay` NAT forward (`127.0.0.1:3000 → guest 3000`) has not been exercised**, and no VM has
+  been rebuilt since it was added to `virtual-box/build-vps-clone.sh`. An existing VM can take it live
+  with `VBoxManage controlvm buzz-dev natpf1 "relay,tcp,127.0.0.1,3000,,3000"`.
+- **`scripts/verify.sh` (chunk 11) still hardcodes the three-file invocation** and asserts that only
+  Caddy's 80/443 are published, so its 34-assertion pass is a result about the experimental profile.
+  It has never run against the default path.
+- **Transport details, and the claim they were later corrected into.** Observed 2026-08-12: the
+  desktop app reached the relay over `wss://buzz-vm.test:8443` and the relay logged HTTP bridge
+  activity proxied through Caddy from `172.18.0.6` — Caddy's address inside `buzz-net` — so *a* TLS
+  handshake against the `tls internal` certificate did complete. The conclusion drawn at the time,
+  that "Tauri's Rust TLS stack accepts the Caddy local CA once it is trusted in the System keychain"
+  and that chunk 03's `curl` check was therefore sufficient, was **too broad and has been retracted**.
+  It held for the HTTP bridge only (`reqwest` via `rustls-platform-verifier v0.7.0`, which does
+  consult the keychain). The app's native WebSocket is built with `rustls-tls-webpki-roots` and trusts
+  only the compiled-in Mozilla roots, so every `wss://` dial against the private CA failed while the
+  bridge kept working — established afterwards with `openssl s_client` and packet capture, tracked as
+  issue **#108**. That is the finding that made the plaintext path the default.
 - **Membership refusal is PROVEN, closing issue #19's last open claim.** Observed 2026-08-12: a key
   that was not on the roster authenticated and the relay logged
   `not a relay member … 403 relay_membership_required`, then closed the connection. Refusal happens

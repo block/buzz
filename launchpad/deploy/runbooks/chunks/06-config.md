@@ -2,11 +2,13 @@
 
 **What it does.** Generates every secret and both Nostr identities **on the target**, renders
 `.env` at mode 0600 root, and renders the two cohort-owned overrides — `compose.cohort.yml` and the
-`tls internal` Caddyfile. Nothing secret is templated from the control node and nothing lands in a
-tracked file.
+Caddyfile (which only the experimental TLS profile mounts). Nothing secret is templated from the
+control node and nothing lands in a tracked file.
 
-**SOP steps covered:** 7 (7.1–7.5), corrected for TLS per `hardening-spec.md` §A.3. Rationale lives
-there, not here.
+**SOP steps covered:** 7 (7.1–7.5). The addressing it writes is the plaintext default —
+`ws://buzz-vm.test:3000`, no Caddy — which is the SOP's own Step 7.3 value. The Caddy +
+`tls internal` variant (`hardening-spec.md` §A.3) is retained as an opt-in profile. Rationale for
+both lives in the SOP, not here.
 
 ## Preconditions
 
@@ -21,6 +23,16 @@ there, not here.
 cd /Users/jeff/group-build-project/buzz/launchpad/deploy/ansible
 ansible-playbook playbooks/06-config.yml --limit dev-vm \
   -e buzz_image=ghcr.io/block/buzz:sha-96ae141
+```
+
+The experimental Caddy + `tls internal` profile, which is **not** desktop-app compatible (Traps):
+
+```bash
+ansible-playbook playbooks/06-config.yml --limit dev-vm \
+  -e buzz_image=ghcr.io/block/buzz:sha-96ae141 \
+  -e buzz_tls_mode=internal \
+  -e buzz_relay_url=wss://buzz-vm.test:8443 \
+  -e buzz_admin_host=admin.buzz-vm.test:8443
 ```
 
 ## Verify
@@ -38,7 +50,12 @@ ssh -p 2222 dev@127.0.0.1 \
 # The addressing family must agree, or every client is refused.
 ssh -p 2222 dev@127.0.0.1 \
   "sudo grep -E '^(RELAY_URL|BUZZ_DOMAIN|BUZZ_ADMIN_HOST)=' /opt/buzz/compose/.env"
-# expect: RELAY_URL=wss://buzz-vm.test:8443
+# expect: RELAY_URL=ws://buzz-vm.test:3000
+#         BUZZ_DOMAIN=buzz-vm.test
+#         BUZZ_ADMIN_HOST=admin.buzz-vm.test:3000
+#
+# Under the experimental TLS profile the same three read
+#         RELAY_URL=wss://buzz-vm.test:8443
 #         BUZZ_DOMAIN=buzz-vm.test
 #         BUZZ_ADMIN_HOST=admin.buzz-vm.test:8443
 ```
@@ -60,6 +77,20 @@ signed with the old one becomes unverifiable (`hardening-spec.md` §B8).
 
 ## Traps
 
+- **The default addressing is plaintext `ws://buzz-vm.test:3000` with no Caddy**, and the community
+  keeps its `:3000` — `normalize_host` strips only a trailing `:443` or `:80`
+  (`crates/buzz-core/src/tenant.rs:121`). The Caddy + `tls internal` profile is opt-in via the three
+  `-e` overrides in Run, and it is **not desktop-app compatible** (chunk 08 Traps, issue #108).
+- **Switching profile on a live stack seeds a second community.** Seeding is an idempotent `INSERT`
+  keyed on `lower(host)`, so the old row persists and chunk 07's "exactly one community" assertion
+  then fails. Changing `RELAY_URL` means `down -v` and re-provision, not a re-run.
+- **The role still encodes the Caddy topology, and that gap is not closed here.** `06-config.yml`
+  renders and `caddy validate`s the Caddyfile unconditionally, `compose.cohort.yml.j2` always emits a
+  `caddy:` service block, and the play asserts `services.relay.ports` is empty — the §B2 control that
+  `compose.caddy.yml`'s `ports: !reset []` provides. On the plaintext default the relay *does*
+  publish 3000, so that assertion fails by design. Re-scoping a stated security control needs
+  `hardening-spec.md` §B2 to say so first ("the SOP changes first"), so until that edit lands drive
+  the default path from SOP Step 7 by hand, or run the play under the experimental profile.
 - **Secrets are generate-once by design.** `.env` is written only when absent; later runs converge
   only the non-secret lines. A role that re-rendered the whole file every run would rotate
   `BUZZ_RELAY_PRIVATE_KEY` and silently break signature verification for the whole community.

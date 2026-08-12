@@ -23,6 +23,10 @@
   gather_facts: true
 
   roles:
+    # FIRST, ON EVERY PLAY IN THIS TREE — hardening-spec.md §B2's plaintext check is
+    # a precondition that must run before any host change, and this play copies the
+    # compose bundle onto the target.
+    - role: tls_mode_guard
     # Plain role name: ansible/ansible.cfg sets `roles_path = roles`, and the
     # `deploy` entrypoint cd's into ansible/ before invoking ansible-playbook so
     # that config is picked up.

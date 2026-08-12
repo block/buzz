@@ -202,15 +202,27 @@
 #
 # The real fix is not a firewall rule at all. It is compose.caddy.yml's
 # `relay: ports: !reset []`, which stops publishing the relay port entirely and puts it
-# behind Caddy — which the TLS-corrected path this bundle uses now does on both targets
-# (hardening-spec §A.3, §B2 control 1). Host policy for any port that genuinely must stay
-# published belongs in the DOCKER-USER chain, with §B2 control 3's ordering fix (conntrack
-# rule first, DROP appended last — an unconditional `-I DOCKER-USER -j DROP` blocks return
-# traffic and kills all container networking).
+# behind Caddy — which every TLS-terminating mode does on both targets (hardening-spec §A.3,
+# §B2 control 1). Host policy for any port that genuinely must stay published belongs in the
+# DOCKER-USER chain, with §B2 control 3's ordering fix (conntrack rule first, DROP appended
+# last — an unconditional `-I DOCKER-USER -j DROP` blocks return traffic and kills all
+# container networking).
 #
-# The task below is the assertion that keeps the fix in place: if anyone drops
-# compose.caddy.yml from the -f list, or re-publishes a port without binding it to
-# loopback (§B2 control 2), this fails.
+# TWO ASSERTIONS, ONE PER HALF OF THE CONTROL, and they are not interchangeable:
+#
+#   negative  no service publishes a non-ingress port on a WILDCARD address. Under a TLS
+#             mode the declared ingress is 80/443; on the plaintext dev path the declared
+#             ingress is EMPTY, so any wildcard publish at all is a finding — including
+#             0.0.0.0:3000, which is the exposure §B2 is about and which a "3000 is allowed"
+#             allowlist would have waved through.
+#   positive  the port the plaintext carve-out DOES permit is actually bound to loopback.
+#             §B2's exception is conditional on that binding; a check that only rejects
+#             wildcards would also pass a stack that publishes nothing at all, which is a
+#             different (broken) state, so this one asserts presence as well as address.
+#
+# Together they mean: if anyone drops compose.caddy.yml from the -f list under a TLS mode, or
+# re-publishes a port without binding it to loopback on the plaintext path (§B2 control 2),
+# this role fails.
 # ---------------------------------------------------------------------------
 
 - name: Read published ports from the running Compose project
@@ -269,10 +281,67 @@
       hardening-spec §B2 control 4 violated: service
       '{{ item.Service | default(item.Name | default('?')) }}' publishes
       {{ hardening_firewall_service_wildcards }} on a wildcard address, and that port is not
-      one of the declared ingress ports {{ hardening_firewall_public_ingress_ports }}. ufw
+      one of the declared ingress ports {{ hardening_firewall_public_ingress_ports }}
+      (buzz_tls_mode '{{ buzz_tls_mode | default('acme') }}' declares
+      {{ 'no wildcard ingress at all — there is no reverse proxy on this path'
+         if not (buzz_tls_enabled | default(true) | bool)
+         else 'Caddy 80/443' }}). ufw
       cannot close this — Docker's chain is evaluated first. Either add compose.caddy.yml to
       the -f list so `ports: !reset []` unpublishes the relay, or bind the port to 127.0.0.1
       in compose.cohort.yml (§B2 control 2).
   loop: "{{ hardening_firewall_compose_services }}"
   loop_control:
     label: "{{ item.Service | default(item.Name | default('?')) }}"
+
+# ---------------------------------------------------------------------------
+# The positive half — hardening-spec §B2's approved dev carve-out.
+#
+# Skipped entirely under every TLS mode (hardening_firewall_loopback_published_ports is
+# empty there), so production runs nothing extra and gains no new path.
+#
+# WHY IT ASSERTS PRESENCE AS WELL AS ADDRESS: the wildcard check above passes trivially on a
+# stack that publishes nothing, and on the plaintext path that is not a pass — it is a relay
+# nothing can reach. This check reads the actual publisher for port 3000, requires it to
+# exist, and requires its bind address to be loopback. `URL` is Compose's field for that
+# address; a missing URL counts as a failure rather than as "no wildcard found", because
+# nothing then proves the binding and §B2 says an unestablished property fails closed.
+# ---------------------------------------------------------------------------
+
+- name: Collect every publisher of a carve-out port across the project
+  when: hardening_firewall_loopback_published_ports | length > 0
+  ansible.builtin.set_fact:
+    hardening_firewall_carveout_publishers: >-
+      {{ hardening_firewall_compose_services
+         | map(attribute='Publishers') | select | flatten
+         | selectattr('PublishedPort', 'defined')
+         | selectattr('PublishedPort', 'in', hardening_firewall_loopback_published_ports)
+         | list }}
+
+- name: Assert the plaintext carve-out publishes its port on loopback only
+  when: hardening_firewall_loopback_published_ports | length > 0
+  vars:
+    hardening_firewall_carveout_offenders: >-
+      {{ (hardening_firewall_carveout_publishers | rejectattr('URL', 'defined') | list)
+         + (hardening_firewall_carveout_publishers | selectattr('URL', 'defined')
+            | rejectattr('URL', 'in', hardening_firewall_loopback_addresses) | list) }}
+  ansible.builtin.assert:
+    that:
+      - hardening_firewall_carveout_publishers | length > 0
+      - hardening_firewall_carveout_offenders | length == 0
+    success_msg: >-
+      port {{ hardening_firewall_loopback_published_ports | join(', ') }} published on
+      {{ hardening_firewall_carveout_publishers | selectattr('URL', 'defined')
+         | map(attribute='URL') | unique | join(', ') }}
+      only — §B2's dev exception holds on the guest side. The host NAT forward's binding and
+      off-host unreachability are asserted by scripts/verify.sh.
+    fail_msg: >-
+      hardening-spec §B2's dev carve-out cannot be established, so this fails closed.
+      {{ 'Nothing publishes port ' ~ (hardening_firewall_loopback_published_ports | join(', '))
+         ~ ' at all — on the plaintext path the relay IS the listener, so the stack is not serving.'
+         if hardening_firewall_carveout_publishers | length == 0
+         else 'Published on ' ~ (hardening_firewall_carveout_offenders | map(attribute='URL') | list | string)
+              ~ ', which is not loopback (' ~ (hardening_firewall_loopback_addresses | join(', ')) ~ ').' }}
+      The exception permits plaintext ONLY while the port is bound to loopback — "a
+      loopback-bound published port is not reachable off-host regardless of what iptables
+      does" (§B2 control 2), and ufw cannot substitute because Docker's chain runs first.
+      Fix compose.cohort.yml's `ports: !override` block, or set buzz_tls_mode to internal/acme.

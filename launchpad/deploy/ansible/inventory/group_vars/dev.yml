@@ -9,33 +9,83 @@
 # roles are not parity-clean.
 
 # ---------------------------------------------------------------- addressing
-# Why there is a port here at all, and why it is 8443:
+# THE DEFAULT DEV PATH IS PLAINTEXT `ws://` ON 3000, WITH NO CADDY.
 #
-# Caddy binds 80/443 INSIDE the guest, exactly as it will on the VPS. But macOS
-# refuses to let a non-root process bind a host port below 1024, and VirtualBox's
-# NAT forwarder runs as the invoking user — so the host side of the forward has to
-# be high (8443 -> 443). VirtualBox host-only networking, which would have given
-# the guest its own IP and a real 443, is unavailable here: /dev/vboxnetctl does
-# not exist because the VirtualBox network kext is not loaded.
+# This is the project's own documented dev addressing — the SOP's Steps 7.3, 10
+# and 12.3 — and it was verified working on 2026-08-11. It is the daily supported
+# development environment for the cohort, and the only dev topology the desktop
+# app can both read AND write on. The experimental TLS profile further down is
+# retained, but it is a compatibility research topology, not the default.
 #
-# The consequence is confined to this one variable. The relay derives its
-# community host from RELAY_URL and preserves any non-default port, stripping only
-# a trailing :443 or :80 (normalize_host, crates/buzz-core/src/tenant.rs:121). So
-# dev's community is `buzz-vm.test:8443` and prod's is a bare `<domain>`.
-# buzz_relay_url was already one of the nine, so this costs no parity that the
-# model did not already concede.
+# Why there is a port here at all, and why it is not stripped: the relay derives
+# its community host from RELAY_URL and preserves any non-default port, stripping
+# only a trailing :443 or :80 (normalize_host, crates/buzz-core/src/tenant.rs:121).
+# So dev's community is `buzz-vm.test:3000`, port included, and prod's is a bare
+# `<domain>`. Every inbound Host header must match that byte-for-byte after
+# normalization. buzz_relay_url is one of the nine §A.2 variables, so this costs no
+# parity the model had not already conceded.
 #
-# Everything else §A.3 wanted from running Caddy in dev still holds: identical
-# compose file sets, wss:// through a reverse proxy, the relay's port unpublished,
-# and the admin vhost split exercised.
+# Reaching it from the host needs the guest's 3000 published (which is what
+# dropping compose.caddy.yml from buzz_compose_files leaves in place) and the
+# `relay` NAT forward 127.0.0.1:3000 -> guest 3000 from
+# virtual-box/build-vps-clone.sh. macOS permits a non-root bind on 3000, so host
+# and guest ports are identical here and nothing is translated — unlike the 8443
+# case below.
 buzz_domain: buzz-vm.test
-buzz_relay_url: "wss://buzz-vm.test:8443"
+buzz_relay_url: "ws://buzz-vm.test:3000"
 
-# Caddy's local CA rather than Let's Encrypt, which cannot certify a name that
-# does not publicly resolve. The cost is trusting one root on the host — see
-# chunk 03.
-buzz_tls_mode: internal
+# `none` = no reverse proxy and no TLS. This is the single switch: group_vars/all.yml
+# derives buzz_compose_files from it, so `none` builds the two-file invocation
+# (compose.yml + compose.cohort.yml) and every other value adds compose.caddy.yml.
+buzz_tls_mode: none
 buzz_acme_email: ""
+
+# ------------------------------------------- EXPERIMENTAL PROFILE: Caddy + `tls internal`
+# OPT-IN, NOT THE DEFAULT, AND NOT DESKTOP-APP COMPATIBLE. Retained deliberately —
+# it is still how we test the admin vhost split, validate the reverse-proxy
+# configuration, and it is the groundwork for a real end-to-end `wss://` once a
+# public DNS-01 certificate exists. Do not delete it.
+#
+#   buzz_relay_url: "wss://buzz-vm.test:8443"
+#   buzz_tls_mode: internal
+#   buzz_admin_host: "admin.buzz-vm.test:8443"
+#
+# To switch: comment out the three default values above, uncomment these three,
+# and re-provision from `down -v` — changing RELAY_URL against an existing stack
+# seeds a SECOND community (seeding is an idempotent INSERT keyed on lower(host),
+# so the old row persists) and chunk 07's "exactly one community" assertion then
+# fails. Chunk 03's `--ca-only` + `security add-trusted-cert` half becomes required
+# under this profile and is optional otherwise.
+#
+# WHAT DOES NOT WORK HERE, AND WHY IT IS NOT A HALF-MEASURE: the desktop app cannot
+# connect to a relay fronted by a private CA. Its native WebSocket
+# (tokio-tungstenite, built with `rustls-tls-webpki-roots`) trusts ONLY the
+# compiled-in Mozilla root set, while its HTTP bridge (reqwest via
+# rustls-platform-verifier) consults the macOS keychain. Against `tls internal` the
+# HTTP half therefore succeeds and every WebSocket dial fails, so the app loads
+# channels and silently sends nothing. This is a trust-store difference between two
+# TLS clients in the same binary, established by `openssl s_client` and packet
+# capture; tracking issue #108. A one-line dependency change resolves it and was
+# deliberately reverted, because it edits an upstream-owned file against this
+# fork's own governance rule and the intended trust behaviour was never agreed with
+# upstream. Browsers, `curl` and the relay itself are unaffected — the profile is
+# verified for those three.
+#
+# Why 8443 rather than 443, kept because it explains the whole shape of this
+# profile: Caddy binds 80/443 INSIDE the guest, exactly as it will on the VPS. But
+# macOS refuses to let a non-root process bind a host port below 1024, and
+# VirtualBox's NAT forwarder runs as the invoking user — so the host side of the
+# forward has to be high (8443 -> 443). VirtualBox host-only networking, which
+# would have given the guest its own IP and a real 443, is unavailable here:
+# /dev/vboxnetctl does not exist because the VirtualBox network kext is not loaded.
+# The consequence is confined to buzz_relay_url, and it is what puts `:8443` into
+# the community host under this profile.
+#
+# Everything §A.3 wanted from running Caddy in dev still holds under it: identical
+# compose file sets to prod, wss:// through a reverse proxy, the relay's port
+# unpublished by `ports: !reset []`, and the admin vhost split exercised. That is
+# why it is retained rather than removed — it is the only place those four things
+# get tested before the VPS.
 
 # Deliberately MORE PERMISSIVE than prod, and one of only two such cases.
 # hardening-spec.md §B1: on a loopback-bound VM an unauthenticated admin API is
@@ -43,7 +93,12 @@ buzz_acme_email: ""
 # tested. On a public host the same setting is an information disclosure. Chunk 11
 # asserts 200 here and 404/403 on prod — that difference is the point, not an
 # oversight.
-buzz_admin_host: "admin.buzz-vm.test:8443"
+#
+# The port tracks buzz_relay_url: :3000 on the default path (same relay listener,
+# selected by Host header), :8443 under the experimental profile (a separate Caddy
+# vhost). Under the default path there is no proxy in front, so the admin split is
+# enforced by the relay's Host matching alone.
+buzz_admin_host: "admin.buzz-vm.test:3000"
 
 # The other deliberate divergence. Correct for a throwaway VM that needs its
 # schema created on first boot; wrong for a database with real data in it

@@ -3,20 +3,26 @@
 **What it does**
 
 Builds the Tauri desktop app on your own Mac, launches it signed in as the relay owner, points it at
-`wss://buzz-vm.test:8443`, and proves the identity it actually loaded is the owner. It is the only
+`ws://buzz-vm.test:3000`, and proves the identity it actually loaded is the owner. It is the only
 chunk with no artifact to run: the window cannot be driven from a CLI (see Traps for the three
 concrete reasons), and confirming ownership means reading a line of terminal output — so this
 document is the chunk.
 
-**SOP steps covered:** 12 (12.1, 12.2, 12.3, 12.4, 12.5), with 12.3's address as corrected by
-hardening-spec.md §A.3 / Part G item 2 -- rationale lives there, not here
+**SOP steps covered:** 12 (12.1, 12.2, 12.3, 12.4, 12.5), at the SOP's own literal address --
+rationale lives there, not here
+
+> **The desktop app works on the plaintext default path only.** It cannot talk to a relay fronted by
+> a private CA (`tls internal`), and the way it fails is the expensive part: the app appears to work.
+> See the first Trap and issue #108 before pointing it anywhere else.
 
 **Preconditions**
 
-- **Chunk 07** has run: the stack is up with Caddy, and the community `buzz-vm.test:8443` exists.
-- **Chunk 03, both jobs.** Job 1 makes the name resolve; job 2 (`--ca-only` plus the printed
-  `security add-trusted-cert`) makes the host trust Caddy's `tls internal` root. Job 2 is a **hard**
-  requirement here, not a nicety -- see Traps.
+- **Chunk 07** has run: the stack is up and the community `buzz-vm.test:3000` exists.
+- **Chunk 03, job 1 only.** The `/etc/hosts` entries must exist so the name resolves. Job 2
+  (`--ca-only` plus `security add-trusted-cert`) belongs to the experimental TLS profile and is **not**
+  needed here -- there is no TLS on this path.
+- **Chunk 02's `relay` NAT forward** `127.0.0.1:3000 -> guest 3000`. Without it the address resolves
+  and nothing answers.
 - **Chunk 09 is not required.** The owner pubkey in `.env` is approved automatically when the relay
   seeds the community (SOP Step 11), so the owner can connect before anyone else is rostered.
 - **The owner secret key.** On the chunked path chunk 06 leaves it at `/root/owner-key.txt` on the VM
@@ -85,7 +91,7 @@ printf '' | pbcopy
 Then, in the app (SOP 12.3, 12.5):
 
 1. Choose **Join a community** -- or **I already have a community** then **I'm a member or admin**.
-2. In the single address field type exactly `wss://buzz-vm.test:8443`. Leave any invite code empty.
+2. In the single address field type exactly `ws://buzz-vm.test:3000`. Leave any invite code empty.
 3. Work through the display-name and welcome screens until you reach the channel list.
 4. Create a channel called `agent-test` and post a message in it.
 
@@ -134,10 +140,28 @@ only a relaunch.
 
 **Traps**
 
-- The address is `wss://buzz-vm.test:8443`, **not** the SOP's literal `ws://buzz-vm.test:3000`: the chunks run Caddy with `tls internal` and `compose.caddy.yml`'s `ports: !reset []` deletes the relay's published 3000 entirely (hardening-spec.md §A.3, §B2).
-- SOP 12.3's "you must type `ws://`" warning is **inverted** on this path -- it applies to the plaintext path only, and that SOP edit is still owed (hardening-spec.md Part G items 1-2).
-- `:8443` is the part that gets dropped by muscle memory: the relay strips only a trailing `:443` or `:80`, so the community really is `buzz-vm.test:8443` and a bare `wss://buzz-vm.test` both mismatches the community and aims at a host port nothing forwards (SOP Step 7.2; `ansible/inventory/group_vars/dev.yml`).
-- Without chunk 03's job 2 the connection is simply refused: Tauri's Rust TLS stack validates against the system keychain and offers no "proceed anyway", so a self-signed `tls internal` CA fails with an error that never mentions certificates (chunk 03 Traps; SOP 12.3 as corrected).
+- **THE BIG ONE: do not point the desktop app at the experimental `tls internal` profile. It will
+  look like it works and it will not send anything.** The app contains two TLS clients with two
+  different trust stores. Its native WebSocket (`tokio-tungstenite`, built with
+  `rustls-tls-webpki-roots`) trusts **only** the compiled-in Mozilla root set and never consults the
+  OS; its HTTP bridge (`reqwest` via `rustls-platform-verifier`) uses the **macOS keychain**. Against
+  a private CA the HTTP half therefore succeeds and every WebSocket dial fails — so channels and
+  profiles load over the bridge, the window looks connected, and every message you send silently goes
+  nowhere. This is a trust-store difference between two clients in the same binary, established with
+  `openssl s_client` and packet capture; tracking issue **#108**. Trusting the CA in the System
+  keychain does not help the WebSocket half, because it never looks there. Use
+  `ws://buzz-vm.test:3000`.
+- The address is the SOP's literal `ws://buzz-vm.test:3000`, and SOP 12.3's "you must type `ws://`"
+  warning applies exactly as written.
+- `:3000` is the part that gets dropped by muscle memory: the relay strips only a trailing `:443` or
+  `:80`, so the community really is `buzz-vm.test:3000` and a bare `ws://buzz-vm.test` both
+  mismatches the community and aims at a host port nothing forwards (SOP Step 7.2;
+  `ansible/inventory/group_vars/dev.yml`).
+- An earlier revision of this chunk made `wss://buzz-vm.test:8443` the address and chunk 03's job 2 a
+  hard precondition. That is now the **experimental** profile: still useful for the admin vhost split,
+  for validating the reverse-proxy configuration, and as groundwork for real end-to-end `wss://` once
+  a public DNS-01 certificate exists — but not reachable from this app (see above). The CA-trust
+  instructions are kept in chunk 03 for it.
 - **Do not use `just desktop-standalone`.** It builds the sidecars properly and then runs `unset BUZZ_PRIVATE_KEY BUZZ_SHARE_IDENTITY` immediately before launching (`Justfile:515`), so the identity is discarded and you land on a sign-in screen you cannot get past (SOP 12.2).
 - `read -rsp "…" VAR` fails in zsh -- `-p` means "read from a coprocess" there, so you get `read: -p: no coprocess`, the variable is never set, and the app launches on a throwaway identity (SOP 12.2).
 - **Do not choose "Create a community" or "I own the community."** Both open a sign-in for Block's hosted service and neither offers an address field; being told at length that you are the owner is exactly what makes the wrong button the obvious one (SOP 12.3).
@@ -165,4 +189,4 @@ only a relaunch.
 - Driving the real window would additionally need macOS TCC grants (Privacy & Security -> Accessibility, and Screen Recording) that cannot be granted from a CLI, so relay-side verification belongs in `buzz-cli`, not in GUI automation -- note `buzz-cli` is not built yet: `cargo build --release -p buzz-cli` (CLAUDE.md, "Agent CLI").
 - Notifications are silently disabled under `tauri dev` because it runs from `target/debug/buzz-desktop` rather than an app bundle; macOS grants notification permission per bundle, so this is expected here and not a defect (observed 2026-08-12).
 - The data directory really is the shared `~/Library/Application Support/xyz.block.buzz.app` -- printed at startup, confirming the warning above that `tauri dev` shares stored data with any other Buzz install on this Mac (SOP 12.2).
-- **Step 12 is only half executed.** Proven on 2026-08-12: the build (6m25s), the launch, and the owner-identity match. **Not proven:** that the app connects to `wss://buzz-vm.test:8443` at all, that Tauri accepts the `tls internal` certificate, or that channel creation and posting work -- what chunk 03 established is only that *the host* trusts the CA at the `curl` level, and the `wss://` handling is still read from `desktop/src/features/communities/communityStorage.ts:140` (SOP, "not verified on either platform").
+- **Step 12 is only partly executed on this address.** Proven on 2026-08-12: the build (6m25s), the launch, and the owner-identity match. **Not proven on `ws://buzz-vm.test:3000`:** that the app connects, or that channel creation and posting work. What *is* settled is the negative result on the other address -- against `wss://buzz-vm.test:8443` with `tls internal`, the HTTP bridge authenticated and the WebSocket never did (issue #108), which is why the plaintext path is the default rather than the fallback.

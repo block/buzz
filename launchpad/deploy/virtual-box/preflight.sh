@@ -49,12 +49,18 @@ PUBKEY_PATH="$HOME/.ssh/id_ed25519.pub"
 MIN_FREE_KIB=$((15 * 1024 * 1024))   # 15 GiB, SOP Step 0.3
 MIN_OVA_BYTES=500000000              # 500 MB; a full noble.ova is ~570 MB, SOP Step 1
 
-# Host ports the NAT forwards claim: ssh 2222->22, http 8080->80, https 8443->443.
+# Host ports the NAT forwards claim: ssh 2222->22, relay 3000->3000, and — for
+# the experimental Caddy profile — http 8080->80 and https 8443->443.
+#
+# 3000 is the DEFAULT path's relay port and the one most likely to collide: it is
+# a common default for local Node/Rails servers. macOS permits a non-root bind
+# there, so host and guest ports match and nothing is translated.
+#
 # 80 and 443 are deliberately NOT checked: we never bind them on the host. macOS
 # forbids a non-root process binding below 1024, which is the whole reason the
-# host side of each forward is a high port while the guest side stays the real
-# one. See build-vps-clone.sh lines 16-22.
-HOST_PORTS="2222 8080 8443"
+# experimental profile's host-side forwards are high ports while the guest side
+# stays the real one. See build-vps-clone.sh.
+HOST_PORTS="2222 3000 8080 8443"
 
 # Names chunk 03 adds to /etc/hosts (SOP Step 10). Warning-only here.
 HOSTS_NAMES="buzz-vm.test admin.buzz-vm.test"
@@ -286,8 +292,9 @@ Then re-run this preflight. SOP Step 2.7."
             "Stop that process, or the VM's port forward will not bind and the
 guest becomes unreachable on this port. Identify it fully with:
   lsof -nP -iTCP:$p -sTCP:LISTEN
-The three host ports are fixed in build-vps-clone.sh (SSH_PORT, HTTP_PORT,
-HTTPS_PORT); change them there, not by hand, or a rebuild loses the change.
+The four host ports are fixed in build-vps-clone.sh (SSH_PORT, RELAY_PORT,
+HTTP_PORT, HTTPS_PORT); change them there, not by hand, or a rebuild loses the
+change.
 SOP Step 2.7."
           ;;
       esac
@@ -295,7 +302,7 @@ SOP Step 2.7."
   done
 else
   warn "host ports $HOST_PORTS" "lsof not available, port checks skipped" \
-    "Check by hand that nothing is listening on 2222, 8080 and 8443 before
+    "Check by hand that nothing is listening on 2222, 3000, 8080 and 8443 before
 running chunk 02. SOP Step 2.7."
 fi
 

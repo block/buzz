@@ -23,6 +23,16 @@
   # It keeps the output readable and makes an interrupted run affect one target only.
   serial: 1
   roles:
+    # FIRST, ON EVERY PLAY IN THIS TREE — hardening-spec.md §B2's plaintext check is
+    # a precondition.
+    #
+    # `always` IS LOAD-BEARING HERE, and only here: membership carries tags, so a run
+    # narrowed with `--tags chunk09` would select the mutating role and SKIP an
+    # untagged guard — the one combination that must not be possible. `always` is
+    # still overridable by `--skip-tags always`, which is an explicit act.
+    - role: tls_mode_guard
+      tags:
+        - always
     - role: membership
       tags:
         - chunk09

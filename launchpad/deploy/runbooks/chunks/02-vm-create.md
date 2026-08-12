@@ -1,7 +1,7 @@
 # Chunk 02 — vm-create
 
 **What it does.** **Destroys and rebuilds** the `buzz-dev` VM: imports the OVA, converts the disk to
-VDI so it can be resized, sets CPU/RAM/swap to match the production VPS, adds the three NAT port
+VDI so it can be resized, sets CPU/RAM/swap to match the production VPS, adds the four NAT port
 forwards, builds a cloud-init seed ISO, and boots headless.
 
 **SOP steps covered:** 2, 3, 4. Rationale lives there, not here.
@@ -43,9 +43,10 @@ ssh -p 2222 dev@127.0.0.1 'free -h; swapon --show; df -h /; uname -m'
 Expect ~1.9 Gi memory, 496 M swap, `x86_64`. Measured on 2026-08-12: 1968 MB / 495 MB / 19 G / x86_64.
 
 ```bash
-# All three forwards must be bound to 127.0.0.1 only.
+# All four forwards must be bound to 127.0.0.1 only.
 VBoxManage showvminfo buzz-dev --machinereadable | grep -i '^Forwarding'
-# expect: http 8080->80, https 8443->443, ssh 2222->22
+# expect: ssh 2222->22, relay 3000->3000,
+#         http 8080->80 and https 8443->443 (experimental TLS profile)
 
 # The deliberately-insecure starting state -- this is the test fixture, not a bug.
 ssh -p 2222 dev@127.0.0.1 'ls /etc/ssh/sshd_config.d/; sudo sshd -T | grep permitrootlogin'
@@ -81,12 +82,18 @@ There is nothing to roll back to — this chunk *is* the rollback. Re-run it for
 - **Disk is deliberately NOT at parity.** 20 GB here versus the VPS's 49.5 GB, to save host space. This
   VM can prove software is *too big* to fit; it can never prove it *will* fit. Do not draw
   storage conclusions from it (SOP Step 2.5).
-- **Host ports are high (8080/8443) but guest ports are real (80/443).** macOS refuses a non-root bind
-  below 1024, and VirtualBox host-only networking is unavailable on this machine
-  (`/dev/vboxnetctl` missing — the network kext is not loaded). Container configuration is therefore
-  identical to production; only the host-side forward differs, and it surfaces as the `:8443` in the
-  community host.
-- **The guest hostname (`buzz-dev`) and the community host (`buzz-vm.test:8443`) are different
+- **The `relay` forward (3000 -> 3000) serves the DEFAULT path; 8080/8443 serve the experimental
+  Caddy + `tls internal` profile.** Both sets are created unconditionally — a forward to a port
+  nothing listens on costs nothing, and having both means switching profiles never needs a rebuild. A
+  VM built before the `relay` rule existed can take it live in place:
+  `VBoxManage controlvm buzz-dev natpf1 "relay,tcp,127.0.0.1,3000,,3000"`.
+- **The experimental profile's host ports are high (8080/8443) but its guest ports are real
+  (80/443).** macOS refuses a non-root bind below 1024, and VirtualBox host-only networking is
+  unavailable on this machine (`/dev/vboxnetctl` missing — the network kext is not loaded). Container
+  configuration is therefore identical to production; only the host-side forward differs, and it
+  surfaces as the `:8443` in that profile's community host. The default path needs no such
+  translation: 3000 is above 1024, so host and guest ports match.
+- **The guest hostname (`buzz-dev`) and the community host (`buzz-vm.test:3000`) are different
   things.** The community comes from `RELAY_URL` alone and nothing else
   ([`../relay-build-list.md`](../relay-build-list.md)).
 - **Every run of this chunk invalidates `~/.ssh/known_hosts`.** The rebuilt VM generates new SSH host

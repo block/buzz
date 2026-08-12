@@ -13,13 +13,22 @@ DISK_MB=20480        # 20G -- deliberately smaller than the VPS's 49.5G
 SSH_PORT=2222
 SWAP_BYTES=520093696 # 496 MiB, matching the VPS swap partition
 
-# Caddy fronts the relay on 80/443 inside the guest (compose.caddy.yml), and
-# `ports: !reset []` means the relay's own 3000 is never published. macOS will
-# not let a non-root process bind a port below 1024, so the host side of each
-# forward is a high port. The guest side is the real one, so the container
-# configuration is byte-identical to production's.
-HTTP_PORT=8080       # host 8080 -> guest 80
-HTTPS_PORT=8443      # host 8443 -> guest 443
+# The DEFAULT dev path is plaintext ws:// straight to the relay on 3000, with no
+# reverse proxy (ansible/inventory/group_vars/dev.yml). macOS permits a non-root
+# bind on 3000, so host and guest ports are identical and nothing is translated.
+RELAY_PORT=3000      # host 3000 -> guest 3000
+#
+# 8080/8443 serve the EXPERIMENTAL Caddy + `tls internal` profile, which is opt-in
+# and retained on purpose. There, Caddy fronts the relay on 80/443 inside the guest
+# (compose.caddy.yml) and `ports: !reset []` means the relay's own 3000 is never
+# published. macOS will not let a non-root process bind a port below 1024, so the
+# host side of each of those forwards is a high port; the guest side is the real
+# one, so the container configuration stays byte-identical to production's. Both
+# sets of forwards are created unconditionally — a forward to a port nothing is
+# listening on costs nothing, and creating them here means switching profiles never
+# needs the VM rebuilt.
+HTTP_PORT=8080       # host 8080 -> guest 80    (experimental TLS profile)
+HTTPS_PORT=8443      # host 8443 -> guest 443   (experimental TLS profile)
 
 # Guest hostname and the non-root fallback account. These names are load-bearing
 # downstream: the hardening role removes the sshd parity file by name, and
@@ -193,6 +202,7 @@ say "Adding NAT port forwards"
 # Bound to 127.0.0.1 so nothing off this machine can reach the guest -- that is
 # what stands in for "no public listener" on the VPS (hardening-spec.md C1).
 for rule in "ssh,tcp,127.0.0.1,${SSH_PORT},,22" \
+            "relay,tcp,127.0.0.1,${RELAY_PORT},,${RELAY_PORT}" \
             "http,tcp,127.0.0.1,${HTTP_PORT},,80" \
             "https,tcp,127.0.0.1,${HTTPS_PORT},,443"; do
   name="${rule%%,*}"
@@ -208,8 +218,9 @@ echo
 echo "VM '$VM' is booting. cloud-init takes ~60-90s on first boot."
 echo "SSH:   ssh -p ${SSH_PORT} root@127.0.0.1                 # matches the VPS access pattern"
 echo "       ssh -p ${SSH_PORT} ${FALLBACK_USER}@127.0.0.1                  # fallback account"
-echo "Relay: https://buzz-vm.test:${HTTPS_PORT}         # once the stack is up (chunk 07)"
+echo "Relay: http://buzz-vm.test:${RELAY_PORT}          # default path, once the stack is up (chunk 07)"
+echo "       https://buzz-vm.test:${HTTPS_PORT}         # experimental Caddy + 'tls internal' profile only"
 echo
 echo "Note: the guest hostname is '${GUEST_HOSTNAME}'; the relay's community host is"
-echo "'buzz-vm.test:${HTTPS_PORT}'. They are deliberately different things -- the community"
+echo "'buzz-vm.test:${RELAY_PORT}'. They are deliberately different things -- the community"
 echo "host comes from RELAY_URL alone. See runbooks/relay-build-list.md."

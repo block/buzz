@@ -25,4 +25,9 @@
   become: true
   gather_facts: true
   roles:
+    # FIRST, ON EVERY PLAY IN THIS TREE. hardening-spec.md §B2's carve-out requires
+    # the plaintext check to be a precondition that "runs before any host change", so
+    # it has to precede the first role that touches the target — here, installing
+    # Docker. It reports ok/changed=0 and costs nothing.
+    - role: tls_mode_guard
     - role: docker

@@ -1,0 +1,94 @@
+---
+# tls_mode_guard — the fail-closed precondition on hardening-spec.md §B2's approved
+# carve-out.
+#
+# WHAT IT ENFORCES, quoted rather than paraphrased so it cannot drift:
+#
+#   Production invariant: `buzz_tls_mode: none` is prohibited on every VPS, cloud
+#   host, bridged VM, host-only VM, or publicly reachable target. Production must
+#   enable Caddy with `BUZZ_COMPOSE_TLS=true`; `compose.caddy.yml` must remove the
+#   relay's published port, and only the declared TLS ingress ports may be externally
+#   reachable. **Automation must fail before changing the host if a non-dev inventory
+#   selects `none`.**
+#
+#   Sole development exception: the `dev-vm` VirtualBox NAT target may use
+#   `buzz_tls_mode: none` and publish guest port 3000 **only when the corresponding
+#   host NAT forward is bound exactly to `127.0.0.1:3000`**. This is a development
+#   accessibility control, not production parity. Verification must assert the
+#   loopback-bound forward **and must demonstrate that port 3000 is unreachable from
+#   another machine**. If either property cannot be established, deployment fails
+#   closed.
+#
+# WHY IT IS A ROLE AND WHY IT RUNS FIRST. The amendment is explicit that this is a
+# *precondition*, not a post-check: "it runs before any host change". A check that
+# runs at the end of chunk 06 has already written .env; one at the end of chunk 10
+# has already recreated the containers. So every playbook in this tree lists this
+# role FIRST, ahead of any role that touches the target, and the two plays that keep
+# pre_tasks (07 and 10) keep only read-only ones ahead of it — `stat`, `id -u` and
+# their asserts change nothing.
+#
+# WHAT IT DOES NOT DO. It cannot see the VirtualBox NAT forward: that is host-side
+# state, and Ansible is inside the guest looking out. The forward's binding is
+# asserted by scripts/verify.sh, which runs on the host where `VBoxManage` exists,
+# together with the off-host reachability demonstration the amendment requires. This
+# role covers the half that must fail *before* the host changes; verify.sh covers the
+# half that can only be established from outside.
+#
+# IDEMPOTENCE: set_fact and assert only. Reports ok, never changed.
+
+- name: Classify the target against the §B2 carve-out
+  ansible.builtin.set_fact:
+    # `group_names` is the list of groups this host resolved into, so a host reached
+    # through `--limit` still carries its real inventory groups.
+    tls_mode_guard_is_dev: "{{ tls_mode_guard_dev_group in group_names }}"
+    # `ansible_host` is what we actually dial. Falls back to inventory_hostname,
+    # which is what Ansible itself would connect to when ansible_host is unset.
+    tls_mode_guard_address: "{{ ansible_host | default(inventory_hostname) }}"
+
+- name: "PRECONDITION — refuse plaintext (buzz_tls_mode: none) on a non-dev target"
+  ansible.builtin.assert:
+    that:
+      - buzz_tls_mode != 'none' or tls_mode_guard_is_dev | bool
+    fail_msg: >-
+      REFUSING TO PROCEED — nothing on this host has been changed.
+      Target '{{ inventory_hostname }}' selects buzz_tls_mode: none but is not in the
+      '{{ tls_mode_guard_dev_group }}' group (groups: {{ group_names | join(', ') }}).
+      hardening-spec.md §B2, production invariant: "buzz_tls_mode: none is prohibited
+      on every VPS, cloud host, bridged VM, host-only VM, or publicly reachable
+      target. Production must enable Caddy with BUZZ_COMPOSE_TLS=true;
+      compose.caddy.yml must remove the relay's published port, and only the declared
+      TLS ingress ports may be externally reachable. Automation must fail before
+      changing the host if a non-dev inventory selects none."
+      Set buzz_tls_mode to 'acme' (or 'internal' to rehearse without a public
+      certificate). Do NOT resolve this by adding the host to the dev group — the
+      exception is for the VirtualBox NAT target, not for the group's name.
+    success_msg: >-
+      {{ 'TLS mode ' ~ buzz_tls_mode ~ ' — Caddy terminates and compose.caddy.yml unpublishes the relay'
+         if buzz_tls_mode != 'none'
+         else 'plaintext permitted: ' ~ inventory_hostname ~ ' is in the ' ~ tls_mode_guard_dev_group ~ ' group (§B2 dev exception)' }}
+
+- name: "PRECONDITION — the plaintext exception requires a loopback-only NAT target"
+  # The second condition, and the one group membership cannot supply. A bridged or
+  # host-only VM placed in the `dev` group is named by the invariant as prohibited;
+  # what makes the sanctioned target different is that it is reached only through the
+  # loopback-bound VirtualBox NAT forward. If we are dialling a routable address, the
+  # thing in front of us is not that target, whatever the group says.
+  when: buzz_tls_mode == 'none'
+  ansible.builtin.assert:
+    that:
+      - tls_mode_guard_address in tls_mode_guard_loopback_addresses
+    fail_msg: >-
+      REFUSING TO PROCEED — nothing on this host has been changed.
+      Target '{{ inventory_hostname }}' selects buzz_tls_mode: none and is in the
+      '{{ tls_mode_guard_dev_group }}' group, but Ansible reaches it at
+      '{{ tls_mode_guard_address }}', which is not loopback
+      ({{ tls_mode_guard_loopback_addresses | join(', ') }}). hardening-spec.md §B2's
+      sole development exception covers "the dev-vm VirtualBox NAT target ... only
+      when the corresponding host NAT forward is bound exactly to 127.0.0.1:3000",
+      and prohibits plaintext on a bridged VM, a host-only VM or any publicly
+      reachable target. A routable connection address means this is not the NAT
+      target the exception describes. Use buzz_tls_mode: internal or acme.
+    success_msg: >-
+      plaintext exception holds: reached at {{ tls_mode_guard_address }} (loopback).
+      The NAT forward's own binding and off-host unreachability are asserted by
+      scripts/verify.sh, which runs where VBoxManage exists.

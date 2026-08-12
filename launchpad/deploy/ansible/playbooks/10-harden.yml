@@ -54,6 +54,12 @@
           connection has no way in. Current ansible_user is '{{ ansible_user }}'.
 
   roles:
+    # FIRST, AHEAD OF EVERY HARDENING ROLE. The pre_tasks above are read-only
+    # (`id -u` + assert), so this still precedes every host change, which is what
+    # hardening-spec.md §B2 means by "the fail-closed check ... is a precondition,
+    # not a post-check". It matters most in this play: the roles below rewrite sshd
+    # policy and enable a firewall, and two of them can lock you out.
+    - role: tls_mode_guard
     - role: hardening_ssh       # access first
     - role: hardening_firewall  # then ingress
     - role: hardening_kernel
@@ -62,6 +68,19 @@
 
   post_tasks:
     # Hardening that breaks the thing it hardens is not finished (SOP Step 13.8).
+    #
+    # MODE-AWARE, because there are two topologies and this probe has to hit the
+    # listener that actually exists. buzz_probe_scheme/buzz_probe_port are derived
+    # from buzz_tls_mode in group_vars/all.yml — https://…:443 through Caddy under
+    # the TLS modes, http://…:3000 straight to the relay on the plaintext default.
+    # Hardcoding 443 here made this play fail on the dev VM's own default while the
+    # stack was perfectly healthy.
+    #
+    # --http1.1 is kept unconditionally. It is only load-bearing over TLS (curl
+    # negotiates HTTP/2 via ALPN there), and on plaintext curl speaks HTTP/1.1
+    # anyway — so the flag is harmless on the default path and removing it would
+    # invite someone to drop it from the WebSocket checks too, where it is the
+    # difference between 101 and a meaningless 200.
     - name: Re-prove the stack still works after hardening
       ansible.builtin.command:
         argv:
@@ -75,10 +94,10 @@
           - --max-time
           - "8"
           - --resolve
-          - "{{ buzz_domain }}:443:127.0.0.1"
+          - "{{ buzz_domain }}:{{ buzz_probe_port }}:127.0.0.1"
           - -H
           - "Host: {{ buzz_authority }}"
-          - "https://{{ buzz_domain }}/"
+          - "{{ buzz_probe_scheme }}://{{ buzz_domain }}:{{ buzz_probe_port }}/"
       register: post_harden
       changed_when: false
 

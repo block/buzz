@@ -34,4 +34,8 @@
           written for. Resolve it with scripts/resolve-image-tag.sh.
 
   roles:
+    # FIRST, ON EVERY PLAY IN THIS TREE. This is the play that writes .env, so
+    # hardening-spec.md §B2's "fail before changing the host if a non-dev inventory
+    # selects none" has to be satisfied ahead of relay_config, not inside it.
+    - role: tls_mode_guard
     - role: relay_config

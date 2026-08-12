@@ -2,4 +2,31 @@
 # Caddy site addresses take a hostname, but BUZZ_ADMIN_HOST carries the port the
 # relay expects to see in the Host header. Strip the port for SNI/--resolve while
 # keeping the full authority for the Host header itself.
+#
+# Under the plaintext default there is no SNI and no Caddy site address at all —
+# the relay selects the admin surface from the Host header on its single listener.
+# The stripped name is still what --resolve needs, so the derivation is unchanged.
 buzz_admin_sni: "{{ buzz_admin_host | regex_replace(':[0-9]+$', '') }}"
+
+# ---------------------------------------------------------------- published ports
+# What each topology is ALLOWED to publish on the host, as strings (docker compose ps
+# reports PublishedPort as a JSON number; every comparison below casts to string so a
+# type mismatch cannot silently reject a legitimate port or accept an illegitimate
+# one).
+#
+#   TLS modes  80 and 443 — Caddy's ingress. The relay publishes nothing, closed by
+#              compose.caddy.yml's `ports: !reset []` (hardening-spec.md §B2
+#              required control 1).
+#   none       3000 only, and ONLY on loopback. There is no proxy to unpublish the
+#              relay, so §B2 required control 2's bind-address restriction is what
+#              replaces control 1. See buzz_loopback_only_published_ports below.
+buzz_expected_published_ports: >-
+  {{ [buzz_plaintext_publish_port] if not buzz_tls_enabled | bool else ['80', '443'] }}
+
+# Ports from the list above that must ADDITIONALLY be bound to a loopback address.
+# Empty under the TLS modes: Caddy's 80/443 are the intended public ingress and
+# upstream compose.caddy.yml publishes them with no host IP on purpose, so Docker
+# binds 0.0.0.0 and :: — that is the reverse proxy doing its job, and §B2's own nmap
+# list deliberately omits 80 and 443 for the same reason.
+buzz_loopback_only_published_ports: >-
+  {{ [buzz_plaintext_publish_port] if not buzz_tls_enabled | bool else [] }}
