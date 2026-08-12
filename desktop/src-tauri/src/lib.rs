@@ -889,6 +889,7 @@ pub fn run() {
             fetch_join_policy,
             set_prevent_sleep_active,
             get_agent_memory,
+            review_agent_memory_proposal,
             relay_reconnect_hook,
             relay_reconnect_hook_configured,
             observer_archive_default_enabled,

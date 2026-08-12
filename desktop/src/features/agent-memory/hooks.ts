@@ -7,6 +7,7 @@ import {
   type AgentMemoryListing,
 } from "@/shared/api/tauriEngrams";
 import { buildMemoryGraph, type MemoryGraph } from "./lib/buildMemoryGraph";
+import { MEMORY_PROPOSAL_PREFIX } from "./lib/memoryProposal";
 
 export const agentMemoryQueryKey = (agentPubkey: string) =>
   ["agent-memory", agentPubkey.toLowerCase()] as const;
@@ -91,7 +92,12 @@ export function useAgentMemoryGraph(
   const query = useAgentMemoryQuery(agentPubkey, options);
   const graph = React.useMemo<MemoryGraph | null>(() => {
     if (!query.data) return null;
-    return buildMemoryGraph(query.data);
+    return buildMemoryGraph({
+      ...query.data,
+      memories: query.data.memories.filter(
+        (entry) => !entry.slug.startsWith(MEMORY_PROPOSAL_PREFIX),
+      ),
+    });
   }, [query.data]);
   return { query, graph };
 }
