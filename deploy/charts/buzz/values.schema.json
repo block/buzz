@@ -200,7 +200,8 @@
         "bucket": { "type": "string", "minLength": 1 },
         "region": {
           "type": "string",
-          "description": "Optional S3 region used for SigV4 signing. When empty, BUZZ_S3_REGION is omitted so the relay can use AWS_REGION or its own default."
+          "minLength": 1,
+          "description": "S3 region used for SigV4 signing by the relay and deletion operator. Defaults to us-east-1 for bundled MinIO/local deployments; set the provider region explicitly when it differs."
         },
         "addressingStyle": {
           "type": "string",

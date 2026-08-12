@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{Sink, SinkExt, StreamExt};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
@@ -20,7 +20,10 @@ use nostr::Filter;
 
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
-use crate::state::{run_registered_community_connection, AppState};
+use crate::state::{
+    run_registered_community_connection, AppState, CommunityConnectionControl,
+    CommunityDisconnectReason,
+};
 use buzz_pubsub::EventTopic;
 
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
@@ -128,6 +131,7 @@ pub async fn handle_connection(
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
+    let control = CommunityConnectionControl::new(cancel);
     let community_id = tenant.community();
     let registry = Arc::clone(&state.community_connections);
     let check_state = Arc::clone(&state);
@@ -136,9 +140,9 @@ pub async fn handle_connection(
         &registry,
         conn_id,
         community_id,
-        cancel.clone(),
+        control,
         move || async move { check_state.db.is_community_active(community_id).await },
-        move || handle_active_connection(socket, run_state, addr, tenant, conn_id, cancel),
+        move |control| handle_active_connection(socket, run_state, addr, tenant, conn_id, control),
     )
     .await;
 }
@@ -149,8 +153,10 @@ async fn handle_active_connection(
     addr: SocketAddr,
     tenant: TenantContext,
     conn_id: Uuid,
-    cancel: CancellationToken,
+    control: CommunityConnectionControl,
 ) {
+    let cancel = control.cancellation_token();
+    let disconnect_reason = control.disconnect_reason();
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -226,7 +232,14 @@ async fn handle_active_connection(
     let (ws_send, ws_recv) = socket.split();
 
     let send_cancel = cancel.child_token();
-    let send_task = tokio::spawn(send_loop(ws_send, rx, ctrl_rx, restart_rx, send_cancel));
+    let send_task = tokio::spawn(send_loop(
+        ws_send,
+        rx,
+        ctrl_rx,
+        restart_rx,
+        send_cancel,
+        disconnect_reason,
+    ));
 
     let missed_pongs = Arc::new(AtomicU8::new(0));
     let heartbeat_cancel = cancel.clone();
@@ -310,8 +323,17 @@ async fn send_loop(
     ctrl_rx: mpsc::Receiver<WsMessage>,
     restart_rx: mpsc::Receiver<RestartClose>,
     cancel: CancellationToken,
+    disconnect_reason: watch::Receiver<Option<CommunityDisconnectReason>>,
 ) {
-    send_loop_inner(ws_send, data_rx, ctrl_rx, restart_rx, cancel).await;
+    send_loop_inner(
+        ws_send,
+        data_rx,
+        ctrl_rx,
+        restart_rx,
+        cancel,
+        disconnect_reason,
+    )
+    .await;
 }
 
 async fn send_loop_inner<S>(
@@ -320,6 +342,7 @@ async fn send_loop_inner<S>(
     mut ctrl_rx: mpsc::Receiver<WsMessage>,
     mut restart_rx: mpsc::Receiver<RestartClose>,
     cancel: CancellationToken,
+    disconnect_reason: watch::Receiver<Option<CommunityDisconnectReason>>,
 ) where
     S: Sink<WsMessage> + Unpin,
 {
@@ -359,7 +382,10 @@ async fn send_loop_inner<S>(
                         break;
                     }
                 }
-                let _ = ws_send.send(WsMessage::Close(None)).await;
+                let close = disconnect_reason
+                    .borrow()
+                    .map_or(WsMessage::Close(None), |reason| reason.close_message());
+                let _ = ws_send.send(close).await;
                 break;
             }
             Some(ctrl_msg) = ctrl_rx.recv() => {
@@ -787,6 +813,17 @@ mod tests {
         }
     }
 
+    fn ordinary_disconnect_reason() -> watch::Receiver<Option<CommunityDisconnectReason>> {
+        let (_tx, rx) = watch::channel(None);
+        rx
+    }
+
+    fn deleted_community_disconnect_reason() -> watch::Receiver<Option<CommunityDisconnectReason>> {
+        let (tx, rx) = watch::channel(None);
+        tx.send_replace(Some(CommunityDisconnectReason::CommunityDeleted));
+        rx
+    }
+
     fn text_payloads(messages: &[WsMessage]) -> Vec<String> {
         messages
             .iter()
@@ -823,7 +860,15 @@ mod tests {
 
         let (sink, state) = MockSink::new(Some(1));
         let (_restart_tx, restart_rx) = mpsc::channel(1);
-        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            CancellationToken::new(),
+            ordinary_disconnect_reason(),
+        )
+        .await;
 
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(state.flush_count, 1);
@@ -844,7 +889,15 @@ mod tests {
 
         let (sink, state) = MockSink::new(Some(1));
         let (_restart_tx, restart_rx) = mpsc::channel(1);
-        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            CancellationToken::new(),
+            ordinary_disconnect_reason(),
+        )
+        .await;
 
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(state.flush_count, 1);
@@ -870,7 +923,15 @@ mod tests {
 
         let (sink, state) = MockSink::new(Some(2));
         let (_restart_tx, restart_rx) = mpsc::channel(1);
-        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            CancellationToken::new(),
+            ordinary_disconnect_reason(),
+        )
+        .await;
 
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(state.flush_count, 2);
@@ -894,7 +955,15 @@ mod tests {
             .expect("queue restart close");
 
         let (sink, state) = MockSink::new(None);
-        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            CancellationToken::new(),
+            ordinary_disconnect_reason(),
+        )
+        .await;
 
         assert_eq!(flushed_rx.await, Ok(true));
         let state = state.lock().expect("mock sink poisoned");
@@ -923,12 +992,73 @@ mod tests {
             .expect("queue restart close");
 
         let (sink, state) = MockSink::new(Some(1));
-        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            CancellationToken::new(),
+            ordinary_disconnect_reason(),
+        )
+        .await;
 
         assert_eq!(flushed_rx.await, Ok(false));
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(state.flush_count, 1);
         assert_eq!(state.messages.len(), 1, "no fallback close is appended");
+    }
+
+    #[tokio::test]
+    async fn send_loop_sends_policy_close_when_community_is_deleted() {
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let (sink, state) = MockSink::new(None);
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            cancel,
+            deleted_community_disconnect_reason(),
+        )
+        .await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.messages.len(), 1);
+        match &state.messages[0] {
+            WsMessage::Close(Some(close)) => {
+                assert_eq!(close.code, axum::extract::ws::close_code::POLICY);
+                assert_eq!(close.reason.as_str(), "community deleted");
+            }
+            other => panic!("expected one 1008 deletion close, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_loop_sends_bare_close_for_ordinary_cancellation() {
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let (sink, state) = MockSink::new(None);
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            cancel,
+            ordinary_disconnect_reason(),
+        )
+        .await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.messages.as_slice(), [WsMessage::Close(None)]);
     }
 
     #[tokio::test]
@@ -951,7 +1081,15 @@ mod tests {
 
         let (sink, state) = MockSink::new(None);
         let (_restart_tx, restart_rx) = mpsc::channel(1);
-        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, cancel).await;
+        send_loop_inner(
+            sink,
+            data_rx,
+            ctrl_rx,
+            restart_rx,
+            cancel,
+            ordinary_disconnect_reason(),
+        )
+        .await;
 
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(
@@ -966,8 +1104,8 @@ mod tests {
             other => panic!("expected the ban reason frame first, got {other:?}"),
         }
         assert!(
-            matches!(state.messages[1], WsMessage::Close(_)),
-            "Close is sent only after the reason frame is flushed"
+            matches!(state.messages[1], WsMessage::Close(None)),
+            "ordinary cancellation retains the bare Close after the reason frame"
         );
     }
 }
