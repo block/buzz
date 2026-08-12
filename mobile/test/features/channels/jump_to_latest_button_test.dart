@@ -5,25 +5,21 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/widget_helpers.dart';
 
+Future<void> _pump(WidgetTester tester, Widget child) {
+  return tester.pumpWidget(WidgetHelpers.testable(child: child));
+}
+
 void main() {
   group('JumpToLatestButton', () {
     testWidgets('renders the Latest label', (tester) async {
-      await tester.pumpWidget(
-        WidgetHelpers.testable(
-          child: JumpToLatestButton(onPressed: () {}),
-        ),
-      );
+      await _pump(tester, JumpToLatestButton(onPressed: () {}));
 
       expect(find.text('Latest'), findsOneWidget);
     });
 
     testWidgets('invokes onPressed when tapped', (tester) async {
       var taps = 0;
-      await tester.pumpWidget(
-        WidgetHelpers.testable(
-          child: JumpToLatestButton(onPressed: () => taps++),
-        ),
-      );
+      await _pump(tester, JumpToLatestButton(onPressed: () => taps++));
 
       await tester.tap(find.text('Latest'));
       await tester.pump();
@@ -31,48 +27,35 @@ void main() {
       expect(taps, 1);
     });
 
-    testWidgets('exposes the surface key so each surface is targetable', (
+    testWidgets('exposes a surface key so surfaces stay targetable', (
       tester,
     ) async {
-      await tester.pumpWidget(
-        WidgetHelpers.testable(
-          child: JumpToLatestButton(
-            surfaceKey: const ValueKey('thread-jump-to-latest-surface'),
-            onPressed: () {},
-          ),
-        ),
+      const surfaceKey = ValueKey('thread-jump-to-latest-surface');
+      final button = JumpToLatestButton(
+        surfaceKey: surfaceKey,
+        onPressed: () {},
       );
+      await _pump(tester, button);
 
-      expect(
-        find.byKey(const ValueKey('thread-jump-to-latest-surface')),
-        findsOneWidget,
-      );
+      expect(find.byKey(surfaceKey), findsOneWidget);
     });
 
     testWidgets('is marked as a button for assistive tech', (tester) async {
-      await tester.pumpWidget(
-        WidgetHelpers.testable(
-          child: JumpToLatestButton(onPressed: () {}),
-        ),
-      );
+      await _pump(tester, JumpToLatestButton(onPressed: () {}));
 
-      final semantics = tester.widget<Semantics>(
-        find
-            .descendant(
-              of: find.byType(JumpToLatestButton),
-              matching: find.byType(Semantics),
-            )
-            .first,
+      final finder = find.descendant(
+        of: find.byType(JumpToLatestButton),
+        matching: find.byType(Semantics),
       );
+      final semantics = tester.widget<Semantics>(finder.first);
+
       expect(semantics.properties.button, isTrue);
     });
   });
 
   group('UnreadDivider', () {
     testWidgets('renders the New label', (tester) async {
-      await tester.pumpWidget(
-        WidgetHelpers.testable(child: const UnreadDivider()),
-      );
+      await _pump(tester, const UnreadDivider());
 
       expect(find.text('New'), findsOneWidget);
     });
