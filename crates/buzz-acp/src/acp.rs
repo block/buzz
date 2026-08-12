@@ -878,7 +878,14 @@ impl AcpClient {
     /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
-        self.goose_usage.take()
+        let usage = self.goose_usage.take();
+        if let Some(payload) = usage
+            .as_ref()
+            .and_then(crate::agent_activity::usage_observer_payload)
+        {
+            self.observe("agent_activity_turn_usage", payload);
+        }
+        usage
     }
 
     /// Notify the usage tracker that buzz-acp just spawned a new session.

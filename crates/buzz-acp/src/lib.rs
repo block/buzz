@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod agent_activity;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -1876,6 +1877,7 @@ async fn tokio_main() -> Result<()> {
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
+    let mut relay_activity_publisher_task = None;
     let mut relay_observer_publisher = None;
     if config.relay_observer {
         if let (Some(observer), Some(owner_pubkey_hex)) =
@@ -1969,6 +1971,23 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    let channel_info = pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client());
+
+    // Shared activity is derived from the same in-process observer as the
+    // owner-only encrypted feed, but is independently sanitized, signed, paced,
+    // and authorized by the relay. It starts after channel discovery so DM and
+    // non-shared channel traffic can be suppressed before publication.
+    if let Some(activity_observer) = observer.clone() {
+        relay_activity_publisher_task = Some(agent_activity::spawn_relay_activity_publisher(
+            activity_observer,
+            relay.event_publisher(),
+            config.keys.clone(),
+            pubkey_hex.clone(),
+            channel_info.clone(),
+        ));
+        tracing::info!("member-safe relay activity enabled");
+    }
+
     if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
         relay_observer_publisher.take()
     {
@@ -2032,7 +2051,7 @@ async fn tokio_main() -> Result<()> {
             .to_string_lossy()
             .to_string(),
         rest_client: relay.rest_client(),
-        channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
+        channel_info,
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
@@ -3337,6 +3356,9 @@ async fn tokio_main() -> Result<()> {
     if let Some(handle) = relay_observer_publisher_task.take() {
         handle.abort();
     }
+    if let Some(handle) = relay_activity_publisher_task.take() {
+        handle.abort();
+    }
 
     // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s
     // for the background task to finish, rather than aborting immediately (#40).
@@ -3876,6 +3898,23 @@ fn handle_prompt_result(
         PromptSource::Heartbeat => None,
     };
     let turn_id = result.turn_id.clone();
+    if let (Some(observer), Some(channel_id)) = (observer.as_ref(), channel_id) {
+        let status = match &result.outcome {
+            PromptOutcome::Ok(crate::acp::StopReason::Cancelled)
+            | PromptOutcome::Cancelled
+            | PromptOutcome::CancelDrainTimeout(_) => "cancelled",
+            PromptOutcome::Ok(_) => "completed",
+            PromptOutcome::Error(_) | PromptOutcome::Timeout(_) | PromptOutcome::AgentExited => {
+                "failed"
+            }
+        };
+        observer.emit(
+            "agent_activity_turn_terminal",
+            Some(agent_index),
+            &observer::context_for(Some(channel_id), None, Some(turn_id.clone())),
+            serde_json::json!({"status": status}),
+        );
+    }
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -4114,10 +4153,17 @@ fn recover_panicked_agent(
     }
 
     if let Some(ref observer) = observer {
+        let context = observer::context_for(meta.channel_id, None, Some(meta.turn_id.clone()));
+        observer.emit(
+            "agent_activity_turn_terminal",
+            Some(i),
+            &context,
+            serde_json::json!({"status": "failed"}),
+        );
         observer.emit(
             "agent_panic",
             Some(i),
-            &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
+            &context,
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
@@ -7094,6 +7140,10 @@ mod error_outcome_emission_tests {
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
         let observer = ObserverHandle::in_process();
+        let expected_terminal_status = match &outcome {
+            PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_) => "cancelled",
+            _ => "failed",
+        };
 
         let result = PromptResult {
             agent,
@@ -7117,17 +7167,25 @@ mod error_outcome_emission_tests {
             None,
         );
 
-        let turn_errors: Vec<_> = observer
-            .snapshot()
-            .into_iter()
-            .filter(|e| e.kind == "turn_error")
-            .collect();
+        let snapshot = observer.snapshot();
+        let turn_errors: Vec<_> = snapshot.iter().filter(|e| e.kind == "turn_error").collect();
         assert!(
             turn_errors
                 .iter()
                 .all(|event| event.turn_id.as_deref() == Some("test-turn-id")),
             "turn_error must retain the completed turn id"
         );
+        let terminals: Vec<_> = snapshot
+            .iter()
+            .filter(|event| event.kind == "agent_activity_turn_terminal")
+            .collect();
+        assert_eq!(
+            terminals.len(),
+            1,
+            "every non-success channel turn is terminal"
+        );
+        assert_eq!(terminals[0].turn_id.as_deref(), Some("test-turn-id"));
+        assert_eq!(terminals[0].payload["status"], expected_terminal_status);
         turn_errors.len()
     }
 
@@ -7200,6 +7258,17 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+        let terminal = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "agent_activity_turn_terminal")
+            .expect("panic recovery emits a safe terminal activity event");
+        assert_eq!(
+            terminal.channel_id.as_deref(),
+            Some(channel_id.to_string().as_str())
+        );
+        assert_eq!(terminal.turn_id.as_deref(), Some("panic-turn-id"));
+        assert_eq!(terminal.payload["status"], "failed");
     }
 
     #[tokio::test]
