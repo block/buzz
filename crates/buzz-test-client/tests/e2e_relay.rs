@@ -120,7 +120,12 @@ async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
 }
 
 async fn seed_relay_owner(keys: &Keys) {
-    seed_relay_member("localhost:3000", keys, "owner").await;
+    seed_relay_member(&relay_authority(), keys, "owner").await;
+}
+
+fn relay_authority() -> String {
+    let url = url::Url::parse(&relay_http_url()).expect("relay HTTP URL");
+    url[url::Position::BeforeHost..url::Position::AfterPort].to_string()
 }
 
 fn http_origin_for_host(host: &str) -> String {
@@ -315,7 +320,7 @@ async fn test_invite_claim_rejects_invalid_code() {
 #[ignore]
 async fn test_invite_mint_requires_owner_or_admin() {
     let member = Keys::generate();
-    seed_relay_member("localhost:3000", &member, "member").await;
+    seed_relay_member(&relay_authority(), &member, "member").await;
 
     let response = invite_post(&member, "/api/invites", "{}").await;
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
@@ -791,10 +796,10 @@ async fn test_auth_event_kind_rejected() {
 
 /// NIP-11 max_subscriptions must be enforced; (limit+1)th REQ gets CLOSED.
 ///
-/// The relay's MAX_SUBSCRIPTIONS is 1024. Opening 1024 subs in a test is slow,
-/// so we open a smaller batch and verify the NIP-11 advertised limit matches
-/// the actual enforcement constant. The full-limit test is covered by the
-/// NIP-11 assertion below (which verifies the advertised value is 1024).
+/// This is a protocol-cap test, not an admission-throughput test. Open one REQ
+/// at a time and wait out any shared fixed-window quota before retrying a REQ
+/// rejected specifically as `rate-limited`, so production admission remains
+/// enabled while the test deterministically reaches the independent 1024 cap.
 #[tokio::test]
 #[ignore]
 async fn test_subscription_limit_enforced() {
@@ -802,58 +807,73 @@ async fn test_subscription_limit_enforced() {
     let keys = Keys::generate();
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
-    // Open 1024 subscriptions (the relay's MAX_SUBSCRIPTIONS).
     for i in 0..1024 {
         let sid = format!("limit-sub-{i}");
-        let filter = Filter::new().kind(Kind::Custom(9));
-        client
-            .subscribe(&sid, vec![filter])
-            .await
-            .expect("subscribe");
-        // Drain EOSE to avoid buffer buildup.
-        client
-            .collect_until_eose(&sid, Duration::from_secs(5))
-            .await
-            .expect("EOSE");
+        let filter = Filter::new().kind(Kind::Custom(49_999));
+        subscribe_until_eose(&mut client, &sid, filter).await;
     }
 
     let overflow_sid = sub_id("overflow");
-    // Use a kind that no other test writes, so we don't receive stale events.
-    let filter = Filter::new().kind(Kind::Custom(49999));
-    client
-        .subscribe(&overflow_sid, vec![filter])
-        .await
-        .expect("send REQ");
-
-    // Drain EOSE and stale events from the 100 earlier subscriptions
-    // until we receive the CLOSED for the overflow subscription.
-    let msg = loop {
-        let m = client
-            .recv_event(Duration::from_secs(5))
+    let filter = Filter::new().kind(Kind::Custom(49_999));
+    loop {
+        client
+            .subscribe(&overflow_sid, vec![filter.clone()])
             .await
-            .expect("recv CLOSED (or timeout)");
-        match &m {
-            RelayMessage::Eose { .. } => continue,
-            RelayMessage::Event { .. } => continue, // stale event from earlier subs
-            _ => break m,
-        }
-    };
+            .expect("send overflow REQ");
 
-    match msg {
-        RelayMessage::Closed {
-            subscription_id,
-            message,
-        } => {
-            assert_eq!(subscription_id, overflow_sid);
-            assert!(
-                message.to_lowercase().contains("too many"),
-                "Expected 'too many' in CLOSED message, got: {message}"
-            );
+        match client
+            .recv_event(Duration::from_secs(6))
+            .await
+            .expect("recv overflow CLOSED")
+        {
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == overflow_sid && message.starts_with("rate-limited:") => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } => {
+                assert_eq!(subscription_id, overflow_sid);
+                assert!(
+                    message.to_lowercase().contains("too many"),
+                    "Expected 'too many' in CLOSED message, got: {message}"
+                );
+                break;
+            }
+            other => panic!("Expected CLOSED for overflow subscription, got {other:?}"),
         }
-        other => panic!("Expected CLOSED for overflow subscription, got {other:?}"),
     }
 
     client.disconnect().await.expect("disconnect");
+}
+
+async fn subscribe_until_eose(client: &mut BuzzTestClient, sid: &str, filter: Filter) {
+    loop {
+        client
+            .subscribe(sid, vec![filter.clone()])
+            .await
+            .expect("subscribe");
+        match client
+            .recv_event(Duration::from_secs(6))
+            .await
+            .expect("EOSE or rate-limit CLOSED")
+        {
+            RelayMessage::Eose { subscription_id } => {
+                assert_eq!(subscription_id, sid);
+                return;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == sid && message.starts_with("rate-limited:") => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            other => panic!("unexpected response while opening {sid}: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]

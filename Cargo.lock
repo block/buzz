@@ -866,6 +866,7 @@ dependencies = [
  "buzz-auth",
  "buzz-core",
  "buzz-db",
+ "buzz-deletion",
  "buzz-media",
  "buzz-pubsub",
  "buzz-search",
@@ -1067,6 +1068,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-deletion"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buzz-core",
+ "buzz-db",
+ "buzz-media",
+ "chrono",
+ "clap",
+ "deadpool-redis",
+ "hex",
+ "redis",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-dev-mcp"
 version = "0.1.0"
 dependencies = [
@@ -1239,6 +1262,7 @@ dependencies = [
  "buzz-core",
  "buzz-datastore-tracing",
  "buzz-db",
+ "buzz-deletion",
  "buzz-media",
  "buzz-pubsub",
  "buzz-relay-mesh",
@@ -1398,6 +1422,7 @@ version = "0.1.0"
 dependencies = [
  "buzz-core",
  "buzz-db",
+ "buzz-deletion",
  "chrono",
  "cron",
  "dashmap",
