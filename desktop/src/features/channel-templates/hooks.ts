@@ -24,7 +24,7 @@ export const CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Focus-refetch policy for the channel templates query; consumed by focusRefetchPolicy.test.mjs. */
 export const channelTemplatesFocusRefetchPolicy = {
   staleTime: CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 export const channelTemplatesQueryKey = ["channel-templates"] as const;

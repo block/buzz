@@ -54,12 +54,12 @@ test("channel-templates: skips fresh focus refetch", async () => {
   );
 });
 
-test("channel-templates: refetches genuinely stale data on focus", async () => {
+test("channel-templates: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: channelTemplatesFocusRefetchPolicy.staleTime + 1,
       policy: channelTemplatesFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });

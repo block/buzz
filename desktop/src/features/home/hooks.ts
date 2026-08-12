@@ -12,7 +12,7 @@ export const HOME_FEED_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Focus-refetch policy for the home feed query; consumed by focusRefetchPolicy.test.mjs. */
 export const homeFeedFocusRefetchPolicy = {
   staleTime: HOME_FEED_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 export function useHomeFeedQuery() {
