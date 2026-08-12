@@ -112,6 +112,12 @@ async fn persist_command_event(
         .begin_transaction()
         .await
         .map_err(|e| IngestError::Internal(format!("error: begin transaction: {e}")))?;
+    buzz_deletion::store(&state.db)
+        .guard_transaction(&mut tx, tenant.community())
+        .await
+        .map_err(|error| {
+            IngestError::Rejected(format!("restricted: community writes are fenced: {error}"))
+        })?;
 
     // INSERT with ON CONFLICT DO NOTHING — idempotency guard.
     let id_bytes = event.id.as_bytes();
