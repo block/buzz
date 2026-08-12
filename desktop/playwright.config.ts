@@ -20,6 +20,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/smoke.spec.ts",
+        "**/search-scope-screenshots.spec.ts",
         "**/onboarding-docked-cta-screenshots.spec.ts",
         "**/identity-key-help.spec.ts",
         "**/key-import-reveal.spec.ts",
@@ -62,6 +63,7 @@ export default defineConfig({
         "**/video-attachment.spec.ts",
         "**/spoiler.spec.ts",
         "**/composer-link-shortcut.spec.ts",
+        "**/entity-link-recipient-cards.spec.ts",
         "**/composer-selection-formatting.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
         "**/mentions.spec.ts",

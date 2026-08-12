@@ -154,7 +154,10 @@ function RelayMemberRow({
             <Shield className="h-4 w-4 text-blue-500" />
           ) : null}
         </div>
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <div
+          className="flex items-center gap-1.5 text-xs text-muted-foreground/70"
+          data-settings-subcopy
+        >
           <span className="shrink-0 capitalize">{member.role}</span>
           <span aria-hidden="true" className="shrink-0">
             ·
@@ -311,19 +314,18 @@ export function CommunityMembersSettingsCard({
         description="Manage members and community access."
       />
 
-      <div className="overflow-hidden rounded-2xl border border-border/70 bg-background/70 shadow-xs">
+      <div className="overflow-hidden rounded-xl border border-border/70 bg-background/70 divide-y divide-border/55">
+        <div className="flex min-h-14 items-center px-4 py-3">
+          <h2 className="text-lg font-semibold tracking-tight">
+            Members
+            {members.length > 0 ? (
+              <span className="ml-1.5 text-sm font-normal text-muted-foreground">
+                {members.length}
+              </span>
+            ) : null}
+          </h2>
+        </div>
         <div className="space-y-3 p-4 sm:p-5">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-sm font-medium">
-              Members
-              {members.length > 0 ? (
-                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                  {members.length}
-                </span>
-              ) : null}
-            </h2>
-          </div>
-
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input

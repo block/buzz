@@ -12,8 +12,10 @@ import {
   AttachmentTrigger,
 } from "@/shared/ui/attachment";
 import { LinkPreviewControls } from "@/shared/ui/link-preview-controls";
+import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 
 function getHostname(preview: ResolvedLinkPreview): string {
+  if (preview.href.startsWith("buzz://")) return preview.provider;
   try {
     return new URL(preview.href).hostname.replace(/^www\./, "");
   } catch {
@@ -66,14 +68,18 @@ export function CompactLinkPreviewAttachment({
   const showFallback =
     preview.imageState === "fallback" || Boolean(imageSrc && !showImage);
   const hostname = getHostname(preview);
+  const showBuzzMark =
+    preview.kind === "buzz-pull-request" ||
+    preview.kind === "buzz-issue" ||
+    preview.kind === "buzz-repository";
 
   return (
     <div className={cn("relative w-96 max-w-full shrink-0", className)}>
       <Attachment
         className={cn(
-          "h-21 min-h-21 max-h-21 w-full bg-transparent no-underline shadow-none hover:bg-transparent",
+          "w-full bg-transparent no-underline shadow-none hover:bg-transparent",
           reserveImage
-            ? "gap-0 border-0 p-0 hover:border-transparent"
+            ? "h-21 min-h-21 max-h-21 gap-0 border-0 p-0 hover:border-transparent"
             : "rounded-none border-0 border-l-[3px] border-border px-0 py-1 pl-3 hover:border-border",
         )}
         data-image-state={preview.imageState}
@@ -120,7 +126,15 @@ export function CompactLinkPreviewAttachment({
             rel="noreferrer"
             target="_blank"
           >
-            {preview.faviconDataUrl ? (
+            {showBuzzMark ? (
+              <span
+                aria-hidden="true"
+                className="flex size-3 shrink-0 items-center text-foreground/70"
+                data-link-preview-hostname-buzz-mark=""
+              >
+                <BuzzMark className="h-auto w-full" />
+              </span>
+            ) : preview.faviconDataUrl ? (
               <img
                 alt=""
                 aria-hidden="true"

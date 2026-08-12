@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyLastMessages,
   reconcileRefreshedCachedChannel,
   upsertCachedChannel,
   upsertCachedChannelMember,
@@ -107,6 +108,59 @@ test("reconcileRefreshedCachedChannel_restoresOpenedDmAfterStaleRefresh", () => 
     fizzPubkey,
   ]);
   assert.deepEqual(reconciled[0], openedDm);
+});
+
+// ── applyLastMessages ─────────────────────────────────────────────────────────
+
+test("applyLastMessages_preservesReferenceWhenTimestampUnchanged", () => {
+  const channel = makeChannel("general", "General");
+  channel.lastMessageAt = "2026-01-01T00:00:00Z";
+
+  const result = applyLastMessages([channel], {
+    general: "2026-01-01T00:00:00Z",
+  });
+
+  // Must be the same object reference — structural sharing avoids re-renders.
+  assert.strictEqual(
+    result[0],
+    channel,
+    "reference must be preserved when lastMessageAt is unchanged",
+  );
+});
+
+test("applyLastMessages_createsNewObjectWhenTimestampChanges", () => {
+  const channel = makeChannel("general", "General");
+  channel.lastMessageAt = "2026-01-01T00:00:00Z";
+
+  const result = applyLastMessages([channel], {
+    general: "2026-06-15T12:00:00Z",
+  });
+
+  assert.notStrictEqual(
+    result[0],
+    channel,
+    "must create a new object when timestamp changes",
+  );
+  assert.equal(result[0].lastMessageAt, "2026-06-15T12:00:00Z");
+});
+
+test("applyLastMessages_setsNullWhenChannelAbsentFromMap", () => {
+  const channel = makeChannel("general", "General");
+  channel.lastMessageAt = "2026-01-01T00:00:00Z";
+
+  const result = applyLastMessages([channel], {});
+
+  assert.notStrictEqual(result[0], channel);
+  assert.equal(result[0].lastMessageAt, null);
+});
+
+test("applyLastMessages_preservesReferenceWhenBothNull", () => {
+  const channel = makeChannel("general", "General");
+  // lastMessageAt defaults to null in makeChannel
+
+  const result = applyLastMessages([channel], {});
+
+  assert.strictEqual(result[0], channel, "null→null must preserve reference");
 });
 
 test("reconcileRefreshedCachedChannel_preservesRefreshedDmRecency", () => {

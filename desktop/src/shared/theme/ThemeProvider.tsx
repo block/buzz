@@ -26,13 +26,20 @@ import {
 export const THEME_STORAGE_KEY = "buzz-theme";
 const CACHE_KEY = "buzz-theme-cache";
 export const ACCENT_STORAGE_KEY = "buzz-accent-color";
+export const GLASS_BACKGROUND_STORAGE_KEY = "buzz-glass-background";
+export const GLASS_OPACITY_STORAGE_KEY = "buzz-glass-opacity";
+export const PROMINENT_ACTIVE_TAB_STORAGE_KEY = "buzz-prominent-active-tab";
+export const GLASS_OPACITY_MIN = 30;
+export const GLASS_OPACITY_MAX = 90;
+export const DEFAULT_GLASS_OPACITY = 65;
+export const DEFAULT_PROMINENT_ACTIVE_TAB = false;
 export const NEUTRAL_ACCENT = "neutral";
 const FOLLOW_SYSTEM_KEY = "buzz-follow-system";
 const VIDEO_REVIEW_NEUTRAL_ACCENT = "0 0% 98%";
 const VIDEO_REVIEW_CHIP_SURFACE = "#161616";
 const VIDEO_REVIEW_TEXT_CONTRAST = 4.5;
 const VIDEO_REVIEW_CHIP_BACKGROUND_ALPHAS = [0.15, 0.3] as const;
-const BUZZ_VIBRANCY_MATERIAL = "sidebar";
+const GLASS_VIBRANCY_MATERIAL = "sidebar";
 
 export const ACCENT_COLORS = [
   { name: "Neutral", value: NEUTRAL_ACCENT },
@@ -56,6 +63,10 @@ type ThemeContextValue = {
   isLoading: boolean;
   accentColor: string;
   followSystem: boolean;
+  glassBackground: boolean;
+  glassOpacity: number;
+  glassBackgroundSupported: boolean;
+  prominentActiveTab: boolean;
   hasPair: boolean;
   terminalPalette: ThemeInfo["terminalPalette"] | null;
   setTheme: (name: string) => void;
@@ -66,6 +77,9 @@ type ThemeContextValue = {
     accent: string;
     followSystem: boolean;
   }) => void;
+  setGlassBackground: (enabled: boolean) => void;
+  setGlassOpacity: (opacity: number) => void;
+  setProminentActiveTab: (enabled: boolean) => void;
 };
 
 type ThemeProviderProps = {
@@ -244,14 +258,7 @@ function resolveEffectiveAccent(
   return isBuzzTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
 }
 
-/**
- * Toggle the opaque Buzz sidebar-gradient marker. This is always safe to apply
- * synchronously: `data-buzz-sidebar` paints solid gradient colors, so it never
- * makes the window see-through. The *translucent* treatment (transparent
- * root/body) is handled separately via {@link setBuzzTranslucent} because it
- * must be sequenced against the native vibrancy layer — see
- * {@link applyBuzzVibrancy}.
- */
+/** Toggle the Buzz-specific gradient marker independently from glass. */
 function applyBuzzSidebar(themeName: string) {
   const root = document.documentElement;
   if (isBuzzTheme(themeName)) {
@@ -264,145 +271,124 @@ function applyBuzzSidebar(themeName: string) {
   } else {
     root.removeAttribute("data-buzz-sidebar");
     root.removeAttribute("data-buzz-theme");
-    // Leaving Buzz: drop translucency synchronously here too. Going *opaque*
-    // never shows desktop/prior content through, so there's no ordering risk
-    // on the way out — only on the way in.
-    setBuzzTranslucent(false);
   }
 }
 
 /**
- * Toggle the translucent (see-through) treatment: transparent root/body so the
- * native macOS vibrancy layer shows through behind the sidebar glass. The
- * transparent root/body themselves are driven by the `data-buzz-translucent`
- * CSS rule (theme.css), so we only flip the attribute here — no inline styles.
+ * Toggle the transparent CSS surfaces that reveal native macOS vibrancy behind
+ * the navigation and outer chrome. The center content panel remains opaque.
  *
- * IMPORTANT: enabling translucency exposes whatever the compositor paints
+ * IMPORTANT: enabling glass exposes whatever the compositor paints
  * behind the webview. Only enable it once the native `NSVisualEffectView`
- * vibrancy layer is confirmed installed, otherwise there's a frame where the
- * transparent webview reveals the content behind it (the "main app nav
- * underneath" flicker). {@link applyBuzzVibrancy} owns that sequencing.
+ * vibrancy layer and the active theme colors are both ready.
  */
-function setBuzzTranslucent(enabled: boolean) {
+function setGlassBackgroundActive(enabled: boolean) {
   const root = document.documentElement;
   if (enabled) {
-    root.setAttribute("data-buzz-translucent", "");
+    // WKWebView keeps its page canvas opaque unless the root background is an
+    // inline transparent value, even when the equivalent author rule wins in
+    // the stylesheet. Clear it before exposing the native vibrancy layer.
+    root.style.setProperty("background", "transparent");
+    root.setAttribute("data-glass-background", "");
   } else {
-    root.removeAttribute("data-buzz-translucent");
+    root.removeAttribute("data-glass-background");
+    root.style.removeProperty("background");
   }
 }
 
-/**
- * Monotonic token identifying the most recent vibrancy request. Because
- * {@link applyBuzzVibrancy} awaits the native `set_window_vibrancy` IPC, a rapid
- * Buzz → non-Buzz toggle can fire two overlapping calls whose awaits resolve out
- * of order. Each call captures the token before awaiting and re-checks it after;
- * a stale continuation (superseded by a newer request) bails without touching
- * translucency — otherwise the earlier Buzz call could re-add
- * `data-buzz-translucent` after the later non-Buzz call already cleared it,
- * leaving the window transparent under a non-Buzz theme.
- */
-let buzzVibrancyRequest = 0;
+/** Apply the optional higher-contrast selected navigation surface. */
+function setProminentActiveTabActive(enabled: boolean) {
+  document.documentElement.toggleAttribute(
+    "data-prominent-active-tab",
+    enabled,
+  );
+}
+
+function clampGlassOpacity(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_GLASS_OPACITY;
+  return Math.min(
+    GLASS_OPACITY_MAX,
+    Math.max(GLASS_OPACITY_MIN, Math.round(value)),
+  );
+}
+
+function readStoredGlassOpacity(): number {
+  const stored = getStorageItem(GLASS_OPACITY_STORAGE_KEY);
+  return stored === null
+    ? DEFAULT_GLASS_OPACITY
+    : clampGlassOpacity(Number(stored));
+}
+
+/** Set the tint opacity layered above native blur; lower values reveal more. */
+function applyGlassOpacity(value: number) {
+  document.documentElement.style.setProperty(
+    "--glass-background-opacity",
+    `${clampGlassOpacity(value)}%`,
+  );
+}
+
+/** Only the newest overlapping native glass request may update CSS state. */
+let glassVibrancyRequest = 0;
+
+/** Whether the native vibrancy layer is confirmed installed. */
+let glassVibrancyReady = false;
+
+/** The native layer does not need rebuilding when only the theme changes. */
+let glassVibrancyEnabled = false;
+
+/** Mirrors the current preference for the async theme/native handshake. */
+let glassBackgroundPreferenceEnabled = false;
+
+/** Theme colors must be installed before the transparent surface is exposed. */
+let glassThemeReady = false;
 
 /**
- * Whether the native vibrancy layer is confirmed installed for a Buzz theme.
- * Set true only after `set_window_vibrancy(true)` resolves; cleared as soon as a
- * new vibrancy request is issued (its outcome is not yet known).
+ * Theme loading and native vibrancy can finish in either order. Whichever lands
+ * last reveals the glass once both prerequisites are ready.
  */
-let buzzVibrancyReady = false;
-
-/** The native layer does not need rebuilding when Buzz only changes mode. */
-let buzzVibrancyEnabled = false;
-
-/**
- * Enable the CSS translucency treatment, but only once BOTH prerequisites for
- * the current request are in place:
- *
- *  1. the native vibrancy layer is installed ({@link buzzVibrancyReady}), and
- *  2. the Buzz sidebar marker + gradient vars are applied (`data-buzz-sidebar`,
- *     set synchronously by {@link applyBuzzSidebar} inside {@link applyTheme}).
- *
- * Translucency clears the body/sidebar surfaces so the vibrancy layer shows
- * through; enabling it before the Buzz gradient vars are installed would flash a
- * transparent/unstyled sidebar. `applyTheme` (theme vars) and
- * `applyBuzzVibrancy` (native layer) are independent async effects that can win
- * their race in either order, so each calls this after its own step completes —
- * whichever lands last flips translucency on. The token check drops stale
- * continuations superseded by a newer theme switch.
- */
-function maybeEnableBuzzTranslucent(themeName: string, requestToken: number) {
-  if (requestToken !== buzzVibrancyRequest) return;
-  if (!isBuzzTheme(themeName) || !isMacPlatform()) return;
-  if (!buzzVibrancyReady) return;
-  if (!document.documentElement.hasAttribute("data-buzz-sidebar")) return;
-  setBuzzTranslucent(true);
+function maybeEnableGlassBackground(requestToken: number) {
+  if (requestToken !== glassVibrancyRequest) return;
+  if (!glassBackgroundPreferenceEnabled || !isMacPlatform()) return;
+  if (!glassVibrancyReady || !glassThemeReady) return;
+  setGlassBackgroundActive(true);
 }
 
 /**
- * Sequence the native vibrancy layer and the CSS translucency so they land in
- * the right order and never leave a transparent webview with nothing painted
- * behind it:
- *
- * - Entering Buzz (macOS): install the vibrancy layer first (await the IPC),
- *   *then* flip on translucency. This closes the frame-gap where the root was
- *   transparent before the vibrancy view existed — the flicker.
- * - Leaving Buzz: translucency was already removed synchronously in
- *   `applyBuzzSidebar` (safe — opaque never shows through), so here we just
- *   clear the native layer.
- *
- * On non-macOS `set_window_vibrancy` is a no-op and translucency stays off, so
- * these platforms fall back to the opaque Buzz gradient.
- *
- * Overlapping calls are guarded by {@link buzzVibrancyRequest} so a stale async
- * continuation can't re-enable translucency after a newer theme superseded it.
+ * Install native vibrancy before making the webview transparent. Non-macOS and
+ * web builds retain the normal opaque theme surface.
  */
-async function applyBuzzVibrancy(themeName: string) {
-  const buzz = isBuzzTheme(themeName);
-  const requestToken = ++buzzVibrancyRequest;
+async function applyWindowGlass(enabled: boolean) {
+  glassBackgroundPreferenceEnabled = enabled;
+  const requestToken = ++glassVibrancyRequest;
 
-  // Buzz Light and Buzz Dark use the same native material. Rebuilding the
-  // NSVisualEffectView on every mode change briefly clears the layer behind
-  // the webview and makes the new CSS theme appear late. Keep the installed
-  // layer and let applyTheme swap only the color tokens.
-  if (buzz && buzzVibrancyEnabled && buzzVibrancyReady) {
-    maybeEnableBuzzTranslucent(themeName, requestToken);
+  if (enabled && glassVibrancyEnabled && glassVibrancyReady) {
+    maybeEnableGlassBackground(requestToken);
     return;
   }
 
-  // A new request is in flight — the vibrancy layer's readiness for it is not
-  // yet known, so any stale "ready" from a prior request must not gate this one.
-  buzzVibrancyReady = false;
+  glassVibrancyReady = false;
 
   if (!isTauri()) {
-    // Web/dev preview: no native vibrancy layer exists, so translucency would
-    // show raw page background. Keep it off; the opaque gradient stands in.
-    setBuzzTranslucent(false);
+    setGlassBackgroundActive(false);
     return;
   }
 
   try {
     await invokeTauri<void>("set_window_vibrancy", {
-      enabled: buzz,
-      material: BUZZ_VIBRANCY_MATERIAL,
+      enabled,
+      material: GLASS_VIBRANCY_MATERIAL,
     });
-    // A newer theme change superseded this request while the IPC was in flight;
-    // that later call owns the current translucency state, so don't clobber it.
-    if (requestToken !== buzzVibrancyRequest) return;
-    buzzVibrancyEnabled = buzz;
-    // Native layer is installed. Record readiness and try to enable translucency
-    // — but only if `applyBuzzSidebar` has already installed the Buzz gradient
-    // vars. If that effect hasn't landed yet (the IPC won the race), it will
-    // call maybeEnableBuzzTranslucent itself once the marker is applied.
-    if (buzz && isMacPlatform()) {
-      buzzVibrancyReady = true;
-      maybeEnableBuzzTranslucent(themeName, requestToken);
+    if (requestToken !== glassVibrancyRequest) return;
+    glassVibrancyEnabled = enabled;
+    if (enabled && isMacPlatform()) {
+      glassVibrancyReady = true;
+      maybeEnableGlassBackground(requestToken);
     }
   } catch (error) {
     console.warn("set_window_vibrancy failed", error);
-    if (requestToken !== buzzVibrancyRequest) return;
-    // Vibrancy failed — don't go transparent or we'd show through to nothing.
-    buzzVibrancyEnabled = false;
-    setBuzzTranslucent(false);
+    if (requestToken !== glassVibrancyRequest) return;
+    glassVibrancyEnabled = false;
+    setGlassBackgroundActive(false);
   }
 }
 
@@ -419,6 +405,7 @@ function applyCachedVars(): string | null {
     root.classList.remove("light", "dark");
     root.classList.add(isDark ? "dark" : "light");
     applyBuzzSidebar(themeName);
+    glassThemeReady = true;
 
     const accent = getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
     // Pin Buzz themes to the neutral accent here too, matching applyTheme.
@@ -459,12 +446,8 @@ async function applyTheme(name: SyntaxThemeName): Promise<{
   root.classList.remove("light", "dark");
   root.classList.add(isDark ? "dark" : "light");
   applyBuzzSidebar(name);
-  // The Buzz gradient vars are now installed. If the vibrancy layer already
-  // resolved for the current request (the IPC won the race against this theme
-  // load), enable translucency now — otherwise applyBuzzVibrancy does it. This
-  // is the second half of the two-effect handshake; the token guards against a
-  // superseding theme switch.
-  maybeEnableBuzzTranslucent(name, buzzVibrancyRequest);
+  glassThemeReady = true;
+  maybeEnableGlassBackground(glassVibrancyRequest);
 
   // Apply the accent synchronously in the same batch as the theme vars so the
   // browser paints the new theme + accent together. Doing this in a later
@@ -513,6 +496,25 @@ export function ThemeProvider({
     // denied-storage origin would otherwise kill the root on first mount.
     return getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
   });
+  const [glassBackground, setGlassBackgroundState] = useState<boolean>(() => {
+    const stored = getStorageItem(GLASS_BACKGROUND_STORAGE_KEY);
+    // Glass is opt-in. Explicitly saved preferences remain intact, while a
+    // fresh profile starts with the normal opaque window treatment.
+    const enabled = stored === "true";
+    glassBackgroundPreferenceEnabled = enabled;
+    return enabled;
+  });
+  const [glassOpacity, setGlassOpacityState] = useState<number>(() => {
+    const opacity = readStoredGlassOpacity();
+    applyGlassOpacity(opacity);
+    return opacity;
+  });
+  const [prominentActiveTab, setProminentActiveTabState] = useState<boolean>(
+    () => {
+      const stored = getStorageItem(PROMINENT_ACTIVE_TAB_STORAGE_KEY);
+      return stored === null ? DEFAULT_PROMINENT_ACTIVE_TAB : stored === "true";
+    },
+  );
   const [followSystem, setFollowSystemState] = useState<boolean>(() => {
     const stored = getStorageItem(FOLLOW_SYSTEM_KEY);
     if (stored !== null) return stored === "true";
@@ -558,9 +560,22 @@ export function ThemeProvider({
   }, [effectiveTheme]);
 
   useEffect(() => {
-    if (!isValidThemeName(effectiveTheme)) return;
-    void applyBuzzVibrancy(effectiveTheme);
-  }, [effectiveTheme]);
+    // `initial-render-ready` fires from a layout effect, so it is already
+    // enqueued before this passive effect's IPC call is dispatched. The native
+    // reveal can in theory precede the transparency call; the Rust-side
+    // stable-geometry wait provides the gap in practice, and a brief opaque
+    // first frame is the accepted worst case for glass users.
+    void applyWindowGlass(glassBackground);
+  }, [glassBackground]);
+
+  // The stronger selected-row treatment belongs exclusively to Buzz. Keep
+  // the saved preference so it is restored when the user returns to Buzz,
+  // but remove the live marker for every other theme.
+  useEffect(() => {
+    setProminentActiveTabActive(
+      prominentActiveTab && isBuzzTheme(effectiveTheme),
+    );
+  }, [effectiveTheme, prominentActiveTab]);
 
   // Listen for system color scheme changes when followSystem is enabled
   useEffect(() => {
@@ -653,6 +668,33 @@ export function ThemeProvider({
     [],
   );
 
+  const setGlassBackground = useCallback((enabled: boolean) => {
+    window.localStorage.setItem(
+      GLASS_BACKGROUND_STORAGE_KEY,
+      enabled ? "true" : "false",
+    );
+    glassBackgroundPreferenceEnabled = enabled;
+    if (!enabled) {
+      setGlassBackgroundActive(false);
+    }
+    setGlassBackgroundState(enabled);
+  }, []);
+
+  const setGlassOpacity = useCallback((opacity: number) => {
+    const nextOpacity = clampGlassOpacity(opacity);
+    window.localStorage.setItem(GLASS_OPACITY_STORAGE_KEY, String(nextOpacity));
+    applyGlassOpacity(nextOpacity);
+    setGlassOpacityState(nextOpacity);
+  }, []);
+
+  const setProminentActiveTab = useCallback((enabled: boolean) => {
+    window.localStorage.setItem(
+      PROMINENT_ACTIVE_TAB_STORAGE_KEY,
+      enabled ? "true" : "false",
+    );
+    setProminentActiveTabState(enabled);
+  }, []);
+
   const value: ThemeContextValue = {
     themeName: effectiveTheme,
     selectedThemeName: selectedTheme,
@@ -660,12 +702,19 @@ export function ThemeProvider({
     isLoading,
     accentColor,
     followSystem,
+    glassBackground,
+    glassOpacity,
+    glassBackgroundSupported: isTauri() && isMacPlatform(),
+    prominentActiveTab,
     hasPair,
     terminalPalette,
     setTheme,
     setAccentColor,
     setFollowSystem,
     applyAppearance,
+    setGlassBackground,
+    setGlassOpacity,
+    setProminentActiveTab,
   };
 
   return (

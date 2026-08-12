@@ -271,9 +271,17 @@ function createPreview(
   typeLabel: SupportedLinkPreview["typeLabel"],
   title: string,
 ): SupportedLinkPreview {
+  // Strip the `#fragment` from the preview identity. A fragment is a
+  // client-only anchor into the page — the preview (and the signed snapshot's
+  // canonicalUrl) is of the page itself. Keeping it would fail the
+  // fragment-free snapshot-URL guard, so a link like `pull/3767#review-1`
+  // would silently get no preview at all. The message body keeps the raw URL,
+  // so click-through to the anchor is preserved.
+  const canonical = new URL(parsed.href);
+  canonical.hash = "";
   return {
     kind,
-    href: parsed.href,
+    href: canonical.href,
     provider,
     title,
     typeLabel,

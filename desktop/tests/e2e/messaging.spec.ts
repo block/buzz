@@ -141,114 +141,185 @@ test.beforeEach(async ({ page }, testInfo) => {
               imageDomain: "pbs.twimg.com",
             },
           }
-        : testInfo.title.includes("mixed link preview image outcomes")
+        : testInfo.title.includes("fragment link previews")
           ? {
+              // Metadata is keyed by the canonical, fragment-less URL — the
+              // shape a real OpenGraph/HTML fetch resolves against. A resolver
+              // that fetches with the raw `#fragment` attached would miss these
+              // keys and drop the card, which is exactly the bug under test.
               linkPreviewMetadataByHref: {
-                "https://github.com/block/buzz/pull/4001": {
-                  title: "Loaded preview image",
+                "https://github.com/block/buzz/pull/3767": {
+                  title: "Buzz pull request 3767",
                   siteName: "GitHub",
-                  description: "The image request completed.",
-                  imageDataUrl:
-                    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-                  imageDomain: "opengraph.githubassets.com",
-                  imageFetchState: "image",
-                  imageRetryAfterMs: null,
-                },
-                "https://github.com/block/buzz/pull/4002": {
-                  title: "Rate-limited preview image",
-                  siteName: "GitHub",
-                  description: "Metadata remains available during cooldown.",
+                  description: "Fragment-bearing PR link.",
                   imageDataUrl: null,
                   imageDomain: null,
-                  imageFetchState: "transient_failure",
-                  imageRetryAfterMs: 900_000,
+                },
+                "https://github.com/block/buzz/pull/3867": {
+                  title: "Buzz pull request 3867",
+                  siteName: "GitHub",
+                  description: "Plain PR link.",
+                  imageDataUrl: null,
+                  imageDomain: null,
                 },
               },
             }
-          : testInfo.title.includes("link preview browser image error")
+          : testInfo.title.includes("mixed link preview image outcomes")
             ? {
-                linkPreviewMetadata: {
-                  title: "Invalid decoded preview image",
-                  siteName: "GitHub",
-                  description: "The browser should replace this image.",
-                  imageDataUrl: null,
-                  imageDomain: null,
-                  imageFetchState: "rejected",
-                  imageRetryAfterMs: null,
-                },
-              }
-            : testInfo.title.includes("link preview image geometry")
-              ? {
-                  linkPreviewMetadata: {
-                    title:
-                      "Ship a wider horizontal preview with a two-line title that wraps cleanly",
+                linkPreviewMetadataByHref: {
+                  "https://github.com/block/buzz/pull/4001": {
+                    title: "Loaded preview image",
                     siteName: "GitHub",
-                    description: "A polished, stable preview for shared links.",
+                    description: "The image request completed.",
                     imageDataUrl:
                       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                     imageDomain: "opengraph.githubassets.com",
-                    faviconDataUrl:
-                      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                    imageFetchState: "image",
+                    imageRetryAfterMs: null,
                   },
-                  linkPreviewMetadataDelayMs: 800,
+                  "https://github.com/block/buzz/pull/4002": {
+                    title: "Rate-limited preview image",
+                    siteName: "GitHub",
+                    description: "Metadata remains available during cooldown.",
+                    imageDataUrl: null,
+                    imageDomain: null,
+                    imageFetchState: "transient_failure",
+                    imageRetryAfterMs: 900_000,
+                  },
+                },
+              }
+            : testInfo.title.includes("link preview browser image error")
+              ? {
+                  linkPreviewMetadata: {
+                    title: "Invalid decoded preview image",
+                    siteName: "GitHub",
+                    description: "The browser should replace this image.",
+                    imageDataUrl: null,
+                    imageDomain: null,
+                    imageFetchState: "rejected",
+                    imageRetryAfterMs: null,
+                  },
                 }
-              : testInfo.title.includes("link preview no-image layout") ||
-                  testInfo.title.includes("composer no-image link embeds")
+              : testInfo.title.includes("link preview image geometry")
                 ? {
                     linkPreviewMetadata: {
-                      title: "Buzz",
+                      title:
+                        "Ship a wider horizontal preview with a two-line title that wraps cleanly",
                       siteName: "GitHub",
                       description:
-                        "Open-source collaboration for the Buzz app.",
-                      imageDataUrl: null,
-                      imageDomain: null,
+                        "A polished, stable preview for shared links.",
+                      imageDataUrl:
+                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                      imageDomain: "opengraph.githubassets.com",
                       faviconDataUrl:
                         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                     },
-                    linkPreviewMetadataDelayMs: 2_000,
+                    linkPreviewMetadataDelayMs: 800,
                   }
-                : testInfo.title.includes(
-                      "rich link preview preserves description newlines",
-                    )
+                : testInfo.title.includes("link preview no-image layout") ||
+                    testInfo.title.includes("composer no-image link embeds")
                   ? {
                       linkPreviewMetadata: {
-                        title: "Buzz pull request",
+                        title: "Buzz",
                         siteName: "GitHub",
                         description:
-                          "First paragraph line one.\nFirst paragraph line two.\n\nSecond paragraph.",
+                          "Open-source collaboration for the Buzz app.",
                         imageDataUrl: null,
                         imageDomain: null,
+                        faviconDataUrl:
+                          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                       },
+                      linkPreviewMetadataDelayMs: 2_000,
                     }
-                  : testInfo.title.includes("link preview") ||
-                      testInfo.title.includes("supported Compact")
+                  : testInfo.title.includes(
+                        "rich link preview preserves description newlines",
+                      )
                     ? {
                         linkPreviewMetadata: {
                           title: "Buzz pull request",
                           siteName: "GitHub",
-                          description: "A sender-authored preview snapshot.",
+                          description:
+                            "First paragraph line one.\nFirst paragraph line two.\n\nSecond paragraph.",
                           imageDataUrl: null,
                           imageDomain: null,
                         },
-                        linkPreviewMetadataDelayMs: testInfo.title.includes(
-                          "loading card before cold resolver work",
-                        )
-                          ? 10_000
-                          : testInfo.title.includes("style defaults") ||
-                              testInfo.title.includes("send does not wait") ||
-                              testInfo.title.includes("attachment-sized")
-                            ? 1_500
-                            : undefined,
-                        linkPreviewMetadataStartBlockMs:
-                          testInfo.title.includes(
-                            "loading card before cold resolver work",
-                          )
-                            ? 150
-                            : undefined,
                       }
-                    : undefined;
+                    : testInfo.title.includes(
+                          "Enter during an in-flight snapshot upload",
+                        )
+                      ? {
+                          linkPreviewMetadata: {
+                            title: "Buzz pull request",
+                            siteName: "GitHub",
+                            description: "A sender-authored preview snapshot.",
+                            imageDataUrl:
+                              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                            imageDomain: "opengraph.githubassets.com",
+                          },
+                          linkPreviewMetadataDelayMs: 300,
+                          linkPreviewUploadDelayMs: 1_200,
+                        }
+                      : testInfo.title.includes(
+                            "snapshot thumbnail upload failure",
+                          )
+                        ? {
+                            linkPreviewMetadata: {
+                              title: "Buzz pull request",
+                              siteName: "GitHub",
+                              description:
+                                "A sender-authored preview snapshot.",
+                              imageDataUrl:
+                                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                              imageDomain: "opengraph.githubassets.com",
+                              faviconDataUrl:
+                                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                            },
+                            // Fail only the thumbnail upload; the favicon survives,
+                            // so the snapshot degrades to a favicon-only preview.
+                            linkPreviewUploadErrorFilenames: [
+                              "link-preview-image",
+                            ],
+                          }
+                        : testInfo.title.includes("link preview") ||
+                            testInfo.title.includes("supported Compact")
+                          ? {
+                              linkPreviewMetadata: {
+                                title: "Buzz pull request",
+                                siteName: "GitHub",
+                                description:
+                                  "A sender-authored preview snapshot.",
+                                imageDataUrl: null,
+                                imageDomain: null,
+                              },
+                              linkPreviewMetadataDelayMs:
+                                testInfo.title.includes(
+                                  "loading card before cold resolver work",
+                                )
+                                  ? 10_000
+                                  : testInfo.title.includes(
+                                        "send does not wait",
+                                      )
+                                    ? 3_000
+                                    : testInfo.title.includes("draft auto-send")
+                                      ? 500
+                                      : testInfo.title.includes(
+                                            "style defaults",
+                                          ) ||
+                                          testInfo.title.includes(
+                                            "attachment-sized",
+                                          )
+                                        ? 1_500
+                                        : undefined,
+                              linkPreviewMetadataStartBlockMs:
+                                testInfo.title.includes(
+                                  "loading card before cold resolver work",
+                                )
+                                  ? 150
+                                  : undefined,
+                            }
+                          : undefined;
   const mock = testInfo.title.includes("unresolvable preview")
-    ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 150 }
+    ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 800 }
     : baseMock;
   await installMockBridge(page, mock);
 });
@@ -613,13 +684,21 @@ test("rich link preview preserves description newlines after sending", async ({
   );
 });
 
-test("completed link previews send when one URL has an unsnapshotable fragment", async ({
+test("completed link previews normalize a trailing-fragment URL and still send", async ({
   page,
 }) => {
+  // The third URL carries a trailing `#` (empty fragment). It is normalized to
+  // its fragmentless canonical form for the preview and snapshot tag, so it now
+  // gets a card like the others; the message body keeps the original URL.
   const previewUrls = [
     "https://twitter.com/tellaho",
     "https://github.com/block/buzz/pull/3246",
     "https://x.com/tellaho/status/1884289176381841506#",
+  ];
+  const canonicalUrls = [
+    "https://twitter.com/tellaho",
+    "https://github.com/block/buzz/pull/3246",
+    "https://x.com/tellaho/status/1884289176381841506",
   ];
   const pastedText = previewUrls.join("\n");
   await page.goto("/");
@@ -640,11 +719,8 @@ test("completed link previews send when one URL has an unsnapshotable fragment",
   const composerPreviewCards = page.locator(
     "[data-link-preview-composer-card]",
   );
-  await expect(composerPreviewCards).toHaveCount(2);
-  await expect(
-    composerPreviewCards.locator(`a[href="${previewUrls[2]}"]`),
-  ).toHaveCount(0);
-  await waitForReadyComposerSnapshots(page, 2);
+  await expect(composerPreviewCards).toHaveCount(3);
+  await waitForReadyComposerSnapshots(page, 3);
 
   const send = page.getByTestId("send-message");
   await expect(send).toBeEnabled();
@@ -664,7 +740,7 @@ test("completed link previews send when one URL has an unsnapshotable fragment",
     (
       calls[0]?.payload as { linkPreviewTags?: string[][] | null } | undefined
     )?.linkPreviewTags?.map((tag) => tag[3]),
-  ).toEqual(previewUrls.slice(0, 2));
+  ).toEqual(canonicalUrls);
 });
 
 test("unresolvable preview disappears after the terminal miss", async ({
@@ -705,6 +781,20 @@ test("send does not wait for a pending link preview snapshot", async ({
     composerPreviews.locator('[data-link-preview="github-pull-request"]'),
   ).toHaveAttribute("data-image-state", "pending");
 
+  // While metadata is still resolving Send is disabled so the button does not
+  // flicker ready -> not-ready. But a link whose metadata stalls must not trap
+  // the composer: past the disable cap Send re-enables even though the card is
+  // still pending, and sending ships a bare link with no snapshot tag.
+  await expect(page.getByTestId("send-message")).toBeDisabled();
+  await expect(composerPreviews).toHaveAttribute(
+    "data-has-pending-snapshots",
+    "false",
+  );
+  await expect(
+    composerPreviews.locator('[data-link-preview="github-pull-request"]'),
+  ).toHaveAttribute("data-image-state", "pending");
+  await expect(page.getByTestId("send-message")).toBeEnabled();
+
   await page.getByTestId("send-message").click();
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
@@ -719,6 +809,314 @@ test("send does not wait for a pending link preview snapshot", async ({
     )?.linkPreviewTags;
   });
   expect(linkPreviewTags ?? []).toEqual([]);
+});
+
+test("Enter during an in-flight snapshot upload cannot ship a bare link", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+
+  const composerPreviews = page.locator("[data-composer-link-previews]");
+  const card = composerPreviews.locator("[data-link-preview-composer-card]");
+  await expect(card).toBeVisible();
+  // Metadata resolves (image painted) but the sendable tag is not ready yet:
+  // the snapshot media upload is still in flight (linkPreviewUploadDelayMs), so
+  // the composer reports the preview as still pending.
+  await expect(card).toHaveAttribute("data-image-state", "image");
+  await expect(card).toHaveAttribute("data-snapshot-tag-ready", "false");
+  await expect(composerPreviews).toHaveAttribute(
+    "data-has-pending-snapshots",
+    "true",
+  );
+
+  // Drive Enter (not a disabled-button click, which the browser swallows on its
+  // own) while the upload is deterministically in flight. The synchronous submit
+  // guard must reject it: no send_channel_message call may occur before the tag
+  // is ready, or the link would ship bare. This is the core Enter-bypass fix —
+  // the disabled state is enforced on the keyboard path, not just the button.
+  await expect(input).toBeFocused();
+  await input.press("Enter");
+  await input.press("Enter");
+  const sendsDuringUpload = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ).length,
+  );
+  expect(sendsDuringUpload).toBe(0);
+
+  // Once the upload settles the tag is captured and Send re-enables. Sending
+  // now lands the preview snapshot matching the body.
+  await expect(card).toHaveAttribute("data-snapshot-tag-ready", "true");
+  await expect(page.getByTestId("send-message")).toBeEnabled();
+  await input.press("Enter");
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  const linkPreviewTags = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((entry) => entry.command === "send_channel_message");
+    return (
+      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
+    )?.linkPreviewTags;
+  });
+  expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
+});
+
+test("draft auto-send with a link preview waits for settling and sends exactly once", async ({
+  page,
+}) => {
+  // Regression for the one-shot auto-submit blocker: a confirmed Drafts-panel
+  // "Send message" for a draft containing a supported link is normally still
+  // inside the preview settling window when the mount-only auto-submit effect
+  // fires. The old effect cleared the ?autoSend trigger then fired submit once
+  // at setTimeout(0); submit bailed at the pending-snapshot guard and the
+  // one-shot never retried, so the confirmed draft was silently never sent.
+  // The effect must instead wait until settling finishes, then send exactly
+  // once — with the resolved snapshot tag attached.
+  const previewUrl = "https://github.com/block/buzz/pull/3246?draft=autosend";
+  const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+
+  // Seed a channel draft under the legacy store key (migrated on startup). The
+  // main composer keys its draft off the bare channel id, and the Drafts panel
+  // navigates with ?autoSend=<that key>, so seeding under the bare id mirrors
+  // the real "Send message" target exactly.
+  await page.addInitScript(
+    ({ storeKey, draftKey, content, channel }) => {
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        storeKey,
+        JSON.stringify({
+          [draftKey]: {
+            channelId: channel,
+            content,
+            createdAt: timestamp,
+            pendingImeta: [],
+            selectionEnd: content.length,
+            selectionStart: content.length,
+            spoileredAttachmentUrls: [],
+            status: "active",
+            updatedAt: timestamp,
+          },
+        }),
+      );
+    },
+    {
+      storeKey: `buzz-drafts.v1:${"deadbeef".repeat(8)}`,
+      draftKey: channelId,
+      content: previewUrl,
+      channel: channelId,
+    },
+  );
+
+  // Drive the real Drafts-panel "Send message" confirm flow. This does an
+  // in-app client navigation to the channel with ?autoSend=<draftKey>, arming
+  // the main composer's auto-submit effect — the exact production path.
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("home-inbox")).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Drafts" }).click();
+  await page.keyboard.press("Escape");
+
+  const draftRow = page.locator(`[data-testid='home-draft-item-${channelId}']`);
+  await expect(draftRow).toBeVisible({ timeout: 8_000 });
+  await draftRow.hover();
+  await draftRow
+    .getByRole("button", { name: "Send message", exact: true })
+    .click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible({ timeout: 4_000 });
+  await dialog.getByRole("button", { name: "Send", exact: true }).click();
+
+  // Exactly one send eventually fires (after the ~500 ms metadata settle), and
+  // it carries the link preview snapshot tag — proving the draft was not
+  // dropped during the settling window and did not double-send on retry.
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+            (entry) => entry.command === "send_channel_message",
+          ).length,
+      ),
+    )
+    .toBe(1);
+
+  const linkPreviewTags = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((entry) => entry.command === "send_channel_message");
+    return (
+      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
+    )?.linkPreviewTags;
+  });
+  expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
+});
+
+test("rapid Enter presses on a ready link preview send exactly once", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?rapid=1";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+
+  // Wait until the snapshot is fully ready and Send is enabled, so the only
+  // thing under test is the composer-local send lock — not preview settling.
+  await waitForReadyComposerSnapshots(page);
+  await expect(page.getByTestId("send-message")).toBeEnabled();
+
+  // Mash Enter. The synchronous submit lock (isSubmitLockedRef), acquired before
+  // any await, must collapse these into exactly one send_channel_message so a
+  // duplicate cannot clear shared prep/hydration state mid-send.
+  await input.press("Enter");
+  await input.press("Enter");
+  await input.press("Enter");
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+            (entry) => entry.command === "send_channel_message",
+          ).length,
+      ),
+    )
+    .toBe(1);
+});
+
+test("pasting a link preview and immediately pressing Enter waits for resolution", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?fast=send";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+
+  // Fill the URL and press Enter within the debounce window, before resolution
+  // has even started. The live-candidate guard must treat the unresolved link
+  // as pending and reject the Enter, so the message cannot ship bare.
+  await input.fill(previewUrl);
+  await input.press("Enter");
+  const sendsBeforeResolution = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ).length,
+  );
+  expect(sendsBeforeResolution).toBe(0);
+
+  // The debounce fires, resolution + upload complete, and only then does Send
+  // become available. A press now lands the snapshot.
+  await waitForReadyComposerSnapshots(page);
+  await input.press("Enter");
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  const linkPreviewTags = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((entry) => entry.command === "send_channel_message");
+    return (
+      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
+    )?.linkPreviewTags;
+  });
+  expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
+});
+
+test("a snapshot thumbnail upload failure toasts and still sends with the favicon", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?upload=fail";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+
+  // The thumbnail upload is configured to reject while the favicon succeeds.
+  // The preview must degrade to the surviving favicon rather than dropping the
+  // whole card or spinning forever: a tag still lands, Send still enables.
+  await waitForReadyComposerSnapshots(page);
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Something went wrong with the thumbnail" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("send-message")).toBeEnabled();
+
+  await input.press("Enter");
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  // The snapshot tag exists (survivor media) but carries no image url — proving
+  // the graceful per-media degrade rather than a dropped or all-or-nothing tag.
+  const imageUrl = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((entry) => entry.command === "send_channel_message");
+    const tags = (
+      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
+    )?.linkPreviewTags;
+    const snapshot = tags?.find(
+      (tag) => tag[0] === "link-preview" && tag[1] === "snapshot",
+    );
+    // Snapshot tag layout: ["link-preview","snapshot",<version>,<url>,...pairs].
+    const pairs = snapshot?.slice(4) ?? [];
+    const imageIndex = pairs.indexOf("image");
+    return imageIndex >= 0 ? pairs[imageIndex + 1] : null;
+  });
+  expect(imageUrl).toBeFalsy();
+});
+
+test("editing a message excludes link previews entirely", async ({ page }) => {
+  const message = `Edit-me ${Date.now()}`;
+  const previewUrl = "https://github.com/block/buzz/pull/3246?edit=1";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+
+  // Send a plain message with no link, then edit it to add a supported URL.
+  await input.fill(message);
+  await input.press("Enter");
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+
+  await expect(input).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(page.getByTestId("edit-target")).toBeVisible();
+
+  // Adding a link while editing must NOT resolve, upload, gate Save, or render a
+  // composer preview card — edit mode does not persist snapshots (decision A).
+  await input.fill(`${message} ${previewUrl}`);
+  await expect(page.locator("[data-composer-link-previews]")).toHaveCount(0);
+  // No snapshot upload was attempted for the edited link.
+  const uploadedPreviewMedia = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) =>
+          entry.command === "upload_media_bytes" &&
+          typeof (entry.payload as { filename?: string })?.filename ===
+            "string" &&
+          (entry.payload as { filename: string }).filename.startsWith(
+            "link-preview-",
+          ),
+      ).length,
+  );
+  expect(uploadedPreviewMedia).toBe(0);
+  // Save is not blocked waiting on a snapshot the edit will never emit.
+  await expect(page.getByTestId("send-message")).toBeEnabled();
 });
 
 test("hiding composer link previews suppresses the whole draft and emits the blanket marker", async ({
@@ -880,6 +1278,44 @@ test("mixed link preview image outcomes keep Compact and Rich fallbacks stable",
   await expect(
     richCards.nth(1).locator("[data-link-preview-image-fallback]"),
   ).toHaveCount(0);
+});
+
+test("fragment link previews render a card per canonical URL", async ({
+  page,
+}) => {
+  // Two links into the SAME page differing only by `#fragment`, plus a link
+  // to a second page. The fragment variants collapse to one card (the preview
+  // is of the page, not the anchor); the second page adds a second card — two
+  // cards total. A resolver that keys previews on the raw fragment-bearing URL
+  // drops the fragment cards entirely (the reported bug).
+  const fragmentUrlA =
+    "https://github.com/block/buzz/pull/3767#pullrequestreview-4857569498";
+  const fragmentUrlB = "https://github.com/block/buzz/pull/3767#issuecomment-1";
+  const plainUrl = "https://github.com/block/buzz/pull/3867";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page
+    .getByTestId("message-input")
+    .fill(`${fragmentUrlA}\n${fragmentUrlB}\n${plainUrl}`);
+
+  const composerCards = page
+    .locator("[data-composer-link-previews]")
+    .locator('[data-link-preview="github-pull-request"]');
+  await expect(composerCards).toHaveCount(2);
+
+  await waitForReadyComposerSnapshots(page, 2);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  // Two preview cards: the fragment variants collapsed to the 3767 page, plus
+  // the 3867 page.
+  await expect(
+    row.locator('[data-link-preview="github-pull-request"]'),
+  ).toHaveCount(2);
+  // Both original fragment-bearing prose links survive intact and clickable —
+  // the fragment is a navigation anchor, only the preview is normalized.
+  await expect(row.locator(`a[href="${fragmentUrlA}"]`)).toBeVisible();
+  await expect(row.locator(`a[href="${fragmentUrlB}"]`)).toBeVisible();
 });
 
 test("link preview browser image errors render a fallback", async ({
@@ -1295,6 +1731,286 @@ test("send message to DM channel p-tags the recipient", async ({ page }) => {
       }, message),
     )
     .toContainEqual(["p", TEST_IDENTITIES.alice.pubkey]);
+});
+
+test("sends a thread message to its parent channel with a root-thread link", async ({
+  page,
+}) => {
+  const timestamp = Date.now();
+  const rootContent = `🧵 Share source thread ${timestamp}`;
+  const priorChannelMessage = `Prior channel message ${timestamp}`;
+  const replySummary = `Share this reply ${timestamp}`;
+  const attachmentSha = "d".repeat(64);
+  const attachmentUrl = `http://localhost:3000/media/${attachmentSha}.txt`;
+  const customEmojiUrl = "https://example.com/send-to-channel-party.svg";
+  const previewUrl = "https://github.com/block/buzz/pull/5305";
+  const ownReplyContent = [
+    `${replySummary} with @alice :party:`,
+    `[launch-notes.txt](${attachmentUrl})`,
+    previewUrl,
+  ].join("\n\n");
+  const imetaTag = [
+    "imeta",
+    `url ${attachmentUrl}`,
+    "m text/plain",
+    `x ${attachmentSha}`,
+    "size 42",
+    "filename launch-notes.txt",
+  ];
+  const emojiTag = ["emoji", "party", customEmojiUrl];
+  const mentionTag = ["mention", TEST_IDENTITIES.alice.pubkey];
+  const linkPreviewTag = [
+    "link-preview",
+    "snapshot",
+    "1",
+    previewUrl,
+    "Add Send to channel for thread messages",
+    "GitHub",
+    "A shared link preview preserved from the source thread message.",
+    "",
+    "",
+    "",
+    "",
+  ];
+
+  await page.route(customEmojiUrl, (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><circle cx="16" cy="16" r="15" fill="#a78bfa"/><path d="M8 18l5 5 11-13" fill="none" stroke="white" stroke-width="3"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      (window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+        channelName: "general",
+      }) ??
+        false),
+  );
+
+  const { ownReplyId, rootId } = await page.evaluate(
+    ({ alicePubkey, ownReply, root, semanticTags }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const rootEvent = emit({
+        channelName: "general",
+        content: root,
+        pubkey: alicePubkey,
+      });
+      const ownReplyEvent = emit({
+        channelName: "general",
+        content: ownReply,
+        extraTags: semanticTags,
+        mentionPubkeys: [alicePubkey],
+        parentEventId: rootEvent.id,
+      });
+      return {
+        ownReplyId: ownReplyEvent.id,
+        rootId: rootEvent.id,
+      };
+    },
+    {
+      alicePubkey: TEST_IDENTITIES.alice.pubkey,
+      ownReply: ownReplyContent,
+      root: rootContent,
+      semanticTags: [imetaTag, emojiTag, mentionTag, linkPreviewTag],
+    },
+  );
+
+  const timeline = page.getByTestId("message-timeline");
+  const rootRow = timeline.locator(`[data-message-id="${rootId}"]`);
+  await expect(rootRow).toContainText(rootContent);
+
+  await page.getByTestId("message-input").fill(priorChannelMessage);
+  await page.getByTestId("send-message").click();
+  const priorChannelRow = timeline
+    .getByTestId("message-row")
+    .filter({ hasText: priorChannelMessage });
+  await expect(priorChannelRow).toBeVisible();
+  await expect(priorChannelRow.getByTestId("message-send-status")).toHaveCount(
+    0,
+  );
+
+  await timeline
+    .locator(
+      `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
+    )
+    .click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadRootRow = threadPanel.locator(`[data-message-id="${rootId}"]`);
+  const rootMoreActions = threadRootRow.getByTestId(`more-actions-${rootId}`);
+  await rootMoreActions.click({ force: true });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Send to channel" }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+
+  const ownReplyRow = threadPanel.locator(`[data-message-id="${ownReplyId}"]`);
+  await expect(ownReplyRow).toContainText(replySummary);
+  await ownReplyRow
+    .getByTestId(`more-actions-${ownReplyId}`)
+    .click({ force: true });
+  const sendToChannelItem = page.getByRole("menuitem", {
+    name: "Send to channel",
+  });
+  const sendToChannelIcon = sendToChannelItem.getByTestId(
+    "send-to-channel-icon",
+  );
+  await expect(sendToChannelIcon).toBeVisible();
+  await expect(sendToChannelIcon).toHaveAttribute("aria-hidden", "true");
+  await expect(sendToChannelIcon).toHaveClass(/lucide-hash-arrow-in/);
+  await expect
+    .poll(async () => {
+      const box = await sendToChannelIcon.boundingBox();
+      return box ? [box.width, box.height] : null;
+    })
+    .toEqual([16, 16]);
+  await sendToChannelItem.click();
+
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "Sent to channel" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate((content) => {
+        return Boolean(
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) =>
+              entry.command === "send_channel_message" &&
+              (entry.payload as { content?: string } | undefined)?.content ===
+                content,
+          ),
+        );
+      }, ownReplyContent),
+    )
+    .toBe(true);
+  const sentPayload = await page.evaluate(
+    (content) =>
+      (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+        (entry) =>
+          entry.command === "send_channel_message" &&
+          (entry.payload as { content?: string } | undefined)?.content ===
+            content,
+      )?.payload as Record<string, unknown> | undefined,
+    ownReplyContent,
+  );
+  expect(sentPayload).toMatchObject({
+    channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+    content: ownReplyContent,
+    emojiTags: [emojiTag],
+    linkPreviewTags: [linkPreviewTag],
+    mediaTags: [imetaTag],
+    mentionPubkeys: [TEST_IDENTITIES.alice.pubkey],
+    mentionTags: [mentionTag],
+    parentEventId: null,
+    sentFromThreadTag: ["buzz:sent-from-thread", rootId, rootContent],
+  });
+
+  await page.getByTestId("auxiliary-panel-close").click();
+
+  const sharedRow = timeline
+    .getByTestId("message-row")
+    .filter({ hasText: replySummary })
+    .last();
+  await expect
+    .poll(async () => {
+      if (await sharedRow.isVisible()) return true;
+      const scrollToLatest = page.getByTestId("message-scroll-to-latest");
+      if (await scrollToLatest.isVisible()) await scrollToLatest.click();
+      return false;
+    })
+    .toBe(true);
+  await expect(sharedRow.getByTestId("message-author")).toHaveText(
+    "npub1mock...",
+  );
+  await expect(sharedRow.getByTestId("message-avatar-fallback")).toBeVisible();
+  await expect(sharedRow.locator('[data-mention=""]')).toContainText("alice");
+  await expect(sharedRow.locator("img[data-custom-emoji]")).toHaveAttribute(
+    "src",
+    customEmojiUrl,
+  );
+  await expect(sharedRow.getByTestId("file-card")).toContainText(
+    "launch-notes.txt",
+  );
+  await expect(
+    sharedRow.locator('[data-link-preview="github-pull-request"]'),
+  ).toContainText("Add Send to channel for thread messages");
+  const sourceLine = sharedRow.getByTestId("sent-from-thread");
+  await expect(sourceLine).toContainText("Sent from thread:");
+  await expect(sourceLine).toHaveClass(/message-markdown/);
+  await expect(sourceLine).toHaveClass(/pt-0\.5/);
+  await expect(sourceLine).toHaveClass(/text-sm/);
+  await expect(sourceLine).toHaveClass(/font-normal/);
+  await expect(sourceLine).toHaveClass(/leading-4/);
+  await expect(sourceLine).toHaveClass(/text-muted-foreground\/70/);
+  const rootLink = sourceLine.locator("[data-message-link]");
+  const sourcePrefix = sourceLine.locator("span").first();
+  const rootLinkLabel = rootContent;
+  await expect(rootLink).toHaveText(rootLinkLabel);
+  await expect(rootLink).toHaveAttribute(
+    "aria-label",
+    "Open thread in general",
+  );
+  await expect(rootLink).toHaveAttribute("title", rootLinkLabel);
+  await expect(rootLink).toHaveClass(/max-w-80/);
+  await expect(rootLink).toHaveClass(/truncate/);
+  await expect(rootLink).toHaveClass(/inline-block/);
+  await expect(rootLink).toHaveClass(/font-medium/);
+  await expect(rootLink).not.toHaveClass(/mention-chip/);
+  await expect(rootLink).not.toHaveClass(/border-b/);
+  const rootLinkText = rootLink.locator("[data-message-link-text]");
+  const rootLinkEmoji = rootLink.locator("[data-message-link-emoji]");
+  await expect(rootLinkText).toHaveText(` Share source thread ${timestamp}`);
+  await expect(rootLinkText).not.toHaveClass(/border-b/);
+  await expect(rootLinkEmoji).toHaveText("🧵");
+  await expect(rootLinkEmoji).not.toHaveClass(/border-b/);
+  await expect(rootLink).not.toHaveAttribute("data-hovered");
+  const [prefixColor, linkColorBeforeHover] = await Promise.all([
+    sourcePrefix.evaluate((element) => getComputedStyle(element).color),
+    rootLink.evaluate((element) => getComputedStyle(element).color),
+  ]);
+  expect(linkColorBeforeHover).not.toBe(prefixColor);
+  await expect
+    .poll(() =>
+      rootLink.evaluate((element) => getComputedStyle(element).backgroundColor),
+    )
+    .toBe("rgba(0, 0, 0, 0)");
+  await expect
+    .poll(() =>
+      rootLinkText.evaluate((element) => getComputedStyle(element).boxShadow),
+    )
+    .toBe("none");
+
+  await rootLink.hover();
+  await expect(rootLink).toHaveAttribute("data-hovered", "");
+  await expect
+    .poll(() => rootLink.evaluate((element) => getComputedStyle(element).color))
+    .toBe(linkColorBeforeHover);
+  await expect
+    .poll(() =>
+      rootLinkText.evaluate(
+        (element) => getComputedStyle(element).boxShadow !== "none",
+      ),
+    )
+    .toBe(true);
+
+  await expect
+    .poll(() =>
+      rootLinkEmoji.evaluate((element) => getComputedStyle(element).boxShadow),
+    )
+    .toBe("none");
+
+  await rootLink.click();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    rootContent,
+  );
 });
 
 test("shows your avatar on your own message when profile avatar is set", async ({

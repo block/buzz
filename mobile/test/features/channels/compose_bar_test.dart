@@ -3139,7 +3139,7 @@ void main() {
     });
 
     testWidgets(
-      'skips the agent add in a private channel when not owner/admin',
+      'adds the agent in a private channel when the sender is a plain member',
       (tester) async {
         final agentPubkey = 'a' * 64;
         final signer = nostr.Keys.generate();
@@ -3152,8 +3152,8 @@ void main() {
           _buildComposeBar(
             uploadService: _testUploadService(signer.nsec),
             currentPubkey: signer.public,
-            // Plain member of a private channel: the relay rejects any add, so
-            // the composer must not attempt one — and must still send.
+            // Plain member of a private channel: ordinary member and bot
+            // additions are permitted; elevated-role grants still are not.
             members: [
               ChannelMember(
                 pubkey: signer.public,
@@ -3201,15 +3201,14 @@ void main() {
         expect(didSend, isTrue);
         expect(
           publishedEvents.where((event) => event['kind'] == 9000),
-          isEmpty,
+          hasLength(1),
         );
-        // The un-added agent is demoted from p-tag to a reference mention.
-        expect(sentMentionPubkeys, isEmpty);
+        expect(sentMentionPubkeys, contains(agentPubkey));
         expect(
           sentMediaTags,
-          contains(orderedEquals(['mention', agentPubkey])),
+          isNot(contains(orderedEquals(['mention', agentPubkey]))),
         );
-        expect(find.text(privateChannelAddDeniedMessage), findsOneWidget);
+        expect(find.text(privateChannelAddDeniedMessage), findsNothing);
       },
     );
 

@@ -7,6 +7,7 @@ import {
 } from "@/features/agents/lib/personaCatalogRelay";
 import { invalidatePersonaEditCaches } from "@/features/agents/lib/personaEditCaches";
 import { relayClient } from "@/shared/api/relayClient";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import {
   setPersonaShared,
   updatePersonaAndPublish,
@@ -14,17 +15,32 @@ import {
 import type { AgentPersona, UpdatePersonaInput } from "@/shared/api/types";
 import { KIND_PERSONA } from "@/shared/constants/kinds";
 
+/** Keeps focused polling at the established 2-minute backstop cadence. */
+export const PERSONA_CATALOG_REFETCH_INTERVAL_MS = 120_000;
+/** Suppresses the focus refetch until persona catalog data is genuinely stale.
+ * The live subscription (invalidateQueries) is the primary freshness path. */
+export const PERSONA_CATALOG_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the persona catalog query; consumed by focusRefetchPolicy.test.mjs. */
+export const personaCatalogFocusRefetchPolicy = {
+  staleTime: PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
 export function personaCatalogQueryKey(communityId: string | null) {
   return ["persona-catalog", communityId] as const;
 }
 
 export function usePersonaCatalogQuery(communityId: string | null) {
+  const refetchInterval = useFocusedRefetchInterval(
+    PERSONA_CATALOG_REFETCH_INTERVAL_MS,
+  );
   return useQuery<PersonaCatalogPublication[]>({
     enabled: communityId !== null,
     queryKey: personaCatalogQueryKey(communityId),
     queryFn: fetchPersonaCatalogPublications,
-    staleTime: 30_000,
-    refetchInterval: 120_000,
+    refetchInterval,
+    ...personaCatalogFocusRefetchPolicy,
   });
 }
 

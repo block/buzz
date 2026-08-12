@@ -347,9 +347,11 @@ test("regular message bolds inactive channel without numeric badge", async ({
     { pubkey: TEST_IDENTITIES.alice.pubkey },
   );
 
-  await expect(page.getByTestId("channel-random")).toHaveCSS(
-    "font-weight",
-    "700",
+  const unreadChannel = page.getByTestId("channel-random");
+  await expect(unreadChannel).toHaveCSS("font-weight", "700");
+  await expect(unreadChannel.locator("[data-sidebar-row-label]")).toHaveCSS(
+    "opacity",
+    "1",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
   await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);

@@ -24,7 +24,7 @@ from .manifest import AgentClass, ExperimentManifest
 from .provisioning import AgentCredential, TrialHandle
 from .runtime import RuntimeResult
 
-DEFAULT_MAX_AGENT_ROUNDS = 32
+DEFAULT_MAX_AGENT_ROUNDS = 0  # 0 = unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial budget is the clock
 # Container-side layout for the uploaded Buzz stack.
 REMOTE_ROOT = "/opt/buzz"
 REMOTE_BIN = f"{REMOTE_ROOT}/bin"
@@ -80,8 +80,8 @@ class BuzzContainerRuntime:
         readiness_timeout_seconds: float = 60.0,
         poll_seconds: float = 1.0,
     ) -> None:
-        if max_agent_rounds <= 0:
-            raise ValueError("max_agent_rounds must be positive")
+        if max_agent_rounds < 0:
+            raise ValueError("max_agent_rounds must be >= 0 (0 = unbounded)")
         if readiness_timeout_seconds <= 0:
             raise ValueError("readiness_timeout_seconds must be positive")
         self.logs_dir = Path(logs_dir)

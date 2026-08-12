@@ -215,12 +215,13 @@ void main() {
       expect(channel.canAddMembers('member'), isTrue);
     });
 
-    test('private channels accept adds only from owners/admins', () {
+    test('private channels accept adds from any active member role', () {
       final channel = make(channelType: 'stream', visibility: 'private');
       expect(channel.canAddMembers('owner'), isTrue);
       expect(channel.canAddMembers('admin'), isTrue);
-      expect(channel.canAddMembers('member'), isFalse);
-      expect(channel.canAddMembers('bot'), isFalse);
+      expect(channel.canAddMembers('member'), isTrue);
+      expect(channel.canAddMembers('bot'), isTrue);
+      expect(channel.canAddMembers('guest'), isTrue);
       expect(channel.canAddMembers(null), isFalse);
     });
 
@@ -235,10 +236,10 @@ void main() {
       );
     });
 
-    test('unknown visibility fails closed for non-elevated callers', () {
+    test('unknown visibility fails closed', () {
       final channel = make(channelType: 'stream', visibility: 'mystery');
       expect(channel.canAddMembers('member'), isFalse);
-      expect(channel.canAddMembers('owner'), isTrue);
+      expect(channel.canAddMembers('owner'), isFalse);
     });
   });
 }

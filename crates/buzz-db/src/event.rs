@@ -1988,6 +1988,7 @@ mod tests {
             target.id.as_bytes(),
             &actor.public_key().to_bytes(),
             &emoji,
+            false,
         )
         .await
         .expect("store wrapped 64-character shortcode");
