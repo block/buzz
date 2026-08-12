@@ -32,8 +32,8 @@ top level and inside function bodies — and the no-model check must REFUSE it.
 create no Import node at all, so an import-name scan reports them as absent while
 the no-model rule is broken outright.
 
-The files are restored from the originals held in memory, and the harness verifies
-the restoration byte-for-byte before it exits — a harness that leaves a mutant in
+Every phase restores the files from the originals held in memory through one
+helper that verifies the restoration byte-for-byte — a harness that leaves a mutant in
 the tree is worse than no harness at all. It also refuses to start if the suite is
 already red, so a survivor can never be a pre-existing failure misread as a
 control gap.
@@ -304,6 +304,25 @@ def suite_is_red() -> tuple[bool, str]:
     return run(SUITE)
 
 
+def restore(originals: dict[str, str]) -> bool:
+    """Put every mutated file back, and CHECK that it went back.
+
+    Called from all three phases. The docstring used to promise a byte-for-byte
+    verification that only the first phase performed — in a tool that rewrites
+    tracked source, an unverified restore is the one failure that matters.
+    """
+    ok = True
+    for name, text in originals.items():
+        path = os.path.join(HERE, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    for name, text in originals.items():
+        if open(os.path.join(HERE, name), encoding="utf-8").read() != text:
+            print(f"RESTORE FAILED for {name} — the tree still holds a mutant", file=sys.stderr)
+            ok = False
+    return ok
+
+
 def no_model_is_red() -> tuple[bool, str]:
     return run([*NO_MODEL_ONLY])
 
@@ -340,14 +359,8 @@ def main() -> int:
             if not went_red:
                 survivors.append(f"{module}::{qualified}")
     finally:
-        for name, text in originals.items():
-            with open(os.path.join(HERE, name), "w", encoding="utf-8") as handle:
-                handle.write(text)
-        for name, text in originals.items():
-            restored = open(os.path.join(HERE, name), encoding="utf-8").read()
-            if restored != text:  # pragma: no cover - a restore that did not restore
-                print(f"RESTORE FAILED for {name}", file=sys.stderr)
-                return 1
+        if not restore(originals):
+            return 1
 
     red, summary = suite_is_red()
     print(f"\nrestored: suite GREEN — {summary}" if not red else f"\nrestored but RED: {summary}")
@@ -382,9 +395,8 @@ def main() -> int:
             if not went_red:
                 lived.append(f"{module}: {label}")
     finally:
-        for name, text in originals.items():
-            with open(os.path.join(HERE, name), "w", encoding="utf-8") as handle:
-                handle.write(text)
+        if not restore(originals):
+            return 1
 
     print(f"\n{len(BRANCH_MUTATIONS) - len(lived)}/{len(BRANCH_MUTATIONS)} branches checked")
     if lived:
@@ -410,9 +422,8 @@ def main() -> int:
             if not went_red:
                 accepted.append(f"{module}::{where} {line}")
     finally:
-        for name, text in originals.items():
-            with open(os.path.join(HERE, name), "w", encoding="utf-8") as handle:
-                handle.write(text)
+        if not restore(originals):
+            return 1
 
     red, summary = suite_is_red()
     print(f"\nrestored again: suite GREEN — {summary}" if not red else f"\nrestored but RED: {summary}")

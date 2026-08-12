@@ -68,7 +68,10 @@ echo "$DEL" > delete-pr.number
 echo "opened throwaway PR #$DEL"
 
 DEL_HEAD=$(gh pr view "$DEL" --repo "$REPO" --json headRefOid -q .headRefOid)
-gh api "repos/$REPO/compare/launchpad...$DEL_HEAD" \
+# BY SHA, per README: a branch name resolves to its tip, and comparing a merged
+# head against a moved tip answers 200 OK with zero files.
+DEL_BASE=$(gh api "repos/$REPO/pulls/$DEL" -q .base.sha)
+gh api "repos/$REPO/compare/$DEL_BASE...$DEL_HEAD" \
   | jq '{base_commit: {sha: .base_commit.sha}, merge_base_commit: {sha: .merge_base_commit.sha},
          status, files: [.files[] | {filename, status, additions, deletions}]}' > prdelete-compare.json
 gh api "repos/$REPO/git/trees/$DEL_HEAD?recursive=1" \

@@ -1081,6 +1081,17 @@ class AbsenceIsNeverAValue(unittest.TestCase):
             "every record field is either degraded above or is the skip register itself",
         )
 
+    def test_a_skip_names_the_read_that_failed_not_only_the_field(self):
+        """build_pr reports under "pr" when the `meta` read is what broke.
+
+        Read.name carried that and nothing published it, so the entry dropped the
+        one fact a debugger starts from.
+        """
+        record, skips = self.build("meta", "malformed")
+        entry = next(s for s in skips if s["field"] == "pr")
+        self.assertEqual(entry["source"], "meta", "the field is pr; the failing read is meta")
+        self.assertNotEqual(entry["source"], entry["field"])
+
     def test_the_skip_register_reports_every_degradation(self):
         """`skips` is the seventh field: it has no read, it has this instead."""
         for field, (read_name, _) in FIELD_SOURCES.items():
@@ -1088,7 +1099,9 @@ class AbsenceIsNeverAValue(unittest.TestCase):
                 _, skips = self.build(read_name, "malformed")
                 self.assertTrue(skips, f"{field} was degraded and the register is empty")
                 for entry in skips:
-                    self.assertEqual(sorted(entry), ["detail", "endpoint", "field", "reason"])
+                    self.assertEqual(
+                        sorted(entry), ["detail", "endpoint", "field", "reason", "source"]
+                    )
 
     def test_a_clean_run_still_publishes_the_skip_it_has(self):
         """PR 86 is the readable case and still cannot see org rulesets."""

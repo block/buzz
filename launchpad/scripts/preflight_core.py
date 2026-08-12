@@ -21,7 +21,7 @@ to the record means adding it to this list in the same commit.**
 ``required_gate``   configured, source_endpoint, review_required,
                     review_decision, review_source_endpoint
 ``nearest_rules``   per changed path, the resolved AGENTS.md and CLAUDE.md
-``skips``           [field, reason, detail, endpoint]
+``skips``           [field, source, reason, detail, endpoint]
 ==================  ========================================================
 
 ``checks`` is a **list, never a name-keyed map.** PR 86 carries three checks all
@@ -202,6 +202,11 @@ class Skips:
         self.entries.append(
             {
                 "field": field_name,
+                # WHICH READ failed, which is not always the field that lost a
+                # value: build_pr reports under "pr" when the `meta` read is what
+                # broke. `Read.name` carried that and nothing published it, so the
+                # entry silently dropped the one fact a debugger starts from.
+                "source": read.name,
                 "reason": read.skip or MALFORMED,
                 "detail": read.detail or SKIP_REASONS.get(read.skip or "", ""),
                 "endpoint": read.endpoint,
@@ -276,8 +281,10 @@ def build_closing_issue(meta: Read, closing_refs: Read, skips: Skips) -> dict[st
     and a pattern over the body disagrees with it in both directions on real pull
     requests in this repository:
 
-    - PR 86's body writes one ``Closes #79``; GitHub reports #79 **and** #91, so a
-      first-match regex under-reports what the merge will do.
+    - PR 86 closes two issues and its body says so on consecutive lines. A
+      first-match ``re.search`` — which is what the plan specified — reports only
+      #79, so it under-reports what the merge will do. ``finditer`` sees both, and
+      a control reproduces the single search to pin the difference.
     - PR 92's body writes a visible ``Closes #n`` and GitHub reports **nothing**,
       because the PR's base was not the default branch — merging it would close
       no issue at all.

@@ -248,7 +248,7 @@ query($owner:String!,$repo:String!,$pr:Int!){
 
 
 def fetch_all(number: int, repo: str, runner: Runner) -> dict[str, Read]:
-    """Perform all seven reads. A failure in one never aborts the others."""
+    """Perform all nine reads. A failure in one never aborts the others."""
     owner, _, name = repo.partition("/")
     reads: dict[str, Read] = {}
 

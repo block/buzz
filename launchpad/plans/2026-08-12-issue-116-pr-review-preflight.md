@@ -316,8 +316,13 @@ BUDGET  Steps 8 and 9 eat the budget, and step 3 decides how badly.
   issue asked for.
 
 OPEN  Not for a builder to decide.
-  Where this runs is #110's call and #110 is open, so no .github/workflows file
-  is added by this work — the issue itself says invocation waits on that ADR.
+  Where this runs was #110's call. RESOLVED after this plan was written: #110
+  decided GitHub Actions for Phase 1 at 2026-08-12T07:43Z — 45 minutes after this
+  file was committed — and its decision comment names #116's .github/workflows
+  invocation among what it unblocks. No workflow file is added by this work even
+  so, which is now a scoping choice rather than a wait: the token and its scopes
+  belong to #119. That is stated here because this file merges and a PR body does
+  not.
   What counts as a "required check" has no readable source of truth in this repo
   today: three endpoints report no protection on launchpad, every check on PR 86
   reports isRequired false, and launchpad/AGENTS.md §6 says the branch is
