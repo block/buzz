@@ -348,6 +348,7 @@ mod tests {
             "push_gateway_delivery_request_replays",
             "product_feedback",
             "replica_heartbeat",
+            "authorization_proxy_nonce_claims",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -561,7 +562,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 30);
+        assert_eq!(migrations.len(), 33);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -985,6 +986,46 @@ mod tests {
                 && !desired_schema.contains("CREATE TABLE client_status_revisions"),
             "desired schema must not persist kind 24244 presentation history",
         );
+
+        assert_eq!(migrations[30].version, 31);
+        let identity_lifecycle = migrations[30].sql.as_str();
+        for required in [
+            "nip_fi_lock_authorization_operation_v1",
+            "authorization_operation_receipt_event_cardinality",
+        ] {
+            assert!(
+                identity_lifecycle.contains(required),
+                "migration 0031 missing identity-lifecycle closure: {required}",
+            );
+        }
+
+        assert_eq!(migrations[31].version, 32);
+        let protected_authority = migrations[31].sql.as_str();
+        for required in [
+            "CREATE TABLE authorization_proxy_nonce_claims",
+            "'authorization_proxy_nonce_claims',",
+            "'server replay ledger; authorization_domain is the isolation key'",
+            "CREATE TABLE protected_publication_projection_outbox",
+            "UNIQUE (community_id, publication_sequence)",
+            "protected_publication_projection_receipt_guard_v1",
+        ] {
+            assert!(
+                protected_authority.contains(required),
+                "migration 0032 missing protected-authority surface: {required}",
+            );
+        }
+
+        assert_eq!(migrations[32].version, 34);
+        let operator_preauth = migrations[32].sql.as_str();
+        for required in [
+            "authorization_event_capacity_before_insert_v2",
+            "CREATE TABLE authorization_operator_denial_buckets",
+        ] {
+            assert!(
+                operator_preauth.contains(required),
+                "migration 0034 missing operator pre-auth audit surface: {required}",
+            );
+        }
     }
 
     #[test]
@@ -1227,7 +1268,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(30));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(34));
     }
 
     #[tokio::test]
@@ -1352,6 +1393,10 @@ mod tests {
         );
     }
 
+    #[path = "migration_nip_fi_lifecycle_tests.rs"]
+    mod migration_nip_fi_lifecycle_tests;
+    #[path = "migration_nip_fi_operator_audit_tests.rs"]
+    mod migration_nip_fi_operator_audit_tests;
     #[path = "migration_nip_fi_authorization_tests.rs"]
     mod nip_fi_authorization_tests;
     #[path = "migration_nip_fi_tests.rs"]

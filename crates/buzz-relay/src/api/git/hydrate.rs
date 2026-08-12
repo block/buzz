@@ -30,6 +30,7 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::process::Command;
 
@@ -178,6 +179,48 @@ pub async fn load_manifest_for_read(
         .map(|(_etag, _digest, manifest)| manifest))
 }
 
+/// Load the exact immutable manifest named by a PostgreSQL publication witness.
+///
+/// This path never reads the raw repository pointer. The object-store key,
+/// stored bytes, canonical re-encoding, and DB result digest must all agree.
+pub(crate) async fn load_authoritative_manifest(
+    store: &GitStore,
+    result_digest: [u8; 32],
+) -> Result<Manifest, HydrateError> {
+    if result_digest == [0; 32] {
+        return Err(HydrateError::InvalidPointer);
+    }
+    let digest = hex::encode(result_digest);
+    let key = format!("manifests/{digest}");
+    let bytes = get_verified_limited(store, &key, &digest, MAX_MANIFEST_BYTES).await?;
+    decode_authoritative_manifest(&bytes, result_digest)
+}
+
+fn decode_authoritative_manifest(
+    bytes: &[u8],
+    result_digest: [u8; 32],
+) -> Result<Manifest, HydrateError> {
+    let manifest = Manifest::from_bytes(bytes)?;
+    manifest.validate()?;
+    let canonical = manifest.canonical_bytes()?;
+    let canonical_digest: [u8; 32] = Sha256::digest(canonical).into();
+    if canonical_digest != result_digest {
+        return Err(HydrateError::InvalidPointer);
+    }
+    Ok(manifest)
+}
+
+/// Hydrate a read workspace only from the DB-witnessed immutable manifest.
+#[allow(dead_code)] // Activated only after S5 freezes the joined read witness.
+pub(crate) async fn hydrate_authoritative_read(
+    store: &GitStore,
+    result_digest: [u8; 32],
+    options: HydrationOptions<'_>,
+) -> Result<HydratedRepo, HydrateError> {
+    let manifest = load_authoritative_manifest(store, result_digest).await?;
+    materialize_manifest(store, &manifest, options).await
+}
+
 async fn init_bare_repo(path: &Path) -> Result<(), HydrateError> {
     run_git(path, &["init", "--bare", "--quiet"]).await?;
     run_git(path, &["symbolic-ref", "HEAD", "refs/heads/main"]).await
@@ -237,6 +280,45 @@ pub async fn hydrate_for_write(
             ))
         }
     }
+}
+
+/// Hydrate a write workspace from the DB-witnessed parent publication.
+///
+/// `None` is the authoritative first-publication state. A present digest is
+/// fetched and verified directly; the raw pointer is neither read nor trusted.
+#[allow(dead_code)] // Activated only after S5 freezes expected-parent publication.
+pub(crate) async fn hydrate_authoritative_write(
+    store: &GitStore,
+    parent_result_digest: Option<[u8; 32]>,
+    options: HydrationOptions<'_>,
+) -> Result<(HydratedRepo, ParentState), HydrateError> {
+    let Some(result_digest) = parent_result_digest else {
+        let tempdir = TempDir::new_in(options.scratch_dir).map_err(|error| {
+            HydrateError::Hydrate(format!("tempdir in {:?}: {error}", options.scratch_dir))
+        })?;
+        let path = tempdir.path().to_path_buf();
+        init_bare_repo(&path).await?;
+        return Ok((
+            HydratedRepo {
+                _tempdir: tempdir,
+                path,
+                hydrated_bytes: 0,
+                hydrated_packs: 0,
+            },
+            ParentState::fresh(),
+        ));
+    };
+
+    let manifest = load_authoritative_manifest(store, result_digest).await?;
+    let repo = materialize_manifest(store, &manifest, options).await?;
+    Ok((
+        repo,
+        ParentState {
+            if_match: None,
+            parent_digest: Some(hex::encode(result_digest)),
+            parent: manifest,
+        },
+    ))
 }
 
 /// Resolve the pointer to its `(ETag, digest, verified Manifest)` triple.
@@ -503,6 +585,34 @@ mod tests {
         assert!(!is_hex_oid(&"a".repeat(39)));
         assert!(!is_hex_oid(&"g".repeat(40))); // non-hex
         assert!(!is_hex_oid(""));
+    }
+
+    #[test]
+    fn authoritative_manifest_requires_exact_canonical_witness_bytes() {
+        let manifest = Manifest {
+            version: 1,
+            head: "refs/heads/main".into(),
+            refs: BTreeMap::from([("refs/heads/main".into(), "1".repeat(40))]),
+            packs: Vec::new(),
+            parent: None,
+        };
+        let canonical = manifest.canonical_bytes().expect("canonical manifest");
+        let canonical_digest: [u8; 32] = Sha256::digest(&canonical).into();
+        assert_eq!(
+            decode_authoritative_manifest(&canonical, canonical_digest).expect("witness"),
+            manifest
+        );
+
+        let noncanonical = serde_json::to_vec_pretty(&manifest).expect("pretty manifest");
+        let noncanonical_digest: [u8; 32] = Sha256::digest(&noncanonical).into();
+        assert!(matches!(
+            decode_authoritative_manifest(&noncanonical, noncanonical_digest),
+            Err(HydrateError::InvalidPointer)
+        ));
+        assert!(matches!(
+            decode_authoritative_manifest(&canonical, [0x55; 32]),
+            Err(HydrateError::InvalidPointer)
+        ));
     }
 
     #[tokio::test]

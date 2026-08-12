@@ -62,6 +62,7 @@
 //!   exact contention `Inv_NoFork` proves safe.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -76,7 +77,7 @@ use crate::api::git::manifest::{
     PACK_COMPACTION_THRESHOLD,
 };
 use crate::api::git::store::{CasOutcome, ETag, GitStore, Precond, StoreError};
-use buzz_core::TenantContext;
+use buzz_core::{CommunityId, TenantContext};
 
 const PACK_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
 const PACK_COMPACTION_OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
@@ -177,6 +178,79 @@ struct CompactionObservation {
     packs_before: usize,
     packs_after: usize,
     compacted_bytes: u64,
+}
+
+/// Immutable Git publication staged in content-addressed storage.
+///
+/// This value does not make the repository visible. The manifest digest must
+/// first be committed as the canonical PostgreSQL protected-operation result;
+/// only then may a raw object-store pointer be refreshed as a disposable cache.
+pub struct StagedGitPublication {
+    community_id: CommunityId,
+    owner: String,
+    repo: String,
+    expected_parent_result_digest: Option<[u8; 32]>,
+    manifest: Manifest,
+    manifest_key: String,
+    result_digest: [u8; 32],
+}
+
+impl fmt::Debug for StagedGitPublication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StagedGitPublication([REDACTED])")
+    }
+}
+
+#[allow(dead_code)] // Accessed by the pending S5 publication transaction adapter.
+impl StagedGitPublication {
+    /// Server-resolved authorization domain bound to this publication.
+    pub const fn community_id(&self) -> CommunityId {
+        self.community_id
+    }
+
+    /// Canonical repository owner bound to this publication.
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Canonical repository name bound to this publication.
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+
+    /// Exact DB-witnessed parent, or `None` only for first publication.
+    pub const fn expected_parent_result_digest(&self) -> Option<[u8; 32]> {
+        self.expected_parent_result_digest
+    }
+
+    /// Canonical immutable manifest to use for derived ref-state events.
+    pub const fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Full content-addressed manifest key (`manifests/<sha256>`).
+    pub fn manifest_key(&self) -> &str {
+        &self.manifest_key
+    }
+
+    /// Non-authoritative pointer projection key for durable outbox delivery.
+    pub fn pointer_cache_key(&self) -> String {
+        pointer_key(self.community_id, &self.owner, &self.repo)
+    }
+
+    /// Exact immutable publication digest committed in the operation receipt.
+    pub const fn result_digest(&self) -> [u8; 32] {
+        self.result_digest
+    }
+}
+
+/// Best-effort result of refreshing the non-authoritative raw pointer cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PointerCacheUpdate {
+    /// The cache now names the staged manifest.
+    Updated,
+    /// The cache CAS observed another value and was deliberately left alone.
+    Stale,
 }
 
 struct PreparedCompaction {
@@ -1018,6 +1092,35 @@ pub async fn cas_publish(
     .await
 }
 
+/// Stage packs and one verified immutable manifest without publishing visibility.
+///
+/// The returned digest is suitable for the canonical protected-operation
+/// receipt. This function never reads or writes the raw repository pointer.
+#[allow(dead_code)] // Activated only after S5 freezes the joined publication seam.
+pub(crate) async fn stage_git_publication(
+    store: &GitStore,
+    ctx: &TenantContext,
+    owner: &str,
+    repo: &str,
+    repo_path: &Path,
+    parent_state: &ParentState,
+    limits: PublishLimits,
+) -> Result<StagedGitPublication, CasError> {
+    stage_git_publication_inner(
+        store,
+        ctx,
+        owner,
+        repo,
+        repo_path,
+        parent_state,
+        PublishOptions {
+            limits,
+            compaction_threshold: PACK_COMPACTION_THRESHOLD,
+        },
+    )
+    .await
+}
+
 async fn cas_publish_inner(
     store: &GitStore,
     ctx: &TenantContext,
@@ -1027,8 +1130,44 @@ async fn cas_publish_inner(
     parent_state: &ParentState,
     options: PublishOptions,
 ) -> Result<CasSuccess, CasError> {
+    let staged =
+        stage_git_publication_inner(store, ctx, owner, repo, repo_path, parent_state, options)
+            .await?;
+    publish_pointer_cache_strict(store, ctx, owner, repo, parent_state, staged).await
+}
+
+async fn stage_git_publication_inner(
+    store: &GitStore,
+    ctx: &TenantContext,
+    owner: &str,
+    repo: &str,
+    repo_path: &Path,
+    parent_state: &ParentState,
+    options: PublishOptions,
+) -> Result<StagedGitPublication, CasError> {
+    let canonical_repo = repo.strip_suffix(".git").unwrap_or(repo);
+    if owner.len() != 64
+        || !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || canonical_repo.is_empty()
+        || canonical_repo.len() > 64
+        || canonical_repo.starts_with('.')
+        || canonical_repo.contains("..")
+        || !canonical_repo
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(CasError::ManifestInvalid(ManifestError::UnsafeRefName(
+            "invalid repository publication target".to_owned(),
+        )));
+    }
+    let expected_parent_result_digest = parent_state
+        .parent_digest
+        .as_deref()
+        .map(parse_publication_digest)
+        .transpose()?;
     let limits = options.limits;
-    let pkey = pointer_key(ctx.community(), owner, repo);
 
     // Hydrated repositories are direct children of the configured Git scratch
     // root. Reuse that parent for publication tempfiles so they remain on the
@@ -1207,56 +1346,94 @@ async fn cas_publish_inner(
         }
     };
     let manifest_digest = digest_from_manifest_key(&manifest_key)?;
+    let result_digest = parse_publication_digest(&manifest_digest)?;
+    if let Some(observation) = &compaction_observation {
+        record_compaction(
+            "staged",
+            observation.started_at,
+            observation.packs_before,
+            Some(observation.packs_after),
+            Some(observation.compacted_bytes),
+        );
+    }
+    Ok(StagedGitPublication {
+        community_id: ctx.community(),
+        owner: owner.to_owned(),
+        repo: canonical_repo.to_owned(),
+        expected_parent_result_digest,
+        manifest: m_after,
+        manifest_key,
+        result_digest,
+    })
+}
 
-    // Step 7: CAS the pointer.
+/// Refresh the legacy raw pointer as a disposable cache after DB publication.
+///
+/// A stale or missing cache never confers authority. Callers must already have
+/// combined `staged.result_digest()` with the server-owned authorization
+/// domain, owner, and repository target and committed that target-bound digest
+/// as the canonical PostgreSQL witness. They must tolerate
+/// [`PointerCacheUpdate::Stale`].
+#[allow(dead_code)] // Activated only after canonical DB publication succeeds.
+pub(crate) async fn publish_pointer_cache(
+    store: &GitStore,
+    staged: &StagedGitPublication,
+) -> Result<PointerCacheUpdate, CasError> {
+    let pkey = pointer_key(staged.community_id(), staged.owner(), staged.repo());
+    let manifest_digest = staged
+        .manifest_key
+        .strip_prefix("manifests/")
+        .ok_or_else(|| CasError::ManifestReadFailed("staged manifest key is invalid".into()))?;
+    let precond = match store.get_pointer(&pkey).await? {
+        Some((_etag, current)) if current.as_ref() == manifest_digest.as_bytes() => {
+            return Ok(PointerCacheUpdate::Updated);
+        }
+        Some((etag, current))
+            if staged
+                .expected_parent_result_digest()
+                .is_some_and(|parent| current.as_ref() == hex::encode(parent).as_bytes()) =>
+        {
+            Precond::IfMatch(etag)
+        }
+        Some(_) => return Ok(PointerCacheUpdate::Stale),
+        None if staged.expected_parent_result_digest().is_none() => Precond::IfNoneMatchStar,
+        None => return Ok(PointerCacheUpdate::Stale),
+    };
+    match store
+        .put_pointer(&pkey, manifest_digest.as_bytes(), precond)
+        .await?
+    {
+        CasOutcome::Won(_) => Ok(PointerCacheUpdate::Updated),
+        CasOutcome::LostRace => Ok(PointerCacheUpdate::Stale),
+    }
+}
+
+async fn publish_pointer_cache_strict(
+    store: &GitStore,
+    ctx: &TenantContext,
+    owner: &str,
+    repo: &str,
+    parent_state: &ParentState,
+    staged: StagedGitPublication,
+) -> Result<CasSuccess, CasError> {
+    let pkey = pointer_key(ctx.community(), owner, repo);
     let precond = match &parent_state.if_match {
-        Some(e) => Precond::IfMatch(e.clone()),
+        Some(etag) => Precond::IfMatch(etag.clone()),
         None => Precond::IfNoneMatchStar,
     };
-    let cas_outcome = match store
+    let manifest_digest = staged
+        .manifest_key
+        .strip_prefix("manifests/")
+        .ok_or_else(|| CasError::ManifestReadFailed("staged manifest key is invalid".into()))?;
+    match store
         .put_pointer(&pkey, manifest_digest.as_bytes(), precond)
-        .await
+        .await?
     {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            if let Some(observation) = &compaction_observation {
-                record_compaction(
-                    "publish_error",
-                    observation.started_at,
-                    observation.packs_before,
-                    Some(observation.packs_after),
-                    Some(observation.compacted_bytes),
-                );
-            }
-            return Err(error.into());
-        }
-    };
-    match cas_outcome {
-        CasOutcome::Won(_new_etag) => {
-            if let Some(observation) = &compaction_observation {
-                record_compaction(
-                    "success",
-                    observation.started_at,
-                    observation.packs_before,
-                    Some(observation.packs_after),
-                    Some(observation.compacted_bytes),
-                );
-            }
-            Ok(CasSuccess {
-                manifest: m_after,
-                manifest_key,
-            })
-        }
+        CasOutcome::Won(_) => Ok(CasSuccess {
+            manifest: staged.manifest,
+            manifest_key: staged.manifest_key,
+        }),
         CasOutcome::LostRace => {
-            if let Some(observation) = &compaction_observation {
-                record_compaction(
-                    "cas_conflict",
-                    observation.started_at,
-                    observation.packs_before,
-                    Some(observation.packs_after),
-                    Some(observation.compacted_bytes),
-                );
-            }
             // Surface a typed Conflict carrying the winner so the caller
             // can reconcile the on-disk workspace without re-reading the
             // pointer. We re-GET the pointer here on the slow path; a
@@ -1271,7 +1448,7 @@ async fn cas_publish_inner(
             warn!(
                 pointer = %pkey,
                 expected_etag = %expected,
-                attempted_manifest = %manifest_key,
+                attempted_manifest = %staged.manifest_key,
                 "CAS lost race; resolving winner for reconcile"
             );
             let (winner_manifest, winner_manifest_key) =
@@ -1282,6 +1459,25 @@ async fn cas_publish_inner(
             })
         }
     }
+}
+
+fn parse_publication_digest(encoded: &str) -> Result<[u8; 32], CasError> {
+    let bytes = hex::decode(encoded)
+        .map_err(|_| CasError::ManifestReadFailed("manifest digest is not hexadecimal".into()))?;
+    let digest: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| CasError::ManifestReadFailed("manifest digest has wrong length".into()))?;
+    if hex::encode(digest) != encoded {
+        return Err(CasError::ManifestReadFailed(
+            "manifest digest is not canonical lowercase hexadecimal".into(),
+        ));
+    }
+    if digest == [0; 32] {
+        return Err(CasError::ManifestReadFailed(
+            "manifest digest is unallocated".into(),
+        ));
+    }
+    Ok(digest)
 }
 
 /// Re-read the pointer after a `LostRace` and fetch the winner's manifest.
@@ -1331,6 +1527,7 @@ async fn read_winner_after_conflict(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest as _;
 
     // `pointer_key` is owned by `manifest.rs` and unit-tested there
     // (one source of truth — Max/Sami's centralization point).
@@ -1389,6 +1586,57 @@ mod tests {
     #[test]
     fn digest_from_key_rejects_unknown_prefix() {
         assert!(digest_from_manifest_key("not/manifests/abc").is_err());
+    }
+
+    #[test]
+    fn staged_publication_seals_exact_manifest_digest_without_pointer_state() {
+        let manifest = Manifest {
+            version: MANIFEST_VERSION,
+            head: "refs/heads/main".into(),
+            refs: BTreeMap::from([("refs/heads/main".into(), "1".repeat(40))]),
+            packs: vec![pack_key('a')],
+            parent: None,
+        };
+        let canonical = manifest.canonical_bytes().expect("canonical manifest");
+        let digest: [u8; 32] = sha2::Sha256::digest(canonical).into();
+        let tenant = tenant();
+        let staged = StagedGitPublication {
+            community_id: tenant.community(),
+            owner: "a".repeat(64),
+            repo: "project".to_owned(),
+            expected_parent_result_digest: None,
+            manifest: manifest.clone(),
+            manifest_key: format!("manifests/{}", hex::encode(digest)),
+            result_digest: digest,
+        };
+
+        assert_eq!(staged.community_id(), tenant.community());
+        assert_eq!(staged.owner(), "a".repeat(64));
+        assert_eq!(staged.repo(), "project");
+        assert_eq!(staged.expected_parent_result_digest(), None);
+        assert_eq!(staged.manifest(), &manifest);
+        assert_eq!(staged.result_digest(), digest);
+        assert_eq!(format!("{staged:?}"), "StagedGitPublication([REDACTED])");
+        assert_eq!(
+            staged.pointer_cache_key(),
+            pointer_key(tenant.community(), &"a".repeat(64), "project")
+        );
+        assert_eq!(
+            staged.manifest_key(),
+            format!("manifests/{}", hex::encode(digest))
+        );
+    }
+
+    #[test]
+    fn publication_digest_rejects_noncanonical_and_unallocated_values() {
+        assert!(parse_publication_digest("not-hex").is_err());
+        assert!(parse_publication_digest(&"01".repeat(31)).is_err());
+        assert!(parse_publication_digest(&"00".repeat(32)).is_err());
+        assert!(parse_publication_digest(&"AB".repeat(32)).is_err());
+        assert_eq!(
+            parse_publication_digest(&"ab".repeat(32)).expect("digest"),
+            [0xab; 32]
+        );
     }
 
     #[test]

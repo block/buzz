@@ -200,16 +200,32 @@ CREATE TABLE IF NOT EXISTS authorization_event_capacity (
     failure_observed_at timestamptz,
     configured_at timestamptz DEFAULT transaction_timestamp() NOT NULL,
     updated_at timestamptz DEFAULT transaction_timestamp() NOT NULL,
+    restrictive_reserve_events bigint NOT NULL,
+    restrictive_reserve_bytes bigint NOT NULL,
+    failure_generation bigint DEFAULT 0 NOT NULL,
+    recovery_generation bigint DEFAULT 0 NOT NULL,
+    recovered_at timestamptz,
     CONSTRAINT authorization_event_capacity_pkey PRIMARY KEY (community_id),
     CONSTRAINT authorization_event_capacity_community_id_fkey FOREIGN KEY (community_id) REFERENCES communities (id),
     CONSTRAINT authorization_event_capacity_check CHECK (max_envelope_bytes <= max_bytes_per_domain),
     CONSTRAINT authorization_event_capacity_check1 CHECK (retained_event_count <= max_events_per_domain),
     CONSTRAINT authorization_event_capacity_check2 CHECK (retained_envelope_bytes <= max_bytes_per_domain),
     CONSTRAINT authorization_event_capacity_failure_code_check CHECK (failure_code IS NULL OR (failure_code IN (1, 2, 3))),
+    CONSTRAINT authorization_event_capacity_generations CHECK (recovery_generation <= failure_generation),
     CONSTRAINT authorization_event_capacity_health_state_check CHECK (health_state IN (1, 2)),
     CONSTRAINT authorization_event_capacity_max_bytes CHECK (max_bytes_per_domain >= 1 AND max_bytes_per_domain <= 16777216),
     CONSTRAINT authorization_event_capacity_max_envelope CHECK (max_envelope_bytes >= 1 AND max_envelope_bytes <= 16384),
     CONSTRAINT authorization_event_capacity_max_events CHECK (max_events_per_domain >= 1 AND max_events_per_domain <= 10000),
+    CONSTRAINT authorization_event_capacity_reserve_bytes CHECK (restrictive_reserve_bytes =
+CASE
+    WHEN max_bytes_per_domain > max_envelope_bytes THEN GREATEST(max_envelope_bytes::bigint, LEAST(262144::bigint, max_bytes_per_domain / 8))
+    ELSE 0::bigint
+END),
+    CONSTRAINT authorization_event_capacity_reserve_events CHECK (restrictive_reserve_events =
+CASE
+    WHEN max_events_per_domain > 1 THEN GREATEST(1::bigint, LEAST(64::bigint, max_events_per_domain / 8))
+    ELSE 0::bigint
+END),
     CONSTRAINT authorization_event_capacity_retained_envelope_bytes_check CHECK (retained_envelope_bytes >= 0),
     CONSTRAINT authorization_event_capacity_retained_event_count_check CHECK (retained_event_count >= 0)
 );
@@ -251,6 +267,40 @@ CREATE TABLE IF NOT EXISTS authorization_operation_receipts (
     CONSTRAINT authorization_operation_receipts_outcome_code_check CHECK (outcome_code IN (1, 2, 3)),
     CONSTRAINT authorization_operation_receipts_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32),
     CONSTRAINT authorization_operation_receipts_result_digest_check CHECK (octet_length(result_digest) = 32)
+);
+
+--
+-- Name: authorization_admission_results; Type: TABLE; Schema: -; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS authorization_admission_results (
+    community_id uuid,
+    operation_id uuid,
+    request_fingerprint bytea NOT NULL,
+    semantic_fingerprint bytea NOT NULL,
+    object_kind smallint NOT NULL,
+    object_key bytea NOT NULL,
+    application_type bytea,
+    application_version smallint,
+    application_code smallint,
+    application_payload bytea,
+    application_intent_digest bytea,
+    application_effect_digest bytea,
+    application_result_digest bytea,
+    recorded_at timestamptz DEFAULT transaction_timestamp() NOT NULL,
+    CONSTRAINT authorization_admission_results_pkey PRIMARY KEY (community_id, operation_id),
+    CONSTRAINT authorization_admission_resul_community_id_operation_id_re_fkey FOREIGN KEY (community_id, operation_id, request_fingerprint) REFERENCES authorization_operation_receipts (community_id, operation_id, request_fingerprint),
+    CONSTRAINT authorization_admission_results_application_code_check CHECK (application_code > 0),
+    CONSTRAINT authorization_admission_results_application_effect_digest_check CHECK (application_effect_digest IS NULL OR octet_length(application_effect_digest) = 32 AND application_effect_digest <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT authorization_admission_results_application_intent_digest_check CHECK (application_intent_digest IS NULL OR octet_length(application_intent_digest) = 32 AND application_intent_digest <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT authorization_admission_results_application_payload_check CHECK (application_payload IS NULL OR octet_length(application_payload) <= 4096),
+    CONSTRAINT authorization_admission_results_application_result_digest_check CHECK (application_result_digest IS NULL OR octet_length(application_result_digest) = 32 AND application_result_digest <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT authorization_admission_results_application_type_check CHECK (application_type IS NULL OR octet_length(application_type) = 32 AND application_type <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT authorization_admission_results_application_version_check CHECK (application_version > 0),
+    CONSTRAINT authorization_admission_results_object_key_check CHECK (octet_length(object_key) = 32 AND object_key <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT authorization_admission_results_object_kind_check CHECK (object_kind >= 1 AND object_kind <= 6),
+    CONSTRAINT authorization_admission_results_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32),
+    CONSTRAINT authorization_admission_results_semantic_fingerprint_check CHECK (octet_length(semantic_fingerprint) = 32 AND semantic_fingerprint <> decode(repeat('00'::text, 32), 'hex'::text))
 );
 
 --
@@ -420,6 +470,46 @@ CREATE TABLE IF NOT EXISTS authorization_operation_version_deltas (
     CONSTRAINT authorization_operation_version_deltas_component_digest_check CHECK (octet_length(component_digest) = 32),
     CONSTRAINT authorization_operation_version_deltas_component_key_check CHECK (octet_length(component_key) = 32),
     CONSTRAINT authorization_operation_version_deltas_component_kind_check CHECK (component_kind IN (1, 2, 3, 4, 6, 7))
+);
+
+--
+-- Name: authorization_operator_denial_buckets; Type: TABLE; Schema: -; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS authorization_operator_denial_buckets (
+    community_id uuid,
+    denial_class smallint,
+    action_kind smallint,
+    slot smallint,
+    window_generation bigint NOT NULL,
+    window_started_at timestamptz NOT NULL,
+    denial_count bigint NOT NULL,
+    last_denied_at timestamptz NOT NULL,
+    CONSTRAINT authorization_operator_denial_buckets_pkey PRIMARY KEY (community_id, denial_class, action_kind, slot),
+    CONSTRAINT authorization_operator_denial_buckets_community_id_fkey FOREIGN KEY (community_id) REFERENCES communities (id),
+    CONSTRAINT authorization_operator_denial_buckets_action_kind_check CHECK (action_kind >= 1 AND action_kind <= 8),
+    CONSTRAINT authorization_operator_denial_buckets_check CHECK (window_started_at <= last_denied_at),
+    CONSTRAINT authorization_operator_denial_buckets_denial_class_check CHECK (denial_class >= 1 AND denial_class <= 8),
+    CONSTRAINT authorization_operator_denial_buckets_denial_count_check CHECK (denial_count > 0),
+    CONSTRAINT authorization_operator_denial_buckets_slot_check CHECK (slot >= 0 AND slot <= 11),
+    CONSTRAINT authorization_operator_denial_buckets_window_generation_check CHECK (window_generation >= 0)
+);
+
+--
+-- Name: authorization_proxy_nonce_claims; Type: TABLE; Schema: -; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS authorization_proxy_nonce_claims (
+    authorization_domain uuid,
+    claim_kind smallint,
+    claim_key bytea,
+    committed_at timestamptz DEFAULT transaction_timestamp() NOT NULL,
+    retain_until timestamptz NOT NULL,
+    CONSTRAINT authorization_proxy_nonce_claims_pkey PRIMARY KEY (authorization_domain, claim_kind, claim_key),
+    CONSTRAINT authorization_proxy_nonce_claims_authorization_domain_fkey FOREIGN KEY (authorization_domain) REFERENCES communities (id),
+    CONSTRAINT authorization_proxy_nonce_claims_check CHECK (committed_at < retain_until),
+    CONSTRAINT authorization_proxy_nonce_claims_claim_key_check CHECK (octet_length(claim_key) = 32 AND claim_key <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT authorization_proxy_nonce_claims_claim_kind_check CHECK (claim_kind = 1)
 );
 
 --
@@ -1769,6 +1859,68 @@ CREATE INDEX IF NOT EXISTS idx_product_feedback_community_received ON product_fe
 CREATE INDEX IF NOT EXISTS idx_product_feedback_received ON product_feedback (received_at DESC, id);
 
 --
+-- Name: protected_publication_projection_outbox; Type: TABLE; Schema: -; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS protected_publication_projection_outbox (
+    community_id uuid,
+    operation_id uuid,
+    request_fingerprint bytea NOT NULL,
+    publication_result_digest bytea NOT NULL,
+    object_kind smallint NOT NULL,
+    object_key bytea NOT NULL,
+    application_type bytea NOT NULL,
+    application_version smallint NOT NULL,
+    application_effect_digest bytea NOT NULL,
+    projection_kind smallint,
+    projection_key text NOT NULL,
+    staged_object_key text NOT NULL,
+    payload_digest bytea NOT NULL,
+    delivery_state smallint DEFAULT 1 NOT NULL,
+    attempt_count bigint DEFAULT 0 NOT NULL,
+    next_attempt_at timestamptz DEFAULT transaction_timestamp() NOT NULL,
+    last_attempt_at timestamptz,
+    delivered_at timestamptz,
+    failure_code smallint DEFAULT 0 NOT NULL,
+    created_at timestamptz DEFAULT transaction_timestamp() NOT NULL,
+    publication_sequence bigint NOT NULL,
+    CONSTRAINT protected_publication_projection_outbox_pkey PRIMARY KEY (community_id, operation_id, projection_kind),
+    CONSTRAINT protected_publication_project_community_id_publication_sequ_key UNIQUE (community_id, publication_sequence),
+    CONSTRAINT protected_publication_project_community_id_operation_id_re_fkey FOREIGN KEY (community_id, operation_id, request_fingerprint) REFERENCES authorization_operation_receipts (community_id, operation_id, request_fingerprint) DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT protected_publication_projection_outbox_community_id_fkey FOREIGN KEY (community_id) REFERENCES communities (id),
+    CONSTRAINT protected_publication_projectio_application_effect_digest_check CHECK (octet_length(application_effect_digest) = 32 AND application_effect_digest <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT protected_publication_projectio_publication_result_digest_check CHECK (octet_length(publication_result_digest) = 32 AND publication_result_digest <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT protected_publication_projection_outb_application_version_check CHECK (application_version > 0),
+    CONSTRAINT protected_publication_projection_outb_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32 AND request_fingerprint <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT protected_publication_projection_outbox_application_type_check CHECK (octet_length(application_type) = 32 AND application_type <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT protected_publication_projection_outbox_attempt_count_check CHECK (attempt_count >= 0),
+    CONSTRAINT protected_publication_projection_outbox_check CHECK ((attempt_count = 0) = (last_attempt_at IS NULL)),
+    CONSTRAINT protected_publication_projection_outbox_check1 CHECK (last_attempt_at IS NULL OR last_attempt_at >= created_at),
+    CONSTRAINT protected_publication_projection_outbox_check2 CHECK (delivered_at IS NULL OR delivered_at >= created_at),
+    CONSTRAINT protected_publication_projection_outbox_delivery_state_check CHECK (delivery_state IN (1, 2, 3)),
+    CONSTRAINT protected_publication_projection_outbox_failure_code_check CHECK (failure_code >= 0 AND failure_code <= 6),
+    CONSTRAINT protected_publication_projection_outbox_object_key_check CHECK (octet_length(object_key) = 32 AND object_key <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT protected_publication_projection_outbox_object_kind_check CHECK (object_kind IN (3, 4)),
+    CONSTRAINT protected_publication_projection_outbox_operation_id_check CHECK (operation_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    CONSTRAINT protected_publication_projection_outbox_payload_digest_check CHECK (octet_length(payload_digest) = 32 AND payload_digest <> decode(repeat('00'::text, 32), 'hex'::text)),
+    CONSTRAINT protected_publication_projection_outbox_projection_key_check CHECK (octet_length(projection_key) >= 1 AND octet_length(projection_key) <= 2048),
+    CONSTRAINT protected_publication_projection_outbox_projection_kind_check CHECK (projection_kind IN (1, 2, 3)),
+    CONSTRAINT protected_publication_projection_outbox_staged_object_key_check CHECK (octet_length(staged_object_key) >= 1 AND octet_length(staged_object_key) <= 2048)
+);
+
+--
+-- Name: protected_publication_projection_outbox_pending; Type: INDEX; Schema: -; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS protected_publication_projection_outbox_pending ON protected_publication_projection_outbox (delivery_state, next_attempt_at, community_id, operation_id) WHERE (delivery_state = 1);
+
+--
+-- Name: protected_publication_projection_outbox_target_order; Type: INDEX; Schema: -; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS protected_publication_projection_outbox_target_order ON protected_publication_projection_outbox (community_id, object_kind, object_key, projection_kind, projection_key, publication_sequence);
+
+--
 -- Name: pubkey_allowlist; Type: TABLE; Schema: -; Owner: -
 --
 
@@ -2766,10 +2918,10 @@ END;
 $$;
 
 --
--- Name: authorization_event_capacity_before_insert_v1(); Type: FUNCTION; Schema: -; Owner: -
+-- Name: authorization_event_capacity_before_insert_v2(); Type: FUNCTION; Schema: -; Owner: -
 --
 
-CREATE OR REPLACE FUNCTION authorization_event_capacity_before_insert_v1()
+CREATE OR REPLACE FUNCTION authorization_event_capacity_before_insert_v2()
 RETURNS trigger
 LANGUAGE plpgsql
 VOLATILE
@@ -2777,6 +2929,9 @@ AS $$
 DECLARE
     policy authorization_event_capacity%ROWTYPE;
     envelope_bytes BIGINT;
+    restrictive_event BOOLEAN;
+    event_limit BIGINT;
+    byte_limit BIGINT;
 BEGIN
     SELECT * INTO policy
     FROM authorization_event_capacity
@@ -2795,13 +2950,22 @@ BEGIN
     END IF;
 
     envelope_bytes := octet_length(NEW.canonical_envelope);
+    restrictive_event := NEW.outcome_code <> 1
+        OR NEW.event_kind IN (2, 3, 4, 5, 6, 7, 8, 9, 11, 14);
+    IF restrictive_event THEN
+        event_limit := policy.max_events_per_domain;
+        byte_limit := policy.max_bytes_per_domain;
+    ELSE
+        event_limit := policy.max_events_per_domain
+            - policy.restrictive_reserve_events;
+        byte_limit := policy.max_bytes_per_domain
+            - policy.restrictive_reserve_bytes;
+    END IF;
+
     IF envelope_bytes > policy.max_envelope_bytes
-        OR policy.retained_event_count + 1 > policy.max_events_per_domain
-        OR policy.retained_envelope_bytes + envelope_bytes > policy.max_bytes_per_domain
+        OR policy.retained_event_count + 1 > event_limit
+        OR policy.retained_envelope_bytes + envelope_bytes > byte_limit
     THEN
-        -- The INSERT and protected mutation abort together. The runtime maps
-        -- this stable constraint to typed CapacityExhausted and latches audit
-        -- health outside the rolled-back transaction.
         RAISE EXCEPTION 'authorization event capacity exhausted'
             USING ERRCODE = 'check_violation',
                   CONSTRAINT = 'authorization_event_capacity_exhausted';
@@ -2810,41 +2974,175 @@ BEGIN
     UPDATE authorization_event_capacity
     SET retained_event_count = retained_event_count + 1,
         retained_envelope_bytes = retained_envelope_bytes + envelope_bytes,
-        updated_at = transaction_timestamp()
+        updated_at = GREATEST(
+            transaction_timestamp(),
+            authorization_event_capacity.updated_at + INTERVAL '1 microsecond'
+        )
     WHERE community_id = NEW.community_id;
     RETURN NEW;
 END;
 $$;
 
 --
--- Name: authorization_event_capacity_guard_v1(); Type: FUNCTION; Schema: -; Owner: -
+-- Name: authorization_event_capacity_guard_v2(); Type: FUNCTION; Schema: -; Owner: -
 --
 
-CREATE OR REPLACE FUNCTION authorization_event_capacity_guard_v1()
+CREATE OR REPLACE FUNCTION authorization_event_capacity_guard_v2()
 RETURNS trigger
 LANGUAGE plpgsql
 VOLATILE
 AS $$
 BEGIN
     IF NEW.community_id IS DISTINCT FROM OLD.community_id
-        OR NEW.max_events_per_domain IS DISTINCT FROM OLD.max_events_per_domain
-        OR NEW.max_bytes_per_domain IS DISTINCT FROM OLD.max_bytes_per_domain
-        OR NEW.max_envelope_bytes IS DISTINCT FROM OLD.max_envelope_bytes
         OR NEW.configured_at IS DISTINCT FROM OLD.configured_at
+        OR NEW.max_events_per_domain < OLD.max_events_per_domain
+        OR NEW.max_bytes_per_domain < OLD.max_bytes_per_domain
+        OR NEW.max_envelope_bytes < OLD.max_envelope_bytes
+        OR NEW.restrictive_reserve_events < OLD.restrictive_reserve_events
+        OR NEW.restrictive_reserve_bytes < OLD.restrictive_reserve_bytes
         OR NEW.retained_event_count < OLD.retained_event_count
         OR NEW.retained_envelope_bytes < OLD.retained_envelope_bytes
-        OR NEW.updated_at < OLD.updated_at
-        OR (OLD.health_state = 2 AND (
-            NEW.health_state <> 2
+        OR NEW.failure_generation < OLD.failure_generation
+        OR NEW.recovery_generation < OLD.recovery_generation
+        OR NEW.updated_at <= OLD.updated_at
+        OR NEW.failure_generation > OLD.failure_generation + 1
+        OR NEW.recovery_generation > NEW.failure_generation
+        OR (OLD.health_state = 1 AND NEW.health_state = 2 AND (
+            NEW.failure_generation <> OLD.failure_generation + 1
+            OR NEW.recovery_generation <> OLD.recovery_generation
+            OR NEW.failure_code IS NULL
+            OR NEW.failure_observed_at IS NULL
+            OR NEW.recovered_at IS DISTINCT FROM OLD.recovered_at
+        ))
+        OR (OLD.health_state = 2 AND NEW.health_state = 1 AND (
+            NEW.failure_generation <> OLD.failure_generation
+            OR NEW.recovery_generation <> OLD.failure_generation
+            OR NEW.failure_code IS NOT NULL
+            OR NEW.failure_observed_at IS NOT NULL
+            OR NEW.recovered_at IS NULL
+            OR NEW.recovered_at <= OLD.failure_observed_at
+        ))
+        OR (OLD.health_state = NEW.health_state AND (
+            NEW.failure_generation <> OLD.failure_generation
+            OR NEW.recovery_generation <> OLD.recovery_generation
             OR NEW.failure_code IS DISTINCT FROM OLD.failure_code
             OR NEW.failure_observed_at IS DISTINCT FROM OLD.failure_observed_at
-        ))
-        OR (OLD.health_state = 1 AND NEW.health_state = 1 AND (
-            NEW.failure_code IS NOT NULL OR NEW.failure_observed_at IS NOT NULL
+            OR NEW.recovered_at IS DISTINCT FROM OLD.recovered_at
         ))
     THEN
-        RAISE EXCEPTION 'authorization event capacity cannot be reset online'
+        RAISE EXCEPTION 'authorization event capacity transition is not monotonic'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'authorization_event_capacity_monotonic_v2';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+--
+-- Name: authorization_event_capacity_recover_v2(uuid, bigint); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_event_capacity_recover_v2(
+    selected_community_id uuid,
+    expected_failure_generation bigint
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+STRICT
+AS $$
+DECLARE
+    recovered BOOLEAN;
+BEGIN
+    UPDATE authorization_event_capacity
+    SET health_state = 1,
+        failure_code = NULL,
+        failure_observed_at = NULL,
+        recovery_generation = failure_generation,
+        recovered_at = transaction_timestamp(),
+        updated_at = GREATEST(
+            transaction_timestamp(),
+            authorization_event_capacity.updated_at + INTERVAL '1 microsecond'
+        )
+    WHERE community_id = selected_community_id
+      AND health_state = 2
+      AND failure_generation = expected_failure_generation;
+    recovered := FOUND;
+    RETURN recovered;
+END;
+$$;
+
+--
+-- Name: authorization_event_capacity_report_failure_v2(uuid, smallint); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_event_capacity_report_failure_v2(
+    selected_community_id uuid,
+    selected_failure_code smallint
+)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+STRICT
+AS $$
+DECLARE
+    next_generation BIGINT;
+BEGIN
+    IF selected_failure_code NOT IN (1, 2, 3) THEN
+        RAISE EXCEPTION 'invalid authorization audit failure code'
             USING ERRCODE = 'check_violation';
+    END IF;
+    UPDATE authorization_event_capacity
+    SET health_state = 2,
+        failure_code = selected_failure_code,
+        failure_observed_at = transaction_timestamp(),
+        failure_generation = failure_generation + 1,
+        updated_at = GREATEST(
+            transaction_timestamp(),
+            authorization_event_capacity.updated_at + INTERVAL '1 microsecond'
+        )
+    WHERE community_id = selected_community_id AND health_state = 1
+    RETURNING failure_generation INTO next_generation;
+    IF next_generation IS NULL THEN
+        SELECT failure_generation INTO next_generation
+        FROM authorization_event_capacity
+        WHERE community_id = selected_community_id AND health_state = 2;
+    END IF;
+    IF next_generation IS NULL THEN
+        RAISE EXCEPTION 'authorization event capacity policy missing'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'authorization_event_capacity_policy_required';
+    END IF;
+    RETURN next_generation;
+END;
+$$;
+
+--
+-- Name: authorization_event_capacity_reserve_defaults_v2(); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_event_capacity_reserve_defaults_v2()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+BEGIN
+    IF NEW.restrictive_reserve_events IS NULL THEN
+        NEW.restrictive_reserve_events := CASE
+            WHEN NEW.max_events_per_domain > 1
+                THEN GREATEST(1, LEAST(64, NEW.max_events_per_domain / 8))
+            ELSE 0
+        END;
+    END IF;
+    IF NEW.restrictive_reserve_bytes IS NULL THEN
+        NEW.restrictive_reserve_bytes := CASE
+            WHEN NEW.max_bytes_per_domain > NEW.max_envelope_bytes
+                THEN GREATEST(
+                    NEW.max_envelope_bytes,
+                    LEAST(262144, NEW.max_bytes_per_domain / 8)
+                )
+            ELSE 0
+        END;
     END IF;
     RETURN NEW;
 END;
@@ -2909,6 +3207,71 @@ BEGIN
             USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
+END;
+$$;
+
+--
+-- Name: authorization_operation_receipt_event_guard_v1(); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_operation_receipt_event_guard_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+DECLARE
+    receipt authorization_operation_receipts%ROWTYPE;
+    expected_event_kind SMALLINT;
+    matching_event_count BIGINT;
+    expected_event_count BIGINT;
+BEGIN
+    IF TG_TABLE_NAME = 'authorization_operation_receipts' THEN
+        receipt := NEW;
+    ELSE
+        SELECT * INTO receipt
+        FROM authorization_operation_receipts
+        WHERE community_id = NEW.community_id
+          AND operation_id = NEW.operation_id;
+        IF NOT FOUND THEN
+            -- Credential-free pre-authentication denials intentionally have no
+            -- canonical receipt. Their separate v30 FK/shape guards still run.
+            RETURN NULL;
+        END IF;
+    END IF;
+
+    IF receipt.operation_kind NOT BETWEEN 1 AND 9 THEN
+        RETURN NULL;
+    END IF;
+
+    expected_event_kind := CASE receipt.operation_kind
+        WHEN 1 THEN 1  -- enroll
+        WHEN 2 THEN 1  -- provision
+        WHEN 3 THEN 6  -- retire
+        WHEN 4 THEN 7  -- disable
+        WHEN 5 THEN 2  -- revoke
+        WHEN 6 THEN 3  -- rotate
+        WHEN 7 THEN 4  -- recover
+        WHEN 8 THEN 5  -- enable
+        WHEN 9 THEN 8  -- admission loss
+    END;
+
+    SELECT
+        count(*),
+        count(*) FILTER (WHERE event_kind = expected_event_kind)
+    INTO matching_event_count, expected_event_count
+    FROM authorization_events
+    WHERE community_id = receipt.community_id
+      AND operation_id = receipt.operation_id
+      AND request_fingerprint = receipt.request_fingerprint;
+
+    IF matching_event_count <> 1 OR expected_event_count <> 1 THEN
+        RAISE EXCEPTION
+            'lifecycle receipt requires exactly one event kind %, found % total and % expected',
+            expected_event_kind, matching_event_count, expected_event_count
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'authorization_operation_receipt_event_cardinality';
+    END IF;
+    RETURN NULL;
 END;
 $$;
 
@@ -2979,6 +3342,130 @@ BEGIN
                   CONSTRAINT = 'authorization_operation_version_delta_cardinality';
     END IF;
     RETURN NULL;
+END;
+$$;
+
+--
+-- Name: authorization_operator_denial_bucket_guard_v1(); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_operator_denial_bucket_guard_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+BEGIN
+    IF NEW.community_id IS DISTINCT FROM OLD.community_id
+        OR NEW.denial_class IS DISTINCT FROM OLD.denial_class
+        OR NEW.action_kind IS DISTINCT FROM OLD.action_kind
+        OR NEW.slot IS DISTINCT FROM OLD.slot
+        OR NEW.window_generation < OLD.window_generation
+        OR (NEW.window_generation = OLD.window_generation AND (
+            NEW.window_started_at IS DISTINCT FROM OLD.window_started_at
+            OR NEW.denial_count < OLD.denial_count
+            OR NEW.last_denied_at < OLD.last_denied_at
+        ))
+        OR (NEW.window_generation > OLD.window_generation AND NEW.denial_count <> 1)
+    THEN
+        RAISE EXCEPTION 'operator denial bucket transition is invalid'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+--
+-- Name: authorization_operator_denial_bucket_record_v1(uuid, smallint, smallint); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_operator_denial_bucket_record_v1(
+    selected_community_id uuid,
+    selected_denial_class smallint,
+    selected_action_kind smallint
+)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+STRICT
+AS $$
+DECLARE
+    authoritative_now TIMESTAMPTZ := transaction_timestamp();
+    generation BIGINT;
+    selected_slot SMALLINT;
+    retained_count BIGINT;
+BEGIN
+    IF selected_denial_class NOT BETWEEN 1 AND 8
+        OR selected_action_kind NOT BETWEEN 1 AND 8
+    THEN
+        RAISE EXCEPTION 'invalid operator denial bucket coordinate'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    generation := floor(extract(epoch FROM authoritative_now) / 300)::BIGINT;
+    selected_slot := (generation % 12)::SMALLINT;
+    INSERT INTO authorization_operator_denial_buckets (
+        community_id, denial_class, action_kind, slot,
+        window_generation, window_started_at, denial_count, last_denied_at
+    ) VALUES (
+        selected_community_id, selected_denial_class, selected_action_kind,
+        selected_slot, generation, to_timestamp(generation * 300), 1,
+        authoritative_now
+    )
+    ON CONFLICT (community_id, denial_class, action_kind, slot) DO UPDATE SET
+        window_generation = EXCLUDED.window_generation,
+        window_started_at = EXCLUDED.window_started_at,
+        denial_count = CASE
+            WHEN authorization_operator_denial_buckets.window_generation
+                = EXCLUDED.window_generation
+            THEN CASE
+                WHEN authorization_operator_denial_buckets.denial_count
+                    = 9223372036854775807
+                THEN 9223372036854775807
+                ELSE authorization_operator_denial_buckets.denial_count + 1
+            END
+            ELSE 1
+        END,
+        last_denied_at = EXCLUDED.last_denied_at
+    RETURNING denial_count INTO retained_count;
+    RETURN retained_count;
+END;
+$$;
+
+--
+-- Name: authorization_proxy_nonce_claim_retention_v1(); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_proxy_nonce_claim_retention_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+BEGIN
+    IF transaction_timestamp() <= OLD.retain_until THEN
+        RAISE EXCEPTION 'trusted-proxy nonce claim retention is still active'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'authorization_proxy_nonce_claim_retention';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+--
+-- Name: authorization_proxy_nonce_claim_stamp_v1(); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION authorization_proxy_nonce_claim_stamp_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+BEGIN
+    NEW.committed_at := transaction_timestamp();
+    IF NEW.retain_until <= NEW.committed_at THEN
+        RAISE EXCEPTION 'trusted-proxy nonce claim is already expired'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'authorization_proxy_nonce_claim_expired';
+    END IF;
+    RETURN NEW;
 END;
 $$;
 
@@ -3734,6 +4221,34 @@ END;
 $$;
 
 --
+-- Name: nip_fi_lock_authorization_operation_v1(uuid, uuid); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION nip_fi_lock_authorization_operation_v1(
+    locked_community_id uuid,
+    locked_operation_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+STRICT
+AS $$
+BEGIN
+    IF locked_community_id = '00000000-0000-0000-0000-000000000000'::uuid
+        OR locked_operation_id = '00000000-0000-0000-0000-000000000000'::uuid
+    THEN
+        RAISE EXCEPTION 'invalid NIP-FI operation lock coordinate'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'buzz:authorization-operation:v1:' || locked_community_id::text
+            || ':' || locked_operation_id::text,
+        0
+    ));
+END;
+$$;
+
+--
 -- Name: nip_fi_reject_row_mutation_v1(); Type: FUNCTION; Schema: -; Owner: -
 --
 
@@ -3786,6 +4301,150 @@ BEGIN
     THEN
         RAISE EXCEPTION 'protected authority replacement requires a new operation and epoch'
             USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+--
+-- Name: protected_publication_projection_insert_guard_v1(); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION protected_publication_projection_insert_guard_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+BEGIN
+    IF NEW.delivery_state <> 1
+        OR NEW.attempt_count <> 0
+        OR NEW.last_attempt_at IS NOT NULL
+        OR NEW.delivered_at IS NOT NULL
+        OR NEW.failure_code <> 0
+    THEN
+        RAISE EXCEPTION 'protected publication projection must start pending'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'protected_publication_projection_initial_state';
+    END IF;
+    -- Serialize only publications for the exact protected projection target.
+    -- Sequence allocation happens after acquiring this transaction lock, so a
+    -- later publication cannot become visible or deliver before an earlier
+    -- allocator commits or aborts. Hash collisions only over-serialize two
+    -- independent targets; they cannot weaken ordering.
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            jsonb_build_array(
+                'buzz:nip-fi:protected-publication-projection:v1',
+                NEW.community_id::TEXT,
+                NEW.object_kind,
+                encode(NEW.object_key, 'hex'),
+                NEW.projection_kind,
+                NEW.projection_key
+            )::TEXT,
+            0
+        )
+    );
+    NEW.publication_sequence := nextval('protected_publication_projection_sequence_v1');
+    NEW.created_at := transaction_timestamp();
+    NEW.next_attempt_at := transaction_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+--
+-- Name: protected_publication_projection_receipt_guard_v1(); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION protected_publication_projection_receipt_guard_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM authorization_operation_receipts receipt
+        JOIN authorization_admission_results admission
+          ON admission.community_id = receipt.community_id
+         AND admission.operation_id = receipt.operation_id
+         AND admission.request_fingerprint = receipt.request_fingerprint
+        WHERE receipt.community_id = NEW.community_id
+          AND receipt.operation_id = NEW.operation_id
+          AND receipt.request_fingerprint = NEW.request_fingerprint
+          -- First-use enrollment may atomically carry this protected effect;
+          -- every later established-binding mutation uses kind 11.
+          AND receipt.operation_kind IN (1, 11)
+          AND receipt.outcome_code = 1
+          AND admission.object_kind = NEW.object_kind
+          AND admission.object_key = NEW.object_key
+          AND admission.application_type = NEW.application_type
+          AND admission.application_version = NEW.application_version
+          AND admission.application_effect_digest = NEW.application_effect_digest
+          AND admission.application_result_digest = NEW.publication_result_digest
+    ) THEN
+        RAISE EXCEPTION 'protected publication projection requires exact applied receipt'
+            USING ERRCODE = 'foreign_key_violation',
+                  CONSTRAINT = 'protected_publication_projection_receipt';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+--
+-- Name: protected_publication_projection_state_guard_v1(); Type: FUNCTION; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE FUNCTION protected_publication_projection_state_guard_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+AS $$
+BEGIN
+    IF NEW.community_id IS DISTINCT FROM OLD.community_id
+        OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+        OR NEW.request_fingerprint IS DISTINCT FROM OLD.request_fingerprint
+        OR NEW.publication_result_digest IS DISTINCT FROM OLD.publication_result_digest
+        OR NEW.object_kind IS DISTINCT FROM OLD.object_kind
+        OR NEW.object_key IS DISTINCT FROM OLD.object_key
+        OR NEW.application_type IS DISTINCT FROM OLD.application_type
+        OR NEW.application_version IS DISTINCT FROM OLD.application_version
+        OR NEW.application_effect_digest IS DISTINCT FROM OLD.application_effect_digest
+        OR NEW.projection_kind IS DISTINCT FROM OLD.projection_kind
+        OR NEW.projection_key IS DISTINCT FROM OLD.projection_key
+        OR NEW.staged_object_key IS DISTINCT FROM OLD.staged_object_key
+        OR NEW.payload_digest IS DISTINCT FROM OLD.payload_digest
+        OR NEW.created_at IS DISTINCT FROM OLD.created_at
+        OR NEW.publication_sequence IS DISTINCT FROM OLD.publication_sequence
+        OR OLD.delivery_state <> 1
+        OR NEW.delivery_state NOT IN (1, 2, 3)
+        OR NEW.attempt_count <> OLD.attempt_count + 1
+        OR NEW.next_attempt_at < OLD.next_attempt_at
+        OR (NEW.delivery_state = 1 AND NEW.failure_code NOT IN (1, 2))
+        OR (
+            NEW.delivery_state = 2
+            AND EXISTS (
+                SELECT 1
+                FROM protected_publication_projection_outbox earlier
+                WHERE earlier.community_id = OLD.community_id
+                  AND earlier.object_kind = OLD.object_kind
+                  AND earlier.object_key = OLD.object_key
+                  AND earlier.projection_kind = OLD.projection_kind
+                  AND earlier.projection_key = OLD.projection_key
+                  AND earlier.publication_sequence < OLD.publication_sequence
+                  AND earlier.delivery_state = 1
+            )
+        )
+    THEN
+        RAISE EXCEPTION 'protected publication projection transition is invalid'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'protected_publication_projection_transition';
+    END IF;
+    NEW.last_attempt_at := transaction_timestamp();
+    IF NEW.delivery_state = 2 THEN
+        NEW.delivered_at := transaction_timestamp();
+        NEW.failure_code := 0;
+    ELSE
+        NEW.delivered_at := NULL;
     END IF;
     RETURN NEW;
 END;
@@ -3925,6 +4584,24 @@ ALTER TABLE identity_bindings
 ADD CONSTRAINT identity_bindings_exact_retirement_history_fk FOREIGN KEY (community_id, retirement_history_id, binding_id, binding_version, lifecycle_revision, binding_state) REFERENCES identity_lifecycle_history (community_id, history_id, old_binding_id, old_binding_version, old_resulting_lifecycle_revision, old_resulting_state) DEFERRABLE INITIALLY DEFERRED;
 
 --
+-- Name: authorization_admission_results_no_truncate; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER authorization_admission_results_no_truncate
+    BEFORE TRUNCATE ON authorization_admission_results
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION nip_fi_reject_truncate_v1();
+
+--
+-- Name: authorization_admission_results_no_update; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER authorization_admission_results_no_update
+    BEFORE UPDATE OR DELETE ON authorization_admission_results
+    FOR EACH ROW
+    EXECUTE FUNCTION nip_fi_reject_row_mutation_v1();
+
+--
 -- Name: authorization_authentication_denial_attempts_immutable; Type: TRIGGER; Schema: -; Owner: -
 --
 
@@ -3976,7 +4653,7 @@ CREATE OR REPLACE TRIGGER authorization_authority_epochs_no_truncate
 CREATE OR REPLACE TRIGGER authorization_event_capacity_monotonic
     BEFORE UPDATE ON authorization_event_capacity
     FOR EACH ROW
-    EXECUTE FUNCTION authorization_event_capacity_guard_v1();
+    EXECUTE FUNCTION authorization_event_capacity_guard_v2();
 
 --
 -- Name: authorization_event_capacity_no_delete; Type: TRIGGER; Schema: -; Owner: -
@@ -3997,13 +4674,32 @@ CREATE OR REPLACE TRIGGER authorization_event_capacity_no_truncate
     EXECUTE FUNCTION nip_fi_reject_truncate_v1();
 
 --
+-- Name: authorization_event_capacity_reserve_defaults; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER authorization_event_capacity_reserve_defaults
+    BEFORE INSERT ON authorization_event_capacity
+    FOR EACH ROW
+    EXECUTE FUNCTION authorization_event_capacity_reserve_defaults_v2();
+
+--
+-- Name: authorization_event_receipt_cardinality; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER authorization_event_receipt_cardinality
+    AFTER INSERT ON authorization_events
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION authorization_operation_receipt_event_guard_v1();
+
+--
 -- Name: authorization_events_capacity; Type: TRIGGER; Schema: -; Owner: -
 --
 
 CREATE OR REPLACE TRIGGER authorization_events_capacity
     BEFORE INSERT ON authorization_events
     FOR EACH ROW
-    EXECUTE FUNCTION authorization_event_capacity_before_insert_v1();
+    EXECUTE FUNCTION authorization_event_capacity_before_insert_v2();
 
 --
 -- Name: authorization_events_immutable; Type: TRIGGER; Schema: -; Owner: -
@@ -4076,6 +4772,16 @@ CREATE OR REPLACE TRIGGER authorization_invalidation_floors_no_truncate
     BEFORE TRUNCATE ON authorization_invalidation_floors
     FOR EACH STATEMENT
     EXECUTE FUNCTION nip_fi_reject_truncate_v1();
+
+--
+-- Name: authorization_operation_receipt_event_cardinality; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER authorization_operation_receipt_event_cardinality
+    AFTER INSERT ON authorization_operation_receipts
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION authorization_operation_receipt_event_guard_v1();
 
 --
 -- Name: authorization_operation_receipt_history_cardinality; Type: TRIGGER; Schema: -; Owner: -
@@ -4162,24 +4868,67 @@ CREATE OR REPLACE TRIGGER authorization_operation_version_deltas_no_truncate
     EXECUTE FUNCTION nip_fi_reject_truncate_v1();
 
 --
--- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
+-- Name: authorization_operator_denial_buckets_monotonic; Type: TRIGGER; Schema: -; Owner: -
 --
 
-CREATE CONSTRAINT TRIGGER events_created_at_floor
-    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p2026_01
-    DEFERRABLE INITIALLY DEFERRED
+CREATE OR REPLACE TRIGGER authorization_operator_denial_buckets_monotonic
+    BEFORE UPDATE ON authorization_operator_denial_buckets
     FOR EACH ROW
-    EXECUTE FUNCTION events_created_at_floor_guard();
+    EXECUTE FUNCTION authorization_operator_denial_bucket_guard_v1();
 
 --
--- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
+-- Name: authorization_operator_denial_buckets_no_delete; Type: TRIGGER; Schema: -; Owner: -
 --
 
-CREATE CONSTRAINT TRIGGER events_created_at_floor
-    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p2026_02
-    DEFERRABLE INITIALLY DEFERRED
+CREATE OR REPLACE TRIGGER authorization_operator_denial_buckets_no_delete
+    BEFORE DELETE ON authorization_operator_denial_buckets
     FOR EACH ROW
-    EXECUTE FUNCTION events_created_at_floor_guard();
+    EXECUTE FUNCTION nip_fi_reject_row_mutation_v1();
+
+--
+-- Name: authorization_operator_denial_buckets_no_truncate; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER authorization_operator_denial_buckets_no_truncate
+    BEFORE TRUNCATE ON authorization_operator_denial_buckets
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION nip_fi_reject_truncate_v1();
+
+--
+-- Name: authorization_proxy_nonce_claims_immutable; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER authorization_proxy_nonce_claims_immutable
+    BEFORE UPDATE ON authorization_proxy_nonce_claims
+    FOR EACH ROW
+    EXECUTE FUNCTION nip_fi_reject_row_mutation_v1();
+
+--
+-- Name: authorization_proxy_nonce_claims_no_truncate; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER authorization_proxy_nonce_claims_no_truncate
+    BEFORE TRUNCATE ON authorization_proxy_nonce_claims
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION nip_fi_reject_truncate_v1();
+
+--
+-- Name: authorization_proxy_nonce_claims_retained; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER authorization_proxy_nonce_claims_retained
+    BEFORE DELETE ON authorization_proxy_nonce_claims
+    FOR EACH ROW
+    EXECUTE FUNCTION authorization_proxy_nonce_claim_retention_v1();
+
+--
+-- Name: authorization_proxy_nonce_claims_stamp; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER authorization_proxy_nonce_claims_stamp
+    BEFORE INSERT ON authorization_proxy_nonce_claims
+    FOR EACH ROW
+    EXECUTE FUNCTION authorization_proxy_nonce_claim_stamp_v1();
 
 --
 -- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
@@ -4196,7 +4945,47 @@ CREATE CONSTRAINT TRIGGER events_created_at_floor
 --
 
 CREATE CONSTRAINT TRIGGER events_created_at_floor
+    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p2026_01
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION events_created_at_floor_guard();
+
+--
+-- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER events_created_at_floor
     AFTER INSERT OR UPDATE OF created_at, channel_id ON events
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION events_created_at_floor_guard();
+
+--
+-- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER events_created_at_floor
+    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p_future
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION events_created_at_floor_guard();
+
+--
+-- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER events_created_at_floor
+    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p2026_06
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION events_created_at_floor_guard();
+
+--
+-- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER events_created_at_floor
+    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p2026_05
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION events_created_at_floor_guard();
@@ -4226,39 +5015,10 @@ CREATE CONSTRAINT TRIGGER events_created_at_floor
 --
 
 CREATE CONSTRAINT TRIGGER events_created_at_floor
-    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p_future
+    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p2026_02
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION events_created_at_floor_guard();
-
---
--- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE CONSTRAINT TRIGGER events_created_at_floor
-    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p2026_05
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW
-    EXECUTE FUNCTION events_created_at_floor_guard();
-
---
--- Name: events_created_at_floor; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE CONSTRAINT TRIGGER events_created_at_floor
-    AFTER INSERT OR UPDATE OF created_at, channel_id ON events_p2026_06
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW
-    EXECUTE FUNCTION events_created_at_floor_guard();
-
---
--- Name: events_enqueue_push_match; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER events_enqueue_push_match
-    AFTER INSERT ON events_p2026_05
-    FOR EACH ROW
-    EXECUTE FUNCTION enqueue_push_match_job();
 
 --
 -- Name: events_enqueue_push_match; Type: TRIGGER; Schema: -; Owner: -
@@ -4283,7 +5043,7 @@ CREATE OR REPLACE TRIGGER events_enqueue_push_match
 --
 
 CREATE OR REPLACE TRIGGER events_enqueue_push_match
-    AFTER INSERT ON events_p_future
+    AFTER INSERT ON events_p2026_04
     FOR EACH ROW
     EXECUTE FUNCTION enqueue_push_match_job();
 
@@ -4292,7 +5052,25 @@ CREATE OR REPLACE TRIGGER events_enqueue_push_match
 --
 
 CREATE OR REPLACE TRIGGER events_enqueue_push_match
-    AFTER INSERT ON events_p2026_04
+    AFTER INSERT ON events_p_past
+    FOR EACH ROW
+    EXECUTE FUNCTION enqueue_push_match_job();
+
+--
+-- Name: events_enqueue_push_match; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER events_enqueue_push_match
+    AFTER INSERT ON events_p2026_05
+    FOR EACH ROW
+    EXECUTE FUNCTION enqueue_push_match_job();
+
+--
+-- Name: events_enqueue_push_match; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER events_enqueue_push_match
+    AFTER INSERT ON events_p_future
     FOR EACH ROW
     EXECUTE FUNCTION enqueue_push_match_job();
 
@@ -4319,15 +5097,6 @@ CREATE OR REPLACE TRIGGER events_enqueue_push_match
 --
 
 CREATE OR REPLACE TRIGGER events_enqueue_push_match
-    AFTER INSERT ON events_p_past
-    FOR EACH ROW
-    EXECUTE FUNCTION enqueue_push_match_job();
-
---
--- Name: events_enqueue_push_match; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER events_enqueue_push_match
     AFTER INSERT ON events_p2026_02
     FOR EACH ROW
     EXECUTE FUNCTION enqueue_push_match_job();
@@ -4337,7 +5106,7 @@ CREATE OR REPLACE TRIGGER events_enqueue_push_match
 --
 
 CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
-    AFTER INSERT ON events_p2026_04
+    AFTER INSERT ON events
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
@@ -4357,27 +5126,27 @@ CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
 --
 
 CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
-    AFTER INSERT ON events_p2026_05
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW
-    EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
-
---
--- Name: events_refresh_channel_ttl; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
-    AFTER INSERT ON events_p2026_06
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW
-    EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
-
---
--- Name: events_refresh_channel_ttl; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
     AFTER INSERT ON events_p_past
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
+
+--
+-- Name: events_refresh_channel_ttl; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
+    AFTER INSERT ON events_p2026_04
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
+
+--
+-- Name: events_refresh_channel_ttl; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
+    AFTER INSERT ON events_p2026_01
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
@@ -4397,7 +5166,7 @@ CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
 --
 
 CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
-    AFTER INSERT ON events
+    AFTER INSERT ON events_p2026_06
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
@@ -4417,7 +5186,7 @@ CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
 --
 
 CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
-    AFTER INSERT ON events_p2026_01
+    AFTER INSERT ON events_p2026_05
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
@@ -4665,6 +5434,52 @@ CREATE OR REPLACE TRIGGER protected_object_authority_strict_replacement
     EXECUTE FUNCTION protected_object_authority_guard_v1();
 
 --
+-- Name: protected_publication_projection_initial_state; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER protected_publication_projection_initial_state
+    BEFORE INSERT ON protected_publication_projection_outbox
+    FOR EACH ROW
+    EXECUTE FUNCTION protected_publication_projection_insert_guard_v1();
+
+--
+-- Name: protected_publication_projection_no_delete; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER protected_publication_projection_no_delete
+    BEFORE DELETE ON protected_publication_projection_outbox
+    FOR EACH ROW
+    EXECUTE FUNCTION nip_fi_reject_row_mutation_v1();
+
+--
+-- Name: protected_publication_projection_no_truncate; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER protected_publication_projection_no_truncate
+    BEFORE TRUNCATE ON protected_publication_projection_outbox
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION nip_fi_reject_truncate_v1();
+
+--
+-- Name: protected_publication_projection_receipt; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER protected_publication_projection_receipt
+    AFTER INSERT ON protected_publication_projection_outbox
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION protected_publication_projection_receipt_guard_v1();
+
+--
+-- Name: protected_publication_projection_state; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER protected_publication_projection_state
+    BEFORE UPDATE ON protected_publication_projection_outbox
+    FOR EACH ROW
+    EXECUTE FUNCTION protected_publication_projection_state_guard_v1();
+
+--
 -- Name: trg_channels_community_id_immutable; Type: TRIGGER; Schema: -; Owner: -
 --
 
@@ -4687,27 +5502,7 @@ CREATE OR REPLACE TRIGGER trg_event_mentions_require_live_event
 --
 
 CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
-    BEFORE DELETE ON events_p2026_04
-    FOR EACH ROW
-    WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
-    EXECUTE FUNCTION guard_nip_rs_hard_delete();
-
---
--- Name: trg_events_guard_nip_rs_hard_delete; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
-    BEFORE DELETE ON events_p2026_03
-    FOR EACH ROW
-    WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
-    EXECUTE FUNCTION guard_nip_rs_hard_delete();
-
---
--- Name: trg_events_guard_nip_rs_hard_delete; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
-    BEFORE DELETE ON events_p2026_05
+    BEFORE DELETE ON events_p_past
     FOR EACH ROW
     WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
     EXECUTE FUNCTION guard_nip_rs_hard_delete();
@@ -4727,27 +5522,7 @@ CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
 --
 
 CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
-    BEFORE DELETE ON events_p_future
-    FOR EACH ROW
-    WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
-    EXECUTE FUNCTION guard_nip_rs_hard_delete();
-
---
--- Name: trg_events_guard_nip_rs_hard_delete; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
-    BEFORE DELETE ON events_p2026_01
-    FOR EACH ROW
-    WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
-    EXECUTE FUNCTION guard_nip_rs_hard_delete();
-
---
--- Name: trg_events_guard_nip_rs_hard_delete; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
-    BEFORE DELETE ON events_p_past
+    BEFORE DELETE ON events_p2026_04
     FOR EACH ROW
     WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
     EXECUTE FUNCTION guard_nip_rs_hard_delete();
@@ -4767,6 +5542,46 @@ CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
 --
 
 CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
+    BEFORE DELETE ON events_p2026_05
+    FOR EACH ROW
+    WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
+    EXECUTE FUNCTION guard_nip_rs_hard_delete();
+
+--
+-- Name: trg_events_guard_nip_rs_hard_delete; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
+    BEFORE DELETE ON events_p2026_01
+    FOR EACH ROW
+    WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
+    EXECUTE FUNCTION guard_nip_rs_hard_delete();
+
+--
+-- Name: trg_events_guard_nip_rs_hard_delete; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
+    BEFORE DELETE ON events_p2026_03
+    FOR EACH ROW
+    WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
+    EXECUTE FUNCTION guard_nip_rs_hard_delete();
+
+--
+-- Name: trg_events_guard_nip_rs_hard_delete; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
+    BEFORE DELETE ON events_p_future
+    FOR EACH ROW
+    WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
+    EXECUTE FUNCTION guard_nip_rs_hard_delete();
+
+--
+-- Name: trg_events_guard_nip_rs_hard_delete; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
     BEFORE DELETE ON events_p2026_06
     FOR EACH ROW
     WHEN ((((OLD.kind = 30078) AND (OLD.d_tag ~ '^read-state:[0-9a-f]{32}$'::text))))
@@ -4777,7 +5592,7 @@ CREATE OR REPLACE TRIGGER trg_events_guard_nip_rs_hard_delete
 --
 
 CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
-    BEFORE INSERT ON events_p_future
+    BEFORE INSERT ON events_p2026_04
     FOR EACH ROW
     EXECUTE FUNCTION guard_nip_rs_watermark();
 
@@ -4786,34 +5601,7 @@ CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
 --
 
 CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
-    BEFORE INSERT ON events
-    FOR EACH ROW
-    EXECUTE FUNCTION guard_nip_rs_watermark();
-
---
--- Name: trg_events_nip_rs_watermark; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
-    BEFORE INSERT ON events_p2026_02
-    FOR EACH ROW
-    EXECUTE FUNCTION guard_nip_rs_watermark();
-
---
--- Name: trg_events_nip_rs_watermark; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
-    BEFORE INSERT ON events_p_past
-    FOR EACH ROW
-    EXECUTE FUNCTION guard_nip_rs_watermark();
-
---
--- Name: trg_events_nip_rs_watermark; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
-    BEFORE INSERT ON events_p2026_03
+    BEFORE INSERT ON events_p2026_06
     FOR EACH ROW
     EXECUTE FUNCTION guard_nip_rs_watermark();
 
@@ -4831,7 +5619,16 @@ CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
 --
 
 CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
-    BEFORE INSERT ON events_p2026_04
+    BEFORE INSERT ON events_p2026_02
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_nip_rs_watermark();
+
+--
+-- Name: trg_events_nip_rs_watermark; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
+    BEFORE INSERT ON events_p_future
     FOR EACH ROW
     EXECUTE FUNCTION guard_nip_rs_watermark();
 
@@ -4849,7 +5646,25 @@ CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
 --
 
 CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
-    BEFORE INSERT ON events_p2026_06
+    BEFORE INSERT ON events
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_nip_rs_watermark();
+
+--
+-- Name: trg_events_nip_rs_watermark; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
+    BEFORE INSERT ON events_p2026_03
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_nip_rs_watermark();
+
+--
+-- Name: trg_events_nip_rs_watermark; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
+    BEFORE INSERT ON events_p_past
     FOR EACH ROW
     EXECUTE FUNCTION guard_nip_rs_watermark();
 
@@ -4858,7 +5673,7 @@ CREATE OR REPLACE TRIGGER trg_events_nip_rs_watermark
 --
 
 CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
-    AFTER UPDATE OF deleted_at ON events_p2026_06
+    AFTER UPDATE OF deleted_at ON events_p2026_04
     FOR EACH ROW
     EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
 
@@ -4867,7 +5682,7 @@ CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
 --
 
 CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
-    AFTER UPDATE OF deleted_at ON events_p_future
+    AFTER UPDATE OF deleted_at ON events_p2026_06
     FOR EACH ROW
     EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
 
@@ -4885,7 +5700,34 @@ CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
 --
 
 CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
+    AFTER UPDATE OF deleted_at ON events_p2026_03
+    FOR EACH ROW
+    EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
+
+--
+-- Name: trg_events_purge_soft_deleted_buzz_mesh_status; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
+    AFTER UPDATE OF deleted_at ON events
+    FOR EACH ROW
+    EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
+
+--
+-- Name: trg_events_purge_soft_deleted_buzz_mesh_status; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
     AFTER UPDATE OF deleted_at ON events_p2026_05
+    FOR EACH ROW
+    EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
+
+--
+-- Name: trg_events_purge_soft_deleted_buzz_mesh_status; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
+    AFTER UPDATE OF deleted_at ON events_p_future
     FOR EACH ROW
     EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
 
@@ -4903,72 +5745,9 @@ CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
 --
 
 CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
-    AFTER UPDATE OF deleted_at ON events
-    FOR EACH ROW
-    EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
-
---
--- Name: trg_events_purge_soft_deleted_buzz_mesh_status; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
-    AFTER UPDATE OF deleted_at ON events_p2026_03
-    FOR EACH ROW
-    EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
-
---
--- Name: trg_events_purge_soft_deleted_buzz_mesh_status; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
-    AFTER UPDATE OF deleted_at ON events_p2026_04
-    FOR EACH ROW
-    EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
-
---
--- Name: trg_events_purge_soft_deleted_buzz_mesh_status; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status
     AFTER UPDATE OF deleted_at ON events_p2026_01
     FOR EACH ROW
     EXECUTE FUNCTION purge_soft_deleted_buzz_mesh_status();
-
---
--- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
-    AFTER UPDATE OF deleted_at ON events
-    FOR EACH ROW
-    EXECUTE FUNCTION purge_soft_deleted_nip_rs();
-
---
--- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
-    AFTER UPDATE OF deleted_at ON events_p2026_06
-    FOR EACH ROW
-    EXECUTE FUNCTION purge_soft_deleted_nip_rs();
-
---
--- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
-    AFTER UPDATE OF deleted_at ON events_p2026_03
-    FOR EACH ROW
-    EXECUTE FUNCTION purge_soft_deleted_nip_rs();
-
---
--- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
---
-
-CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
-    AFTER UPDATE OF deleted_at ON events_p2026_04
-    FOR EACH ROW
-    EXECUTE FUNCTION purge_soft_deleted_nip_rs();
 
 --
 -- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
@@ -4993,7 +5772,43 @@ CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
 --
 
 CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
+    AFTER UPDATE OF deleted_at ON events_p2026_05
+    FOR EACH ROW
+    EXECUTE FUNCTION purge_soft_deleted_nip_rs();
+
+--
+-- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
+    AFTER UPDATE OF deleted_at ON events_p2026_06
+    FOR EACH ROW
+    EXECUTE FUNCTION purge_soft_deleted_nip_rs();
+
+--
+-- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
     AFTER UPDATE OF deleted_at ON events_p2026_02
+    FOR EACH ROW
+    EXECUTE FUNCTION purge_soft_deleted_nip_rs();
+
+--
+-- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
+    AFTER UPDATE OF deleted_at ON events
+    FOR EACH ROW
+    EXECUTE FUNCTION purge_soft_deleted_nip_rs();
+
+--
+-- Name: trg_events_purge_soft_deleted_nip_rs; Type: TRIGGER; Schema: -; Owner: -
+--
+
+CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
+    AFTER UPDATE OF deleted_at ON events_p2026_04
     FOR EACH ROW
     EXECUTE FUNCTION purge_soft_deleted_nip_rs();
 
@@ -5011,7 +5826,7 @@ CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
 --
 
 CREATE OR REPLACE TRIGGER trg_events_purge_soft_deleted_nip_rs
-    AFTER UPDATE OF deleted_at ON events_p2026_05
+    AFTER UPDATE OF deleted_at ON events_p2026_03
     FOR EACH ROW
     EXECUTE FUNCTION purge_soft_deleted_nip_rs();
 
@@ -5049,6 +5864,9 @@ ALTER TABLE ONLY moderation_reports
 
 ALTER TABLE ONLY protected_object_authority
     ADD CONSTRAINT protected_object_authority_check1 CHECK ((((owner_pubkey IS NULL) AND (delegated_relationship_id IS NULL) AND (delegated_relationship_revision IS NULL) AND (delegation_conditions_fingerprint IS NULL)) OR ((owner_pubkey IS NOT NULL) AND (delegated_relationship_id IS NOT NULL) AND (delegated_relationship_revision IS NOT NULL) AND (delegation_conditions_fingerprint IS NOT NULL))));
+
+ALTER TABLE ONLY protected_publication_projection_outbox
+    ADD CONSTRAINT protected_publication_projection_outbox_check3 CHECK ((((delivery_state = 1) AND (delivered_at IS NULL) AND (failure_code = ANY (ARRAY[0, 1, 2]))) OR ((delivery_state = 2) AND (delivered_at IS NOT NULL) AND (failure_code = 0)) OR ((delivery_state = 3) AND (delivered_at IS NULL) AND (failure_code >= 3) AND (failure_code <= 6))));
 
 ALTER TABLE ONLY push_leases
     ADD CONSTRAINT push_leases_check CHECK (((active AND (app_profile IS NOT NULL) AND (endpoint_hash IS NOT NULL) AND (endpoint_grant IS NOT NULL) AND (max_class IS NOT NULL) AND (subscriptions IS NOT NULL)) OR ((NOT active) AND (app_profile IS NULL) AND (endpoint_hash IS NULL) AND (endpoint_grant IS NULL) AND (max_class IS NULL) AND (subscriptions IS NULL))));

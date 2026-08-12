@@ -1,17 +1,21 @@
-//! Upload pipeline — validate, store, thumbnail, sidecar.
+//! Upload pipeline — validate and stage immutable blobs and manifests.
 
 use buzz_core::tenant::TenantContext;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
+use std::fmt;
 use tokio::io::AsyncWriteExt;
 
 use crate::auth::verify_blossom_upload_auth;
 use crate::config::MediaConfig;
 use crate::error::MediaError;
+use crate::publication::{MediaPublicationManifest, StagedMediaPublication};
 use crate::storage::{BlobMeta, MediaStorage};
 use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
-use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
+use crate::upload_record::{
+    stage_upload_record, StagedUploadRecord, UploadAttribution, UploadEventFacts,
+};
 use crate::validation::{
     looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
     validate_video_file,
@@ -24,24 +28,20 @@ use crate::validation::{
 ///   the `(mime, ext)` pair for the body. Images derive `ext` from the MIME;
 ///   generic files get both from the deny-list validator.
 /// - `prepare_metadata`: builds metadata and stores any derived artifacts such
-///   as a thumbnail, but deliberately does not write the sidecar. The sidecar
-///   is the media serve gate and is published only after the moderation record
-///   succeeds. It receives the already-computed
+///   as a thumbnail, but deliberately does not write operational projections.
+///   It receives the already-computed
 ///   `(sha256, ext, mime, uploaded_at)` so no work is repeated.
 ///
 /// Everything else — hash, Blossom auth (10-minute window), content-addressed
-/// key, the both-exist idempotency short-circuit, blob store, orphan-blob
-/// handling, and descriptor build — is common. The streaming video path stays
-/// separate (see [`process_video_upload`]) because it never buffers in RAM.
+/// key, blob store, orphan-blob handling, and descriptor build — is common.
+/// The streaming video path stays separate (see [`stage_video_upload`])
+/// because it never buffers in RAM.
 ///
 /// `attribution` is `Some` when per-event upload records are enabled
-/// (`BUZZ_MEDIA_UPLOAD_RECORDS`): a record is then written for **every**
-/// accepted upload — including the idempotent short-circuit, which does no
-/// blob PUT and would otherwise be invisible to the moderation pipeline.
-/// For fresh uploads, the record is written after the blob and derived
-/// artifacts but before the sidecar. This preserves both contracts: record
-/// existence implies referenced objects are readable, while a record failure
-/// cannot publish media without triggering moderation.
+/// (`BUZZ_MEDIA_UPLOAD_RECORDS`). Staging retains the exact record facts but
+/// does not call the record sink: an upload is not accepted until its canonical
+/// protected-operation witness commits. The caller publishes the retained
+/// record and cache-only sidecar afterward.
 struct BufferedUploadInput<'a> {
     storage: &'a MediaStorage,
     config: &'a MediaConfig,
@@ -51,11 +51,70 @@ struct BufferedUploadInput<'a> {
     attribution: Option<UploadAttribution>,
 }
 
-async fn process_buffered_upload<V, M, Fut>(
+/// Immutable artifacts and response metadata staged before DB publication.
+pub struct StagedMediaUpload {
+    publication: StagedMediaPublication,
+    descriptor: BlobDescriptor,
+    upload_record: Option<StagedUploadRecord>,
+}
+
+impl fmt::Debug for StagedMediaUpload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StagedMediaUpload([REDACTED])")
+    }
+}
+
+impl StagedMediaUpload {
+    /// Opaque immutable publication consumed by the protected-operation commit.
+    pub const fn publication(&self) -> &StagedMediaPublication {
+        &self.publication
+    }
+
+    /// Response descriptor returned only after the DB witness commits.
+    pub const fn descriptor(&self) -> &BlobDescriptor {
+        &self.descriptor
+    }
+
+    /// Deterministic moderation recovery plan bound into the publication.
+    pub const fn moderation_projection(&self) -> Option<&StagedUploadRecord> {
+        self.upload_record.as_ref()
+    }
+
+    /// Consume the staged upload after publication and cache projection.
+    pub fn into_descriptor(self) -> BlobDescriptor {
+        self.descriptor
+    }
+
+    /// Publish non-authoritative operational projections after DB publication.
+    ///
+    /// The moderation record describes an accepted publication, so staging
+    /// must not write it before the canonical protected-operation commit. The
+    /// sidecar is refreshed afterward and remains a disposable cache.
+    pub async fn publish_post_commit_projections(
+        &self,
+        storage: &MediaStorage,
+        ctx: &TenantContext,
+        public_base_url: &str,
+    ) -> Result<(), MediaError> {
+        if self.publication.manifest().community_id() != ctx.community() {
+            return Err(MediaError::StorageError(
+                "media projection tenant does not match staged publication".into(),
+            ));
+        }
+        if let Some(record) = &self.upload_record {
+            record.publish_exact(storage).await?;
+        }
+        self.publication
+            .publish_sidecar_cache(storage, ctx, public_base_url)
+            .await
+    }
+}
+
+async fn stage_buffered_upload<V, M, Fut>(
     input: BufferedUploadInput<'_>,
     validate: V,
     prepare_metadata: M,
-) -> Result<BlobDescriptor, MediaError>
+) -> Result<StagedMediaUpload, MediaError>
 where
     V: FnOnce(&Bytes, &MediaConfig) -> Result<(String, String), MediaError> + Send + 'static,
     M: FnOnce(MetadataInput) -> Fut,
@@ -89,47 +148,10 @@ where
     .map_err(|_| MediaError::Internal)??;
 
     let key = format!("{sha256}.{ext}");
-    let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256);
-
-    // Idempotent: short-circuit only if BOTH sidecar and blob exist. If the
-    // sidecar exists but the blob is missing, fall through to re-upload.
-    let sidecar_exists = storage.head(&meta_key).await?;
-    let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
-        let meta = storage.get_sidecar(ctx, &sha256).await?;
-        // A re-upload of known bytes is still a distinct upload *event*: no
-        // blob PUT happens, so without this record the uploader would be
-        // invisible to the moderation pipeline (and takedown re-uploads
-        // would go unscanned).
-        if let Some(attribution) = &attribution {
-            record_upload_event(
-                storage,
-                ctx,
-                &auth_event.pubkey,
-                attribution,
-                UploadEventFacts {
-                    sha256: &sha256,
-                    ext: &ext,
-                    mime: &mime,
-                    size: body.len() as u64,
-                    uploaded_at: chrono::Utc::now().timestamp(),
-                },
-            )
-            .await?;
-        }
-        return Ok(build_descriptor(
-            config,
-            &sha256,
-            &ext,
-            &mime,
-            body.len() as u64,
-            Some(&meta),
-            meta.uploaded_at,
-        ));
-    }
-
-    // Compute uploaded_at once — single source of truth for sidecar and response.
-    let uploaded_at = chrono::Utc::now().timestamp();
+    // The signed request time makes crash recovery and exact replay converge
+    // on one manifest and moderation projection instead of minting new state.
+    let uploaded_at = i64::try_from(auth_event.created_at.as_secs())
+        .map_err(|_| MediaError::StorageError("upload timestamp exceeds i64".into()))?;
 
     // Store blob first, then metadata.
     // On failure we intentionally do NOT delete the orphan blob — concurrent
@@ -138,7 +160,7 @@ where
     // content-addressed and bounded by the upload size limit, so the storage
     // cost is negligible. A V2 background GC job can sweep blobs with no
     // matching sidecar after a grace period.
-    storage.put(&key, &body, &mime).await?;
+    storage.put_immutable_exact(&key, &body, &mime).await?;
 
     let meta = match prepare_metadata(MetadataInput {
         sha256: sha256.clone(),
@@ -156,36 +178,39 @@ where
         }
     };
 
-    // The moderation record precedes the sidecar publish gate. If this write
-    // fails, the blob and any thumbnail remain orphaned but the media cannot be
-    // served. Conversely, record existence still implies those objects exist.
-    if let Some(attribution) = &attribution {
-        record_upload_event(
-            storage,
-            ctx,
-            &auth_event.pubkey,
-            attribution,
-            UploadEventFacts {
-                sha256: &sha256,
-                ext: &ext,
-                mime: &mime,
-                size: body.len() as u64,
-                uploaded_at,
-            },
-        )
-        .await?;
-    }
-    storage.put_sidecar(ctx, &sha256, &meta).await?;
-
-    Ok(build_descriptor(
-        config,
+    let upload_record = match attribution {
+        Some(attribution) => Some(
+            stage_upload_record(
+                storage,
+                ctx,
+                &auth_event.pubkey,
+                &auth_event.id.to_hex(),
+                &attribution,
+                UploadEventFacts {
+                    sha256: &sha256,
+                    ext: &ext,
+                    mime: &mime,
+                    size: body.len() as u64,
+                    uploaded_at,
+                },
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let manifest = MediaPublicationManifest::from_staged_blob_with_projection(
+        ctx,
         &sha256,
-        &ext,
-        &mime,
-        body.len() as u64,
-        Some(&meta),
-        uploaded_at,
-    ))
+        &meta,
+        upload_record.as_ref().map(StagedUploadRecord::digest),
+    )?;
+    let publication = storage.stage_media_publication(manifest).await?;
+    let descriptor = publication.manifest().descriptor(&config.public_base_url)?;
+    Ok(StagedMediaUpload {
+        publication,
+        descriptor,
+        upload_record,
+    })
 }
 
 /// Inputs handed to a buffered-upload metadata builder, after the shared
@@ -200,19 +225,19 @@ struct MetadataInput {
     uploaded_at: i64,
 }
 
-/// Process an upload end-to-end: validate, store, thumbnail, return descriptor.
+/// Validate an image and stage all immutable artifacts without publishing it.
 ///
 /// This is the image path — body is already fully buffered in RAM. Do NOT use
-/// this for video uploads; use [`process_video_upload`] instead.
-pub async fn process_upload(
+/// this for video uploads; use [`stage_video_upload`] instead.
+pub async fn stage_upload(
     storage: &MediaStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
     attribution: Option<UploadAttribution>,
-) -> Result<BlobDescriptor, MediaError> {
-    process_buffered_upload(
+) -> Result<StagedMediaUpload, MediaError> {
+    stage_buffered_upload(
         BufferedUploadInput {
             storage,
             config,
@@ -231,6 +256,26 @@ pub async fn process_upload(
     .await
 }
 
+/// Legacy end-to-end image helper retained until relay DB composition lands.
+///
+/// Protected transports must call [`stage_upload`], commit the returned digest
+/// in PostgreSQL, and only then invoke
+/// [`StagedMediaUpload::publish_post_commit_projections`].
+pub async fn process_upload(
+    storage: &MediaStorage,
+    config: &MediaConfig,
+    ctx: &TenantContext,
+    auth_event: &nostr::Event,
+    body: Bytes,
+    attribution: Option<UploadAttribution>,
+) -> Result<BlobDescriptor, MediaError> {
+    let staged = stage_upload(storage, config, ctx, auth_event, body, attribution).await?;
+    staged
+        .publish_post_commit_projections(storage, ctx, &config.public_base_url)
+        .await?;
+    Ok(staged.into_descriptor())
+}
+
 /// Process a generic non-media file upload end-to-end.
 ///
 /// This is the catch-all attachment path for documents, archives, text, and
@@ -242,15 +287,15 @@ pub async fn process_upload(
 ///
 /// The resulting blob is served with `Content-Disposition: attachment`, so the
 /// client always downloads it rather than rendering it inline.
-pub async fn process_file_upload(
+pub async fn stage_file_upload(
     storage: &MediaStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
     attribution: Option<UploadAttribution>,
-) -> Result<BlobDescriptor, MediaError> {
-    process_buffered_upload(
+) -> Result<StagedMediaUpload, MediaError> {
+    stage_buffered_upload(
         BufferedUploadInput {
             storage,
             config,
@@ -266,6 +311,7 @@ pub async fn process_file_upload(
                 dim: String::new(),
                 blurhash: String::new(),
                 thumb_url: String::new(),
+                thumbnail_sha256: None,
                 size: input.body.len() as u64,
                 ext: input.ext,
                 mime_type: input.mime,
@@ -278,7 +324,23 @@ pub async fn process_file_upload(
     .await
 }
 
-/// Process a video upload end-to-end using a streaming pipeline.
+/// Legacy end-to-end file helper retained until relay DB composition lands.
+pub async fn process_file_upload(
+    storage: &MediaStorage,
+    config: &MediaConfig,
+    ctx: &TenantContext,
+    auth_event: &nostr::Event,
+    body: Bytes,
+    attribution: Option<UploadAttribution>,
+) -> Result<BlobDescriptor, MediaError> {
+    let staged = stage_file_upload(storage, config, ctx, auth_event, body, attribution).await?;
+    staged
+        .publish_post_commit_projections(storage, ctx, &config.public_base_url)
+        .await?;
+    Ok(staged.into_descriptor())
+}
+
+/// Validate a video and stage all immutable artifacts using a streaming pipeline.
 ///
 /// Unlike [`process_upload`], this function:
 /// 1. Streams the request body to a [`tempfile::NamedTempFile`] while computing
@@ -289,7 +351,7 @@ pub async fn process_file_upload(
 /// 5. Writes a sidecar with `duration_secs` (no thumbnail — desktop handles that).
 ///
 /// Returns a [`BlobDescriptor`] with the `duration` field populated.
-pub async fn process_video_upload(
+pub async fn stage_video_upload(
     storage: &MediaStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
@@ -297,7 +359,7 @@ pub async fn process_video_upload(
     body_stream: impl futures_core::Stream<Item = Result<Bytes, axum::Error>> + Send + 'static,
     content_length: Option<u64>,
     attribution: Option<UploadAttribution>,
-) -> Result<BlobDescriptor, MediaError> {
+) -> Result<StagedMediaUpload, MediaError> {
     // --- 1. Stream body to temp file, compute SHA-256 incrementally ---
     let tmp = tempfile::NamedTempFile::new().map_err(|e| MediaError::Io(e.to_string()))?;
     let tmp_path = tmp.path().to_path_buf();
@@ -424,46 +486,13 @@ pub async fn process_video_upload(
 
     let ext = "mp4";
     let key = format!("{sha256_hex}.{ext}");
-    let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256_hex);
-
-    // --- 5. Idempotency check ---
-    let sidecar_exists = storage.head(&meta_key).await?;
-    let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
-        let meta = storage.get_sidecar(ctx, &sha256_hex).await?;
-        // Re-upload of known bytes: still a distinct upload event — see the
-        // buffered path's short-circuit for the rationale.
-        if let Some(attribution) = &attribution {
-            record_upload_event(
-                storage,
-                ctx,
-                &auth_event.pubkey,
-                attribution,
-                UploadEventFacts {
-                    sha256: &sha256_hex,
-                    ext,
-                    mime: &mime,
-                    size: file_size,
-                    uploaded_at: chrono::Utc::now().timestamp(),
-                },
-            )
-            .await?;
-        }
-        return Ok(build_descriptor(
-            config,
-            &sha256_hex,
-            ext,
-            &mime,
-            file_size,
-            Some(&meta),
-            meta.uploaded_at,
-        ));
-    }
-
-    let uploaded_at = chrono::Utc::now().timestamp();
+    let uploaded_at = i64::try_from(auth_event.created_at.as_secs())
+        .map_err(|_| MediaError::StorageError("upload timestamp exceeds i64".into()))?;
 
     // --- 6. Stream blob from temp file to S3 ---
-    storage.put_file(&key, &tmp_path, &mime).await?;
+    storage
+        .put_file_immutable_verified(&key, &tmp_path, &mime, &sha256_hex, file_size)
+        .await?;
     drop(tmp); // Free temp file disk space immediately after S3 upload.
 
     // --- 7. Build metadata (no thumbnail for video — desktop handles that) ---
@@ -471,6 +500,7 @@ pub async fn process_video_upload(
         dim: format!("{}x{}", video_meta.width, video_meta.height),
         blurhash: String::new(),
         thumb_url: String::new(),
+        thumbnail_sha256: None,
         ext: ext.to_string(),
         mime_type: mime.clone(),
         size: file_size,
@@ -478,37 +508,68 @@ pub async fn process_video_upload(
         duration_secs: Some(video_meta.duration_secs),
     };
 
-    // Record before publishing the sidecar serve gate. See the buffered path.
-    if let Some(attribution) = &attribution {
-        record_upload_event(
-            storage,
-            ctx,
-            &auth_event.pubkey,
-            attribution,
-            UploadEventFacts {
-                sha256: &sha256_hex,
-                ext,
-                mime: &mime,
-                size: file_size,
-                uploaded_at,
-            },
-        )
-        .await?;
-    }
-    storage.put_sidecar(ctx, &sha256_hex, &meta).await?;
-
-    Ok(build_descriptor(
-        config,
+    let upload_record = match attribution {
+        Some(attribution) => Some(
+            stage_upload_record(
+                storage,
+                ctx,
+                &auth_event.pubkey,
+                &auth_event.id.to_hex(),
+                &attribution,
+                UploadEventFacts {
+                    sha256: &sha256_hex,
+                    ext,
+                    mime: &mime,
+                    size: file_size,
+                    uploaded_at,
+                },
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let manifest = MediaPublicationManifest::from_staged_blob_with_projection(
+        ctx,
         &sha256_hex,
-        ext,
-        &mime,
-        file_size,
-        Some(&meta),
-        uploaded_at,
-    ))
+        &meta,
+        upload_record.as_ref().map(StagedUploadRecord::digest),
+    )?;
+    let publication = storage.stage_media_publication(manifest).await?;
+    let descriptor = publication.manifest().descriptor(&config.public_base_url)?;
+    Ok(StagedMediaUpload {
+        publication,
+        descriptor,
+        upload_record,
+    })
 }
 
-/// Generate thumbnail and metadata without publishing the sidecar serve gate.
+/// Legacy end-to-end video helper retained until relay DB composition lands.
+pub async fn process_video_upload(
+    storage: &MediaStorage,
+    config: &MediaConfig,
+    ctx: &TenantContext,
+    auth_event: &nostr::Event,
+    body_stream: impl futures_core::Stream<Item = Result<Bytes, axum::Error>> + Send + 'static,
+    content_length: Option<u64>,
+    attribution: Option<UploadAttribution>,
+) -> Result<BlobDescriptor, MediaError> {
+    let staged = stage_video_upload(
+        storage,
+        config,
+        ctx,
+        auth_event,
+        body_stream,
+        content_length,
+        attribution,
+    )
+    .await?;
+    staged
+        .publish_post_commit_projections(storage, ctx, &config.public_base_url)
+        .await?;
+    Ok(staged.into_descriptor())
+}
+
+/// Generate immutable thumbnail and metadata without publishing cache projections.
 /// Returns the completed [`BlobMeta`] on success.
 async fn prepare_image_metadata(
     storage: &MediaStorage,
@@ -529,68 +590,29 @@ async fn prepare_image_metadata(
     meta.uploaded_at = input.uploaded_at;
 
     if let Some(ref tb) = thumb_bytes {
-        let thumb_key = format!("{}.thumb.jpg", input.sha256);
-        storage.put(&thumb_key, tb, "image/jpeg").await?;
+        let thumbnail_sha256 = hex::encode(Sha256::digest(tb));
+        let thumb_key = format!("{thumbnail_sha256}.thumb.jpg");
+        storage
+            .put_immutable_exact(&thumb_key, tb, "image/jpeg")
+            .await?;
+        meta.thumbnail_sha256 = Some(thumbnail_sha256);
     }
 
     Ok(meta)
-}
-
-fn build_descriptor(
-    config: &MediaConfig,
-    sha256: &str,
-    ext: &str,
-    mime: &str,
-    size: u64,
-    meta: Option<&BlobMeta>,
-    uploaded_at: i64,
-) -> BlobDescriptor {
-    let duration = meta.and_then(|m| m.duration_secs);
-    BlobDescriptor {
-        url: format!("{}/{sha256}.{ext}", config.public_base_url),
-        sha256: sha256.to_string(),
-        size,
-        mime_type: mime.to_string(),
-        uploaded: uploaded_at,
-        dim: meta.and_then(|m| (!m.dim.is_empty()).then(|| m.dim.clone())),
-        blurhash: meta.and_then(|m| (!m.blurhash.is_empty()).then(|| m.blurhash.clone())),
-        thumb: meta.and_then(|m| (!m.thumb_url.is_empty()).then(|| m.thumb_url.clone())),
-        duration,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn test_config() -> MediaConfig {
-        MediaConfig {
-            s3_endpoint: String::new(),
-            s3_access_key: String::new(),
-            s3_secret_key: String::new(),
-            s3_bucket: String::new(),
-            s3_region: "us-east-1".to_string(),
-            s3_addressing_style: crate::config::S3AddressingStyle::Path,
-            max_image_bytes: 50 * 1024 * 1024,
-            max_gif_bytes: 10 * 1024 * 1024,
-            max_video_bytes: 524_288_000,
-            max_file_bytes: 104_857_600,
-            public_base_url: "https://media.example.com".to_string(),
-            upload_records_enabled: false,
-            upload_ip_header: None,
-            upload_port_header: None,
-        }
-    }
-
     #[test]
-    fn test_build_descriptor_video_omits_empty_thumb_and_blurhash() {
-        // Video uploads produce a BlobMeta with empty thumb_url and blurhash.
-        // build_descriptor must convert these to None so they're omitted from JSON.
-        let config = test_config();
+    fn test_publication_descriptor_video_omits_empty_thumb_and_blurhash() {
+        // Video publications omit thumbnail and blurhash response fields.
         let meta = BlobMeta {
             dim: "320x240".to_string(),
             blurhash: String::new(),  // empty — video has no blurhash
             thumb_url: String::new(), // empty — video has no thumbnail
+            thumbnail_sha256: None,
             ext: "mp4".to_string(),
             mime_type: "video/mp4".to_string(),
             size: 5_000_000,
@@ -598,15 +620,17 @@ mod tests {
             duration_secs: Some(29.5),
         };
 
-        let desc = build_descriptor(
-            &config,
-            "abc123",
-            "mp4",
-            "video/mp4",
-            5_000_000,
-            Some(&meta),
-            1700000000,
-        );
+        let desc = MediaPublicationManifest::from_staged_blob(
+            &TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::from_u128(1)),
+                "media.example.com",
+            ),
+            "a".repeat(64),
+            &meta,
+        )
+        .expect("manifest")
+        .descriptor("https://media.example.com")
+        .expect("descriptor");
 
         // Empty strings must become None, not Some("")
         assert!(
@@ -641,14 +665,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_descriptor_image_includes_thumb_and_blurhash() {
+    fn test_publication_descriptor_image_includes_thumb_and_blurhash() {
         // Image uploads produce a BlobMeta with populated thumb_url and blurhash.
-        let config = test_config();
         let hash = "a".repeat(64);
         let meta = BlobMeta {
             dim: "800x600".to_string(),
             blurhash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj".to_string(),
             thumb_url: format!("https://media.example.com/{hash}.thumb.jpg"),
+            thumbnail_sha256: Some("b".repeat(64)),
             ext: "jpg".to_string(),
             mime_type: "image/jpeg".to_string(),
             size: 100_000,
@@ -656,15 +680,17 @@ mod tests {
             duration_secs: None,
         };
 
-        let desc = build_descriptor(
-            &config,
+        let desc = MediaPublicationManifest::from_staged_blob(
+            &TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::from_u128(1)),
+                "media.example.com",
+            ),
             &hash,
-            "jpg",
-            "image/jpeg",
-            100_000,
-            Some(&meta),
-            1700000000,
-        );
+            &meta,
+        )
+        .expect("manifest")
+        .descriptor("https://media.example.com")
+        .expect("descriptor");
 
         assert_eq!(
             desc.blurhash,
@@ -712,18 +738,29 @@ mod tests {
     }
 
     #[test]
-    fn test_build_descriptor_no_meta() {
-        // When meta is None, all optional fields should be None.
-        let config = test_config();
-        let desc = build_descriptor(
-            &config,
-            "abc123",
-            "jpg",
-            "image/jpeg",
-            100,
-            None,
-            1700000000,
-        );
+    fn test_publication_descriptor_without_optional_metadata() {
+        let meta = BlobMeta {
+            dim: String::new(),
+            blurhash: String::new(),
+            thumb_url: String::new(),
+            thumbnail_sha256: None,
+            ext: "bin".to_owned(),
+            mime_type: "application/octet-stream".to_owned(),
+            size: 100,
+            uploaded_at: 1_700_000_000,
+            duration_secs: None,
+        };
+        let desc = MediaPublicationManifest::from_staged_blob(
+            &TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::from_u128(1)),
+                "media.example.com",
+            ),
+            "a".repeat(64),
+            &meta,
+        )
+        .expect("manifest")
+        .descriptor("https://media.example.com")
+        .expect("descriptor");
 
         assert!(desc.dim.is_none());
         assert!(desc.blurhash.is_none());

@@ -15,7 +15,7 @@
 //! through the integration thread.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -208,6 +208,49 @@ pub async fn insert_report(
     Ok(row.try_get("id")?)
 }
 
+/// Insert a report inside a caller-owned transaction.
+///
+/// Protected callers use this variant so the report and its canonical
+/// authorization receipt can share one commit boundary.
+pub async fn insert_report_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    report: NewReport<'_>,
+) -> Result<Uuid> {
+    let (target_kind, target_event_id, target_pubkey, target_blob_sha256) = match &report.target {
+        ReportTarget::Event(id) => ("event", Some(id.as_slice()), None, None),
+        ReportTarget::Pubkey(pubkey) => ("pubkey", None, Some(pubkey.as_slice()), None),
+        ReportTarget::Blob(sha256) => ("blob", None, None, Some(sha256.as_slice())),
+    };
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO moderation_reports (
+            community_id, report_event_id, reporter_pubkey, target_kind,
+            target_event_id, target_pubkey, target_blob_sha256, channel_id,
+            report_type, note
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (community_id, report_event_id) DO UPDATE SET
+            report_event_id = EXCLUDED.report_event_id
+        RETURNING id
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report.report_event_id)
+    .bind(report.reporter_pubkey)
+    .bind(target_kind)
+    .bind(target_event_id)
+    .bind(target_pubkey)
+    .bind(target_blob_sha256)
+    .bind(report.channel_id)
+    .bind(report.report_type)
+    .bind(report.note)
+    .fetch_one(&mut **transaction)
+    .await?;
+
+    Ok(row.try_get("id")?)
+}
+
 /// List reports for the moderation queue, newest first.
 /// `status = None` lists all; `Some("open")` etc. filters.
 pub async fn list_reports(
@@ -282,6 +325,31 @@ pub async fn get_report_by_event(
     row.map(row_to_report).transpose()
 }
 
+/// Lock and fetch a report by signed event id inside a caller-owned
+/// transaction.
+pub async fn get_report_by_event_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    report_event_id: &[u8],
+) -> Result<Option<ReportRecord>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, report_event_id, reporter_pubkey, target_kind, target_event_id,
+               target_pubkey, target_blob_sha256, channel_id, report_type, note,
+               status, resolved_by, resolved_at, action_id, created_at
+        FROM moderation_reports
+        WHERE community_id = $1 AND report_event_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report_event_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    row.map(row_to_report).transpose()
+}
+
 /// Mark a report resolved/dismissed/escalated, linking the audit action.
 /// Returns `false` if the report was not found or already closed.
 pub async fn resolve_report(
@@ -305,6 +373,33 @@ pub async fn resolve_report(
     .bind(resolved_by)
     .bind(action_id)
     .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Resolve a report inside a caller-owned transaction.
+pub async fn resolve_report_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    report_id: Uuid,
+    status: &str,
+    resolved_by: &[u8],
+    action_id: Option<Uuid>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE moderation_reports
+        SET status = $3, resolved_by = $4, resolved_at = now(), action_id = $5
+        WHERE community_id = $1 AND id = $2 AND status = 'open'
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report_id)
+    .bind(status)
+    .bind(resolved_by)
+    .bind(action_id)
+    .execute(&mut **transaction)
     .await?;
 
     Ok(result.rows_affected() > 0)
@@ -343,6 +438,38 @@ pub async fn ban_member(
     Ok(())
 }
 
+/// Upsert a ban inside a caller-owned transaction.
+pub async fn ban_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+    reason: Option<&str>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO community_bans (
+            community_id, pubkey, banned, ban_expires_at, ban_reason, actor_pubkey
+        ) VALUES ($1, $2, true, $3, $4, $5)
+        ON CONFLICT (community_id, pubkey) DO UPDATE SET
+            banned = true,
+            ban_expires_at = EXCLUDED.ban_expires_at,
+            ban_reason = EXCLUDED.ban_reason,
+            actor_pubkey = EXCLUDED.actor_pubkey,
+            updated_at = now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(expires_at)
+    .bind(reason)
+    .bind(actor)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Lift a ban. Returns `false` if the member was not banned.
 pub async fn unban_member(
     pool: &PgPool,
@@ -364,6 +491,29 @@ pub async fn unban_member(
     .execute(pool)
     .await?;
 
+    Ok(result.rows_affected() > 0)
+}
+
+/// Lift a ban inside a caller-owned transaction.
+pub async fn unban_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE community_bans
+        SET banned = false, ban_expires_at = NULL, ban_reason = NULL,
+            actor_pubkey = $3, updated_at = now()
+        WHERE community_id = $1 AND pubkey = $2 AND banned = true
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(actor)
+    .execute(&mut **transaction)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -399,6 +549,37 @@ pub async fn timeout_member(
     Ok(())
 }
 
+/// Upsert a timeout inside a caller-owned transaction.
+pub async fn timeout_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+    muted_until: DateTime<Utc>,
+    reason: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO community_bans (
+            community_id, pubkey, muted_until, mute_reason, actor_pubkey
+        ) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (community_id, pubkey) DO UPDATE SET
+            muted_until = EXCLUDED.muted_until,
+            mute_reason = EXCLUDED.mute_reason,
+            actor_pubkey = EXCLUDED.actor_pubkey,
+            updated_at = now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(muted_until)
+    .bind(reason)
+    .bind(actor)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Clear a timeout early. Returns `false` if the member was not timed out.
 pub async fn untimeout_member(
     pool: &PgPool,
@@ -420,6 +601,29 @@ pub async fn untimeout_member(
     .execute(pool)
     .await?;
 
+    Ok(result.rows_affected() > 0)
+}
+
+/// Clear a timeout inside a caller-owned transaction.
+pub async fn untimeout_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE community_bans
+        SET muted_until = NULL, mute_reason = NULL,
+            actor_pubkey = $3, updated_at = now()
+        WHERE community_id = $1 AND pubkey = $2 AND muted_until > now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(actor)
+    .execute(&mut **transaction)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -457,6 +661,43 @@ pub async fn restriction_state(
     .fetch_optional(pool)
     .await?;
 
+    match row {
+        Some(row) => Ok(RestrictionState {
+            banned: row.try_get("banned")?,
+            muted_until: row.try_get("muted_until")?,
+        }),
+        None => Ok(RestrictionState::default()),
+    }
+}
+
+/// Fetch and share-lock current restriction state inside a caller-owned
+/// transaction.
+///
+/// The table lock closes the absent-row race: an actor with no restriction row
+/// cannot be concurrently banned between this recheck and the protected
+/// moderation commit.
+pub async fn restriction_state_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+) -> Result<RestrictionState> {
+    sqlx::query("LOCK TABLE community_bans IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut **transaction)
+        .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
+            CASE WHEN muted_until > now() THEN muted_until ELSE NULL END AS muted_until
+        FROM community_bans
+        WHERE community_id = $1 AND pubkey = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut **transaction)
+    .await?;
     match row {
         Some(row) => Ok(RestrictionState {
             banned: row.try_get("banned")?,
@@ -542,6 +783,36 @@ pub async fn insert_action(
     .fetch_one(pool)
     .await?;
 
+    Ok(row.try_get("id")?)
+}
+
+/// Insert a moderation audit row inside a caller-owned transaction.
+pub async fn insert_action_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    action: NewAction<'_>,
+) -> Result<Uuid> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO moderation_actions (
+            community_id, actor_pubkey, action, target_pubkey, target_event_id,
+            channel_id, reason_code, public_reason, private_reason, matched_principal
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(action.actor_pubkey)
+    .bind(action.action)
+    .bind(action.target_pubkey)
+    .bind(action.target_event_id)
+    .bind(action.channel_id)
+    .bind(action.reason_code)
+    .bind(action.public_reason)
+    .bind(action.private_reason)
+    .bind(action.matched_principal)
+    .fetch_one(&mut **transaction)
+    .await?;
     Ok(row.try_get("id")?)
 }
 
@@ -890,5 +1161,931 @@ mod tests {
                 .expect("second resolve"),
             "second resolve should return false once the report is closed"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn moderation_state_and_audit_rollback_together() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let target = random_32();
+        let actor = random_32();
+        let mut transaction = pool.begin().await.expect("begin transaction");
+
+        ban_member_tx(
+            &mut transaction,
+            community,
+            &target,
+            &actor,
+            Some("rollback"),
+            None,
+        )
+        .await
+        .expect("stage ban");
+        insert_action_tx(
+            &mut transaction,
+            community,
+            NewAction {
+                actor_pubkey: &actor,
+                action: "ban",
+                target_pubkey: Some(&target),
+                target_event_id: None,
+                channel_id: None,
+                reason_code: None,
+                public_reason: Some("rollback"),
+                private_reason: None,
+                matched_principal: None,
+            },
+        )
+        .await
+        .expect("stage audit");
+        transaction.rollback().await.expect("roll back transaction");
+
+        let restriction = restriction_state(&pool, community, &target)
+            .await
+            .expect("read restriction");
+        assert!(!restriction.banned, "rolled-back ban must not be visible");
+        assert!(
+            list_actions(&pool, community, 10)
+                .await
+                .expect("list actions")
+                .iter()
+                .all(|row| row.target_pubkey.as_deref() != Some(target.as_slice())),
+            "rolled-back audit row must not be visible"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn moderation_effect_receipt_claim_and_audit_share_one_rollback_boundary() {
+        let pool = setup_pool().await;
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("apply protected-authority migration");
+        let community = make_test_community(&pool).await;
+        let actor = random_32();
+        let retain_until = Utc::now() + Duration::minutes(5);
+
+        // An application-effect error after state, receipt, and claim staging
+        // leaves none of them committed.
+        let effect_operation = Uuid::new_v4();
+        let effect_request = random_32();
+        let effect_claim = random_32();
+        let effect_target = random_32();
+        let mut effect_tx = pool.begin().await.expect("begin effect failure");
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 11, $4, 1, $5)",
+        )
+        .bind(community.as_uuid())
+        .bind(effect_operation)
+        .bind(&effect_request)
+        .bind(&actor)
+        .bind(random_32())
+        .execute(&mut *effect_tx)
+        .await
+        .expect("stage effect receipt");
+        sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&effect_claim)
+        .bind(retain_until)
+        .execute(&mut *effect_tx)
+        .await
+        .expect("stage effect replay claim");
+        ban_member_tx(
+            &mut effect_tx,
+            community,
+            &effect_target,
+            &actor,
+            Some("effect failure"),
+            None,
+        )
+        .await
+        .expect("stage effect state");
+        let failed_effect = insert_action_tx(
+            &mut effect_tx,
+            community,
+            NewAction {
+                actor_pubkey: &actor,
+                action: "not-a-moderation-action",
+                target_pubkey: Some(&effect_target),
+                target_event_id: None,
+                channel_id: None,
+                reason_code: None,
+                public_reason: None,
+                private_reason: None,
+                matched_principal: None,
+            },
+        )
+        .await;
+        assert!(failed_effect.is_err(), "invalid effect must abort");
+        effect_tx.rollback().await.expect("rollback failed effect");
+
+        let effect_receipts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_operation_receipts \
+             WHERE community_id = $1 AND operation_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(effect_operation)
+        .fetch_one(&pool)
+        .await
+        .expect("count effect receipts");
+        let effect_claims: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_proxy_nonce_claims \
+             WHERE authorization_domain = $1 AND claim_key = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&effect_claim)
+        .fetch_one(&pool)
+        .await
+        .expect("count effect claims");
+        assert_eq!((effect_receipts, effect_claims), (0, 0));
+        assert!(
+            !restriction_state(&pool, community, &effect_target)
+                .await
+                .expect("read effect restriction")
+                .banned
+        );
+
+        // Exhaust the immutable authorization-audit budget, then prove the
+        // failed canonical audit append rolls moderation, receipt, and replay
+        // state back together.
+        sqlx::query(
+            "INSERT INTO authorization_event_capacity \
+             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
+             VALUES ($1, 1, 4, 4)",
+        )
+        .bind(community.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("install one-event audit capacity");
+        let fill_operation = Uuid::new_v4();
+        let fill_request = random_32();
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 11, $4, 1, $5)",
+        )
+        .bind(community.as_uuid())
+        .bind(fill_operation)
+        .bind(&fill_request)
+        .bind(&actor)
+        .bind(random_32())
+        .execute(&pool)
+        .await
+        .expect("insert capacity-fill receipt");
+        sqlx::query(
+            "INSERT INTO authorization_events \
+             (community_id, event_id, event_kind, outcome_code, reason_code, actor_kind, \
+              actor_fingerprint, operation_id, request_fingerprint, correlation_id, \
+              attempt_id, occurred_at, canonical_envelope, envelope_digest) \
+             VALUES ($1, $2, 10, 1, 1, 1, $3, $4, $5, $6, $7, \
+                     transaction_timestamp(), $8, $9)",
+        )
+        .bind(community.as_uuid())
+        .bind(Uuid::new_v4())
+        .bind(&actor)
+        .bind(fill_operation)
+        .bind(&fill_request)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(vec![1_u8; 4])
+        .bind(random_32())
+        .execute(&pool)
+        .await
+        .expect("fill audit capacity");
+
+        let audit_operation = Uuid::new_v4();
+        let audit_request = random_32();
+        let audit_claim = random_32();
+        let audit_target = random_32();
+        let mut audit_tx = pool.begin().await.expect("begin exhausted audit effect");
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 11, $4, 1, $5)",
+        )
+        .bind(community.as_uuid())
+        .bind(audit_operation)
+        .bind(&audit_request)
+        .bind(&actor)
+        .bind(random_32())
+        .execute(&mut *audit_tx)
+        .await
+        .expect("stage exhausted receipt");
+        sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&audit_claim)
+        .bind(retain_until)
+        .execute(&mut *audit_tx)
+        .await
+        .expect("stage exhausted replay claim");
+        ban_member_tx(
+            &mut audit_tx,
+            community,
+            &audit_target,
+            &actor,
+            Some("audit exhausted"),
+            None,
+        )
+        .await
+        .expect("stage exhausted state");
+        insert_action_tx(
+            &mut audit_tx,
+            community,
+            NewAction {
+                actor_pubkey: &actor,
+                action: "ban",
+                target_pubkey: Some(&audit_target),
+                target_event_id: None,
+                channel_id: None,
+                reason_code: None,
+                public_reason: Some("audit exhausted"),
+                private_reason: None,
+                matched_principal: None,
+            },
+        )
+        .await
+        .expect("stage moderation audit");
+        let exhausted = sqlx::query(
+            "INSERT INTO authorization_events \
+             (community_id, event_id, event_kind, outcome_code, reason_code, actor_kind, \
+              actor_fingerprint, operation_id, request_fingerprint, correlation_id, \
+              attempt_id, occurred_at, canonical_envelope, envelope_digest) \
+             VALUES ($1, $2, 10, 1, 1, 1, $3, $4, $5, $6, $7, \
+                     transaction_timestamp(), $8, $9)",
+        )
+        .bind(community.as_uuid())
+        .bind(Uuid::new_v4())
+        .bind(&actor)
+        .bind(audit_operation)
+        .bind(&audit_request)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(vec![2_u8; 1])
+        .bind(random_32())
+        .execute(&mut *audit_tx)
+        .await;
+        assert!(exhausted.is_err(), "audit capacity must fail closed");
+        audit_tx
+            .rollback()
+            .await
+            .expect("rollback exhausted effect");
+        assert!(
+            !restriction_state(&pool, community, &audit_target)
+                .await
+                .expect("read exhausted restriction")
+                .banned
+        );
+        let exhausted_receipts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_operation_receipts \
+             WHERE community_id = $1 AND operation_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(audit_operation)
+        .fetch_one(&pool)
+        .await
+        .expect("count exhausted receipt");
+        let exhausted_claims: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_proxy_nonce_claims \
+             WHERE authorization_domain = $1 AND claim_key = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&audit_claim)
+        .fetch_one(&pool)
+        .await
+        .expect("count exhausted claim");
+        assert_eq!((exhausted_receipts, exhausted_claims), (0, 0));
+
+        // A deferred commit-time target-link failure has the same rollback
+        // semantics; no post-commit action may run for this branch.
+        let commit_operation = Uuid::new_v4();
+        let commit_request = random_32();
+        let commit_claim = random_32();
+        let commit_target = random_32();
+        let commit_result = random_32();
+        let mut commit_tx = pool.begin().await.expect("begin commit failure");
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 11, $4, 1, $5)",
+        )
+        .bind(community.as_uuid())
+        .bind(commit_operation)
+        .bind(&commit_request)
+        .bind(&actor)
+        .bind(&commit_result)
+        .execute(&mut *commit_tx)
+        .await
+        .expect("stage commit-failure receipt");
+        sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&commit_claim)
+        .bind(retain_until)
+        .execute(&mut *commit_tx)
+        .await
+        .expect("stage commit-failure claim");
+        ban_member_tx(
+            &mut commit_tx,
+            community,
+            &commit_target,
+            &actor,
+            Some("commit failure"),
+            None,
+        )
+        .await
+        .expect("stage commit-failure state");
+        insert_action_tx(
+            &mut commit_tx,
+            community,
+            NewAction {
+                actor_pubkey: &actor,
+                action: "ban",
+                target_pubkey: Some(&commit_target),
+                target_event_id: None,
+                channel_id: None,
+                reason_code: None,
+                public_reason: Some("commit failure"),
+                private_reason: None,
+                matched_principal: None,
+            },
+        )
+        .await
+        .expect("stage commit-failure moderation audit");
+        sqlx::query(
+            "INSERT INTO protected_publication_projection_outbox \
+             (community_id, operation_id, request_fingerprint, \
+              publication_result_digest, object_kind, object_key, application_type, \
+              application_version, application_effect_digest, projection_kind, \
+              projection_key, staged_object_key, payload_digest) \
+             VALUES ($1, $2, $3, $4, 3, $5, decode(repeat('11', 32), 'hex'), \
+                     1, decode(repeat('12', 32), 'hex'), 3, $6, $7, $8)",
+        )
+        .bind(community.as_uuid())
+        .bind(commit_operation)
+        .bind(&commit_request)
+        .bind(&commit_result)
+        .bind(random_32())
+        .bind("repos/commit-failure/pointer")
+        .bind("manifests/commit-failure")
+        .bind(random_32())
+        .execute(&mut *commit_tx)
+        .await
+        .expect("stage deferred target-link failure");
+        assert!(
+            commit_tx.commit().await.is_err(),
+            "deferred target link must fail commit"
+        );
+        assert!(
+            !restriction_state(&pool, community, &commit_target)
+                .await
+                .expect("read commit-failure restriction")
+                .banned
+        );
+        let commit_receipts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_operation_receipts \
+             WHERE community_id = $1 AND operation_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(commit_operation)
+        .fetch_one(&pool)
+        .await
+        .expect("count commit-failure receipt");
+        let commit_claims: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_proxy_nonce_claims \
+             WHERE authorization_domain = $1 AND claim_key = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&commit_claim)
+        .fetch_one(&pool)
+        .await
+        .expect("count commit-failure claim");
+        assert_eq!((commit_receipts, commit_claims), (0, 0));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_report_resolution_commits_one_audit_row() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let report_event_id = random_32();
+        let reporter = random_32();
+        let target_event_id = random_32();
+        let report_id = insert_report(
+            &pool,
+            community,
+            new_report(&report_event_id, &reporter, &target_event_id, None),
+        )
+        .await
+        .expect("insert report");
+
+        let resolve_once = |pool: PgPool, actor: Vec<u8>| {
+            let report_event_id = report_event_id.clone();
+            let target_event_id = target_event_id.clone();
+            async move {
+                let mut transaction = pool.begin().await.expect("begin resolver");
+                let report = get_report_by_event_tx(&mut transaction, community, &report_event_id)
+                    .await
+                    .expect("lock report")
+                    .expect("report exists");
+                if report.status != "open" {
+                    transaction.rollback().await.expect("rollback loser");
+                    return false;
+                }
+                let action_id = insert_action_tx(
+                    &mut transaction,
+                    community,
+                    NewAction {
+                        actor_pubkey: &actor,
+                        action: "dismiss_report",
+                        target_pubkey: None,
+                        target_event_id: Some(&target_event_id),
+                        channel_id: None,
+                        reason_code: None,
+                        public_reason: None,
+                        private_reason: None,
+                        matched_principal: None,
+                    },
+                )
+                .await
+                .expect("insert resolution audit");
+                let resolved = resolve_report_tx(
+                    &mut transaction,
+                    community,
+                    report.id,
+                    "dismissed",
+                    &actor,
+                    Some(action_id),
+                )
+                .await
+                .expect("resolve report");
+                transaction.commit().await.expect("commit resolver");
+                resolved
+            }
+        };
+
+        let (first, second) = tokio::join!(
+            resolve_once(pool.clone(), random_32()),
+            resolve_once(pool.clone(), random_32())
+        );
+        assert_ne!(first, second, "exactly one concurrent resolver must win");
+
+        let row = get_report(&pool, community, report_id)
+            .await
+            .expect("read report")
+            .expect("report exists");
+        let action_id = row.action_id.expect("winner action id");
+        let matching = list_actions(&pool, community, 20)
+            .await
+            .expect("list actions")
+            .into_iter()
+            .filter(|action| action.id == action_id)
+            .count();
+        assert_eq!(matching, 1, "one committed resolution has one audit row");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn proxy_nonce_claims_are_atomic_domain_scoped_and_exclusive() {
+        let pool = setup_pool().await;
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("apply nonce-claim migration");
+        let domain_a = make_test_community(&pool).await;
+        let domain_b = make_test_community(&pool).await;
+        let claim_key = random_32();
+        let retain_until = Utc::now() + Duration::minutes(5);
+
+        sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(domain_a.as_uuid())
+        .bind(&claim_key)
+        .bind(retain_until)
+        .execute(&pool)
+        .await
+        .expect("first claim commits");
+
+        let replay = sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(domain_a.as_uuid())
+        .bind(&claim_key)
+        .bind(retain_until)
+        .execute(&pool)
+        .await;
+        assert!(replay.is_err(), "same-domain replay must be rejected");
+
+        sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(domain_b.as_uuid())
+        .bind(&claim_key)
+        .bind(retain_until)
+        .execute(&pool)
+        .await
+        .expect("same opaque claim remains isolated across domains");
+
+        let expired_key = random_32();
+        let expired = sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, transaction_timestamp())",
+        )
+        .bind(domain_a.as_uuid())
+        .bind(&expired_key)
+        .execute(&pool)
+        .await;
+        assert!(expired.is_err(), "equality at retain_until is expired");
+
+        // Construct an exact equality row transactionally with only the stamp
+        // trigger disabled. The table CHECK remains active. This proves the
+        // deletion trigger retains through, not merely until, the boundary.
+        let equality_key = random_32();
+        let mut equality = pool.begin().await.expect("begin equality probe");
+        sqlx::query(
+            "ALTER TABLE authorization_proxy_nonce_claims \
+             DISABLE TRIGGER authorization_proxy_nonce_claims_stamp",
+        )
+        .execute(&mut *equality)
+        .await
+        .expect("disable insert stamp in rollback-only probe");
+        sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, committed_at, retain_until) \
+             VALUES ($1, 1, $2, transaction_timestamp() - INTERVAL '1 second', \
+                     transaction_timestamp())",
+        )
+        .bind(domain_a.as_uuid())
+        .bind(&equality_key)
+        .execute(&mut *equality)
+        .await
+        .expect("insert exact-boundary probe row");
+        sqlx::query(
+            "ALTER TABLE authorization_proxy_nonce_claims \
+             ENABLE TRIGGER authorization_proxy_nonce_claims_stamp",
+        )
+        .execute(&mut *equality)
+        .await
+        .expect("restore insert stamp in probe");
+        let equality_delete = sqlx::query(
+            "DELETE FROM authorization_proxy_nonce_claims \
+             WHERE authorization_domain = $1 AND claim_kind = 1 AND claim_key = $2",
+        )
+        .bind(domain_a.as_uuid())
+        .bind(&equality_key)
+        .execute(&mut *equality)
+        .await;
+        assert!(
+            equality_delete.is_err(),
+            "deletion at the exclusive retain_until equality must be rejected"
+        );
+        equality.rollback().await.expect("rollback equality probe");
+
+        let rolled_back_key = random_32();
+        let mut transaction = pool.begin().await.expect("begin claim transaction");
+        sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(domain_a.as_uuid())
+        .bind(&rolled_back_key)
+        .bind(retain_until)
+        .execute(&mut *transaction)
+        .await
+        .expect("stage claim");
+        transaction.rollback().await.expect("rollback admission");
+        let rolled_back_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_proxy_nonce_claims \
+             WHERE authorization_domain = $1 AND claim_kind = 1 AND claim_key = $2",
+        )
+        .bind(domain_a.as_uuid())
+        .bind(&rolled_back_key)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back claim");
+        assert_eq!(rolled_back_count, 0, "rollback must not consume the claim");
+
+        let unavailable_key = random_32();
+        let mut unavailable = pool.begin().await.expect("begin unavailable probe");
+        sqlx::query("SET LOCAL search_path = pg_catalog")
+            .execute(&mut *unavailable)
+            .await
+            .expect("isolate dependency");
+        let dependency_failure = sqlx::query(
+            "INSERT INTO authorization_proxy_nonce_claims \
+             (authorization_domain, claim_kind, claim_key, retain_until) \
+             VALUES ($1, 1, $2, $3)",
+        )
+        .bind(domain_a.as_uuid())
+        .bind(&unavailable_key)
+        .bind(retain_until)
+        .execute(&mut *unavailable)
+        .await;
+        assert!(
+            dependency_failure.is_err(),
+            "unreadable claim storage must fail closed"
+        );
+        unavailable.rollback().await.expect("rollback failed probe");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn protected_projection_outbox_is_target_bound_ordered_and_idempotent() {
+        let pool = setup_pool().await;
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("apply projection-outbox migration");
+        let community = make_test_community(&pool).await;
+        let object_key = random_32();
+        let projection_key = format!("repos/{}/pointer", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO authorization_event_capacity \
+             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
+             VALUES ($1, 32, 1048576, 16384)",
+        )
+        .bind(community.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("install outbox-test audit capacity");
+
+        let seed = stage_publication_admission(&pool, community, &object_key, 1, false)
+            .await
+            .expect("stage seed admission");
+        sqlx::query(
+            "INSERT INTO authorization_authority_epochs \
+             (community_id, object_kind, object_key, authority_epoch, fence, \
+              operation_id, request_fingerprint) \
+             VALUES ($1, 3, $2, 7, $3, $4, $5)",
+        )
+        .bind(community.as_uuid())
+        .bind(&object_key)
+        .bind(random_32())
+        .bind(seed.operation)
+        .bind(&seed.request)
+        .execute(&pool)
+        .await
+        .expect("install unchanged same-epoch authority row");
+
+        let first = stage_publication_admission(&pool, community, &object_key, 2, true);
+        let second = stage_publication_admission(&pool, community, &object_key, 3, true);
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("first concurrent same-epoch publication");
+        let second = second.expect("second concurrent same-epoch publication");
+
+        let first_projection =
+            insert_projection(&pool, community, &first, &object_key, &projection_key);
+        let second_projection =
+            insert_projection(&pool, community, &second, &object_key, &projection_key);
+        let (first_projection, second_projection) =
+            tokio::join!(first_projection, second_projection);
+        first_projection.expect("insert first concurrent same-epoch projection");
+        second_projection.expect("insert second concurrent same-epoch projection");
+
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            "SELECT operation_id, publication_sequence \
+             FROM protected_publication_projection_outbox \
+             WHERE community_id = $1 AND object_kind = 3 AND object_key = $2 \
+               AND projection_kind = 3 AND projection_key = $3 \
+             ORDER BY publication_sequence",
+        )
+        .bind(community.as_uuid())
+        .bind(&object_key)
+        .bind(&projection_key)
+        .fetch_all(&pool)
+        .await
+        .expect("read concurrent publication order");
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].0, rows[1].0);
+        assert!(rows[0].1 < rows[1].1);
+
+        let stale_delivery = sqlx::query(
+            "UPDATE protected_publication_projection_outbox \
+             SET delivery_state = 2, attempt_count = 1, failure_code = 0 \
+             WHERE community_id = $1 AND operation_id = $2 AND projection_kind = 3",
+        )
+        .bind(community.as_uuid())
+        .bind(rows[1].0)
+        .execute(&pool)
+        .await;
+        assert!(
+            stale_delivery.is_err(),
+            "newer concurrent version is fenced"
+        );
+        for (operation, _) in &rows {
+            sqlx::query(
+                "UPDATE protected_publication_projection_outbox \
+                 SET delivery_state = 2, attempt_count = 1, failure_code = 0 \
+                 WHERE community_id = $1 AND operation_id = $2 AND projection_kind = 3",
+            )
+            .bind(community.as_uuid())
+            .bind(operation)
+            .execute(&pool)
+            .await
+            .expect("deliver concurrent versions in database order");
+        }
+
+        let duplicate =
+            insert_projection(&pool, community, &first, &object_key, &projection_key).await;
+        assert!(
+            duplicate.is_err(),
+            "exact replay cannot duplicate an outbox effect"
+        );
+
+        let mismatch = stage_publication_admission(&pool, community, &object_key, 4, true)
+            .await
+            .expect("stage mismatch admission");
+        let mut mismatch_tx = pool.begin().await.expect("begin mismatch projection");
+        sqlx::query(
+            "INSERT INTO protected_publication_projection_outbox \
+             (community_id, operation_id, request_fingerprint, publication_result_digest, \
+              object_kind, object_key, application_type, application_version, \
+              application_effect_digest, projection_kind, projection_key, \
+              staged_object_key, payload_digest) \
+             VALUES ($1, $2, $3, $4, 3, $5, $6, 1, $7, 3, $8, $9, $10)",
+        )
+        .bind(community.as_uuid())
+        .bind(mismatch.operation)
+        .bind(&mismatch.request)
+        .bind(&mismatch.application_result)
+        .bind(&object_key)
+        .bind(&mismatch.application_type)
+        .bind(random_32())
+        .bind(format!("{projection_key}/mismatch"))
+        .bind("manifests/mismatch")
+        .bind(random_32())
+        .execute(&mut *mismatch_tx)
+        .await
+        .expect("stage deferred effect mismatch");
+        assert!(
+            mismatch_tx.commit().await.is_err(),
+            "application effect mismatch must fail deferred binding"
+        );
+
+        let lower = stage_publication_admission(&pool, community, &object_key, 5, false)
+            .await
+            .expect("stage receipt rejected before an admission result");
+        let mut lower_tx = pool.begin().await.expect("begin lower-epoch projection");
+        sqlx::query(
+            "INSERT INTO protected_publication_projection_outbox \
+             (community_id, operation_id, request_fingerprint, publication_result_digest, \
+              object_kind, object_key, application_type, application_version, \
+              application_effect_digest, projection_kind, projection_key, \
+              staged_object_key, payload_digest) \
+             VALUES ($1, $2, $3, $4, 3, $5, $6, 1, $7, 3, $8, $9, $10)",
+        )
+        .bind(community.as_uuid())
+        .bind(lower.operation)
+        .bind(&lower.request)
+        .bind(&lower.application_result)
+        .bind(&object_key)
+        .bind(&lower.application_type)
+        .bind(&lower.application_effect)
+        .bind(format!("{projection_key}/lower"))
+        .bind("manifests/lower")
+        .bind(random_32())
+        .execute(&mut *lower_tx)
+        .await
+        .expect("stage lower-epoch projection without admitted result");
+        assert!(
+            lower_tx.commit().await.is_err(),
+            "a lower-epoch denial without a committed admission result cannot publish"
+        );
+    }
+
+    struct PublicationAdmissionFixture {
+        operation: Uuid,
+        request: Vec<u8>,
+        application_type: Vec<u8>,
+        application_effect: Vec<u8>,
+        application_result: Vec<u8>,
+        payload: Vec<u8>,
+    }
+
+    async fn stage_publication_admission(
+        pool: &PgPool,
+        community: CommunityId,
+        object_key: &[u8],
+        marker: u8,
+        include_admission_result: bool,
+    ) -> std::result::Result<PublicationAdmissionFixture, sqlx::Error> {
+        let fixture = PublicationAdmissionFixture {
+            operation: Uuid::new_v4(),
+            request: vec![marker.saturating_add(10); 32],
+            application_type: vec![marker.saturating_add(20); 32],
+            application_effect: vec![marker.saturating_add(30); 32],
+            application_result: vec![marker.saturating_add(40); 32],
+            payload: vec![marker.saturating_add(50); 32],
+        };
+        let mut transaction = pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 11, $4, 1, $5)",
+        )
+        .bind(community.as_uuid())
+        .bind(fixture.operation)
+        .bind(&fixture.request)
+        .bind(vec![marker.saturating_add(60); 32])
+        .bind(vec![marker.saturating_add(70); 32])
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO authorization_events \
+             (community_id, event_id, event_kind, outcome_code, reason_code, actor_kind, \
+              actor_fingerprint, operation_id, request_fingerprint, correlation_id, attempt_id, \
+              occurred_at, canonical_envelope, envelope_digest) \
+             VALUES ($1, $2, 10, 1, 1, 1, $3, $4, $5, $6, $7, \
+                     transaction_timestamp(), $8, $9)",
+        )
+        .bind(community.as_uuid())
+        .bind(Uuid::new_v4())
+        .bind(vec![marker.saturating_add(60); 32])
+        .bind(fixture.operation)
+        .bind(&fixture.request)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(vec![marker])
+        .bind(vec![marker.saturating_add(80); 32])
+        .execute(&mut *transaction)
+        .await?;
+        if include_admission_result {
+            sqlx::query(
+                "INSERT INTO authorization_admission_results \
+                 (community_id, operation_id, request_fingerprint, semantic_fingerprint, \
+                  object_kind, object_key, application_type, application_version, \
+                  application_code, application_payload, application_intent_digest, \
+                  application_effect_digest, application_result_digest) \
+                 VALUES ($1, $2, $3, $4, 3, $5, $6, 1, 1, $7, $8, $9, $10)",
+            )
+            .bind(community.as_uuid())
+            .bind(fixture.operation)
+            .bind(&fixture.request)
+            .bind(vec![marker.saturating_add(90); 32])
+            .bind(object_key)
+            .bind(&fixture.application_type)
+            .bind(vec![marker])
+            .bind(vec![marker.saturating_add(100); 32])
+            .bind(&fixture.application_effect)
+            .bind(&fixture.application_result)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(fixture)
+    }
+
+    async fn insert_projection(
+        pool: &PgPool,
+        community: CommunityId,
+        fixture: &PublicationAdmissionFixture,
+        object_key: &[u8],
+        projection_key: &str,
+    ) -> std::result::Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO protected_publication_projection_outbox \
+             (community_id, operation_id, request_fingerprint, publication_result_digest, \
+              object_kind, object_key, application_type, application_version, \
+              application_effect_digest, projection_kind, projection_key, \
+              staged_object_key, payload_digest) \
+             VALUES ($1, $2, $3, $4, 3, $5, $6, 1, $7, 3, $8, $9, $10)",
+        )
+        .bind(community.as_uuid())
+        .bind(fixture.operation)
+        .bind(&fixture.request)
+        .bind(&fixture.application_result)
+        .bind(object_key)
+        .bind(&fixture.application_type)
+        .bind(&fixture.application_effect)
+        .bind(projection_key)
+        .bind(format!("manifests/{}", fixture.operation))
+        .bind(&fixture.payload)
+        .execute(pool)
+        .await
     }
 }

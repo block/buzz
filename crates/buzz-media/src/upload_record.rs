@@ -31,10 +31,11 @@
 //! The moderation pipeline triggers on `ObjectCreated` events under the
 //! `_uploads/` prefix and parses this record instead of HEADing blobs:
 //!
-//! - For fresh uploads, the record is written after the blob and derived
-//!   artifacts but before the sidecar serve gate. Record existence therefore
-//!   implies the scan inputs are readable, while record failure cannot leave
-//!   unscanned media publicly servable.
+//! - For fresh uploads, the record is written after immutable blob staging and
+//!   the canonical PostgreSQL publication commit, but before cache projections.
+//!   Record existence therefore implies the scan inputs are readable. A record
+//!   failure leaves the DB-witnessed object authoritative but unprojected for
+//!   moderation retry; a sidecar never grants canonical visibility.
 //! - `ext`, `mime_type`, and `size` are always present so the consumer can
 //!   derive the blob key (`{sha256}.{ext}`) and scan eligibility without
 //!   extra round-trips.
@@ -43,28 +44,40 @@
 //! - Consumers must tolerate unknown fields; `version` bumps only on
 //!   breaking changes to existing fields.
 
+use std::fmt;
 use std::net::IpAddr;
 
 use buzz_core::tenant::TenantContext;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const UPLOAD_RECORD_PLAN_PREFIX: &str = "_publication-plans/moderation";
+const UPLOAD_RECORD_REPLAY_PREFIX: &str = "_publication-plans/moderation-replay";
+const MAX_UPLOAD_RECORD_BYTES: u64 = 16 * 1024;
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// Current record schema version. Additive fields do not bump this.
 pub const UPLOAD_RECORD_VERSION: u32 = 1;
 
 /// One accepted upload event. See module docs for the consumer contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadRecord {
     /// Schema version ([`UPLOAD_RECORD_VERSION`]).
     pub version: u32,
     /// ULID — unique per accepted upload, time-sortable. Also the key suffix.
     pub event_id: String,
+    /// Signed Blossom authorization event id that makes retry identity stable.
+    #[serde(default)]
+    pub request_event_id: String,
     /// Content hash of the uploaded bytes (64 lowercase hex chars).
     pub sha256: String,
     /// Canonical extension — consumers derive the blob key `{sha256}.{ext}`.
     pub ext: String,
     /// Sniffed MIME type of the uploaded bytes.
     pub mime_type: String,
-    /// Size of the uploaded bytes.
+    /// Size of the uploaded bytes. Zero denotes the canonical empty
+    /// octet-stream attachment.
     pub size: u64,
     /// Unix seconds when the relay accepted *this* upload event. On an
     /// idempotent re-upload this is the re-upload time, not the original
@@ -129,13 +142,261 @@ pub struct UploadEventFacts<'a> {
     pub uploaded_at: i64,
 }
 
-/// Build and store the per-event record for one accepted upload.
+/// Immutable moderation projection staged before publication commit.
 ///
-/// Called after blob and derived-artifact durability but before the sidecar
-/// publish gate on fresh uploads; called on the existing published state for
-/// idempotent re-uploads. A write failure propagates and fails the upload. The
-/// record's `ObjectCreated` event is the moderation pipeline's only scan
-/// trigger, so no newly published media may exist without a record.
+/// The plan lives outside the consumer-triggering `_uploads/` prefix. Its
+/// digest and projection key can be committed in the publication transaction,
+/// allowing a recovery worker to resume exact bytes after a process crash.
+#[derive(Clone)]
+pub struct StagedUploadRecord {
+    record: UploadRecord,
+    plan_key: String,
+    projection_key: String,
+    canonical_bytes: Vec<u8>,
+    digest: [u8; 32],
+}
+
+/// Immutable first-result index for one signed upload identity.
+#[derive(Debug, Serialize, Deserialize)]
+struct UploadRecordReplayIndex {
+    version: u32,
+    community_id: String,
+    request_event_id: String,
+    uploader_id: String,
+    event_id: String,
+    sha256: String,
+    plan_digest: String,
+}
+
+impl fmt::Debug for StagedUploadRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StagedUploadRecord([REDACTED])")
+    }
+}
+
+impl StagedUploadRecord {
+    /// Digest of the exact canonical record bytes persisted before commit.
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Content-addressed recovery-plan key safe to persist transactionally.
+    pub fn plan_key(&self) -> &str {
+        &self.plan_key
+    }
+
+    /// Final consumer-triggering projection key.
+    pub fn projection_key(&self) -> &str {
+        &self.projection_key
+    }
+
+    /// Canonical bytes whose digest is returned by [`Self::digest`].
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    /// Validated record facts carried by this plan.
+    pub const fn record(&self) -> &UploadRecord {
+        &self.record
+    }
+
+    /// Publish exact bytes after the canonical DB commit.
+    ///
+    /// Repeating this operation is an exact-byte no-op. An existing object
+    /// with different bytes fails closed instead of being overwritten.
+    pub async fn publish_exact(
+        &self,
+        storage: &crate::storage::MediaStorage,
+    ) -> Result<UploadProjectionResult, crate::error::MediaError> {
+        let recovered = load_upload_record_plan(storage, self.digest).await?;
+        if recovered.projection_key != self.projection_key
+            || recovered.canonical_bytes != self.canonical_bytes
+        {
+            return Err(invalid_record(
+                "staged upload record changed before projection",
+            ));
+        }
+        put_exact_object(
+            storage,
+            &self.projection_key,
+            &self.canonical_bytes,
+            "application/json",
+        )
+        .await
+    }
+}
+
+/// Outcome of an idempotent moderation projection attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadProjectionResult {
+    /// Exact bytes were written and verified.
+    Created,
+    /// Exact bytes already existed at the deterministic projection key.
+    Deduplicated,
+}
+
+/// Stage deterministic record bytes outside the consumer-triggering prefix.
+pub async fn stage_upload_record(
+    storage: &crate::storage::MediaStorage,
+    ctx: &TenantContext,
+    uploader: &nostr::PublicKey,
+    request_event_id: &str,
+    attribution: &UploadAttribution,
+    facts: UploadEventFacts<'_>,
+) -> Result<StagedUploadRecord, crate::error::MediaError> {
+    let staged = build_staged_upload_record(ctx, uploader, request_event_id, attribution, facts)?;
+    put_exact_object(
+        storage,
+        &staged.plan_key,
+        &staged.canonical_bytes,
+        "application/json",
+    )
+    .await?;
+
+    // Mutable observation fields (host alias, profile label, source address)
+    // remain in the first audit record, but never select a new canonical
+    // result for the same signed event. The stable replay index is immutable;
+    // concurrent retries load and validate the first winner.
+    let replay_index = UploadRecordReplayIndex {
+        version: UPLOAD_RECORD_VERSION,
+        community_id: staged.record.community_id.clone(),
+        request_event_id: staged.record.request_event_id.clone(),
+        uploader_id: staged.record.uploader_id.clone(),
+        event_id: staged.record.event_id.clone(),
+        sha256: staged.record.sha256.clone(),
+        plan_digest: hex::encode(staged.digest),
+    };
+    let replay_bytes = serde_json::to_vec(&replay_index)?;
+    let persisted = storage
+        .put_immutable_first(
+            &upload_record_replay_key(ctx, &staged.record.event_id),
+            &replay_bytes,
+            "application/json",
+        )
+        .await?;
+    if persisted.is_empty() || persisted.len() as u64 > MAX_UPLOAD_RECORD_BYTES {
+        return Err(invalid_record("upload replay index exceeds its bound"));
+    }
+    let winner: UploadRecordReplayIndex = serde_json::from_slice(&persisted)?;
+    if serde_json::to_vec(&winner)? != persisted
+        || winner.version != UPLOAD_RECORD_VERSION
+        || winner.community_id != staged.record.community_id
+        || winner.request_event_id != staged.record.request_event_id
+        || winner.uploader_id != staged.record.uploader_id
+        || winner.event_id != staged.record.event_id
+        || winner.sha256 != staged.record.sha256
+        || !is_lower_hex_32(&winner.plan_digest)
+    {
+        return Err(invalid_record("upload replay index identity mismatch"));
+    }
+    let digest: [u8; 32] = hex::decode(&winner.plan_digest)
+        .map_err(|_| invalid_record("upload replay index digest is malformed"))?
+        .try_into()
+        .map_err(|_| invalid_record("upload replay index digest has wrong length"))?;
+    let selected = load_upload_record_plan(storage, digest).await?;
+    select_persisted_replay(staged, selected)
+}
+
+/// Recover a staged moderation projection from its committed digest.
+pub async fn load_upload_record_plan(
+    storage: &crate::storage::MediaStorage,
+    digest: [u8; 32],
+) -> Result<StagedUploadRecord, crate::error::MediaError> {
+    if digest == [0; 32] {
+        return Err(invalid_record("upload record plan digest is unallocated"));
+    }
+    let plan_key = upload_record_plan_key(digest);
+    let canonical_bytes = read_bounded_object(storage, &plan_key).await?;
+    let actual: [u8; 32] = Sha256::digest(&canonical_bytes).into();
+    if actual != digest {
+        return Err(invalid_record("upload record plan digest mismatch"));
+    }
+    let record: UploadRecord = serde_json::from_slice(&canonical_bytes)?;
+    validate_record(&record)?;
+    if serde_json::to_vec(&record)? != canonical_bytes {
+        return Err(invalid_record("upload record plan is not canonical"));
+    }
+    let projection_key = format!(
+        "_uploads/{}/{}/{}.json",
+        record.community_id, record.sha256, record.event_id
+    );
+    Ok(StagedUploadRecord {
+        record,
+        plan_key,
+        projection_key,
+        canonical_bytes,
+        digest,
+    })
+}
+
+fn build_staged_upload_record(
+    ctx: &TenantContext,
+    uploader: &nostr::PublicKey,
+    request_event_id: &str,
+    attribution: &UploadAttribution,
+    facts: UploadEventFacts<'_>,
+) -> Result<StagedUploadRecord, crate::error::MediaError> {
+    use nostr::ToBech32;
+
+    if !is_lower_hex_32(request_event_id)
+        || !is_lower_hex_32(facts.sha256)
+        || facts.ext.is_empty()
+        || facts.ext.len() > 8
+        || !facts
+            .ext
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || facts.mime.is_empty()
+        || facts.mime.len() > 255
+        || !facts.mime.contains('/')
+        || (facts.size == 0
+            && (facts.sha256 != EMPTY_SHA256
+                || facts.ext != "bin"
+                || facts.mime != "application/octet-stream"))
+        || facts.uploaded_at <= 0
+    {
+        return Err(invalid_record("invalid deterministic upload record facts"));
+    }
+    let uploader_id = uploader.to_hex();
+    let event_id = deterministic_event_id(ctx, &uploader_id, request_event_id, facts)?;
+    let ip = attribution.net.ip;
+    let record = UploadRecord {
+        version: UPLOAD_RECORD_VERSION,
+        event_id,
+        request_event_id: request_event_id.to_owned(),
+        sha256: facts.sha256.to_owned(),
+        ext: facts.ext.to_owned(),
+        mime_type: facts.mime.to_owned(),
+        size: facts.size,
+        uploaded_at: facts.uploaded_at,
+        community_id: ctx.community().to_string(),
+        community_host: ctx.host().to_string(),
+        uploader_id,
+        uploader_npub: uploader
+            .to_bech32()
+            .map_err(|error| invalid_record(&format!("npub encoding failed: {error}")))?,
+        uploader_name: attribution.uploader_name.clone(),
+        ip: ip.map(|address| address.to_string()),
+        port: ip.and(attribution.net.port),
+    };
+    validate_record(&record)?;
+    let canonical_bytes = serde_json::to_vec(&record)?;
+    let digest: [u8; 32] = Sha256::digest(&canonical_bytes).into();
+    let plan_key = upload_record_plan_key(digest);
+    let projection_key = upload_record_key(ctx, facts.sha256, &record.event_id);
+    Ok(StagedUploadRecord {
+        record,
+        plan_key,
+        projection_key,
+        canonical_bytes,
+        digest,
+    })
+}
+
+/// Legacy immediate writer for transports without protected publication.
+///
+/// Protected transports must use [`stage_upload_record`] and commit its exact
+/// plan before invoking [`StagedUploadRecord::publish_exact`].
 pub async fn record_upload_event(
     storage: &crate::storage::MediaStorage,
     ctx: &TenantContext,
@@ -146,12 +407,14 @@ pub async fn record_upload_event(
     use nostr::ToBech32;
 
     let event_id = ulid::Ulid::new().to_string();
+    let request_event_id = hex::encode(Sha256::digest(event_id.as_bytes()));
     // Ports are only meaningful next to the address they were observed with.
     let ip = attribution.net.ip;
     let port = ip.and(attribution.net.port);
     let record = UploadRecord {
         version: UPLOAD_RECORD_VERSION,
         event_id: event_id.clone(),
+        request_event_id,
         sha256: facts.sha256.to_string(),
         ext: facts.ext.to_string(),
         mime_type: facts.mime.to_string(),
@@ -180,6 +443,190 @@ pub async fn record_upload_event(
 /// `_meta/` sidecar key (see [`crate::storage::MediaStorage::sidecar_key`]).
 pub fn upload_record_key(ctx: &TenantContext, sha256: &str, event_id: &str) -> String {
     format!("_uploads/{}/{sha256}/{event_id}.json", ctx.community())
+}
+
+/// Content-addressed recovery-plan key for canonical moderation bytes.
+pub fn upload_record_plan_key(digest: [u8; 32]) -> String {
+    format!("{UPLOAD_RECORD_PLAN_PREFIX}/{}.json", hex::encode(digest))
+}
+
+fn upload_record_replay_key(ctx: &TenantContext, event_id: &str) -> String {
+    format!(
+        "{UPLOAD_RECORD_REPLAY_PREFIX}/{}/{}.json",
+        ctx.community(),
+        event_id
+    )
+}
+
+fn ensure_same_replay_identity(
+    candidate: &StagedUploadRecord,
+    selected: &StagedUploadRecord,
+) -> Result<(), crate::error::MediaError> {
+    let candidate = &candidate.record;
+    let selected = &selected.record;
+    if candidate.version != selected.version
+        || candidate.event_id != selected.event_id
+        || candidate.request_event_id != selected.request_event_id
+        || candidate.sha256 != selected.sha256
+        || candidate.ext != selected.ext
+        || candidate.mime_type != selected.mime_type
+        || candidate.size != selected.size
+        || candidate.uploaded_at != selected.uploaded_at
+        || candidate.community_id != selected.community_id
+        || candidate.uploader_id != selected.uploader_id
+        || candidate.uploader_npub != selected.uploader_npub
+    {
+        return Err(invalid_record(
+            "persisted upload replay result does not match signed identity",
+        ));
+    }
+    Ok(())
+}
+
+fn select_persisted_replay(
+    candidate: StagedUploadRecord,
+    selected: StagedUploadRecord,
+) -> Result<StagedUploadRecord, crate::error::MediaError> {
+    ensure_same_replay_identity(&candidate, &selected)?;
+    Ok(selected)
+}
+
+fn deterministic_event_id(
+    ctx: &TenantContext,
+    uploader_id: &str,
+    request_event_id: &str,
+    facts: UploadEventFacts<'_>,
+) -> Result<String, crate::error::MediaError> {
+    let seconds = u64::try_from(facts.uploaded_at)
+        .map_err(|_| invalid_record("upload timestamp is negative"))?;
+    let millis = seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| invalid_record("upload timestamp overflows milliseconds"))?;
+    if millis > 0x0000_ffff_ffff_ffff {
+        return Err(invalid_record("upload timestamp exceeds ULID range"));
+    }
+
+    let mut hasher = Sha256::new();
+    digest_field(&mut hasher, b"buzz-moderation-projection-v2");
+    digest_field(&mut hasher, ctx.community().to_string().as_bytes());
+    digest_field(&mut hasher, uploader_id.as_bytes());
+    digest_field(&mut hasher, request_event_id.as_bytes());
+    digest_field(&mut hasher, facts.sha256.as_bytes());
+    digest_field(&mut hasher, facts.ext.as_bytes());
+    digest_field(&mut hasher, facts.mime.as_bytes());
+    digest_field(&mut hasher, &facts.size.to_be_bytes());
+    digest_field(&mut hasher, &facts.uploaded_at.to_be_bytes());
+    let identity = hasher.finalize();
+    let mut ulid_bytes = [0_u8; 16];
+    ulid_bytes[..6].copy_from_slice(&millis.to_be_bytes()[2..]);
+    ulid_bytes[6..].copy_from_slice(&identity[..10]);
+    Ok(ulid::Ulid::from(u128::from_be_bytes(ulid_bytes)).to_string())
+}
+
+fn digest_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn validate_record(record: &UploadRecord) -> Result<(), crate::error::MediaError> {
+    if record.version != UPLOAD_RECORD_VERSION
+        || record.event_id.parse::<ulid::Ulid>().is_err()
+        || !is_lower_hex_32(&record.request_event_id)
+        || !is_lower_hex_32(&record.sha256)
+        || record.ext.is_empty()
+        || record.ext.len() > 8
+        || !record
+            .ext
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || record.mime_type.is_empty()
+        || record.mime_type.len() > 255
+        || !record.mime_type.contains('/')
+        || (record.size == 0
+            && (record.sha256 != EMPTY_SHA256
+                || record.ext != "bin"
+                || record.mime_type != "application/octet-stream"))
+        || record.uploaded_at <= 0
+        || uuid::Uuid::parse_str(&record.community_id).is_err()
+        || record.community_host.is_empty()
+        || record.community_host != record.community_host.trim()
+        || !is_lower_hex_32(&record.uploader_id)
+        || record
+            .uploader_name
+            .as_deref()
+            .is_some_and(|value| value.len() > 256 || value.chars().any(char::is_control))
+        || record
+            .ip
+            .as_deref()
+            .is_some_and(|value| parse_public_ip(value).is_none())
+        || (record.port.is_some() && record.ip.is_none())
+    {
+        return Err(invalid_record("invalid canonical upload record"));
+    }
+    Ok(())
+}
+
+fn is_lower_hex_32(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+async fn put_exact_object(
+    storage: &crate::storage::MediaStorage,
+    key: &str,
+    expected: &[u8],
+    content_type: &str,
+) -> Result<UploadProjectionResult, crate::error::MediaError> {
+    if storage
+        .put_immutable_exact(key, expected, content_type)
+        .await?
+    {
+        Ok(UploadProjectionResult::Created)
+    } else {
+        Ok(UploadProjectionResult::Deduplicated)
+    }
+}
+
+async fn read_bounded_object(
+    storage: &crate::storage::MediaStorage,
+    key: &str,
+) -> Result<Vec<u8>, crate::error::MediaError> {
+    let size = storage
+        .head_with_metadata(key)
+        .await?
+        .ok_or(crate::error::MediaError::NotFound)?
+        .size;
+    if size == 0 || size > MAX_UPLOAD_RECORD_BYTES {
+        return Err(invalid_record("upload record object has invalid size"));
+    }
+    let mut stream = storage.get_stream(key).await?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    let mut total = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        total =
+            total
+                .checked_add(u64::try_from(chunk.len()).map_err(|_| {
+                    invalid_record("upload record chunk length exceeds supported size")
+                })?)
+                .ok_or_else(|| invalid_record("upload record size overflow"))?;
+        if total > MAX_UPLOAD_RECORD_BYTES {
+            return Err(invalid_record("upload record object exceeds maximum size"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if total != size {
+        return Err(invalid_record(
+            "upload record object size changed during read",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn invalid_record(message: &str) -> crate::error::MediaError {
+    crate::error::MediaError::StorageError(message.to_owned())
 }
 
 /// Parse an IP header value, accepting only public addresses (fail-empty).
@@ -286,6 +733,7 @@ mod tests {
         let record = UploadRecord {
             version: UPLOAD_RECORD_VERSION,
             event_id: "01J9W3TEST".into(),
+            request_event_id: "d".repeat(64),
             sha256: "b".repeat(64),
             ext: "png".into(),
             mime_type: "image/png".into(),
@@ -314,6 +762,7 @@ mod tests {
         let record = UploadRecord {
             version: UPLOAD_RECORD_VERSION,
             event_id: "01J9W3TEST".into(),
+            request_event_id: "d".repeat(64),
             sha256: "b".repeat(64),
             ext: "mp4".into(),
             mime_type: "video/mp4".into(),
@@ -348,6 +797,194 @@ mod tests {
         let record: UploadRecord = serde_json::from_str(json).unwrap();
         assert_eq!(record.version, 1);
         assert_eq!(record.ip, None);
+    }
+
+    #[test]
+    fn deterministic_plan_replay_is_byte_identical_and_domain_bound() {
+        let keys = nostr::Keys::generate();
+        let attribution = UploadAttribution::default();
+        let operation_id = "d".repeat(64);
+        let sha256 = "a".repeat(64);
+        let facts = UploadEventFacts {
+            sha256: &sha256,
+            ext: "png",
+            mime: "image/png",
+            size: 42,
+            uploaded_at: 1_783_358_352,
+        };
+        let one = build_staged_upload_record(
+            &tenant(),
+            &keys.public_key(),
+            &operation_id,
+            &attribution,
+            facts,
+        )
+        .expect("first plan");
+        let replay = build_staged_upload_record(
+            &tenant(),
+            &keys.public_key(),
+            &operation_id,
+            &attribution,
+            facts,
+        )
+        .expect("replay plan");
+        let other_tenant = TenantContext::resolved(
+            CommunityId::from_uuid(uuid::Uuid::from_u128(8)),
+            "other.example.com",
+        );
+        let other = build_staged_upload_record(
+            &other_tenant,
+            &keys.public_key(),
+            &operation_id,
+            &attribution,
+            facts,
+        )
+        .expect("other domain plan");
+
+        assert_eq!(one.digest(), replay.digest());
+        assert_eq!(one.plan_key(), replay.plan_key());
+        assert_eq!(one.projection_key(), replay.projection_key());
+        assert_eq!(one.canonical_bytes(), replay.canonical_bytes());
+        assert_ne!(one.digest(), other.digest());
+        assert_ne!(one.projection_key(), other.projection_key());
+        assert_eq!(format!("{one:?}"), "StagedUploadRecord([REDACTED])");
+    }
+
+    #[test]
+    fn deterministic_plan_preserves_zero_byte_upload_attribution() {
+        let keys = nostr::Keys::generate();
+        let sha256 = hex::encode(Sha256::digest([]));
+        let facts = UploadEventFacts {
+            sha256: &sha256,
+            ext: "bin",
+            mime: "application/octet-stream",
+            size: 0,
+            uploaded_at: 1_783_358_352,
+        };
+
+        let staged = build_staged_upload_record(
+            &tenant(),
+            &keys.public_key(),
+            &"d".repeat(64),
+            &UploadAttribution::default(),
+            facts,
+        )
+        .expect("zero-byte attribution plan");
+
+        assert_eq!(staged.record().size, 0);
+        validate_record(staged.record()).expect("canonical zero-byte record");
+
+        let wrong_sha = "a".repeat(64);
+        let false_empty = UploadEventFacts {
+            sha256: &wrong_sha,
+            ..facts
+        };
+        assert!(build_staged_upload_record(
+            &tenant(),
+            &keys.public_key(),
+            &"d".repeat(64),
+            &UploadAttribution::default(),
+            false_empty,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn deterministic_plan_identity_excludes_retry_variant_attribution() {
+        let keys = nostr::Keys::generate();
+        let sha256 = "a".repeat(64);
+        let facts = UploadEventFacts {
+            sha256: &sha256,
+            ext: "png",
+            mime: "image/png",
+            size: 42,
+            uploaded_at: 1_783_358_352,
+        };
+        let plain = build_staged_upload_record(
+            &tenant(),
+            &keys.public_key(),
+            &"d".repeat(64),
+            &UploadAttribution::default(),
+            facts,
+        )
+        .expect("plain plan");
+        let named = build_staged_upload_record(
+            &tenant(),
+            &keys.public_key(),
+            &"d".repeat(64),
+            &UploadAttribution {
+                uploader_name: Some("alice".into()),
+                net: UploadNetworkInfo::default(),
+            },
+            facts,
+        )
+        .expect("named plan");
+        let other_operation = build_staged_upload_record(
+            &tenant(),
+            &keys.public_key(),
+            &"e".repeat(64),
+            &UploadAttribution::default(),
+            facts,
+        )
+        .expect("other operation plan");
+
+        assert_ne!(plain.digest(), named.digest());
+        assert_ne!(plain.digest(), other_operation.digest());
+        assert_eq!(plain.record().event_id, named.record().event_id);
+        assert_eq!(plain.projection_key(), named.projection_key());
+        assert_ne!(plain.record().event_id, other_operation.record().event_id);
+    }
+
+    #[test]
+    fn changed_profile_network_and_host_retry_selects_first_exact_result() {
+        let keys = nostr::Keys::generate();
+        let operation_id = "d".repeat(64);
+        let sha256 = "a".repeat(64);
+        let facts = UploadEventFacts {
+            sha256: &sha256,
+            ext: "png",
+            mime: "image/png",
+            size: 42,
+            uploaded_at: 1_783_358_352,
+        };
+        let first = build_staged_upload_record(
+            &tenant(),
+            &keys.public_key(),
+            &operation_id,
+            &UploadAttribution {
+                uploader_name: Some("first-name".into()),
+                net: UploadNetworkInfo {
+                    ip: Some("8.8.8.8".parse().expect("public test IP")),
+                    port: Some(443),
+                },
+            },
+            facts,
+        )
+        .expect("first result");
+        let alias_tenant = TenantContext::resolved(tenant().community(), "alias.example.com");
+        let retry = build_staged_upload_record(
+            &alias_tenant,
+            &keys.public_key(),
+            &operation_id,
+            &UploadAttribution {
+                uploader_name: Some("changed-name".into()),
+                net: UploadNetworkInfo {
+                    ip: Some("1.1.1.1".parse().expect("public test IP")),
+                    port: Some(8443),
+                },
+            },
+            facts,
+        )
+        .expect("retry candidate");
+
+        assert_eq!(first.record().event_id, retry.record().event_id);
+        assert_eq!(first.projection_key(), retry.projection_key());
+        assert_ne!(first.digest(), retry.digest());
+        let first_digest = first.digest();
+        let first_bytes = first.canonical_bytes().to_vec();
+        let selected = select_persisted_replay(retry, first).expect("first result wins");
+        assert_eq!(selected.digest(), first_digest);
+        assert_eq!(selected.canonical_bytes(), first_bytes);
     }
 
     #[test]

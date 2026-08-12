@@ -83,8 +83,6 @@ async fn authorize_operator_request(
         true, // operator endpoints always require NIP-98; no X-Pubkey dev fallback
         body.is_some(),
     )?;
-    check_operator_replay(state, event_id_bytes).await?;
-
     let pubkey_hex = pubkey.to_hex();
     if !state
         .config
@@ -97,6 +95,9 @@ async fn authorize_operator_request(
             "actor not authorized: not a relay operator",
         ));
     }
+    // An unconfigured signer is not entitled to mutate shared replay or quota
+    // state. Keep this closed allowlist decision ahead of all replay I/O.
+    check_operator_replay(state, event_id_bytes).await?;
 
     Ok(pubkey)
 }

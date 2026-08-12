@@ -19,6 +19,8 @@
 pub mod access;
 /// Authentication error types.
 pub mod error;
+/// Sealed transport provenance shared by protected authorization paths.
+pub mod evidence;
 /// Provider-free authorization composition and sealed verifier evidence.
 pub mod foundation;
 /// NIP-42 challenge–response authentication.
@@ -27,13 +29,18 @@ pub mod nip42;
 pub mod nip98;
 /// NIP-98 replay protection — shared, community-scoped, atomic seen-set.
 pub mod nip98_replay;
+/// Origin-sealed deployment-operator identity lifecycle authority.
+pub mod operator_lifecycle;
 /// Per-connection rate limiting.
 pub mod rate_limit;
 /// OAuth scope parsing and enforcement.
 pub mod scope;
+/// Request-bound HMAC provenance verification for trusted proxies.
+pub mod trusted_proxy;
 
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
 pub use error::AuthError;
+pub use evidence::{AssertionTransportProfile, SealedTransportEvidence, TrustedProxyNonceClaim};
 pub use foundation::{
     ActiveLocalBinding, AuthContext as FinalizedAuthContext, AuthoritativeAuthorizationRecheck,
     AuthorizationAuditConfig, AuthorizationAuditConfigError, AuthorizationError,
@@ -62,6 +69,11 @@ pub use rate_limit::{
     ip_rate_limit_key, rate_limit_key, LimitType, RateLimitConfig, RateLimitResult, RateLimiter,
 };
 pub use scope::{parse_scopes, Scope};
+pub use trusted_proxy::{
+    HttpHeaderField, TrustedProxyError, TrustedProxyNonceReplayReader,
+    TrustedProxyProvenanceVerifier, TrustedProxyReplayReadError, TrustedProxyRequest,
+    ASSERTION_HEADER_NAME, PROVENANCE_HEADER_NAME,
+};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use access::MockAccessChecker;

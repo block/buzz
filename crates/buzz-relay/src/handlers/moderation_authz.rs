@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use buzz_core::tenant::TenantContext;
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -125,6 +126,82 @@ pub async fn authorize_moderation_action(
                 .db
                 .get_member_role(community, channel_id, actor_pubkey)
                 .await?
+        }
+        _ => None,
+    };
+
+    decide_authority(
+        actor_role.as_deref(),
+        target_role.as_deref(),
+        channel_role.as_deref(),
+        action,
+    )
+}
+
+/// Revalidate moderation authority under locks held by the caller's database
+/// transaction.
+///
+/// Moderation writes are rare. Taking table-level share locks closes both the
+/// existing-row and absent-row role-revocation races until the application
+/// mutation and its audit row commit together.
+pub async fn authorize_moderation_action_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant: &TenantContext,
+    actor_pubkey: &[u8],
+    channel_id: Option<Uuid>,
+    target: ModerationTarget<'_>,
+    action: ModerationAction,
+) -> anyhow::Result<ModerationAuthority> {
+    sqlx::query("LOCK TABLE relay_members IN SHARE MODE")
+        .execute(&mut **transaction)
+        .await?;
+    if matches!(
+        action,
+        ModerationAction::DeleteMessage | ModerationAction::Kick
+    ) {
+        sqlx::query("LOCK TABLE channel_members IN SHARE MODE")
+            .execute(&mut **transaction)
+            .await?;
+    }
+
+    let community = tenant.community();
+    let actor_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(hex::encode(actor_pubkey))
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    let target_role: Option<String> = match (actor_role.as_deref(), action, target) {
+        (
+            Some("admin"),
+            ModerationAction::Ban | ModerationAction::Timeout,
+            ModerationTarget::Pubkey(target),
+        ) => {
+            sqlx::query_scalar(
+                "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(hex::encode(target))
+            .fetch_optional(&mut **transaction)
+            .await?
+        }
+        _ => None,
+    };
+
+    let channel_role: Option<String> = match (actor_role.as_deref(), action, channel_id) {
+        (Some("owner") | Some("admin"), _, _) => None,
+        (_, ModerationAction::DeleteMessage | ModerationAction::Kick, Some(channel_id)) => {
+            sqlx::query_scalar(
+                "SELECT role::text FROM channel_members WHERE community_id = $1 \
+                 AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL",
+            )
+            .bind(community.as_uuid())
+            .bind(channel_id)
+            .bind(actor_pubkey)
+            .fetch_optional(&mut **transaction)
+            .await?
         }
         _ => None,
     };

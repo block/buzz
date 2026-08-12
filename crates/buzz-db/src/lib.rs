@@ -15,6 +15,12 @@ pub mod admin_moderation;
 pub mod api_token;
 /// Relay-scoped archived identity persistence (NIP-IA).
 pub mod archived_identities;
+/// Provider-free atomic authorization admission contract.
+pub mod authorization_admission;
+/// Immutable provider-free authorization events and capacity controls.
+pub mod authorization_events;
+/// Immutable provider-free enrollment-policy reconciliation.
+pub mod authorization_policy;
 /// Channel and membership persistence.
 pub mod channel;
 /// Direct message channel persistence.
@@ -29,12 +35,18 @@ pub mod feed;
 pub mod git_repo;
 /// Corporate identity binding persistence.
 pub mod identity_binding;
+/// Canonical direct enrollment transaction helpers.
+pub mod identity_enrollment;
 /// Canonical identity lifecycle advisory-lock helpers.
 pub mod identity_lifecycle;
+/// Typed lifecycle and admission-loss invalidation notices.
+pub mod lifecycle_invalidation;
 /// Embedded database migrations.
 pub mod migration;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+/// Closed deployment-operator lifecycle intent contract.
+pub mod operator_lifecycle;
 /// Monthly table partition management.
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.

@@ -2,15 +2,21 @@
 
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use buzz_core::tenant::{CommunityId, TenantContext};
 
 use crate::config::{MediaConfig, S3AddressingStyle};
 use crate::error::MediaError;
 use bytes::Bytes;
+use futures_util::StreamExt;
 use s3::creds::Credentials;
 use s3::{Bucket, Region};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Bound full-object verification disk and object-store amplification per process.
+const DEFAULT_MEDIA_VERIFICATION_CONCURRENCY: usize = 2;
 
 /// A stream of byte chunks from S3, usable with `axum::body::Body::from_stream()`.
 pub type ByteStream = Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, MediaError>> + Send>>;
@@ -18,6 +24,7 @@ pub type ByteStream = Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, Medi
 /// S3-compatible object storage client.
 pub struct MediaStorage {
     bucket: Box<Bucket>,
+    pub(crate) verification_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl MediaStorage {
@@ -66,7 +73,12 @@ impl MediaStorage {
             S3AddressingStyle::Path => bucket.with_path_style(),
             S3AddressingStyle::Virtual => bucket,
         };
-        Ok(Self { bucket })
+        Ok(Self {
+            bucket,
+            verification_slots: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MEDIA_VERIFICATION_CONCURRENCY,
+            )),
+        })
     }
 
     /// Store an object from a byte slice.
@@ -78,6 +90,83 @@ impl MediaStorage {
             .put_object_with_content_type(key, bytes, content_type)
             .await?;
         Ok(())
+    }
+
+    /// Create one immutable object and verify exact bytes on deduplicated replay.
+    ///
+    /// The key must already be derived from `bytes`. `true` means this call
+    /// created it; `false` means exact bytes were already present. A collision
+    /// with different bytes fails closed and is never overwritten.
+    pub(crate) async fn put_immutable_exact(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<bool, MediaError> {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::IF_NONE_MATCH,
+            axum::http::HeaderValue::from_static("*"),
+        );
+        let created = match self
+            .bucket
+            .put_object_with_content_type_and_headers(key, bytes, content_type, Some(headers))
+            .await
+        {
+            Ok(response) if (200..300).contains(&response.status_code()) => true,
+            Ok(response) if response.status_code() == 412 => false,
+            Err(s3::error::S3Error::HttpFailWithBody(412, _)) => false,
+            Ok(response) => {
+                return Err(MediaError::StorageError(format!(
+                    "immutable object write returned HTTP {}",
+                    response.status_code()
+                )));
+            }
+            Err(error) => return Err(MediaError::StorageError(error.to_string())),
+        };
+        let stored = self.get(key).await?;
+        if stored != bytes {
+            return Err(MediaError::StorageError(
+                "immutable object key contains different bytes".to_owned(),
+            ));
+        }
+        Ok(created)
+    }
+
+    /// Create an immutable first-writer-wins value and return the persisted
+    /// bytes.
+    ///
+    /// This is used only for a bounded typed replay index. A losing retry does
+    /// not compare its mutable attribution bytes with the winner; it loads the
+    /// first value and validates the signed stable identity at the caller.
+    pub(crate) async fn put_immutable_first(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<Vec<u8>, MediaError> {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::IF_NONE_MATCH,
+            axum::http::HeaderValue::from_static("*"),
+        );
+        match self
+            .bucket
+            .put_object_with_content_type_and_headers(key, bytes, content_type, Some(headers))
+            .await
+        {
+            Ok(response) if (200..300).contains(&response.status_code()) => {}
+            Ok(response) if response.status_code() == 412 => {}
+            Err(s3::error::S3Error::HttpFailWithBody(412, _)) => {}
+            Ok(response) => {
+                return Err(MediaError::StorageError(format!(
+                    "immutable first-writer index returned HTTP {}",
+                    response.status_code()
+                )));
+            }
+            Err(error) => return Err(MediaError::StorageError(error.to_string())),
+        }
+        self.get(key).await
     }
 
     /// Stream a file from disk into S3 without loading it into RAM.
@@ -101,6 +190,80 @@ impl MediaStorage {
         self.bucket
             .put_object_stream_with_content_type(&mut reader, key, content_type)
             .await?;
+        Ok(())
+    }
+
+    /// Stage a large content-addressed file without replacing existing bytes.
+    ///
+    /// Existing objects are verified and reused. New writes are streamed and
+    /// then verified before the staged object is returned to a caller.
+    pub(crate) async fn put_file_immutable_verified(
+        &self,
+        key: &str,
+        path: &Path,
+        content_type: &str,
+        expected_digest: &str,
+        expected_size: u64,
+    ) -> Result<bool, MediaError> {
+        const BUF: usize = 8 * 1024 * 1024;
+
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| MediaError::Io(error.to_string()))?;
+        let mut reader = tokio::io::BufReader::with_capacity(BUF, file);
+        let request = self
+            .bucket
+            .put_object_stream_builder(key)
+            .with_content_type(content_type)
+            .with_header(axum::http::header::IF_NONE_MATCH, "*")
+            .map_err(|error| MediaError::StorageError(error.to_string()))?;
+        let created = match request.execute_stream(&mut reader).await {
+            Ok(response) if (200..300).contains(&response.status_code()) => true,
+            Ok(response) if response.status_code() == 412 => false,
+            Err(s3::error::S3Error::HttpFailWithBody(412, _)) => false,
+            Ok(response) => {
+                return Err(MediaError::StorageError(format!(
+                    "immutable streamed write returned HTTP {}",
+                    response.status_code()
+                )));
+            }
+            Err(error) => return Err(MediaError::StorageError(error.to_string())),
+        };
+        self.verify_object_digest(key, expected_digest, expected_size)
+            .await?;
+        Ok(created)
+    }
+
+    async fn verify_object_digest(
+        &self,
+        key: &str,
+        expected_digest: &str,
+        expected_size: u64,
+    ) -> Result<(), MediaError> {
+        let mut stream = self.get_stream(key).await?;
+        let mut digest = Sha256::new();
+        let mut size = 0_u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            size = size
+                .checked_add(u64::try_from(chunk.len()).map_err(|_| {
+                    MediaError::StorageError("immutable object chunk is too large".to_owned())
+                })?)
+                .ok_or_else(|| {
+                    MediaError::StorageError("immutable object size overflow".to_owned())
+                })?;
+            if size > expected_size {
+                return Err(MediaError::StorageError(
+                    "immutable object exceeds staged size".to_owned(),
+                ));
+            }
+            digest.update(&chunk);
+        }
+        if size != expected_size || hex::encode(digest.finalize()) != expected_digest {
+            return Err(MediaError::StorageError(
+                "immutable object bytes do not match staged digest".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -410,6 +573,9 @@ pub struct BlobMeta {
     pub blurhash: String,
     /// Full URL to thumbnail.
     pub thumb_url: String,
+    /// SHA-256 of the exact thumbnail bytes, when a thumbnail exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_sha256: Option<String>,
     /// File extension (e.g. "jpg").
     pub ext: String,
     /// MIME type (e.g. "image/jpeg").

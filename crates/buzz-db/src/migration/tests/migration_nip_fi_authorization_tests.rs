@@ -66,6 +66,25 @@ async fn seed_binding(pool: &PgPool, community_id: Uuid) -> (Uuid, i64, Vec<u8>,
         1,
     )
     .await;
+    sqlx::query(
+        "INSERT INTO authorization_events \
+         (community_id,event_id,event_kind,outcome_code,reason_code,actor_kind, \
+          actor_fingerprint,operation_id,request_fingerprint,correlation_id,attempt_id, \
+          occurred_at,canonical_envelope,envelope_digest) \
+         VALUES ($1,$2,1,1,1,1,$3,$4,$5,$6,$7,transaction_timestamp(),$8,$9)",
+    )
+    .bind(community_id)
+    .bind(Uuid::new_v4())
+    .bind(vec![241_u8; 32])
+    .bind(operation_id)
+    .bind(&request_fingerprint)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(vec![35_u8; 4])
+    .bind(vec![36_u8; 32])
+    .execute(&mut *transaction)
+    .await
+    .expect("insert authorization-state binding event");
     let binding_version: i64 = sqlx::query_scalar(
         "INSERT INTO identity_bindings \
          (community_id,binding_id,issuer,subject,principal_fingerprint,event_author_pubkey, \
@@ -170,6 +189,15 @@ async fn nip_fi_authorization_foundation_behavior() {
     .execute(&pool)
     .await
     .expect("insert authorization test policy");
+    sqlx::query(
+        "INSERT INTO authorization_event_capacity \
+         (community_id,max_events_per_domain,max_bytes_per_domain,max_envelope_bytes) \
+         VALUES ($1,4,16,4)",
+    )
+    .bind(community_id)
+    .execute(&pool)
+    .await
+    .expect("install bounded authorization event capacity");
     let (binding_id, binding_version, principal_fingerprint, event_author_pubkey) =
         seed_binding(&pool, community_id).await;
 
@@ -443,18 +471,11 @@ async fn nip_fi_authorization_foundation_behavior() {
         Some("protected_object_authority_delegated_relationship_non_nil")
     );
 
-    // Audit insertion atomically advances bounded counters. Exhaustion and
-    // unhealthy state reject the event without advancing either counter, and
-    // health cannot be reset or relabelled online.
-    sqlx::query(
-        "INSERT INTO authorization_event_capacity \
-         (community_id,max_events_per_domain,max_bytes_per_domain,max_envelope_bytes) \
-         VALUES ($1,2,8,4)",
-    )
-    .bind(community_id)
-    .execute(&pool)
-    .await
-    .expect("install bounded authorization event capacity");
+    // The lifecycle seed consumed the first bounded event. Two additional
+    // success events reach the exact non-restrictive limits while preserving
+    // one event and four bytes for security evidence. Exhaustion and unhealthy
+    // state reject later events without advancing either counter, and health
+    // cannot be reset or relabelled online.
     for event_byte in [71_u8, 72_u8] {
         let (operation_id, request_fingerprint) =
             committed_receipt(&pool, community_id, 11, event_byte).await;
@@ -580,20 +601,19 @@ async fn nip_fi_authorization_foundation_behavior() {
     .fetch_one(&pool)
     .await
     .expect("read bounded authorization event counters");
-    assert_eq!(counters, (2, 8));
+    assert_eq!(counters, (3, 12));
     sqlx::query("UPDATE authorization_events SET reason_code=2 WHERE community_id=$1")
         .bind(community_id)
         .execute(&pool)
         .await
         .expect_err("authorization event envelopes are immutable");
-    sqlx::query(
-        "UPDATE authorization_event_capacity SET health_state=2,failure_code=1, \
-         failure_observed_at=transaction_timestamp() WHERE community_id=$1",
-    )
-    .bind(community_id)
-    .execute(&pool)
-    .await
-    .expect("latch authorization event health");
+    let failure_generation: i64 =
+        sqlx::query_scalar("SELECT authorization_event_capacity_report_failure_v2($1,1::smallint)")
+            .bind(community_id)
+            .fetch_one(&pool)
+            .await
+            .expect("latch authorization event health");
+    assert_eq!(failure_generation, 1);
     sqlx::query(
         "UPDATE authorization_event_capacity SET failure_code=2 \
          WHERE community_id=$1",

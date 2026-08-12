@@ -389,6 +389,41 @@ async fn insert_binding(
     .expect("insert immutable binding generation")
 }
 
+async fn insert_lifecycle_event(
+    connection: &mut PgConnection,
+    community_id: Uuid,
+    operation_id: Uuid,
+    fingerprint: &[u8],
+    outcome_code: i16,
+    envelope_byte: u8,
+) {
+    sqlx::query(
+        "INSERT INTO authorization_events \
+         (community_id,event_id,event_kind,outcome_code,reason_code,actor_kind, \
+          actor_fingerprint,operation_id,request_fingerprint,correlation_id,attempt_id, \
+          occurred_at,canonical_envelope,envelope_digest) \
+         SELECT $1,$2,CASE receipt.operation_kind \
+             WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 3 THEN 6 WHEN 4 THEN 7 \
+             WHEN 5 THEN 2 WHEN 6 THEN 3 WHEN 7 THEN 4 WHEN 8 THEN 5 WHEN 9 THEN 8 \
+         END,$3,1,1,receipt.actor_fingerprint,$4,$5,$6,$7,transaction_timestamp(),$8,$9 \
+         FROM authorization_operation_receipts receipt \
+         WHERE receipt.community_id=$1 AND receipt.operation_id=$4 \
+           AND receipt.operation_kind BETWEEN 1 AND 9",
+    )
+    .bind(community_id)
+    .bind(Uuid::new_v4())
+    .bind(outcome_code)
+    .bind(operation_id)
+    .bind(fingerprint)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(vec![envelope_byte; 32])
+    .bind(vec![214_u8; 32])
+    .execute(&mut *connection)
+    .await
+    .expect("insert lifecycle audit event");
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_history(
     connection: &mut PgConnection,
@@ -431,9 +466,19 @@ async fn insert_history(
     .bind(operation_id)
     .bind(fingerprint)
     .bind(vec![212_u8; 32])
-    .execute(connection)
+    .execute(&mut *connection)
     .await
     .expect("insert canonical lifecycle transition");
+
+    insert_lifecycle_event(
+        connection,
+        community_id,
+        operation_id,
+        fingerprint,
+        outcome_code,
+        transition_kind as u8,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -728,6 +773,8 @@ async fn assert_race_loser_has_no_residue(pool: &PgPool, community_id: Uuid, ope
             (SELECT count(*) FROM identity_lifecycle_selectors \
              WHERE community_id=$1 AND selected_by_operation_id=$2) + \
             (SELECT count(*) FROM identity_lifecycle_selector_consumptions \
+             WHERE community_id=$1 AND operation_id=$2) + \
+            (SELECT count(*) FROM authorization_events \
              WHERE community_id=$1 AND operation_id=$2)",
     )
     .bind(community_id)
@@ -1193,6 +1240,15 @@ async fn nip_fi_direct_final_catalog_and_behavior() {
         .expect_err("V1 hard audit-capacity ceiling must reject oversized policy");
         assert_eq!(constraint(&error), Some(expected_constraint));
     }
+    sqlx::query(
+        "INSERT INTO authorization_event_capacity \
+         (community_id,max_events_per_domain,max_bytes_per_domain,max_envelope_bytes) \
+         VALUES ($1,10000,16777216,16384)",
+    )
+    .bind(community_id)
+    .execute(&pool)
+    .await
+    .expect("install direct-final audit capacity");
 
     // Both transaction orderings are exercised for every closed selector
     // class. The waiter is observed in PostgreSQL's advisory wait state, the
@@ -1964,6 +2020,15 @@ async fn nip_fi_direct_final_catalog_and_behavior() {
             outcome_code,
         )
         .await;
+        insert_lifecycle_event(
+            &mut missing_history,
+            community_id,
+            operation_id,
+            &fingerprint,
+            outcome_code,
+            105_u8.wrapping_add(outcome_code as u8),
+        )
+        .await;
         let error = (&mut *missing_history)
             .execute("SET CONSTRAINTS ALL IMMEDIATE")
             .await
@@ -1988,6 +2053,15 @@ async fn nip_fi_direct_final_catalog_and_behavior() {
         &denied_fingerprint,
         3,
         2,
+    )
+    .await;
+    insert_lifecycle_event(
+        &mut denied,
+        community_id,
+        denied_operation,
+        &denied_fingerprint,
+        2,
+        109,
     )
     .await;
     (&mut *denied)
@@ -2045,6 +2119,15 @@ async fn nip_fi_direct_final_catalog_and_behavior() {
         &rollback_fingerprint,
         3,
         1,
+    )
+    .await;
+    insert_lifecycle_event(
+        &mut rollback,
+        community_id,
+        rollback_operation,
+        &rollback_fingerprint,
+        1,
+        113,
     )
     .await;
     sqlx::query(

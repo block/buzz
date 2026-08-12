@@ -22,6 +22,7 @@ tracing      = { workspace = true }
 thiserror    = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }
+hmac         = { workspace = true }
 rand         = { workspace = true }
 uuid         = { workspace = true }
 url          = { workspace = true }

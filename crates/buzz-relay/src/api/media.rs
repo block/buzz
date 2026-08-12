@@ -18,10 +18,711 @@ use axum::{
 };
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
+use buzz_auth::SealedTransportEvidence;
 use buzz_core::tenant::TenantContext;
-use buzz_media::{BlobDescriptor, MediaError, UploadAttribution, UploadNetworkInfo};
+use buzz_db::authorization_admission::{
+    AdmissionApplicationContext, AdmissionApplicationEffect, AdmissionApplicationOutcome,
+    AdmissionApplicationResult, AdmissionApplicationResultSchema, AdmissionCommitError,
+    AdmissionCommitOutcome, AdmissionCommitReceipt, AdmissionCommitRequest, AdmissionObject,
+    AdmissionObjectKind, AdmissionReplayClaim, AdmissionReplayClaimKind,
+};
+use buzz_media::{
+    BlobDescriptor, MediaError, MediaStorage, StagedMediaUpload, UploadAttribution,
+    UploadNetworkInfo,
+};
+use sha2::{Digest, Sha256};
+use sqlx::{Postgres, Transaction};
 
+use crate::api::git::cas_publish::StagedGitPublication;
 use crate::state::AppState;
+
+/// Installs origin-sealed transport replay state onto S3's sole admission
+/// request without creating an alternate admission or lifecycle authority.
+///
+/// S5 calls this only after canonical assertion/proof preparation. Consuming
+/// the move-only evidence ensures confidential assertion bytes do not survive
+/// beyond installation, while S3 remains responsible for atomic claim use.
+#[derive(Debug, Default)]
+pub struct ProtectedTransportInstaller;
+
+impl ProtectedTransportInstaller {
+    /// Bind the trusted-proxy nonce claim to the exact server-owned admission
+    /// domain. Domain drift fails before canonical admission performs I/O.
+    pub fn install(
+        request: AdmissionCommitRequest,
+        evidence: SealedTransportEvidence,
+    ) -> Result<AdmissionCommitRequest, AdmissionCommitError> {
+        let (request_transport, request_transport_context) = request.transport_binding();
+        let claim = verified_transport_replay_claim(
+            request.authorization_domain(),
+            request.request_fingerprint(),
+            request_transport,
+            request_transport_context,
+            &evidence,
+        )?;
+        Ok(request.with_replay_claim(claim))
+    }
+}
+
+fn verified_transport_replay_claim(
+    authorization_domain: buzz_core::CommunityId,
+    request_fingerprint: [u8; 32],
+    transport: buzz_auth::ProofTransport,
+    transport_context_fingerprint: [u8; 32],
+    evidence: &SealedTransportEvidence,
+) -> Result<AdmissionReplayClaim, AdmissionCommitError> {
+    if authorization_domain != evidence.authorization_domain()
+        || request_fingerprint != *evidence.request_fingerprint()
+        || transport != evidence.transport()
+        || transport_context_fingerprint != *evidence.transport_context_fingerprint()
+    {
+        return Err(AdmissionCommitError::InvalidRequest);
+    }
+    AdmissionReplayClaim::new(
+        AdmissionReplayClaimKind::TrustedProxyNonce,
+        *evidence.nonce_claim().claim_key(),
+        evidence.nonce_claim().retain_until(),
+    )
+}
+
+/// Typed server-owned publication coordinate used by canonical admission.
+///
+/// The opaque object key is derived from the authorization domain and exact
+/// target coordinates. Repository targets bind both owner and canonical repo;
+/// media targets bind the canonical blob digest. This prevents two plans with
+/// byte-identical artifact manifests from sharing an admission result.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ProtectedPublicationTarget {
+    authorization_domain: buzz_core::CommunityId,
+    object: AdmissionObject,
+}
+
+impl ProtectedPublicationTarget {
+    /// Derive the canonical repository object from exact server-resolved path
+    /// coordinates.
+    pub fn repository(
+        authorization_domain: buzz_core::CommunityId,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Self, AdmissionCommitError> {
+        let canonical_repo = repo.strip_suffix(".git").unwrap_or(repo);
+        if authorization_domain.as_uuid().is_nil()
+            || owner.len() != 64
+            || !owner
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || canonical_repo.is_empty()
+            || canonical_repo.len() > 64
+            || canonical_repo.starts_with('.')
+            || canonical_repo.contains("..")
+            || !canonical_repo
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        Self::derive(
+            authorization_domain,
+            AdmissionObjectKind::Repository,
+            b"buzz:nip-fi:repository-target:v1",
+            &[owner.as_bytes(), canonical_repo.as_bytes()],
+        )
+    }
+
+    /// Derive the canonical media object from an exact lower-hex blob digest.
+    pub fn media(
+        authorization_domain: buzz_core::CommunityId,
+        blob_sha256: &str,
+    ) -> Result<Self, AdmissionCommitError> {
+        if authorization_domain.as_uuid().is_nil()
+            || blob_sha256.len() != 64
+            || !blob_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        Self::derive(
+            authorization_domain,
+            AdmissionObjectKind::Media,
+            b"buzz:nip-fi:media-target:v1",
+            &[blob_sha256.as_bytes()],
+        )
+    }
+
+    fn derive(
+        authorization_domain: buzz_core::CommunityId,
+        kind: AdmissionObjectKind,
+        domain: &[u8],
+        coordinates: &[&[u8]],
+    ) -> Result<Self, AdmissionCommitError> {
+        let mut fields = Vec::with_capacity(coordinates.len() + 1);
+        fields.push(authorization_domain.as_uuid().as_bytes().as_slice());
+        fields.extend_from_slice(coordinates);
+        let key = framed_digest(domain, &fields);
+        let object = AdmissionObject::new(kind, key).ok_or(AdmissionCommitError::InvalidRequest)?;
+        Ok(Self {
+            authorization_domain,
+            object,
+        })
+    }
+
+    /// Server-resolved authorization domain.
+    pub const fn authorization_domain(self) -> buzz_core::CommunityId {
+        self.authorization_domain
+    }
+
+    /// Closed kind and opaque key supplied to canonical admission.
+    pub const fn admission_object(self) -> AdmissionObject {
+        self.object
+    }
+
+    /// Derive the application result committed by canonical admission from an
+    /// immutable artifact-manifest digest and this exact server-owned target.
+    pub fn bind_artifact_result(self, artifact_digest: [u8; 32]) -> [u8; 32] {
+        framed_digest(
+            b"buzz:nip-fi:protected-publication-result:v1",
+            &[
+                self.authorization_domain.as_uuid().as_bytes(),
+                &[self.object.kind().database_code() as u8],
+                self.object.key(),
+                &artifact_digest,
+            ],
+        )
+    }
+
+    /// Exact typed application result persisted by canonical admission.
+    pub fn application_result(
+        self,
+        artifact_digest: [u8; 32],
+    ) -> Result<AdmissionApplicationResult, AdmissionCommitError> {
+        publication_application_result(self, artifact_digest)
+    }
+
+    /// Validate a storage-issued receipt and typed result against this exact
+    /// target and immutable artifact manifest.
+    pub fn validate_receipt(
+        self,
+        artifact_digest: [u8; 32],
+        application_intent_digest: [u8; 32],
+        admission: AdmissionCommitReceipt,
+        application_result: &AdmissionApplicationResult,
+    ) -> Result<(), AdmissionCommitError> {
+        validate_publication_binding(
+            self,
+            artifact_digest,
+            application_intent_digest,
+            admission,
+            application_result,
+        )
+    }
+}
+
+impl std::fmt::Debug for ProtectedPublicationTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProtectedPublicationTarget([REDACTED])")
+    }
+}
+
+/// Closed immutable publication staged before S3 canonical admission.
+///
+/// Neither variant is visible until an exact applied admission receipt is
+/// bound by [`ProtectedPublicationReceipt::bind`]. Raw object-store pointers
+/// and media sidecars remain post-commit projections only.
+pub enum ProtectedPublicationPlan {
+    /// Media manifest, blob artifacts, and deterministic moderation plan.
+    Media(Box<StagedMediaUpload>),
+    /// Git manifest and content-addressed pack artifacts.
+    Git(Box<StagedGitPublication>),
+}
+
+impl ProtectedPublicationPlan {
+    /// Exact server-owned target bound to this plan.
+    pub fn target(&self) -> Result<ProtectedPublicationTarget, AdmissionCommitError> {
+        match self {
+            Self::Media(staged) => ProtectedPublicationTarget::media(
+                staged.publication().manifest().community_id(),
+                staged.publication().manifest().blob_sha256(),
+            ),
+            Self::Git(staged) => ProtectedPublicationTarget::repository(
+                staged.community_id(),
+                staged.owner(),
+                staged.repo(),
+            ),
+        }
+    }
+
+    /// Raw immutable artifact-manifest digest before target binding.
+    pub fn artifact_digest(&self) -> [u8; 32] {
+        match self {
+            Self::Media(staged) => staged.publication().result_digest(),
+            Self::Git(staged) => staged.result_digest(),
+        }
+    }
+
+    /// Target-bound application result that canonical admission must persist.
+    pub fn result_digest(&self) -> Result<[u8; 32], AdmissionCommitError> {
+        Ok(self.target()?.bind_artifact_result(self.artifact_digest()))
+    }
+
+    /// Build the bounded application mutation installed on canonical admission.
+    ///
+    /// The staged plan remains with the caller for receipt binding and
+    /// post-commit projection. The effect retains only credential-free target,
+    /// immutable object-store, and deterministic outbox coordinates.
+    pub fn application_effect(
+        &self,
+    ) -> Result<ProtectedPublicationApplicationEffect, AdmissionCommitError> {
+        let target = self.target()?;
+        let artifact_digest = self.artifact_digest();
+        let projections = match self {
+            Self::Media(staged) => {
+                let publication = staged.publication();
+                let manifest = publication.manifest();
+                let mut projections = vec![ProtectedProjectionPlan {
+                    kind: 2,
+                    projection_key: MediaStorage::sidecar_key(
+                        target.authorization_domain(),
+                        manifest.blob_sha256(),
+                    ),
+                    staged_object_key: publication.manifest_key().to_owned(),
+                    payload_digest: publication.result_digest(),
+                }];
+                if let Some(record) = staged.moderation_projection() {
+                    projections.push(ProtectedProjectionPlan {
+                        kind: 1,
+                        projection_key: record.projection_key().to_owned(),
+                        staged_object_key: record.plan_key().to_owned(),
+                        payload_digest: record.digest(),
+                    });
+                }
+                projections
+            }
+            Self::Git(staged) => vec![ProtectedProjectionPlan {
+                kind: 3,
+                projection_key: staged.pointer_cache_key(),
+                staged_object_key: staged.manifest_key().to_owned(),
+                payload_digest: staged.result_digest(),
+            }],
+        };
+        ProtectedPublicationApplicationEffect::new(target, artifact_digest, projections)
+    }
+}
+
+impl std::fmt::Debug for ProtectedPublicationPlan {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProtectedPublicationPlan([REDACTED])")
+    }
+}
+
+impl From<StagedMediaUpload> for ProtectedPublicationPlan {
+    fn from(staged: StagedMediaUpload) -> Self {
+        Self::Media(Box::new(staged))
+    }
+}
+
+impl From<StagedGitPublication> for ProtectedPublicationPlan {
+    fn from(staged: StagedGitPublication) -> Self {
+        Self::Git(Box::new(staged))
+    }
+}
+
+const PROTECTED_PUBLICATION_RESULT_CODE: i16 = 1;
+
+#[derive(Debug)]
+struct ProtectedProjectionPlan {
+    kind: i16,
+    projection_key: String,
+    staged_object_key: String,
+    payload_digest: [u8; 32],
+}
+
+/// Credential-free publication DML executed inside canonical final admission.
+///
+/// All outbox coordinates are derived from immutable staged artifacts. The
+/// canonical transaction supplies domain, object, operation, request, schema,
+/// and result binding; callers cannot substitute any of those coordinates.
+pub struct ProtectedPublicationApplicationEffect {
+    target: ProtectedPublicationTarget,
+    artifact_digest: [u8; 32],
+    projections: Vec<ProtectedProjectionPlan>,
+    intent_digest: [u8; 32],
+}
+
+impl ProtectedPublicationApplicationEffect {
+    fn new(
+        target: ProtectedPublicationTarget,
+        artifact_digest: [u8; 32],
+        projections: Vec<ProtectedProjectionPlan>,
+    ) -> Result<Self, AdmissionCommitError> {
+        if artifact_digest == [0; 32] || projections.is_empty() {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        let intent_digest = publication_intent_digest(target, artifact_digest, &projections);
+        if intent_digest == [0; 32] {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        Ok(Self {
+            target,
+            artifact_digest,
+            projections,
+            intent_digest,
+        })
+    }
+}
+
+impl std::fmt::Debug for ProtectedPublicationApplicationEffect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProtectedPublicationApplicationEffect([REDACTED])")
+    }
+}
+
+impl AdmissionApplicationEffect for ProtectedPublicationApplicationEffect {
+    fn intent_digest(&self) -> [u8; 32] {
+        self.intent_digest
+    }
+
+    fn result_schema(&self) -> AdmissionApplicationResultSchema {
+        publication_result_schema()
+    }
+
+    fn apply<'a, 'transaction>(
+        &'a mut self,
+        transaction: &'a mut Transaction<'transaction, Postgres>,
+        context: &'a AdmissionApplicationContext<'a>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<AdmissionApplicationOutcome, AdmissionCommitError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if context.authorization_domain() != self.target.authorization_domain()
+                || context.object() != self.target.admission_object()
+            {
+                return Err(AdmissionCommitError::AuthorizationDenied);
+            }
+
+            let result = publication_application_result(self.target, self.artifact_digest)?;
+            let effect_digest = publication_effect_digest(context, self.intent_digest);
+            let outcome = AdmissionApplicationOutcome::new(result, effect_digest)?;
+            let publication_result_digest = context.canonical_result_digest(&outcome)?;
+            let schema = outcome.result().schema();
+
+            for projection in &self.projections {
+                sqlx::query(
+                    "INSERT INTO protected_publication_projection_outbox \
+                     (community_id, operation_id, request_fingerprint, \
+                      publication_result_digest, object_kind, object_key, \
+                      application_type, application_version, application_effect_digest, \
+                      projection_kind, projection_key, staged_object_key, payload_digest) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                )
+                .bind(context.authorization_domain().as_uuid())
+                .bind(context.operation_id())
+                .bind(context.request_fingerprint().as_slice())
+                .bind(publication_result_digest.as_slice())
+                .bind(context.object().kind().database_code())
+                .bind(context.object().key().as_slice())
+                .bind(schema.type_key().as_slice())
+                .bind(
+                    i16::try_from(schema.version())
+                        .map_err(|_| AdmissionCommitError::InvalidRequest)?,
+                )
+                .bind(effect_digest.as_slice())
+                .bind(projection.kind)
+                .bind(&projection.projection_key)
+                .bind(&projection.staged_object_key)
+                .bind(projection.payload_digest.as_slice())
+                .execute(&mut **transaction)
+                .await
+                .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            }
+            Ok(outcome)
+        })
+    }
+}
+
+fn publication_result_schema() -> AdmissionApplicationResultSchema {
+    AdmissionApplicationResultSchema::protected_publication()
+}
+
+fn publication_application_result(
+    target: ProtectedPublicationTarget,
+    artifact_digest: [u8; 32],
+) -> Result<AdmissionApplicationResult, AdmissionCommitError> {
+    let mut payload = Vec::with_capacity(83);
+    payload.push(1);
+    payload.extend_from_slice(target.authorization_domain().as_uuid().as_bytes());
+    payload.extend_from_slice(
+        &target
+            .admission_object()
+            .kind()
+            .database_code()
+            .to_be_bytes(),
+    );
+    payload.extend_from_slice(target.admission_object().key());
+    payload.extend_from_slice(&artifact_digest);
+    AdmissionApplicationResult::new(
+        publication_result_schema(),
+        PROTECTED_PUBLICATION_RESULT_CODE,
+        payload,
+    )
+}
+
+fn publication_intent_digest(
+    target: ProtectedPublicationTarget,
+    artifact_digest: [u8; 32],
+    projections: &[ProtectedProjectionPlan],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"buzz:nip-fi:protected-publication-effect-intent:v1");
+    for field in [
+        target
+            .authorization_domain()
+            .as_uuid()
+            .as_bytes()
+            .as_slice(),
+        &target
+            .admission_object()
+            .kind()
+            .database_code()
+            .to_be_bytes(),
+        target.admission_object().key(),
+        &artifact_digest,
+    ] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    for projection in projections {
+        for field in [
+            projection.kind.to_be_bytes().as_slice(),
+            projection.projection_key.as_bytes(),
+            projection.staged_object_key.as_bytes(),
+            projection.payload_digest.as_slice(),
+        ] {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field);
+        }
+    }
+    digest.finalize().into()
+}
+
+fn publication_effect_digest(
+    context: &AdmissionApplicationContext<'_>,
+    intent_digest: [u8; 32],
+) -> [u8; 32] {
+    framed_digest(
+        b"buzz:nip-fi:protected-publication-effect:v1",
+        &[
+            context.authorization_domain().as_uuid().as_bytes(),
+            context.operation_id().as_bytes(),
+            context.request_fingerprint(),
+            &intent_digest,
+        ],
+    )
+}
+
+/// Exact canonical admission receipt bound to immutable staged artifacts.
+///
+/// Construction rejects cross-domain or result-digest substitution. Applied
+/// and exact-replay outcomes use the same durable S3 receipt and therefore the
+/// same deterministic plan.
+pub struct ProtectedPublicationReceipt {
+    plan: ProtectedPublicationPlan,
+    admission: AdmissionCommitReceipt,
+}
+
+/// Closed binding result for fresh publication versus exact replay.
+///
+/// Only the fresh variant owns a projection plan. Exact replay exposes the
+/// byte-identical persisted typed result but is structurally incapable of
+/// yielding post-commit projection work.
+pub enum ProtectedPublicationBinding {
+    /// A newly committed admission whose projection plan may run once.
+    Committed(ProtectedPublicationReceipt),
+    /// An already committed operation with no projection plan.
+    ExactReplay(ProtectedPublicationReplay),
+}
+
+/// Persisted exact-replay result without any post-commit projection authority.
+pub struct ProtectedPublicationReplay {
+    admission: AdmissionCommitReceipt,
+    application_result: AdmissionApplicationResult,
+}
+
+impl ProtectedPublicationReplay {
+    /// Durable receipt for the already committed operation.
+    pub const fn admission(&self) -> AdmissionCommitReceipt {
+        self.admission
+    }
+
+    /// Byte-identical typed result reconstructed by canonical storage.
+    pub const fn application_result(&self) -> &AdmissionApplicationResult {
+        &self.application_result
+    }
+}
+
+impl ProtectedPublicationReceipt {
+    /// Bind S3's typed application result to the exact staged publication.
+    ///
+    /// The outcome carries only storage-issued domain/object coordinates and
+    /// the byte-identical typed result reconstructed on exact replay. A caller
+    /// cannot supply replacement coordinates or compare against the unrelated
+    /// whole-admission envelope digest.
+    pub fn bind(
+        plan: ProtectedPublicationPlan,
+        outcome: &AdmissionCommitOutcome,
+    ) -> Result<ProtectedPublicationBinding, AdmissionCommitError> {
+        let (admission, application_result, committed) = match outcome {
+            AdmissionCommitOutcome::Committed {
+                receipt,
+                application_result,
+                ..
+            } => (*receipt, application_result.as_ref(), true),
+            AdmissionCommitOutcome::ExactReplay {
+                receipt,
+                application_result,
+            } => (*receipt, application_result.as_ref(), false),
+        };
+        let application_result = application_result.ok_or(AdmissionCommitError::IntentConflict)?;
+        let target = plan.target()?;
+        let application_intent_digest = plan.application_effect()?.intent_digest();
+        validate_publication_binding(
+            target,
+            plan.artifact_digest(),
+            application_intent_digest,
+            admission,
+            application_result,
+        )?;
+        if committed {
+            Ok(ProtectedPublicationBinding::Committed(Self {
+                plan,
+                admission,
+            }))
+        } else {
+            Ok(ProtectedPublicationBinding::ExactReplay(
+                ProtectedPublicationReplay {
+                    admission,
+                    application_result: application_result.clone(),
+                },
+            ))
+        }
+    }
+
+    /// Durable canonical admission receipt.
+    pub const fn admission(&self) -> AdmissionCommitReceipt {
+        self.admission
+    }
+
+    /// Exact immutable artifacts authorized by the receipt.
+    pub const fn plan(&self) -> &ProtectedPublicationPlan {
+        &self.plan
+    }
+
+    /// Consume the receipt for post-commit deterministic projection.
+    pub fn into_plan(self) -> ProtectedPublicationPlan {
+        self.plan
+    }
+}
+
+fn validate_publication_binding(
+    target: ProtectedPublicationTarget,
+    artifact_digest: [u8; 32],
+    application_intent_digest: [u8; 32],
+    admission: AdmissionCommitReceipt,
+    application_result: &AdmissionApplicationResult,
+) -> Result<(), AdmissionCommitError> {
+    let expected = publication_application_result(target, artifact_digest)?;
+    let expected_digest = canonical_publication_result_digest(
+        target,
+        *admission.semantic_fingerprint(),
+        application_intent_digest,
+        &expected,
+    )?;
+    if admission.authorization_domain() != target.authorization_domain()
+        || admission.object() != target.admission_object()
+        || admission.application_result_digest() != Some(&expected_digest)
+        || application_result != &expected
+    {
+        return Err(AdmissionCommitError::IntentConflict);
+    }
+    Ok(())
+}
+
+fn canonical_publication_result_digest(
+    target: ProtectedPublicationTarget,
+    semantic_fingerprint: [u8; 32],
+    application_intent_digest: [u8; 32],
+    result: &AdmissionApplicationResult,
+) -> Result<[u8; 32], AdmissionCommitError> {
+    if semantic_fingerprint == [0; 32] || application_intent_digest == [0; 32] {
+        return Err(AdmissionCommitError::InvalidRequest);
+    }
+    let schema = result.schema();
+    Ok(admission_framed_digest(
+        b"buzz:canonical-application-result:v1",
+        &[
+            target.authorization_domain().as_uuid().as_bytes(),
+            &target
+                .admission_object()
+                .kind()
+                .database_code()
+                .to_be_bytes(),
+            target.admission_object().key(),
+            &semantic_fingerprint,
+            &application_intent_digest,
+            schema.type_key(),
+            &schema.version().to_be_bytes(),
+            &result.code().to_be_bytes(),
+            result.payload(),
+        ],
+    ))
+}
+
+fn admission_framed_digest(domain: &[u8], fields: &[&[u8]]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update((domain.len() as u64).to_be_bytes());
+    digest.update(domain);
+    for field in fields {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    digest.finalize().into()
+}
+
+fn framed_digest(domain: &[u8], fields: &[&[u8]]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    for field in fields {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    digest.finalize().into()
+}
+
+impl std::fmt::Debug for ProtectedPublicationReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProtectedPublicationReceipt([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for ProtectedPublicationBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Committed(_) => "ProtectedPublicationBinding::Committed([REDACTED])",
+            Self::ExactReplay(_) => "ProtectedPublicationBinding::ExactReplay([REDACTED])",
+        })
+    }
+}
+
+impl std::fmt::Debug for ProtectedPublicationReplay {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProtectedPublicationReplay([REDACTED])")
+    }
+}
 
 /// Axum extractor that validates Blossom auth, the BUD-11 hash binding, and
 /// relay membership (NIP-43, when enabled) from headers BEFORE the request
@@ -961,17 +1662,305 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{Arc, OnceLock},
+    };
 
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
     };
+    use buzz_auth::{
+        HttpHeaderField, TrustedProxyNonceClaim, TrustedProxyNonceReplayReader,
+        TrustedProxyProvenanceVerifier, TrustedProxyReplayReadError, TrustedProxyRequest,
+        ASSERTION_HEADER_NAME, PROVENANCE_HEADER_NAME,
+    };
+    use chrono::TimeZone;
+    use hmac::{Hmac, KeyInit, Mac};
     use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
     use tower::ServiceExt;
     use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    const PROXY_NOW: u64 = 1_800_000_000;
+    const PROXY_SECRET: [u8; 32] = [0x53; 32];
+
+    fn proxy_assertion() -> &'static str {
+        static VALUE: OnceLock<String> = OnceLock::new();
+        VALUE.get_or_init(|| {
+            [
+                ["eyJhbGciOiJF", "UzI1NiJ9"].concat(),
+                ["eyJzdWIiOiJz", "dWJqZWN0In0"].concat(),
+                ["c2lnbmF0", "dXJl"].concat(),
+            ]
+            .join(".")
+        })
+    }
+
+    #[derive(Default)]
+    struct EmptyReplayReader;
+
+    impl TrustedProxyNonceReplayReader for EmptyReplayReader {
+        fn is_committed<'a>(
+            &'a self,
+            _authorization_domain: buzz_core::CommunityId,
+            _claim: &'a TrustedProxyNonceClaim,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, TrustedProxyReplayReadError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(false) })
+        }
+    }
+
+    #[test]
+    fn publication_receipt_cannot_cross_domain_or_repository_target() {
+        let domain_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(1));
+        let domain_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(2));
+        let owner = "a".repeat(64);
+        let target_a =
+            ProtectedPublicationTarget::repository(domain_a, &owner, "repo-a").expect("target A");
+        let target_b =
+            ProtectedPublicationTarget::repository(domain_a, &owner, "repo-b").expect("target B");
+        let target_other_domain =
+            ProtectedPublicationTarget::repository(domain_b, &owner, "repo-a")
+                .expect("other-domain target");
+        let artifact = [7_u8; 32];
+        let result = publication_application_result(target_a, artifact).expect("typed result");
+        let semantic_fingerprint = [9; 32];
+        let application_intent_digest = [12; 32];
+        let application_result_digest = canonical_publication_result_digest(
+            target_a,
+            semantic_fingerprint,
+            application_intent_digest,
+            &result,
+        )
+        .expect("canonical application result digest");
+        let receipt = AdmissionCommitReceipt::from_storage(
+            domain_a,
+            target_a.admission_object(),
+            Uuid::from_u128(10),
+            [8; 32],
+            semantic_fingerprint,
+            buzz_db::authorization_admission::AdmissionCommitDigests::new(
+                [10; 32],
+                Some(application_result_digest),
+            )
+            .expect("digests"),
+            Uuid::from_u128(11),
+        )
+        .expect("receipt");
+
+        assert!(validate_publication_binding(
+            target_a,
+            artifact,
+            application_intent_digest,
+            receipt,
+            &result
+        )
+        .is_ok());
+        assert_eq!(
+            validate_publication_binding(
+                target_b,
+                artifact,
+                application_intent_digest,
+                receipt,
+                &result,
+            ),
+            Err(AdmissionCommitError::IntentConflict)
+        );
+        assert_eq!(
+            validate_publication_binding(
+                target_other_domain,
+                artifact,
+                application_intent_digest,
+                receipt,
+                &result,
+            ),
+            Err(AdmissionCommitError::IntentConflict)
+        );
+        let wrong_digest_receipt = AdmissionCommitReceipt::from_storage(
+            domain_a,
+            target_a.admission_object(),
+            Uuid::from_u128(10),
+            [8; 32],
+            semantic_fingerprint,
+            buzz_db::authorization_admission::AdmissionCommitDigests::new([10; 32], Some([13; 32]))
+                .expect("wrong digests"),
+            Uuid::from_u128(11),
+        )
+        .expect("wrong-digest receipt");
+        assert_eq!(
+            validate_publication_binding(
+                target_a,
+                artifact,
+                application_intent_digest,
+                wrong_digest_receipt,
+                &result,
+            ),
+            Err(AdmissionCommitError::IntentConflict)
+        );
+        let arbitrary_result =
+            publication_application_result(target_a, [14; 32]).expect("arbitrary typed result");
+        assert_eq!(
+            validate_publication_binding(
+                target_a,
+                artifact,
+                application_intent_digest,
+                receipt,
+                &arbitrary_result,
+            ),
+            Err(AdmissionCommitError::IntentConflict)
+        );
+    }
+
+    #[test]
+    fn exact_replay_binding_contains_typed_result_but_no_projection_plan() {
+        let domain = buzz_core::CommunityId::from_uuid(Uuid::from_u128(20));
+        let target = ProtectedPublicationTarget::repository(domain, &"b".repeat(64), "replay-only")
+            .expect("replay target");
+        let result = publication_application_result(target, [21; 32]).expect("typed result");
+        let receipt = AdmissionCommitReceipt::from_storage(
+            domain,
+            target.admission_object(),
+            Uuid::from_u128(22),
+            [23; 32],
+            [24; 32],
+            buzz_db::authorization_admission::AdmissionCommitDigests::new([25; 32], Some([26; 32]))
+                .expect("digests"),
+            Uuid::from_u128(27),
+        )
+        .expect("receipt");
+        let binding = ProtectedPublicationBinding::ExactReplay(ProtectedPublicationReplay {
+            admission: receipt,
+            application_result: result.clone(),
+        });
+
+        let ProtectedPublicationBinding::ExactReplay(replay) = binding else {
+            panic!("constructed replay binding changed variant");
+        };
+        assert_eq!(replay.admission(), receipt);
+        assert_eq!(replay.application_result(), &result);
+        // The replay type intentionally has no plan/into_plan API. Projection
+        // authority exists only on ProtectedPublicationReceipt in Committed.
+    }
+
+    #[tokio::test]
+    async fn mixed_same_domain_evidence_is_rejected_before_a_claim_exists() {
+        let domain = buzz_core::CommunityId::from_uuid(Uuid::from_u128(3));
+        let verifier = TrustedProxyProvenanceVerifier::new(
+            vec![PROXY_SECRET.to_vec()],
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        )
+        .expect("proxy verifier");
+        let first = verified_proxy_evidence(
+            &verifier,
+            domain,
+            buzz_auth::ProofTransport::Nip98,
+            "/upload?slot=a",
+            b"body-a",
+            &[1; 16],
+        )
+        .await;
+        let mixed = verified_proxy_evidence(
+            &verifier,
+            domain,
+            buzz_auth::ProofTransport::Blossom,
+            "/upload?slot=b",
+            b"body-b",
+            &[2; 16],
+        )
+        .await;
+
+        assert!(matches!(
+            verified_transport_replay_claim(
+                domain,
+                *first.request_fingerprint(),
+                first.transport(),
+                *first.transport_context_fingerprint(),
+                &mixed,
+            ),
+            Err(AdmissionCommitError::InvalidRequest)
+        ));
+        let unconsumed = verified_transport_replay_claim(
+            domain,
+            *mixed.request_fingerprint(),
+            mixed.transport(),
+            *mixed.transport_context_fingerprint(),
+            &mixed,
+        )
+        .expect("failed comparison did not consume or mutate the evidence claim");
+        assert_eq!(
+            unconsumed.claim_key(),
+            mixed.nonce_claim().claim_key(),
+            "only an exact three-way match can materialize the replay claim"
+        );
+    }
+
+    async fn verified_proxy_evidence(
+        verifier: &TrustedProxyProvenanceVerifier,
+        domain: buzz_core::CommunityId,
+        transport: buzz_auth::ProofTransport,
+        path: &str,
+        body: &[u8],
+        nonce: &[u8],
+    ) -> SealedTransportEvidence {
+        let request = TrustedProxyRequest::from_server_request(
+            domain,
+            transport,
+            "POST",
+            "relay.example.com:443",
+            path,
+            body,
+        )
+        .expect("trusted request");
+        let assertion = format!("Bearer {}", proxy_assertion());
+        let assertion_digest: [u8; 32] = Sha256::digest(proxy_assertion().as_bytes()).into();
+        let body_digest: [u8; 32] = Sha256::digest(body).into();
+        let transport_code = match transport {
+            buzz_auth::ProofTransport::Nip42 => 1,
+            buzz_auth::ProofTransport::Nip98 => 2,
+            buzz_auth::ProofTransport::GitSmartHttpSession => 3,
+            buzz_auth::ProofTransport::Blossom => 4,
+        };
+        let mut input = b"NIP-FI-PROXY-1".to_vec();
+        for field in [
+            PROXY_NOW.to_be_bytes().as_slice(),
+            nonce,
+            &assertion_digest,
+            b"POST".as_slice(),
+            b"relay.example.com:443".as_slice(),
+            path.as_bytes(),
+            &body_digest,
+            &[transport_code],
+        ] {
+            input.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            input.extend_from_slice(field);
+        }
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&PROXY_SECRET).expect("HMAC key");
+        mac.update(&input);
+        let provenance = format!(
+            "v1.{PROXY_NOW}.{}.{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        );
+        verifier
+            .verify(
+                &[
+                    HttpHeaderField::new(ASSERTION_HEADER_NAME, assertion.as_bytes()),
+                    HttpHeaderField::new(PROVENANCE_HEADER_NAME, provenance.as_bytes()),
+                ],
+                &request,
+                chrono::Utc
+                    .timestamp_opt(PROXY_NOW as i64, 0)
+                    .single()
+                    .expect("test time"),
+                &EmptyReplayReader,
+            )
+            .await
+            .expect("valid proxy evidence")
+    }
 
     #[test]
     fn upload_routes_distinguish_standard_and_legacy_modes() {

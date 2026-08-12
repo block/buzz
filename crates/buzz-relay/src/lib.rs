@@ -31,6 +31,8 @@ pub mod mesh_boot;
 pub mod metrics;
 /// NIP-11 relay information document.
 pub mod nip11;
+/// Typed installer boundary for provider-free operator routes.
+pub mod operator_runtime;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;
 /// Durable NIP-PL matcher and delivery worker.
