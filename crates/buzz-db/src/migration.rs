@@ -1030,6 +1030,12 @@ mod tests {
 
         assert!(deletion.contains("retry_stage TEXT CHECK"));
         assert!(desired_schema.contains("retry_stage TEXT CHECK"));
+
+        // Recovery migration 0030 alters populated tables and must preserve
+        // the same fail-fast lock behavior as the deletion migration.
+        assert_eq!(migrations[29].version, 30);
+        let deletion_recovery = migrations[29].sql.as_str();
+        assert!(deletion_recovery.contains("SET LOCAL lock_timeout = '5s'"));
     }
 
     #[test]
