@@ -3993,6 +3993,13 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_teaches_flat_dm_replies() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("Direct messages are always flat"));
+        assert!(prompt.contains("Do not pass `--reply-to` in a DM"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("--mention <hex-or-npub>"));

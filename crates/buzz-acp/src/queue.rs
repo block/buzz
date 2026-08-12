@@ -1164,6 +1164,18 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append the reply instruction for direct messages.
+///
+/// DMs use a flat timeline instead of threads, even when the triggering event
+/// carries legacy thread tags.
+fn append_dm_reply_instruction(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: DMs are a flat conversation. Send an ordinary message to \
+         this channel and keep it at the top level. Do not pass `--reply-to` to \
+         `buzz messages send`.",
+    );
+}
+
 /// Append a new-thread reply instruction for a human-facing top-level mention.
 ///
 /// The triggering mention has no thread tags, so the agent's reply becomes the
@@ -1234,10 +1246,10 @@ fn resolve_reply_anchor(
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
-/// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
-/// replies; in the channel branch a `Some` anchor means a human-facing
-/// top-level mention whose reply should open a new thread rooted at the
-/// triggering event.
+/// [`resolve_reply_anchor`]). In the thread branch it threads ordinary replies;
+/// in the channel branch a `Some` anchor means a human-facing top-level mention
+/// whose reply should open a new thread rooted at the triggering event. DMs
+/// always remain flat and ignore reply anchors.
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
@@ -1285,10 +1297,8 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
-            }
         }
+        append_dm_reply_instruction(&mut s);
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
         let ctx_hint = if has_conversation_context {
@@ -1518,13 +1528,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there. DMs remain flat and never receive a reply anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        None
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4109,14 +4116,13 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_present_for_dm_thread_reply() {
+    fn test_dm_thread_reply_instruction_uses_flat_message() {
         let ch = Uuid::new_v4();
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
             vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -4141,8 +4147,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            prompt.contains("DMs are a flat conversation"),
+            "DM reply should instruct the agent to keep the conversation flat"
+        );
+        assert!(
+            prompt.contains("Do not pass `--reply-to`"),
+            "DM reply should explicitly omit the thread flag"
         );
     }
 
@@ -4177,7 +4187,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_dm_top_level_reply_instruction_uses_flat_message() {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
         let batch = FlushBatch {
@@ -4204,8 +4214,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            prompt.contains("DMs are a flat conversation"),
+            "top-level DM should instruct the agent to keep the conversation flat"
+        );
+        assert!(
+            prompt.contains("Do not pass `--reply-to`"),
+            "top-level DM should explicitly omit the thread flag"
         );
     }
 
