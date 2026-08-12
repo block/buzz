@@ -4007,6 +4007,16 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_teaches_root_first_reply_routing() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("Hailed at a channel or DM root"));
+        assert!(prompt.contains("send at that root with no `--reply-to`"));
+        assert!(prompt.contains("use the thread root supplied in `[Context]` as `--reply-to`"));
+        assert!(prompt.contains("Create a new thread only when the human explicitly asks"));
+        assert!(!prompt.contains("triggering top-level event"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {

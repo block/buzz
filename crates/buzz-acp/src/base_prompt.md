@@ -60,13 +60,13 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 
 ### Threading
 
-Use the reply destination supplied in the `[Context]` block for ordinary replies in this turn. Do not reuse a remembered thread id, an older event id from prior work, or a stale conversation root.
+Reply in the root of the conversation where you were hailed:
 
-For human-facing work, keep the conversation flat and easy to read. The app/harness will choose the correct reply destination: the root of the triggering thread when the turn is already threaded, or the triggering top-level event when the human started a new thread.
+- Hailed at a channel or DM root: send at that root with no `--reply-to`.
+- Hailed inside an existing thread: use the thread root supplied in `[Context]` as `--reply-to`.
+- Create a new thread only when the human explicitly asks for one.
 
-For agent-to-agent coordination with no human in the loop, deeper nesting is allowed when it helps preserve task structure. Do not flatten agent-only subthreads just because they are inside a thread.
-
-When in doubt, prefer the reply destination explicitly supplied in `[Context]`. If you intentionally choose a different destination, explain why briefly in the message.
+This routing applies to human-facing and agent-to-agent replies. Never reuse a remembered thread id, an older event id, or a stale conversation root.
 
 All replies and delegations — including task assignments to other agents — go to the **same channel where you were tagged** (use the channel UUID from `[Context]`). Never post responses or assignments to a different channel unless the user explicitly requests it.
 
