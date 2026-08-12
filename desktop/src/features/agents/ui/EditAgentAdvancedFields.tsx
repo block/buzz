@@ -16,10 +16,6 @@ import {
   NumericTuningFields,
 } from "./buzzAgentModelTuningFields";
 import {
-  isBuzzAgentRuntime,
-  BUZZ_AGENT_THINKING_EFFORT,
-} from "./buzzAgentConfig";
-import {
   EDIT_AGENT_PARALLELISM_HELP,
   parallelismCapHint,
 } from "../lib/agentParallelism";
@@ -28,6 +24,7 @@ import {
   structuredEnvKeys,
   type RuntimeCatalogStatus,
 } from "../lib/agentConfigCore";
+import { deriveEditAgentEffortControl } from "../lib/editAgentEffortControl";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -72,9 +69,9 @@ export function EditAgentAdvancedFields({
   /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   model?: string;
   /**
-   * The actual/prospective runtime id used to decide whether to show the
-   * buzz-agent effort-tuning field. Uses `prospectiveRuntimeId` from
-   * EditAgentDialog — the resolved runtime, not the "inherit"/"custom" sentinel.
+   * The actual/prospective runtime id used in the descriptor field model.
+   * Uses `prospectiveRuntimeId` from EditAgentDialog — the resolved runtime,
+   * not the "inherit"/"custom" sentinel.
    */
   modelTuningRuntimeId: string;
   parallelism: string;
@@ -118,17 +115,36 @@ export function EditAgentAdvancedFields({
     [catalogStatus, selectedRuntime],
   );
 
+  const effortControl = React.useMemo(
+    () =>
+      deriveEditAgentEffortControl({
+        catalogStatus,
+        envVars,
+        model,
+        provider,
+        runtime: selectedRuntime,
+        runtimeId: modelTuningRuntimeId,
+      }),
+    [
+      catalogStatus,
+      envVars,
+      model,
+      modelTuningRuntimeId,
+      provider,
+      selectedRuntime,
+    ],
+  );
+  const effortPersistenceKey = effortControl?.persistenceKey;
+
   // Build the effective hidden-key list: caller's secrets + effort key (when
   // rendered by BuzzAgentModelTuningFields) + numeric keys via structuredEnvKeys.
   const effectiveHiddenKeys = React.useMemo(
     () => [
       ...hiddenEnvKeys,
-      ...(isBuzzAgentRuntime(modelTuningRuntimeId)
-        ? [BUZZ_AGENT_THINKING_EFFORT]
-        : []),
+      ...(effortPersistenceKey ? [effortPersistenceKey] : []),
       ...structuredEnvKeys(numericDescriptors),
     ],
-    [hiddenEnvKeys, modelTuningRuntimeId, numericDescriptors],
+    [effortPersistenceKey, hiddenEnvKeys, numericDescriptors],
   );
 
   // Harness cap hint: show only when the selected runtime has a cap and the
@@ -358,12 +374,13 @@ export function EditAgentAdvancedFields({
         />
       ) : null}
 
-      {/* Effort-tuning knob — only shown for buzz-agent. */}
-      {isBuzzAgentRuntime(modelTuningRuntimeId) ? (
+      {/* Effort is descriptor-driven by the selected runtime catalog entry. */}
+      {effortPersistenceKey ? (
         <BuzzAgentModelTuningFields
           envVars={envVars}
           inheritedEnvVars={inheritedEnvVars}
           model={model}
+          effortPersistenceKey={effortPersistenceKey}
           onEnvVarChange={(key, value) => {
             const next = { ...envVars };
             if (value === "") {
@@ -373,7 +390,7 @@ export function EditAgentAdvancedFields({
             }
             onEnvVarsChange(next);
           }}
-          provider={provider}
+          provider={effortControl.provider}
         />
       ) : null}
     </div>
