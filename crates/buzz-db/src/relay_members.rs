@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
 
 use crate::error::Result;
+use crate::identity_binding::{BindIdentityResult, IdentityBindingConflict, IdentityBindingInput};
 use crate::CommunityId;
 
 /// A single relay member record.
@@ -153,7 +154,62 @@ pub async fn claim_relay_membership(
     role: &str,
     policy_version: Option<&str>,
 ) -> Result<bool> {
+    match claim_relay_membership_with_identity(pool, community, pubkey, role, policy_version, None)
+        .await?
+    {
+        MembershipClaimOutcome::Joined { inserted, .. } => Ok(inserted),
+        MembershipClaimOutcome::IdentityConflict(_) | MembershipClaimOutcome::IdentityRevoked => {
+            Err(crate::DbError::InvalidData(
+                "unexpected corporate identity result without staged identity".to_string(),
+            ))
+        }
+    }
+}
+
+/// Outcome of an atomic membership and optional identity claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MembershipClaimOutcome {
+    /// Membership and any staged binding committed together.
+    Joined {
+        /// Whether the membership row was newly inserted.
+        inserted: bool,
+        /// Binding committed in the same transaction, when one was staged.
+        identity_binding: Option<BindIdentityResult>,
+    },
+    /// The staged identity conflicts with an active binding.
+    IdentityConflict(IdentityBindingConflict),
+    /// The staged identity is revoked.
+    IdentityRevoked,
+}
+
+/// Claims relay membership and an optional corporate identity in one transaction.
+pub async fn claim_relay_membership_with_identity(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+    role: &str,
+    policy_version: Option<&str>,
+    identity: Option<&IdentityBindingInput<'_>>,
+) -> Result<MembershipClaimOutcome> {
+    crate::identity_binding::validate_membership_identity_key(pubkey, identity)?;
     let mut tx = pool.begin().await?;
+    let identity_binding = if let Some(identity) = identity {
+        match crate::identity_binding::bind_or_validate_identity_tx(&mut tx, community, identity)
+            .await?
+        {
+            binding @ (BindIdentityResult::Created | BindIdentityResult::Matched) => Some(binding),
+            BindIdentityResult::Conflict(conflict) => {
+                tx.rollback().await?;
+                return Ok(MembershipClaimOutcome::IdentityConflict(conflict));
+            }
+            BindIdentityResult::Revoked => {
+                tx.rollback().await?;
+                return Ok(MembershipClaimOutcome::IdentityRevoked);
+            }
+        }
+    } else {
+        None
+    };
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, $3, 'invite') \
@@ -180,7 +236,10 @@ pub async fn claim_relay_membership(
     }
 
     tx.commit().await?;
-    Ok(inserted)
+    Ok(MembershipClaimOutcome::Joined {
+        inserted,
+        identity_binding,
+    })
 }
 
 /// Returns whether a member has persisted acceptance evidence for a policy version.

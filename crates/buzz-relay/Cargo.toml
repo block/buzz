@@ -38,6 +38,7 @@ tower-http = { workspace = true }
 nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -99,3 +100,4 @@ tokio-tungstenite = { workspace = true }
 futures = "0.3"
 flate2 = "1.1.9"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+aws-lc-rs = { workspace = true }

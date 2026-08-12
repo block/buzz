@@ -19,6 +19,8 @@
 pub mod access;
 /// Authentication error types.
 pub mod error;
+/// Provider-free authorization composition and sealed verifier evidence.
+pub mod foundation;
 /// NIP-42 challenge–response authentication.
 pub mod nip42;
 /// NIP-98 HTTP Auth verification (kind:27235).
@@ -32,7 +34,25 @@ pub mod scope;
 
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
 pub use error::AuthError;
-pub use nip42::{generate_challenge, verify_nip42_event};
+pub use foundation::{
+    ActiveLocalBinding, AuthContext as FinalizedAuthContext, AuthoritativeAuthorizationRecheck,
+    AuthorizationAuditConfig, AuthorizationAuditConfigError, AuthorizationError,
+    AuthorizationEventCapacityPolicy, AuthorizationEventCapacityPolicyError,
+    AuthorizationFinalizationRechecker, AuthorizationFinalizationWitness, AuthorizationFinalizer,
+    AuthorizationInput, AuthorizationLeaseDependencySnapshot, AuthorizationReason,
+    BindingResolutionRequest, BoundedAuthorizationLease, CanonicalFederatedAssertionVerifier,
+    CanonicalVerifierError, CanonicalVerifierKeySet, CanonicalVerifierPolicy,
+    CanonicalVerifierPolicyId, CurrentBindingStatusEvidenceRequest, DirectEnrollmentMode,
+    DirectEnrollmentProposal, FederatedPrincipalStorageKey, LocalAuthorizationPolicy,
+    LocalBindingResolution, LocalBindingResolver, LocalBindingResolverCapability,
+    LocalEnrollmentAuthority, NipFiMode, PreparedAuthorization, PreparedAuthorizationRecheck,
+    ProofTransport, RouteCapability, RouteProtection, VerifiedDelegation,
+    VerifiedFederatedAssertion, VerifiedNostrProof, VerifierKeyGeneration, VerifierPolicyStamp,
+};
+pub use nip42::{
+    generate_challenge, verify_nip42_authorization_proof, verify_nip42_event,
+    Nip42AuthorizationProofError,
+};
 pub use nip98::verify_nip98_event;
 pub use nip98_replay::{
     nip98_replay_key, nip98_replay_key_for_scope, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS,

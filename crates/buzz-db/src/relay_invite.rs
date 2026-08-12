@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
 
 use crate::error::Result;
+use crate::identity_binding::{BindIdentityResult, IdentityBindingConflict, IdentityBindingInput};
 use crate::CommunityId;
 
 /// Outcome of a v2 invite claim. Expected invalid/expired/exhausted states are
@@ -39,6 +40,8 @@ pub enum ClaimOutcome {
         use_count: i32,
         /// Remaining slots, or `None` when the invite is unlimited.
         uses_remaining: Option<i32>,
+        /// Binding committed in the same transaction, when one was staged.
+        identity_binding: Option<BindIdentityResult>,
     },
     /// The claimer was already a member. `use_count` was NOT incremented.
     AlreadyMember {
@@ -46,6 +49,8 @@ pub enum ClaimOutcome {
         use_count: i32,
         /// Remaining slots, or `None` when the invite is unlimited.
         uses_remaining: Option<i32>,
+        /// Binding committed in the same transaction, when one was staged.
+        identity_binding: Option<BindIdentityResult>,
     },
     /// The invite's `expires_at` has passed.
     Expired,
@@ -53,6 +58,10 @@ pub enum ClaimOutcome {
     Exhausted,
     /// No invite row matches `(community_id, token_hash)`.
     Invalid,
+    /// The staged identity conflicts with another active principal or pubkey.
+    IdentityConflict(IdentityBindingConflict),
+    /// The staged identity principal or key is revoked.
+    IdentityRevoked,
 }
 
 /// A freshly minted v2 invite, including the plaintext code and metadata.
@@ -198,14 +207,19 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
 /// `FOR UPDATE` serializes concurrent claims so exactly one claimant wins the
 /// final slot. Membership insertion, policy evidence, and consumption share
 /// one commit — a failure in any rolls back all.
-pub async fn claim_relay_invite(
+pub async fn claim_relay_invite_with_identity(
     pool: &PgPool,
     community: CommunityId,
     token_hash: &[u8; 32],
     claimer_pubkey: &str,
     policy_version: Option<&str>,
+    identity: Option<&IdentityBindingInput<'_>>,
 ) -> Result<ClaimOutcome> {
+    crate::identity_binding::validate_membership_identity_key(claimer_pubkey, identity)?;
     let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '3s'")
+        .execute(&mut *tx)
+        .await?;
 
     // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
     let row = sqlx::query(
@@ -246,6 +260,38 @@ pub async fn claim_relay_invite(
         return Ok(ClaimOutcome::Expired);
     }
 
+    let identity_binding = if let Some(identity) = identity {
+        match crate::identity_binding::bind_or_validate_identity_tx(&mut tx, community, identity)
+            .await?
+        {
+            binding @ (BindIdentityResult::Created | BindIdentityResult::Matched) => Some(binding),
+            BindIdentityResult::Conflict(conflict) => {
+                tx.rollback().await?;
+                log_claim_outcome(
+                    community,
+                    Some(invite_id),
+                    "identity_conflict",
+                    max_uses,
+                    Some(use_count),
+                );
+                return Ok(ClaimOutcome::IdentityConflict(conflict));
+            }
+            BindIdentityResult::Revoked => {
+                tx.rollback().await?;
+                log_claim_outcome(
+                    community,
+                    Some(invite_id),
+                    "identity_revoked",
+                    max_uses,
+                    Some(use_count),
+                );
+                return Ok(ClaimOutcome::IdentityRevoked);
+            }
+        }
+    } else {
+        None
+    };
+
     let uses_remaining = || max_uses.map(|mu| mu - use_count);
 
     // 5. Check existing membership.
@@ -280,6 +326,7 @@ pub async fn claim_relay_invite(
         return Ok(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
+            identity_binding,
         });
     }
 
@@ -339,6 +386,7 @@ pub async fn claim_relay_invite(
         return Ok(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
+            identity_binding,
         });
     }
 
@@ -367,7 +415,27 @@ pub async fn claim_relay_invite(
     Ok(ClaimOutcome::Joined {
         use_count: new_use_count,
         uses_remaining: new_uses_remaining,
+        identity_binding,
     })
+}
+
+/// Atomically claim a v2 invite without a corporate identity binding.
+pub async fn claim_relay_invite(
+    pool: &PgPool,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+    claimer_pubkey: &str,
+    policy_version: Option<&str>,
+) -> Result<ClaimOutcome> {
+    claim_relay_invite_with_identity(
+        pool,
+        community,
+        token_hash,
+        claimer_pubkey,
+        policy_version,
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -467,6 +535,7 @@ mod tests {
             ClaimOutcome::Joined {
                 use_count: 1,
                 uses_remaining: Some(0),
+                identity_binding: None,
             }
         );
         assert_eq!(
@@ -476,6 +545,7 @@ mod tests {
             ClaimOutcome::AlreadyMember {
                 use_count: 1,
                 uses_remaining: Some(0),
+                identity_binding: None,
             }
         );
         assert_eq!(
@@ -536,6 +606,40 @@ mod tests {
                 .await
                 .expect("second membership") as u8;
         assert_eq!(admitted, 1);
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn invite_claim_commits_membership_only_after_canonical_admission() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let claimer = test_pubkey();
+        let invalid_hash = [7_u8; 32];
+
+        assert_eq!(
+            claim_relay_invite(&pool, community, &invalid_hash, &claimer, None)
+                .await
+                .expect("invalid claim result"),
+            ClaimOutcome::Invalid
+        );
+        assert!(!is_relay_member(&pool, community, &claimer)
+            .await
+            .expect("membership after invalid claim"));
+
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+            .await
+            .expect("mint invite");
+        let hash = hash_v2_code(&invite.code);
+        assert!(matches!(
+            claim_relay_invite(&pool, community, &hash, &claimer, None)
+                .await
+                .expect("valid atomic claim"),
+            ClaimOutcome::Joined { .. }
+        ));
+        assert!(is_relay_member(&pool, community, &claimer)
+            .await
+            .expect("membership committed"));
         delete_test_community(&pool, community).await;
     }
 
@@ -633,6 +737,7 @@ mod tests {
                 ClaimOutcome::Joined {
                     use_count: expected_count,
                     uses_remaining: None,
+                    identity_binding: None,
                 }
             );
         }

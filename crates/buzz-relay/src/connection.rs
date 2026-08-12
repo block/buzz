@@ -64,6 +64,8 @@ pub struct ConnectionState {
     pub tenant: TenantContext,
     /// Remote socket address of the client.
     pub remote_addr: SocketAddr,
+    /// Optional corporate identity JWT captured from the WebSocket upgrade request.
+    pub corporate_identity_jwt: Option<String>,
     /// Current NIP-42 authentication state.
     pub auth_state: RwLock<AuthState>,
     /// Active subscriptions keyed by subscription ID.
@@ -125,6 +127,7 @@ pub async fn handle_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    corporate_identity_jwt: Option<String>,
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
@@ -138,7 +141,17 @@ pub async fn handle_connection(
         community_id,
         cancel.clone(),
         move || async move { check_state.db.is_community_active(community_id).await },
-        move || handle_active_connection(socket, run_state, addr, tenant, conn_id, cancel),
+        move || {
+            handle_active_connection(
+                socket,
+                run_state,
+                addr,
+                tenant,
+                conn_id,
+                cancel,
+                corporate_identity_jwt,
+            )
+        },
     )
     .await;
 }
@@ -150,6 +163,7 @@ async fn handle_active_connection(
     tenant: TenantContext,
     conn_id: Uuid,
     cancel: CancellationToken,
+    corporate_identity_jwt: Option<String>,
 ) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
@@ -178,6 +192,7 @@ async fn handle_active_connection(
         conn_id,
         tenant,
         remote_addr: addr,
+        corporate_identity_jwt,
         auth_state: RwLock::new(AuthState::Pending {
             challenge: challenge.clone(),
         }),

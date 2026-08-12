@@ -710,6 +710,19 @@ jobs:
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Relay-verified identity lifecycle tests
+        run: |
+          docker exec -e PGPASSWORD="${BUZZ_TEST_POSTGRES_PASSWORD}" buzz-postgres \
+            psql -U buzz -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE buzz_identity_tests"
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-db) and test(/migration::tests::nip_fi_(authorization_tests|direct_final_tests)::/)' \
+            --no-tests=fail \
+            --test-threads 1 \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz_identity_tests
       - name: Workspace profile (kind:9033) gate tests
         # Call-site integration for the 9033 authorization gate: open relay
         # rosterless/steward transitions and the closed-relay admin/owner rule,

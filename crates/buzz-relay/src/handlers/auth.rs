@@ -183,6 +183,28 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             }
 
+            let identity_proof = match crate::corporate_identity::verify_corporate_identity(
+                &state,
+                conn.tenant.community(),
+                pubkey,
+                conn.corporate_identity_jwt.as_deref(),
+                auth_tag_json.as_deref(),
+            )
+            .await
+            {
+                Ok(proof) => proof,
+                Err(e) => {
+                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e, "corporate identity denied");
+                    *conn.auth_state.write().await = AuthState::Failed;
+                    conn.send(RelayMessage::ok(
+                        &event_id_hex,
+                        false,
+                        &format!("restricted: {}", e.public_message()),
+                    ));
+                    return;
+                }
+            };
+
             // Pubkey allowlist gate — only for pubkey-only auth.
             if state.config.pubkey_allowlist_enabled
                 && auth_ctx.auth_method == buzz_auth::AuthMethod::Nip42
@@ -237,6 +259,34 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             };
 
+            let identity_decision = match crate::corporate_identity::finalize_corporate_identity(
+                &state,
+                conn.tenant.community(),
+                pubkey,
+                identity_proof,
+            )
+            .await
+            {
+                Ok(decision) => decision,
+                Err(e) => {
+                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e, "corporate identity finalization denied");
+                    *conn.auth_state.write().await = AuthState::Failed;
+                    conn.send(RelayMessage::ok(
+                        &event_id_hex,
+                        false,
+                        &format!("restricted: {}", e.public_message()),
+                    ));
+                    return;
+                }
+            };
+            if let crate::corporate_identity::CorporateIdentityDecision::Delegated {
+                owner_pubkey,
+                ..
+            } = &identity_decision
+            {
+                auth_ctx.agent_owner_pubkey = Some(*owner_pubkey);
+            }
+
             // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
             // (needed for observer frame auth). Only runs on open relays — on closed
             // relays, enforce_relay_membership already handles NIP-OA delegation.
@@ -279,6 +329,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             state
                 .conn_manager
                 .set_authenticated_pubkey(conn_id, pubkey.to_bytes().to_vec());
+            crate::corporate_identity::spawn_session_revalidation(
+                Arc::clone(&state),
+                conn.tenant.community(),
+                pubkey,
+                identity_decision,
+                conn.cancel.clone(),
+            );
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
         }
         Err(e) => {

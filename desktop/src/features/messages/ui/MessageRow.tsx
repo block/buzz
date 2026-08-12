@@ -16,7 +16,10 @@ import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  resolveUserVerification,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
@@ -36,6 +39,7 @@ import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAu
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
@@ -53,10 +57,11 @@ import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelin
 import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
+import { MessageDepthGuides } from "./MessageDepthGuides";
+import { MessageStatusMetadata } from "./MessageStatusMetadata";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
@@ -555,6 +560,9 @@ export const MessageRow = React.memo(
     ) : (
       <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
     );
+    const verifiedName = message.pubkey
+      ? resolveUserVerification({ pubkey: message.pubkey, profiles })
+      : null;
     const agentOwnerNode = message.isAgent ? (
       <MessageAgentOwner
         ownerLabel={message.ownerLabel}
@@ -605,24 +613,10 @@ export const MessageRow = React.memo(
 
     const statusMetadataNode =
       message.pending || message.edited ? (
-        <>
-          {message.pending ? (
-            <p
-              className="font-normal text-muted-foreground/70"
-              data-testid="message-send-status"
-            >
-              Sending…
-            </p>
-          ) : null}
-          {message.edited ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <p className="text-muted-foreground/70">(edited)</p>
-              </TooltipTrigger>
-              <TooltipContent>This message has been edited</TooltipContent>
-            </Tooltip>
-          ) : null}
-        </>
+        <MessageStatusMetadata
+          edited={message.edited}
+          pending={message.pending}
+        />
       ) : null;
 
     const inlineMetadataNode = (
@@ -657,6 +651,17 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
+        {verifiedName ? (
+          <VerifiedBadge
+            verifiedName={verifiedName}
+            verifiedNameExpiresAt={
+              message.pubkey
+                ? profiles?.[normalizePubkey(message.pubkey)]
+                    ?.verifiedNameExpiresAt
+                : null
+            }
+          />
+        ) : null}
         {agentOwnerNode}
         {inlineMetadataNode}
         {message.personaDisplayName &&
@@ -726,99 +731,15 @@ export const MessageRow = React.memo(
         }
       >
         {showDepthGuides && depthGuideItems.length > 0 ? (
-          <div
-            aria-hidden={
-              collapseDepthGuideActionsByDepth.size > 0 ? undefined : true
-            }
-            className={cn(
-              "absolute left-0",
-              collapseDepthGuideActionsByDepth.size === 0 &&
-                "pointer-events-none",
-            )}
-            style={{
-              bottom: threadReplyLength(-guideBleedRem),
-              top: threadReplyLength(-guideBleedRem),
-            }}
-          >
-            {depthGuideItems.map(({ depth, offset }) => {
-              const collapseAction =
-                collapseDepthGuideActionsByDepth.get(depth);
-              const isHighlighted =
-                Boolean(collapseAction?.active) ||
-                Boolean(highlightThreadLineDepths?.includes(depth));
-              if (collapseAction) {
-                return (
-                  <React.Fragment key={`${message.id}-depth-guide-${offset}`}>
-                    <div
-                      aria-hidden
-                      className={cn(
-                        "pointer-events-none absolute bottom-0 top-0 border-l transition-[border-color]",
-                        isHighlighted ? "border-primary" : "border-border/45",
-                      )}
-                      style={{
-                        borderLeftWidth: threadReplyLength(
-                          THREAD_REPLY_LINE_WIDTH_REM,
-                        ),
-                        left: threadReplyLength(offset),
-                      }}
-                    />
-                    <button
-                      aria-label={collapseAction.label}
-                      className="absolute bottom-0 top-0 z-20 w-5 -translate-x-1/2 cursor-pointer rounded-full focus-visible:outline-hidden"
-                      data-thread-head-id={collapseAction.message.id}
-                      data-testid="thread-collapse-guide"
-                      onBlur={() =>
-                        handleCollapseDepthGuideHoverChange(
-                          collapseAction.message,
-                          false,
-                        )
-                      }
-                      onClick={(event) =>
-                        handleCollapseDepthGuide(event, collapseAction.message)
-                      }
-                      onFocus={() =>
-                        handleCollapseDepthGuideHoverChange(
-                          collapseAction.message,
-                          true,
-                        )
-                      }
-                      onMouseEnter={() =>
-                        handleCollapseDepthGuideHoverChange(
-                          collapseAction.message,
-                          true,
-                        )
-                      }
-                      onMouseLeave={() =>
-                        handleCollapseDepthGuideHoverChange(
-                          collapseAction.message,
-                          false,
-                        )
-                      }
-                      style={{ left: threadReplyLength(offset) }}
-                      type="button"
-                    />
-                  </React.Fragment>
-                );
-              }
-
-              return (
-                <div
-                  aria-hidden
-                  className={cn(
-                    "pointer-events-none absolute bottom-0 top-0 border-l transition-[border-color]",
-                    isHighlighted ? "border-primary" : "border-border/45",
-                  )}
-                  key={`${message.id}-depth-guide-${offset}`}
-                  style={{
-                    borderLeftWidth: threadReplyLength(
-                      THREAD_REPLY_LINE_WIDTH_REM,
-                    ),
-                    left: threadReplyLength(offset),
-                  }}
-                />
-              );
-            })}
-          </div>
+          <MessageDepthGuides
+            collapseDepthGuideActionsByDepth={collapseDepthGuideActionsByDepth}
+            depthGuideItems={depthGuideItems}
+            guideBleedRem={guideBleedRem}
+            highlightThreadLineDepths={highlightThreadLineDepths}
+            messageId={message.id}
+            onCollapse={handleCollapseDepthGuide}
+            onHoverChange={handleCollapseDepthGuideHoverChange}
+          />
         ) : null}
         {showDepthGuides && descendantGuideOffsetRem !== null ? (
           <>

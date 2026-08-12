@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 28);
+        assert_eq!(migrations.len(), 30);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -596,7 +596,6 @@ mod tests {
             .as_str()
             .contains("CREATE TABLE git_repo_names"));
         assert!(!migrations[0].sql.as_str().contains("git_repo_names"));
-
         // Same additive-migration rule for the per-community workspace icon
         // (NIP-11 `icon`): its own version, never folded into 0001.
         assert_eq!(migrations[2].version, 3);
@@ -880,7 +879,6 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
-
         // Use-limited invite links: durable relay_invites table stores only
         // the SHA-256 of an opaque v2 code, scoped by community_id. Never
         // listed in _operator_global_tables — it is community-scoped.
@@ -902,10 +900,9 @@ mod tests {
 
         let desired_schema = include_str!("../../../schema/schema.sql");
         assert!(
-            desired_schema.contains("CREATE TABLE join_policy_acceptances"),
+            desired_schema.contains("CREATE TABLE IF NOT EXISTS join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
         );
-
         // Replica heartbeat (this branch, renumbered to 0026 after
         // 0025_relay_invites landed on main): the fence's portable read-side
         // observation. A single CHECK'd row makes the token update the
@@ -945,7 +942,49 @@ mod tests {
         assert!(
             long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
         );
-        assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
+        assert!(desired_schema.contains("emoji varchar(66)"));
+
+        // NIP-FI uses direct-final, provider-free foundation migrations.
+        assert_eq!(migrations[28].version, 29);
+        let identity_foundation = migrations[28].sql.as_str();
+        for required in [
+            "CREATE TABLE authorization_operation_receipts",
+            "CREATE TABLE identity_enrollment_policies",
+            "CREATE TABLE identity_bindings",
+            "CREATE TABLE identity_lifecycle_history",
+            "CREATE TABLE identity_lifecycle_selectors",
+            "binding_provenance SMALLINT",
+            "identity_bindings_no_delete",
+        ] {
+            assert!(
+                identity_foundation.contains(required),
+                "migration 0029 missing direct-final identity surface: {required}",
+            );
+        }
+
+        assert_eq!(migrations[29].version, 30);
+        let authorization_foundation = migrations[29].sql.as_str();
+        for required in [
+            "CREATE TABLE authorization_invalidation_domains",
+            "CREATE TABLE authorization_invalidation_floors",
+            "CREATE TABLE protected_object_authority",
+            "CREATE TABLE authorization_events",
+            "28, 29",
+        ] {
+            assert!(
+                authorization_foundation.contains(required),
+                "migration 0030 missing direct-final authorization surface: {required}",
+            );
+        }
+        assert!(
+            !authorization_foundation.contains("client_status_revisions"),
+            "kind 24244 status must remain connection-local and ephemeral",
+        );
+        assert!(
+            !desired_schema.contains("CREATE TABLE IF NOT EXISTS client_status_revisions")
+                && !desired_schema.contains("CREATE TABLE client_status_revisions"),
+            "desired schema must not persist kind 24244 presentation history",
+        );
     }
 
     #[test]
@@ -1188,7 +1227,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(30));
     }
 
     #[tokio::test]
@@ -1274,6 +1313,7 @@ mod tests {
             "communities",
             "events",
             "channels",
+            "identity_bindings",
             "scheduled_workflow_fires",
             "audit_log",
         ] {
@@ -1311,4 +1351,9 @@ mod tests {
             "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
         );
     }
+
+    #[path = "migration_nip_fi_authorization_tests.rs"]
+    mod nip_fi_authorization_tests;
+    #[path = "migration_nip_fi_tests.rs"]
+    mod nip_fi_direct_final_tests;
 }

@@ -13,6 +13,24 @@ use tracing::warn;
 /// NIP-44 encryption overhead.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
 
+/// Default header carrying a corporate identity JWT.
+pub const DEFAULT_CORPORATE_IDENTITY_JWT_HEADER: &str = "x-forwarded-identity-token";
+/// Default JWT claim used as the stable corporate uid.
+pub const DEFAULT_CORPORATE_IDENTITY_UID_CLAIM: &str = "sub";
+/// Default JWT claim displayed as the verified corporate identity.
+pub const DEFAULT_CORPORATE_IDENTITY_DISPLAY_CLAIM: &str = "email";
+
+/// Which identity source wins when a request carries both a JWT and a
+/// cryptographically verified NIP-OA owner declaration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CorporateIdentityAuthPrecedence {
+    /// Treat the JWT as the signer's identity. This is the provider-neutral default.
+    #[default]
+    Direct,
+    /// Treat the NIP-OA owner binding as the signer's delegated identity.
+    Delegated,
+}
+
 /// Errors that can occur while loading relay configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -44,6 +62,61 @@ pub struct JoinPolicyConfig {
     pub age_attestation_required: bool,
     /// Content-derived identifier binding receipts to the exact policy revision.
     pub version: String,
+}
+
+/// Source-neutral corporate identity configuration.
+///
+/// The relay does not care whether the JWT was injected by a trusted proxy or
+/// attached by a first-party client. It only validates the JWT and binds the
+/// configured uid claim to the authenticated Nostr pubkey after NIP proof.
+#[derive(Debug, Clone)]
+pub struct CorporateIdentityConfig {
+    /// Whether every authenticated request must satisfy corporate identity.
+    pub require: bool,
+    /// Header containing the corporate identity JWT.
+    pub jwt_header: String,
+    /// Allow agents without JWTs to pass the corporate identity gate through
+    /// NIP-OA when their owner pubkey already has an active identity binding.
+    pub allow_delegation: bool,
+    /// Identity source selected when both a JWT and NIP-OA delegation are present.
+    pub auth_precedence: CorporateIdentityAuthPrecedence,
+    /// JWKS URI used to verify JWT signatures.
+    pub jwks_uri: String,
+    /// Expected JWT issuer.
+    pub issuer: String,
+    /// Expected JWT audience.
+    pub audience: String,
+    /// Claim name used as Buzz's stable corporate uid.
+    pub uid_claim: String,
+    /// Claim name used for verified display.
+    ///
+    /// This value is stored only in the private relay binding table. It is
+    /// never projected into a public Nostr event unless
+    /// `public_display_claim` is configured separately.
+    pub display_claim: String,
+    /// Optional claim name explicitly approved for public NIP-85 projection.
+    /// Unset by default so private corporate attributes stay private.
+    pub public_display_claim: Option<String>,
+    /// Optional claim name carrying a hex pubkey or `npub1...`.
+    pub npub_claim: Option<String>,
+}
+
+impl Default for CorporateIdentityConfig {
+    fn default() -> Self {
+        Self {
+            require: false,
+            jwt_header: DEFAULT_CORPORATE_IDENTITY_JWT_HEADER.to_string(),
+            allow_delegation: true,
+            auth_precedence: CorporateIdentityAuthPrecedence::Direct,
+            jwks_uri: String::new(),
+            issuer: String::new(),
+            audience: String::new(),
+            uid_claim: DEFAULT_CORPORATE_IDENTITY_UID_CLAIM.to_string(),
+            display_claim: DEFAULT_CORPORATE_IDENTITY_DISPLAY_CLAIM.to_string(),
+            public_display_claim: None,
+            npub_claim: None,
+        }
+    }
 }
 
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
@@ -217,6 +290,9 @@ pub struct Config {
     ///
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
+
+    /// Corporate identity verification and uid/pubkey binding.
+    pub corporate_identity: CorporateIdentityConfig,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -431,6 +507,118 @@ fn ensure_git_path(
     Ok(git_repo_path)
 }
 
+fn corporate_env_trimmed(name: &str) -> Result<Option<String>, ConfigError> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(format!(
+            "{name} must be valid UTF-8"
+        ))),
+        Ok(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(ConfigError::InvalidValue(format!(
+                    "{name} must not be empty when set"
+                )));
+            }
+            Ok(Some(value.to_string()))
+        }
+    }
+}
+
+fn parse_corporate_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
+    match corporate_env_trimmed(name)? {
+        None => Ok(default),
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" => Ok(true),
+            "false" | "0" | "off" => Ok(false),
+            _ => Err(ConfigError::InvalidValue(format!(
+                "{name} must be true or false"
+            ))),
+        },
+    }
+}
+
+fn load_corporate_identity_config() -> Result<CorporateIdentityConfig, ConfigError> {
+    let mut config = CorporateIdentityConfig::default();
+    config.require = parse_corporate_bool("BUZZ_REQUIRE_CORPORATE_IDENTITY", config.require)?;
+    config.jwt_header = corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_JWT_HEADER")?
+        .unwrap_or_else(|| config.jwt_header.clone())
+        .to_ascii_lowercase();
+    config.allow_delegation = parse_corporate_bool(
+        "BUZZ_ALLOW_CORPORATE_IDENTITY_DELEGATION",
+        config.allow_delegation,
+    )?;
+    config.auth_precedence =
+        match corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_AUTH_PRECEDENCE")?.as_deref() {
+            None | Some("direct") => CorporateIdentityAuthPrecedence::Direct,
+            Some("delegated") => CorporateIdentityAuthPrecedence::Delegated,
+            Some(value) => {
+                return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_CORPORATE_IDENTITY_AUTH_PRECEDENCE must be direct or delegated, got {value}"
+            )));
+            }
+        };
+    config.jwks_uri = corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_JWKS_URI")?
+        .unwrap_or_else(|| config.jwks_uri.clone());
+    config.issuer = corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_ISSUER")?
+        .unwrap_or_else(|| config.issuer.clone());
+    config.audience = corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_AUDIENCE")?
+        .unwrap_or_else(|| config.audience.clone());
+    config.uid_claim = corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_UID_CLAIM")?
+        .unwrap_or_else(|| config.uid_claim.clone());
+    config.display_claim = corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM")?
+        .unwrap_or_else(|| config.display_claim.clone());
+    config.public_display_claim =
+        corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_PUBLIC_DISPLAY_CLAIM")?;
+    config.npub_claim = corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM")?;
+
+    if config.require {
+        let mut missing = Vec::new();
+        if config.jwt_header.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_JWT_HEADER");
+        }
+        if config.jwks_uri.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_JWKS_URI");
+        }
+        if config.issuer.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_ISSUER");
+        }
+        if config.audience.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_AUDIENCE");
+        }
+        if config.uid_claim.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_UID_CLAIM");
+        }
+        if config.display_claim.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM");
+        }
+        if !missing.is_empty() {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_REQUIRE_CORPORATE_IDENTITY=true but required corporate identity config is missing: {}",
+                missing.join(", ")
+            )));
+        }
+
+        let jwks_url = url::Url::parse(&config.jwks_uri).map_err(|error| {
+            ConfigError::InvalidValue(format!(
+                "BUZZ_CORPORATE_IDENTITY_JWKS_URI must be a valid HTTPS URL: {error}"
+            ))
+        })?;
+        if jwks_url.scheme() != "https"
+            || jwks_url.host_str().is_none()
+            || !jwks_url.username().is_empty()
+            || jwks_url.password().is_some()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_CORPORATE_IDENTITY_JWKS_URI must be an HTTPS URL with a host and no credentials"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(config)
+}
+
 /// Env vars that once gated authenticated media reads.
 ///
 /// `BUZZ_REQUIRE_MEDIA_GET_AUTH` was the real flag; `BUZZ_REQUIRE_MEDIA_READ_AUTH`
@@ -627,6 +815,8 @@ impl Config {
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+
+        let corporate_identity = load_corporate_identity_config()?;
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -1019,6 +1209,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
+            corporate_identity,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -1053,6 +1244,24 @@ mod tests {
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
     // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clear_corporate_identity_env() {
+        for name in [
+            "BUZZ_REQUIRE_CORPORATE_IDENTITY",
+            "BUZZ_CORPORATE_IDENTITY_JWT_HEADER",
+            "BUZZ_ALLOW_CORPORATE_IDENTITY_DELEGATION",
+            "BUZZ_CORPORATE_IDENTITY_AUTH_PRECEDENCE",
+            "BUZZ_CORPORATE_IDENTITY_JWKS_URI",
+            "BUZZ_CORPORATE_IDENTITY_ISSUER",
+            "BUZZ_CORPORATE_IDENTITY_AUDIENCE",
+            "BUZZ_CORPORATE_IDENTITY_UID_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_PUBLIC_DISPLAY_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
 
     /// Look up against a fixed set, standing in for process env.
     fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
@@ -1110,6 +1319,7 @@ mod tests {
     #[test]
     fn defaults_are_valid() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
         let config = Config::from_env().expect("default config");
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
@@ -1157,6 +1367,197 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+        assert!(
+            !config.corporate_identity.require,
+            "corporate identity should default to disabled"
+        );
+        assert_eq!(
+            config.corporate_identity.jwt_header,
+            DEFAULT_CORPORATE_IDENTITY_JWT_HEADER
+        );
+        assert!(
+            config.corporate_identity.allow_delegation,
+            "corporate identity delegation should default to true for agents"
+        );
+        assert_eq!(
+            config.corporate_identity.auth_precedence,
+            CorporateIdentityAuthPrecedence::Direct,
+            "an accompanying JWT should identify the signer by default"
+        );
+        assert!(
+            config.corporate_identity.public_display_claim.is_none(),
+            "public corporate identity projection must be opt-in"
+        );
+    }
+
+    #[test]
+    fn corporate_identity_requires_complete_verifier_config() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
+        std::env::set_var("BUZZ_REQUIRE_CORPORATE_IDENTITY", "true");
+
+        let err = Config::from_env().expect_err("incomplete corporate identity config");
+        let msg = err.to_string();
+        clear_corporate_identity_env();
+
+        assert!(msg.contains("BUZZ_CORPORATE_IDENTITY_JWKS_URI"));
+        assert!(msg.contains("BUZZ_CORPORATE_IDENTITY_ISSUER"));
+        assert!(msg.contains("BUZZ_CORPORATE_IDENTITY_AUDIENCE"));
+    }
+
+    #[test]
+    fn corporate_identity_config_can_be_enabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
+        std::env::set_var("BUZZ_REQUIRE_CORPORATE_IDENTITY", "true");
+        std::env::set_var(
+            "BUZZ_CORPORATE_IDENTITY_JWKS_URI",
+            "https://idp.example/.well-known/jwks.json",
+        );
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_ISSUER", "https://idp.example");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_AUDIENCE", "buzz-relay");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_UID_CLAIM", "employee_id");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM", "email");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM", "buzz_npub");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_AUTH_PRECEDENCE", "delegated");
+
+        let config = Config::from_env().expect("corporate identity config");
+        clear_corporate_identity_env();
+
+        assert!(config.corporate_identity.require);
+        assert_eq!(config.corporate_identity.uid_claim, "employee_id");
+        assert_eq!(
+            config.corporate_identity.npub_claim.as_deref(),
+            Some("buzz_npub")
+        );
+        assert_eq!(
+            config.corporate_identity.auth_precedence,
+            CorporateIdentityAuthPrecedence::Delegated
+        );
+    }
+
+    #[test]
+    fn corporate_identity_rejects_invalid_auth_precedence() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_AUTH_PRECEDENCE", "automatic");
+
+        let err = Config::from_env().expect_err("invalid precedence must fail closed");
+        clear_corporate_identity_env();
+
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue(ref message)
+                if message.contains("BUZZ_CORPORATE_IDENTITY_AUTH_PRECEDENCE")
+        ));
+    }
+
+    #[test]
+    fn corporate_identity_rejects_malformed_boolean_values() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
+        std::env::set_var("BUZZ_REQUIRE_CORPORATE_IDENTITY", "tru");
+        let require_error = Config::from_env().expect_err("malformed require flag must fail");
+        clear_corporate_identity_env();
+
+        std::env::set_var("BUZZ_ALLOW_CORPORATE_IDENTITY_DELEGATION", "sometimes");
+        let delegation_error = Config::from_env().expect_err("malformed delegation flag must fail");
+        clear_corporate_identity_env();
+
+        assert!(require_error
+            .to_string()
+            .contains("BUZZ_REQUIRE_CORPORATE_IDENTITY"));
+        assert!(delegation_error
+            .to_string()
+            .contains("BUZZ_ALLOW_CORPORATE_IDENTITY_DELEGATION"));
+    }
+
+    #[test]
+    fn corporate_identity_rejects_present_empty_values() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for name in [
+            "BUZZ_REQUIRE_CORPORATE_IDENTITY",
+            "BUZZ_CORPORATE_IDENTITY_JWT_HEADER",
+            "BUZZ_ALLOW_CORPORATE_IDENTITY_DELEGATION",
+            "BUZZ_CORPORATE_IDENTITY_AUTH_PRECEDENCE",
+            "BUZZ_CORPORATE_IDENTITY_JWKS_URI",
+            "BUZZ_CORPORATE_IDENTITY_ISSUER",
+            "BUZZ_CORPORATE_IDENTITY_AUDIENCE",
+            "BUZZ_CORPORATE_IDENTITY_UID_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_PUBLIC_DISPLAY_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM",
+        ] {
+            clear_corporate_identity_env();
+            std::env::set_var(name, "  ");
+            let error = Config::from_env().expect_err("present empty setting must fail closed");
+            assert!(error.to_string().contains(name));
+            assert!(error.to_string().contains("must not be empty"));
+        }
+        clear_corporate_identity_env();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corporate_identity_rejects_non_utf8_boolean_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for name in [
+            "BUZZ_REQUIRE_CORPORATE_IDENTITY",
+            "BUZZ_ALLOW_CORPORATE_IDENTITY_DELEGATION",
+        ] {
+            clear_corporate_identity_env();
+            std::env::set_var(name, std::ffi::OsString::from_vec(vec![0xff]));
+            let error = Config::from_env().expect_err("non-UTF-8 boolean must fail closed");
+            assert!(error.to_string().contains(name));
+            assert!(error.to_string().contains("valid UTF-8"));
+        }
+        clear_corporate_identity_env();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corporate_identity_rejects_non_utf8_string_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for name in [
+            "BUZZ_CORPORATE_IDENTITY_JWT_HEADER",
+            "BUZZ_CORPORATE_IDENTITY_AUTH_PRECEDENCE",
+            "BUZZ_CORPORATE_IDENTITY_JWKS_URI",
+            "BUZZ_CORPORATE_IDENTITY_ISSUER",
+            "BUZZ_CORPORATE_IDENTITY_AUDIENCE",
+            "BUZZ_CORPORATE_IDENTITY_UID_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_PUBLIC_DISPLAY_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM",
+        ] {
+            clear_corporate_identity_env();
+            std::env::set_var(name, std::ffi::OsString::from_vec(vec![0xff]));
+            let error = Config::from_env().expect_err("non-UTF-8 setting must fail closed");
+            assert!(error.to_string().contains(name));
+            assert!(error.to_string().contains("valid UTF-8"));
+        }
+        clear_corporate_identity_env();
+    }
+
+    #[test]
+    fn corporate_identity_requires_https_jwks_uri() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
+        std::env::set_var("BUZZ_REQUIRE_CORPORATE_IDENTITY", "true");
+        std::env::set_var(
+            "BUZZ_CORPORATE_IDENTITY_JWKS_URI",
+            "http://idp.example/.well-known/jwks.json",
+        );
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_ISSUER", "https://idp.example");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_AUDIENCE", "buzz-relay");
+
+        let error = Config::from_env().expect_err("insecure JWKS URL must fail");
+        clear_corporate_identity_env();
+
+        assert!(error.to_string().contains("JWKS_URI must be an HTTPS URL"));
     }
 
     #[test]

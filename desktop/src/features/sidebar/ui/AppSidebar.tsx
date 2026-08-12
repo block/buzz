@@ -24,14 +24,8 @@ import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortP
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { isSidebarBackgroundTarget } from "@/features/sidebar/lib/sidebarBackgroundTarget";
 import { useSidebarActivityOverflow } from "@/features/sidebar/lib/useSidebarActivityOverflow";
-import {
-  CreateSectionDialog,
-  DeleteSectionAlertDialog,
-  RenameSectionDialog,
-  useDeleteChannelDialog,
-  useLeaveChannelDialog,
-  type SectionDialogValue,
-} from "@/features/sidebar/ui/ChannelSectionDialogs";
+// biome-ignore format: keep compact to stay within file size limit
+import { CreateSectionDialog, DeleteSectionAlertDialog, RenameSectionDialog, useDeleteChannelDialog, useLeaveChannelDialog, type SectionDialogValue } from "@/features/sidebar/ui/ChannelSectionDialogs";
 import {
   AppSidebarPinnedHeader,
   AppSidebarPrimaryMenu,
@@ -53,6 +47,7 @@ import type {
 } from "@/features/sidebar/ui/AppSidebar.types";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { formatVerifiedUserLabel } from "@/features/profile/lib/identity";
 import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
@@ -475,13 +470,18 @@ export function AppSidebar({
     immediate: isSelectedDirectMessage,
     timeoutMs: 400,
   });
+  const resolvedProfileDisplayName = formatVerifiedUserLabel(
+    profile?.displayName,
+    profile?.verifiedName,
+    profile?.verifiedNameExpiresAt,
+  );
   const { dmChannelLabels, dmParticipantsByChannelId, dmPresenceByChannelId } =
     useDmSidebarMetadata({
       currentPubkey,
       directMessages,
       enabled: shouldLoadDmMetadata,
       fallbackDisplayName,
-      profileDisplayName: profile?.displayName,
+      profileDisplayName: resolvedProfileDisplayName,
     });
   const sortedDirectMessages = React.useMemo(
     () =>
@@ -501,7 +501,7 @@ export function AppSidebar({
     streamChannels,
   });
   const resolvedDisplayName =
-    profile?.displayName?.trim() ||
+    resolvedProfileDisplayName ||
     fallbackDisplayName?.trim() ||
     "Current identity";
   const isCreatingAny =

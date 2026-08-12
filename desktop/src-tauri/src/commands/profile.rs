@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use buzz_core_pkg::PresenceStatus;
+use buzz_core_pkg::{kind::KIND_USER_TRUSTED_ASSERTION, PresenceStatus};
 use serde_json::Value;
 use tauri::State;
 
 use crate::{
     app_state::AppState,
+    commands::identity_archive::fetch_relay_self,
     events,
     managed_agents::persona_events::monotonic_created_at,
     models::{ProfileInfo, SearchUsersResponse, UserNotesResponse, UsersBatchResponse},
@@ -16,24 +17,152 @@ use crate::{
     },
 };
 
+async fn query_profiles_with_assertions(
+    state: &AppState,
+    pubkeys: &[String],
+) -> Result<(Vec<nostr::Event>, Option<String>), String> {
+    if pubkeys.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+
+    let relay_self = fetch_relay_self(state).await.unwrap_or(None);
+    let mut filters = vec![serde_json::json!({
+        "kinds": [0],
+        "authors": pubkeys,
+    })];
+    if let Some(author) = relay_self.as_ref() {
+        filters.push(serde_json::json!({
+            "kinds": [KIND_USER_TRUSTED_ASSERTION],
+            "authors": [author],
+            "#d": pubkeys,
+        }));
+    }
+    Ok((query_relay(state, &filters).await?, relay_self))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedIdentity {
+    display_name: String,
+    expires_at: u64,
+}
+
+fn verified_identities(
+    events: &[nostr::Event],
+    relay_self: Option<&str>,
+) -> HashMap<String, VerifiedIdentity> {
+    let Some(relay_self) = relay_self else {
+        return HashMap::new();
+    };
+    let mut verified = HashMap::<String, (u64, String, Option<VerifiedIdentity>)>::new();
+    let now = nostr::Timestamp::now().as_secs();
+    for event in events {
+        if event.kind.as_u16() as u32 != KIND_USER_TRUSTED_ASSERTION
+            || !event.pubkey.to_hex().eq_ignore_ascii_case(relay_self)
+            || !event.verify_id()
+            || !event.verify_signature()
+        {
+            continue;
+        }
+        // The coordinate is recoverable even when the newer payload is
+        // malformed (for example, an overlong `d` tag). That malformed head
+        // must suppress the prior assertion rather than being skipped.
+        let Some(subject) = event.tags.iter().find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().is_some_and(|part| part == "d"))
+                .then(|| parts.get(1).map(|part| part.as_str()))
+                .flatten()
+        }) else {
+            continue;
+        };
+        if subject.len() != 64 || !subject.chars().all(|value| value.is_ascii_hexdigit()) {
+            continue;
+        }
+        let tag_value = |name: &str| {
+            let mut matches = event.tags.iter().filter(|tag| {
+                let parts = tag.as_slice();
+                parts.first().is_some_and(|part| part == name)
+            });
+            let tag = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            let parts = tag.as_slice();
+            (parts.len() == 2).then(|| parts[1].as_str())
+        };
+        // Select the signed replaceable-event head before validating its
+        // payload. Otherwise a newer malformed assertion could be skipped and
+        // silently resurrect the older active label returned alongside it.
+        let identity = match (tag_value("d"), tag_value("verified"), tag_value("p")) {
+            (Some(assertion_d), Some("relay"), Some(asserted_subject))
+                if assertion_d == subject && asserted_subject == subject =>
+            {
+                match tag_value("active") {
+                    Some("false") => None,
+                    Some("true") => match (
+                        tag_value("expiration")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|expiration| *expiration > now),
+                        tag_value("display_name")
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty()),
+                    ) {
+                        (Some(expires_at), Some(display_name)) => Some(VerifiedIdentity {
+                            display_name: display_name.to_string(),
+                            expires_at,
+                        }),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let created_at = event.created_at.as_secs();
+        let event_id = event.id.to_hex();
+        // NIP-01 replaceable-event ordering: greatest timestamp wins; equal
+        // timestamps are resolved by the lowest event id. This stays stable
+        // regardless of relay response order.
+        match verified.entry(subject.to_ascii_lowercase()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((created_at, event_id, identity));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry)
+                if created_at > entry.get().0
+                    || (created_at == entry.get().0 && event_id < entry.get().1) =>
+            {
+                entry.insert((created_at, event_id, identity));
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {}
+        }
+    }
+    verified
+        .into_iter()
+        .filter_map(|(pubkey, (_, _, identity))| identity.map(|value| (pubkey, value)))
+        .collect()
+}
+
+fn apply_verified_identity(profile: &mut ProfileInfo, identity: Option<VerifiedIdentity>) {
+    profile.verified_name = identity
+        .as_ref()
+        .map(|value| value.display_name.to_string());
+    profile.verified_name_expires_at = identity.map(|value| value.expires_at);
+}
+
 #[tauri::command]
 pub async fn get_profile(state: State<'_, AppState>) -> Result<ProfileInfo, String> {
     let my_pubkey = current_pubkey_hex(&state)?;
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [0],
-            "authors": [my_pubkey],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let (events, relay_self) =
+        query_profiles_with_assertions(&state, std::slice::from_ref(&my_pubkey)).await?;
 
-    Ok(events
-        .first()
+    let mut profile = events
+        .iter()
+        .find(|event| event.kind.as_u16() == 0 && event.pubkey.to_hex() == my_pubkey)
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
-        .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state))))
+        .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state)));
+    let identity = verified_identities(&events, relay_self.as_deref()).remove(&profile.pubkey);
+    apply_verified_identity(&mut profile, identity);
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -187,21 +316,18 @@ pub async fn get_user_profile(
         None => current_pubkey_hex(&state)?,
     };
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [0],
-            "authors": [target.clone()],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let (events, relay_self) =
+        query_profiles_with_assertions(&state, std::slice::from_ref(&target)).await?;
 
-    Ok(events
-        .first()
+    let mut profile = events
+        .iter()
+        .find(|event| event.kind.as_u16() == 0 && event.pubkey.to_hex() == target)
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
-        .unwrap_or_else(|| empty_profile_info(&target)))
+        .unwrap_or_else(|| empty_profile_info(&target));
+    let identity = verified_identities(&events, relay_self.as_deref()).remove(&profile.pubkey);
+    apply_verified_identity(&mut profile, identity);
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -215,16 +341,17 @@ pub async fn get_users_batch(
             missing: Vec::new(),
         });
     }
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [0],
-            "authors": pubkeys,
-        })],
-    )
-    .await?;
+    let (events, relay_self) = query_profiles_with_assertions(&state, &pubkeys).await?;
 
-    Ok(nostr_convert::users_batch_from_events(&events, &pubkeys))
+    let mut response = nostr_convert::users_batch_from_events(&events, &pubkeys);
+    let verified = verified_identities(&events, relay_self.as_deref());
+    for (pubkey, profile) in &mut response.profiles {
+        if let Some(identity) = verified.get(pubkey) {
+            profile.verified_name = Some(identity.display_name.to_string());
+            profile.verified_name_expires_at = Some(identity.expires_at);
+        }
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -406,6 +533,8 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
     ProfileInfo {
         pubkey: pubkey.to_string(),
         display_name: None,
+        verified_name: None,
+        verified_name_expires_at: None,
         avatar_url: None,
         about: None,
         nip05_handle: None,
@@ -417,6 +546,210 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verified_identity_requires_relay_signed_nip85_assertion() {
+        let relay = nostr::Keys::generate();
+        let subject = nostr::Keys::generate().public_key().to_hex();
+        let expires_at = nostr::Timestamp::now().as_secs() + 60;
+        let event =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Example User"]).unwrap(),
+                ])
+                .sign_with_keys(&relay)
+                .unwrap();
+
+        let verified = verified_identities(&[event], Some(&relay.public_key().to_hex()));
+        assert_eq!(
+            verified.get(&subject),
+            Some(&VerifiedIdentity {
+                display_name: "Example User".to_string(),
+                expires_at,
+            })
+        );
+    }
+
+    #[test]
+    fn expired_verified_identity_is_rejected() {
+        let relay = nostr::Keys::generate();
+        let subject = nostr::Keys::generate().public_key().to_hex();
+        let created_at = nostr::Timestamp::now().as_secs();
+        let expires_at = nostr::Timestamp::now().as_secs().saturating_sub(1);
+        let prior_expiration = created_at + 120;
+        let prior =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &prior_expiration.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Prior User"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&relay)
+                .unwrap();
+        let expired =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Expired User"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at + 1))
+                .sign_with_keys(&relay)
+                .unwrap();
+
+        assert!(
+            verified_identities(&[prior, expired], Some(&relay.public_key().to_hex())).is_empty()
+        );
+    }
+
+    #[test]
+    fn newer_inactive_assertion_removes_verified_identity() {
+        let relay = nostr::Keys::generate();
+        let subject = nostr::Keys::generate().public_key().to_hex();
+        let created_at = nostr::Timestamp::now().as_secs();
+        let expires_at = created_at + 60;
+        let active =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Example User"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&relay)
+                .unwrap();
+        let inactive =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "false"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at + 1))
+                .sign_with_keys(&relay)
+                .unwrap();
+
+        assert!(
+            verified_identities(&[active, inactive], Some(&relay.public_key().to_hex())).is_empty()
+        );
+    }
+
+    #[test]
+    fn newer_malformed_assertion_does_not_resurrect_older_identity() {
+        let relay = nostr::Keys::generate();
+        let subject = nostr::Keys::generate().public_key().to_hex();
+        let wrong_subject = nostr::Keys::generate().public_key().to_hex();
+        let created_at = nostr::Timestamp::now().as_secs();
+        let expires_at = created_at + 60;
+        let active =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Example User"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&relay)
+                .unwrap();
+        let malformed =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", wrong_subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Malformed User"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at + 1))
+                .sign_with_keys(&relay)
+                .unwrap();
+
+        assert!(verified_identities(
+            &[active.clone(), malformed],
+            Some(&relay.public_key().to_hex())
+        )
+        .is_empty());
+
+        let overlong_d =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str(), "unexpected"]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Malformed User"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at + 1))
+                .sign_with_keys(&relay)
+                .unwrap();
+        assert!(
+            verified_identities(&[active, overlong_d], Some(&relay.public_key().to_hex()))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn equal_timestamp_assertions_use_lowest_event_id_independent_of_response_order() {
+        let relay = nostr::Keys::generate();
+        let subject = nostr::Keys::generate().public_key().to_hex();
+        let created_at = nostr::Timestamp::now().as_secs();
+        let expires_at = created_at + 60;
+        let active =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Example User"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&relay)
+                .unwrap();
+        let inactive =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "false"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&relay)
+                .unwrap();
+        let relay_pubkey = relay.public_key().to_hex();
+        let expected_active = active.id.to_hex() < inactive.id.to_hex();
+
+        for events in [
+            vec![active.clone(), inactive.clone()],
+            vec![inactive.clone(), active.clone()],
+        ] {
+            let actual = verified_identities(&events, Some(&relay_pubkey));
+            assert_eq!(actual.contains_key(&subject), expected_active);
+        }
+    }
 
     #[test]
     fn deferred_profile_signer_is_captured_and_rejects_wrong_identity() {

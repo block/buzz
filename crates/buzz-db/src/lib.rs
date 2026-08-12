@@ -27,6 +27,10 @@ pub mod event;
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
+/// Corporate identity binding persistence.
+pub mod identity_binding;
+/// Canonical identity lifecycle advisory-lock helpers.
+pub mod identity_lifecycle;
 /// Embedded database migrations.
 pub mod migration;
 /// Community moderation: reports, bans/timeouts, audit actions.
@@ -2303,6 +2307,28 @@ impl Db {
         .await
     }
 
+    /// Adds a channel member and optional corporate identity binding atomically.
+    pub async fn add_member_with_identity(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        role: channel::MemberRole,
+        invited_by: Option<&[u8]>,
+        identity: Option<&identity_binding::IdentityBindingInput<'_>>,
+    ) -> Result<channel::ChannelAdmissionOutcome> {
+        channel::add_member_with_identity(
+            &self.pool,
+            community_id,
+            channel_id,
+            pubkey,
+            role,
+            invited_by,
+            identity,
+        )
+        .await
+    }
+
     /// Removes a member from a channel.
     #[datastore_span(name = "remove_member", system = "postgresql")]
     pub async fn remove_member(
@@ -2638,6 +2664,99 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<user::UserSearchProfile>> {
         user::search_users(&self.pool, community_id, query, limit).await
+    }
+
+    /// Create or validate a corporate identity binding.
+    pub async fn bind_or_validate_identity(
+        &self,
+        community_id: CommunityId,
+        issuer: &str,
+        uid: &str,
+        pubkey: &[u8],
+        display_name: Option<&str>,
+        source: &str,
+    ) -> Result<identity_binding::BindIdentityResult> {
+        identity_binding::bind_or_validate_identity(
+            &self.pool,
+            community_id,
+            issuer,
+            uid,
+            pubkey,
+            display_name,
+            source,
+        )
+        .await
+    }
+
+    /// Return the active corporate identity binding for `pubkey`, if any.
+    pub async fn get_active_identity_binding_by_pubkey(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Option<identity_binding::IdentityBinding>> {
+        identity_binding::get_active_identity_binding_by_pubkey(&self.pool, community_id, pubkey)
+            .await
+    }
+
+    /// Disable a corporate principal and revoke its active key.
+    pub async fn revoke_identity_principal(
+        &self,
+        community_id: CommunityId,
+        issuer: &str,
+        uid: &str,
+        revoked_by: Option<&[u8]>,
+        reason: &str,
+    ) -> Result<bool> {
+        identity_binding::revoke_identity_principal(
+            &self.pool,
+            community_id,
+            issuer,
+            uid,
+            revoked_by,
+            reason,
+        )
+        .await
+    }
+
+    /// Revoke one corporate identity key without disabling its principal.
+    pub async fn revoke_identity_key(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+        revoked_by: Option<&[u8]>,
+        reason: &str,
+    ) -> Result<bool> {
+        identity_binding::revoke_identity_key(&self.pool, community_id, pubkey, revoked_by, reason)
+            .await
+    }
+
+    /// Atomically rotate a corporate principal to a replacement key.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rotate_identity_binding(
+        &self,
+        community_id: CommunityId,
+        issuer: &str,
+        uid: &str,
+        old_pubkey: &[u8],
+        new_pubkey: &[u8],
+        display_name: Option<&str>,
+        source: &str,
+        rotated_by: Option<&[u8]>,
+        reason: &str,
+    ) -> Result<()> {
+        identity_binding::rotate_identity_binding(
+            &self.pool,
+            community_id,
+            issuer,
+            uid,
+            old_pubkey,
+            new_pubkey,
+            display_name,
+            source,
+            rotated_by,
+            reason,
+        )
+        .await
     }
 
     /// Atomically set agent owner — only if no owner is currently assigned.
@@ -4258,6 +4377,27 @@ impl Db {
             .await
     }
 
+    /// Claims invite membership and an optional corporate identity binding in
+    /// one transaction.
+    pub async fn claim_relay_membership_with_identity(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        policy_version: Option<&str>,
+        identity: Option<&identity_binding::IdentityBindingInput<'_>>,
+    ) -> Result<relay_members::MembershipClaimOutcome> {
+        relay_members::claim_relay_membership_with_identity(
+            &self.pool,
+            community,
+            pubkey,
+            role,
+            policy_version,
+            identity,
+        )
+        .await
+    }
+
     /// Returns whether a member has persisted acceptance evidence for a policy version.
     #[datastore_span(name = "has_join_policy_acceptance", system = "postgresql")]
     pub async fn has_join_policy_acceptance(
@@ -4391,6 +4531,27 @@ impl Db {
             token_hash,
             claimer_pubkey,
             policy_version,
+        )
+        .await
+    }
+
+    /// Atomically claims a v2 invite and commits the staged corporate identity
+    /// binding in the same transaction as membership and invite consumption.
+    pub async fn claim_relay_invite_with_identity(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8; 32],
+        claimer_pubkey: &str,
+        policy_version: Option<&str>,
+        identity: Option<&identity_binding::IdentityBindingInput<'_>>,
+    ) -> Result<relay_invite::ClaimOutcome> {
+        relay_invite::claim_relay_invite_with_identity(
+            &self.pool,
+            community,
+            token_hash,
+            claimer_pubkey,
+            policy_version,
+            identity,
         )
         .await
     }

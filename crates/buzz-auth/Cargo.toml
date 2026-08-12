@@ -13,6 +13,7 @@ dev = []
 
 [dependencies]
 buzz-core = { workspace = true }
+chrono     = { workspace = true }
 nostr        = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -24,3 +25,4 @@ hex          = { workspace = true }
 rand         = { workspace = true }
 uuid         = { workspace = true }
 url          = { workspace = true }
+jsonwebtoken = { workspace = true }

@@ -315,24 +315,38 @@ pub(crate) async fn run_demo_echo(
     tracing::info!(%session_id, %peer, "mesh demo echo: session open");
     let mut drain_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
-        let frame = tokio::select! {
-            _ = drain_tick.tick() => {
-                if shutting_down.load(Ordering::Relaxed) {
-                    if let Some(community_id) = stream.community_id() {
-                        if let Err(e) = stream.send_goodbye(community_id, GoodbyeReason::Draining).await {
-                            tracing::warn!(%session_id, "mesh demo echo: draining goodbye failed: {e}");
-                        } else {
-                            tracing::info!(%session_id, "mesh demo echo: sent draining goodbye");
+        // Keep one receive future alive across drain polls. Recreating it on
+        // every tick can cancel an in-progress length-prefixed QUIC read and
+        // strand the peer waiting for an echo that will never arrive.
+        let frame = {
+            let recv = stream.recv_validated(&directory);
+            tokio::pin!(recv);
+            loop {
+                tokio::select! {
+                    frame = &mut recv => break Some(frame),
+                    _ = drain_tick.tick() => {
+                        if shutting_down.load(Ordering::Relaxed) {
+                            break None;
                         }
-                    } else {
-                        let _ = stream.finish();
-                        tracing::info!(%session_id, "mesh demo echo: drain before community latch — closing");
                     }
-                    return;
                 }
-                continue;
             }
-            frame = stream.recv_validated(&directory) => frame,
+        };
+        let Some(frame) = frame else {
+            if let Some(community_id) = stream.community_id() {
+                if let Err(e) = stream
+                    .send_goodbye(community_id, GoodbyeReason::Draining)
+                    .await
+                {
+                    tracing::warn!(%session_id, "mesh demo echo: draining goodbye failed: {e}");
+                } else {
+                    tracing::info!(%session_id, "mesh demo echo: sent draining goodbye");
+                }
+            } else {
+                let _ = stream.finish();
+                tracing::info!(%session_id, "mesh demo echo: drain before community latch — closing");
+            }
+            return;
         };
         match frame {
             Ok(Some(ReliableFrame::Data(payload))) => {
@@ -522,6 +536,7 @@ pub async fn boot_mesh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tunnel::reliable::ReliableMeshStream;
 
     /// BUZZ_MESH=off must be a hard no-op: no endpoint bind, no Redis write,
     /// no background task — `boot_mesh` returns `None` before touching
@@ -580,6 +595,25 @@ mod tests {
         MeshStream::new(Box::new(StubSend), Box::new(StubRecv))
     }
 
+    struct FinishRecordingSend(Arc<AtomicBool>);
+    impl StreamSendHalf for FinishRecordingSend {
+        fn send_frame(&mut self, _frame: MeshStreamFrame) -> BoxFuture<'_, Result<(), MeshError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn finish(&mut self) -> Result<(), MeshError> {
+            self.0.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    struct PendingRecv;
+    impl StreamRecvHalf for PendingRecv {
+        fn recv_frame(&mut self) -> BoxFuture<'_, Result<Option<MeshStreamFrame>, MeshError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
     fn rid(byte: u8) -> RuntimeId {
         RuntimeId([byte; 32])
     }
@@ -596,6 +630,42 @@ mod tests {
                 profile,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn demo_echo_drain_finishes_idle_unlatched_stream() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let stream = MeshStream::new(
+            Box::new(FinishRecordingSend(Arc::clone(&finished))),
+            Box::new(PendingRecv),
+        );
+        let owner = rid(1);
+        let fenced = FencedHeader {
+            session_id: uuid::Uuid::nil(),
+            generation: 1,
+            owner_runtime_id: owner,
+        };
+        let inbound = ReliableInbound {
+            fenced,
+            from: rid(2),
+            stream: ReliableMeshStream::new_inbound(fenced, stream),
+        };
+        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_demo_echo(
+                SessionDirectory::new(pool),
+                inbound,
+                Arc::new(AtomicBool::new(true)),
+            ),
+        )
+        .await
+        .expect("idle demo echo observes drain without waiting for a frame");
+
+        assert!(finished.load(Ordering::Relaxed));
     }
 
     #[test]

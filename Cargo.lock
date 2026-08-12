@@ -440,7 +440,8 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "aws-creds"
 version = "0.39.1"
-source = "git+https://github.com/tlongwell-block/rust-s3?rev=c9fce3620dd434c1f810101d672cf384268dbb0f#c9fce3620dd434c1f810101d672cf384268dbb0f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca3b85155d265df828f84e53886ed9e427aed979dd8a39f5b8b2162c77e142d7"
 dependencies = [
  "attohttpc",
  "home",
@@ -460,6 +461,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -933,7 +935,9 @@ name = "buzz-auth"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "chrono",
  "hex",
+ "jsonwebtoken",
  "nostr 0.44.7",
  "rand 0.10.1",
  "serde",
@@ -1231,6 +1235,7 @@ dependencies = [
  "anyhow",
  "async-compression",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "base64 0.22.1",
  "buzz-audit",
@@ -1257,6 +1262,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "infer",
+ "jsonwebtoken",
  "mesh-llm-host-runtime",
  "mesh-llm-sdk",
  "metrics",
@@ -2601,7 +2607,7 @@ dependencies = [
  "digest 0.11.3",
  "elliptic-curve",
  "rfc6979",
- "signature",
+ "signature 3.0.0",
  "spki",
  "zeroize",
 ]
@@ -2614,7 +2620,7 @@ checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
 dependencies = [
  "pkcs8",
  "serdect",
- "signature",
+ "signature 3.0.0",
 ]
 
 [[package]]
@@ -2628,7 +2634,7 @@ dependencies = [
  "rand_core 0.10.1",
  "serde",
  "sha2 0.11.0",
- "signature",
+ "signature 3.0.0",
  "subtle",
  "zeroize",
 ]
@@ -4360,6 +4366,22 @@ dependencies = [
  "regex",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "10.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "signature 2.2.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -8016,7 +8038,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "getrandom 0.2.17",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -8236,7 +8258,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -8795,6 +8817,15 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "signature"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
+dependencies = [
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -10532,6 +10563,12 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"

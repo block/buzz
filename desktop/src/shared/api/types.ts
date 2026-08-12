@@ -108,6 +108,9 @@ export type { Identity, IdentityStorage } from "./identityTypes";
 export type Profile = {
   pubkey: string;
   displayName: string | null;
+  /** Relay-authoritative name, trusted until `verifiedNameExpiresAt`. */
+  verifiedName?: string | null;
+  verifiedNameExpiresAt?: number | null;
   avatarUrl: string | null;
   about: string | null;
   nip05Handle: string | null;
@@ -121,6 +124,9 @@ export type Profile = {
 
 export type UserProfileSummary = {
   displayName: string | null;
+  /** Relay-authoritative name, trusted until `verifiedNameExpiresAt`. */
+  verifiedName?: string | null;
+  verifiedNameExpiresAt?: number | null;
   /** Kind-0 `name` field, kept separate from `displayName` so @mention text
    * can be matched against either alias (agents/CLI resolve mentions against
    * `display_name` *or* `name` at send time). */
@@ -139,6 +145,8 @@ export type UsersBatchResponse = {
 export type UserSearchResult = {
   pubkey: string;
   displayName: string | null;
+  verifiedName?: string | null;
+  verifiedNameExpiresAt?: number | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;
@@ -972,14 +980,9 @@ export type ThreadRepliesResponse = {
 };
 
 /**
- * Composite backward keyset cursor for channel-timeline paging via the bridge
- * (`getChannelMessagesBefore`).
- *
- * The event-id tiebreak is load-bearing for the dense-second case: the relay
- * orders `created_at DESC, id ASC` and advances past a second denser than one
- * page with `id > eventId`. A bare `createdAt` (`until`) cursor cannot escape
- * such a second — it re-returns the same slice forever, leaving older history
- * unreachable. `(createdAt, eventId)` moves strictly older every page.
+ * Composite backward cursor for `getChannelMessagesBefore`, ordered
+ * `created_at DESC, id ASC`. The event id advances through dense seconds;
+ * a timestamp-only cursor would re-return the same slice forever.
  */
 export type ChannelPageCursor = {
   createdAt: number;
@@ -996,12 +999,9 @@ export type ChannelMessagesPageResponse = {
 // ── Global agent configuration ────────────────────────────────────────────────
 
 /**
- * Global agent configuration defaults applied to ALL agents.
- *
- * Lowest user-settable layer — per-agent and persona values win on any key
- * collision. Mirrors the Rust `GlobalAgentConfig` struct.
- *
- * Precedence: baked floor < global < persona < per-agent.
+ * Global defaults applied to all agents. Persona and per-agent values win on
+ * collisions. Precedence: baked floor < global < persona < per-agent.
+ * Mirrors the Rust `GlobalAgentConfig` struct.
  */
 export type GlobalAgentConfig = {
   /** Global env vars injected into all agents unconditionally. */

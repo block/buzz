@@ -7,6 +7,8 @@
 
 /// NIP-AM: Agent Turn Metric — payload type and encrypt/decrypt helpers.
 pub mod agent_turn_metric;
+/// Provider-free authorization fences and privacy-safe binding evidence.
+pub mod authorization;
 /// Channel and membership enums shared across crates.
 pub mod channel;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
@@ -41,6 +43,10 @@ pub mod tenant;
 /// Schnorr signature and event ID verification.
 pub mod verification;
 
+pub use authorization::{
+    AuthorizationLeaseFence, AuthorizationLeaseFenceError, CanonicalCurrentBindingEvidence,
+    CurrentBindingEvidenceError,
+};
 pub use error::VerificationError;
 pub use event::StoredEvent;
 pub use nostr::{Event, EventId, Filter, Keys, Kind, PublicKey};

@@ -1,13 +1,15 @@
 //! axum routers — app (WebSocket + REST), health (K8s probes), metrics (Prometheus).
 
+mod route_policy;
+
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
+    extract::{ConnectInfo, FromRequest, MatchedPath, State, WebSocketUpgrade},
     http::{HeaderMap, Request, StatusCode},
-    middleware,
+    middleware::{self, Next},
     response::{IntoResponse, Json},
     routing::{get, post, put},
     Router,
@@ -187,9 +189,64 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     }
 
     merged
+        // Every registered route must be present in the centralized policy
+        // inventory. When the gate is enabled, an unclassified route fails
+        // before its handler can perform reads or writes.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            enforce_corporate_identity_route_inventory,
+        ))
         .layer(middleware::from_fn(track_metrics))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
+}
+
+async fn enforce_corporate_identity_route_inventory(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> axum::response::Response {
+    enforce_route_inventory_for_requirement(state.config.corporate_identity.require, request, next)
+        .await
+}
+
+async fn enforce_route_inventory_for_requirement(
+    corporate_identity_required: bool,
+    request: Request<Body>,
+    next: Next,
+) -> axum::response::Response {
+    if !corporate_identity_required {
+        return next.run(request).await;
+    }
+    let matched_path = request.extensions().get::<MatchedPath>();
+    let policy = matched_path
+        .and_then(|path| route_policy::classify_matched_route(request.method(), path.as_str()));
+    if policy.is_some() {
+        return next.run(request).await;
+    }
+    if matched_path.is_some_and(|path| route_policy::is_known_matched_path(path.as_str())) {
+        // Axum's method fallback also runs route layers. Return its semantic
+        // equivalent directly, while still preventing an accidentally added
+        // unclassified method handler from executing.
+        let allow = matched_path
+            .and_then(|path| route_policy::allowed_methods(path.as_str()))
+            .unwrap_or_default();
+        return axum::response::Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(axum::http::header::ALLOW, allow)
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+    tracing::error!(
+        method = %request.method(),
+        matched_path = matched_path.map(|path| path.as_str()).unwrap_or("<missing>"),
+        "rejecting route missing corporate identity policy classification"
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "route unavailable: identity policy is not configured",
+    )
+        .into_response()
 }
 
 fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
@@ -197,11 +254,18 @@ fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tr
 }
 
 fn make_http_span(request: &Request<Body>) -> tracing::Span {
+    let corporate_identity_policy = request
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|path| route_policy::classify_matched_route(request.method(), path.as_str()))
+        .map(route_policy::CorporateIdentityRoutePolicy::trace_label)
+        .unwrap_or("unclassified");
     tracing::info_span!(
         target: "buzz_relay",
         "http.request",
         otel.kind = "server",
         http.request.method = %request.method(),
+        buzz.corporate_identity.route_policy = corporate_identity_policy,
     )
 }
 
@@ -310,6 +374,10 @@ async fn nip11_or_ws_handler(
                 .into_response();
         }
     };
+    let corporate_identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+        &headers,
+        &state.config.corporate_identity,
+    );
 
     let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {
@@ -324,7 +392,9 @@ async fn nip11_or_ws_handler(
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| {
+                    handle_connection(socket, state, addr, tenant, corporate_identity_jwt)
+                })
                 .into_response()
         }
         Err(_) => {
@@ -447,7 +517,10 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
-    use axum::{routing::get, Router};
+    use axum::{
+        routing::{get, post},
+        Router,
+    };
     use futures_util::SinkExt;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
@@ -459,6 +532,49 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    async fn require_route_inventory(
+        request: Request<Body>,
+        next: Next,
+    ) -> axum::response::Response {
+        enforce_route_inventory_for_requirement(true, request, next).await
+    }
+
+    #[tokio::test]
+    async fn route_inventory_preserves_405_and_rejects_new_unclassified_handlers() {
+        let app = Router::new()
+            .route("/events", post(|| async { StatusCode::OK }))
+            .route("/new-unclassified-route", get(|| async { StatusCode::OK }))
+            .route_layer(middleware::from_fn(require_route_inventory));
+
+        let allowed = app
+            .clone()
+            .oneshot(Request::post("/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let unsupported = app
+            .clone()
+            .oneshot(Request::delete("/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unsupported.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            unsupported.headers().get(axum::http::header::ALLOW),
+            Some(&axum::http::HeaderValue::from_static("POST"))
+        );
+
+        let unclassified = app
+            .oneshot(
+                Request::get("/new-unclassified-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unclassified.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     #[test]
     fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {
