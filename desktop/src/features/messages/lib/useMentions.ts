@@ -215,10 +215,10 @@ export function useMentions(
     }
     return lookup;
   }, [managedAgentsQuery.data, personasQuery.data]);
-  const knownAgentPubkeys = new Set([
-    ...mentionableAgentPubkeys,
-    ...managedAgentPubkeys,
-  ]);
+  const knownAgentPubkeys = React.useMemo(
+    () => new Set([...mentionableAgentPubkeys, ...managedAgentPubkeys]),
+    [managedAgentPubkeys, mentionableAgentPubkeys],
+  );
   const activePersonas = React.useMemo(
     () => (personasQuery.data ?? []).filter((persona) => persona.isActive),
     [personasQuery.data],
@@ -813,10 +813,12 @@ export function useMentions(
     },
     [admittedAgentPubkeys, agentIdentityPubkeys, mentionCandidates],
   );
-
+  const getSelectedAgentPubkeys = React.useRef(
+    () => selectedAgentMentionPubkeysRef.current,
+  ).current;
   const revalidateMentionPubkeys = useAgentMentionRevalidation({
     agentPubkeys: agentIdentityPubkeys,
-    getSelectedAgentPubkeys: () => selectedAgentMentionPubkeysRef.current,
+    getSelectedAgentPubkeys,
     currentPubkey,
     eligibilityScope: mentionChannelId
       ? { type: "channel", channelId: mentionChannelId }
@@ -862,12 +864,12 @@ export function useMentions(
     setMentionQuery(null);
     setMentionSelectedIndex(0);
   }, []);
-
   const clearMentions = React.useCallback(() => {
     cancelMentionAutocomplete();
     mentionMapRef.current.clear();
     personaMentionMapRef.current.clear();
     selectedAgentMentionNamesRef.current = [];
+    selectedAgentMentionPubkeysRef.current.clear();
     setSelectedMentionNames([]);
     setSelectedAgentMentionNames([]);
   }, [cancelMentionAutocomplete]);

@@ -134,7 +134,7 @@ export function shouldHideAgentFromMentions({
   currentPubkey,
   mentionableAgentPubkeys,
   directoryReady = true,
-  ownerOnly = false,
+  ownerOnly,
 }: {
   isAgent: boolean;
   isManagedAgent?: boolean;
@@ -143,7 +143,7 @@ export function shouldHideAgentFromMentions({
   currentPubkey?: string | null;
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryReady?: boolean;
-  ownerOnly?: boolean;
+  ownerOnly: boolean | undefined;
 }) {
   return (
     getAgentMentionAdmission({

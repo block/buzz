@@ -58,6 +58,7 @@ export function ForumComposer({
   const [isCompactExpanded, setIsCompactExpanded] = React.useState(!compact);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
+  const [isSubmissionPending, setIsSubmissionPending] = React.useState(false);
   const [submitMode, setSubmitMode] = React.useState<"primary" | "secondary">(
     "primary",
   );
@@ -112,7 +113,7 @@ export function ForumComposer({
 
   const richText = useRichTextEditor({
     placeholder,
-    editable: !disabled,
+    editable: !disabled && !isSubmissionPending,
     mentionNames: mentions.knownNames,
     channelNames: channelLinks.knownChannelNames,
     messageLinkChannels: channelLinks.channels,
@@ -230,6 +231,7 @@ export function ForumComposer({
       }
 
       isSubmissionPendingRef.current = true;
+      setIsSubmissionPending(true);
       try {
         const pubkeys = await mentions.revalidateMentionPubkeys(
           mentions.extractMentionPubkeys(trimmed),
@@ -271,6 +273,7 @@ export function ForumComposer({
         // Keep the draft intact when authorization refresh fails.
       } finally {
         isSubmissionPendingRef.current = false;
+        setIsSubmissionPending(false);
       }
     },
     [
@@ -380,9 +383,16 @@ export function ForumComposer({
   const sendDisabled = React.useMemo(
     () =>
       disabled ||
+      isSubmissionPending ||
       media.isUploading ||
       (content.trim().length === 0 && media.pendingImeta.length === 0),
-    [disabled, media.isUploading, content, media.pendingImeta.length],
+    [
+      disabled,
+      isSubmissionPending,
+      media.isUploading,
+      content,
+      media.pendingImeta.length,
+    ],
   );
   const hasComposerContent =
     content.trim().length > 0 ||
@@ -455,13 +465,27 @@ export function ForumComposer({
         )}
         onBlurCapture={handleFormBlur}
         onDragEnter={(event) => {
+          if (isSubmissionPending) {
+            event.preventDefault();
+            return;
+          }
           expandCompactComposer();
           media.handleDragEnter(event);
         }}
         onDragLeave={media.handleDragLeave}
-        onDragOver={media.handleDragOver}
-        onDrop={(e) => {
-          void media.handleDrop(e);
+        onDragOver={(event) => {
+          if (isSubmissionPending) {
+            event.preventDefault();
+            return;
+          }
+          media.handleDragOver(event);
+        }}
+        onDrop={(event) => {
+          if (isSubmissionPending) {
+            event.preventDefault();
+            return;
+          }
+          void media.handleDrop(event);
         }}
         onFocusCapture={expandCompactComposer}
         onSubmit={handleSubmit}
@@ -471,7 +495,7 @@ export function ForumComposer({
           <ForumComposerCompactLayout
             editor={richText.editor}
             header={header}
-            isSending={isSending}
+            isSending={Boolean(isSending || isSubmissionPending)}
             onEditorKeyDown={handleEditorKeyDown}
             sendDisabled={sendDisabled}
           />
@@ -512,14 +536,14 @@ export function ForumComposer({
             </div>
 
             <MessageComposerToolbar
-              composerDisabled={disabled ?? false}
+              composerDisabled={Boolean(disabled || isSubmissionPending)}
               editor={richText.editor}
               extraActions={
                 onCancel || (onSecondarySubmit && secondarySubmitLabel) ? (
                   <>
                     {onCancel ? (
                       <Button
-                        disabled={isSending}
+                        disabled={isSending || isSubmissionPending}
                         onClick={onCancel}
                         size="sm"
                         type="button"
@@ -536,7 +560,9 @@ export function ForumComposer({
                               submitMode === "secondary" &&
                                 "border-amber-500/40 text-amber-700 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-300",
                             )}
-                            disabled={disabled || isSending}
+                            disabled={
+                              disabled || isSending || isSubmissionPending
+                            }
                             size="sm"
                             type="button"
                             variant="outline"
@@ -567,10 +593,10 @@ export function ForumComposer({
                   </>
                 ) : undefined
               }
-              formattingDisabled={disabled ?? false}
+              formattingDisabled={Boolean(disabled || isSubmissionPending)}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
-              isSending={isSending ?? false}
+              isSending={Boolean(isSending || isSubmissionPending)}
               isUploading={media.isUploading}
               onCaptureSelection={handleToolbarMouseDown}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}

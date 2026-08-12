@@ -1029,12 +1029,18 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   await page.keyboard.type("hello");
   await page.evaluate(() => {
     window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
     window.__BUZZ_E2E__.mock.relayAgentListErrors = Array(100).fill(
       "mock forum directory revoked before send",
     );
   });
 
   await page.getByTestId("send-message").click();
+  await expect(input).toHaveAttribute("contenteditable", "false");
+  await input.focus();
+  await page.keyboard.type(" later edit");
+  await expect(input).toContainText("@quinn hello");
+  await expect(input).not.toContainText("later edit");
 
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))

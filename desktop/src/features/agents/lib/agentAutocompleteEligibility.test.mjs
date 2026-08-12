@@ -260,6 +260,7 @@ test("isAgentIdentityInAllowedList: keeps people and only explicitly allowed age
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: false,
       isMember: false,
       pubkey: PUB_A,
@@ -273,6 +274,7 @@ test("shouldHideAgentFromMentions: never hides non-agents", () => {
 test("shouldHideAgentFromMentions: shows invocable agents even when non-member", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: true,
       isMember: false,
       pubkey: PUB_A,
@@ -286,6 +288,7 @@ test("shouldHideAgentFromMentions: shows invocable agents even when non-member",
 test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: true,
       isMember: false,
       pubkey: PUB_A,
@@ -299,6 +302,7 @@ test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () =>
 test("shouldHideAgentFromMentions: hides member agents with an explicit not-invocable directory entry (Fizz)", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -312,6 +316,7 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
 test("shouldHideAgentFromMentions: hides member agents without an affirmative directory grant", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -325,6 +330,7 @@ test("shouldHideAgentFromMentions: hides member agents without an affirmative di
 test("shouldHideAgentFromMentions: hides unknown member agents while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -339,6 +345,7 @@ test("shouldHideAgentFromMentions: hides unknown member agents while directories
 test("shouldHideAgentFromMentions: hides mentionable member agents while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -353,6 +360,7 @@ test("shouldHideAgentFromMentions: hides mentionable member agents while directo
 test("shouldHideAgentFromMentions: shows non-agent members while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: false,
       isMember: true,
       pubkey: PUB_A,
@@ -367,6 +375,7 @@ test("shouldHideAgentFromMentions: shows non-agent members while directories loa
 test("shouldHideAgentFromMentions: hides unknown member agents after empty directories settle", () => {
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -378,12 +387,26 @@ test("shouldHideAgentFromMentions: hides unknown member agents after empty direc
   );
 });
 
+test("shouldHideAgentFromMentions: hides agents while owner policy loads", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set([PUB_A]),
+      directoryReady: true,
+      ownerOnly: undefined,
+    }),
+    true,
+  );
+});
+
 test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
   const mixedCase = "Ab".repeat(32);
   const normalized = mixedCase.toLowerCase();
 
   assert.equal(
     shouldHideAgentFromMentions({
+      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: mixedCase,
