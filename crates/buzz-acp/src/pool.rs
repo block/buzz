@@ -1850,6 +1850,16 @@ pub async fn run_prompt_task(
                     if !agent.has_system_prompt_support() {
                         agent.state.mark_channel_delivery_success(*cid, true, []);
                     }
+                    let usage = agent.acp.take_turn_usage();
+                    publish_agent_turn_metric(
+                        &ctx,
+                        usage,
+                        Some(*cid),
+                        &session_id,
+                        &format!("{turn_id}:initial"),
+                        Some(acp_stop_to_core(&stop_reason)),
+                    )
+                    .await;
                 }
                 Err(AcpError::AgentExited) => {
                     agent.state.invalidate_all();
@@ -1874,7 +1884,17 @@ pub async fn run_prompt_task(
                         .cancel_with_cleanup(&session_id, ctx.idle_timeout)
                         .await
                     {
-                        Ok(_) => {
+                        Ok(stop_reason) => {
+                            let usage = agent.acp.take_turn_usage();
+                            publish_agent_turn_metric(
+                                &ctx,
+                                usage,
+                                Some(*cid),
+                                &session_id,
+                                &format!("{turn_id}:initial"),
+                                Some(acp_stop_to_core(&stop_reason)),
+                            )
+                            .await;
                             agent.state.invalidate(&source);
                         }
                         Err(AcpError::AgentExited) => {
