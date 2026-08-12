@@ -204,32 +204,28 @@ export function deriveAgentConfigFieldModel({
   });
 
   if (runtime?.thinkingEnvVar) {
+    const usesNativeAcpEffort = runtime.thinkingEnvVar === "BUZZ_ACP_EFFORT";
     fields.push({
       kind: "effort",
       optionSource:
-        runtime.id === "buzz-agent"
+        usesNativeAcpEffort
+          ? "harnessNative"
+          : runtime.id === "buzz-agent"
           ? "buzzAgentCatalog"
           : "legacyProviderModelCatalog",
       currentPersistence: {
         kind: "envVar",
         key: BUZZ_AGENT_THINKING_EFFORT,
       },
-      targetApplication: { kind: "envVar", key: runtime.thinkingEnvVar },
+      targetApplication: usesNativeAcpEffort
+        ? {
+            kind: "acpConfigOption",
+            id: "effort",
+            category: "thought_level",
+          }
+        : { kind: "envVar", key: runtime.thinkingEnvVar },
       render: "control",
       value: valueFromEnv(config, BUZZ_AGENT_THINKING_EFFORT),
-    });
-  } else if (runtime?.id === "claude") {
-    fields.push({
-      kind: "effort",
-      optionSource: "harnessNative",
-      currentPersistence: { kind: "unavailable" },
-      targetApplication: {
-        kind: "acpConfigOption",
-        id: "effort",
-        category: "thought_level",
-      },
-      render: "deferredUntilNativeOptionsAvailable",
-      value: null,
     });
   } else {
     omissions.push({
