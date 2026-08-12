@@ -32,7 +32,7 @@ test("persists and applies the selected font size across the app", () => {
   assert.equal(preference.getFontSize(), "smaller");
   assert.equal(values.get(preference.FONT_SIZE_STORAGE_KEY), "smaller");
   assert.equal(attributes.get("data-font-size"), "smaller");
-  assert.equal(style.fontSize, "15px");
+  assert.equal(style.fontSize, "16px");
 });
 
 test("previews a font size without changing the saved preference", () => {
@@ -42,11 +42,11 @@ test("previews a font size without changing the saved preference", () => {
   assert.equal(preference.getFontSize(), "smaller");
   assert.equal(values.get(preference.FONT_SIZE_STORAGE_KEY), "smaller");
   assert.equal(attributes.get("data-font-size"), "larger");
-  assert.equal(style.fontSize, "18.7px");
+  assert.equal(style.fontSize, "20.114286px");
 
   preference.previewFontSize(null);
   assert.equal(attributes.get("data-font-size"), "smaller");
-  assert.equal(style.fontSize, "16.5px");
+  assert.equal(style.fontSize, "17.6px");
 });
 
 test("initializes from the stored font size", () => {
@@ -55,5 +55,5 @@ test("initializes from the stored font size", () => {
   preference.initializeFontSizePreference();
   assert.equal(preference.getFontSize(), "larger");
   assert.equal(attributes.get("data-font-size"), "larger");
-  assert.equal(style.fontSize, "17px");
+  assert.equal(style.fontSize, "18.285714px");
 });

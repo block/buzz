@@ -754,13 +754,13 @@ test("app font size and conversation density apply independently", async ({
   );
   await expect(fontSizeDescription).toHaveText("Adjust text throughout Buzz.");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1.0625,
+    authorLineHeight: 1,
     bodyGap: 0.125,
-    fontSize: 0.9375,
+    fontSize: 0.875,
     lineHeight: 1.25,
     paragraphGap: 0.5,
     rowPadding: 0.375,
-    timestampFontSize: 0.6875,
+    timestampFontSize: 0.75,
     timestampLineHeight: 1,
   });
   await expect
@@ -777,7 +777,7 @@ test("app font size and conversation density apply independently", async ({
           .evaluate((element) => element.getBoundingClientRect().width),
       ]),
     )
-    .toEqual([288, 288, 240]);
+    .toEqual([308.5625, 308.5625, 257.140625]);
   await expect
     .poll(() =>
       previewMessage.evaluate((element) => {
@@ -785,15 +785,19 @@ test("app font size and conversation density apply independently", async ({
         return [style.fontSize, style.lineHeight];
       }),
     )
-    .toEqual(["15px", "20px"]);
+    .toEqual(["15px", "21.4286px"]);
   await expect.poll(readSettingsScale).toEqual({
-    fontSize: "14px",
-    lineHeight: "20px",
-    minHeight: "64px",
-    paddingBlock: "12px",
+    fontSize: "15px",
+    lineHeight: "21.4286px",
+    minHeight: "68.5714px",
+    paddingBlock: "12.8571px",
   });
-  await expect.poll(readPreviewTimestampScale).toEqual(["11px", "16px"]);
-  await expect.poll(readSettingsChromeScale).toEqual(["24px", "14px", "18px"]);
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["12.8571px", "17.1429px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.7143px", "15px", "19.2857px"]);
   await expect(densityIndicator).toHaveCSS("transition-duration", "0.2s");
   await expect(densityIndicator).toHaveCSS("transition-property", /transform/);
   await expect(fontSizeIndicator).toHaveCSS("transition-duration", "0.2s");
@@ -834,29 +838,29 @@ test("app font size and conversation density apply independently", async ({
     previewSurfaceBox.x +
     previewSurfaceBox.width -
     (previewChipBox.x + previewChipBox.width);
-  expect(previewChipRightInset).toBeGreaterThanOrEqual(12);
-  expect(previewChipRightInset).toBeLessThanOrEqual(13);
+  expect(previewChipRightInset).toBeGreaterThanOrEqual(13);
+  expect(previewChipRightInset).toBeLessThanOrEqual(15);
   const previewChipTopInset = previewChipBox.y - previewSurfaceBox.y;
-  expect(previewChipTopInset).toBeGreaterThanOrEqual(12);
-  expect(previewChipTopInset).toBeLessThanOrEqual(13);
-  await expect(previewContent).toHaveCSS("padding-top", "16px");
-  await expect(previewContent).toHaveCSS("padding-right", "16px");
-  await expect(previewContent).toHaveCSS("padding-bottom", "16px");
-  await expect(previewContent).toHaveCSS("padding-left", "16px");
+  expect(previewChipTopInset).toBeGreaterThanOrEqual(13);
+  expect(previewChipTopInset).toBeLessThanOrEqual(15);
+  await expect(previewContent).toHaveCSS("padding-top", "17.1429px");
+  await expect(previewContent).toHaveCSS("padding-right", "17.1429px");
+  await expect(previewContent).toHaveCSS("padding-bottom", "17.1429px");
+  await expect(previewContent).toHaveCSS("padding-left", "17.1429px");
   expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeGreaterThanOrEqual(
-    16,
+    17,
   );
   expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeLessThanOrEqual(
-    18,
+    19,
   );
   expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeGreaterThanOrEqual(
-    16,
+    17,
   );
   expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeLessThanOrEqual(
-    18,
+    19,
   );
-  await expect(previewChip).toHaveCSS("padding-top", "4px");
-  await expect(previewChip).toHaveCSS("padding-bottom", "4px");
+  await expect(previewChip).toHaveCSS("padding-top", "4.28571px");
+  await expect(previewChip).toHaveCSS("padding-bottom", "4.28571px");
 
   await densityIndicator.evaluate((element) => {
     element.addEventListener(
@@ -880,23 +884,27 @@ test("app font size and conversation density apply independently", async ({
     )
     .toBe("compact");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1.0625,
+    authorLineHeight: 1,
     bodyGap: 0,
-    fontSize: 0.9375,
+    fontSize: 0.875,
     lineHeight: 1.25,
     paragraphGap: 0.375,
     rowPadding: 0.25,
-    timestampFontSize: 0.6875,
+    timestampFontSize: 0.75,
     timestampLineHeight: 1,
   });
   await expect.poll(readSettingsScale).toEqual({
-    fontSize: "14px",
-    lineHeight: "20px",
-    minHeight: "64px",
-    paddingBlock: "12px",
+    fontSize: "15px",
+    lineHeight: "21.4286px",
+    minHeight: "68.5714px",
+    paddingBlock: "12.8571px",
   });
-  await expect.poll(readPreviewTimestampScale).toEqual(["11px", "16px"]);
-  await expect.poll(readSettingsChromeScale).toEqual(["24px", "14px", "18px"]);
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["12.8571px", "17.1429px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.7143px", "15px", "19.2857px"]);
 
   await larger.click();
   await expect(root).toHaveAttribute("data-conversation-density", "compact");
@@ -911,13 +919,13 @@ test("app font size and conversation density apply independently", async ({
     )
     .toBe("larger");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1.0625,
+    authorLineHeight: 1,
     bodyGap: 0,
-    fontSize: 0.9375,
+    fontSize: 0.875,
     lineHeight: 1.25,
     paragraphGap: 0.375,
     rowPadding: 0.25,
-    timestampFontSize: 0.6875,
+    timestampFontSize: 0.75,
     timestampLineHeight: 1,
   });
   await expect
@@ -927,17 +935,19 @@ test("app font size and conversation density apply independently", async ({
         return [style.fontSize, style.lineHeight];
       }),
     )
-    .toEqual(["15.9375px", "21.25px"]);
+    .toEqual(["16px", "22.8571px"]);
   await expect.poll(readSettingsScale).toEqual({
-    fontSize: "14.875px",
-    lineHeight: "21.25px",
-    minHeight: "68px",
-    paddingBlock: "12.75px",
+    fontSize: "16px",
+    lineHeight: "22.8571px",
+    minHeight: "73.1429px",
+    paddingBlock: "13.7143px",
   });
-  await expect.poll(readPreviewTimestampScale).toEqual(["11.6875px", "17px"]);
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["13.7143px", "18.2857px"]);
   await expect
     .poll(readSettingsChromeScale)
-    .toEqual(["25.5px", "14.875px", "19.125px"]);
+    .toEqual(["27.4286px", "16px", "20.5714px"]);
   await waitForAnimations(page);
   await page.getByTestId("appearance-preferences-card").screenshot({
     path: `${SHOTS}/15-conversation-compact-larger.png`,
@@ -948,38 +958,40 @@ test("app font size and conversation density apply independently", async ({
   await expect(root).toHaveAttribute("data-font-size", "larger");
   await expect(spacious).toHaveAttribute("aria-pressed", "true");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1.0625,
+    authorLineHeight: 1,
     bodyGap: 0.25,
-    fontSize: 0.9375,
+    fontSize: 0.875,
     lineHeight: 1.25,
     paragraphGap: 0.625,
     rowPadding: 0.5,
-    timestampFontSize: 0.6875,
+    timestampFontSize: 0.75,
     timestampLineHeight: 1,
   });
   await expect.poll(readSettingsScale).toEqual({
-    fontSize: "14.875px",
-    lineHeight: "21.25px",
-    minHeight: "68px",
-    paddingBlock: "12.75px",
+    fontSize: "16px",
+    lineHeight: "22.8571px",
+    minHeight: "73.1429px",
+    paddingBlock: "13.7143px",
   });
-  await expect.poll(readPreviewTimestampScale).toEqual(["11.6875px", "17px"]);
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["13.7143px", "18.2857px"]);
   await expect
     .poll(readSettingsChromeScale)
-    .toEqual(["25.5px", "14.875px", "19.125px"]);
+    .toEqual(["27.4286px", "16px", "20.5714px"]);
 
   await smaller.click();
   await expect(root).toHaveAttribute("data-conversation-density", "spacious");
   await expect(root).toHaveAttribute("data-font-size", "smaller");
   await expect(smaller).toHaveAttribute("aria-pressed", "true");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1.0625,
+    authorLineHeight: 1,
     bodyGap: 0.25,
-    fontSize: 0.9375,
+    fontSize: 0.875,
     lineHeight: 1.25,
     paragraphGap: 0.625,
     rowPadding: 0.5,
-    timestampFontSize: 0.6875,
+    timestampFontSize: 0.75,
     timestampLineHeight: 1,
   });
   await expect
@@ -989,17 +1001,15 @@ test("app font size and conversation density apply independently", async ({
         return [style.fontSize, style.lineHeight];
       }),
     )
-    .toEqual(["14.0625px", "18.75px"]);
+    .toEqual(["14px", "20px"]);
   await expect.poll(readSettingsScale).toEqual({
-    fontSize: "13.125px",
-    lineHeight: "18.75px",
-    minHeight: "60px",
-    paddingBlock: "11.25px",
+    fontSize: "14px",
+    lineHeight: "20px",
+    minHeight: "64px",
+    paddingBlock: "12px",
   });
-  await expect.poll(readPreviewTimestampScale).toEqual(["10.3125px", "15px"]);
-  await expect
-    .poll(readSettingsChromeScale)
-    .toEqual(["22.5px", "13.125px", "16.875px"]);
+  await expect.poll(readPreviewTimestampScale).toEqual(["12px", "16px"]);
+  await expect.poll(readSettingsChromeScale).toEqual(["24px", "14px", "18px"]);
   await waitForAnimations(page);
   await page.getByTestId("appearance-preferences-card").screenshot({
     path: `${SHOTS}/16-conversation-spacious-smaller.png`,
@@ -1042,20 +1052,20 @@ test("app font size and conversation density apply independently", async ({
     )
     .toBe("comfortable");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1.0625,
+    authorLineHeight: 1,
     bodyGap: 0.25,
-    fontSize: 0.9375,
+    fontSize: 0.875,
     lineHeight: 1.25,
     paragraphGap: 0.625,
     rowPadding: 0.5,
-    timestampFontSize: 0.6875,
+    timestampFontSize: 0.75,
     timestampLineHeight: 1,
   });
   await expect.poll(readSettingsScale).toEqual({
-    fontSize: "14px",
-    lineHeight: "20px",
-    minHeight: "64px",
-    paddingBlock: "12px",
+    fontSize: "15px",
+    lineHeight: "21.4286px",
+    minHeight: "68.5714px",
+    paddingBlock: "12.8571px",
   });
   await page.mouse.up();
   await expect(spacious).toHaveAttribute("aria-pressed", "true");
@@ -1107,10 +1117,10 @@ test("app font size and conversation density apply independently", async ({
         return [style.fontSize, style.lineHeight];
       }),
     )
-    .toEqual(["15.9375px", "21.25px"]);
+    .toEqual(["16px", "22.8571px"]);
   await expect
     .poll(readSettingsChromeScale)
-    .toEqual(["25.5px", "14.875px", "19.125px"]);
+    .toEqual(["27.4286px", "16px", "20.5714px"]);
   await page.mouse.up();
   await expect(larger).toHaveAttribute("aria-pressed", "true");
   await expect

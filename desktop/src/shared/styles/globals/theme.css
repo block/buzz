@@ -7,14 +7,14 @@
      * Inbox, and the composer. The app-wide Font size preference and Cmd +/-
      * scale these rem values; Conversation density overrides only spacing.
      */
-    --conversation-message-font-size: 0.9375rem;
+    --conversation-message-font-size: 0.875rem;
     --conversation-message-line-height: 1.25rem;
-    --conversation-author-line-height: 1.0625rem;
+    --conversation-author-line-height: 1rem;
     --conversation-body-gap: 0.125rem;
     --conversation-row-padding-block: 0.375rem;
     --conversation-paragraph-gap: 0.5rem;
     --conversation-list-item-gap: 0.375rem;
-    --conversation-timestamp-font-size: 0.6875rem;
+    --conversation-timestamp-font-size: 0.75rem;
     --conversation-timestamp-line-height: 1rem;
     --background: 220 23.08% 94.9%;
     --foreground: 234 16.02% 35.49%;

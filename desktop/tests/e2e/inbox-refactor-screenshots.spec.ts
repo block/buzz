@@ -343,7 +343,7 @@ test.describe("inbox refactor screenshots", () => {
     await expect(firstUnreadRow).toBeVisible();
     const listPreview = firstUnreadRow.locator(".inbox-preview-markdown");
     await expect(listPreview).toHaveCSS("font-size", "15px");
-    await expect(listPreview).toHaveCSS("line-height", "20px");
+    await expect(listPreview).toHaveCSS("line-height", "21.4286px");
     await firstUnreadRow.click();
 
     const detail = page.getByTestId("home-inbox-detail");
@@ -413,12 +413,12 @@ test.describe("inbox refactor screenshots", () => {
         }),
       ]);
     await expect.poll(readConversationMetrics).toEqual([
-      { fontSize: "15px", lineHeight: "20px" },
-      { paddingBottom: "6px", paddingTop: "6px" },
-      { fontSize: "15px", lineHeight: "17px" },
-      { fontSize: "15px", lineHeight: "20px" },
-      { fontSize: "11px", lineHeight: "16px" },
-      { fontSize: "15px", lineHeight: "20px" },
+      { fontSize: "15px", lineHeight: "21.4286px" },
+      { paddingBottom: "6.42857px", paddingTop: "6.42857px" },
+      { fontSize: "15px", lineHeight: "17.1429px" },
+      { fontSize: "15px", lineHeight: "21.4286px" },
+      { fontSize: "12.8571px", lineHeight: "17.1429px" },
+      { fontSize: "15px", lineHeight: "21.4286px" },
     ]);
     await waitForAnimations(page);
 
@@ -428,25 +428,25 @@ test.describe("inbox refactor screenshots", () => {
       root.setAttribute("data-conversation-density", "compact");
     });
     await expect.poll(readConversationMetrics).toEqual([
-      { fontSize: "15px", lineHeight: "20px" },
-      { paddingBottom: "4px", paddingTop: "4px" },
-      { fontSize: "15px", lineHeight: "17px" },
-      { fontSize: "15px", lineHeight: "20px" },
-      { fontSize: "11px", lineHeight: "16px" },
-      { fontSize: "15px", lineHeight: "20px" },
+      { fontSize: "15px", lineHeight: "21.4286px" },
+      { paddingBottom: "4.28571px", paddingTop: "4.28571px" },
+      { fontSize: "15px", lineHeight: "17.1429px" },
+      { fontSize: "15px", lineHeight: "21.4286px" },
+      { fontSize: "12.8571px", lineHeight: "17.1429px" },
+      { fontSize: "15px", lineHeight: "21.4286px" },
     ]);
 
     await page.locator("html").evaluate((root) => {
       root.setAttribute("data-font-size", "smaller");
-      root.style.fontSize = "15px";
+      root.style.fontSize = "16px";
     });
     await expect.poll(readConversationMetrics).toEqual([
-      { fontSize: "14.0625px", lineHeight: "18.75px" },
-      { paddingBottom: "3.75px", paddingTop: "3.75px" },
-      { fontSize: "14.0625px", lineHeight: "15.9375px" },
-      { fontSize: "14.0625px", lineHeight: "18.75px" },
-      { fontSize: "10.3125px", lineHeight: "15px" },
-      { fontSize: "14.0625px", lineHeight: "18.75px" },
+      { fontSize: "14px", lineHeight: "20px" },
+      { paddingBottom: "4px", paddingTop: "4px" },
+      { fontSize: "14px", lineHeight: "16px" },
+      { fontSize: "14px", lineHeight: "20px" },
+      { fontSize: "12px", lineHeight: "16px" },
+      { fontSize: "14px", lineHeight: "20px" },
     ]);
     await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/05-thread-context-compact.png` });
@@ -454,15 +454,15 @@ test.describe("inbox refactor screenshots", () => {
     await page.locator("html").evaluate((root) => {
       root.setAttribute("data-conversation-density", "spacious");
       root.setAttribute("data-font-size", "larger");
-      root.style.fontSize = "17px";
+      root.style.fontSize = "18.285714px";
     });
     await expect.poll(readConversationMetrics).toEqual([
-      { fontSize: "15.9375px", lineHeight: "21.25px" },
-      { paddingBottom: "8.5px", paddingTop: "8.5px" },
-      { fontSize: "15.9375px", lineHeight: "18.0625px" },
-      { fontSize: "15.9375px", lineHeight: "21.25px" },
-      { fontSize: "11.6875px", lineHeight: "17px" },
-      { fontSize: "15.9375px", lineHeight: "21.25px" },
+      { fontSize: "16px", lineHeight: "22.8571px" },
+      { paddingBottom: "9.14286px", paddingTop: "9.14286px" },
+      { fontSize: "16px", lineHeight: "18.2857px" },
+      { fontSize: "16px", lineHeight: "22.8571px" },
+      { fontSize: "13.7143px", lineHeight: "18.2857px" },
+      { fontSize: "16px", lineHeight: "22.8571px" },
     ]);
     await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/06-thread-context-spacious.png` });
@@ -470,7 +470,7 @@ test.describe("inbox refactor screenshots", () => {
     await page.locator("html").evaluate((root) => {
       root.setAttribute("data-conversation-density", "comfortable");
       root.setAttribute("data-font-size", "default");
-      root.style.fontSize = "16px";
+      root.style.fontSize = "17.142857px";
     });
 
     await page.evaluate(() => {
@@ -496,13 +496,13 @@ test.describe("inbox refactor screenshots", () => {
         ...(await readConversationMetrics()),
       ])
       .toEqual([
-        "17.6px",
-        { fontSize: "16.5px", lineHeight: "22px" },
-        { paddingBottom: "6.6px", paddingTop: "6.6px" },
-        { fontSize: "16.5px", lineHeight: "18.7px" },
-        { fontSize: "16.5px", lineHeight: "22px" },
-        { fontSize: "12.1px", lineHeight: "17.6px" },
-        { fontSize: "16.5px", lineHeight: "22px" },
+        "18.8571px",
+        { fontSize: "16.5px", lineHeight: "23.5714px" },
+        { paddingBottom: "7.07143px", paddingTop: "7.07143px" },
+        { fontSize: "16.5px", lineHeight: "18.8571px" },
+        { fontSize: "16.5px", lineHeight: "23.5714px" },
+        { fontSize: "14.1429px", lineHeight: "18.8571px" },
+        { fontSize: "16.5px", lineHeight: "23.5714px" },
       ]);
   });
 });

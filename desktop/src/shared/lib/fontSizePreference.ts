@@ -6,10 +6,14 @@ export type FontSize = "smaller" | "default" | "larger";
 export const FONT_SIZE_STORAGE_KEY = "buzz.appearance.fontSize";
 export const DEFAULT_FONT_SIZE: FontSize = "default";
 
+/**
+ * Root sizes that map Tailwind's production `text-sm` size (0.875rem) to the
+ * three app-wide 14px, 15px, and 16px steps.
+ */
 const BASE_FONT_SIZE_PX: Record<FontSize, number> = {
-  smaller: 15,
-  default: 16,
-  larger: 17,
+  smaller: 14 / 0.875,
+  default: 15 / 0.875,
+  larger: 16 / 0.875,
 };
 
 const listeners = new Set<() => void>();
@@ -33,7 +37,9 @@ function readStoredFontSize(): FontSize {
 }
 
 function rootFontSizePx(size: FontSize): number {
-  return Math.round(BASE_FONT_SIZE_PX[size] * textZoomFactor * 1_000) / 1_000;
+  return (
+    Math.round(BASE_FONT_SIZE_PX[size] * textZoomFactor * 1_000_000) / 1_000_000
+  );
 }
 
 function applyFontSize(size: FontSize): void {
