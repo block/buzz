@@ -619,7 +619,7 @@ test("appearance groups theme and preferences into labeled rows", async ({
         (lightModeButtonBox.x + lightModeButtonBox.width / 2),
     ),
   ).toBeLessThanOrEqual(0.5);
-  await expect(colorModeIndicator).toHaveCSS("transition-duration", "0.25s");
+  await expect(colorModeIndicator).toHaveCSS("transition-duration", "0.2s");
 
   await themeCard.getByTestId("appearance-mode-dark").click();
   await waitForAnimations(page);
