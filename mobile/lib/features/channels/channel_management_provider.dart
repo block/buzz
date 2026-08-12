@@ -68,13 +68,56 @@ class ChannelMember {
   }
 }
 
+String _channelMemberSnapshotKey({
+  required String relayBaseUrl,
+  required String? pubkey,
+  required String channelId,
+}) =>
+    '${relayBaseUrl.toLowerCase()}::${pubkey?.toLowerCase() ?? 'anon'}::$channelId';
+
+class _ChannelMembersSnapshotCache {
+  final _membersByKey = <String, List<ChannelMember>>{};
+
+  List<ChannelMember> read({
+    required String relayBaseUrl,
+    required String? pubkey,
+    required String channelId,
+  }) =>
+      _membersByKey[_channelMemberSnapshotKey(
+        relayBaseUrl: relayBaseUrl,
+        pubkey: pubkey,
+        channelId: channelId,
+      )] ??
+      const [];
+
+  void write({
+    required String relayBaseUrl,
+    required String? pubkey,
+    required String channelId,
+    required List<ChannelMember> members,
+  }) {
+    _membersByKey[_channelMemberSnapshotKey(
+      relayBaseUrl: relayBaseUrl,
+      pubkey: pubkey,
+      channelId: channelId,
+    )] = List.unmodifiable(
+      members,
+    );
+  }
+}
+
+final _channelMembersSnapshotCacheProvider =
+    Provider<_ChannelMembersSnapshotCache>((ref) {
+      return _ChannelMembersSnapshotCache();
+    });
+
 /// Uses the relay-backed member list when connected, but keeps the channel
-/// snapshot visible while a reconnect temporarily publishes an empty result.
+/// snapshot visible while a reconnect temporarily interrupts the refresh.
 ///
-/// An empty member list is authoritative while connected. During reconnect,
-/// [channelMembersProvider] deliberately avoids a relay request and returns an
-/// empty value; autocomplete should treat that value as unavailable so the
-/// snapshot can keep suggestions visible until the refresh completes.
+/// The provider retains its current value while disconnected and also keeps a
+/// relay/account/channel-scoped snapshot for consumers that mount during the
+/// reconnect window. An empty member list is authoritative only after a
+/// connected fetch completes.
 List<ChannelMember> channelMembersForAutocomplete({
   required AsyncValue<List<ChannelMember>> membersAsync,
   required SessionStatus sessionStatus,
@@ -441,19 +484,47 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
 final channelMembersProvider = FutureProvider.autoDispose
     .family<List<ChannelMember>, String>((ref, channelId) async {
       ref.watch(channelMembershipUpdateProvider(channelId));
-      final sessionState = ref.watch(relaySessionProvider);
-      if (sessionState.status != SessionStatus.connected) return const [];
+      final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
+      final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
+      final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
+
+      // Keep the current AsyncData value through reconnecting/connecting
+      // transitions. Invalidating only when the session becomes connected
+      // avoids publishing AsyncData([]) to every member-data consumer while
+      // the refresh is waiting for the socket.
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (next.status == SessionStatus.connected &&
+            previous?.status != SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
+      final sessionState = ref.read(relaySessionProvider);
+      if (sessionState.status != SessionStatus.connected) {
+        return snapshotCache.read(
+          relayBaseUrl: relayBaseUrl,
+          pubkey: pubkey,
+          channelId: channelId,
+        );
+      }
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilters.channelMembers(channelId),
       );
-      if (events.isEmpty) return const [];
+      if (events.isEmpty) {
+        snapshotCache.write(
+          relayBaseUrl: relayBaseUrl,
+          pubkey: pubkey,
+          channelId: channelId,
+          members: const [],
+        );
+        return const [];
+      }
       final event = events.first;
       final joinedAt = DateTime.fromMillisecondsSinceEpoch(
         event.createdAt * 1000,
         isUtc: true,
       );
-      return membersFromEvent(event)
+      final members = membersFromEvent(event)
           .map(
             (m) => ChannelMember(
               pubkey: m.pubkey,
@@ -462,6 +533,13 @@ final channelMembersProvider = FutureProvider.autoDispose
             ),
           )
           .toList();
+      snapshotCache.write(
+        relayBaseUrl: relayBaseUrl,
+        pubkey: pubkey,
+        channelId: channelId,
+        members: members,
+      );
+      return members;
     });
 
 /// Channel canvas (kind:40100 for the channel).

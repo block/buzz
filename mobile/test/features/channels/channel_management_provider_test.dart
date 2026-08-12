@@ -254,6 +254,41 @@ void main() {
       expect(members.single.role, 'admin');
     });
 
+    test(
+      'keeps the provider member snapshot available during reconnect',
+      () async {
+        final session = _ConnectionAwareRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        final subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
+
+        session.connect();
+        await container.pump();
+        final connectedMembers = await container.read(
+          channelMembersProvider(_channelId).future,
+        );
+        expect(connectedMembers, hasLength(1));
+        expect(session.historyQueryCount, 1);
+
+        session.setStatus(SessionStatus.reconnecting);
+        await container.pump();
+
+        final reconnectingMembers = container
+            .read(channelMembersProvider(_channelId))
+            .asData
+            ?.value;
+        expect(reconnectingMembers, connectedMembers);
+        expect(session.historyQueryCount, 1);
+      },
+    );
+
     test('keeps the member snapshot available during reconnect', () {
       final cachedMembers = [
         ChannelMember(
@@ -443,6 +478,10 @@ class _ConnectionAwareRelaySession extends RelaySessionNotifier {
         sig: 'sig',
       ),
     ];
+  }
+
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
   }
 
   @override

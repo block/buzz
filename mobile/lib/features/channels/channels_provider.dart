@@ -51,6 +51,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _threadInterestPubkey;
   bool _hasLoaded = false;
   String? _memberSnapshotRelayBaseUrl;
+  String? _memberSnapshotPubkey;
   Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
 
   /// The member snapshot already returned while loading the channel list.
@@ -73,8 +74,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   @override
   Future<List<Channel>> build() async {
     final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
-    if (_memberSnapshotRelayBaseUrl != relayBaseUrl) {
+    final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
+    if (_memberSnapshotRelayBaseUrl != relayBaseUrl ||
+        _memberSnapshotPubkey != pubkey) {
       _memberSnapshotRelayBaseUrl = relayBaseUrl;
+      _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
     }
     final connected = Completer<void>();
