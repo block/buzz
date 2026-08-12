@@ -3049,17 +3049,27 @@ async fn resubscribe_after_reconnect(
     }
 }
 
-/// Send a signed EVENT frame on the live socket. Returns `false` on send failure.
+/// Serialize a signed EVENT frame without hiding serialization failure.
+fn serialize_publish_event_frame<T: serde::Serialize>(event: &T) -> serde_json::Result<String> {
+    serde_json::to_string(&("EVENT", event))
+}
+
+/// Send a signed EVENT frame on the live socket. Returns `false` on serialization
+/// or send failure.
 ///
 /// Callers decide whether a failed write is droppable or requires reconnect.
 async fn send_publish_event_frame(ws: &mut WsStream, event: &Event) -> bool {
-    let msg = json!(["EVENT", event]);
-    if let Ok(text) = serde_json::to_string(&msg) {
-        if let Err(e) = ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await
-        {
-            warn!("failed to publish event: {e}");
+    let text = match serialize_publish_event_frame(event) {
+        Ok(text) => text,
+        Err(error) => {
+            warn!("failed to serialize publish event frame: {error}");
             return false;
         }
+    };
+    if let Err(error) = ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await
+    {
+        warn!("failed to publish event: {error}");
+        return false;
     }
     true
 }
@@ -4471,6 +4481,33 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SerializationFailure;
+
+    impl serde::Serialize for SerializationFailure {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("intentional test failure"))
+        }
+    }
+
+    #[test]
+    fn publish_event_frame_serialization_propagates_failure() {
+        assert!(serialize_publish_event_frame(&SerializationFailure).is_err());
+    }
+
+    #[test]
+    fn publish_event_frame_serialization_preserves_event_wire_shape() {
+        let event = EventBuilder::new(Kind::TextNote, "safe")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        let text = serialize_publish_event_frame(&event).expect("serialize EVENT frame");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("parse EVENT frame");
+        assert_eq!(value[0], "EVENT");
+        assert_eq!(value[1]["id"], event.id.to_hex());
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {

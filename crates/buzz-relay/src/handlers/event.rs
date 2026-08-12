@@ -200,38 +200,28 @@ pub async fn filter_fanout_by_access(
     };
 
     // Authoritative kind-24201 fence: run before channel-less/open-channel
-    // short-circuits and before every cache-backed membership path.
+    // short-circuits and before every cache-backed membership path. The full
+    // signed envelope, Redis/local route, managed-agent status, producer
+    // membership, and channel state are revalidated here at the shared delivery
+    // chokepoint; admission at publication time is not sufficient authority.
     if event_kind_u32(&stored_event.event) == KIND_AGENT_ACTIVITY_SUMMARY {
-        let Some(channel_id) = stored_event.channel_id else {
+        let Some(routed_channel_id) = stored_event.channel_id else {
             return Vec::new();
         };
-        let matches =
-            filter_agent_activity_subscription_matches(&state.sub_registry, channel_id, matches);
+        let matches = filter_agent_activity_subscription_matches(
+            &state.sub_registry,
+            routed_channel_id,
+            matches,
+        );
         if matches.is_empty() {
             return Vec::new();
         }
-        let channel = match state.db.get_channel(community_id, channel_id).await {
-            Ok(channel)
-                if agent_activity_channel_allowed(
-                    &channel.channel_type,
-                    channel.archived_at.is_some(),
-                ) =>
-            {
-                channel
-            }
-            Ok(_) => return Vec::new(),
-            Err(error) => {
-                warn!(
-                    %channel_id,
-                    "agent activity fan-out fence: channel lookup failed: {error}"
-                );
-                return Vec::new();
-            }
+        let Some((channel_id, channel_type, channel_visibility)) =
+            authorize_agent_activity_delivery(state, community_id, stored_event).await
+        else {
+            return Vec::new();
         };
-        debug_assert!(agent_activity_channel_allowed(
-            &channel.channel_type,
-            channel.archived_at.is_some()
-        ));
+        debug_assert_eq!(channel_id, routed_channel_id);
 
         let mut recipient_pubkeys: Vec<Vec<u8>> = matches
             .iter()
@@ -268,8 +258,8 @@ pub async fn filter_fanout_by_access(
                 let pubkey = state.conn_manager.pubkey_for_conn(*conn_id);
                 agent_activity_delivery_allowed(
                     Some(channel_id),
-                    Some(&channel.channel_type),
-                    Some(&channel.visibility),
+                    Some(&channel_type),
+                    Some(&channel_visibility),
                     pubkey.as_deref(),
                     &active_pubkeys,
                 )
@@ -1176,6 +1166,71 @@ fn validate_agent_activity_envelope(event: &Event, now: i64) -> Result<uuid::Uui
     agent_activity_route(event)
 }
 
+fn validate_agent_activity_delivery_envelope(
+    event: &Event,
+    routed_channel_id: Option<uuid::Uuid>,
+    now: i64,
+) -> Result<uuid::Uuid, String> {
+    let event_channel_id = validate_agent_activity_envelope(event, now)?;
+    if routed_channel_id != Some(event_channel_id) {
+        return Err("invalid: agent activity route does not match canonical h tag".into());
+    }
+    Ok(event_channel_id)
+}
+
+/// Re-authorize a kind-24201 producer at the final delivery seam shared by
+/// relay-local and Redis fan-out. All lookups are fresh and fail closed.
+async fn authorize_agent_activity_delivery(
+    state: &AppState,
+    community_id: CommunityId,
+    stored_event: &StoredEvent,
+) -> Option<(uuid::Uuid, String, String)> {
+    let routed_channel_id = stored_event.channel_id;
+    let event = stored_event.event.clone();
+    let now = chrono::Utc::now().timestamp();
+    let channel_id = match tokio::task::spawn_blocking(move || {
+        validate_agent_activity_delivery_envelope(&event, routed_channel_id, now)
+    })
+    .await
+    {
+        Ok(Ok(channel_id)) => channel_id,
+        Ok(Err(message)) => {
+            warn!(reason = %message, "agent activity delivery envelope rejected");
+            return None;
+        }
+        Err(error) => {
+            warn!("agent activity delivery verification task failed: {error}");
+            return None;
+        }
+    };
+
+    let agent_bytes = stored_event.event.pubkey.to_bytes().to_vec();
+    let (policy, member, channel) = tokio::join!(
+        state
+            .db
+            .get_agent_channel_policy(community_id, &agent_bytes),
+        state.db.is_member(community_id, channel_id, &agent_bytes),
+        state.db.get_channel(community_id, channel_id),
+    );
+    let (policy, member, channel) = match (policy, member, channel) {
+        (Ok(policy), Ok(member), Ok(channel)) => (policy, member, channel),
+        _ => {
+            warn!(
+                %channel_id,
+                "agent activity delivery authorization lookup failed"
+            );
+            return None;
+        }
+    };
+    if !agent_activity_principal_allowed(policy.as_ref(), member)
+        || !agent_activity_channel_allowed(&channel.channel_type, channel.archived_at.is_some())
+    {
+        return None;
+    }
+
+    Some((channel_id, channel.channel_type, channel.visibility))
+}
+
 async fn handle_agent_activity_event(
     event: Event,
     conn_id: uuid::Uuid,
@@ -1792,6 +1847,27 @@ mod tests {
         assert!(super::validate_agent_activity_envelope(
             &forged,
             forged.created_at.as_secs() as i64
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn agent_activity_delivery_envelope_rejects_missing_or_mismatched_topic() {
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = agent_activity_event(&agent, channel_id, valid_agent_activity_content(), None);
+        let now = event.created_at.as_secs() as i64;
+
+        assert_eq!(
+            super::validate_agent_activity_delivery_envelope(&event, Some(channel_id), now)
+                .expect("canonical channel topic should be accepted"),
+            channel_id
+        );
+        assert!(super::validate_agent_activity_delivery_envelope(&event, None, now).is_err());
+        assert!(super::validate_agent_activity_delivery_envelope(
+            &event,
+            Some(Uuid::new_v4()),
+            now
         )
         .is_err());
     }
@@ -2684,7 +2760,7 @@ mod tests {
         use std::sync::Arc;
 
         use buzz_core::StoredEvent;
-        use nostr::{EventBuilder, Keys, Kind};
+        use nostr::{EventBuilder, Filter, Keys, Kind};
         use tokio::sync::{mpsc, Mutex};
         use tokio_util::sync::CancellationToken;
         use uuid::Uuid;
@@ -2875,12 +2951,25 @@ mod tests {
         #[tokio::test]
         async fn agent_activity_db_or_unknown_channel_error_fails_closed() {
             let state = test_state().await;
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            let channel_id = Uuid::new_v4();
             let conn = register_conn(&state, Some(vec![1u8; 32]));
+            let activity_kind = Kind::Custom(buzz_core::kind::KIND_AGENT_ACTIVITY_SUMMARY as u16);
+            let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+            state.sub_registry.register_scoped(
+                community_id,
+                conn,
+                "activity".to_string(),
+                vec![Filter::new()
+                    .kind(activity_kind)
+                    .custom_tags(h, [channel_id.to_string()])],
+                Some(channel_id),
+            );
             let out = filter_fanout_by_access(
                 &state,
-                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
-                &agent_activity_event(Some(Uuid::new_v4())),
-                vec![(conn, "generic".to_string())],
+                community_id,
+                &agent_activity_event(Some(channel_id)),
+                vec![(conn, "activity".to_string())],
                 None,
             )
             .await;

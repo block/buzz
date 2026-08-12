@@ -135,6 +135,12 @@ fn agent_activity_req_access_allowed(
         && token_channel_ids.is_none_or(|allowed| allowed.contains(&channel_id))
 }
 
+/// Kind 24201 is an ephemeral live stream. It is registered for fan-out and
+/// receives an immediate EOSE, but must never reach a historical-event query.
+fn should_query_historical_events(agent_activity_channel: Option<uuid::Uuid>) -> bool {
+    agent_activity_channel.is_none()
+}
+
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
 pub async fn handle_req(
     sub_id: String,
@@ -415,6 +421,16 @@ pub async fn handle_req(
         .await;
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
+
+    if !should_query_historical_events(agent_activity_channel) {
+        conn.send(RelayMessage::eose(&sub_id));
+        debug!(
+            conn_id = %conn_id,
+            sub_id = %sub_id,
+            "Live-only agent activity subscription ready"
+        );
+        return;
+    }
 
     // NIP-01 OR semantics: execute one DB query per filter and deduplicate results
     // by event ID. Collapsing all filters into a single query would merge their
@@ -1483,6 +1499,12 @@ mod tests {
                 Some(channel)
             );
         }
+    }
+
+    #[test]
+    fn agent_activity_req_is_registered_live_only_without_history_query() {
+        assert!(!should_query_historical_events(Some(uuid::Uuid::new_v4())));
+        assert!(should_query_historical_events(None));
     }
 
     #[test]
