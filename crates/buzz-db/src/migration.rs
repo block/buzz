@@ -4,24 +4,75 @@
 //! multi-tenant rewrite owns a clean consolidated `0001`; legacy single-tenant
 //! cutover/backfill is a separate operator script, not startup migration state.
 
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 
 use crate::Result;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 /// Run all pending Buzz database migrations.
+///
+/// Everything that can be slow on a populated database — the legacy NIP-RS
+/// preflight scan and the migrator itself — runs on one dedicated connection
+/// with the runtime `statement_timeout` and `lock_timeout` lifted. An index
+/// build on a populated table, an `ACCESS EXCLUSIVE` wait behind live traffic,
+/// or a full scan of `events` with per-row JSON expansion routinely outlasts
+/// the runtime caps — and because startup treats a migration failure as fatal,
+/// inheriting them would turn a slow migration into a relay that cannot boot.
+/// sqlx also takes its migration advisory lock as a single waiting statement,
+/// so a second replica rolling out would be canceled mid-wait rather than
+/// queueing behind the first.
+///
+/// The connection is detached from the pool before its limits are lifted and
+/// closed afterwards: a session with no caps must never serve traffic, and
+/// detaching first means even a cancellation mid-migration drops it rather than
+/// releasing it back.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
-    reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
-    MIGRATOR.run(pool).await?;
+    let mut connection = exempt_migration_connection(pool).await?;
+    let migrated = migrate_on_exempt_connection(&mut connection).await;
+    // Close the connection either way; report the migration outcome first so a
+    // close failure cannot mask it.
+    let closed = connection.close().await;
+    migrated?;
+    closed?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
     // `created_at` floor trigger from migration 0021 — correctly shaped — on
     // the `events` parent and every partition. `CREATE TABLE .. PARTITION OF`
     // clones parent triggers, but a partition attached with `ATTACH
     // PARTITION` or created by an older code path would silently escape the
     // guard, so migration fails closed if any is missing. (The fence probe
-    // re-runs this same check at startup on non-migrating relays.)
+    // re-runs this same check at startup on non-migrating relays.) Catalog-only
+    // and bounded by the number of partitions, so the runtime caps are fine.
     crate::replica_fence::verify_floor_guard_catalog(pool).await?;
+    Ok(())
+}
+
+/// Take a connection out of the pool for good, then lift its runtime limits.
+///
+/// Detaching before lifting is what makes the exemption structurally
+/// cancellation-safe: a [`sqlx::pool::PoolConnection`] returns itself to the
+/// pool on drop, so a future cancelled after the lift would hand an unbounded
+/// session to runtime traffic. A detached [`sqlx::PgConnection`] closes on drop
+/// instead.
+async fn exempt_migration_connection(pool: &PgPool) -> Result<sqlx::PgConnection> {
+    let mut connection = pool.acquire().await?.detach();
+    lift_runtime_timeouts(&mut connection).await?;
+    Ok(connection)
+}
+
+/// The preflight *and* the migrator, both on the exempt connection. The
+/// preflight stays ahead of sqlx's migration transaction so an operator can
+/// still inspect and repair before any DDL runs.
+async fn migrate_on_exempt_connection(connection: &mut sqlx::PgConnection) -> Result<()> {
+    reject_legacy_nip_rs_cardinality_ambiguity(connection).await?;
+    MIGRATOR.run(connection).await?;
+    Ok(())
+}
+
+/// Remove both runtime limits from one connection's session.
+async fn lift_runtime_timeouts(connection: &mut sqlx::PgConnection) -> Result<()> {
+    crate::apply_runtime_connection_timeouts(connection, &crate::RuntimeTimeouts::disabled())
+        .await?;
     Ok(())
 }
 
@@ -29,17 +80,24 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
 /// enforcement. A populated database still on 0001-0006 must not let 0007
 /// irreversibly purge duplicate-tag history. Fail before sqlx starts its
 /// migration transaction so an operator can inspect and repair those rows.
-async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()> {
+///
+/// Takes a connection, not the pool: the scan below is a full pass over
+/// `events` with per-row JSON expansion on exactly the databases that are large
+/// enough to matter, so it must run on the timeout-exempt migration connection
+/// (see [`run_migrations`]) or a slow scan becomes a fatal startup failure.
+async fn reject_legacy_nip_rs_cardinality_ambiguity(
+    connection: &mut sqlx::PgConnection,
+) -> Result<()> {
     let migrations_table: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
-            .fetch_one(pool)
+            .fetch_one(&mut *connection)
             .await?;
     if migrations_table.is_none() {
         return Ok(());
     }
     let applied: Option<i64> =
         sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
-            .fetch_one(pool)
+            .fetch_one(&mut *connection)
             .await?;
     if applied.is_none_or(|version| version >= 7) {
         return Ok(());
@@ -83,7 +141,7 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()>
                )\
          )",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
 
     if ambiguous {
@@ -1112,6 +1170,20 @@ mod tests {
             .expect("create public schema");
     }
 
+    /// Every limit set to the same tight value. Parsed rather than constructed
+    /// so a typo in a literal fails loudly here instead of silently falling
+    /// back to the runtime default.
+    fn tight_timeouts(raw: &str) -> crate::RuntimeTimeouts {
+        let timeout = raw
+            .parse::<crate::PgTimeout>()
+            .expect("test timeout literal must be valid");
+        crate::RuntimeTimeouts {
+            statement: timeout.clone(),
+            lock: timeout.clone(),
+            idle_in_transaction: timeout,
+        }
+    }
+
     async fn applied_versions(pool: &PgPool) -> Vec<i64> {
         sqlx::query_scalar::<_, i64>(
             "SELECT version FROM _sqlx_migrations WHERE success ORDER BY version",
@@ -1119,6 +1191,86 @@ mod tests {
         .fetch_all(pool)
         .await
         .expect("read applied migrations")
+    }
+
+    /// Read the head version from `MIGRATOR` rather than hardcoding it —
+    /// otherwise every new migration file breaks these assertions.
+    fn latest_migration_version() -> i64 {
+        MIGRATOR
+            .iter()
+            .map(|migration| migration.version)
+            .max()
+            .expect("migrations exist")
+    }
+
+    /// The migration connection must have both limits lifted, and it must not
+    /// come back to the pool afterwards — a session with no statement timeout
+    /// serving traffic is the failure this exemption trades against.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_connection_is_unbounded_and_is_retired_not_reused() {
+        const TIGHT: &str = "50ms";
+
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        // One slot: a reused connection would be handed straight back below.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _meta| {
+                let tight = tight_timeouts(TIGHT);
+                Box::pin(async move {
+                    crate::apply_runtime_connection_timeouts(connection, &tight).await
+                })
+            })
+            .connect(&database_url)
+            .await
+            .expect("connect to test DB");
+
+        let mut pooled = pool.acquire().await.expect("acquire");
+        assert_eq!(show_timeout(&mut pooled, "statement_timeout").await, TIGHT);
+        drop(pooled);
+
+        let mut connection = exempt_migration_connection(&pool)
+            .await
+            .expect("acquire exempt migration connection");
+        for setting in RUNTIME_TIMEOUT_SETTINGS {
+            assert_eq!(
+                show_timeout(&mut connection, setting).await,
+                "0",
+                "{setting} must be lifted for the migrator"
+            );
+        }
+
+        // Dropping without closing stands in for a cancelled migration future:
+        // the connection is detached, so the pool must still not see it.
+        drop(connection);
+
+        let mut fresh = pool.acquire().await.expect("re-acquire");
+        for setting in RUNTIME_TIMEOUT_SETTINGS {
+            assert_eq!(
+                show_timeout(&mut fresh, setting).await,
+                TIGHT,
+                "the pool must not hand out the relaxed migration session"
+            );
+        }
+        drop(fresh);
+        pool.close().await;
+    }
+
+    /// Every GUC `apply_runtime_connection_timeouts` sets, so a limit added
+    /// there without a matching exemption fails these assertions.
+    const RUNTIME_TIMEOUT_SETTINGS: [&str; 3] = [
+        "statement_timeout",
+        "lock_timeout",
+        "idle_in_transaction_session_timeout",
+    ];
+
+    async fn show_timeout(connection: &mut sqlx::PgConnection, setting: &str) -> String {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SHOW {setting}")))
+            .fetch_one(connection)
+            .await
+            .unwrap_or_else(|error| panic!("SHOW {setting}: {error}"))
     }
 
     #[tokio::test]
@@ -1188,7 +1340,139 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
+        assert_eq!(
+            applied_versions(&pool).await.last().copied(),
+            Some(latest_migration_version())
+        );
+    }
+
+    /// A pool whose connections carry `timeout` for both runtime limits.
+    async fn connect_capped_pool(timeout: &'static str) -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |connection, _meta| {
+                let timeouts = tight_timeouts(timeout);
+                Box::pin(async move {
+                    crate::apply_runtime_connection_timeouts(connection, &timeouts).await
+                })
+            })
+            .connect(&database_url)
+            .await
+            .expect("connect capped test pool")
+    }
+
+    fn is_statement_timeout(error: &crate::DbError) -> bool {
+        // 57014 = query_canceled, which is what `statement_timeout` raises.
+        matches!(error, crate::DbError::Sqlx(sqlx::Error::Database(db))
+            if db.code().as_deref() == Some("57014"))
+    }
+
+    /// Conforming (never ambiguous) kind-30078 read-state rows, so the preflight
+    /// scan cannot short-circuit on an early match and has to read them all.
+    async fn seed_conforming_read_state_rows(
+        pool: &PgPool,
+        community_id: uuid::Uuid,
+        offset: i64,
+        count: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, d_tag) \
+             SELECT $1, \
+                    decode(md5('id' || i::text) || md5('id2' || i::text), 'hex'), \
+                    decode(md5('pk' || i::text) || md5('pk2' || i::text), 'hex'), \
+                    NOW(), 30078, \
+                    jsonb_build_array( \
+                        jsonb_build_array('d', 'read-state:' || md5(i::text)), \
+                        jsonb_build_array('t', 'read-state')), \
+                    'conforming', \
+                    decode(repeat(md5(i::text), 4), 'hex'), \
+                    NOW(), \
+                    'read-state:' || md5(i::text) \
+             FROM generate_series($2::bigint, $3::bigint) AS i",
+        )
+        .bind(community_id)
+        .bind(offset + 1)
+        .bind(offset + count)
+        .execute(pool)
+        .await
+        .expect("seed conforming read-state rows");
+    }
+
+    /// The legacy NIP-RS preflight must run on the timeout-exempt migration
+    /// connection, not on a pooled one. It scans all of `events` with per-row
+    /// JSON expansion on exactly the databases big enough for that to be slow,
+    /// and startup treats the error as fatal — so inheriting the runtime
+    /// `statement_timeout` there is a relay that cannot boot. The fresh-database
+    /// migration test returns before this scan and cannot catch the ordering.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_preflight_scan_outlives_the_runtime_statement_timeout() {
+        const TIGHT: &str = "50ms";
+        const SEED_BATCH: i64 = 20_000;
+        const MAX_SEEDED: i64 = 200_000;
+
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(6, &pool)
+            .await
+            .expect("apply migrations 1-6");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("preflight-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        let capped = connect_capped_pool(TIGHT).await;
+
+        // Grow the table until the preflight genuinely exceeds the cap on a
+        // pooled connection. Scan cost is hardware-dependent, so calibrate
+        // instead of hardcoding a row count that is slow on one machine only.
+        let mut seeded = 0;
+        loop {
+            seed_conforming_read_state_rows(&pool, community_id, seeded, SEED_BATCH).await;
+            seeded += SEED_BATCH;
+
+            let mut capped_connection = capped.acquire().await.expect("acquire capped connection");
+            match reject_legacy_nip_rs_cardinality_ambiguity(&mut capped_connection).await {
+                Err(error) if is_statement_timeout(&error) => break,
+                Err(error) => panic!("preflight failed for an unrelated reason: {error}"),
+                Ok(()) => assert!(
+                    seeded < MAX_SEEDED,
+                    "preflight still finished inside {TIGHT} with {seeded} rows; \
+                     the test can no longer prove the exemption is load-bearing"
+                ),
+            }
+        }
+
+        // Same cap, same data — the exemption is the only difference.
+        run_migrations(&capped)
+            .await
+            .expect("migrations must not inherit the runtime caps during the legacy preflight");
+        assert_eq!(
+            applied_versions(&pool).await.last().copied(),
+            Some(latest_migration_version())
+        );
+
+        // And the caps are still in force for traffic afterwards.
+        let mut runtime = capped.acquire().await.expect("acquire after migration");
+        for setting in RUNTIME_TIMEOUT_SETTINGS {
+            assert_eq!(
+                show_timeout(&mut runtime, setting).await,
+                TIGHT,
+                "the pool must not hand out a relaxed session after migrating"
+            );
+        }
+        drop(runtime);
+        capped.close().await;
     }
 
     #[tokio::test]

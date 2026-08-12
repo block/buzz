@@ -66,6 +66,249 @@ use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
+/// Default maximum time a runtime query may execute before Postgres cancels it.
+pub const RUNTIME_STATEMENT_TIMEOUT: &str = "30s";
+/// Default maximum time a runtime query may wait to acquire a lock.
+pub const RUNTIME_LOCK_TIMEOUT: &str = "5s";
+/// Default maximum time a runtime session may sit idle inside an open
+/// transaction. Deliberately looser than [`RUNTIME_STATEMENT_TIMEOUT`]: this
+/// budget covers only the gaps *between* a transaction's statements, so a
+/// transaction doing continuous work is never at risk, and a wide bound still
+/// reclaims a session that has stopped working entirely.
+pub const RUNTIME_IDLE_IN_TRANSACTION_TIMEOUT: &str = "60s";
+/// Postgres spelling of "no limit", used for schema migrations.
+pub const TIMEOUT_DISABLED: &str = "0";
+/// The runtime timeouts are `int` GUCs measured in milliseconds, so Postgres
+/// refuses anything larger regardless of the unit it is spelled with. Private on
+/// purpose: [`PgTimeout`] is the only way to build a timeout, so no caller needs
+/// to range-check by hand.
+/// `pg_timeout_max_millis_matches_postgres` pins it to the live server.
+const PG_TIMEOUT_MAX_MILLIS: u128 = i32::MAX as u128;
+
+/// Why a string is not a timeout Postgres would accept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PgTimeoutError {
+    /// Not an integer with an optional `us`/`ms`/`s`/`min`/`h`/`d` unit.
+    Malformed,
+    /// Well-formed, but larger than Postgres can store in an `int` GUC.
+    OutOfRange {
+        /// The value in milliseconds, for the operator-facing message.
+        millis: u128,
+    },
+}
+
+impl std::fmt::Display for PgTimeoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed => write!(
+                f,
+                "expected an integer with an optional us/ms/s/min/h/d unit"
+            ),
+            Self::OutOfRange { millis } => write!(
+                f,
+                "{millis}ms exceeds the {PG_TIMEOUT_MAX_MILLIS}ms Postgres stores in an int GUC"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PgTimeoutError {}
+
+/// A Postgres timeout that the server is known to accept.
+///
+/// Parsing is the only way to build one from operator input, so a [`DbConfig`]
+/// cannot carry a value that would break
+/// [`apply_runtime_connection_timeouts`] — which runs on every pooled
+/// connection, and would therefore fail all database access. The stored
+/// spelling is canonical: the magnitude followed by the lowercased unit, since
+/// Postgres' unit names are case-sensitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgTimeout(String);
+
+impl PgTimeout {
+    /// The default runtime statement timeout ([`RUNTIME_STATEMENT_TIMEOUT`]).
+    pub fn statement_default() -> Self {
+        Self(RUNTIME_STATEMENT_TIMEOUT.to_string())
+    }
+
+    /// The default runtime lock timeout ([`RUNTIME_LOCK_TIMEOUT`]).
+    pub fn lock_default() -> Self {
+        Self(RUNTIME_LOCK_TIMEOUT.to_string())
+    }
+
+    /// The default idle-in-transaction timeout
+    /// ([`RUNTIME_IDLE_IN_TRANSACTION_TIMEOUT`]).
+    pub fn idle_in_transaction_default() -> Self {
+        Self(RUNTIME_IDLE_IN_TRANSACTION_TIMEOUT.to_string())
+    }
+
+    /// No limit at all — what schema migrations and one-shot operator tools
+    /// run with.
+    pub fn disabled() -> Self {
+        Self(TIMEOUT_DISABLED.to_string())
+    }
+
+    /// The canonical spelling, ready to hand to Postgres.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Parse operator input, falling back to `default` with a warning.
+    ///
+    /// Refusing to start on a bad timeout would be the same outage the limits
+    /// prevent, so a malformed or out-of-range value keeps the documented
+    /// default instead. `None` and blank mean "unset".
+    pub fn parse_or(raw: Option<&str>, default: Self) -> Self {
+        let Some(candidate) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+            return default;
+        };
+        match candidate.parse::<Self>() {
+            Ok(timeout) => timeout,
+            Err(error) => {
+                tracing::warn!(
+                    value = candidate,
+                    default = default.as_str(),
+                    %error,
+                    "ignoring unusable Postgres timeout"
+                );
+                default
+            }
+        }
+    }
+
+    /// [`PgTimeout::parse_or`] against an environment variable.
+    pub fn from_env_or(var: &str, default: Self) -> Self {
+        Self::parse_or(std::env::var(var).ok().as_deref(), default)
+    }
+}
+
+#[cfg(test)]
+impl PgTimeout {
+    /// Build without validation, so a test can hand Postgres a value
+    /// [`FromStr`](std::str::FromStr) refuses to produce and prove the server
+    /// rejects it.
+    pub(crate) fn unchecked(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+}
+
+impl std::fmt::Display for PgTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for PgTimeout {
+    type Err = PgTimeoutError;
+
+    fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
+        let candidate = raw.trim();
+        let digits = candidate.chars().take_while(char::is_ascii_digit).count();
+        let (magnitude, unit) = candidate.split_at(digits);
+        let unit = unit.trim().to_ascii_lowercase();
+
+        match pg_timeout_millis(magnitude, &unit) {
+            Some(millis) if millis <= PG_TIMEOUT_MAX_MILLIS => {
+                Ok(Self(format!("{magnitude}{unit}")))
+            }
+            Some(millis) => Err(PgTimeoutError::OutOfRange { millis }),
+            None => Err(PgTimeoutError::Malformed),
+        }
+    }
+}
+
+/// Convert a Postgres timeout magnitude and unit to milliseconds, mirroring the
+/// rounding Postgres applies to sub-millisecond `us` values. `None` means the
+/// spelling is not something Postgres would accept.
+fn pg_timeout_millis(magnitude: &str, unit: &str) -> Option<u128> {
+    let value = magnitude.parse::<u128>().ok()?;
+    match unit {
+        // Round half up without the `value + 500` intermediate, which overflows
+        // for the top 500 representable microsecond values.
+        "us" => Some(value / 1_000 + u128::from(value % 1_000 >= 500)),
+        "" | "ms" => Some(value),
+        "s" => value.checked_mul(1_000),
+        "min" => value.checked_mul(60_000),
+        "h" => value.checked_mul(3_600_000),
+        "d" => value.checked_mul(86_400_000),
+        _ => None,
+    }
+}
+
+/// The per-session limits that stop one caller from holding a pooled connection
+/// indefinitely.
+///
+/// Grouped rather than passed as three same-typed arguments, which would make a
+/// swapped pair a silent misconfiguration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTimeouts {
+    /// Bounds a single statement's execution time.
+    pub statement: PgTimeout,
+    /// Bounds heavyweight and row lock waits. Advisory-lock waits are bounded
+    /// by [`Self::statement`] instead.
+    pub lock: PgTimeout,
+    /// Bounds a session sitting idle inside an open transaction.
+    ///
+    /// [`Self::statement`] only counts time spent *executing*, so a session
+    /// that opens a transaction and then stops issuing statements holds its
+    /// connection — and every lock it already took — with no statement running
+    /// for the statement timeout to cancel.
+    pub idle_in_transaction: PgTimeout,
+}
+
+impl Default for RuntimeTimeouts {
+    fn default() -> Self {
+        Self {
+            statement: PgTimeout::statement_default(),
+            lock: PgTimeout::lock_default(),
+            idle_in_transaction: PgTimeout::idle_in_transaction_default(),
+        }
+    }
+}
+
+impl RuntimeTimeouts {
+    /// Every limit lifted — schema migrations and one-shot operator tools.
+    pub fn disabled() -> Self {
+        Self {
+            statement: PgTimeout::disabled(),
+            lock: PgTimeout::disabled(),
+            idle_in_transaction: PgTimeout::disabled(),
+        }
+    }
+
+    /// Read each limit from its environment variable, falling back to the
+    /// corresponding field of `defaults` with a warning.
+    pub fn from_env_or(defaults: Self) -> Self {
+        Self {
+            statement: PgTimeout::from_env_or("BUZZ_DB_STATEMENT_TIMEOUT", defaults.statement),
+            lock: PgTimeout::from_env_or("BUZZ_DB_LOCK_TIMEOUT", defaults.lock),
+            idle_in_transaction: PgTimeout::from_env_or(
+                "BUZZ_DB_IDLE_IN_TRANSACTION_TIMEOUT",
+                defaults.idle_in_transaction,
+            ),
+        }
+    }
+}
+
+/// Apply the runtime safety limits shared by writer, reader, audit, and search
+/// pools. [`RuntimeTimeouts::disabled`] lifts them entirely.
+pub async fn apply_runtime_connection_timeouts(
+    connection: &mut PgConnection,
+    timeouts: &RuntimeTimeouts,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT set_config('statement_timeout', $1, false), \
+                set_config('lock_timeout', $2, false), \
+                set_config('idle_in_transaction_session_timeout', $3, false)",
+    )
+    .bind(timeouts.statement.as_str())
+    .bind(timeouts.lock.as_str())
+    .bind(timeouts.idle_in_transaction.as_str())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 fn event_replacement_lock_key(
     community_id: CommunityId,
     kind: i32,
@@ -529,6 +772,10 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
+    /// Per-session limits applied to every runtime connection. An operator
+    /// running a backfill or working an incident can widen these without a code
+    /// change; [`RuntimeTimeouts::disabled`] removes them.
+    pub timeouts: RuntimeTimeouts,
 }
 
 impl Default for DbConfig {
@@ -546,6 +793,7 @@ impl Default for DbConfig {
             max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
+            timeouts: RuntimeTimeouts::default(),
         }
     }
 }
@@ -684,18 +932,21 @@ impl Db {
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs));
-        if arm_floor_guard {
-            options = options.after_connect(|conn, _meta| {
-                Box::pin(async move {
+        let timeouts = config.timeouts.clone();
+        options = options.after_connect(move |conn, _meta| {
+            let timeouts = timeouts.clone();
+            Box::pin(async move {
+                apply_runtime_connection_timeouts(conn, &timeouts).await?;
+                if arm_floor_guard {
                     // `SET` cannot take bind parameters; `set_config` can.
                     sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
                         .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
                         .execute(conn)
                         .await?;
-                    Ok(())
-                })
-            });
-        }
+                }
+                Ok(())
+            })
+        });
         Ok(options.connect(url).await?)
     }
 
@@ -723,12 +974,19 @@ impl Db {
     /// No floor guard: replica sessions are read-only, the trigger never
     /// fires there (see [`Db::connect_pool`]).
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
+        let timeouts = config.timeouts.clone();
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(0)
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .after_connect(move |connection, _meta| {
+                let timeouts = timeouts.clone();
+                Box::pin(
+                    async move { apply_runtime_connection_timeouts(connection, &timeouts).await },
+                )
+            })
             .connect_lazy(url)?)
     }
 
@@ -6739,6 +6997,74 @@ mod tests {
         .await;
     }
 
+    /// Migrations must outlive the runtime caps — an index build or an
+    /// `ACCESS EXCLUSIVE` wait routinely exceeds them, and startup treats a
+    /// migration failure as fatal — and the relaxed session must not survive
+    /// into the pool afterwards.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrations_ignore_runtime_timeouts_and_leak_no_relaxed_session() {
+        const TIGHT: &str = "50ms";
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let name = format!("migration_timeouts_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("create scratch db");
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let scratch_url = format!("{}/{}", &base[..idx], name);
+
+        // Far shorter than the migration suite needs, ample for a pooled query.
+        let db = Db::new(&DbConfig {
+            database_url: scratch_url,
+            max_connections: 2,
+            min_connections: 2,
+            timeouts: RuntimeTimeouts {
+                statement: TIGHT.parse().expect("test timeout literal"),
+                lock: TIGHT.parse().expect("test timeout literal"),
+                idle_in_transaction: TIGHT.parse().expect("test timeout literal"),
+            },
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect Db against the unmigrated scratch db");
+
+        db.migrate()
+            .await
+            .expect("migrations must not inherit the runtime caps");
+
+        // Hold every connection at once so a leaked relaxed session cannot hide
+        // behind a freshly dialed one.
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            let mut connection = db.pool.acquire().await.expect("acquire pooled connection");
+            let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("SHOW statement_timeout");
+            let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("SHOW lock_timeout");
+            let idle_timeout: String =
+                sqlx::query_scalar("SHOW idle_in_transaction_session_timeout")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .expect("SHOW idle_in_transaction_session_timeout");
+            assert_eq!(statement_timeout, TIGHT);
+            assert_eq!(lock_timeout, TIGHT);
+            assert_eq!(idle_timeout, TIGHT);
+            held.push(connection);
+        }
+        drop(held);
+
+        drop_scratch_db(&admin, db.pool.clone(), &name).await;
+    }
+
     /// Insert identical community + channel rows into a database so the same
     /// (community, channel) ids resolve in both writer and replica.
     async fn seed_community_channel(
@@ -8545,7 +8871,8 @@ mod tests {
         let idx = base.rfind('/').expect("db url has a path segment");
         let scratch_url = format!("{}/{}", &base[..idx], name);
         let db = Db::new(&DbConfig {
-            database_url: scratch_url,
+            database_url: scratch_url.clone(),
+            read_database_url: Some(scratch_url),
             max_connections: 2,
             ..DbConfig::default()
         })
@@ -8553,7 +8880,38 @@ mod tests {
         .expect("connect armed Db");
         let cid = CommunityId::from_uuid(community);
 
-        // Perci nit: assert the effective session value, not the intent.
+        // Assert the effective session values, not only pool-builder intent.
+        // Compare milliseconds, not spellings: Postgres re-spells a setting on
+        // the way out (`60s` reads back as `1min`), so asserting on `SHOW`
+        // text couples the test to the server's formatting rather than to the
+        // limit actually in force.
+        for (pool, label) in [
+            (&db.pool, "writer"),
+            (
+                db.read_pool.as_ref().expect("read pool configured"),
+                "reader",
+            ),
+        ] {
+            for (setting, expected_millis) in [
+                ("statement_timeout", 30_000),
+                ("lock_timeout", 5_000),
+                ("idle_in_transaction_session_timeout", 60_000),
+            ] {
+                let millis: i64 =
+                    sqlx::query_scalar("SELECT setting::bigint FROM pg_settings WHERE name = $1")
+                        .bind(setting)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("read {setting} on the {label} pool: {error}")
+                        });
+                assert_eq!(
+                    millis, expected_millis,
+                    "{label} pool must carry the default {setting}"
+                );
+            }
+        }
+
         let effective: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
             .fetch_one(&db.pool)
             .await
@@ -8614,6 +8972,208 @@ mod tests {
         drop_scratch_db(&admin, seed_pool, &name).await;
         // db pool still holds connections to the dropped DB; close it.
         db.pool.close().await;
+    }
+
+    /// Every limit set to the same value, for tests that care about one
+    /// spelling rather than about the individual limits.
+    fn uniform_timeouts(timeout: &PgTimeout) -> RuntimeTimeouts {
+        RuntimeTimeouts {
+            statement: timeout.clone(),
+            lock: timeout.clone(),
+            idle_in_transaction: timeout.clone(),
+        }
+    }
+
+    /// The built-in defaults bypass parsing, so prove they would survive it —
+    /// otherwise a typo in a literal ships a value Postgres refuses.
+    #[test]
+    fn builtin_timeout_defaults_are_parseable() {
+        for default in [
+            PgTimeout::statement_default(),
+            PgTimeout::lock_default(),
+            PgTimeout::disabled(),
+        ] {
+            assert_eq!(
+                default.as_str().parse::<PgTimeout>().as_ref(),
+                Ok(&default),
+                "{default} must round-trip through the parser"
+            );
+        }
+    }
+
+    #[test]
+    fn pg_timeout_accepts_postgres_spellings_and_refuses_the_rest() {
+        let default = PgTimeout::statement_default();
+        for (accepted, canonical) in [
+            ("30s", "30s"),
+            ("500ms", "500ms"),
+            ("0", "0"),
+            ("45S", "45s"),
+            ("2MIN", "2min"),
+            (" 10 H ", "10h"),
+        ] {
+            assert_eq!(
+                PgTimeout::parse_or(Some(accepted), default.clone()).as_str(),
+                canonical,
+                "{accepted} is a valid Postgres timeout"
+            );
+        }
+
+        // A rejected value must not reach Postgres: `after_connect` would fail
+        // for every connection, which is worse than the documented default.
+        for rejected in ["", "   ", "soon", "30 seconds", "s30", "-5s", "30s;DROP"] {
+            assert_eq!(
+                PgTimeout::parse_or(Some(rejected), default.clone()),
+                default,
+                "{rejected:?} must fall back to the default"
+            );
+        }
+
+        assert_eq!(
+            PgTimeout::parse_or(None, PgTimeout::lock_default()),
+            PgTimeout::lock_default()
+        );
+    }
+
+    #[test]
+    fn pg_timeout_refuses_magnitudes_postgres_cannot_store() {
+        let default = PgTimeout::statement_default();
+        // Well-formed spellings whose millisecond value exceeds the int GUC
+        // range. Postgres rejects these in `set_config`, which would fail every
+        // pool's `after_connect`.
+        for rejected in [
+            "2147483648",
+            "2147483648ms",
+            "2147484s",
+            "35792min",
+            "597h",
+            "25d",
+            // Wider than any integer type — must fall back, not overflow.
+            "999999999999999999999999999999999999999999d",
+            "99999999999999999999999999999999999999999999999999",
+            // Parses as u128, so unlike the two above it reaches the unit
+            // conversion — where rounding must not overflow on the way to the
+            // range check.
+            &format!("{}us", u128::MAX),
+            &format!("{}us", u128::MAX - 499),
+        ] {
+            assert_eq!(
+                PgTimeout::parse_or(Some(rejected), default.clone()),
+                default,
+                "{rejected:?} is out of range for Postgres and must fall back"
+            );
+        }
+
+        // The boundary itself, and the same instant in every unit, stay valid.
+        for accepted in [
+            "2147483647",
+            "2147483647ms",
+            "2147483647000us",
+            "2147483s",
+            "35791min",
+            "596h",
+            "24d",
+        ] {
+            assert_eq!(
+                PgTimeout::parse_or(Some(accepted), default.clone()).as_str(),
+                accepted,
+                "{accepted} is inside the Postgres range"
+            );
+        }
+    }
+
+    /// Every spelling the parser emits must be usable by Postgres. A
+    /// parser-only assertion missed that Postgres rejects uppercase units even
+    /// though validation lowercases them.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pg_timeout_canonical_spellings_are_accepted_by_postgres() {
+        let mut connection = PgConnection::connect(&admin_url().await)
+            .await
+            .expect("connect test Postgres");
+
+        for (raw, canonical) in [
+            ("500US", "500us"),
+            ("500MS", "500ms"),
+            ("2S", "2s"),
+            ("2MIN", "2min"),
+            ("2H", "2h"),
+            ("2D", "2d"),
+            ("0", "0"),
+            (" 10 S ", "10s"),
+        ] {
+            let parsed = PgTimeout::parse_or(Some(raw), PgTimeout::statement_default());
+            assert_eq!(parsed.as_str(), canonical);
+            apply_runtime_connection_timeouts(&mut connection, &uniform_timeouts(&parsed))
+                .await
+                .unwrap_or_else(|error| panic!("{raw:?} normalized to {parsed}: {error}"));
+        }
+
+        connection.close().await.expect("close test Postgres");
+    }
+
+    /// `PG_TIMEOUT_MAX_MILLIS` is the bound [`PgTimeout`] range-checks operator
+    /// input against, so it must be the server's real bound: too high and an
+    /// accepted value still fails every `after_connect`; too low and we reject
+    /// settings Postgres would have taken.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pg_timeout_max_millis_matches_postgres() {
+        let mut conn = PgConnection::connect(&admin_url().await)
+            .await
+            .expect("connect");
+
+        let boundary = PgTimeout::unchecked(PG_TIMEOUT_MAX_MILLIS.to_string());
+        apply_runtime_connection_timeouts(&mut conn, &uniform_timeouts(&boundary))
+            .await
+            .expect("PG_TIMEOUT_MAX_MILLIS must be settable");
+
+        // Same instant spelled in a coarser unit — the conversion the caller's
+        // range check performs must land inside the range too.
+        let in_seconds = (PG_TIMEOUT_MAX_MILLIS / 1_000).to_string();
+        let boundary_seconds = PgTimeout::unchecked(format!("{in_seconds}s"));
+        apply_runtime_connection_timeouts(&mut conn, &uniform_timeouts(&boundary_seconds))
+            .await
+            .expect("the boundary in seconds must be settable");
+
+        for over in [
+            (PG_TIMEOUT_MAX_MILLIS + 1).to_string(),
+            format!("{}ms", PG_TIMEOUT_MAX_MILLIS + 1),
+            format!("{}s", PG_TIMEOUT_MAX_MILLIS / 1_000 + 1),
+            "999999999999999999999999999999999999999999d".to_string(),
+        ] {
+            let err = apply_runtime_connection_timeouts(
+                &mut conn,
+                &RuntimeTimeouts {
+                    statement: PgTimeout::unchecked(over.clone()),
+                    ..RuntimeTimeouts::default()
+                },
+            )
+            .await
+            .expect_err(&format!("{over} must be rejected by Postgres"));
+            let code = match &err {
+                sqlx::Error::Database(db) => db.code().map(|c| c.to_string()),
+                other => panic!("expected a database error, got {other:?}"),
+            };
+            assert_eq!(
+                code.as_deref(),
+                Some("22023"),
+                "{over}: expected invalid_parameter_value"
+            );
+        }
+
+        // A rejected `set_config` leaves the session usable, so the failure mode
+        // is a poisoned pool of unbounded sessions only if the caller ignores it.
+        let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut conn)
+            .await
+            .expect("SHOW statement_timeout");
+        assert_ne!(
+            statement_timeout, "0",
+            "a rejected value must not silently disable the limit"
+        );
+
+        conn.close().await.expect("close");
     }
 
     /// `spawn_fence_probe` must verify the floor guard before letting the

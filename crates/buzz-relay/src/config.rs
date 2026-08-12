@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use buzz_db::RuntimeTimeouts;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::warn;
@@ -99,6 +100,13 @@ pub struct Config {
     /// independently so reader capacity can be tuned against the replica's
     /// headroom without touching the writer pool.
     pub db_read_pool_size: Option<u32>,
+    /// Per-session Postgres limits for every runtime connection
+    /// (`BUZZ_DB_STATEMENT_TIMEOUT`, `BUZZ_DB_LOCK_TIMEOUT`,
+    /// `BUZZ_DB_IDLE_IN_TRANSACTION_TIMEOUT`; e.g. `45s`, `500ms`, `0` to
+    /// disable). Tunable so a backfill or an incident does not need a code
+    /// change. Schema migrations always run with all of them lifted — see
+    /// `buzz_db::migration::run_migrations`.
+    pub db_timeouts: RuntimeTimeouts,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
@@ -530,6 +538,8 @@ impl Config {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0);
+
+        let db_timeouts = RuntimeTimeouts::from_env_or(RuntimeTimeouts::default());
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -996,6 +1006,7 @@ impl Config {
             redis_pool_size,
             db_pool_size,
             db_read_pool_size,
+            db_timeouts,
             relay_url,
             pairing_relay_url,
             max_connections,
@@ -1262,6 +1273,89 @@ mod tests {
         assert_eq!(overridden, 80);
         assert_eq!(zero, 50, "zero must fall back to the default");
         assert_eq!(junk, 50, "unparsable value must fall back to the default");
+    }
+
+    #[test]
+    fn db_timeout_env_overrides_and_invalid_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_statement = std::env::var_os("BUZZ_DB_STATEMENT_TIMEOUT");
+        let previous_lock = std::env::var_os("BUZZ_DB_LOCK_TIMEOUT");
+        let previous_idle = std::env::var_os("BUZZ_DB_IDLE_IN_TRANSACTION_TIMEOUT");
+
+        std::env::remove_var("BUZZ_DB_STATEMENT_TIMEOUT");
+        std::env::remove_var("BUZZ_DB_LOCK_TIMEOUT");
+        std::env::remove_var("BUZZ_DB_IDLE_IN_TRANSACTION_TIMEOUT");
+        let defaults = Config::from_env().expect("config");
+        assert_eq!(
+            defaults.db_timeouts.statement.as_str(),
+            buzz_db::RUNTIME_STATEMENT_TIMEOUT
+        );
+        assert_eq!(
+            defaults.db_timeouts.lock.as_str(),
+            buzz_db::RUNTIME_LOCK_TIMEOUT
+        );
+        assert_eq!(
+            defaults.db_timeouts.idle_in_transaction.as_str(),
+            buzz_db::RUNTIME_IDLE_IN_TRANSACTION_TIMEOUT
+        );
+
+        std::env::set_var("BUZZ_DB_STATEMENT_TIMEOUT", "90s");
+        std::env::set_var("BUZZ_DB_LOCK_TIMEOUT", "250ms");
+        std::env::set_var("BUZZ_DB_IDLE_IN_TRANSACTION_TIMEOUT", "2min");
+        let overridden = Config::from_env().expect("config");
+        assert_eq!(overridden.db_timeouts.statement.as_str(), "90s");
+        assert_eq!(overridden.db_timeouts.lock.as_str(), "250ms");
+        assert_eq!(overridden.db_timeouts.idle_in_transaction.as_str(), "2min");
+
+        std::env::set_var("BUZZ_DB_STATEMENT_TIMEOUT", "45S");
+        std::env::set_var("BUZZ_DB_LOCK_TIMEOUT", " 2 MIN ");
+        let canonicalized = Config::from_env().expect("config");
+        assert_eq!(canonicalized.db_timeouts.statement.as_str(), "45s");
+        assert_eq!(canonicalized.db_timeouts.lock.as_str(), "2min");
+
+        std::env::set_var("BUZZ_DB_STATEMENT_TIMEOUT", "half a minute");
+        let junk = Config::from_env().expect("config");
+        assert_eq!(
+            junk.db_timeouts.statement.as_str(),
+            buzz_db::RUNTIME_STATEMENT_TIMEOUT,
+            "a malformed value must not be handed to Postgres"
+        );
+
+        // Shape-valid but far outside the int millisecond GUC range: Postgres
+        // would reject it in every pool's `after_connect`.
+        std::env::set_var(
+            "BUZZ_DB_STATEMENT_TIMEOUT",
+            "999999999999999999999999999999999999999999d",
+        );
+        std::env::set_var("BUZZ_DB_LOCK_TIMEOUT", "25d");
+        std::env::set_var("BUZZ_DB_IDLE_IN_TRANSACTION_TIMEOUT", "25d");
+        let out_of_range = Config::from_env().expect("config");
+        assert_eq!(
+            out_of_range.db_timeouts.statement.as_str(),
+            buzz_db::RUNTIME_STATEMENT_TIMEOUT,
+            "an out-of-range value must not be handed to Postgres"
+        );
+        assert_eq!(
+            out_of_range.db_timeouts.lock.as_str(),
+            buzz_db::RUNTIME_LOCK_TIMEOUT
+        );
+        assert_eq!(
+            out_of_range.db_timeouts.idle_in_transaction.as_str(),
+            buzz_db::RUNTIME_IDLE_IN_TRANSACTION_TIMEOUT
+        );
+
+        match previous_statement {
+            Some(value) => std::env::set_var("BUZZ_DB_STATEMENT_TIMEOUT", value),
+            None => std::env::remove_var("BUZZ_DB_STATEMENT_TIMEOUT"),
+        }
+        match previous_lock {
+            Some(value) => std::env::set_var("BUZZ_DB_LOCK_TIMEOUT", value),
+            None => std::env::remove_var("BUZZ_DB_LOCK_TIMEOUT"),
+        }
+        match previous_idle {
+            Some(value) => std::env::set_var("BUZZ_DB_IDLE_IN_TRANSACTION_TIMEOUT", value),
+            None => std::env::remove_var("BUZZ_DB_IDLE_IN_TRANSACTION_TIMEOUT"),
+        }
     }
 
     #[test]
