@@ -1185,6 +1185,12 @@ pub enum ReposCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Delete one of your repository announcements (head-based tombstone; verified after submit).
+    Delete {
+        /// Repository identifier (d-tag). Only the current identity's head is targeted.
+        #[arg(long)]
+        id: String,
+    },
     /// Bind (or rebind) one of your repositories to a channel.
     ///
     /// The `buzz-channel` tag on the announcement is the git ACL: the relay
@@ -2251,7 +2257,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec!["bind", "create", "delete", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -2327,7 +2333,7 @@ mod tests {
             ("pr", 5),
             ("projects", 7),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 6),
             ("social", 7),
             ("upload", 1),
             ("users", 5),
