@@ -50,18 +50,19 @@ import { HomePersonalInboxDetail } from "@/features/home/ui/HomePersonalInboxDet
 import {
   useChannelMessagesQuery,
   useChannelSubscription,
+  useSendMessageMutation,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
 import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
-import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
-import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
+import { deleteMessage } from "@/shared/api/tauri";
 import type { HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
@@ -104,6 +105,7 @@ export function HomeView({
   onOpenContext,
   onRefresh,
 }: HomeViewProps) {
+  const identity = useIdentityQuery().data;
   const relaySelfPubkey = useRelaySelfQuery().data;
   const [homeInboxRef, homeInboxWidthPx] = useElementWidth<HTMLDivElement>();
   const isNarrowHomeViewport =
@@ -300,7 +302,10 @@ export function HomeView({
   // Inbox detail renders the active DM as a conversation. Keep its cache live
   // so an agent's NIP-10 reply arrives here instead of only in its activity
   // transcript.
-  useChannelSubscription(selectedChannel);
+  useChannelSubscription(
+    selectedChannel?.channelType === "dm" ? selectedChannel : null,
+  );
+  const sendMessageMutation = useSendMessageMutation(selectedChannel, identity);
   const toggleReactionMutation = useToggleReactionMutation();
   const channelMessages = channelMessagesQuery.data;
   const threadContext = useInboxThreadContext(
@@ -844,47 +849,48 @@ export function HomeView({
                 const itemToReply = selectedItem;
                 setIsSendingReply(true);
                 try {
-                  const {
-                    mediaTags: imetaTags,
-                    emojiTags,
-                    mentionTags,
-                  } = splitOutgoingTags(mediaTags);
-                  const result = await sendChannelMessage(
-                    channelId,
+                  // Use the same path as the channel composer so DM
+                  // participants are addressed and the shared window cache
+                  // stays authoritative across Inbox and conversation views.
+                  const sent = await sendMessageMutation.mutateAsync({
                     content,
-                    parentEventId,
-                    imetaTags,
+                    mediaTags,
                     mentionPubkeys,
-                    undefined,
-                    emojiTags,
-                    mentionTags,
-                  );
-                  const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
+                    parentEventId,
+                    targetChannel: selectedChannel ?? undefined,
+                    channelId,
+                  });
+                  const thread = getThreadReference(sent.tags);
+                  const parentDepth = thread.parentId
+                    ? (contextMessages.find(
+                        (message) => message.id === thread.parentId,
+                      )?.depth ?? 0)
+                    : -1;
                   const reply: InboxReply = {
                     authorLabel: currentPubkey
                       ? resolveUserLabel({
                           currentPubkey,
                           profiles: feedProfiles,
-                          pubkey: authorPubkey,
+                          pubkey: sent.pubkey,
                         })
                       : "You",
-                    authorPubkey,
+                    authorPubkey: sent.pubkey,
                     avatarUrl:
                       currentPubkey && feedProfiles
                         ? (feedProfiles[currentPubkey.trim().toLowerCase()]
                             ?.avatarUrl ?? null)
                         : null,
-                    content,
-                    createdAt: result.createdAt,
-                    depth: result.depth,
+                    content: sent.content,
+                    createdAt: sent.created_at,
+                    depth: thread.parentId ? parentDepth + 1 : 0,
                     fullTimestampLabel: formatInboxFullTimestamp(
-                      result.createdAt,
+                      sent.created_at,
                     ),
-                    id: result.eventId,
-                    parentId: result.parentEventId,
-                    rootId: result.rootEventId,
-                    tags: [...imetaTags, ...emojiTags, ...mentionTags],
-                    timeLabel: formatTime(result.createdAt),
+                    id: sent.id,
+                    parentId: thread.parentId,
+                    rootId: thread.rootId,
+                    tags: sent.tags,
+                    timeLabel: formatTime(sent.created_at),
                   };
                   setLocalRepliesByItemId((current) => ({
                     ...current,
