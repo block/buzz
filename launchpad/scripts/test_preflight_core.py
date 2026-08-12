@@ -411,6 +411,79 @@ class ClosingIssue(unittest.TestCase):
         self.assertIn("unresolved", section["source"])
 
 
+class MergeBaseDiff(unittest.TestCase):
+    """STEP 5 — the diff is against the merge base, not the base branch tip.
+
+    ``baseRefOid`` is the tip of the base branch *now*, not the commit the head
+    forked from. Diffing against it attributes every commit landed on the base
+    since the fork to this PR's author, in reverse.
+    """
+
+    def test_the_recorded_paths_are_the_prs_own_files(self):
+        record = core.build_record(reads())
+        self.assertEqual(
+            sorted(f["path"] for f in record["diff"]["files"]),
+            sorted(f["filename"] for f in fixture("pr86-compare.json")["files"]),
+        )
+        self.assertEqual(
+            sorted(f["path"] for f in record["diff"]["files"]),
+            [
+                "launchpad/ARCHITECTURE.md",
+                "launchpad/ENVIRONMENTS.md",
+                "launchpad/README.md",
+                "launchpad/REQUIREMENTS.md",
+                "launchpad/SECURITY-POSTURE.md",
+                "launchpad/VISION.md",
+            ],
+            "identical to `gh pr diff 86 --repo launchpad-26/buzz --name-only | sort`",
+        )
+
+    def test_each_file_carries_the_four_enumerated_keys(self):
+        for entry in core.build_record(reads())["diff"]["files"]:
+            self.assertEqual(sorted(entry), ["added", "path", "removed", "status"])
+
+    def test_the_recorded_base_is_the_merge_base_and_not_the_base_tip(self):
+        """On PR 86, whose base tip has moved 6 commits past its fork point."""
+        record = core.build_record(reads())
+        recorded = fixture("pr86-compare.json")
+        self.assertEqual(record["diff"]["merge_base_sha"], recorded["merge_base_commit"]["sha"])
+        self.assertNotEqual(
+            record["diff"]["merge_base_sha"],
+            fixture("pr86-pr.json")["base"]["sha"],
+            "the base tip is not the merge base",
+        )
+
+    def test_a_divergent_pr_reports_its_fork_point_not_its_base_tip(self):
+        """The fixture that exists because a two-dot implementation passes without it."""
+        pr = fixture("upstream-divergent-pr.json")
+        compare = fixture("upstream-divergent-compare.json")
+        skips = core.Skips()
+        diff = core.build_diff(
+            core.Read("compare", data=compare, endpoint=ENDPOINTS["compare"]),
+            {"head_sha": pr["head"]["sha"]},
+            skips,
+        )
+        self.assertEqual(diff["merge_base_sha"], compare["merge_base_commit"]["sha"])
+        self.assertNotEqual(
+            diff["merge_base_sha"],
+            pr["base"]["sha"],
+            "a two-dot implementation records the base tip here and this is where it fails",
+        )
+        self.assertEqual(skips.entries, [])
+
+    def test_the_head_sha_pins_the_commit_pair_the_record_read(self):
+        record = core.build_record(reads())
+        self.assertEqual(record["diff"]["head_sha"], fixture("pr86-pr.json")["head"]["sha"])
+        self.assertEqual(record["diff"]["head_sha"], record["pr"]["head_sha"])
+
+    def test_a_compare_without_a_merge_base_is_a_skip_not_an_empty_diff(self):
+        broken = {k: v for k, v in fixture("pr86-compare.json").items() if k != "merge_base_commit"}
+        skips = core.Skips()
+        diff = core.build_diff(core.Read("compare", data=broken), {"head_sha": "abc"}, skips)
+        self.assertIsNone(diff)
+        self.assertEqual(skips.entries[0]["reason"], core.MALFORMED)
+
+
 class CliShell(unittest.TestCase):
     """STEP 3 — the CLI prints a record, and refuses to print a broken one."""
 
