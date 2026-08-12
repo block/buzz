@@ -35,6 +35,12 @@ import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout"
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
+import {
+  registerFileViewerHost,
+  selectActiveFileViewerTab,
+} from "@/features/fileViewer/fileViewerStore";
+import { useFileViewerState } from "@/features/fileViewer/useFileViewerState";
+import { FileViewerPanel } from "@/features/fileViewer/ui/FileViewerPanel";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
@@ -456,6 +462,11 @@ export const ChannelPane = React.memo(function ChannelPane({
       onExternalTargetResolved: onThreadScrollTargetResolved,
       onModeChange: markExitComplete,
     });
+  const fileViewerSnapshot = useFileViewerState();
+  const activeFileViewerTab = selectActiveFileViewerTab(fileViewerSnapshot);
+  // Register a viewer host so FileCards in this pane open the panel instead of
+  // falling back to download.
+  React.useEffect(() => registerFileViewerHost(), []);
   const selectedAgent = React.useMemo(
     () =>
       agentSessionSelection.resolveSelectedAgentSession({
@@ -468,7 +479,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const hasSplitAuxiliaryPane =
     useSplitAuxiliaryPane &&
-    (channelManagementOpen ||
+    (activeFileViewerTab !== null ||
+      channelManagementOpen ||
       Boolean(threadHeadMessage) ||
       shouldShowThreadSkeleton ||
       Boolean(activeChannel && selectedAgent) ||
@@ -753,7 +765,19 @@ export const ChannelPane = React.memo(function ChannelPane({
        * frozen snapshot because the panel is fully prop-driven.
        */}
       <AnimatePresence onExitComplete={markExitComplete}>
-        {channelManagementOpen && activeChannel ? (
+        {activeFileViewerTab ? (
+          wrapAux(
+            <FileViewerPanel
+              isSinglePanelView={
+                useSplitAuxiliaryPane ? false : isSinglePanelView
+              }
+              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
+              widthPx={threadPanelWidthPx}
+            />,
+            "file-viewer-panel",
+          )
+        ) : channelManagementOpen && activeChannel ? (
           <ChannelManagementAuxiliaryPanel
             activeChannel={activeChannel}
             canResetThreadPanelWidth={canResetThreadPanelWidth}

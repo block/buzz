@@ -46,6 +46,7 @@ test("resolveFileCard: builds a card for a generic file, preferring imeta filena
   assert.deepEqual(card, {
     href: PDF_URL,
     filename: "Q3-budget.pdf",
+    mime: "application/pdf",
     size: 2048,
   });
 });

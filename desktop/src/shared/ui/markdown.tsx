@@ -1343,9 +1343,8 @@ function createMarkdownComponents(
       label,
     );
     if (card) {
-      return (
-        <FileCard href={card.href} filename={card.filename} size={card.size} />
-      );
+      // `ResolvedFileCard` matches FileCard's props exactly.
+      return <FileCard {...card} />;
     }
 
     // Intercept `buzz://message?channel=…&id=…` links so a click navigates
