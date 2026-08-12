@@ -127,6 +127,27 @@ impl AdmissionObject {
         )
     }
 
+    /// Bind one canonical AUTH mutation to its signed event and domain.
+    ///
+    /// Binding-status presentation remains connection-local, so independent
+    /// connections for the same actor must not compete for one latest-wins
+    /// protected-object epoch.
+    pub fn binding_status_auth_event(
+        authorization_domain: CommunityId,
+        auth_event_id: [u8; 32],
+    ) -> Option<Self> {
+        if authorization_domain.as_uuid().is_nil() || auth_event_id == [0; 32] {
+            return None;
+        }
+        Self::new(
+            AdmissionObjectKind::BindingStatus,
+            admission_framed_digest(
+                b"buzz:nip-fi:binding-status-auth-event:v1",
+                &[authorization_domain.as_uuid().as_bytes(), &auth_event_id],
+            ),
+        )
+    }
+
     const fn event_kind() -> AdmissionObjectKind {
         AdmissionObjectKind::Event
     }
@@ -4465,6 +4486,7 @@ mod tests {
 
     const TEST_VERIFIER_ISSUER: &str = "https://verifier.example";
     const TEST_VERIFIER_AUDIENCE: &str = "buzz-relay-test";
+
     fn loopback_test_database_url() -> String {
         format!(
             "{}://{}:{}@{}:{}/{}",

@@ -65,8 +65,8 @@ pub use foundation::{
 };
 pub use nip42::{
     generate_challenge, verify_nip42_authorization_proof, verify_nip42_binding_status_proof,
-    verify_nip42_event, Nip42AuthorizationProofError, Nip42BindingStatusCoordinates,
-    VerifiedBindingStatusProof,
+    verify_nip42_event, verify_nip42_session_event_proof, Nip42AuthorizationProofError,
+    Nip42BindingStatusCoordinates, VerifiedBindingStatusProof,
 };
 pub use nip98::{
     verify_nip42_moderation_command_proof, verify_nip98_authorization_proof, verify_nip98_event,

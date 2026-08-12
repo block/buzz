@@ -179,15 +179,27 @@ pub enum AuthState {
 #[derive(Clone)]
 pub(crate) struct CanonicalWebsocketSession {
     read: buzz_auth::FinalizedAuthContext,
-    write: buzz_auth::FinalizedAuthContext,
+    event_assertion: buzz_auth::VerifiedFederatedAssertion,
 }
 
 impl CanonicalWebsocketSession {
     pub(crate) fn new(
         read: buzz_auth::FinalizedAuthContext,
-        write: buzz_auth::FinalizedAuthContext,
+        event_assertion: buzz_auth::VerifiedFederatedAssertion,
     ) -> Self {
-        Self { read, write }
+        Self {
+            read,
+            event_assertion,
+        }
+    }
+
+    pub(crate) fn event_admission(
+        &self,
+    ) -> (
+        buzz_auth::FinalizedAuthContext,
+        buzz_auth::VerifiedFederatedAssertion,
+    ) {
+        (self.read.clone(), self.event_assertion.clone())
     }
 
     fn authorization(
@@ -195,7 +207,6 @@ impl CanonicalWebsocketSession {
         ingress: crate::authorization_runtime::ProtectedIngress,
     ) -> Option<&buzz_auth::FinalizedAuthContext> {
         match ingress {
-            crate::authorization_runtime::ProtectedIngress::WebSocketEvent => Some(&self.write),
             crate::authorization_runtime::ProtectedIngress::WebSocketQuery
             | crate::authorization_runtime::ProtectedIngress::WebSocketCount => Some(&self.read),
             _ => None,
@@ -1098,18 +1109,28 @@ async fn enforce_ws_admission(
             }
             _ => return true,
         };
+        let session_ingress = if is_event {
+            // EVENT uses the read-only canonical session only as its AUTH
+            // origin. The handler independently prepares and commits the
+            // exact MessagesWrite mutation before any event effect.
+            crate::authorization_runtime::ProtectedIngress::WebSocketQuery
+        } else {
+            ingress
+        };
         let admitted = {
             let authorization = conn.canonical_authorization.read().await;
             authorization.as_ref().is_some_and(|session| {
-                session.authorization(ingress).is_some_and(|authorization| {
-                    crate::protected_ingress::session_authorizes(
-                        state,
-                        ingress,
-                        authorization,
-                        conn.tenant.community(),
-                        pubkey,
-                    )
-                })
+                session
+                    .authorization(session_ingress)
+                    .is_some_and(|authorization| {
+                        crate::protected_ingress::session_authorizes(
+                            state,
+                            session_ingress,
+                            authorization,
+                            conn.tenant.community(),
+                            pubkey,
+                        )
+                    })
             })
         };
         if !admitted {
@@ -1124,6 +1145,12 @@ async fn enforce_ws_admission(
                 "restricted: canonical session authorization denied",
             ));
             return false;
+        }
+        if is_event {
+            // Enforce EVENT owns quota/replay and application mutation inside
+            // the canonical PostgreSQL transaction. Legacy Redis admission
+            // here would mutate before the exact event can be authorized.
+            return true;
         }
     }
 

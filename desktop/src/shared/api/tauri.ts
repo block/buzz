@@ -644,15 +644,15 @@ export async function signRelayEvent(input: {
   const eventJson = await invokeTauri<string>("sign_event", input);
   return JSON.parse(eventJson) as RelayEvent;
 }
-
+/** Create ordinary or exact-native-socket-scoped relay AUTH. */
 export async function createAuthEvent(input: {
   challenge: string;
+  nativeWebsocketId?: number;
   relayUrl: string;
 }): Promise<RelayEvent> {
   const eventJson = await invokeTauri<string>("create_auth_event", input);
   return JSON.parse(eventJson) as RelayEvent;
 }
-
 function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
   return {
     pubkey: agent.pubkey,

@@ -17,9 +17,10 @@ use uuid::Uuid;
 
 use crate::error::AuthError;
 use crate::foundation::{
-    ActiveLocalBinding, AuthorizationError, AuthorizationFinalizer, AuthorizationInput,
-    LocalAuthorizationPolicy, LocalBindingResolution, PreparedAuthorization, ProofTransport,
-    RouteCapability, VerifiedNostrProof,
+    ActiveLocalBinding, AuthContext as FinalizedAuthContext, AuthorizationError,
+    AuthorizationFinalizer, AuthorizationInput, LocalAuthorizationPolicy, LocalBindingResolution,
+    PreparedAuthorization, ProofTransport, RouteCapability, VerifiedFederatedAssertion,
+    VerifiedNostrProof,
 };
 
 /// Normalize a relay URL for comparison.
@@ -147,6 +148,60 @@ pub fn verify_nip42_authorization_proof(
     .ok_or(Nip42AuthorizationProofError::InvalidBinding)
 }
 
+/// Bind one signed WebSocket EVENT to an already finalized NIP-42 session.
+///
+/// The session and assertion are origin-sealed values produced by canonical
+/// AUTH. This verifier rechecks the submitted event signature and derives an
+/// exact request/target binding without treating a reusable session grant as
+/// the mutation itself. Gift wraps may use their protocol-defined ephemeral
+/// envelope signer; every other event must be signed by the authenticated
+/// actor.
+pub fn verify_nip42_session_event_proof(
+    event: &Event,
+    session: &FinalizedAuthContext,
+    assertion: &VerifiedFederatedAssertion,
+    request_fingerprint: [u8; 32],
+    target_fingerprint: [u8; 32],
+    transport_context_fingerprint: [u8; 32],
+) -> Result<(VerifiedFederatedAssertion, VerifiedNostrProof), Nip42AuthorizationProofError> {
+    buzz_core::verify_event(event).map_err(|_| Nip42AuthorizationProofError::InvalidBinding)?;
+    let now = Utc::now();
+    let (assertion_transport, _, _, _) = assertion.request_binding();
+    let (_, assertion_expires_at) = assertion.time_bounds();
+    let expires_at = assertion_expires_at.min(session.lease().expires_at());
+    if event.kind == Kind::Authentication
+        || (event.pubkey != session.actor_pubkey() && event.kind != Kind::GiftWrap)
+        || session.authorization_domain() != assertion.authorization_domain()
+        || session.capability() != RouteCapability::MessagesRead
+        || session.transport() != ProofTransport::Nip42
+        || assertion_transport != ProofTransport::Nip42
+        || assertion.attested_event_author_pubkey() != Some(session.actor_pubkey())
+        || expires_at <= now
+    {
+        return Err(Nip42AuthorizationProofError::InvalidBinding);
+    }
+    let assertion = assertion
+        .with_request_binding(
+            request_fingerprint,
+            target_fingerprint,
+            transport_context_fingerprint,
+        )
+        .ok_or(Nip42AuthorizationProofError::InvalidBinding)?;
+    let proof = VerifiedNostrProof::from_verifier(
+        session.authorization_domain(),
+        session.actor_pubkey(),
+        ProofTransport::Nip42,
+        request_fingerprint,
+        target_fingerprint,
+        transport_context_fingerprint,
+        Some(*assertion.assertion_fingerprint()),
+        None,
+        expires_at,
+    )
+    .ok_or(Nip42AuthorizationProofError::InvalidBinding)?;
+    Ok((assertion, proof))
+}
+
 /// Exact server-derived coordinates for one opted-in status connection.
 pub struct Nip42BindingStatusCoordinates {
     authorization_domain: CommunityId,
@@ -226,6 +281,16 @@ impl Nip42BindingStatusCoordinates {
     /// Exact opaque connection target used by the delivery owner.
     pub const fn target_fingerprint(&self) -> [u8; 32] {
         self.target_fingerprint
+    }
+
+    /// Exact request, target, and transport fingerprints sealed into the
+    /// purpose-specific status proof.
+    pub const fn request_binding(&self) -> (&[u8; 32], &[u8; 32], &[u8; 32]) {
+        (
+            &self.request_fingerprint,
+            &self.target_fingerprint,
+            &self.transport_context_fingerprint,
+        )
     }
 }
 

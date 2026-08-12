@@ -46,76 +46,11 @@ import {
 } from "@/features/profile/lib/userLabelStorage";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
-import { useVerifiedIdentityExpiryRevision } from "@/shared/hooks/useVerifiedIdentityExpiry";
-import {
-  type VerifiedIdentityFields,
-  withCurrentVerifiedIdentity,
-} from "@/shared/lib/verifiedIdentity";
 
 export const profileQueryKey = ["profile"] as const;
 export const contactListQueryKey = (pubkey: string) =>
   ["contact-list", pubkey] as const;
 export const allPulseTimelinesQueryKey = ["pulse-timeline"] as const;
-
-function useCurrentVerifiedIdentity<T extends VerifiedIdentityFields>(
-  identity: T | undefined,
-): T | undefined {
-  const revision = useVerifiedIdentityExpiryRevision([
-    identity?.verifiedNameExpiresAt,
-  ]);
-  return React.useMemo(() => {
-    // `revision` is the timer-driven cache key for an otherwise unchanged
-    // React Query value.
-    void revision;
-    return identity ? withCurrentVerifiedIdentity(identity) : undefined;
-  }, [identity, revision]);
-}
-
-function useCurrentVerifiedIdentityRecord<T extends VerifiedIdentityFields>(
-  identities: Record<string, T> | undefined,
-): Record<string, T> | undefined {
-  const revision = useVerifiedIdentityExpiryRevision(
-    identities
-      ? Object.values(identities).map(
-          (identity) => identity.verifiedNameExpiresAt,
-        )
-      : [],
-  );
-  return React.useMemo(() => {
-    void revision;
-    if (!identities) return undefined;
-
-    let changed = false;
-    const current = Object.fromEntries(
-      Object.entries(identities).map(([pubkey, identity]) => {
-        const next = withCurrentVerifiedIdentity(identity);
-        changed ||= next !== identity;
-        return [pubkey, next];
-      }),
-    );
-    return changed ? current : identities;
-  }, [identities, revision]);
-}
-
-function useCurrentVerifiedIdentityList<T extends VerifiedIdentityFields>(
-  identities: T[] | undefined,
-): T[] | undefined {
-  const revision = useVerifiedIdentityExpiryRevision(
-    identities?.map((identity) => identity.verifiedNameExpiresAt) ?? [],
-  );
-  return React.useMemo(() => {
-    void revision;
-    if (!identities) return undefined;
-
-    let changed = false;
-    const current = identities.map((identity) => {
-      const next = withCurrentVerifiedIdentity(identity);
-      changed ||= next !== identity;
-      return next;
-    });
-    return changed ? current : identities;
-  }, [identities, revision]);
-}
 
 /**
  * Persists a freshly-fetched profile to localStorage as the offline fallback.
@@ -218,8 +153,7 @@ export function useProfileQuery(enabled = true) {
     staleTime: 30_000,
     ...seedOptions,
   });
-  const profile = useCurrentVerifiedIdentity(query.data);
-  return profile === query.data ? query : { ...query, data: profile };
+  return query;
 }
 
 /**
@@ -347,8 +281,7 @@ export function useUserProfileQuery(pubkey?: string) {
     queryFn: () => getUserProfile(pubkey),
     staleTime: 60_000,
   });
-  const profile = useCurrentVerifiedIdentity(query.data);
-  return profile === query.data ? query : { ...query, data: profile };
+  return query;
 }
 
 // Per-pubkey resolution cache backing `useUsersBatchQuery`'s delta fetch.
@@ -478,15 +411,7 @@ export function useUsersBatchQuery(
     }
   }, [query.data, query.dataUpdatedAt, queryClient]);
 
-  const profiles = useCurrentVerifiedIdentityRecord(query.data?.profiles);
-  return profiles === query.data?.profiles
-    ? query
-    : {
-        ...query,
-        data: query.data
-          ? { ...query.data, profiles: profiles ?? {} }
-          : query.data,
-      };
+  return query;
 }
 
 export function useUserSearchQuery(
@@ -510,10 +435,7 @@ export function useUserSearchQuery(
     staleTime: 30_000,
     gcTime: 5 * 60 * 1_000,
   });
-  const users = useCurrentVerifiedIdentityList(searchQuery.data);
-  return users === searchQuery.data
-    ? searchQuery
-    : { ...searchQuery, data: users };
+  return searchQuery;
 }
 
 export function useInfiniteUserSearchQuery(

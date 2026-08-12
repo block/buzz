@@ -122,6 +122,7 @@ impl ProtectedIngress {
     pub const fn required_effect(self) -> ProtectedEffect {
         match self {
             Self::WebSocketAuthenticate
+            | Self::WebSocketEvent
             | Self::BridgeEvent
             | Self::ModerationWrite
             | Self::OperatorWrite

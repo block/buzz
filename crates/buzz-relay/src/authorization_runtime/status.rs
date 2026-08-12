@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use buzz_auth::{
     BoundedAuthorizationLease, CurrentBindingStatusEvidenceRequest, LocalStatusEvidenceResolver,
-    RouteCapability,
+    ProofTransport, RouteCapability,
 };
 use buzz_core::client_binding_status::ClientBindingStatusInputV1;
 use buzz_core::{AuthorizationLeaseFence, CanonicalCurrentBindingEvidence, CommunityId};
@@ -84,24 +84,44 @@ pub struct CurrentStatusAuthorization {
 }
 
 impl CurrentStatusAuthorization {
-    /// Capture the exact domain, actor, and exclusive lease bound.
-    pub fn from_lease(lease: &BoundedAuthorizationLease) -> Result<Self, StatusSessionError> {
-        if lease.capability() != RouteCapability::BindingStatus || lease.owner_pubkey().is_some() {
+    /// Bind stable connection evidence to the shorter lifetime of its fresh
+    /// co-committed canonical admission.
+    pub(crate) fn from_committed_connection(
+        connection: &BoundedAuthorizationLease,
+        admission: &BoundedAuthorizationLease,
+    ) -> Result<Self, StatusSessionError> {
+        let (connection_policy, connection_generation, connection_epoch) =
+            connection.dependency_versions();
+        let (admission_policy, admission_generation, _) = admission.dependency_versions();
+        if connection.capability() != RouteCapability::BindingStatus
+            || admission.capability() != RouteCapability::BindingStatus
+            || connection.owner_pubkey().is_some()
+            || admission.owner_pubkey().is_some()
+            || connection.transport() != ProofTransport::Nip42
+            || admission.transport() != ProofTransport::Nip42
+            || connection.authorization_domain() != admission.authorization_domain()
+            || connection.actor_pubkey() != admission.actor_pubkey()
+            || connection.binding() != admission.binding()
+            || connection_policy != admission_policy
+            || connection_generation != admission_generation
+        {
             return Err(StatusSessionError::EvidenceUnavailable);
         }
-        let (binding_id, binding_version) = lease.binding();
-        let (policy_revision, invalidation_generation, authority_epoch) =
-            lease.dependency_versions();
+        let expires_at = connection.expires_at().min(admission.expires_at());
+        if expires_at <= connection.issued_at().max(admission.issued_at()) {
+            return Err(StatusSessionError::Expired);
+        }
+        let (binding_id, binding_version) = connection.binding();
         Ok(Self {
-            domain: lease.authorization_domain(),
-            author: lease.actor_pubkey(),
+            domain: connection.authorization_domain(),
+            author: connection.actor_pubkey(),
             binding_id,
             binding_version,
-            policy_revision,
-            invalidation_generation,
-            authority_epoch,
-            fence: lease.fence(),
-            expires_at: lease.expires_at(),
+            policy_revision: connection_policy,
+            invalidation_generation: connection_generation,
+            authority_epoch: connection_epoch,
+            fence: connection.fence(),
+            expires_at,
         })
     }
 

@@ -20,7 +20,9 @@ use buzz_db::authorization_admission::{
 };
 use tracing::{debug, info, warn};
 
-use crate::authorization_runtime::outbox::{DurableStatusContract, DurableStatusSink};
+use crate::authorization_runtime::outbox::{
+    CommittedStatusDeliveryAuthority, DurableStatusContract, DurableStatusSink,
+};
 use crate::authorization_runtime::{
     ConnectionStatusSession, CurrentStatusAuthorization, CurrentStatusEvidenceSource,
     ProviderFreeRuntimeMode, StatusCadence, StatusSessionError,
@@ -29,22 +31,59 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-struct BindingStatusAdmissionEffect {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StatusConnectionBinding {
+    request: [u8; 32],
+    target: [u8; 32],
+    transport: [u8; 32],
+}
+
+impl StatusConnectionBinding {
+    fn from_coordinates(coordinates: &buzz_auth::Nip42BindingStatusCoordinates) -> Self {
+        let (request, target, transport) = coordinates.request_binding();
+        Self {
+            request: *request,
+            target: *target,
+            transport: *transport,
+        }
+    }
+}
+
+fn committed_status_receipt_matches(
+    authorization_request: &[u8; 32],
+    receipt: buzz_db::authorization_admission::AdmissionCommitReceipt,
+    expected_result_digest: &[u8; 32],
+) -> bool {
+    authorization_request == receipt.request_fingerprint()
+        && receipt.application_result_digest() == Some(expected_result_digest)
+}
+
+#[derive(Clone, Copy)]
+struct BindingStatusApplicationBinding {
     object: AdmissionObject,
     actor: nostr::PublicKey,
+    event_id: [u8; 32],
+    connection: Option<StatusConnectionBinding>,
     intent_digest: [u8; 32],
 }
 
-impl BindingStatusAdmissionEffect {
+impl BindingStatusApplicationBinding {
     fn new(
         object: AdmissionObject,
         actor: nostr::PublicKey,
         event_id: [u8; 32],
         challenge: &str,
+        connection: Option<StatusConnectionBinding>,
     ) -> Self {
+        let connection_enabled = [u8::from(connection.is_some())];
+        let connection_request = connection.map_or([0; 32], |binding| binding.request);
+        let connection_target = connection.map_or([0; 32], |binding| binding.target);
+        let connection_transport = connection.map_or([0; 32], |binding| binding.transport);
         Self {
             object,
             actor,
+            event_id,
+            connection,
             intent_digest: crate::protected_ingress::fingerprint(
                 b"buzz:nip-fi:binding-status-admission-intent:v1",
                 &[
@@ -52,15 +91,128 @@ impl BindingStatusAdmissionEffect {
                     actor.as_bytes(),
                     &event_id,
                     challenge.as_bytes(),
+                    &connection_enabled,
+                    &connection_request,
+                    &connection_target,
+                    &connection_transport,
                 ],
             ),
         }
     }
+
+    fn application_result(self) -> Result<AdmissionApplicationResult, AdmissionCommitError> {
+        let mut payload = Vec::with_capacity(130);
+        payload.push(1);
+        payload.extend_from_slice(&self.event_id);
+        payload.push(u8::from(self.connection.is_some()));
+        if let Some(connection) = self.connection {
+            payload.extend_from_slice(&connection.request);
+            payload.extend_from_slice(&connection.target);
+            payload.extend_from_slice(&connection.transport);
+        }
+        AdmissionApplicationResult::new(
+            AdmissionApplicationResultSchema::binding_status(),
+            1,
+            payload,
+        )
+    }
+
+    fn application_result_digest(
+        self,
+        result_binding: buzz_db::authorization_admission::AdmissionApplicationResultBinding,
+        result: &AdmissionApplicationResult,
+    ) -> Result<[u8; 32], AdmissionCommitError> {
+        let authorization_domain = result_binding.authorization_domain();
+        let semantic_fingerprint = result_binding.semantic_fingerprint();
+        let application_intent_digest = result_binding.application_intent_digest();
+        if authorization_domain.as_uuid().is_nil()
+            || semantic_fingerprint == &[0; 32]
+            || application_intent_digest == &[0; 32]
+        {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        let schema = result.schema();
+        Ok(crate::protected_ingress::fingerprint(
+            b"buzz:canonical-application-result:v1",
+            &[
+                authorization_domain.as_uuid().as_bytes(),
+                &self.object.kind().database_code().to_be_bytes(),
+                self.object.key(),
+                semantic_fingerprint,
+                application_intent_digest,
+                schema.type_key(),
+                &schema.version().to_be_bytes(),
+                &result.code().to_be_bytes(),
+                result.payload(),
+            ],
+        ))
+    }
+
+    fn bind_committed(
+        self,
+        authorization: buzz_auth::FinalizedAuthContext,
+        receipt: buzz_db::authorization_admission::AdmissionCommitReceipt,
+        application_result: AdmissionApplicationResult,
+        result_binding: buzz_db::authorization_admission::AdmissionApplicationResultBinding,
+        connection_lease: Option<buzz_auth::BoundedAuthorizationLease>,
+    ) -> Result<Option<CommittedStatusActivation>, AdmissionCommitError> {
+        let expected_result = self.application_result()?;
+        let expected_result_digest =
+            self.application_result_digest(result_binding, &expected_result)?;
+        let admission_lease = authorization.lease().clone();
+        let (_, admission_target, _) = admission_lease.request_binding();
+        if authorization.authorization_domain() != receipt.authorization_domain()
+            || authorization.authorization_domain() != result_binding.authorization_domain()
+            || authorization.authorization_domain() != admission_lease.authorization_domain()
+            || authorization.actor_pubkey() != self.actor
+            || authorization.capability() != buzz_auth::RouteCapability::BindingStatus
+            || authorization.owner_pubkey().is_some()
+            || !committed_status_receipt_matches(
+                authorization.request_fingerprint(),
+                receipt,
+                &expected_result_digest,
+            )
+            || admission_target != self.object.key()
+            || receipt.object() != self.object
+            || result_binding.object() != self.object
+            || receipt.semantic_fingerprint() != result_binding.semantic_fingerprint()
+            || result_binding.application_intent_digest() != &self.intent_digest
+            || application_result != expected_result
+        {
+            return Err(AdmissionCommitError::IntentConflict);
+        }
+        match (self.connection, connection_lease) {
+            (None, None) => Ok(None),
+            (Some(binding), Some(connection_lease)) => {
+                let delivery_authority = CommittedStatusDeliveryAuthority::new(
+                    self.object,
+                    admission_lease,
+                    connection_lease,
+                    (binding.request, binding.target, binding.transport),
+                )
+                .map_err(|_| AdmissionCommitError::IntentConflict)?;
+                let authorization = CurrentStatusAuthorization::from_committed_connection(
+                    delivery_authority.connection_lease(),
+                    delivery_authority.admission_lease(),
+                )
+                .map_err(|_| AdmissionCommitError::IntentConflict)?;
+                Ok(Some(CommittedStatusActivation {
+                    authorization,
+                    delivery_authority,
+                }))
+            }
+            (None, Some(_)) | (Some(_), None) => Err(AdmissionCommitError::IntentConflict),
+        }
+    }
+}
+
+struct BindingStatusAdmissionEffect {
+    binding: BindingStatusApplicationBinding,
 }
 
 impl AdmissionApplicationEffect for BindingStatusAdmissionEffect {
     fn intent_digest(&self) -> [u8; 32] {
-        self.intent_digest
+        self.binding.intent_digest
     }
 
     fn result_schema(&self) -> AdmissionApplicationResultSchema {
@@ -80,20 +232,20 @@ impl AdmissionApplicationEffect for BindingStatusAdmissionEffect {
         >,
     > {
         Box::pin(async move {
-            if context.object() != self.object
-                || context.authorization().actor_pubkey() != self.actor
+            if context.object() != self.binding.object
+                || context.authorization().actor_pubkey() != self.binding.actor
                 || context.authorization().capability() != buzz_auth::RouteCapability::BindingStatus
             {
                 return Err(AdmissionCommitError::AuthorizationDenied);
             }
-            let result = AdmissionApplicationResult::new(self.result_schema(), 1, Vec::new())?;
+            let result = self.binding.application_result()?;
             let effect_digest = crate::protected_ingress::fingerprint(
                 b"buzz:nip-fi:binding-status-admission-effect:v1",
                 &[
                     context.authorization_domain().as_uuid().as_bytes(),
                     context.operation_id().as_bytes(),
                     context.request_fingerprint(),
-                    &self.intent_digest,
+                    &self.binding.intent_digest,
                 ],
             );
             AdmissionApplicationOutcome::new(result, effect_digest)
@@ -127,6 +279,11 @@ fn status_activation_scope_matches(
     authorization_domain == tenant_domain && authorization_author == verified_auth_event.pubkey
 }
 
+struct CommittedStatusActivation {
+    authorization: CurrentStatusAuthorization,
+    delivery_authority: CommittedStatusDeliveryAuthority,
+}
+
 /// Activate current-only status after the caller has completed canonical
 /// scoped NIP-42 finalization and obtained a status authorization.
 ///
@@ -137,10 +294,10 @@ fn status_activation_scope_matches(
 /// bootstrap, then becomes sole owner of the new task. `Ok(None)` means the
 /// optional presentation was withheld by authenticated-peer admission without
 /// changing the completed AUTH decision.
-pub async fn activate_client_binding_status<E>(
+async fn activate_client_binding_status<E>(
     verified_auth_event: &nostr::Event,
-    authorization: CurrentStatusAuthorization,
-    status_lease: buzz_auth::BoundedAuthorizationLease,
+    activation: CommittedStatusActivation,
+    authenticated_peer: buzz_auth::AuthenticatedClientPeer,
     evidence: Arc<E>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
@@ -148,6 +305,10 @@ pub async fn activate_client_binding_status<E>(
 where
     E: CurrentStatusEvidenceSource + ?Sized + 'static,
 {
+    let CommittedStatusActivation {
+        authorization,
+        delivery_authority,
+    } = activation;
     if state.authorization_runtime.mode() != ProviderFreeRuntimeMode::Enforce
         || !state.authorization_runtime.is_ready()
     {
@@ -167,29 +328,10 @@ where
             conn.cancel.cancel();
             StatusSessionError::ContractUnavailable
         })?;
-    let authenticated_peer = {
-        let auth = conn.auth_state.read().await;
-        match &*auth {
-            AuthState::Authenticated(context) if context.pubkey == verified_auth_event.pubkey => {
-                context.authenticated_client_peer().copied()
-            }
-            AuthState::Authenticated(_) => {
-                conn.cancel.cancel();
-                return Err(StatusSessionError::EvidenceChanged);
-            }
-            AuthState::Pending { .. } | AuthState::Failed => {
-                conn.cancel.cancel();
-                return Err(StatusSessionError::EvidenceUnavailable);
-            }
-        }
-    };
     if !conn.clear_client_binding_status_task().await {
         conn.cancel.cancel();
         return Err(StatusSessionError::DeliveryFailed);
     }
-    let Some(authenticated_peer) = authenticated_peer else {
-        return Ok(None);
-    };
     let admission_policy = state
         .config
         .nip_fi
@@ -222,7 +364,7 @@ where
         state.db.clone(),
         Arc::clone(&evidence),
         Arc::clone(&conn),
-        &status_lease,
+        delivery_authority,
         &state.relay_keypair,
         activation_now,
     )
@@ -696,37 +838,16 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             }
 
-            let authenticated_peer = canonical_status
-                .as_ref()
-                .map(|admission| admission.authenticated_peer);
-            *conn.auth_state.write().await =
-                AuthState::Authenticated(crate::connection::AuthenticatedConnectionContext::new(
-                    auth_ctx,
-                    authenticated_peer,
-                ));
+            let mut authenticated_peer = None;
+            let mut canonical_session = None;
             if let Some(admission) = canonical_status {
                 let CanonicalWebsocketAdmission {
-                    status_authorization,
-                    status_lease,
+                    status_activation,
+                    authenticated_peer: canonical_peer,
                     read_authorization,
-                    write_authorization,
-                    ..
+                    event_assertion,
                 } = admission;
-                *conn.canonical_authorization.write().await =
-                    Some(crate::connection::CanonicalWebsocketSession::new(
-                        read_authorization,
-                        write_authorization,
-                    ));
-                let opted_in = canonical_event.tags.iter().any(|tag| {
-                    tag.as_slice().first().map(String::as_str)
-                        == Some(buzz_core::client_binding_bootstrap::CLIENT_BINDING_SCOPE_TAG)
-                });
-                if opted_in {
-                    let resolver = Arc::new(
-                        buzz_db::authorization_resolver::PostgresLocalBindingResolver::new(
-                            state.db.clone(),
-                        ),
-                    );
+                if let Some(status_activation) = status_activation {
                     let evidence: Arc<
                         dyn crate::authorization_runtime::CurrentStatusEvidenceSource,
                     > = {
@@ -738,21 +859,21 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         } else {
                             Arc::new(
                                 crate::authorization_runtime::LocalBindingStatusEvidenceSource::new(
-                                    resolver,
+                                    Arc::new(state.db.clone()),
                                 ),
                             )
                         }
                         #[cfg(not(test))]
                         Arc::new(
                             crate::authorization_runtime::LocalBindingStatusEvidenceSource::new(
-                                resolver,
+                                Arc::new(state.db.clone()),
                             ),
                         )
                     };
                     if let Err(error) = activate_client_binding_status(
                         &canonical_event,
-                        status_authorization,
-                        status_lease,
+                        status_activation,
+                        canonical_peer,
                         evidence,
                         Arc::clone(&conn),
                         Arc::clone(&state),
@@ -761,7 +882,6 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     {
                         warn!(conn_id = %conn_id, error = %error, "current-binding status activation failed closed");
                         *conn.auth_state.write().await = AuthState::Failed;
-                        *conn.canonical_authorization.write().await = None;
                         let _ = conn.ctrl_tx.try_send(WsMessage::Text(
                             RelayMessage::ok(
                                 &event_id_hex,
@@ -774,7 +894,20 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         return;
                     }
                 }
+                authenticated_peer = Some(canonical_peer);
+                canonical_session = Some(crate::connection::CanonicalWebsocketSession::new(
+                    read_authorization,
+                    event_assertion,
+                ));
             }
+            if let Some(canonical_session) = canonical_session {
+                *conn.canonical_authorization.write().await = Some(canonical_session);
+            }
+            *conn.auth_state.write().await =
+                AuthState::Authenticated(crate::connection::AuthenticatedConnectionContext::new(
+                    auth_ctx,
+                    authenticated_peer,
+                ));
             info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
             state
                 .conn_manager
@@ -804,18 +937,19 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 }
 
 struct CanonicalWebsocketAdmission {
-    status_authorization: CurrentStatusAuthorization,
-    status_lease: buzz_auth::BoundedAuthorizationLease,
+    status_activation: Option<CommittedStatusActivation>,
     authenticated_peer: buzz_auth::AuthenticatedClientPeer,
     read_authorization: buzz_auth::FinalizedAuthContext,
-    write_authorization: buzz_auth::FinalizedAuthContext,
+    event_assertion: buzz_auth::VerifiedFederatedAssertion,
 }
 
 struct PreparedCanonicalWebsocketAdmission {
     status_request: AdmissionCommitRequest,
+    status_binding: BindingStatusApplicationBinding,
+    connection_status_lease: Option<buzz_auth::BoundedAuthorizationLease>,
     authenticated_peer: buzz_auth::AuthenticatedClientPeer,
     read_authorization: buzz_auth::FinalizedAuthContext,
-    write_authorization: buzz_auth::FinalizedAuthContext,
+    event_assertion: buzz_auth::VerifiedFederatedAssertion,
 }
 
 async fn prepare_canonical_websocket(
@@ -827,7 +961,7 @@ async fn prepare_canonical_websocket(
 ) -> Result<PreparedCanonicalWebsocketAdmission, crate::protected_ingress::ProtectedIngressError> {
     let domain = conn.tenant.community();
     let assertion_object = crate::protected_ingress::domain_object(domain)?;
-    let object = AdmissionObject::binding_status(domain, event.pubkey)
+    let object = AdmissionObject::binding_status_auth_event(domain, event.id.to_bytes())
         .ok_or(crate::protected_ingress::ProtectedIngressError::Denied)?;
     let event_id = event.id.to_bytes();
     let evidence = conn
@@ -862,6 +996,48 @@ async fn prepare_canonical_websocket(
         assertion_coordinates,
     )
     .await?;
+    let status_opted_in = event.tags.iter().any(|tag| {
+        tag.as_slice().first().map(String::as_str)
+            == Some(buzz_core::client_binding_bootstrap::CLIENT_BINDING_SCOPE_TAG)
+    });
+    let (connection_binding, connection_status_lease) = if status_opted_in {
+        let authoritative_now = state
+            .db
+            .status_delivery_authoritative_now()
+            .await
+            .map_err(|_| crate::protected_ingress::ProtectedIngressError::Unavailable)?;
+        let coordinates = buzz_auth::Nip42BindingStatusCoordinates::new(
+            domain,
+            relay_url,
+            conn.conn_id,
+            state.relay_keypair.public_key(),
+            event,
+        )
+        .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?;
+        let binding = StatusConnectionBinding::from_coordinates(&coordinates);
+        let proof = buzz_auth::verify_nip42_binding_status_proof(
+            event,
+            challenge,
+            &coordinates,
+            authoritative_now,
+        )
+        .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?;
+        let lease = state
+            .db
+            .finalize_binding_status_authorization(proof)
+            .await
+            .map_err(|error| match error {
+                buzz_db::DbError::InvalidData(_) => {
+                    crate::protected_ingress::ProtectedIngressError::Denied
+                }
+                _ => crate::protected_ingress::ProtectedIngressError::Unavailable,
+            })?
+            .lease()
+            .clone();
+        (Some(binding), Some(lease))
+    } else {
+        (None, None)
+    };
     let session_assertion_coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
         crate::authorization_runtime::ProtectedIngress::WebSocketQuery,
         domain,
@@ -904,16 +1080,21 @@ async fn prepare_canonical_websocket(
     let request =
         crate::protected_ingress::prepare_mutation(state, coordinates, status_assertion, proof)
             .await?;
+    let status_binding = BindingStatusApplicationBinding::new(
+        object,
+        event.pubkey,
+        event_id,
+        challenge,
+        connection_binding,
+    );
     let request = request
-        .with_application_effect(Box::new(BindingStatusAdmissionEffect::new(
-            object,
-            event.pubkey,
-            event_id,
-            challenge,
-        )))
+        .with_application_effect(Box::new(BindingStatusAdmissionEffect {
+            binding: status_binding,
+        }))
         .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?;
     let request = crate::api::media::ProtectedTransportInstaller::install(request, evidence)
         .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?;
+    let event_assertion = session_assertion.clone();
     let read_coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
         crate::authorization_runtime::ProtectedIngress::WebSocketQuery,
         domain,
@@ -944,40 +1125,13 @@ async fn prepare_canonical_websocket(
     )
     .await?;
 
-    let write_coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
-        crate::authorization_runtime::ProtectedIngress::WebSocketEvent,
-        domain,
-        buzz_auth::RouteCapability::MessagesWrite,
-        assertion_object,
-        buzz_auth::ProofTransport::Nip42,
-        request_fingerprint,
-        transport_context_fingerprint,
-    )?;
-    let write_proof = buzz_auth::verify_nip42_authorization_proof(
-        event,
-        challenge,
-        relay_url,
-        domain,
-        request_fingerprint,
-        *assertion_object.key(),
-        transport_context_fingerprint,
-        Some(*session_assertion.assertion_fingerprint()),
-        None,
-        session_assertion_expires_at,
-    )
-    .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?;
-    let write_authorization = crate::protected_ingress::authorize_read(
-        state,
-        write_coordinates,
-        session_assertion,
-        write_proof,
-    )
-    .await?;
     Ok(PreparedCanonicalWebsocketAdmission {
         status_request: request,
+        status_binding,
+        connection_status_lease,
         authenticated_peer,
         read_authorization,
-        write_authorization,
+        event_assertion,
     })
 }
 
@@ -985,9 +1139,36 @@ async fn commit_canonical_websocket(
     state: &AppState,
     prepared: PreparedCanonicalWebsocketAdmission,
 ) -> Result<CanonicalWebsocketAdmission, crate::protected_ingress::ProtectedIngressError> {
+    let PreparedCanonicalWebsocketAdmission {
+        status_request,
+        status_binding,
+        connection_status_lease,
+        authenticated_peer,
+        read_authorization,
+        event_assertion,
+    } = prepared;
     let committer = crate::protected_ingress::mutation_committer(state)?;
-    let finalized = match committer.commit(prepared.status_request).await {
-        Ok(AdmissionCommitOutcome::Committed { authorization, .. }) => *authorization,
+    let status_activation = match committer.commit(status_request).await {
+        Ok(AdmissionCommitOutcome::Committed {
+            authorization,
+            receipt,
+            application_result,
+            application_result_binding,
+        }) => {
+            let application_result = application_result
+                .ok_or(crate::protected_ingress::ProtectedIngressError::Denied)?;
+            let application_result_binding = application_result_binding
+                .ok_or(crate::protected_ingress::ProtectedIngressError::Denied)?;
+            status_binding
+                .bind_committed(
+                    *authorization,
+                    receipt,
+                    application_result,
+                    application_result_binding,
+                    connection_status_lease,
+                )
+                .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?
+        }
         Ok(AdmissionCommitOutcome::ExactReplay { .. }) => {
             return Err(crate::protected_ingress::ProtectedIngressError::Denied);
         }
@@ -998,23 +1179,24 @@ async fn commit_canonical_websocket(
         ) => return Err(crate::protected_ingress::ProtectedIngressError::Unavailable),
         Err(_) => return Err(crate::protected_ingress::ProtectedIngressError::Denied),
     };
-    let status_lease = finalized.lease().clone();
-    let status_authorization = CurrentStatusAuthorization::from_lease(&status_lease)
-        .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?;
     Ok(CanonicalWebsocketAdmission {
-        status_authorization,
-        status_lease,
-        authenticated_peer: prepared.authenticated_peer,
-        read_authorization: prepared.read_authorization,
-        write_authorization: prepared.write_authorization,
+        status_activation,
+        authenticated_peer,
+        read_authorization,
+        event_assertion,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_auth_tag_json, status_activation_scope_matches};
+    use super::{
+        committed_status_receipt_matches, extract_auth_tag_json, status_activation_scope_matches,
+    };
     use crate::authorization_runtime::CurrentStatusAuthorization;
     use buzz_core::{AuthorizationLeaseFence, CanonicalCurrentBindingEvidence, CommunityId};
+    use buzz_db::authorization_admission::{
+        AdmissionCommitDigests, AdmissionCommitReceipt, AdmissionObject,
+    };
     use chrono::Utc;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use uuid::Uuid;
@@ -1066,6 +1248,44 @@ mod tests {
             Tag::parse(["auth", b.as_str(), "", sig.as_str()]).unwrap(),
         ]);
         assert_eq!(extract_auth_tag_json(&event), None);
+    }
+
+    #[test]
+    fn status_receipt_requires_exact_request_and_typed_result_digest() {
+        let domain = CommunityId::from_uuid(Uuid::from_u128(1));
+        let object = AdmissionObject::binding_status(domain, Keys::generate().public_key())
+            .expect("build binding-status object");
+        let receipt = |request_fingerprint, application_result_digest| {
+            AdmissionCommitReceipt::from_storage(
+                domain,
+                object,
+                Uuid::new_v4(),
+                request_fingerprint,
+                [8; 32],
+                AdmissionCommitDigests::new([9; 32], Some(application_result_digest))
+                    .expect("build commit digests"),
+                Uuid::new_v4(),
+            )
+            .expect("build commit receipt")
+        };
+        let request_fingerprint = [7; 32];
+        let application_result_digest = [10; 32];
+
+        assert!(committed_status_receipt_matches(
+            &request_fingerprint,
+            receipt(request_fingerprint, application_result_digest),
+            &application_result_digest,
+        ));
+        assert!(!committed_status_receipt_matches(
+            &request_fingerprint,
+            receipt([6; 32], application_result_digest),
+            &application_result_digest,
+        ));
+        assert!(!committed_status_receipt_matches(
+            &request_fingerprint,
+            receipt(request_fingerprint, [11; 32]),
+            &application_result_digest,
+        ));
     }
 
     #[test]

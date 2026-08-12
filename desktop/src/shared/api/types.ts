@@ -108,9 +108,6 @@ export type { Identity, IdentityStorage } from "./identityTypes";
 export type Profile = {
   pubkey: string;
   displayName: string | null;
-  /** Relay-authoritative name, trusted until `verifiedNameExpiresAt`. */
-  verifiedName?: string | null;
-  verifiedNameExpiresAt?: number | null;
   avatarUrl: string | null;
   about: string | null;
   nip05Handle: string | null;
@@ -124,9 +121,6 @@ export type Profile = {
 
 export type UserProfileSummary = {
   displayName: string | null;
-  /** Relay-authoritative name, trusted until `verifiedNameExpiresAt`. */
-  verifiedName?: string | null;
-  verifiedNameExpiresAt?: number | null;
   /** Kind-0 `name` field, kept separate from `displayName` so @mention text
    * can be matched against either alias (agents/CLI resolve mentions against
    * `display_name` *or* `name` at send time). */
@@ -145,8 +139,6 @@ export type UsersBatchResponse = {
 export type UserSearchResult = {
   pubkey: string;
   displayName: string | null;
-  verifiedName?: string | null;
-  verifiedNameExpiresAt?: number | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;

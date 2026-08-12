@@ -36,6 +36,33 @@ test("hasSameMessageAuthor: missing pubkeys never match", () => {
   assert.equal(hasSameMessageAuthor({ pubkey: "" }, { pubkey: "" }), false);
 });
 
+test("hasSameMessageAuthor: raw signer changes break displayed-author grouping", () => {
+  assert.equal(
+    hasSameMessageAuthor(
+      { pubkey: "actor", signerPubkey: "relay" },
+      { pubkey: "actor", signerPubkey: "actor" },
+    ),
+    false,
+  );
+  assert.equal(
+    hasSameMessageAuthor(
+      { pubkey: " ACTOR ", signerPubkey: " RELAY " },
+      { pubkey: "actor", signerPubkey: "relay" },
+    ),
+    true,
+  );
+});
+
+test("hasSameMessageAuthor: missing signer falls back to displayed author", () => {
+  assert.equal(
+    hasSameMessageAuthor(
+      { pubkey: "actor" },
+      { pubkey: "actor", signerPubkey: "actor" },
+    ),
+    true,
+  );
+});
+
 test("isWithinGroupingWindow: at or under the boundary is in window", () => {
   const base = 1_000_000;
   assert.equal(isWithinGroupingWindow(base, base), true);

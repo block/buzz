@@ -55,8 +55,6 @@ import { cn } from "@/shared/lib/cn";
 import { observeElementBlockSize } from "@/shared/layout/observeElementBlockSize";
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { Badge } from "@/shared/ui/badge";
-import { getCurrentVerifiedName } from "@/shared/lib/verifiedIdentity";
-import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
 
 export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 
@@ -644,10 +642,6 @@ function ProfileHero({
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
   const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
-  const verifiedName = getCurrentVerifiedName(
-    profile?.verifiedName,
-    profile?.verifiedNameExpiresAt,
-  );
   const botIndicator = isBot ? (
     <BotIdenticon
       className="shrink-0 rounded"
@@ -723,19 +717,6 @@ function ProfileHero({
             {botIndicator}
           </h3>
         )}
-
-        {verifiedName ? (
-          <div
-            className="flex items-center justify-center gap-1.5 text-sm font-medium text-muted-foreground"
-            data-testid="user-profile-verified-alias"
-          >
-            <span>{verifiedName}</span>
-            <VerifiedBadge
-              verifiedName={verifiedName}
-              verifiedNameExpiresAt={profile?.verifiedNameExpiresAt}
-            />
-          </div>
-        ) : null}
 
         {profile?.about?.trim() ? (
           <ProfileHeroDescription

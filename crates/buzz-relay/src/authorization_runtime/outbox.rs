@@ -32,7 +32,7 @@ use super::status::{
     CurrentStatusContract, CurrentStatusEvidenceSource, CurrentStatusSink, StatusSessionError,
     UnchangedBootstrapDelivery,
 };
-use crate::connection::{AuthState, ConnectionState, StatusWriteIdentity, StatusWriter};
+use crate::connection::{ConnectionState, StatusWriteIdentity, StatusWriter};
 use crate::protocol::RelayMessage;
 
 const CLAIM_LEASE: Duration = Duration::from_secs(30);
@@ -191,30 +191,102 @@ where
     in_flight: tokio::sync::Mutex<Option<StatusWriteReceiver>>,
 }
 
+/// Pair of co-committed admission authority and exact connection authority
+/// after validation of their typed application-result binding.
+pub(crate) struct CommittedStatusDeliveryAuthority {
+    admission_lease: BoundedAuthorizationLease,
+    connection_lease: BoundedAuthorizationLease,
+    connection_binding: ([u8; 32], [u8; 32], [u8; 32]),
+}
+
+impl CommittedStatusDeliveryAuthority {
+    pub(crate) fn new(
+        admission_object: buzz_db::authorization_admission::AdmissionObject,
+        admission_lease: BoundedAuthorizationLease,
+        connection_lease: BoundedAuthorizationLease,
+        connection_binding: ([u8; 32], [u8; 32], [u8; 32]),
+    ) -> Result<Self, DurableStatusError> {
+        let (admission_policy, admission_generation, _) = admission_lease.dependency_versions();
+        let (connection_policy, connection_generation, _) = connection_lease.dependency_versions();
+        let (_, admission_target, _) = admission_lease.request_binding();
+        let (connection_request, connection_target, connection_transport) =
+            connection_lease.request_binding();
+        if admission_lease.capability() != RouteCapability::BindingStatus
+            || connection_lease.capability() != RouteCapability::BindingStatus
+            || admission_lease.owner_pubkey().is_some()
+            || connection_lease.owner_pubkey().is_some()
+            || admission_lease.transport() != ProofTransport::Nip42
+            || connection_lease.transport() != ProofTransport::Nip42
+            || admission_lease.authorization_domain() != connection_lease.authorization_domain()
+            || admission_lease.actor_pubkey() != connection_lease.actor_pubkey()
+            || admission_lease.binding() != connection_lease.binding()
+            || admission_policy != connection_policy
+            || admission_generation != connection_generation
+            || admission_object.kind()
+                != buzz_db::authorization_admission::AdmissionObjectKind::BindingStatus
+            || admission_target != admission_object.key()
+            || (connection_request, connection_target, connection_transport)
+                != (
+                    &connection_binding.0,
+                    &connection_binding.1,
+                    &connection_binding.2,
+                )
+        {
+            return Err(DurableStatusError::Unauthorized);
+        }
+        Ok(Self {
+            admission_lease,
+            connection_lease,
+            connection_binding,
+        })
+    }
+
+    pub(crate) const fn admission_lease(&self) -> &BoundedAuthorizationLease {
+        &self.admission_lease
+    }
+
+    pub(crate) const fn connection_lease(&self) -> &BoundedAuthorizationLease {
+        &self.connection_lease
+    }
+}
+
 impl<E> DurableStatusSink<E>
 where
     E: CurrentStatusEvidenceSource + ?Sized + 'static,
 {
     /// Validate exact connection ownership and physically flush bootstrap.
     ///
-    /// The caller must pass the finalized direct binding-status lease that it
-    /// will convert into `CurrentStatusAuthorization`; legacy AUTH state alone
-    /// is intentionally insufficient.
-    pub async fn activate(
+    /// The caller must pass both the co-committed admission lease and the
+    /// connection-sealed delivery lease. The first owns durable authority and
+    /// the second owns the exact socket target; legacy AUTH state alone is
+    /// intentionally insufficient.
+    pub(crate) async fn activate(
         mode: NipFiMode,
         db: Db,
         evidence: Arc<E>,
         connection: Arc<ConnectionState>,
-        lease: &BoundedAuthorizationLease,
+        authority: CommittedStatusDeliveryAuthority,
         relay_keys: &Keys,
         authoritative_now: DateTime<Utc>,
     ) -> Result<(Self, UnchangedBootstrapDelivery), DurableStatusError> {
+        let CommittedStatusDeliveryAuthority {
+            admission_lease,
+            connection_lease,
+            connection_binding,
+        } = authority;
         if mode != NipFiMode::Enforce
-            || lease.capability() != RouteCapability::BindingStatus
-            || lease.owner_pubkey().is_some()
-            || lease.transport() != ProofTransport::Nip42
-            || lease.authorization_domain() != connection.tenant.community()
-            || !lease.is_valid_at(authoritative_now)
+            || admission_lease.capability() != RouteCapability::BindingStatus
+            || connection_lease.capability() != RouteCapability::BindingStatus
+            || admission_lease.owner_pubkey().is_some()
+            || connection_lease.owner_pubkey().is_some()
+            || admission_lease.transport() != ProofTransport::Nip42
+            || connection_lease.transport() != ProofTransport::Nip42
+            || admission_lease.authorization_domain() != connection.tenant.community()
+            || connection_lease.authorization_domain() != connection.tenant.community()
+            || admission_lease.actor_pubkey() != connection_lease.actor_pubkey()
+            || admission_lease.binding() != connection_lease.binding()
+            || !admission_lease.is_valid_at(authoritative_now)
+            || !connection_lease.is_valid_at(authoritative_now)
         {
             return Err(DurableStatusError::Unauthorized);
         }
@@ -227,14 +299,8 @@ where
         if scope.relay_signer() != relay_keys.public_key() {
             return Err(DurableStatusError::Unauthorized);
         }
-        let author = lease.actor_pubkey();
-        let directly_authenticated = match &*connection.auth_state.read().await {
-            AuthState::Authenticated(context) => {
-                context.pubkey == author && context.agent_owner_pubkey.is_none()
-            }
-            AuthState::Pending { .. } | AuthState::Failed => false,
-        };
-        if !directly_authenticated || connection.cancel.is_cancelled() {
+        let author = admission_lease.actor_pubkey();
+        if connection.cancel.is_cancelled() {
             return Err(DurableStatusError::Unauthorized);
         }
         let connection_fingerprint = status_fingerprint(
@@ -247,8 +313,7 @@ where
                 scope.connection_epoch().as_str().as_bytes(),
             ],
         );
-        let (_, authorized_target, _) = lease.request_binding();
-        if authorized_target != &connection_fingerprint {
+        if connection_binding.1 != connection_fingerprint {
             return Err(DurableStatusError::Unauthorized);
         }
         db.install_status_delivery_capacity(connection.tenant.community())

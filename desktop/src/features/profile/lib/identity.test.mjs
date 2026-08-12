@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  formatProfileLabel,
   formatOwnerLabel,
-  formatVerifiedUserLabel,
   profileLookupsEqual,
   resolveUserLabel,
 } from "./identity.ts";
@@ -11,8 +11,6 @@ import {
 const OWNER_PUBKEY =
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const USER_PUBKEY = "11".repeat(32);
-const NOW_MS = 1_800_000_000_000;
-const FUTURE_EXPIRATION = NOW_MS / 1_000 + 60;
 
 const summary = (over = {}) => ({
   displayName: "Ada",
@@ -66,8 +64,6 @@ test("profileLookupsEqual: same count, different keys is not equal", () => {
 test("profileLookupsEqual: a changed field is not equal", () => {
   for (const field of [
     "displayName",
-    "verifiedName",
-    "verifiedNameExpiresAt",
     "avatarUrl",
     "nip05Handle",
     "ownerPubkey",
@@ -131,39 +127,43 @@ test("stabiliser: a real profile change swaps the reference (re-render fires)", 
   assert.equal(held, changed, "must re-stabilise around the new value");
 });
 
-test("formats a chosen name followed by the authoritative display name", () => {
+test("profile labels prefer display name then NIP-05", () => {
   assert.equal(
-    formatVerifiedUserLabel("Example", "example", FUTURE_EXPIRATION, NOW_MS),
-    "Example (example)",
-  );
-});
-
-test("does not duplicate equal chosen and authoritative names", () => {
-  assert.equal(
-    formatVerifiedUserLabel("example", "example", FUTURE_EXPIRATION, NOW_MS),
-    "example",
-  );
-});
-
-test("expired authoritative names fail closed", () => {
-  assert.equal(
-    formatVerifiedUserLabel("Example", "example", NOW_MS / 1_000, NOW_MS),
+    formatProfileLabel({ displayName: " Example ", nip05Handle: "e@x" }),
     "Example",
   );
+  assert.equal(
+    formatProfileLabel({ displayName: " ", nip05Handle: " e@x " }),
+    "e@x",
+  );
+  assert.equal(formatProfileLabel(null), null);
 });
 
-test("resolved user labels keep the chosen name first", () => {
+test("profile labels ignore retired trust-shaped properties", () => {
+  assert.equal(
+    formatProfileLabel({
+      displayName: null,
+      nip05Handle: "profile@nip05",
+      verifiedName: "must-not-render",
+      verifiedNameExpiresAt: Number.MAX_SAFE_INTEGER,
+    }),
+    "profile@nip05",
+  );
+});
+
+test("resolved user labels never fall back to retired trust-shaped names", () => {
   assert.equal(
     resolveUserLabel({
       pubkey: USER_PUBKEY,
       profiles: {
         [USER_PUBKEY]: summary({
-          displayName: "Example",
-          verifiedName: "example",
-          verifiedNameExpiresAt: Math.floor(Date.now() / 1_000) + 60,
+          displayName: null,
+          nip05Handle: null,
+          verifiedName: "must-not-render",
+          verifiedNameExpiresAt: Number.MAX_SAFE_INTEGER,
         }),
       },
     }),
-    "Example (example)",
+    "11111111…1111",
   );
 });

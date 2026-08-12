@@ -10,6 +10,7 @@ use crate::{
     nostr_bind,
     relay::{self, relay_api_base_url_with_override, relay_ws_url_with_override},
 };
+use buzz_core_pkg::client_binding_bootstrap::CLIENT_BINDING_SCOPE_TAG;
 
 /// Encode `pubkey` as npub bech32 and truncate it for display: first 10 chars
 /// + "…" + last 4 chars. Returns the full bech32 when it is 16 chars or fewer.
@@ -339,7 +340,12 @@ pub async fn import_identity(
     password: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
-    tokio::task::spawn_blocking(move || {
+    let projection_app = app_handle.clone();
+    let scope_mutation = projection_app
+        .state::<crate::native_websocket::WebSocketManager>()
+        .begin_scope_mutation()
+        .await?;
+    let identity_result = tokio::task::spawn_blocking(move || {
         // NIP-49 backups require a passphrase and decrypt entirely in Rust.
         // Raw nsec/hex input follows the existing parser path unchanged.
         let password = password.map(zeroize::Zeroizing::new);
@@ -385,7 +391,11 @@ pub async fn import_identity(
         })
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))
+    .and_then(|result| result);
+    scope_mutation.finish().await;
+    let identity = identity_result?;
+    Ok(identity)
 }
 
 /// Commit an imported identity: durably persist, swap in-memory keys, clear
@@ -542,6 +552,10 @@ pub async fn sign_out(app: tauri::AppHandle) -> Result<(), String> {
         );
     }
 
+    app.state::<crate::native_websocket::WebSocketManager>()
+        .suspend_projection()
+        .await;
+
     // Stop all managed agents before restart so they don't race the wipe.
     if let Err(e) = crate::shutdown::shutdown_managed_agents(&app) {
         eprintln!("buzz-desktop sign-out: agent shutdown: {e}");
@@ -639,30 +653,82 @@ pub async fn sign_nostr_identity_binding(
 }
 
 #[tauri::command]
+/// Build an AUTH event and scope it to a matching live native socket when one
+/// is supplied. Missing, stale, or nonmatching socket identifiers produce the
+/// ordinary unscoped AUTH event.
 pub async fn create_auth_event(
     challenge: String,
     relay_url: String,
     state: State<'_, AppState>,
+    websocket_manager: State<'_, crate::native_websocket::WebSocketManager>,
+    native_websocket_id: Option<u32>,
 ) -> Result<String, String> {
     let keys = state.signing_keys()?;
+    let status_proof = match native_websocket_id {
+        Some(id) if relay_url == relay_ws_url_with_override(&state) => websocket_manager
+            .status_auth_proof(id, &challenge, &relay_url, keys.public_key())
+            .await
+            .ok(),
+        None => None,
+        Some(_) => None,
+    };
+    let scope_tag = status_proof.as_ref().map(|proof| {
+        vec![
+            CLIENT_BINDING_SCOPE_TAG.to_string(),
+            "1".to_string(),
+            proof.connection_epoch().as_str().to_string(),
+            proof.relay_signer().to_hex(),
+        ]
+    });
+    let (ordinary_event_json, scoped_event_json) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let ordinary = build_auth_event_json(&keys, &challenge, &relay_url, None)?;
+            let scoped = scope_tag.and_then(|scope_tag| {
+                build_auth_event_json(&keys, &challenge, &relay_url, Some(scope_tag)).ok()
+            });
+            Ok::<_, String>((ordinary, scoped))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+    if let (Some(id), Some(proof), Some(scoped)) = (
+        native_websocket_id,
+        status_proof.as_ref(),
+        scoped_event_json,
+    ) {
+        if websocket_manager
+            .complete_status_auth(id, proof)
+            .await
+            .is_ok()
+        {
+            return Ok(scoped);
+        }
+    }
+    Ok(ordinary_event_json)
+}
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let tags = vec![
-            Tag::parse(vec!["relay", &relay_url])
-                .map_err(|error| format!("relay tag failed: {error}"))?,
-            Tag::parse(vec!["challenge", &challenge])
-                .map_err(|error| format!("challenge tag failed: {error}"))?,
-        ];
-
-        let event = EventBuilder::new(Kind::Custom(22242), "")
-            .tags(tags)
-            .sign_with_keys(&keys)
-            .map_err(|error| format!("sign failed: {error}"))?;
-
-        Ok(event.as_json())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+fn build_auth_event_json(
+    keys: &Keys,
+    challenge: &str,
+    relay_url: &str,
+    scope_tag: Option<Vec<String>>,
+) -> Result<String, String> {
+    let mut tags = vec![
+        Tag::parse(vec!["relay", relay_url])
+            .map_err(|error| format!("relay tag failed: {error}"))?,
+        Tag::parse(vec!["challenge", challenge])
+            .map_err(|error| format!("challenge tag failed: {error}"))?,
+    ];
+    if let Some(scope_tag) = scope_tag {
+        tags.push(
+            Tag::parse(scope_tag)
+                .map_err(|error| format!("client binding scope tag failed: {error}"))?,
+        );
+    }
+    EventBuilder::new(Kind::Custom(22242), "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map(|event| event.as_json())
+        .map_err(|error| format!("sign failed: {error}"))
 }
 
 #[tauri::command]
@@ -702,8 +768,9 @@ pub async fn nip44_decrypt_from_self(
 
 #[cfg(test)]
 mod nostr_identity_binding_tests {
-    use super::build_nostr_identity_binding_event;
+    use super::{build_auth_event_json, build_nostr_identity_binding_event};
     use crate::nostr_bind;
+    use buzz_core_pkg::client_binding_bootstrap::{ClientBindingScopeV1, CLIENT_BINDING_SCOPE_TAG};
     use nostr::{JsonUtil, Keys};
 
     fn tag_values(event: &nostr::Event) -> Vec<Vec<String>> {
@@ -750,6 +817,49 @@ mod nostr_identity_binding_tests {
         assert!(tags.contains(&vec!["version".into(), "1".into(),]));
         assert!(tags.contains(&vec!["origin".into(), "https://example.com".into(),]));
         assert!(tags.contains(&vec!["expires_at".into(), "2999-01-01T00:00:00Z".into(),]));
+    }
+
+    #[test]
+    fn auth_builder_adds_scope_only_when_native_proof_supplies_exact_tag() {
+        let author = Keys::generate();
+        let relay = Keys::generate();
+        let ordinary = nostr::Event::from_json(
+            build_auth_event_json(&author, "challenge", "wss://relay.example/", None)
+                .expect("ordinary AUTH builds"),
+        )
+        .expect("ordinary AUTH parses");
+        assert!(matches!(
+            ClientBindingScopeV1::from_verified_auth_event(&ordinary),
+            Err(buzz_core_pkg::client_binding_bootstrap::ClientBindingBootstrapError::MissingScopeTag)
+        ));
+
+        let scoped = nostr::Event::from_json(
+            build_auth_event_json(
+                &author,
+                "challenge",
+                "wss://relay.example/",
+                Some(vec![
+                    CLIENT_BINDING_SCOPE_TAG.to_string(),
+                    "1".to_string(),
+                    "11111111-1111-4111-8111-111111111111".to_string(),
+                    relay.public_key().to_hex(),
+                ]),
+            )
+            .expect("scoped AUTH builds"),
+        )
+        .expect("scoped AUTH parses");
+        let parsed =
+            ClientBindingScopeV1::from_verified_auth_event(&scoped).expect("signed scope parses");
+        assert_eq!(parsed.relay_signer(), relay.public_key());
+        assert_eq!(
+            scoped
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str)
+                    == Some(CLIENT_BINDING_SCOPE_TAG))
+                .count(),
+            1
+        );
     }
 
     #[test]

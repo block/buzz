@@ -1514,8 +1514,16 @@ async fn recheck_status_evidence_tx(
     evidence: &CanonicalCurrentBindingEvidence,
     authoritative_now: DateTime<Utc>,
 ) -> Result<bool> {
+    recheck_connection_status_evidence_tx(transaction, evidence, authoritative_now).await
+}
+
+async fn recheck_connection_status_evidence_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    evidence: &CanonicalCurrentBindingEvidence,
+    authoritative_now: DateTime<Utc>,
+) -> Result<bool> {
     let row = sqlx::query(
-        "SELECT binding.binding_id, binding.binding_version, binding.policy_revision, \
+        "SELECT binding.binding_id,binding.binding_version,binding.policy_revision, \
                 domain.current_generation \
          FROM identity_bindings binding \
          JOIN authorization_invalidation_domains domain \
@@ -1525,14 +1533,17 @@ async fn recheck_status_evidence_tx(
           AND policy.policy_revision=binding.policy_revision \
          WHERE binding.community_id=$1 AND binding.event_author_pubkey=$2 \
            AND binding.binding_state=1 AND binding.lifecycle_revision=1 \
-           AND (binding.expires_at IS NULL OR binding.expires_at > transaction_timestamp()) \
+           AND (binding.expires_at IS NULL OR binding.expires_at > $3) \
+           AND policy.effective_at <= $3 \
+           AND (policy.expires_at IS NULL OR policy.expires_at > $3) \
            AND NOT EXISTS (SELECT 1 FROM identity_enrollment_policies newer \
                WHERE newer.community_id=binding.community_id \
                  AND newer.policy_revision > binding.policy_revision) \
-         FOR SHARE OF binding, domain, policy",
+         FOR SHARE OF binding,domain,policy",
     )
     .bind(evidence.authorization_domain().as_uuid())
     .bind(evidence.event_author_pubkey().as_bytes())
+    .bind(authoritative_now)
     .fetch_optional(&mut **transaction)
     .await?;
     let Some(row) = row else {
@@ -1565,7 +1576,7 @@ async fn recheck_status_evidence_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn derive_status_evidence_fence(
+pub(crate) fn derive_status_evidence_fence(
     community_id: CommunityId,
     author: PublicKey,
     binding_id: Uuid,

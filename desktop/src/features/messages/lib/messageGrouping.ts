@@ -2,6 +2,7 @@ import { getSentFromThreadRootId } from "@/features/messages/lib/sentFromThread"
 
 type MessageAuthorCandidate = {
   pubkey?: string | null;
+  signerPubkey?: string | null;
 };
 
 type MessageGroupingCandidate = {
@@ -33,9 +34,20 @@ export function hasSameMessageAuthor(
 ) {
   const previousPubkey = previous?.pubkey?.trim().toLowerCase();
   const currentPubkey = current?.pubkey?.trim().toLowerCase();
+  const previousSigner = (previous?.signerPubkey ?? previous?.pubkey)
+    ?.trim()
+    .toLowerCase();
+  const currentSigner = (current?.signerPubkey ?? current?.pubkey)
+    ?.trim()
+    .toLowerCase();
 
   return Boolean(
-    previousPubkey && currentPubkey && previousPubkey === currentPubkey,
+    previousPubkey &&
+      currentPubkey &&
+      previousPubkey === currentPubkey &&
+      previousSigner &&
+      currentSigner &&
+      previousSigner === currentSigner,
   );
 }
 

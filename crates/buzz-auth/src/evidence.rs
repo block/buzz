@@ -133,6 +133,38 @@ impl SealedTransportEvidence {
         proxy_expires_at: DateTime<Utc>,
         authenticated_client_peer: AuthenticatedClientPeer,
     ) -> Self {
+        Self::for_test_with_nonce(
+            authorization_domain,
+            assertion,
+            method,
+            authority,
+            path_and_query,
+            body_digest,
+            transport,
+            proxy_expires_at,
+            authenticated_client_peer,
+            [0x91; 32],
+        )
+    }
+
+    /// Construct test evidence with an explicit opaque replay identity.
+    ///
+    /// This permits independent connections in one domain to exercise the
+    /// production nonce ledger without deleting or bypassing prior claims.
+    #[cfg(any(test, feature = "dev"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_test_with_nonce(
+        authorization_domain: CommunityId,
+        assertion: impl Into<Box<str>>,
+        method: &[u8],
+        authority: &[u8],
+        path_and_query: &[u8],
+        body_digest: [u8; 32],
+        transport: ProofTransport,
+        proxy_expires_at: DateTime<Utc>,
+        authenticated_client_peer: AuthenticatedClientPeer,
+        nonce_claim: [u8; 32],
+    ) -> Self {
         let assertion = assertion.into();
         let assertion_digest: [u8; 32] = Sha256::digest(assertion.as_bytes()).into();
         Self::from_trusted_proxy(
@@ -145,7 +177,7 @@ impl SealedTransportEvidence {
             body_digest,
             transport,
             proxy_expires_at,
-            TrustedProxyNonceClaim::new([0x91; 32], proxy_expires_at),
+            TrustedProxyNonceClaim::new(nonce_claim, proxy_expires_at),
             AssertionTransportProfile::TrustedProxyHmacV2,
             Some(authenticated_client_peer),
         )

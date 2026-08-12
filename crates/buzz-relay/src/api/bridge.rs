@@ -4087,7 +4087,11 @@ mod tests {
         }
     }
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+    fn test_database_url() -> Option<String> {
+        std::env::var("BUZZ_TEST_DATABASE_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+    }
 
     /// Build an AppState suitable for handler-level bridge tests.
     ///
@@ -4133,7 +4137,7 @@ mod tests {
         database_url: Option<&str>,
     ) -> Option<(Arc<crate::state::AppState>, sqlx::PgPool)> {
         let mut config = crate::config::Config::from_env().ok()?;
-        config.database_url = database_url.unwrap_or(TEST_DB_URL).to_owned();
+        config.database_url = database_url.map(str::to_owned).or_else(test_database_url)?;
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -4218,10 +4222,15 @@ mod tests {
         }
     }
 
-    struct UnavailableStatusEvidence;
+    struct BlockingUnavailableStatusEvidence {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
 
     #[async_trait]
-    impl crate::authorization_runtime::CurrentStatusEvidenceSource for UnavailableStatusEvidence {
+    impl crate::authorization_runtime::CurrentStatusEvidenceSource
+        for BlockingUnavailableStatusEvidence
+    {
         async fn current(
             &self,
             _request: &buzz_auth::CurrentBindingStatusEvidenceRequest,
@@ -4229,6 +4238,8 @@ mod tests {
             buzz_core::CanonicalCurrentBindingEvidence,
             crate::authorization_runtime::StatusSessionError,
         > {
+            self.entered.notify_one();
+            self.release.notified().await;
             Err(crate::authorization_runtime::StatusSessionError::EvidenceUnavailable)
         }
 
@@ -4378,13 +4389,16 @@ mod tests {
         use axum::body::{to_bytes, Body};
         use axum::http::{header, Request};
         use base64::Engine as _;
+        use buzz_auth::LocalStatusEvidenceResolver as _;
         use sha2::{Digest as _, Sha256};
         use tower::ServiceExt;
 
         const KID: &str = "bridge-canonical-test";
         const ISSUER: &str = "https://bridge-issuer.example";
         const AUDIENCE: &str = "buzz-bridge-test";
-        let admin_url = TEST_DB_URL
+        let test_db_url = test_database_url()
+            .expect("BUZZ_TEST_DATABASE_URL must name a disposable PostgreSQL database");
+        let admin_url = test_db_url
             .rsplit_once('/')
             .map(|(prefix, _)| format!("{prefix}/postgres"))
             .expect("test database URL has a database name");
@@ -4418,7 +4432,7 @@ mod tests {
         .execute(&admin)
         .await
         .expect("create disposable bridge database");
-        let database_url = TEST_DB_URL
+        let database_url = test_db_url
             .rsplit_once('/')
             .map(|(prefix, _)| format!("{prefix}/{database_name}"))
             .expect("derive disposable bridge database URL");
@@ -4809,6 +4823,66 @@ mod tests {
             assert_eq!(context.authorization().pubkey, actor.public_key());
         }
         assert_eq!(status_results, 1);
+        let durable_status: (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                 (SELECT count(*) FROM client_status_delivery_capacity \
+                    WHERE community_id=$1 AND healthy), \
+                 (SELECT count(*) FROM client_status_transitions \
+                    WHERE community_id=$1 AND delivery_kind=1 AND status_revision=1), \
+                 (SELECT count(*) FROM client_status_delivery_outbox outbox \
+                    JOIN client_status_transitions transition \
+                      ON transition.community_id=outbox.community_id \
+                     AND transition.transition_id=outbox.transition_id \
+                    WHERE outbox.community_id=$1 AND outbox.delivery_state=2 \
+                      AND transition.delivery_kind=1)",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("read physically acknowledged current-binding status");
+        assert_eq!(durable_status, (1, 1, 1));
+
+        // The live WS EVENT handler must prepare a fresh operation-bound
+        // admission from the canonical session. An exact replay returns the
+        // immutable typed result without a second event write or dispatch.
+        let websocket_event = EventBuilder::new(
+            Kind::TextNote,
+            format!("canonical websocket event {}", uuid::Uuid::new_v4()),
+        )
+        .sign_with_keys(&actor)
+        .expect("sign canonical WebSocket event");
+        crate::handlers::event::handle_event(
+            websocket_event.clone(),
+            Arc::clone(&conn),
+            Arc::clone(&state),
+        )
+        .await;
+        crate::handlers::event::handle_event(
+            websocket_event.clone(),
+            Arc::clone(&conn),
+            Arc::clone(&state),
+        )
+        .await;
+        let websocket_event_counts: (i64, i64) = sqlx::query_as(
+            "SELECT \
+                 (SELECT count(*) FROM events WHERE community_id=$1 AND id=$2), \
+                 (SELECT count(*) FROM authorization_admission_results \
+                    WHERE community_id=$1 AND object_kind=7 AND object_key=$2)",
+        )
+        .bind(community.as_uuid())
+        .bind(websocket_event.id.as_bytes())
+        .fetch_one(&pool)
+        .await
+        .expect("read canonical WebSocket event result");
+        assert_eq!(websocket_event_counts, (1, 1));
+        let status_evidence_request =
+            buzz_auth::CurrentBindingStatusEvidenceRequest::new(community, actor.public_key())
+                .expect("build current-status evidence request");
+        let first_status_evidence = state
+            .db
+            .current_status_evidence(&status_evidence_request)
+            .await
+            .expect("resolve first connection status evidence");
         assert!(conn.canonical_authorization.read().await.is_some());
         let bootstrap_index = frames
             .iter()
@@ -4833,11 +4907,255 @@ mod tests {
         assert!(control_frames.is_empty());
         assert!(conn.clear_client_binding_status_task().await);
         conn.cancel.cancel();
+        let prior_connection = match Arc::try_unwrap(conn) {
+            Ok(connection) => connection,
+            Err(_) => panic!("first status connection remained shared after task shutdown"),
+        };
+
+        // A second opted-in connection for the same actor must bind its own
+        // socket target while advancing the canonical object epoch. This
+        // catches accidental equality between the connection-local evidence
+        // epoch and the independently monotonic admission epoch.
+        let reconnect_challenge = format!("bridge-auth-reconnect-{}", uuid::Uuid::new_v4());
+        let reconnect_event = EventBuilder::auth(
+            &reconnect_challenge,
+            nostr::RelayUrl::parse(&relay_url).expect("parse reconnect relay URL"),
+        )
+        .tag(
+            Tag::parse([
+                buzz_core::client_binding_bootstrap::CLIENT_BINDING_SCOPE_TAG,
+                "1",
+                uuid::Uuid::new_v4().to_string().as_str(),
+                state.relay_keypair.public_key().to_hex().as_str(),
+            ])
+            .expect("build reconnect binding-status scope"),
+        )
+        .sign_with_keys(&actor)
+        .expect("sign reconnect AUTH event");
+        let reconnect_peer = buzz_auth::AuthenticatedClientPeer::for_test([0x93; 32]);
+        let reconnect_evidence = buzz_auth::SealedTransportEvidence::for_test_with_nonce(
+            community,
+            assertion.clone(),
+            b"GET",
+            host.as_bytes(),
+            b"/",
+            [0; 32],
+            buzz_auth::ProofTransport::Nip42,
+            chrono::Utc::now() + chrono::Duration::seconds(300),
+            reconnect_peer,
+            [0x92; 32],
+        );
+        let (reconnect_send_tx, mut reconnect_send_rx) = tokio::sync::mpsc::channel(16);
+        let (reconnect_ctrl_tx, mut reconnect_ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let reconnect_status_writer = test_status_writer(reconnect_send_tx.clone());
+        let reconnect = Arc::new(crate::connection::ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            canonical_transport_evidence: tokio::sync::Mutex::new(Some(reconnect_evidence)),
+            canonical_authorization: tokio::sync::RwLock::new(None),
+            auth_state: tokio::sync::RwLock::new(crate::connection::AuthState::Pending {
+                challenge: reconnect_challenge,
+            }),
+            status_scope: tokio::sync::RwLock::new(None),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx: reconnect_send_tx,
+            status_writer: reconnect_status_writer,
+            ctrl_tx: reconnect_ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            ..prior_connection
+        });
+        crate::handlers::auth::handle_auth(
+            reconnect_event,
+            Arc::clone(&reconnect),
+            Arc::clone(&state),
+        )
+        .await;
+        let mut reconnect_frames = Vec::new();
+        while let Ok(frame) = reconnect_send_rx.try_recv() {
+            reconnect_frames.push(format!("{frame:?}"));
+        }
+        let mut reconnect_control_frames = Vec::new();
+        while let Ok(frame) = reconnect_ctrl_rx.try_recv() {
+            reconnect_control_frames.push(format!("{frame:?}"));
+        }
+        {
+            let auth = reconnect.auth_state.read().await;
+            let crate::connection::AuthState::Authenticated(context) = &*auth else {
+                panic!(
+                    "reconnect did not authenticate: data={reconnect_frames:?} control={reconnect_control_frames:?}"
+                );
+            };
+            assert_eq!(context.authenticated_client_peer(), Some(&reconnect_peer));
+        }
+        assert!(reconnect.canonical_authorization.read().await.is_some());
+        assert!(reconnect_frames.iter().any(|frame| frame.contains("true")));
+        assert!(reconnect_frames.iter().any(|frame| frame
+            .contains(buzz_core::client_binding_bootstrap::CLIENT_BINDING_BOOTSTRAP_SUB_ID)));
+        assert!(reconnect_frames.iter().any(|frame| frame
+            .contains(buzz_core::client_binding_bootstrap::CLIENT_BINDING_STATUS_SUB_ID)));
+        assert!(reconnect_control_frames.is_empty());
+        let reconnect_status: (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                 (SELECT count(*) FROM authorization_admission_results \
+                    WHERE community_id=$1 AND object_kind=8), \
+                 (SELECT count(*) FROM client_status_transitions \
+                    WHERE community_id=$1 AND delivery_kind=1 AND status_revision=1), \
+                 (SELECT count(*) FROM client_status_delivery_outbox outbox \
+                    JOIN client_status_transitions transition \
+                      ON transition.community_id=outbox.community_id \
+                     AND transition.transition_id=outbox.transition_id \
+                    WHERE outbox.community_id=$1 AND outbox.delivery_state=2 \
+                      AND transition.delivery_kind=1)",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("read reconnect status completion");
+        assert_eq!(reconnect_status, (2, 2, 2));
+        let reconnect_status_evidence = state
+            .db
+            .current_status_evidence(&status_evidence_request)
+            .await
+            .expect("resolve reconnect status evidence");
+        assert_eq!(
+            (
+                first_status_evidence.binding_id(),
+                first_status_evidence.binding_version(),
+                first_status_evidence.policy_revision(),
+                first_status_evidence.invalidation_generation(),
+                first_status_evidence.authority_epoch(),
+                first_status_evidence.fence(),
+            ),
+            (
+                reconnect_status_evidence.binding_id(),
+                reconnect_status_evidence.binding_version(),
+                reconnect_status_evidence.policy_revision(),
+                reconnect_status_evidence.invalidation_generation(),
+                reconnect_status_evidence.authority_epoch(),
+                reconnect_status_evidence.fence(),
+            ),
+            "a later connection must preserve the stable connection-status evidence",
+        );
+        assert!(reconnect.clear_client_binding_status_task().await);
+        reconnect.cancel.cancel();
+        let prior_reconnect = match Arc::try_unwrap(reconnect) {
+            Ok(connection) => connection,
+            Err(_) => panic!("reconnect remained shared after task shutdown"),
+        };
+
+        // The connection-status scope remains an opt-in. A canonical Enforce
+        // AUTH without that tag must authenticate normally and must not create
+        // a bootstrap or status delivery.
+        let unscoped_challenge = format!("bridge-auth-unscoped-{}", uuid::Uuid::new_v4());
+        let unscoped_event = EventBuilder::auth(
+            &unscoped_challenge,
+            nostr::RelayUrl::parse(&relay_url).expect("parse unscoped relay URL"),
+        )
+        .sign_with_keys(&actor)
+        .expect("sign unscoped AUTH event");
+        let unscoped_peer = buzz_auth::AuthenticatedClientPeer::for_test([0x94; 32]);
+        let unscoped_evidence = buzz_auth::SealedTransportEvidence::for_test_with_nonce(
+            community,
+            assertion.clone(),
+            b"GET",
+            host.as_bytes(),
+            b"/",
+            [0; 32],
+            buzz_auth::ProofTransport::Nip42,
+            chrono::Utc::now() + chrono::Duration::seconds(300),
+            unscoped_peer,
+            [0x93; 32],
+        );
+        let (unscoped_send_tx, mut unscoped_send_rx) = tokio::sync::mpsc::channel(8);
+        let (unscoped_ctrl_tx, mut unscoped_ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let unscoped_status_writer = test_status_writer(unscoped_send_tx.clone());
+        let unscoped = Arc::new(crate::connection::ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            canonical_transport_evidence: tokio::sync::Mutex::new(Some(unscoped_evidence)),
+            canonical_authorization: tokio::sync::RwLock::new(None),
+            auth_state: tokio::sync::RwLock::new(crate::connection::AuthState::Pending {
+                challenge: unscoped_challenge,
+            }),
+            status_scope: tokio::sync::RwLock::new(None),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx: unscoped_send_tx,
+            status_writer: unscoped_status_writer,
+            ctrl_tx: unscoped_ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            ..prior_reconnect
+        });
+        crate::handlers::auth::handle_auth(
+            unscoped_event,
+            Arc::clone(&unscoped),
+            Arc::clone(&state),
+        )
+        .await;
+        let mut unscoped_frames = Vec::new();
+        while let Ok(frame) = unscoped_send_rx.try_recv() {
+            unscoped_frames.push(format!("{frame:?}"));
+        }
+        assert!(matches!(
+            &*unscoped.auth_state.read().await,
+            crate::connection::AuthState::Authenticated(context)
+                if context.authenticated_client_peer() == Some(&unscoped_peer)
+        ));
+        assert!(unscoped.canonical_authorization.read().await.is_some());
+        assert!(unscoped_frames.iter().any(|frame| frame.contains("true")));
+        assert!(unscoped_frames.iter().all(|frame| !frame
+            .contains(buzz_core::client_binding_bootstrap::CLIENT_BINDING_BOOTSTRAP_SUB_ID)));
+        assert!(unscoped_frames.iter().all(|frame| !frame
+            .contains(buzz_core::client_binding_bootstrap::CLIENT_BINDING_STATUS_SUB_ID)));
+        assert!(unscoped_ctrl_rx.try_recv().is_err());
+        let unscoped_counts: (i64, i64) = sqlx::query_as(
+            "SELECT \
+                 (SELECT count(*) FROM authorization_admission_results \
+                    WHERE community_id=$1 AND object_kind=8), \
+                 (SELECT count(*) FROM client_status_transitions \
+                    WHERE community_id=$1 AND delivery_kind=1)",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("read unscoped canonical AUTH state");
+        assert_eq!(unscoped_counts, (3, 2));
+        let unscoped_status_evidence = state
+            .db
+            .current_status_evidence(&status_evidence_request)
+            .await
+            .expect("resolve status evidence after unscoped AUTH");
+        assert_eq!(
+            (
+                first_status_evidence.binding_id(),
+                first_status_evidence.binding_version(),
+                first_status_evidence.policy_revision(),
+                first_status_evidence.invalidation_generation(),
+                first_status_evidence.authority_epoch(),
+                first_status_evidence.fence(),
+            ),
+            (
+                unscoped_status_evidence.binding_id(),
+                unscoped_status_evidence.binding_version(),
+                unscoped_status_evidence.policy_revision(),
+                unscoped_status_evidence.invalidation_generation(),
+                unscoped_status_evidence.authority_epoch(),
+                unscoped_status_evidence.fence(),
+            ),
+            "unscoped AUTH must preserve the stable connection-status evidence",
+        );
+        unscoped.cancel.cancel();
+        let prior_unscoped = match Arc::try_unwrap(unscoped) {
+            Ok(connection) => connection,
+            Err(_) => panic!("unscoped connection remained shared after AUTH"),
+        };
 
         // Keep canonical admission live but fail the evidence source that the
         // real AUTH owner awaits before it may acknowledge success.
-        *state.client_status_evidence_override.write().await =
-            Some(Arc::new(UnavailableStatusEvidence));
+        let unavailable_status = Arc::new(BlockingUnavailableStatusEvidence {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        *state.client_status_evidence_override.write().await = Some(unavailable_status.clone());
         let failed_actor = Keys::generate();
         let failed_subject = format!("bridge-status-failure-{}", uuid::Uuid::new_v4());
         let failed_host = format!(
@@ -4922,12 +5240,24 @@ mod tests {
             backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             grace_limit: 3,
         });
-        crate::handlers::auth::handle_auth(
+        let failed_auth_task = tokio::spawn(crate::handlers::auth::handle_auth(
             failed_auth_event,
             Arc::clone(&failed_conn),
             Arc::clone(&state),
+        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            unavailable_status.entered.notified(),
         )
-        .await;
+        .await
+        .expect("failed evidence source must be reached");
+        assert!(matches!(
+            &*failed_conn.auth_state.read().await,
+            crate::connection::AuthState::Pending { .. }
+        ));
+        assert!(failed_conn.canonical_authorization.read().await.is_none());
+        unavailable_status.release.notify_one();
+        failed_auth_task.await.expect("join failed AUTH task");
         let mut failed_frames = Vec::new();
         while let Ok(frame) = failed_send_rx.try_recv() {
             failed_frames.push(format!("{frame:?}"));
@@ -4960,6 +5290,135 @@ mod tests {
         assert!(failed_conn.canonical_authorization.read().await.is_none());
         assert!(failed_conn.cancel.is_cancelled());
         assert!(!failed_conn.clear_client_binding_status_task().await);
+        let prior_failed = match Arc::try_unwrap(failed_conn) {
+            Ok(connection) => connection,
+            Err(_) => panic!("failed connection remained shared after AUTH"),
+        };
+        *state.client_status_evidence_override.write().await = None;
+
+        // Two independent AUTH events for the same actor must not compete for
+        // one actor-global protected-object epoch. Start two opted-in live
+        // status owners in the same scheduler turn and require both physical
+        // status activations plus two authenticated sessions.
+        let concurrent_connection = |marker: u8, prior: crate::connection::ConnectionState| {
+            let challenge = format!("bridge-auth-concurrent-{marker}-{}", uuid::Uuid::new_v4());
+            let relay_signer = state.relay_keypair.public_key().to_hex();
+            let connection_epoch = uuid::Uuid::new_v4().to_string();
+            let auth_event = EventBuilder::auth(
+                &challenge,
+                nostr::RelayUrl::parse(&relay_url).expect("parse concurrent relay URL"),
+            )
+            .tag(
+                Tag::parse([
+                    buzz_core::client_binding_bootstrap::CLIENT_BINDING_SCOPE_TAG,
+                    "1",
+                    connection_epoch.as_str(),
+                    relay_signer.as_str(),
+                ])
+                .expect("build concurrent binding-status scope"),
+            )
+            .sign_with_keys(&actor)
+            .expect("sign concurrent AUTH event");
+            let peer = buzz_auth::AuthenticatedClientPeer::for_test([marker; 32]);
+            let evidence = buzz_auth::SealedTransportEvidence::for_test_with_nonce(
+                community,
+                assertion.clone(),
+                b"GET",
+                host.as_bytes(),
+                b"/",
+                [0; 32],
+                buzz_auth::ProofTransport::Nip42,
+                chrono::Utc::now() + chrono::Duration::seconds(300),
+                peer,
+                [marker.wrapping_add(1); 32],
+            );
+            let (send_tx, send_rx) = tokio::sync::mpsc::channel(16);
+            let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel(8);
+            let connection = Arc::new(crate::connection::ConnectionState {
+                conn_id: uuid::Uuid::new_v4(),
+                tenant: TenantContext::resolved(community, &host),
+                canonical_transport_evidence: tokio::sync::Mutex::new(Some(evidence)),
+                canonical_authorization: tokio::sync::RwLock::new(None),
+                auth_state: tokio::sync::RwLock::new(crate::connection::AuthState::Pending {
+                    challenge,
+                }),
+                status_scope: tokio::sync::RwLock::new(None),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+                status_writer: test_status_writer(send_tx.clone()),
+                send_tx,
+                ctrl_tx,
+                cancel: tokio_util::sync::CancellationToken::new(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                ..prior
+            });
+            (auth_event, peer, connection, send_rx, ctrl_rx)
+        };
+        let (
+            concurrent_event_a,
+            concurrent_peer_a,
+            concurrent_a,
+            mut concurrent_send_rx_a,
+            mut concurrent_ctrl_rx_a,
+        ) = concurrent_connection(0xa1, prior_unscoped);
+        let (
+            concurrent_event_b,
+            concurrent_peer_b,
+            concurrent_b,
+            mut concurrent_send_rx_b,
+            mut concurrent_ctrl_rx_b,
+        ) = concurrent_connection(0xb1, prior_failed);
+        tokio::join!(
+            crate::handlers::auth::handle_auth(
+                concurrent_event_a,
+                Arc::clone(&concurrent_a),
+                Arc::clone(&state),
+            ),
+            crate::handlers::auth::handle_auth(
+                concurrent_event_b,
+                Arc::clone(&concurrent_b),
+                Arc::clone(&state),
+            ),
+        );
+        assert!(matches!(
+            &*concurrent_a.auth_state.read().await,
+            crate::connection::AuthState::Authenticated(context)
+                if context.authenticated_client_peer() == Some(&concurrent_peer_a)
+        ));
+        assert!(matches!(
+            &*concurrent_b.auth_state.read().await,
+            crate::connection::AuthState::Authenticated(context)
+                if context.authenticated_client_peer() == Some(&concurrent_peer_b)
+        ));
+        assert!(concurrent_a.canonical_authorization.read().await.is_some());
+        assert!(concurrent_b.canonical_authorization.read().await.is_some());
+        for frames in [&mut concurrent_send_rx_a, &mut concurrent_send_rx_b] {
+            let mut delivered = Vec::new();
+            while let Ok(frame) = frames.try_recv() {
+                delivered.push(format!("{frame:?}"));
+            }
+            assert!(delivered.iter().any(|frame| frame.contains("true")));
+            assert!(delivered.iter().any(|frame| frame
+                .contains(buzz_core::client_binding_bootstrap::CLIENT_BINDING_BOOTSTRAP_SUB_ID)));
+            assert!(delivered.iter().any(|frame| frame
+                .contains(buzz_core::client_binding_bootstrap::CLIENT_BINDING_STATUS_SUB_ID)));
+        }
+        assert!(concurrent_ctrl_rx_a.try_recv().is_err());
+        assert!(concurrent_ctrl_rx_b.try_recv().is_err());
+        let concurrent_results: (i64, i64) = sqlx::query_as(
+            "SELECT \
+                 (SELECT count(*) FROM authorization_admission_results \
+                    WHERE community_id=$1 AND object_kind=8), \
+                 (SELECT count(*) FROM client_status_transitions \
+                    WHERE community_id=$1 AND delivery_kind=1 AND status_revision=1)",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count concurrent canonical AUTH and status results");
+        assert_eq!(concurrent_results, (5, 4));
+        concurrent_a.cancel.cancel();
+        concurrent_b.cancel.cancel();
 
         let tenant = TenantContext::resolved(community, &host);
         let rate_key = buzz_auth::rate_limit::rate_limit_key(

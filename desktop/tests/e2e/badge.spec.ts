@@ -88,6 +88,69 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("current relay binding is informational, exact-author only, and fail-closed", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general");
+
+  await page.evaluate(
+    ({ alicePubkey, bobPubkey }) => {
+      const testWindow = window as Window & {
+        __BUZZ_E2E_EMIT_CURRENT_PROJECTION__?: (projection: unknown) => void;
+        __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+          channelName: string;
+          content: string;
+          pubkey: string;
+        }) => unknown;
+      };
+      testWindow.__BUZZ_E2E_EMIT_CURRENT_PROJECTION__?.({
+        eventAuthorPubkey: alicePubkey,
+        freshUntil: Math.floor(Date.now() / 1_000) + 60,
+      });
+      testWindow.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "Current relay key author",
+        pubkey: alicePubkey,
+      });
+      testWindow.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "Different raw event author",
+        pubkey: bobPubkey,
+      });
+    },
+    {
+      alicePubkey: TEST_IDENTITIES.alice.pubkey,
+      bobPubkey: TEST_IDENTITIES.bob.pubkey,
+    },
+  );
+
+  const currentAuthorRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Current relay key author" });
+  const otherAuthorRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Different raw event author" });
+  await expect(
+    currentAuthorRow.getByLabel("Relay-reported current key (informational)"),
+  ).toHaveCount(1);
+  await expect(otherAuthorRow.getByTestId("current-relay-binding")).toHaveCount(
+    0,
+  );
+
+  await page.evaluate((alicePubkey) => {
+    window.__BUZZ_E2E_EMIT_CURRENT_PROJECTION__?.({
+      connectionEpoch: "11111111-1111-4111-8111-111111111111",
+      eventAuthorPubkey: alicePubkey,
+      freshUntil: Math.floor(Date.now() / 1_000) + 60,
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+  await expect(
+    currentAuthorRow.getByTestId("current-relay-binding"),
+  ).toHaveCount(0);
+});
+
 test("selected Inbox and Agents rows keep their highlight without bold text", async ({
   page,
 }) => {

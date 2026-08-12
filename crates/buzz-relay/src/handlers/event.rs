@@ -17,6 +17,7 @@ use buzz_core::observer::{
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
+use buzz_db::authorization_admission::{AdmissionCommitRequest, AdmissionObject};
 use buzz_pubsub::EventTopic;
 use nostr::{Event, PublicKey};
 
@@ -677,6 +678,54 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    let canonical_admission = match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => None,
+        buzz_auth::NipFiMode::DenyProtected => {
+            reject("auth");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "restricted: protected ingress denied",
+            ));
+            return;
+        }
+        buzz_auth::NipFiMode::Enforce if buzz_core::kind::is_moderation_command_kind(kind_u32) => {
+            // Moderation commands own their operation-specific NIP-42 proof,
+            // typed application effect, and canonical transaction.
+            None
+        }
+        buzz_auth::NipFiMode::Enforce
+            if is_ephemeral(kind_u32) || kind_u32 == KIND_AGENT_OBSERVER_FRAME =>
+        {
+            reject("auth");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "restricted: event kind requires a dedicated canonical mutation owner",
+            ));
+            return;
+        }
+        buzz_auth::NipFiMode::Enforce => {
+            if !super::ingest::canonical_bridge_kind_supported(kind_u32) {
+                reject("auth");
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "restricted: event kind requires a dedicated canonical mutation owner",
+                ));
+                return;
+            }
+            match prepare_canonical_event_admission(&event, &conn, &state).await {
+                Ok(request) => Some(request),
+                Err(error) => {
+                    reject("auth");
+                    conn.send(RelayMessage::ok(&event_id_hex, false, error.code()));
+                    return;
+                }
+            }
+        }
+    };
+
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
@@ -732,7 +781,19 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         },
     };
 
-    match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
+    let ingested = match canonical_admission {
+        Some(request) => super::ingest::ingest_event_with_canonical_admission(
+            &state,
+            &conn.tenant,
+            event,
+            ingest_auth,
+            request,
+        )
+        .await
+        .map(|(result, _)| result),
+        None => super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await,
+    };
+    match ingested {
         Ok(result) => {
             if result.accepted {
                 // buzz_events_stored_total is emitted inside ingest_event()
@@ -763,6 +824,65 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             conn.send(RelayMessage::ok(&event_id_hex, false, &msg));
         }
     }
+}
+
+async fn prepare_canonical_event_admission(
+    event: &Event,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> Result<AdmissionCommitRequest, crate::protected_ingress::ProtectedIngressError> {
+    let (session, assertion) = conn
+        .canonical_authorization
+        .read()
+        .await
+        .as_ref()
+        .map(crate::connection::CanonicalWebsocketSession::event_admission)
+        .ok_or(crate::protected_ingress::ProtectedIngressError::Denied)?;
+    let domain = conn.tenant.community();
+    let object = AdmissionObject::event(event.id.to_bytes())
+        .ok_or(crate::protected_ingress::ProtectedIngressError::Denied)?;
+    let request_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:websocket-event-request:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            conn.conn_id.as_bytes(),
+            event.id.as_bytes(),
+        ],
+    );
+    let (_, _, session_transport) = session.lease().request_binding();
+    let transport_context_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:websocket-event-transport:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            conn.conn_id.as_bytes(),
+            session.request_fingerprint(),
+            session_transport,
+        ],
+    );
+    let coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
+        crate::authorization_runtime::ProtectedIngress::WebSocketEvent,
+        domain,
+        buzz_auth::RouteCapability::MessagesWrite,
+        object,
+        buzz_auth::ProofTransport::Nip42,
+        request_fingerprint,
+        transport_context_fingerprint,
+    )?;
+    let event = event.clone();
+    let verified = tokio::task::spawn_blocking(move || {
+        buzz_auth::verify_nip42_session_event_proof(
+            &event,
+            &session,
+            &assertion,
+            request_fingerprint,
+            *object.key(),
+            transport_context_fingerprint,
+        )
+    })
+    .await
+    .map_err(|_| crate::protected_ingress::ProtectedIngressError::Unavailable)?
+    .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?;
+    crate::protected_ingress::prepare_mutation(state, coordinates, verified.0, verified.1).await
 }
 
 /// Handle ephemeral events (kind 20000–29999) — WS-only, never stored.

@@ -1,8 +1,10 @@
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
 mod app_menu;
+mod app_run_events;
 mod app_state;
 mod archive;
 mod builderlab;
+mod client_binding_status_session;
 mod commands;
 mod deep_link;
 mod egress_guard;
@@ -62,7 +64,7 @@ use huddle::{
     get_model_status, get_voice_input_mode, interrupt_huddle_speech, join_huddle, leave_huddle,
     open_huddle_window, push_audio_pcm, remove_agent_from_huddle, set_huddle_manual_mic_unmuted,
     set_huddle_transcription_enabled, set_tts_enabled, set_voice_input_mode, speak_agent_message,
-    start_huddle, start_stt_pipeline, HuddlePhase,
+    start_huddle, start_stt_pipeline,
 };
 use initial_window::*;
 use managed_agents::{
@@ -73,16 +75,13 @@ use managed_agents::{
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
-#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
-use shutdown::{is_restart_request, shut_down_app};
-use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
+#[cfg(not(test))]
+use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use tauri::Listener;
-use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::StateFlags;
-#[cfg(target_os = "macos")]
-use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // mesh-llm's async chains (model download, node start/join) overflow
@@ -917,76 +916,5 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
-    let shutdown_done = Arc::new(AtomicBool::new(false));
-
-    #[cfg(unix)]
-    shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));
-
-    let run_shutdown_done = Arc::clone(&shutdown_done);
-    let restart_requested = Arc::new(AtomicBool::new(false));
-    app.run(move |app_handle, event| match event {
-        #[cfg(target_os = "macos")]
-        RunEvent::Reopen { .. } => show_main_window(app_handle),
-        #[cfg(target_os = "macos")]
-        RunEvent::WindowEvent {
-            label,
-            event: WindowEvent::CloseRequested { api, .. },
-            ..
-        } if label == "main" => {
-            // Keep the webview alive so Buzz can be reopened from its tray menu.
-            api.prevent_close();
-            if let Some(window) = app_handle.get_webview_window("main") {
-                if let Err(error) = window.hide() {
-                    eprintln!("buzz-desktop: failed to hide main window: {error}");
-                }
-            }
-        }
-        RunEvent::WindowEvent {
-            label,
-            event: WindowEvent::CloseRequested { .. },
-            ..
-        } if label.starts_with("huddle-") => {
-            let is_active_huddle_window =
-                app_handle
-                    .state::<AppState>()
-                    .huddle()
-                    .ok()
-                    .is_some_and(|huddle| {
-                        !matches!(huddle.phase, HuddlePhase::Idle | HuddlePhase::Leaving)
-                            && huddle
-                                .ephemeral_channel_id
-                                .as_deref()
-                                .is_some_and(|channel_id| label == format!("huddle-{channel_id}"))
-                    });
-            if is_active_huddle_window {
-                if let Err(error) = app_handle.emit("huddle-companion-returned", ()) {
-                    eprintln!("buzz-desktop: failed to restore huddle drawer: {error}");
-                }
-            }
-        }
-        RunEvent::ExitRequested { code, .. } => {
-            if is_restart_request(code) {
-                restart_requested.store(true, Ordering::SeqCst);
-            }
-            shut_down_app(app_handle, &run_shutdown_done);
-        }
-        RunEvent::Exit => {
-            shut_down_app(app_handle, &run_shutdown_done);
-            app_handle.state::<ClipboardState>().release();
-
-            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-            if restart_requested.load(Ordering::SeqCst) {
-                relaunch_after_mesh_shutdown(app_handle);
-            }
-
-            // AppKit terminates through libc exit(), which runs C++ static
-            // destructors. The embedded ggml/Metal runtime currently aborts in
-            // that destructor phase even after its node has stopped cleanly.
-            // End the process only after Buzz and Mesh shutdown above, while
-            // deliberately skipping those native global destructors.
-            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-            hard_exit_after_mesh_shutdown();
-        }
-        _ => {}
-    });
+    app_run_events::run(app);
 }

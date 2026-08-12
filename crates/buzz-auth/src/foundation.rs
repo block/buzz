@@ -1060,6 +1060,25 @@ impl VerifiedFederatedAssertion {
         (self.not_before, self.expires_at)
     }
 
+    pub(crate) fn with_request_binding(
+        &self,
+        request_fingerprint: [u8; 32],
+        target_fingerprint: [u8; 32],
+        transport_context_fingerprint: [u8; 32],
+    ) -> Option<Self> {
+        if request_fingerprint == [0; 32]
+            || target_fingerprint == [0; 32]
+            || transport_context_fingerprint == [0; 32]
+        {
+            return None;
+        }
+        let mut rebound = self.clone();
+        rebound.request_fingerprint = request_fingerprint;
+        rebound.target_fingerprint = target_fingerprint;
+        rebound.transport_context_fingerprint = transport_context_fingerprint;
+        Some(rebound)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_test_attested_event_author(mut self, author: PublicKey) -> Self {
         self.attested_event_author_pubkey = Some(author);

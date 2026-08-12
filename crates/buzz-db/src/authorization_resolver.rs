@@ -408,6 +408,31 @@ async fn read_current_status_evidence(
     if authority_epoch != protected_authority_epoch || fence != protected_fence {
         return Err(AuthorizationResolverError::PolicyUnavailable);
     }
+    let binding_id = row.try_get("binding_id").map_err(DbError::from)?;
+    let binding_version = database_u64(
+        row.try_get("binding_version").map_err(DbError::from)?,
+        "status binding version",
+    )?;
+    let policy_revision = database_u64(
+        row.try_get("policy_revision").map_err(DbError::from)?,
+        "status policy revision",
+    )?;
+    let invalidation_generation = database_u64(
+        row.try_get("current_generation").map_err(DbError::from)?,
+        "status invalidation generation",
+    )?;
+    let status_authority_epoch = invalidation_generation
+        .checked_add(1)
+        .ok_or(AuthorizationResolverError::PolicyUnavailable)?;
+    let status_fence = crate::client_status_delivery::derive_status_evidence_fence(
+        request.authorization_domain(),
+        request.event_author_pubkey(),
+        binding_id,
+        binding_version,
+        policy_revision,
+        invalidation_generation,
+        status_authority_epoch,
+    )?;
     let observed_at: DateTime<Utc> = row.try_get("authoritative_now").map_err(DbError::from)?;
     let mut fresh_until = observed_at + chrono::Duration::seconds(300);
     for deadline in [
@@ -427,21 +452,12 @@ async fn read_current_status_evidence(
     CanonicalCurrentBindingEvidence::new(
         request.authorization_domain(),
         request.event_author_pubkey(),
-        row.try_get("binding_id").map_err(DbError::from)?,
-        database_u64(
-            row.try_get("binding_version").map_err(DbError::from)?,
-            "status binding version",
-        )?,
-        database_u64(
-            row.try_get("policy_revision").map_err(DbError::from)?,
-            "status policy revision",
-        )?,
-        database_u64(
-            row.try_get("current_generation").map_err(DbError::from)?,
-            "status invalidation generation",
-        )?,
-        authority_epoch,
-        fence,
+        binding_id,
+        binding_version,
+        policy_revision,
+        invalidation_generation,
+        status_authority_epoch,
+        status_fence,
         observed_at,
         fresh_until,
     )

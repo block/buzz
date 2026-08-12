@@ -30,11 +30,6 @@ pub struct IdentityInfo {
 pub struct ProfileInfo {
     pub pubkey: String,
     pub display_name: Option<String>,
-    #[serde(default)]
-    pub verified_name: Option<String>,
-    /// Unix timestamp (seconds) after which `verified_name` must not be shown.
-    #[serde(default)]
-    pub verified_name_expires_at: Option<u64>,
     pub avatar_url: Option<String>,
     pub about: Option<String>,
     pub nip05_handle: Option<String>,
@@ -49,11 +44,6 @@ pub struct ProfileInfo {
 #[derive(Serialize, Deserialize)]
 pub struct UserProfileSummaryInfo {
     pub display_name: Option<String>,
-    #[serde(default)]
-    pub verified_name: Option<String>,
-    /// Unix timestamp (seconds) after which `verified_name` must not be shown.
-    #[serde(default)]
-    pub verified_name_expires_at: Option<u64>,
     /// Kind-0 `name` field, carried separately from `display_name` so clients
     /// can match @mention text against either alias (agents and the CLI
     /// resolve mentions server-side against `display_name` *or* `name`).
@@ -76,11 +66,6 @@ pub struct UsersBatchResponse {
 pub struct UserSearchResultInfo {
     pub pubkey: String,
     pub display_name: Option<String>,
-    #[serde(default)]
-    pub verified_name: Option<String>,
-    /// Unix timestamp (seconds) after which `verified_name` must not be shown.
-    #[serde(default)]
-    pub verified_name_expires_at: Option<u64>,
     pub avatar_url: Option<String>,
     pub nip05_handle: Option<String>,
     pub owner_pubkey: Option<String>,
@@ -406,4 +391,85 @@ pub struct ContactEntry {
     pub relay_url: Option<String>,
     #[serde(default)]
     pub petname: Option<String>,
+}
+
+#[cfg(test)]
+mod profile_transport_tests {
+    use super::{ProfileInfo, UserProfileSummaryInfo, UserSearchResultInfo};
+    use std::collections::BTreeSet;
+
+    fn serialized_keys(value: &impl serde::Serialize) -> BTreeSet<String> {
+        serde_json::to_value(value)
+            .expect("profile transport serializes")
+            .as_object()
+            .expect("profile transport is an object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn profile_transports_have_exact_non_trust_shapes() {
+        let profile = ProfileInfo {
+            pubkey: "11".repeat(32),
+            display_name: None,
+            avatar_url: None,
+            about: None,
+            nip05_handle: None,
+            owner_pubkey: None,
+            has_profile_event: false,
+        };
+        assert_eq!(
+            serialized_keys(&profile),
+            BTreeSet::from([
+                "about".to_string(),
+                "avatar_url".to_string(),
+                "display_name".to_string(),
+                "has_profile_event".to_string(),
+                "nip05_handle".to_string(),
+                "owner_pubkey".to_string(),
+                "pubkey".to_string(),
+            ])
+        );
+
+        let summary = UserProfileSummaryInfo {
+            display_name: None,
+            name: None,
+            avatar_url: None,
+            nip05_handle: None,
+            owner_pubkey: None,
+            is_agent: false,
+        };
+        assert_eq!(
+            serialized_keys(&summary),
+            BTreeSet::from([
+                "avatar_url".to_string(),
+                "display_name".to_string(),
+                "is_agent".to_string(),
+                "name".to_string(),
+                "nip05_handle".to_string(),
+                "owner_pubkey".to_string(),
+            ])
+        );
+
+        let search = UserSearchResultInfo {
+            pubkey: "22".repeat(32),
+            display_name: None,
+            avatar_url: None,
+            nip05_handle: None,
+            owner_pubkey: None,
+            is_agent: false,
+        };
+        assert_eq!(
+            serialized_keys(&search),
+            BTreeSet::from([
+                "avatar_url".to_string(),
+                "display_name".to_string(),
+                "is_agent".to_string(),
+                "nip05_handle".to_string(),
+                "owner_pubkey".to_string(),
+                "pubkey".to_string(),
+            ])
+        );
+    }
 }

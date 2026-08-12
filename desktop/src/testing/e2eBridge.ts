@@ -995,6 +995,7 @@ type MockFilter = {
 
 type MockSocket = {
   handler: WsHandler;
+  projectionHandler?: WsHandler;
   subscriptions: Map<string, MockSubscription>;
 };
 
@@ -1139,6 +1140,8 @@ declare global {
       /** 64-hex id required for the event to be a valid reaction target. */
       id?: string;
     }) => RelayEvent;
+    /** Deliver the narrow native current-binding projection to active mock sockets. */
+    __BUZZ_E2E_EMIT_CURRENT_PROJECTION__?: (projection: unknown) => void;
     /** Prepend `count` synthetic older messages to a channel's mock store so
      *  an older-history fetch has something to paginate. Mirrors how the real
      *  relay backfills history. Returns the created events. */
@@ -9596,7 +9599,10 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
   });
 }
 
-async function connectMockSocket(args: { onMessage: unknown }) {
+async function connectMockSocket(args: {
+  onMessage: unknown;
+  onProjection?: unknown;
+}) {
   relayWebsocketConnectAttemptStarts.push(Date.now());
   if (mockWebsocketUnavailable) {
     throw new Error("mock relay unavailable");
@@ -9615,6 +9621,10 @@ async function connectMockSocket(args: { onMessage: unknown }) {
 
   mockSockets.set(wsId, {
     handler,
+    projectionHandler:
+      args.onProjection === undefined
+        ? undefined
+        : resolveHandler(args.onProjection),
     subscriptions: new Map(),
   });
 
@@ -10134,6 +10144,11 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
   window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__ = (payload) =>
     emit("huddle-tts-speaker-level", payload);
+  window.__BUZZ_E2E_EMIT_CURRENT_PROJECTION__ = (projection) => {
+    for (const socket of mockSockets.values()) {
+      socket.projectionHandler?.(projection);
+    }
+  };
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
   window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__ = async (input) => {
@@ -12824,6 +12839,7 @@ export function maybeInstallE2eTauriMocks() {
           ]),
         );
       case "plugin:websocket|connect":
+      case "plugin:websocket|connect_with_status":
         if (isRelayMode(activeConfig)) {
           return connectRealSocket(
             payload as Parameters<typeof connectRealSocket>[0],

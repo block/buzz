@@ -68,10 +68,6 @@ pub const KIND_LONG_FORM: u32 = 30023;
 /// Parameterized replaceable (NIP-33, 30000–39999 range) — keyed by `(pubkey, kind, d_tag)`.
 /// Stored globally (channel_id = NULL); user-owned personal data, not channel-scoped.
 pub const KIND_USER_STATUS: u32 = 30315;
-/// NIP-85: relay-signed binding assertion about a user public key.
-///
-/// The relay authors the event and keys it by the subject public key in `d`.
-pub const KIND_USER_TRUSTED_ASSERTION: u32 = 30382;
 /// NIP-78 / NIP-RS: Per-client read state blob for cross-device read position sync.
 /// Parameterized replaceable (NIP-33, 30000–39999 range) — keyed by `(pubkey, kind, d_tag)`.
 /// Stored globally (channel_id = NULL); user-owned personal data, not channel-scoped.

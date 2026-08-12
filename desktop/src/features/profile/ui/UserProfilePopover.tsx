@@ -14,7 +14,7 @@ import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
-  formatVerifiedUserLabel,
+  formatProfileLabel,
   formatOwnerLabel,
   ownsAuthorAgent,
 } from "@/features/profile/lib/identity";
@@ -34,7 +34,6 @@ import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
-import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
 
 type UserProfilePopoverProps = {
   children: React.ReactNode;
@@ -176,12 +175,7 @@ export function UserProfilePopover({
       relayAgentsQuery.isPending ||
       managedAgentsQuery.isPending ||
       usersBatchQuery.isPending);
-  const displayName =
-    formatVerifiedUserLabel(
-      profile?.displayName,
-      profile?.verifiedName,
-      profile?.verifiedNameExpiresAt,
-    ) ?? truncatePubkey(pubkey);
+  const displayName = formatProfileLabel(profile) ?? truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
   // wrongly hides the affordance from them — and gating on bot-ness alone shows
@@ -322,12 +316,6 @@ export function UserProfilePopover({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <HoverPubkeyName displayName={displayName} pubkey={pubkey} />
-          {profile?.verifiedName ? (
-            <VerifiedBadge
-              verifiedName={profile.verifiedName}
-              verifiedNameExpiresAt={profile.verifiedNameExpiresAt}
-            />
-          ) : null}
           {isBotProfile && botIdenticonValue ? (
             <BotIdenticon
               value={botIdenticonValue}

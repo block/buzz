@@ -44,7 +44,7 @@ use buzz_db::authorization_admission::{
     AdmissionApplicationResult, AdmissionApplicationResultSchema, AdmissionCommitError,
     AdmissionCommitOutcome, AdmissionCommitRequest, AdmissionObject, CanonicalAdmissionCommitter,
 };
-use nostr::Event;
+use nostr::{Event, PublicKey};
 
 use crate::state::AppState;
 
@@ -781,6 +781,7 @@ struct CanonicalBridgeEventResult {
 struct CanonicalBridgeEventEffect {
     domain: CommunityId,
     object: AdmissionObject,
+    actor: PublicKey,
     event: Event,
     channel_id: Option<Uuid>,
     thread_metadata: Option<ThreadMetadataOwned>,
@@ -791,6 +792,7 @@ impl CanonicalBridgeEventEffect {
     fn new(
         domain: CommunityId,
         object: AdmissionObject,
+        actor: PublicKey,
         event: Event,
         channel_id: Option<Uuid>,
         thread_metadata: Option<ThreadMetadataOwned>,
@@ -822,6 +824,7 @@ impl CanonicalBridgeEventEffect {
         Self {
             domain,
             object,
+            actor,
             event,
             channel_id,
             thread_metadata,
@@ -855,7 +858,7 @@ impl AdmissionApplicationEffect for CanonicalBridgeEventEffect {
             if context.authorization_domain() != self.domain
                 || context.object() != self.object
                 || context.authorization().capability() != buzz_auth::RouteCapability::MessagesWrite
-                || context.authorization().actor_pubkey() != self.event.pubkey
+                || context.authorization().actor_pubkey() != self.actor
             {
                 return Err(AdmissionCommitError::AuthorizationDenied);
             }
@@ -3222,6 +3225,7 @@ async fn ingest_event_inner(
         let effect = CanonicalBridgeEventEffect::new(
             tenant.community(),
             object,
+            *auth.pubkey(),
             event.clone(),
             channel_id,
             thread_meta.clone(),
