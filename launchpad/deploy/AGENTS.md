@@ -1,7 +1,9 @@
-# AGENTS.md — failed deployment archive
+# AGENTS.md — Launchpad deployment guard and failed deployment archive
 
 The deployment method formerly stored in this directory **failed** and has been
-moved to `archived/` for historical reference only.
+moved to `archived/` for historical reference only. The active `run.sh` in this
+directory is a thin Launchpad image guard that delegates all orchestration to
+`../../deploy/compose/run.sh`; it is not a replacement Compose implementation.
 
 ## Mandatory rule
 
