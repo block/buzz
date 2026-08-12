@@ -4,6 +4,7 @@ import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
+import { AgentUsageSection } from "@/features/agent-usage/ui/AgentUsageSection";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -290,6 +291,12 @@ export function AgentsView() {
               }}
               personas={personas.libraryPersonas}
               teams={teamActions.teams}
+            />
+
+            <AgentUsageSection
+              onOpenAgentProfile={(pubkey, options) => {
+                openProfilePanel?.(pubkey, options);
+              }}
             />
           </div>
         </div>

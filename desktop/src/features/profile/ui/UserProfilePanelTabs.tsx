@@ -2,6 +2,7 @@ import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   Archive,
+  BarChart3,
   ChevronRight,
   Info,
   MessageSquare,
@@ -213,9 +214,12 @@ export function ProfileInfoTabContent({
   onExportAgent,
   onOpenActivity,
   onEditAgent,
+  onOpenUsage,
   pubkey,
   showActivityIngress,
   showInstructionBlock,
+  showUsageIngress,
+  usageIngressTrailing,
 }: {
   activeTurns: ActiveTurnSummary[];
   activityAgent: ProfileActivityAgent | null;
@@ -234,9 +238,12 @@ export function ProfileInfoTabContent({
   onExportAgent?: () => void;
   onEditAgent: () => void;
   onOpenActivity: (channelId?: string | null) => void;
+  onOpenUsage: () => void;
   pubkey: string | null;
   showActivityIngress: boolean;
   showInstructionBlock: boolean;
+  showUsageIngress: boolean;
+  usageIngressTrailing: string | undefined;
 }) {
   const infoFields: ProfileField[] = isArchived
     ? [
@@ -265,7 +272,8 @@ export function ProfileInfoTabContent({
     !onDuplicateAgent &&
     !onExportAgent &&
     !showActivityIngress &&
-    !showInstructionBlock
+    !showInstructionBlock &&
+    !showUsageIngress
   ) {
     return null;
   }
@@ -290,6 +298,15 @@ export function ProfileInfoTabContent({
             trailing="View"
           />
         )
+      ) : null}
+      {showUsageIngress ? (
+        <ProfileIngressRow
+          icon={BarChart3}
+          label="Usage"
+          onClick={onOpenUsage}
+          testId={`user-profile-view-usage-${pubkey}`}
+          trailing={usageIngressTrailing}
+        />
       ) : null}
       {hasInfoFields || showInstructionBlock ? (
         <ProfileSectionGroup testId="user-profile-info-section" title="Info">
