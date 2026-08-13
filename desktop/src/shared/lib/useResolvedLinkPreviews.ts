@@ -469,16 +469,14 @@ export function useResolvedLinkPreviews(
     React.useState<ResolvedMetadataByHref>({});
   const [retryGeneration, setRetryGeneration] = React.useState(0);
   const seenHrefsRef = React.useRef<Set<string>>(new Set());
-  // Newness is tracked against the live href set when the caller supplies one,
-  // so a debounce-swallowed leave/re-entry of the same URL still counts as new.
-  // Read through a ref inside the effect and drive re-runs off the stable string
-  // key, so an unstable per-render array does not have to be an effect dep.
+  // Drive newness tracking from a stable string key so an equivalent href list
+  // does not restart the effect. The effect closes over the committed render's
+  // hrefs; do not mirror them into a ref during render, because an abandoned
+  // concurrent render could otherwise leak uncommitted presence into the live
+  // effect from the previous commit.
   const currentHrefs = liveHrefs ?? previews.map((preview) => preview.href);
   const newnessKey = currentHrefs.join("\n");
-  const currentHrefsRef = React.useRef<readonly string[]>(currentHrefs);
-  currentHrefsRef.current = currentHrefs;
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: newnessKey is the stable string key for the live href set read via currentHrefsRef; it drives the re-run so the per-render array need not be a dep.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: newnessKey is the stable identity for currentHrefs; depending on the freshly allocated array would rerun this effect every render.
   React.useEffect(() => {
     let cancelled = false;
     let retryAt = Number.POSITIVE_INFINITY;
@@ -491,8 +489,14 @@ export function useResolvedLinkPreviews(
       // Newness is judged against the live href set when supplied (so a
       // debounce-swallowed leave/re-entry still counts), else against previews.
       const seen = seenHrefsRef.current;
-      const liveNow = currentHrefsRef.current;
-      const next = new Set<string>(liveNow);
+      const liveNow = currentHrefs;
+      // Preserve handled hrefs only while they remain live. A live href is not
+      // marked handled until its debounced preview exists and invalidation has
+      // actually been attempted; otherwise blank -> paste would consume
+      // newness during the 350ms debounce and later reuse the stale negative.
+      const next = new Set<string>(
+        [...seen].filter((href) => liveNow.includes(href)),
+      );
       const reenteredKeys: string[] = [];
       for (const preview of previews) {
         if (
@@ -507,6 +511,7 @@ export function useResolvedLinkPreviews(
         // the shared entry is healthy, in-flight, or absent.)
         metadataLoader.invalidateNegative(preview.href);
         reenteredKeys.push(metadataCacheKey(preview.href));
+        next.add(preview.href);
       }
       seenHrefsRef.current = next;
       // Dropping the loader entry alone is not enough: this hook retains its own

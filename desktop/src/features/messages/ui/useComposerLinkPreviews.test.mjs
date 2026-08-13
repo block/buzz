@@ -387,3 +387,96 @@ test("a stale in-flight upload cannot publish after the URL re-enters and a fres
     ipcHandlers.clear();
   }
 });
+
+// The ordinary production gesture starts from a mounted empty composer. Live
+// href tracking must not mark the pasted href handled before the debounced
+// candidate exists, or the eventual resolver pass will reuse a cached negative.
+test("composer refetches a cached negative when a link is pasted into an empty draft", async () => {
+  const { act, cleanup, renderHook } = await import("@testing-library/react");
+  const { resetLinkPreviewMetadataCache } = await import(
+    "@/shared/lib/useResolvedLinkPreviews.ts"
+  );
+  const { useComposerLinkPreviews } = await import(
+    "./useComposerLinkPreviews.tsx"
+  );
+
+  resetLinkPreviewMetadataCache();
+  ipcHandlers.clear();
+  ipcHandlers.set("get_relay_http_url", () =>
+    Promise.resolve("https://relay.example.com"),
+  );
+  ipcHandlers.set("upload_media_bytes", () =>
+    Promise.resolve({
+      url: "https://relay.example.com/media/fresh",
+      sha256: "f8e5",
+      size: 1,
+      type: "image/png",
+      uploaded: 0,
+    }),
+  );
+
+  let fetchCalls = 0;
+  ipcHandlers.set("fetch_link_preview_metadata", () => {
+    fetchCalls += 1;
+    return Promise.resolve(
+      fetchCalls === 1
+        ? metadata({
+            imageFetchState: "transient_failure",
+            imageRetryAfterMs: 900_000,
+          })
+        : metadata({
+            imageDataUrl: "data:image/png;base64,QQ==",
+            imageDomain: "images.example.com",
+            imageFetchState: "image",
+          }),
+    );
+  });
+
+  try {
+    // Seed the shared cache with the negative result before the composer sees A.
+    const { useResolvedLinkPreviews } = await import(
+      "@/shared/lib/useResolvedLinkPreviews.ts"
+    );
+    const cached = renderHook(() =>
+      useResolvedLinkPreviews([
+        {
+          kind: "generic-link",
+          href: HREF,
+          title: HREF,
+          provider: "example.com",
+          imageUrl: null,
+        },
+      ]),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    assert.equal(fetchCalls, 1, "the negative was cached before paste");
+    cached.unmount();
+
+    const { result, rerender, unmount } = renderHook(
+      ({ content }) => useComposerLinkPreviews(content),
+      { initialProps: { content: "" } },
+    );
+    await act(async () => rerender({ content: `see ${HREF}` }));
+    assert.equal(
+      fetchCalls,
+      1,
+      "debounce has not resolved the pasted href yet",
+    );
+    assert.equal(result.current.hasPendingSnapshots, true);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    assert.equal(fetchCalls, 2, "paste invalidated and refetched the negative");
+    assert.equal(result.current.getReadyTags().length, 1);
+    unmount();
+  } finally {
+    cleanup();
+    ipcHandlers.clear();
+  }
+});
