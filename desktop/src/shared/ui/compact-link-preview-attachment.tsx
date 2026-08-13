@@ -79,7 +79,7 @@ export function CompactLinkPreviewAttachment({
         className={cn(
           "w-full bg-transparent no-underline shadow-none hover:bg-transparent",
           reserveImage
-            ? "h-21 min-h-21 max-h-21 gap-0 border-0 p-0 hover:border-transparent"
+            ? "gap-0 border-0 px-0 py-0 hover:border-transparent"
             : "rounded-none border-0 border-l-[3px] border-border px-0 py-1 pl-3 hover:border-border",
         )}
         data-image-state={preview.imageState}
@@ -89,7 +89,7 @@ export function CompactLinkPreviewAttachment({
         {reserveImage ? (
           <AttachmentMedia
             aria-hidden={showImage ? undefined : "true"}
-            className="aspect-auto h-full min-h-0 w-30 min-w-30 max-w-30 self-stretch rounded-xl bg-muted sm:w-34 sm:min-w-34 sm:max-w-34"
+            className="aspect-auto h-16 w-26 rounded-xl bg-muted"
             data-link-preview-thumbnail=""
             variant="image"
           >
@@ -110,7 +110,7 @@ export function CompactLinkPreviewAttachment({
             )}
           </AttachmentMedia>
         ) : null}
-        <AttachmentContent className={reserveImage ? "px-2 py-2" : undefined}>
+        <AttachmentContent className={reserveImage ? "px-2 py-1.5" : undefined}>
           <a
             className="relative z-20 flex w-fit max-w-full min-w-0 items-center gap-1.5 text-xs font-normal leading-4 text-muted-foreground/70 group-hover/attachment:underline"
             data-link-preview-hostname=""
@@ -145,7 +145,7 @@ export function CompactLinkPreviewAttachment({
             ) : null}
             <span className="truncate">{hostname}</span>
           </a>
-          <AttachmentTitle className="line-clamp-2 whitespace-normal group-hover/attachment:underline">
+          <AttachmentTitle className="group-hover/attachment:underline">
             {preview.title}
           </AttachmentTitle>
           {preview.description ? (
