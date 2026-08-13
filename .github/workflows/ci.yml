@@ -90,6 +90,8 @@ jobs:
         run: scripts/test-mobile-worktree-overrides.sh
       - name: File size ratchet unit tests
         run: node --test scripts/check-file-sizes-core.test.mjs
+      - name: ACP command acceptance contract
+        run: scripts/test-agent-harness-acceptance.sh
 
   rust-lint:
     name: Rust Lint
