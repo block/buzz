@@ -229,6 +229,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 <summary><strong>Configuration</strong> (env vars, defaults work for local dev)</summary>
 
 All defaults work out of the box. Override via `.env`. Full reference in [`.env.example`](.env.example).
+For local MinIO, keep `BUZZ_S3_ADDRESSING_STYLE=path`; real S3-style providers may require `virtual` bucket-subdomain addressing instead.
 
 </details>
 
