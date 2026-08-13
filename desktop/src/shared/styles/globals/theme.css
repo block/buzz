@@ -901,7 +901,9 @@
   background: transparent;
 }
 
-:root[data-glass-background] .buzz-huddle-app-surface-open::after {
+:root[data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="true"]
+  .buzz-huddle-app-surface-open::after {
   background: hsl(var(--buzz-huddle-drawer-surface));
 }
 
@@ -914,8 +916,8 @@
 }
 
 :root[data-buzz-sidebar][data-glass-background]
-  .buzz-huddle-shell[data-huddle-open="true"] {
-  background-color: hsl(var(--buzz-huddle-drawer-surface));
+  .buzz-huddle-shell[data-huddle-window="false"][data-huddle-open="true"] {
+  background-color: transparent;
   background-image: none;
 }
 
@@ -929,4 +931,37 @@
   pointer-events: none;
   position: absolute;
   z-index: 0;
+}
+
+/* In the main glass window, let vibrancy continue around the Huddle controls
+ * and present the tray as an inset four-corner surface. The dedicated Huddle
+ * window keeps the full-width dark control dock above. */
+:root[data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"]
+  .buzz-huddle-drawer-backdrop {
+  background: transparent;
+}
+
+:root[data-buzz-sidebar][data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"][data-huddle-open="true"]::before {
+  content: none;
+}
+
+:root[data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"]
+  .buzz-huddle-drawer-slot {
+  padding: var(--buzz-huddle-drawer-inset);
+}
+
+:root[data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"]
+  .buzz-huddle-drawer-slot
+  > .buzz-huddle-drawer {
+  border-radius: calc(
+    var(--buzz-huddle-drawer-radius) -
+    var(--buzz-huddle-drawer-inset)
+  );
+  height: 100%;
+  padding-block: var(--buzz-huddle-drawer-inset);
+  padding-inline: var(--buzz-huddle-drawer-inset);
 }
