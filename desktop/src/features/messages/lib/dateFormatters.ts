@@ -106,6 +106,36 @@ export function formatShortMonthDayOrdinal(unixSeconds: number): string {
 }
 
 /**
+ * Clock time prefixed with the date when the timestamp is not from today,
+ * for timelines without day dividers (e.g. the thread panel).
+ * Returns "2:34 PM", "Yesterday at 2:34 PM", "May 19th at 2:34 PM",
+ * or "May 19th, 2025 at 2:34 PM" for prior years.
+ */
+export function formatDatedTime(
+  unixSeconds: number,
+  nowSeconds = Date.now() / 1_000,
+): string {
+  const time = formatTime(unixSeconds);
+  const date = new Date(unixSeconds * 1_000);
+  const now = new Date(nowSeconds * 1_000);
+
+  if (isSameDayDate(date, now)) {
+    return time;
+  }
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (isSameDayDate(date, yesterday)) {
+    return `Yesterday at ${time}`;
+  }
+
+  const dateLabel = formatMonthDayOrdinal(date, SHORT_MONTH_FORMATTER);
+  return date.getFullYear() === now.getFullYear()
+    ? `${dateLabel} at ${time}`
+    : `${dateLabel}, ${date.getFullYear()} at ${time}`;
+}
+
+/**
  * Relative thread-summary timestamp with expanded units, e.g. "3 hours ago",
  * falling back to "on May 19th" for older replies.
  */

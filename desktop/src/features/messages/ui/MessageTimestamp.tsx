@@ -1,4 +1,5 @@
 import {
+  formatDatedTime,
   formatFullDateTime,
   formatTimeWithoutDayPeriod,
 } from "@/features/messages/lib/dateFormatters";
@@ -16,14 +17,21 @@ export function MessageTimestamp({
   className,
   createdAt,
   hideDayPeriod = false,
+  showDateForOlderDays = false,
   time,
 }: {
   className?: string;
   createdAt: number;
   hideDayPeriod?: boolean;
+  /** Prefix the date when the message is not from today ("May 19th at 2:34 PM"). */
+  showDateForOlderDays?: boolean;
   time: string;
 }) {
-  const displayTime = hideDayPeriod ? formatTimeWithoutDayPeriod(time) : time;
+  const displayTime = showDateForOlderDays
+    ? formatDatedTime(createdAt)
+    : hideDayPeriod
+      ? formatTimeWithoutDayPeriod(time)
+      : time;
 
   return (
     <TooltipProvider

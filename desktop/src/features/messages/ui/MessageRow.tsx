@@ -627,7 +627,11 @@ export const MessageRow = React.memo(
 
     const inlineMetadataNode = (
       <div className="flex shrink-0 items-baseline gap-2 text-xs">
-        <MessageTimestamp createdAt={message.createdAt} time={message.time} />
+        <MessageTimestamp
+          createdAt={message.createdAt}
+          showDateForOlderDays={isThreadReplyLayout}
+          time={message.time}
+        />
         {statusMetadataNode}
       </div>
     );

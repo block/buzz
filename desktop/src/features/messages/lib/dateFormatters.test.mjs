@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  formatDatedTime,
   formatDayHeading,
   formatShortMonthDayOrdinal,
   formatThreadSummaryLastReplyTime,
@@ -133,6 +134,34 @@ test("formatDayHeading includes the year for other years", () => {
     formatDayHeading(date.getTime() / 1_000),
     `${weekday(date)}, May 19th, ${year}`,
   );
+});
+
+test("formatDatedTime returns bare time for same-day timestamps", () => {
+  const now = new Date(2026, 4, 19, 18, 0).getTime() / 1_000;
+  const at = new Date(2026, 4, 19, 14, 34).getTime() / 1_000;
+
+  assert.equal(formatDatedTime(at, now), "2:34 PM");
+});
+
+test("formatDatedTime labels yesterday", () => {
+  const now = new Date(2026, 4, 19, 9, 0).getTime() / 1_000;
+  const at = new Date(2026, 4, 18, 14, 34).getTime() / 1_000;
+
+  assert.equal(formatDatedTime(at, now), "Yesterday at 2:34 PM");
+});
+
+test("formatDatedTime prefixes the date within the current year", () => {
+  const now = new Date(2026, 7, 20, 9, 0).getTime() / 1_000;
+  const at = new Date(2026, 4, 19, 14, 34).getTime() / 1_000;
+
+  assert.equal(formatDatedTime(at, now), "May 19th at 2:34 PM");
+});
+
+test("formatDatedTime includes the year for prior years", () => {
+  const now = new Date(2026, 4, 19, 9, 0).getTime() / 1_000;
+  const at = new Date(2025, 4, 19, 14, 34).getTime() / 1_000;
+
+  assert.equal(formatDatedTime(at, now), "May 19th, 2025 at 2:34 PM");
 });
 
 test("startOfLocalDaySeconds collapses a day's timestamps to one value", () => {
