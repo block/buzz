@@ -118,6 +118,56 @@ treatment for free.
 11. **End-to-end SMS → project dispatch → reply** → verify: full loop — real inbound SMS from an allow-listed number with a clear `default_project`, agent dispatches and completes, outbound reply SMS arrives back at the sending number.
 12. **Fetch-before-dispatch freshness check (new — from privacy/freshness review)** → verify: point `--project-paths` at a checkout that's behind its remote, dispatch into it, confirm the harness either fast-forwards it first or at minimum logs a clear staleness warning rather than silently working off outdated code.
 
+## ⚠ Two blocking findings (verified 2026-08-13) — these invalidate the original slice-8 plan
+
+Both were found by an adversarial research pass and then **independently re-verified against the
+real code** before being recorded here. They change what "add this as a plugin" can mean today.
+
+### Finding 1: Persona Packs are inert at runtime — `buzz-acp` never loads one
+
+The pack *format* is real, well-specified (`PERSONA_PACK_SPEC.md`), and has a working
+parser/validator in `buzz-persona` + `buzz pack validate`/`inspect` in the CLI. But **nothing
+loads a pack at agent-run time.**
+
+Verified directly, not taken on report:
+- `grep -rn "buzz_persona" crates/buzz-acp/src crates/buzz-acp/tests` → **zero hits**, despite
+  `crates/buzz-acp/Cargo.toml:22` declaring `buzz-persona = { path = "../buzz-persona" }`. It is
+  a dead Cargo edge.
+- buzz-acp has **no** `--pack` / `--persona` flag and no `BUZZ_ACP_PERSONA_*` env var.
+- `Config::persona_env_vars`'s doc comment claims it is "Populated from persona pack resolution" —
+  **that comment is false**; the only code that pushes into it is the Codex sandbox network var.
+- A persona's `subscribe:` field survives parsing into `ResolvedPersona.subscribe`, but its only
+  consumer in the whole repo is the `buzz pack inspect` printout — the documented mapping to
+  `Config.subscribe_mode`/`channels_override` **is never performed**.
+- Spec §11's distribution surface (`buzz pack ... --output`, `buzz install`, `pack.lock`,
+  `.buzzpack.sha256`, `~/.buzz/packs/`) does not exist; only `validate` and `inspect` are wired.
+
+**Consequence:** writing `sms-operator.persona.md` would produce a file that validates cleanly and
+does nothing. `buzz pack validate` printing "Valid." means *it parses*, not *it will run*.
+**Deploying an agent today** = create it in the desktop app (`personas.json`), or set
+`BUZZ_ACP_SYSTEM_PROMPT` / `BUZZ_ACP_MODEL` / env vars on the `buzz-acp` process directly.
+
+**Consequence for the "plugin" question:** the operator can be *authored* as a pack for future
+portability, but a pack is **not a deployment mechanism** today. Making it one is its own project
+(wire pack resolution into buzz-acp startup), not a step in this feature.
+
+### Finding 2: Per-message project routing is blocked by session caching
+
+Routing on a per-message `["project", …]` tag is *not* just "extend `resolve_effective_cwd`":
+- The triggering event and its tags **are** in scope at the call site (`batch` is live and
+  un-moved at `pool.rs:1684`), so reading the tag is genuinely a small change. That part is fine.
+- **But** `pool.rs:1678` short-circuits to a **cached session** and never reaches the resolver, and
+  a session's `cwd` is immutable after `session/new` (`acp.rs:653`).
+
+**Consequence:** a naive implementation routes correctly for the *first* message in a channel and
+then silently ignores the project tag forever after — and it **passes a single-message test**,
+which is the worst possible failure shape. Doing this properly needs a `session_cwd` field on
+`SessionState` (`pool.rs:108-132`) plus pre-emptive invalidation when the resolved cwd changes,
+touching both invalidation methods (`pool.rs:151-168`) which are load-bearing for core memory,
+canvas, delivery state, and turn counters.
+
+**Status:** deliberately NOT implemented. Landing the tag-read alone would look green and be wrong.
+
 ## Open questions for Michael
 
 - Should `linked_pubkey` be required for `allowed = true` rows, or is the shared "SMS relay" service pubkey acceptable for allow-listed-but-unlinked numbers?
