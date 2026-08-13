@@ -206,6 +206,7 @@ export interface ComposerLinkPreviewInput {
   content: string;
   hrefs: Set<string>;
   hrefVersions: Map<string, number>;
+  nextHrefVersion: number;
 }
 
 export function updateComposerLinkPreviewInput(
@@ -213,13 +214,23 @@ export function updateComposerLinkPreviewInput(
   content: string,
 ): ComposerLinkPreviewInput {
   const nextHrefs = new Set(extractComposerLinkPreviewHrefs(content));
-  const nextVersions = new Map(current.hrefVersions);
+  const nextVersions = new Map<string, number>();
+  let nextHrefVersion = current.nextHrefVersion;
   for (const href of nextHrefs) {
-    if (!current.hrefs.has(href)) {
-      nextVersions.set(href, (nextVersions.get(href) ?? 0) + 1);
+    if (current.hrefs.has(href)) {
+      const version = current.hrefVersions.get(href);
+      if (version !== undefined) nextVersions.set(href, version);
+      continue;
     }
+    nextHrefVersion += 1;
+    nextVersions.set(href, nextHrefVersion);
   }
-  return { content, hrefs: nextHrefs, hrefVersions: nextVersions };
+  return {
+    content,
+    hrefs: nextHrefs,
+    hrefVersions: nextVersions,
+    nextHrefVersion,
+  };
 }
 
 export function useComposerLinkPreviewInput() {
@@ -227,6 +238,7 @@ export function useComposerLinkPreviewInput() {
     content: "",
     hrefs: new Set(),
     hrefVersions: new Map(),
+    nextHrefVersion: 0,
   }));
   const update = React.useCallback(
     (content: string) =>

@@ -58,6 +58,37 @@ function metadata(overrides = {}) {
   };
 }
 
+test("composer input versions retain only active hrefs while re-entry advances", async () => {
+  const { updateComposerLinkPreviewInput } = await import(
+    "./useComposerLinkPreviews.tsx"
+  );
+  const secondHref = "https://example.com/second";
+  let input = {
+    content: "",
+    hrefs: new Set(),
+    hrefVersions: new Map(),
+    nextHrefVersion: 0,
+  };
+
+  input = updateComposerLinkPreviewInput(input, `see ${HREF}`);
+  const firstVersion = input.hrefVersions.get(HREF);
+  assert.equal(input.hrefVersions.size, 1);
+
+  input = updateComposerLinkPreviewInput(input, `see ${secondHref}`);
+  assert.deepEqual(
+    [...input.hrefVersions.keys()],
+    [secondHref],
+    "departed href history is pruned instead of retained for the composer lifetime",
+  );
+
+  input = updateComposerLinkPreviewInput(input, `see ${HREF}`);
+  assert.deepEqual([...input.hrefVersions.keys()], [HREF]);
+  assert.ok(
+    input.hrefVersions.get(HREF) > firstVersion,
+    "a re-entered href receives a new monotonic version after its old entry was pruned",
+  );
+});
+
 test("composer forces a refetch and drops the stale tag on a fast clear+re-paste of the same URL", async () => {
   const { act, cleanup, renderHook } = await import("@testing-library/react");
   const { resetLinkPreviewMetadataCache } = await import(
@@ -121,7 +152,12 @@ test("composer forces a refetch and drops the stale tag on a fast clear+re-paste
 
   try {
     let previewInput = updateComposerLinkPreviewInput(
-      { content: "", hrefs: new Set(), hrefVersions: new Map() },
+      {
+        content: "",
+        hrefs: new Set(),
+        hrefVersions: new Map(),
+        nextHrefVersion: 0,
+      },
       `see ${HREF}`,
     );
     const { result, rerender, unmount } = renderHook(
@@ -314,7 +350,12 @@ test("a stale in-flight upload cannot publish after the URL re-enters and a fres
 
   try {
     let previewInput = updateComposerLinkPreviewInput(
-      { content: "", hrefs: new Set(), hrefVersions: new Map() },
+      {
+        content: "",
+        hrefs: new Set(),
+        hrefVersions: new Map(),
+        nextHrefVersion: 0,
+      },
       `see ${HREF}`,
     );
     const { result, rerender, unmount } = renderHook(
