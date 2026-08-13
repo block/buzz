@@ -87,5 +87,31 @@ check(
     "the pre-suppression figures are gone from the contract, not merely outvoted",
 )
 
+# --- the confusable script list must match the map, in BOTH directions -----
+# The document named Latin as a covered script while _CONFUSABLES held no Latin key,
+# so a delimiter in Latin small capitals passed unflagged under a contract that said it
+# was covered. Naming a script the map lacks is the dangerous direction; omitting one it
+# has is merely inaccurate, and both are checked because only checking one is how the
+# first version stayed wrong.
+print("\nconfusable script list agrees with the map")
+import unicodedata  # noqa: E402
+
+from contain import _CONFUSABLES  # noqa: E402
+
+present = {unicodedata.name(k).split()[0] for k in _CONFUSABLES}
+paragraph = CONTRACT.split("**How confusables are recognised", 1)[-1].split("\n\n")[0]
+paragraph += CONTRACT.split("**How confusables are recognised", 1)[-1].split("\n\n")[1]
+
+for script in ("LATIN", "GREEK", "CYRILLIC", "CHEROKEE", "LISU", "COPTIC", "ARMENIAN"):
+    named = script.capitalize() in paragraph
+    held = script in present
+    check(named == held, f"{script.capitalize()}: named in the contract={named}, in the map={held}")
+
+check("Canadian" in paragraph, "Canadian Aboriginal Syllabics is named (it is in the map)")
+check(
+    "not UTS #39" in CONTRACT,
+    "the contract still says the skeleton is bounded, not a general confusables table",
+)
+
 print(f"\n{len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

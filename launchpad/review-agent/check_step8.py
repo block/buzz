@@ -82,8 +82,28 @@ for case in detected:
         len(matching) >= 1,
         f"{case.payload.id}: one record is Blocker AND quotes this payload post-escape",
     )
+    # `delimiter_lookalike` records are EXEMPT from the round trip, and the reason
+    # is the finding itself: they quote the NORMALISED form — case-folded,
+    # whitespace-squeezed, or confusable-folded — because "this normalises to the
+    # marker" is precisely what was detected. `delimiter-breakout` carries a
+    # case-variant probe, so its lookalike evidence reads `OOKING LINE\nBUZZ-...`
+    # against a payload that says `ooking line`. That cannot be a slice of the
+    # payload by construction, and requiring it would be requiring the detector
+    # not to work. It is the only case in the matrix that reaches this, which is
+    # why this assertion passed for four payloads and failed for one.
+    #
+    # They are not left unchecked. The assertion below proves the raw token never
+    # reaches the review body, which is the property that matters for a lookalike:
+    # it may be shown, but never in a form that could act.
+    #
+    # The newline is NOT the problem here, and an earlier attempt at this fix
+    # assumed it was. `_excerpt` renders a newline as a literal backslash-n, but
+    # `payload` is already put through the same transform by `normalise` on the
+    # line above — so `unescape(ev)` is the correct comparison and "reversing the
+    # display transform" on the evidence side breaks a match that was working.
+    must_round_trip = [(sev, kind, ev) for sev, kind, ev in recs if kind != "delimiter_lookalike"]
     check(
-        all(unescape(ev) in payload for _, _, ev in recs),
+        bool(must_round_trip) and all(unescape(ev) in payload for _, _, ev in must_round_trip),
         f"{case.payload.id}: every quoted record round-trips to real payload text",
     )
 

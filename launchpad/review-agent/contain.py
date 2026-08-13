@@ -60,6 +60,14 @@ _DASHES = re.compile("[\u2010-\u2015\u2212\u2043\uff0d]")
 #: ``BUZZ-UNTRUSTED`` and no others, which is all this boundary needs. CONTAINMENT.md
 #: states that bound rather than implying general confusable coverage.
 _CONFUSABLES = {
+    # Latin small capitals and IPA extensions. Absent from the first version of this
+    # map, which is how `\u0299\u1d1c\u1d22\u1d22-\u1d1c\u0274\u1d1b\u0280\u1d1c\ua731\u1d1b\u1d07\u1d05` \u2014 every character a LATIN LETTER SMALL CAPITAL,
+    # NFKC-invariant, untouched by escape() \u2014 produced no finding at all while the
+    # contract named Latin as a covered script. The most reachable spoof of the set,
+    # and the one a "fancy text" generator emits.
+    "\u0299": "B", "\u1d1c": "U", "\u1d22": "Z", "\u0274": "N", "\u1d1b": "T",
+    "\u0280": "R", "\u1d19": "R", "\ua731": "S", "\u1d07": "E", "\u1d05": "D",
+    "\u1d20": "V", "\u1d21": "W",
     "\u0392": "B", "\u0412": "B", "\u0432": "B", "\u13f4": "B", "\u2c82": "B",
     "\u054d": "U", "\u144c": "U", "\u222a": "U", "\ua4f4": "U",
     "\u0396": "Z", "\u0417": "Z", "\u13c3": "Z", "\ua4dc": "Z",
@@ -213,21 +221,28 @@ def find_lookalikes(text: str, entry_point: str) -> list[Finding]:
         )
 
     # Cross-script homoglyph: the token only appears once look-alike letters are mapped
-    # to the ASCII they imitate. Checked last, and only when nothing above already
-    # reported this text, so one probe yields one finding rather than four.
-    if not findings:
-        skeleton = _skeleton(text)
-        skeleton_squeezed = re.sub(r"\s+", "", skeleton)
-        for candidate in (skeleton, skeleton_squeezed):
-            if TOKEN in candidate:
-                findings.append(
-                    Finding(
-                        "delimiter_lookalike",
-                        entry_point,
-                        _excerpt(candidate, candidate.index(TOKEN)),
-                    )
+    # to the ASCII they imitate.
+    #
+    # **Run unconditionally.** This was gated on ``if not findings`` — nothing found
+    # anywhere in the text, rather than nothing found at this position — as a way to
+    # emit one finding per probe instead of four. It cost an attacker one prepended
+    # word: a benign lowercase mention of the token ahead of a forged Cyrillic close
+    # marker produced findings for the decoy only, and the marker never reached the
+    # review at all. Collapsing duplicates is ``_dedupe``'s job, and it keys on the
+    # evidence, so a genuinely distinct probe survives it while a re-report of the same
+    # span does not.
+    skeleton = _skeleton(text)
+    skeleton_squeezed = re.sub(r"\s+", "", skeleton)
+    for candidate in (skeleton, skeleton_squeezed):
+        if TOKEN in candidate:
+            findings.append(
+                Finding(
+                    "delimiter_lookalike",
+                    entry_point,
+                    _excerpt(candidate, candidate.index(TOKEN)),
                 )
-                break
+            )
+            break
 
     return _dedupe(findings)
 

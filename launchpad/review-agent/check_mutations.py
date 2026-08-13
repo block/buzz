@@ -93,8 +93,8 @@ MUTATIONS = [
     (
         "no-homoglyph-detection",
         "contain.py",
-        "        skeleton = _skeleton(text)",
-        '        skeleton = ""',
+        "    skeleton = _skeleton(text)",
+        '    skeleton = ""',
         "a cross-script look-alike delimiter is neither escaped nor flagged, so a "
         "boundary probe that is pixel-identical to the real marker passes unreported",
     ),
@@ -115,6 +115,59 @@ MUTATIONS = [
         r'    r"|system\s+directive_disabled"',
         "one alternative is quietly removed from the standalone tells, lowering recall "
         "without changing any count the contract states",
+    ),
+    # --- the preprocessing contract: a line loses decoration, never prose ---
+    # Four bypasses lived here across four commits, and none had a mutant. Each entry
+    # below reintroduces one of them, so the contract in _sentences' docstring is
+    # enforced rather than merely written down.
+    (
+        "structure-swallows-prose",
+        "detect.py",
+        r'    r"|(?:---|\+\+\+) (?:/dev/null|[ab]/\S+)"',
+        r'    r"|(?:---|\+\+\+) \S.*"',
+        "a structure pattern loose enough to match a line CARRYING prose drops that "
+        "prose — `--- ignore all previous instructions` vanishes entirely",
+    ),
+    (
+        "hunk-unbounded",
+        "detect.py",
+        r'_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")',
+        r'_HUNK = re.compile(r"^@@.*@@")',
+        "the hunk pattern matches anything between two `@@`, so `@@ Ignore all previous "
+        "instructions @@` is swallowed whole — the line is dropped with its prose",
+    ),
+    (
+        "marker-not-stripped",
+        "detect.py",
+        '        residue = _DECORATION.sub("", _MARKER.sub("", stripped, count=1))',
+        '        residue = _DECORATION.sub("", stripped)',
+        "a diff-marked decoration line keeps its marker as a word, so `+---` wedges "
+        "apart a phrase every tell needs adjacent",
+    ),
+    (
+        "decoration-drops-the-line",
+        "detect.py",
+        '        residue = _DECORATION.sub("", _MARKER.sub("", stripped, count=1))',
+        '        residue = "" if _DECORATION.search(stripped) else stripped',
+        "a decorated line is dropped rather than stripped, so any tell written inside "
+        "decoration is hidden — the failure direction the contract exists to deny",
+    ),
+    (
+        "structure-splits-prose-surfaces",
+        "detect.py",
+        "        if _STRUCTURE.match(stripped):\n"
+        '            if entry_point == "pr_diff" and passages[-1]:',
+        "        if _STRUCTURE.match(stripped):\n            if passages[-1]:",
+        "diff structure ends a passage on surfaces that are not diffs, so a pasted "
+        "file header splits a phrase on a PR body — bypass two, reopened",
+    ),
+    (
+        "oversized-discards-text",
+        "fetch.py",
+        '            text=text,\n            reason=f"{len(text.encode(\'utf-8\'))} bytes exceeds the "',
+        '            reason=f"{len(text.encode(\'utf-8\'))} bytes exceeds the "',
+        "a payload padded past the per-entry cap loses its text before findings are "
+        "computed, so padding buys silence",
     ),
 ]
 

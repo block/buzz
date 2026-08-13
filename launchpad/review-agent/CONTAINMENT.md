@@ -97,9 +97,13 @@ before the comparison, and each catches a class the one before it misses: NFKC
 normalisation (fullwidth and mathematical forms), invisible- and dash-character
 stripping, and a **look-alike skeleton** that maps cross-script letters to the ASCII
 they imitate. The skeleton is not UTS #39. It covers the ten distinct characters of
-`BUZZ-UNTRUSTED` across Latin, Greek, Cyrillic, Cherokee and a handful of mathematical
-and Lisu forms — bounded to the token's own alphabet, which is all this boundary needs.
-That bound is stated here rather than left for a reader to infer from the source.
+`BUZZ-UNTRUSTED` only, bounded to the token's own alphabet, which is all this boundary
+needs. By source script the map holds Latin small capitals and IPA extensions, Greek,
+Cyrillic, Cherokee, Lisu, Coptic, Armenian, Canadian Aboriginal Syllabics, and a few
+mathematical and Roman-numeral forms. That list is stated here rather than left for a
+reader to infer, and it is checked against the map by a control — an earlier version
+named Latin while the map held **no Latin key at all**, which is exactly how a delimiter
+in Latin small capitals passed unflagged under a document that said it was covered.
 
 NFKC alone was not enough, and the reason is worth keeping: it deliberately does *not*
 fold Cyrillic `Е` onto Latin `E`, because they are genuinely different letters. So a
@@ -200,19 +204,41 @@ comment and matched nothing. The same keystroke, through the mechanism that clos
 A control asserted that behaviour as an invariant, naming `pr_body`, which is why the
 suite stayed green over it.
 
-Two rules now, and the distinction is the whole fix. Real diff structure ends a passage
-**only in `pr_diff`**, the one surface that can contain a diff — and `---`/`+++` count as
-structure only when they carry a path, since a real file header names one. Formatting
-noise — a bare horizontal rule, or diff metadata an author typed into prose — is
-**skipped like a blank line, on every surface**, so the prose either side joins. Skipping
-rather than splitting is the point, and the reason is the same one the newline bypass
-turned on: every rule here needs its words adjacent, so a rule line *kept as a word*
-wedges three dashes into the middle of the phrase and defeats the match exactly as
-splitting did. Dropping the line is the only treatment that joins what an author wrote —
-which is also what a reader does with a horizontal rule.
+**And skipping the line reopened it a third and fourth time.** Skipping was the fix for
+the rule-as-a-word problem, and it introduced the opposite failure: the pattern that
+recognised a hunk header was unbounded, so `@@ … @@` wrapped around a sentence dropped
+that sentence entirely — the tell hidden by the very mechanism meant to reveal it. And
+because the skip was tested *before* the diff marker was removed, `+---` matched no skip
+rule, kept its dashes, and wedged the phrase apart again, while a `-`-prefixed rule was
+caught by the coincidence that the marker character equals the rule character.
 
-Dropping can only ever join more text, so it cannot hide a tell; whether it manufactures
-one is a false-positive question, and the benign corpora answer it at zero. **This
+**The contract, because four patches produced four bypasses.** Discarding a line has two
+failure directions that trade against each other — a line dropped can hide the tell it
+carried, a token kept can wedge a phrase apart — and each fix above chose one direction
+and re-opened the other. So the rule is single, and every case is an instance of it:
+
+> **A line loses its decoration. It never loses its prose.**
+
+Three consequences, in the order they apply:
+
+1. **Structure is recognised before the marker is stripped**, or `+++ b/path` stops being
+   a header the moment its `+` comes off. Every structure pattern matches a whole line
+   and pins its own shape — paths are non-space runs — so none can match a line
+   *carrying* prose. That strictness is what makes "contributes nothing" safe.
+2. **A hunk header contributes nothing, but its trailing context is prose** and is kept:
+   git appends the enclosing function's signature there. In `pr_diff` a real hunk
+   boundary also ends a passage, since joining across one would let two unrelated files'
+   text form a phrase neither wrote. On the six prose surfaces it is only decoration.
+3. **Everything else keeps its residue.** The marker comes off, then decoration runs at
+   either end. A line that was nothing but decoration leaves nothing and the prose joins
+   across it — which can only ever join *more* text, never hide any, because there was no
+   prose on that line to lose.
+
+Only the third case can join text, and only a line with no prose on it. Whether joining
+manufactures a tell is a false-positive question, and the benign corpora answer it at
+zero across 156 tracked markdown files. It is not zero in principle: adjacent bullet
+items that each carry half a construction will join into it. That is a credibility cost
+on an honest pull request, named here rather than discovered later. **This
 paragraph is written without the example sentence in it, and the first draft of it was
 not** — the zero-false-positive control failed on this file, again, for the reason the
 warning above gives. Describe the shape; do not write it out.

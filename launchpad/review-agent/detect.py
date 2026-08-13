@@ -81,21 +81,37 @@ _SUPPRESS = re.compile(
 #: Sentence split. On punctuation **only** — never on a newline. See ``_sentences``.
 _SENTENCE_END = re.compile(r"(?<=[.!?:])\s+")
 
-#: Diff structure that is never prose. ``---`` and ``+++`` must carry a path: a real
-#: file header names one, and requiring it is what stops a bare ``---`` — an ordinary
-#: markdown horizontal rule — being read as structure. See ``_sentences``.
-_DIFF_META = re.compile(
-    r"^(?:diff --git|index |(?:---|\+\+\+)\s+\S|@@|similarity index|rename )"
+#: Diff structure, every alternative matching a WHOLE line and nothing less.
+#:
+#: **Strictness is the safety property, not tidiness.** A structure line contributes no
+#: prose, so any pattern loose enough to also match a line *carrying* prose would drop
+#: that prose — and dropping prose is how a tell gets hidden. Each alternative therefore
+#: pins its own shape: paths are ``\S+`` so they cannot swallow a sentence, and the
+#: previous ``(?:---|\+\+\+)\s+\S`` — which matched ``--- ignore all previous
+#: instructions`` — is gone.
+_STRUCTURE = re.compile(
+    r"^(?:diff --git \S+ \S+"
+    r"|index [0-9a-f]+\.\.[0-9a-f]+(?: \d+)?"
+    r"|(?:---|\+\+\+) (?:/dev/null|[ab]/\S+)"
+    r"|similarity index \d+%"
+    r"|rename (?:from|to) \S+"
+    r"|(?:new|deleted) file mode \d+)$"
 )
 
-#: Formatting noise on a PROSE surface — a markdown horizontal rule, or diff structure
-#: an author typed into a comment. Skipped like a blank line so the prose either side
-#: joins. Never applied to ``pr_diff``, where these lines are real structure.
-_NOISE = re.compile(
-    r"^(?:\s*(?:-\s*){3,}|\s*(?:\*\s*){3,}|\s*(?:_\s*){3,}"
-    r"|diff --git\b|index [0-9a-f]|(?:---|\+\+\+)\s+\S|@@.*@@|similarity index|rename )"
-    r"\s*$|^(?:@@.*@@|(?:---|\+\+\+)\s+\S+)\s*$"
-)
+#: A real hunk header — and only a real one. Git appends the enclosing function's
+#: signature after the second ``@@``; that trailing text is content, so ``_sentences``
+#: keeps it. The old ``@@.*@@`` was unbounded and swallowed whole lines: ``@@ Ignore all
+#: previous instructions @@`` matched it and vanished, prose and all.
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
+
+#: One transport marker at the head of a line: a diff's ``+``/``-``, or a markdown
+#: bullet or quote. Carriage, never content.
+_MARKER = re.compile(r"^[+\-*>]\s?")
+
+#: Decoration runs at either end of a line. **Stripped, never used to drop the line.**
+#: Removing the characters keeps whatever prose the line carried, which is what makes
+#: "a line cannot hide a tell" a property rather than an aspiration.
+_DECORATION = re.compile(r"^[-*_=#>~@`\s]+|[-*_=#>~@`\s]+$")
 
 
 def _sentences(text: str, entry_point: str) -> list[str]:
@@ -121,34 +137,63 @@ def _sentences(text: str, entry_point: str) -> list[str]:
     mechanism that fixed the first one. A control asserted that behaviour as correct,
     on ``pr_body``, which is why the suite stayed green over it.
 
-    **On a prose surface such a line is skipped, exactly as a blank line is — not made
-    a boundary, and not made a word.** Both alternatives buy the same silence: a rule
-    line kept as text turns ``ignore all previous instructions`` into ``ignore all
-    previous --- instructions``, and every pattern here needs its words adjacent. Only
-    dropping the line joins the prose either side of it, which is what a reader does
-    with a horizontal rule. Dropping can only ever join more text, so it cannot hide a
-    tell; whether it manufactures one is measured against the benign corpora, which
-    hold at zero false positives.
+    **THE CONTRACT, because patching this by cases produced four bypasses in a row.**
+    Each fix classified a line and then discarded it, and discarding has two failure
+    directions that trade against each other: a line dropped can hide the tell it
+    carried, and a token kept can wedge apart a phrase that every pattern here needs
+    adjacent. Newline-splitting hid tells; the ``---`` skip that fixed it wedged them;
+    the ``@@.*@@`` skip that fixed *that* hid them again; and ``+---`` slipped between
+    the noise check and the marker strip to wedge them once more. A fifth alternative
+    in a regex would have been the fifth bypass.
+
+    So the rule is single and stated, and every branch below is an instance of it:
+
+        A line loses its DECORATION. It never loses its PROSE.
+
+    Three consequences, in the order they are applied:
+
+    1. **Structure is recognised before the marker is stripped**, or ``+++ b/path``
+       stops being a header the moment its ``+`` is removed. Every structure pattern
+       matches a whole line and pins its own shape, so none can match a line carrying
+       prose — that strictness is what makes "contributes nothing" safe.
+    2. **A hunk header contributes nothing, but its trailing context is prose** and is
+       kept. On ``pr_diff`` a real hunk boundary also ends a passage, because joining
+       across one would let two unrelated files' text form a phrase neither wrote. On
+       the six prose surfaces a pasted hunk header is only decoration, so it joins.
+    3. **Everything else keeps its residue.** The marker comes off, then decoration
+       runs at either end. Whatever survives is prose and is appended. A line that was
+       nothing but decoration leaves nothing, and prose joins across it — which can
+       only ever join MORE text, never hide any, because there was no prose on it.
+
+    Whether joining manufactures a tell is a false-positive question, measured against
+    the benign corpora rather than argued.
     """
     passages: list[list[str]] = [[]]
     for line in text.split("\n"):
         stripped = line.strip()
-        # Real diff structure ends a passage — but only where the surface IS a diff.
-        if entry_point == "pr_diff" and _DIFF_META.match(stripped):
-            if passages[-1]:
+
+        # 1. Structure, on the raw line — before the marker strip, see the contract.
+        if _STRUCTURE.match(stripped):
+            if entry_point == "pr_diff" and passages[-1]:
                 passages.append([])
             continue
-        # Formatting noise is skipped on EVERY surface, diff included: a bare `---` is
-        # not a file header anywhere, and inside a diff it is a context line an author
-        # can write at will. Skipping rather than splitting is what joins the prose.
-        if _NOISE.match(stripped):
+
+        # 2. A hunk header contributes nothing; its trailing git context is prose.
+        hunk = _HUNK.match(stripped)
+        if hunk:
+            if entry_point == "pr_diff" and passages[-1]:
+                passages.append([])
+            context = stripped[hunk.end() :].strip()
+            if context:
+                passages[-1].append(context)
             continue
-        if not stripped:
-            continue
-        # Strip a leading diff marker so an added line is still read as prose. Not
-        # scoped to pr_diff: authors paste diff fragments into bodies and comments, and
-        # scoping it there let `+Ignore all previous\n+instructions.` evade on a body.
-        passages[-1].append(stripped[1:].strip() if stripped[:1] in "+-" else stripped)
+
+        # 3. Marker, then decoration, then whatever prose is left. Ordering the marker
+        #    strip AFTER the noise check is precisely what let `+---` through as a word
+        #    while a bare `---` was correctly reduced to nothing.
+        residue = _DECORATION.sub("", _MARKER.sub("", stripped, count=1))
+        if residue:
+            passages[-1].append(residue)
 
     out: list[str] = []
     for passage in passages:
