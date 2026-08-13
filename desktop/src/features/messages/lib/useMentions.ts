@@ -257,7 +257,10 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)) {
+      if (
+        candidate.isMember !== true &&
+        !isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)
+      ) {
         return;
       }
       if (

@@ -29,6 +29,8 @@ const CASEY_PROFILE_PUBKEY =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
+const UNSHARED_AGENT_PUBKEY =
+  "7f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
 const SYSTEM_MESSAGE_KIND = 40099;
@@ -828,6 +830,41 @@ test("other-owned agents without a shared channel are hidden from mentions", asy
   await installMockBridge(page, {
     searchProfiles: [
       {
+        pubkey: UNSHARED_AGENT_PUBKEY,
+        displayName: "rhea",
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@rhea");
+
+  await expect
+    .poll(async () =>
+      (await readCommandPayloadLog(page)).some(
+        (entry) =>
+          entry.command === "search_users" &&
+          (entry.payload as { query?: string }).query === "rhea",
+      ),
+    )
+    .toBe(true);
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown).not.toBeVisible();
+  await expect(input.locator(".mention-chip")).toHaveCount(0);
+});
+
+test("other-owned channel-member agents absent from local directories emit a mention tag", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
         pubkey: PROFILE_ONLY_AGENT_PUBKEY,
         displayName: "mira",
         ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
@@ -841,25 +878,24 @@ test("other-owned agents without a shared channel are hidden from mentions", asy
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("@mira");
+  await input.fill("Ask @mira");
 
-  const dropdown = autocomplete(page);
-  await expect(dropdown).not.toBeVisible();
-  await expect(input.locator(".mention-chip")).toHaveCount(0);
-});
+  const miraRow = autocomplete(page).getByTestId(
+    `mention-suggestion-${PROFILE_ONLY_AGENT_PUBKEY}`,
+  );
+  await expect(miraRow).toBeVisible();
+  await expect(miraRow.getByTestId("mention-agent-icon")).toBeVisible();
+  await expect(miraRow.getByText("not in channel")).toHaveCount(0);
+  await miraRow.click();
+  await page.keyboard.type("please reply");
 
-test("stale channel-member agents absent from managed and relay directories stay hidden", async ({
-  page,
-}) => {
-  await installMockBridge(page, { userSearchDelayMs: 1_000 });
-  await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const content = "Ask @mira please reply";
+  await expect(input).toHaveText(content);
+  await page.getByTestId("send-message").click();
 
-  const input = page.getByTestId("message-input");
-  await input.fill("@mira");
-
-  await expect(autocomplete(page)).toHaveCount(0);
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toContain(PROFILE_ONLY_AGENT_PUBKEY);
 });
 
 test("managed relay agents are visible in channel mentions regardless of relay policy", async ({
