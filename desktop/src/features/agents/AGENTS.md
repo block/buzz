@@ -180,6 +180,15 @@ with a TypeScript lookup table or an id comparison in a component.
    import boundary. Do not silently strip them: rejection keeps the reviewed
    string identical to the executed string. New sharing paths must reuse the
    same validation before they persist or activate a definition.
+13. **Shared activity is a separate, member-safe relay plane.** Owners retain the
+   detailed owner-only activity feed. Other current members of the same non-DM
+   channel may render only validated kind-24201 summaries: the exact closed
+   schema, fresh signed author, matching channel and agent tags, bounded item /
+   byte counts, and safe activity classes and tool categories. Never project
+   prompts, narration, tool arguments or results, paths, URLs, error text,
+   model/provider/session identifiers, credentials, or chain-of-thought into
+   this plane. Unknown fields and stale, malformed, cross-channel, non-member,
+   or DM activity fail closed rather than degrading to a permissive view.
 
 ## The tests that enforce this
 
