@@ -63,9 +63,8 @@ test("composer forces a refetch and drops the stale tag on a fast clear+re-paste
   const { resetLinkPreviewMetadataCache } = await import(
     "@/shared/lib/useResolvedLinkPreviews.ts"
   );
-  const { useComposerLinkPreviews } = await import(
-    "./useComposerLinkPreviews.tsx"
-  );
+  const { updateComposerLinkPreviewInput, useComposerLinkPreviews } =
+    await import("./useComposerLinkPreviews.tsx");
 
   resetLinkPreviewMetadataCache();
   ipcHandlers.clear();
@@ -121,9 +120,14 @@ test("composer forces a refetch and drops the stale tag on a fast clear+re-paste
   };
 
   try {
+    let previewInput = updateComposerLinkPreviewInput(
+      { content: "", hrefs: new Set(), hrefVersions: new Map() },
+      `see ${HREF}`,
+    );
     const { result, rerender, unmount } = renderHook(
-      ({ content }) => useComposerLinkPreviews(content),
-      { initialProps: { content: `see ${HREF}` } },
+      ({ content, hrefVersions }) =>
+        useComposerLinkPreviews(content, true, hrefVersions),
+      { initialProps: previewInput },
     );
 
     // 1. Paste settles to a transient-failure fallback with a ready snapshot tag.
@@ -136,15 +140,19 @@ test("composer forces a refetch and drops the stale tag on a fast clear+re-paste
     );
     assert.equal(result.current.hasPendingSnapshots, false);
 
-    // 2. Fast gesture: clear the URL, then re-paste the SAME URL, both before
-    //    the debounce fires. Two separate ticks (as real keystrokes/paste are),
-    //    so the LIVE content commits empty then re-pasted, but the debounced
-    //    `candidates` never commit the empty intermediate.
+    // 2. Fast gesture: clear the URL, then re-paste the SAME URL, with both
+    //    editor updates folded into one React batch. The debounced candidates
+    //    and the committed live href set therefore never observe empty.
+    // Model two editor onUpdate calls folded into one React batch. The final
+    // href set equals the previous commit, but the update-boundary version has
+    // advanced because the URL left and re-entered between those updates.
     await act(async () => {
-      rerender({ content: "see " });
-    });
-    await act(async () => {
-      rerender({ content: `see ${HREF}` });
+      previewInput = updateComposerLinkPreviewInput(previewInput, "see ");
+      previewInput = updateComposerLinkPreviewInput(
+        previewInput,
+        `see ${HREF}`,
+      );
+      rerender(previewInput);
     });
 
     // 3a. The stale tag must be gone AS SOON AS the same URL re-enters — this is
@@ -227,9 +235,8 @@ test("a stale in-flight upload cannot publish after the URL re-enters and a fres
   const { resetLinkPreviewMetadataCache } = await import(
     "@/shared/lib/useResolvedLinkPreviews.ts"
   );
-  const { useComposerLinkPreviews } = await import(
-    "./useComposerLinkPreviews.tsx"
-  );
+  const { updateComposerLinkPreviewInput, useComposerLinkPreviews } =
+    await import("./useComposerLinkPreviews.tsx");
 
   resetLinkPreviewMetadataCache();
   ipcHandlers.clear();
@@ -306,9 +313,14 @@ test("a stale in-flight upload cannot publish after the URL re-enters and a fres
   };
 
   try {
+    let previewInput = updateComposerLinkPreviewInput(
+      { content: "", hrefs: new Set(), hrefVersions: new Map() },
+      `see ${HREF}`,
+    );
     const { result, rerender, unmount } = renderHook(
-      ({ content }) => useComposerLinkPreviews(content),
-      { initialProps: { content: `see ${HREF}` } },
+      ({ content, hrefVersions }) =>
+        useComposerLinkPreviews(content, true, hrefVersions),
+      { initialProps: previewInput },
     );
 
     // 1. Paste settles to a transient-failure fallback. Its favicon upload (U1)
@@ -328,12 +340,13 @@ test("a stale in-flight upload cannot publish after the URL re-enters and a fres
 
     // 2. Fast gesture: clear then re-paste the SAME URL inside the debounce.
     await act(async () => {
-      rerender({ content: "see " });
+      previewInput = updateComposerLinkPreviewInput(previewInput, "see ");
+      previewInput = updateComposerLinkPreviewInput(
+        previewInput,
+        `see ${HREF}`,
+      );
+      rerender(previewInput);
     });
-    await act(async () => {
-      rerender({ content: `see ${HREF}` });
-    });
-    await act(async () => {});
 
     // 3. The re-entry forces a fresh fetch; resolve it to fresh success. The
     //    upload effect must start a FRESH upload (U2) even though U1 still holds

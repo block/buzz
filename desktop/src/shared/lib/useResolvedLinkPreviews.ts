@@ -444,6 +444,7 @@ export function useResolvedLinkPreviews(
   {
     refetchNewNegatives = false,
     liveHrefs,
+    liveHrefVersions,
   }: {
     /**
      * When a preview href is newly present since the last run, drop any cached
@@ -463,19 +464,29 @@ export function useResolvedLinkPreviews(
      * uses this. Omit to track newness against `previews` (the default).
      */
     liveHrefs?: readonly string[];
+    /**
+     * Per-href entry versions captured at the live editor-update boundary.
+     * Unlike committed href-set equality, a bumped version preserves an
+     * intermediate leave/re-entry even when React batches both updates into one
+     * commit with the same final href set.
+     */
+    liveHrefVersions?: ReadonlyMap<string, number>;
   } = {},
 ): ResolvedLinkPreview[] {
   const [resolvedMetadata, setResolvedMetadata] =
     React.useState<ResolvedMetadataByHref>({});
   const [retryGeneration, setRetryGeneration] = React.useState(0);
   const seenHrefsRef = React.useRef<Set<string>>(new Set());
+  const handledHrefVersionsRef = React.useRef<Map<string, number>>(new Map());
   // Drive newness tracking from a stable string key so an equivalent href list
   // does not restart the effect. The effect closes over the committed render's
   // hrefs; do not mirror them into a ref during render, because an abandoned
   // concurrent render could otherwise leak uncommitted presence into the live
   // effect from the previous commit.
   const currentHrefs = liveHrefs ?? previews.map((preview) => preview.href);
-  const newnessKey = currentHrefs.join("\n");
+  const newnessKey = currentHrefs
+    .map((href) => `${href}\0${liveHrefVersions?.get(href) ?? ""}`)
+    .join("\n");
   // biome-ignore lint/correctness/useExhaustiveDependencies: newnessKey is the stable identity for currentHrefs; depending on the freshly allocated array would rerun this effect every render.
   React.useEffect(() => {
     let cancelled = false;
@@ -489,6 +500,7 @@ export function useResolvedLinkPreviews(
       // Newness is judged against the live href set when supplied (so a
       // debounce-swallowed leave/re-entry still counts), else against previews.
       const seen = seenHrefsRef.current;
+      const handledVersions = handledHrefVersionsRef.current;
       const liveNow = currentHrefs;
       // Preserve handled hrefs only while they remain live. A live href is not
       // marked handled until its debounced preview exists and invalidation has
@@ -497,10 +509,18 @@ export function useResolvedLinkPreviews(
       const next = new Set<string>(
         [...seen].filter((href) => liveNow.includes(href)),
       );
+      const nextVersions = new Map(
+        [...handledVersions].filter(([href]) => liveNow.includes(href)),
+      );
       const reenteredKeys: string[] = [];
       for (const preview of previews) {
+        const version = liveHrefVersions?.get(preview.href);
+        const alreadyHandled =
+          version === undefined
+            ? seen.has(preview.href)
+            : handledVersions.get(preview.href) === version;
         if (
-          seen.has(preview.href) ||
+          alreadyHandled ||
           !liveNow.includes(preview.href) ||
           preview.href.startsWith("buzz://")
         ) {
@@ -512,8 +532,10 @@ export function useResolvedLinkPreviews(
         metadataLoader.invalidateNegative(preview.href);
         reenteredKeys.push(metadataCacheKey(preview.href));
         next.add(preview.href);
+        if (version !== undefined) nextVersions.set(preview.href, version);
       }
       seenHrefsRef.current = next;
+      handledHrefVersionsRef.current = nextVersions;
       // Dropping the loader entry alone is not enough: this hook retains its own
       // resolved metadata, and the render that scheduled this effect already
       // read the stale negative from it. Clear this hook's OWN negative key for

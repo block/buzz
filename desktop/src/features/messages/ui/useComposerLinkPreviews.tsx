@@ -192,7 +192,63 @@ async function uploadSnapshotMedia(
   }
 }
 
-export function useComposerLinkPreviews(content: string, enabled = true) {
+export function extractComposerLinkPreviewHrefs(content: string): string[] {
+  return extractSupportedLinkPreviews(content)
+    .filter((preview) =>
+      preview.href.startsWith("buzz://")
+        ? true
+        : isValidLinkPreviewSnapshotCanonicalUrl(preview.href),
+    )
+    .map((preview) => preview.href);
+}
+
+export interface ComposerLinkPreviewInput {
+  content: string;
+  hrefs: Set<string>;
+  hrefVersions: Map<string, number>;
+}
+
+export function updateComposerLinkPreviewInput(
+  current: ComposerLinkPreviewInput,
+  content: string,
+): ComposerLinkPreviewInput {
+  const nextHrefs = new Set(extractComposerLinkPreviewHrefs(content));
+  const nextVersions = new Map(current.hrefVersions);
+  for (const href of nextHrefs) {
+    if (!current.hrefs.has(href)) {
+      nextVersions.set(href, (nextVersions.get(href) ?? 0) + 1);
+    }
+  }
+  return { content, hrefs: nextHrefs, hrefVersions: nextVersions };
+}
+
+export function useComposerLinkPreviewInput() {
+  const [input, setInput] = React.useState<ComposerLinkPreviewInput>(() => ({
+    content: "",
+    hrefs: new Set(),
+    hrefVersions: new Map(),
+  }));
+  const update = React.useCallback(
+    (content: string) =>
+      setInput((current) => updateComposerLinkPreviewInput(current, content)),
+    [],
+  );
+  return [input, update] as const;
+}
+
+export function useManagedComposerLinkPreviews(enabled = true) {
+  const [input, updateContent] = useComposerLinkPreviewInput();
+  return {
+    ...useComposerLinkPreviews(input.content, enabled, input.hrefVersions),
+    updateContent,
+  };
+}
+
+export function useComposerLinkPreviews(
+  content: string,
+  enabled = true,
+  liveHrefVersions?: ReadonlyMap<string, number>,
+) {
   const [suppressed, setSuppressed] = React.useState(false);
   // Debounce the content that drives resolution so typing a URL character by
   // character does not churn a new candidate href (and a flickering card) per
@@ -233,6 +289,9 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
     [extractCandidates, content],
   );
   const liveCandidatesKey = liveCandidates.join("\n");
+  const liveHrefVersionsKey = liveCandidates
+    .map((href) => `${href}\0${liveHrefVersions?.get(href) ?? ""}`)
+    .join("\n");
   // Submit and async-completion paths read only the last COMMITTED live set.
   // Updating this during render would let an abandoned concurrent render leak
   // uncommitted editor content into a later submit or upload completion.
@@ -251,7 +310,11 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // still seen as a re-entry and refetched — not served the stale negative.
   const resolvedPreviews = useResolvedLinkPreviews(
     suppressed ? [] : candidates,
-    { refetchNewNegatives: true, liveHrefs: liveCandidates },
+    {
+      refetchNewNegatives: true,
+      liveHrefs: liveCandidates,
+      liveHrefVersions,
+    },
   );
   // Entity links resolve to null metadata when the relay lookup has nothing
   // for them; keep their safe fallback cards rather than dropping them.
@@ -310,15 +373,21 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // below commits the block, generation bump, and tag removal only if React
   // actually commits this render; an abandoned concurrent render leaks nothing.
   const committedLiveHrefsRef = React.useRef<Set<string>>(new Set());
+  const committedLiveHrefVersionsRef = React.useRef<Map<string, number>>(
+    new Map(),
+  );
   // Hrefs that re-entered with a STALE negative fallback stay blocked until the
   // resolver visibly cycles pending -> ready. Healthy image re-entries are not
   // blocked because their cached metadata remains valid and does not refetch.
   const reenteringHrefsRef = React.useRef<
     Map<string, "blocked" | "refetching">
   >(new Map());
-  const reenteredLiveHrefs = liveCandidates.filter(
-    (href) => !committedLiveHrefsRef.current.has(href),
-  );
+  const reenteredLiveHrefs = liveCandidates.filter((href) => {
+    const version = liveHrefVersions?.get(href);
+    return version === undefined
+      ? !committedLiveHrefsRef.current.has(href)
+      : committedLiveHrefVersionsRef.current.get(href) !== version;
+  });
   const staleReenteredHrefs = reenteredLiveHrefs.filter(
     (href) =>
       !reenteringHrefsRef.current.has(href) &&
@@ -334,6 +403,7 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: stable href keys intentionally represent the live/stale sets; the arrays are rebuilt each render.
   React.useLayoutEffect(() => {
     committedLiveHrefsRef.current = new Set(liveCandidates);
+    committedLiveHrefVersionsRef.current = new Map(liveHrefVersions);
     if (staleReenteredHrefs.length === 0) return;
 
     for (const href of staleReenteredHrefs) {
@@ -356,7 +426,7 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
         }
       return changed ? next : current;
     });
-  }, [liveCandidatesKey, staleReenteredKey]);
+  }, [liveCandidatesKey, liveHrefVersionsKey, staleReenteredKey]);
 
   const isHrefReentering = (href: string) =>
     reenteringHrefsRef.current.has(href) || staleReenteredHrefs.includes(href);
