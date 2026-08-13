@@ -3360,6 +3360,35 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     })
 }
 
+/// Compare a message body to an owner control command, tolerating leading
+/// `@mention` labels.
+///
+/// Chat clients (and human habit) prefix commands with the agent's visible
+/// mention label — e.g. `@zai !cancel` — because typing the mention is also
+/// what produces the notifying `p` tag. A strict `content == "!cancel"` check
+/// would reject that, forcing owners onto the CLI. This strips every
+/// whitespace-separated token that starts with `@` before the exact comparison:
+///
+/// - `"!cancel"`          → `"!cancel"`     ✅
+/// - `"@zai !cancel"`     → `"!cancel"`     ✅
+/// - `"@zai   !cancel"`   → `"!cancel"`     ✅ (collapses whitespace)
+/// - `"hey @zai !cancel"` → `"hey !cancel"` ❌ (stray prose remains)
+///
+/// Safety is preserved by [`is_owner_control_command`]'s `p`-tag check: a
+/// command can only fire when the event actually mentions the agent, so a bare
+/// `!cancel` in an unrelated message never matches. Agent display names are
+/// expected to be single tokens (`zai`, `claude`); a multi-word name would
+/// leave its non-`@` words behind and fail to match, which is the safe
+/// direction (no false trigger).
+fn content_matches_command(content: &str, command: &str) -> bool {
+    let stripped: String = content
+        .split_whitespace()
+        .filter(|tok| !tok.starts_with('@'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    stripped == command
+}
+
 fn is_owner_control_command(
     event: &nostr::Event,
     kind_u32: u32,
@@ -3367,7 +3396,7 @@ fn is_owner_control_command(
     agent_pubkey_hex: &str,
 ) -> bool {
     kind_u32 == KIND_STREAM_MESSAGE
-        && event.content.trim() == command
+        && content_matches_command(&event.content, command)
         && event_mentions_agent(event, agent_pubkey_hex)
 }
 
@@ -4965,6 +4994,58 @@ mod owner_control_command_tests {
             &no_mention,
             KIND_STREAM_MESSAGE,
             "!rotate",
+            &agent
+        ));
+    }
+
+    #[test]
+    fn owner_control_command_tolerates_leading_mention_label() {
+        let agent = "ab".repeat(32);
+
+        // Desktop-style "@zai !cancel" — the leading mention label is stripped
+        // before the exact comparison, so the command fires.
+        let with_label = make_event(KIND_STREAM_MESSAGE, "@zai !cancel", Some(&agent));
+        assert!(is_owner_control_command(
+            &with_label,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
+            &agent
+        ));
+
+        // Bare command still matches (back-compat).
+        let bare = make_event(KIND_STREAM_MESSAGE, "!cancel", Some(&agent));
+        assert!(is_owner_control_command(
+            &bare,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
+            &agent
+        ));
+
+        // Extra whitespace between the label and the command collapses.
+        let spaced = make_event(KIND_STREAM_MESSAGE, "@zai   !shutdown", Some(&agent));
+        assert!(is_owner_control_command(
+            &spaced,
+            KIND_STREAM_MESSAGE,
+            "!shutdown",
+            &agent
+        ));
+
+        // Surrounding prose is NOT stripped — "hey @zai !cancel that" stays
+        // "hey !cancel that" ≠ "!cancel", so it does not fire. Safe.
+        let prose = make_event(KIND_STREAM_MESSAGE, "hey @zai !cancel that", Some(&agent));
+        assert!(!is_owner_control_command(
+            &prose,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
+            &agent
+        ));
+
+        // A trailing word also breaks the exact match.
+        let trailing = make_event(KIND_STREAM_MESSAGE, "@zai !cancel please", Some(&agent));
+        assert!(!is_owner_control_command(
+            &trailing,
+            KIND_STREAM_MESSAGE,
+            "!cancel",
             &agent
         ));
     }
