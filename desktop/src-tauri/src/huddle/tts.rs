@@ -688,7 +688,7 @@ fn tts_worker(
         // largest natural units within the model's exact 50-token limit. Once
         // each unit is appended, generation of the next proceeds while rodio
         // plays the already-queued audio.
-        let chunks = match engine.split_text_into_chunks(&text) {
+        let chunks = match engine.split_text_for_playback(&text) {
             Ok(chunks) => chunks,
             Err(_) => {
                 eprintln!(

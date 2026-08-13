@@ -377,22 +377,18 @@ impl AprilPocketTts {
         if self.prepared_token_count(&prepared.text)? <= self.bundle.max_token_per_chunk {
             return Ok(vec![prepared.text.clone()]);
         }
-        split_at_natural_boundaries(
-            &prepared.text,
-            self.bundle.max_token_per_chunk,
-            false,
-            |text| self.prepared_token_count(text),
-        )
+        split_model_at_natural_boundaries(&prepared.text, self.bundle.max_token_per_chunk, |text| {
+            self.prepared_token_count(text)
+        })
     }
 
     pub(crate) fn split_playback_prompt(
         &self,
         prepared: &AprilPreparedPrompt,
     ) -> Result<Vec<String>, String> {
-        split_at_natural_boundaries(
+        split_playback_at_natural_boundaries(
             &prepared.text,
             self.bundle.max_token_per_chunk,
-            true,
             |text| self.prepared_token_count(text),
         )
     }
@@ -962,6 +958,28 @@ impl AprilPocketTts {
     }
 }
 
+fn split_model_at_natural_boundaries<F>(
+    text: &str,
+    max_tokens: usize,
+    token_count: F,
+) -> Result<Vec<String>, String>
+where
+    F: FnMut(&str) -> Result<usize, String>,
+{
+    split_at_natural_boundaries(text, max_tokens, false, token_count)
+}
+
+fn split_playback_at_natural_boundaries<F>(
+    text: &str,
+    max_tokens: usize,
+    token_count: F,
+) -> Result<Vec<String>, String>
+where
+    F: FnMut(&str) -> Result<usize, String>,
+{
+    split_at_natural_boundaries(text, max_tokens, true, token_count)
+}
+
 fn split_at_natural_boundaries<F>(
     text: &str,
     max_tokens: usize,
@@ -1342,9 +1360,9 @@ mod tests {
     }
 
     #[test]
-    fn natural_split_keeps_first_sentence_separate_then_packs_the_remainder() {
+    fn playback_split_keeps_first_sentence_separate_then_packs_the_remainder() {
         let text = "One two. Three four. Five six.";
-        let chunks = split_at_natural_boundaries(text, 4, true, whitespace_token_count).unwrap();
+        let chunks = split_playback_at_natural_boundaries(text, 4, whitespace_token_count).unwrap();
         assert_eq!(chunks, ["One two. ", "Three four. Five six."]);
         assert_eq!(chunks.concat(), text);
     }
@@ -1352,9 +1370,25 @@ mod tests {
     #[test]
     fn model_split_packs_multiple_sentences_within_limit() {
         let text = "One two. Three four. Five six.";
-        let chunks = split_at_natural_boundaries(text, 4, false, whitespace_token_count).unwrap();
+        let chunks = split_model_at_natural_boundaries(text, 4, whitespace_token_count).unwrap();
         assert_eq!(chunks, ["One two. Three four. ", "Five six."]);
         assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn playback_then_model_split_does_not_isolate_later_sentences_again() {
+        let text = "Alpha one. Beta two. Gamma three.";
+        let playback =
+            split_playback_at_natural_boundaries(text, 50, whitespace_token_count).unwrap();
+        assert_eq!(playback, ["Alpha one. ", "Beta two. Gamma three."]);
+
+        let model: Vec<_> = playback
+            .iter()
+            .flat_map(|chunk| {
+                split_model_at_natural_boundaries(chunk.trim(), 50, whitespace_token_count).unwrap()
+            })
+            .collect();
+        assert_eq!(model, ["Alpha one.", "Beta two. Gamma three."]);
     }
 
     #[test]
