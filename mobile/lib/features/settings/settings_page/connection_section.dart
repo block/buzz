@@ -41,8 +41,19 @@ class _ConnectionSection extends ConsumerWidget {
                 }
                 return;
               }
-              await _waitForResumedFrame();
+              final resumed = await _waitForResumedFrame();
               if (!context.mounted) return;
+              if (!resumed) {
+                ref.read(pairingProvider.notifier).reset();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Buzz did not return to the foreground. Try again.',
+                    ),
+                  ),
+                );
+                return;
+              }
               await Navigator.of(context).push(
                 MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
               );
@@ -55,26 +66,23 @@ class _ConnectionSection extends ConsumerWidget {
   }
 }
 
-Future<void> _waitForResumedFrame() async {
+const _resumeWaitTimeout = Duration(seconds: 5);
+
+Future<bool> _waitForResumedFrame() async {
   final binding = WidgetsBinding.instance;
   if (binding.lifecycleState != AppLifecycleState.resumed) {
     final resumed = Completer<void>();
-    late final AppLifecycleListener listener;
-    listener = AppLifecycleListener(
-      onResume: () {
-        if (!resumed.isCompleted) resumed.complete();
-      },
-    );
-    if (binding.lifecycleState == AppLifecycleState.resumed) {
-      resumed.complete();
-    }
+    final listener = AppLifecycleListener(onResume: resumed.complete);
     try {
-      await resumed.future;
+      await resumed.future.timeout(_resumeWaitTimeout);
+    } on TimeoutException {
+      return false;
     } finally {
       listener.dispose();
     }
   }
   await binding.endOfFrame;
+  return true;
 }
 
 /// Destructive, so it gets a container of its own rather than sitting at the
