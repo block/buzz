@@ -1559,7 +1559,12 @@ pub async fn run_prompt_task(
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
     let reaction_ids: Vec<String> = batch
         .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .map(|b| {
+            b.events
+                .iter()
+                .map(|be| crate::queue::reaction_target_id(&be.event))
+                .collect()
+        })
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 

@@ -1507,6 +1507,16 @@ fn format_conversation_context(
     s
 }
 
+/// Event ID that should own lifecycle reactions for an inbound event.
+///
+/// Kind:40003 edits are auxiliary events that do not render as timeline rows,
+/// so their seen/working reactions belong on the visible original message.
+/// Prompt routing and reaction routing deliberately share `edit_target_id` as
+/// their semantic authority even when fetching the original event later fails.
+pub(crate) fn reaction_target_id(event: &Event) -> String {
+    edit_target_id(event).unwrap_or_else(|| event.id.to_hex())
+}
+
 /// Original-message routing recovered for a kind:40003 edit event.
 #[derive(Debug, Clone)]
 pub struct ResolvedEdit {
@@ -5325,6 +5335,23 @@ mod tests {
         )
         .join("\n");
         assert!(prompt.contains(&format!("--reply-to {root_id}")));
+    }
+
+    #[test]
+    fn edit_reactions_target_visible_original_message() {
+        let original_id = "66".repeat(32);
+        let edit = edit_event(&original_id);
+
+        assert_eq!(reaction_target_id(&edit), original_id);
+    }
+
+    #[test]
+    fn ordinary_event_reactions_target_the_event_itself() {
+        let event = EventBuilder::new(Kind::Custom(9), "mention")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+
+        assert_eq!(reaction_target_id(&event), event.id.to_hex());
     }
 
     #[test]

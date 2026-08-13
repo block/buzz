@@ -2874,7 +2874,8 @@ async fn tokio_main() -> Result<()> {
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
-                            let event_id_hex = buzz_event.event.id.to_hex();
+                            let reaction_event_id =
+                                queue::reaction_target_id(&buzz_event.event);
                             // Clone for the non-cancelling steer fork, which
                             // needs the event to render the steer body. The
                             // clone is unconditional because we don't know
@@ -2900,7 +2901,7 @@ async fn tokio_main() -> Result<()> {
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             if accepted {
                                 let rc = ctx.rest_client.clone();
-                                let eid = event_id_hex.clone();
+                                let eid = reaction_event_id.clone();
                                 tokio::spawn(async move {
                                     pool::reaction_add(&rc, &eid, "👀").await;
                                 });
