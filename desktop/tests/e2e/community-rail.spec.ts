@@ -914,6 +914,37 @@ test.describe("community rail", () => {
       .toEqual(identityBefore);
   });
 
+  test("shows a recoverable error when leaving the final community cannot clear navigation", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      { clearPendingNavigationDeepLinksError: "queue unavailable" },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
+
+    const error = page.getByTestId("community-apply-error");
+    await expect(error).toBeVisible();
+    await expect(error).toContainText(
+      "Could not safely leave community: queue unavailable",
+    );
+    await expect(page.getByText("Join or create a community")).toHaveCount(0);
+    await expect(page.getByTestId("community-switch-gate")).toHaveCount(0);
+    await expect(page.getByTestId("community-apply-error-retry")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Change community" }),
+    ).toBeVisible();
+  });
+
   test("hides the rail with a single community", async ({ page }) => {
     await installMockBridge(page, undefined, { skipCommunitySeed: true });
     await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);

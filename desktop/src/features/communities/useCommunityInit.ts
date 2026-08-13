@@ -130,7 +130,23 @@ export function useCommunityInit(
             saveActiveAgentTurnsForCommunity(prevCommunityIdRef.current);
             prevCommunityIdRef.current = null;
           }
-          await resetCommunityState({ resetAvatarState: true });
+          try {
+            await resetCommunityState({ resetAvatarState: true });
+          } catch (error) {
+            console.error("Failed to reset community state:", error);
+            if (!cancelled) {
+              setResult({
+                isReady: false,
+                needsSetup: false,
+                appliedKey: null,
+                error:
+                  error instanceof Error
+                    ? `Could not safely leave community: ${error.message}`
+                    : "Could not safely leave community",
+              });
+            }
+            return;
+          }
           appliedRelayUrlRef.current = null;
           hasInitializedRef.current = false;
         }
