@@ -12,14 +12,51 @@ From a Buzz checkout:
 nix build .#buzz-desktop
 nix build .#buzz-relay
 nix build .#buzz-sidecars
+nix build .#buzz-cli
+nix build .#git-credential-nostr
+nix build .#buzz-git-tools
 
 nix run .#buzz-desktop
 nix run .#buzz-relay
 nix run .#buzz-admin -- --help
+nix run .#buzz -- --help
 ```
 
 The `buzz-relay` package contains both `buzz-relay` and `buzz-admin`. The named
-apps select the appropriate executable.
+apps select the appropriate executable. `buzz-git-tools` provides the complete
+client-side git workflow in one package: Git 2.46 or newer, the `buzz` CLI, and
+the `git-credential-nostr` NIP-98 helper. On Linux, the Nix desktop package also
+puts Git on its runtime `PATH`; the CLI and credential helper are bundled
+sidecars.
+
+## Clone a Buzz-hosted repository
+
+Enter the complete client toolset, announce a repository bound to a channel,
+then use normal Git commands. The relay URL is HTTP(S) for Git even when the
+Buzz WebSocket URL uses WS(S).
+
+```bash
+nix shell .#buzz-git-tools
+
+export BUZZ_RELAY_URL=https://buzz.example.com
+export BUZZ_PRIVATE_KEY=nsec1...
+export NOSTR_PRIVATE_KEY="$BUZZ_PRIVATE_KEY"
+
+buzz channels create --name example --type stream --visibility private
+# Copy channel_id from the response, and use your 64-character hex pubkey below.
+export CHANNEL_ID=00000000-0000-0000-0000-000000000000
+export OWNER_PUBKEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+export CLONE_URL="$BUZZ_RELAY_URL/git/$OWNER_PUBKEY/example"
+
+buzz repos create --id example --clone "$CLONE_URL" --channel "$CHANNEL_ID"
+git -c credential.helper=nostr -c credential.useHttpPath=true clone "$CLONE_URL"
+```
+
+The repository announcement creates the empty remote repository. The channel
+binding is its access-control boundary, and the credential helper signs Git's
+HTTP requests with `NOSTR_PRIVATE_KEY`. Buzz Desktop configures the helper
+ephemerally for managed agents, so its project and agent flows can use ordinary
+`git clone`, `git fetch`, and `git push` without global Git configuration.
 
 ## Development shells
 

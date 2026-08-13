@@ -422,11 +422,14 @@ in
     path = mkOption {
       type = types.listOf types.package;
       default = with pkgs; [
+        bash
+        coreutils
         curl
         git
+        gnused
         openssl
       ];
-      defaultText = lib.literalExpression "with pkgs; [ curl git openssl ]";
+      defaultText = lib.literalExpression "with pkgs; [ bash coreutils curl git gnused openssl ]";
       description = "Packages available to relay-managed git subprocesses and hooks.";
     };
 

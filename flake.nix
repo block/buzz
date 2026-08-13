@@ -69,14 +69,27 @@
         in
         {
           packages = {
-            inherit (buzzPackages) buzz-desktop buzz-sidecars;
+            inherit (buzzPackages)
+              buzz-cli
+              buzz-desktop
+              buzz-git-tools
+              buzz-sidecars
+              git-credential-nostr
+              ;
             default = buzzPackages.buzz-desktop;
           }
           // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             inherit (buzzPackages) buzz-relay;
           };
 
-          apps = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          apps = {
+            buzz = {
+              type = "app";
+              program = "${buzzPackages.buzz-cli}/bin/buzz";
+              meta.description = "Run the Buzz command-line client";
+            };
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             buzz-relay = {
               type = "app";
               program = "${buzzPackages.buzz-relay}/bin/buzz-relay";
@@ -131,9 +144,27 @@
                   "-/run/secrets/buzz-relay"
                 ];
               assert builtins.elem 3456 config.networking.firewall.allowedTCPPorts;
+              assert builtins.all (package: builtins.elem package config.systemd.services.buzz-relay.path) (
+                with pkgs;
+                [
+                  bash
+                  coreutils
+                  curl
+                  git
+                  gnused
+                  openssl
+                ]
+              );
               pkgs.runCommand "buzz-relay-nixos-module-check" { } ''
+                export PATH=${pkgs.lib.makeBinPath config.systemd.services.buzz-relay.path}
+                for command in bash cat curl date git mktemp openssl rm sed sort; do
+                  command -v "$command" >/dev/null
+                done
                 test -x ${buzzPackages.buzz-relay}/bin/buzz-relay
                 test -x ${buzzPackages.buzz-relay}/bin/buzz-admin
+                test -x ${buzzPackages.buzz-cli}/bin/buzz
+                test -x ${buzzPackages.git-credential-nostr}/bin/git-credential-nostr
+                test -x ${buzzPackages.buzz-git-tools}/bin/git
                 touch "$out"
               '';
           };

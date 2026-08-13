@@ -4,9 +4,12 @@
   fetchPnpmDeps,
   fetchurl,
   linkFarm,
+  runCommand,
+  symlinkJoin,
   perl,
   cmake,
   cargo-tauri,
+  git,
   nodejs,
   pnpm,
   pnpmConfigHook,
@@ -55,6 +58,12 @@ let
     }
   ];
 
+  workspaceCargoDeps = rustPlatform.fetchCargoVendor {
+    inherit src;
+    name = "buzz-sidecars-${desktopVersion}";
+    hash = versions.workspaceCargoHash;
+  };
+
   sidecarPackages = [
     "buzz-acp"
     "buzz-agent"
@@ -77,7 +86,7 @@ let
 
     inherit src;
 
-    cargoHash = versions.workspaceCargoHash;
+    cargoDeps = workspaceCargoDeps;
 
     cargoBuildFlags = lib.concatLists (
       map (p: [
@@ -99,6 +108,84 @@ let
     meta = with lib; {
       description = "Buzz sidecar binaries";
       license = licenses.asl20;
+      platforms = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+    };
+  };
+
+  gitClientSidecars = rustPlatform.buildRustPackage {
+    pname = "buzz-git-client-sidecars";
+    version = desktopVersion;
+
+    inherit src;
+
+    cargoDeps = workspaceCargoDeps;
+    cargoBuildFlags = [
+      "-p"
+      "buzz-cli"
+      "-p"
+      "git-credential-nostr"
+    ];
+    doCheck = false;
+
+    nativeBuildInputs = [ pkg-config ];
+    buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ openssl ];
+  };
+
+  mkSidecarBinary =
+    {
+      pname,
+      binaryName,
+      description,
+    }:
+    runCommand "${pname}-${desktopVersion}"
+      {
+        meta = with lib; {
+          inherit description;
+          homepage = "https://github.com/block/buzz";
+          license = licenses.asl20;
+          mainProgram = binaryName;
+          platforms = [
+            "x86_64-linux"
+            "aarch64-linux"
+            "aarch64-darwin"
+          ];
+        };
+      }
+      ''
+        mkdir -p "$out/bin"
+        ln -s ${gitClientSidecars}/bin/${binaryName} "$out/bin/${binaryName}"
+      '';
+
+  buzzCli = mkSidecarBinary {
+    pname = "buzz-cli";
+    binaryName = "buzz";
+    description = "Command-line client for Buzz relays";
+  };
+
+  gitCredentialNostr = mkSidecarBinary {
+    pname = "git-credential-nostr";
+    binaryName = "git-credential-nostr";
+    description = "NIP-98 credential helper for Buzz-hosted git repositories";
+  };
+
+  buzzGitTools = symlinkJoin {
+    name = "buzz-git-tools-${desktopVersion}";
+    paths = [
+      buzzCli
+      gitCredentialNostr
+      git
+    ];
+    meta = with lib; {
+      description = "Buzz CLI, Nostr git credential helper, and git client";
+      homepage = "https://github.com/block/buzz";
+      license = [
+        licenses.asl20
+        licenses.gpl2Only
+      ];
       platforms = [
         "x86_64-linux"
         "aarch64-linux"
@@ -144,6 +231,9 @@ in
 {
   buzz-relay = relayRuntime;
   buzz-sidecars = sidecars;
+  buzz-cli = buzzCli;
+  git-credential-nostr = gitCredentialNostr;
+  buzz-git-tools = buzzGitTools;
 
   buzz-desktop = rustPlatform.buildRustPackage (finalAttrs: {
     pname = "buzz-desktop";
@@ -179,6 +269,13 @@ in
       for bin in ${builtins.concatStringsSep " " sidecarBinNames}; do
         cp ${sidecars}/bin/$bin desktop/src-tauri/binaries/$bin-${stdenv.hostPlatform.config}
       done
+    '';
+
+    # Project clone/fetch/push operations are performed by git itself. The
+    # Nostr credential helper is bundled as a Tauri sidecar, while this makes
+    # a compatible git client available to the launched desktop application.
+    preFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
+      gappsWrapperArgs+=(--prefix PATH : "${lib.makeBinPath [ git ]}")
     '';
 
     nativeBuildInputs = [
