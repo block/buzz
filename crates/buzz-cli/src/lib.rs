@@ -371,7 +371,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  printf 'first\\n\\nsecond\\n' | buzz messages send --channel <UUID> --content -"
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -380,6 +380,9 @@ pub enum MessagesCmd {
         /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
         #[arg(long)]
         content: String,
+        /// Permit literal backslash-n, backslash-r, or backslash-t sequences in direct content
+        #[arg(long, default_value_t = false)]
+        allow_literal_escapes: bool,
         /// Nostr event kind (default: channel default)
         #[arg(long)]
         kind: Option<u16>,
@@ -2076,6 +2079,32 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn messages_send_parses_literal_escape_override() {
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "00000000-0000-0000-0000-000000000000",
+            "--content",
+            r"explain \n literally",
+            "--allow-literal-escapes",
+        ])
+        .unwrap();
+
+        let Cmd::Messages(MessagesCmd::Send {
+            content,
+            allow_literal_escapes,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected messages send command")
+        };
+        assert_eq!(content, r"explain \n literally");
+        assert!(allow_literal_escapes);
     }
 
     #[test]

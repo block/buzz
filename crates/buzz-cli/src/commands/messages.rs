@@ -564,11 +564,38 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
 pub struct SendMessageParams {
     pub channel_id: String,
     pub content: String,
+    pub allow_literal_escapes: bool,
     pub kind: Option<u16>,
     pub reply_to: Option<String>,
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+}
+
+fn read_message_content<F>(
+    value: &str,
+    allow_literal_escapes: bool,
+    read_stdin: F,
+) -> Result<String, CliError>
+where
+    F: FnOnce() -> Result<String, CliError>,
+{
+    if value == "-" {
+        return read_stdin();
+    }
+
+    if !allow_literal_escapes
+        && [r"\n", r"\r", r"\t"]
+            .iter()
+            .any(|escape| value.contains(escape))
+    {
+        return Err(CliError::Usage(
+            "--content contains a literal \\n, \\r, or \\t escape sequence; if you intended formatted or multiline text, pipe real bytes through stdin with --content -. If the literal escape sequence is intentional, add --allow-literal-escapes."
+                .to_string(),
+        ));
+    }
+
+    Ok(value.to_string())
 }
 
 pub async fn cmd_send_message(
@@ -579,7 +606,7 @@ pub async fn cmd_send_message(
     // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
-    p.content = read_or_stdin(&p.content)?;
+    p.content = read_message_content(&p.content, p.allow_literal_escapes, || read_or_stdin("-"))?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -875,6 +902,7 @@ pub async fn dispatch(
         MessagesCmd::Send {
             channel,
             content,
+            allow_literal_escapes,
             kind,
             reply_to,
             broadcast,
@@ -886,6 +914,7 @@ pub async fn dispatch(
                 SendMessageParams {
                     channel_id: channel,
                     content,
+                    allow_literal_escapes,
                     kind,
                     reply_to,
                     broadcast,
@@ -994,7 +1023,7 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys, read_message_content,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
@@ -1011,6 +1040,46 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn direct_message_content_rejects_literal_escape_sequences() {
+        for content in [r"first\nsecond", r"first\rsecond", r"first\tsecond"] {
+            let error = read_message_content(content, false, || {
+                panic!("direct content must not read stdin")
+            })
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("--content -"));
+            assert!(message.contains("--allow-literal-escapes"));
+        }
+    }
+
+    #[test]
+    fn direct_message_content_override_preserves_literal_escapes() {
+        let content = r"first\nsecond\rthird\tfourth";
+        let resolved = read_message_content(content, true, || {
+            panic!("direct content must not read stdin")
+        })
+        .unwrap();
+        assert_eq!(resolved, content);
+    }
+
+    #[test]
+    fn stdin_message_content_preserves_real_control_characters() {
+        let content = "first\nsecond\r\nthird\tfourth and literal \\n";
+        let resolved = read_message_content("-", false, || Ok(content.to_string())).unwrap();
+        assert_eq!(resolved, content);
+    }
+
+    #[test]
+    fn ordinary_direct_message_content_is_unchanged() {
+        let content = "single-line markdown with `code` and $shell syntax";
+        let resolved = read_message_content(content, false, || {
+            panic!("direct content must not read stdin")
+        })
+        .unwrap();
+        assert_eq!(resolved, content);
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
