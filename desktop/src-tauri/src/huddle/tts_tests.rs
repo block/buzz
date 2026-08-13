@@ -829,6 +829,20 @@ fn tts_worker_uses_distinct_playback_and_model_splitters() {
         (1, 1),
         "the worker must isolate sentence one only in the outer playback split"
     );
+
+    // Counts alone are order-blind: swapping the two call sites keeps them at
+    // (1, 1) while the outer split stops isolating sentence one, which delays
+    // first audio by a whole generation. Pin the ORDER too.
+    let playback_at = source
+        .find("engine.split_text_for_playback(")
+        .expect("outer playback split exists");
+    let model_at = source
+        .find("engine.split_text_into_chunks(")
+        .expect("inner model split exists");
+    assert!(
+        playback_at < model_at,
+        "the playback split must be the OUTER pass; swapping the two delays first audio"
+    );
 }
 
 // ── clamp_to_full_scale tests ─────────────────────────────────────────────

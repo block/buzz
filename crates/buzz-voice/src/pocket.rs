@@ -219,6 +219,31 @@ mod tests {
         assert_eq!(playback_api.matches(".split_prompt(").count(), 0);
     }
 
+    /// Mirror of the playback guard: the model API must NOT isolate the first
+    /// sentence, or every already-packed playback unit gets sentence one peeled
+    /// off again — the exact double-split this PR removes.
+    #[test]
+    fn model_api_delegates_to_non_isolating_splitter() {
+        let source = include_str!("pocket.rs");
+        let (_, model_api) = source
+            .split_once("pub fn split_text_into_chunks")
+            .expect("model API exists");
+        let (model_api, _) = model_api
+            .split_once("pub fn split_text_for_playback")
+            .expect("model API ends before the playback API");
+
+        assert_eq!(
+            model_api.matches(".split_prompt(").count(),
+            1,
+            "the model splitter must pack sentences, not isolate the first one"
+        );
+        assert_eq!(
+            model_api.matches(".split_playback_prompt(").count(),
+            0,
+            "isolating inside the model split reinstates the per-sentence seam"
+        );
+    }
+
     #[test]
     #[ignore = "requires BUZZ_POCKET_TEST_MODEL_DIR"]
     fn production_api_emits_non_silent_april_int8_pcm() {
