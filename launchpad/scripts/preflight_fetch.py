@@ -13,21 +13,21 @@ can fail — is exercisable with no network. Hardcoding ``subprocess.run(["gh",
 ...])` at each call site would make that impossible without a rewrite.
 
 Nine reads, five of them required
-================================
+=================================
 
-============  ======================================================  =========
-name          call                                                    kind
-============  ======================================================  =========
-pr            ``GET /repos/{o}/{r}/pulls/{n}``                         required
-meta          ``gh pr view {n} --json title,body,labels``              required
-compare       ``GET /repos/{o}/{r}/compare/{base.sha}...{head.sha}``   required
-checks        GraphQL ``statusCheckRollup`` with ``isRequired``        required
-tree          ``GET /repos/{o}/{r}/git/trees/{head}?recursive=1``      required
-branch_rules  ``GET /repos/{o}/{r}/rules/branches/{base}``             skip-only
-org_rulesets  ``GET /orgs/{o}/rulesets``                              skip-only
-closing_refs  GraphQL ``closingIssuesReferences``                      skip-only
-review_decis  ``gh pr view {n} --json reviewDecision``                  skip-only
-============  ======================================================  =========
+================  ======================================================  =========
+name              call                                                    kind
+================  ======================================================  =========
+pr                ``GET /repos/{o}/{r}/pulls/{n}``                         required
+meta              ``gh pr view {n} --json title,body,labels``              required
+compare           ``GET /repos/{o}/{r}/compare/{base.sha}...{head.sha}``   required
+checks            GraphQL ``statusCheckRollup`` with ``isRequired``        required
+tree              ``GET /repos/{o}/{r}/git/trees/{head}?recursive=1``      required
+branch_rules      ``GET /repos/{o}/{r}/rules/branches/{base}``             skip-only
+org_rulesets      ``GET /orgs/{o}/rulesets``                               skip-only
+closing_refs      GraphQL ``closingIssuesReferences``                      skip-only
+review_decision   ``gh pr view {n} --json reviewDecision``                 skip-only
+================  ======================================================  =========
 
 ``review_decision`` is the only gate signal this token can read: §6's ruleset is
 invisible without ``admin:org``, and ``reviewDecision`` confirms review is

@@ -30,6 +30,12 @@ ALREADY TRUE  (verified against git and the GitHub API, not notes)
   isRequired(pullRequestNumber:).
   PR 86 carries 24 checks and two of them are both named "check" from the same
   workflow "launchpad — PR body check". Check names are NOT unique.
+  CORRECTED 2026-08-13, one day later: the live API and the recorded fixture both
+  report 47 contexts with THREE named "check" and 23 names duplicated overall.
+  Every "24" below is stale in the same way. The property each criterion tests —
+  names collide, so the record must carry a list — holds more strongly, not less,
+  and the controls assert against the recorded fixture rather than against these
+  numbers.
   No branch protection is readable on launchpad: /rulesets returns [],
   /branches/launchpad/protection 404s, and /rules/branches/launchpad returns [].
   Every check on PR 86 reports isRequired false. This contradicts
@@ -69,6 +75,7 @@ STEP 1  Record real gh/GraphQL responses as fixtures under              [indepen
         launchpad/scripts/testdata/ — seven of them, recorded from the live API
         and never hand-written:
           (i)   PR 86 — 24 checks, two sharing the name "check"
+                [recorded 2026-08-13: 47, three sharing it]
           (ii)  a PR carrying a closing keyword
           (iii) a PR whose only `Closes #n` sits inside an HTML comment
           (iv)  a 404 PR number
@@ -116,9 +123,9 @@ STEP 2  launchpad/scripts/preflight_core.py — pure functions over             
         Adding a field to the record means adding it to this list in the same
         commit. Whether the record also carries a schema version is OPEN below.
         done when: `python3 -m py_compile launchpad/scripts/preflight_core.py`
-        succeeds; building the record from the PR-86 fixture yields exactly 24
-        check entries; and the record's top-level keys equal the seven names
-        above.
+        succeeds; building the record from the PR-86 fixture yields exactly as
+        many check entries as the fixture holds — 24 when this was written, 47 as
+        recorded — and the record's top-level keys equal the seven names above.
 
 STEP 3  launchpad/scripts/pr-preflight.py — the CLI shell. Takes a  [needs 2]  <- RUNS HERE
         PR number, prints the record as JSON on stdout, and takes its command
@@ -126,8 +133,9 @@ STEP 3  launchpad/scripts/pr-preflight.py — the CLI shell. Takes a  [needs 2] 
         control can feed fixtures without a network call.
         done when: `python3 launchpad/scripts/pr-preflight.py 86` prints JSON
         whose title matches `gh pr view 86 --json title -q .title` and whose
-        checks array has 24 entries, exiting 0; and a nonexistent PR number
-        exits non-zero rather than printing a record.
+        checks array has as many entries as the fixture holds (24 when written,
+        47 as recorded), exiting 0; and a nonexistent PR number exits non-zero
+        rather than printing a record.
 
 STEP 4  Title, body, labels, and closing-keyword detection — reusing            [needs 3]
         launchpad-pr-check.yml's regex and its comment-stripping order, so a
@@ -160,7 +168,8 @@ STEP 6  Required checks, from both sources. Per-context isRequired via          
         /rulesets, so an empty required set is reported as
         `required_checks_configured: false` with the endpoint that answered —
         never as a silent zero, which is indistinguishable from a scope failure.
-        done when: on PR 86 the record shows 24 checks each with required false,
+        done when: on PR 86 the record shows every check (24 when written, 47 as
+        recorded) each with required false,
         names which endpoint supplied that, and — because the token lacks
         admin:org — carries a SKIP for org-level rulesets rather than asserting
         that none exist.

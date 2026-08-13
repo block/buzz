@@ -51,7 +51,7 @@ REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 #: This stage's own controls, named explicitly rather than discovered.
 #:
 #: `launchpad/scripts/` is a SHARED directory: #126 merged pr_body_check.py and
-#: test_pr_body_check.py into it, so plain discovery there runs 156 tests, not the
+#: test_pr_body_check.py into it, so plain discovery there runs every test in it, not only the
 #: pre-flight's own. That matters in both directions. A regression in a module
 #: this branch does not own aborts the harness with "the suite is already
 #: failing" and reports it as the pre-flight's; and if one of those foreign
@@ -189,6 +189,29 @@ BRANCH_MUTATIONS: list[tuple[str, str, str, str]] = [
         "an unpinned diff stops being a failure",
         "    if not head_sha:",
         "    if False:",
+    ),
+    (
+        "preflight_core.py",
+        "a capped check page stops being truncated",
+        "    if isinstance(total, int) and total > len(contexts):",
+        "    if False:",
+    ),
+    (
+        "preflight_core.py",
+        "checks stop being pinned to the PR's head commit",
+        "    if head_sha and rollup_sha and rollup_sha != head_sha:",
+        "    if False:",
+    ),
+    (
+        "preflight_core.py",
+        "the unreadable-rules path drops the review half again",
+        '            "source_endpoint": branch_rules.endpoint if not required_by_check else "graphql:isRequired",\n'
+        "            # Spread here too. Every other return path carries the review half,\n"
+        "            # and a consumer written to the five-key contract got a KeyError from\n"
+        "            # this one — the failure INTERFACE.md's \"null means not read\" rule\n"
+        "            # cannot express, because the key was absent rather than null.\n"
+        "            **review,\n",
+        '            "source_endpoint": branch_rules.endpoint if not required_by_check else "graphql:isRequired",\n',
     ),
     (
         "preflight_core.py",

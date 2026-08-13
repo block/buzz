@@ -70,25 +70,35 @@ ALLOWLIST: dict[str, frozenset[str]] = {
 }
 
 
+#: Files in this directory that belong to another task, named one by one with the
+#: reason. Everything else is ours and must be on the allowlist.
+NOT_OURS = {
+    "pr_body_check.py": "the PR-body check from #126; its imports are that task's business",
+    "mutation_harness.py": "the evidence generator — it rewrites source by design, and "
+    "its own imports are not part of the no-model claim",
+}
+
+
 def preflight_sources() -> set[str]:
-    """Every file this stage owns, from the directory rather than from a list.
+    """Every file this stage owns, by EXCLUSION rather than by name shape.
 
     The allowlist above is deliberately written by hand — that is what makes an
     unanticipated import fail — but *which files it must cover* cannot also be
     hand-written, or a new module simply never gets checked. That is how
     ``pr-preflight.py`` went unguarded.
 
-    Scoped to this stage's own files, not to everything in ``launchpad/scripts/``:
-    ``pr_body_check.py`` is another task's script (#126) and its imports are not
-    this suite's business to police.
+    An earlier version of this function matched ``name.startswith("preflight")``,
+    which is a hand-written list wearing a filename prefix: a module this stage
+    owns called ``gate_reader.py`` would not be discovered, would not be on the
+    allowlist, and the control asserting full coverage would stay green while its
+    imports went unchecked — the same failure, one level up. So the rule is
+    inverted. A new file is ours until someone says otherwise **here**, with a
+    reason, and an unlisted new module fails closed whatever it is called.
     """
     return {
         name
         for name in os.listdir(HERE)
-        if name.endswith(".py")
-        and not name.startswith("test_")
-        and name != "mutation_harness.py"
-        and (name.startswith("preflight") or name == "pr-preflight.py")
+        if name.endswith(".py") and not name.startswith("test_") and name not in NOT_OURS
     }
 
 #: Calls that load code by name, bypassing every import statement.
@@ -162,6 +172,28 @@ class NoModelCall(unittest.TestCase):
             "this control is only meaningful while that file is really here",
         )
         self.assertNotIn("pr_body_check.py", preflight_sources())
+        for name, reason in NOT_OURS.items():
+            with self.subTest(excluded=name):
+                self.assertTrue(reason, "an exclusion without a stated reason is a hole")
+
+    def test_a_new_module_fails_closed_whatever_it_is_called(self):
+        """The prefix filter this replaced would have missed `gate_reader.py`.
+
+        Discovery is by exclusion now, so a file nobody anticipated is ours by
+        default and its absence from ALLOWLIST is a failure, not a silence.
+        """
+        invented = os.path.join(HERE, "gate_reader.py")
+        self.assertFalse(os.path.exists(invented), "pick a name that is not real")
+        try:
+            with open(invented, "w", encoding="utf-8") as handle:
+                handle.write("import openai\n")
+            self.assertIn("gate_reader.py", preflight_sources(), "a new module must be discovered")
+            self.assertNotIn("gate_reader.py", ALLOWLIST, "and it is not on the allowlist")
+            with self.assertRaises(AssertionError):
+                NoModelCall("test_every_file_this_stage_owns_is_on_the_allowlist").test_every_file_this_stage_owns_is_on_the_allowlist()
+        finally:
+            os.remove(invented)
+        self.assertNotIn("gate_reader.py", preflight_sources())
 
     def test_every_import_is_on_the_allowlist(self):
         for name, allowed in ALLOWLIST.items():

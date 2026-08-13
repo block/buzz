@@ -507,6 +507,74 @@ class MergeBaseDiff(unittest.TestCase):
         self.assertEqual(skips.entries[0]["reason"], core.MALFORMED)
 
 
+class CheckListIntegrity(unittest.TestCase):
+    """The two values the query fetched and the code used to throw away."""
+
+    def rollup(self, total=None, oid=None, count=2):
+        nodes = [{"__typename": "CheckRun", "name": f"c{i}", "isRequired": False}
+                 for i in range(count)]
+        contexts = {"nodes": nodes}
+        if total is not None:
+            contexts["totalCount"] = total
+        commit = {"statusCheckRollup": {"contexts": contexts}}
+        if oid is not None:
+            commit["oid"] = oid
+        return {"data": {"repository": {"pullRequest": {"commits": {"nodes": [{"commit": commit}]}}}}}
+
+    def test_a_capped_page_is_truncated_not_a_complete_list(self):
+        """first:100 with more than 100 contexts publishes a page as the whole."""
+        skips = core.Skips()
+        value = core.build_checks(
+            core.Read("checks", data=self.rollup(total=120, count=2), endpoint="e"), None, skips
+        )
+        self.assertIsNone(value, "a partial list must not be published as complete")
+        self.assertEqual(skips.entries[0]["reason"], core.TRUNCATED)
+        self.assertIn("120", skips.entries[0]["detail"])
+        self.assertTrue(core.is_fatal(skips.entries[0]), "checks is REQUIRED")
+
+    def test_a_full_page_is_not_truncated(self):
+        skips = core.Skips()
+        value = core.build_checks(
+            core.Read("checks", data=self.rollup(total=2, count=2), endpoint="e"), None, skips
+        )
+        self.assertEqual(len(value), 2)
+        self.assertEqual(skips.entries, [])
+
+    def test_the_real_fixture_is_not_truncated(self):
+        """PR 86: 47 contexts and totalCount 47. The guard is latent here, not idle."""
+        recorded = fixture("pr86-checks.json")
+        contexts = recorded["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]
+        self.assertEqual(contexts["totalCount"], len(contexts["nodes"]))
+
+    def test_checks_belonging_to_another_commit_are_refused(self):
+        """commits(last:1) resolves server-side; a push between reads desyncs it."""
+        skips = core.Skips()
+        value = core.build_checks(
+            core.Read("checks", data=self.rollup(total=2, oid="b" * 40), endpoint="e"),
+            "a" * 40,
+            skips,
+        )
+        self.assertIsNone(value)
+        self.assertEqual(skips.entries[0]["reason"], core.MALFORMED)
+        self.assertIn("bbbbbbbbb", skips.entries[0]["detail"])
+
+    def test_a_matching_commit_passes(self):
+        skips = core.Skips()
+        value = core.build_checks(
+            core.Read("checks", data=self.rollup(total=2, oid="a" * 40), endpoint="e"),
+            "a" * 40,
+            skips,
+        )
+        self.assertEqual(len(value), 2)
+        self.assertEqual(skips.entries, [])
+
+    def test_the_live_record_pins_checks_to_the_prs_head(self):
+        record = core.build_record(reads())
+        recorded_oid = fixture("pr86-checks.json")["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]["oid"]
+        self.assertEqual(recorded_oid, record["pr"]["head_sha"])
+        self.assertIsNotNone(record["checks"])
+
+
 class RequiredGate(unittest.TestCase):
     """STEP 6 — an empty required set is reported, with the endpoint that answered."""
 
@@ -632,6 +700,29 @@ class RequiredGate(unittest.TestCase):
             reads(branch_rules=unreadable("branch_rules", core.FORBIDDEN))
         )["required_gate"]
         self.assertIsNone(gate["configured"], "unknown, because nothing answered")
+        self.assertEqual(
+            sorted(gate),
+            ["configured", "review_decision", "review_required",
+             "review_source_endpoint", "source_endpoint"],
+            "this return path dropped the review half, so a consumer written to the "
+            "five-key contract got a KeyError while the run still exited 0",
+        )
+        self.assertIs(gate["review_required"], True, "the review gate was readable")
+
+    def test_every_sub_gate_skip_uses_the_dotted_field_name(self):
+        """One selector must find all three, or a consumer misses one silently."""
+        record = core.build_record(
+            reads(branch_rules=unreadable("branch_rules", core.FORBIDDEN),
+                  review_decision=unreadable("review_decision", core.FORBIDDEN))
+        )
+        gate_skips = {s["field"] for s in record["skips"] if s["field"].startswith("required_gate")}
+        self.assertEqual(
+            gate_skips,
+            {"required_gate.branch_rules", "required_gate.org_rulesets",
+             "required_gate.review_decision"},
+        )
+        for field in gate_skips:
+            self.assertTrue(field.startswith("required_gate."), f"{field} is not dotted")
 
     def test_an_unreadable_rules_probe_still_exits_zero(self):
         code, out, err = run_cli(["86"], FakeGh(fail={"branch_rules": FORBIDDEN_RESULT}))
@@ -937,7 +1028,7 @@ class ExitContract(unittest.TestCase):
                 if name == "compare":
                     value = core.build_diff(unreadable("compare", core.ABSENT), "x", skips)
                 elif name == "checks":
-                    value = core.build_checks(unreadable("checks", core.ABSENT), skips)
+                    value = core.build_checks(unreadable("checks", core.ABSENT), "x", skips)
                 else:
                     value = core.build_nearest_rules(
                         unreadable("tree", core.ABSENT), {"files": []}, skips

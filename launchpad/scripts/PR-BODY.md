@@ -316,8 +316,8 @@ added here.
      the push, and the push happened first. Disclosed in escalations 1 and 2.
 5. **No `.github/workflows` file.** #110 has decided — GitHub Actions for Phase 1 — so this
    is a scoping choice rather than a blocker, and #119 is its natural home. The plan file
-   still says #110 is open, which was true when it was written and is not now; that
-   correction is one of the follow-ups above.
+   said #110 was open, which was true when it was written; that line now records the
+   decision instead.
 6. **The required-check contradiction is resolved, not deferred.** §6 was rewritten by #126
    and now answers it: two approving reviews, ruleset invisible without `admin:org`,
    `reviewDecision` readable. The record reports both gates. What remains a cohort decision

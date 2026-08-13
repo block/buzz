@@ -466,7 +466,25 @@ def _normalise_check(node: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_checks(checks: Read, skips: Skips) -> list[dict[str, Any]] | None:
+def build_checks(checks: Read, head_sha: str | None, skips: Skips) -> list[dict[str, Any]] | None:
+    """The check list, pinned to a commit and refused when it is partial.
+
+    Two guards that exist because the value proving each was already being
+    fetched and thrown away:
+
+    **The page cap.** The query asks for ``contexts(first: 100)`` and the API
+    answers with ``totalCount`` beside the nodes. A PR with more than 100
+    contexts would otherwise publish the first hundred as if they were all of
+    them — a partial read wearing a complete answer's clothes, which is the exact
+    shape the ``truncated`` reason exists for on the trees API. This one is
+    rarer, not different: PR 86 has 47. It fails closed.
+
+    **The commit.** The rollup is reached through ``commits(last: 1)``, resolved
+    server-side at its own moment, while ``diff`` is pinned to the head sha read
+    from the PR payload. If the PR is pushed to between the two calls, the record
+    would carry a diff for commit A and checks for commit B with nothing able to
+    say so — while every other section states which commit it describes.
+    """
     if not checks.ok:
         skips.add("checks", checks)
         return None
@@ -503,6 +521,39 @@ def build_checks(checks: Read, skips: Skips) -> list[dict[str, Any]] | None:
         skips.add(
             "checks",
             Read("checks", skip=EMPTY, detail="the rollup lists no contexts", endpoint=checks.endpoint),
+        )
+        return None
+
+    total = _get(rollup, "contexts", "totalCount")
+    if isinstance(total, int) and total > len(contexts):
+        skips.add(
+            "checks",
+            Read(
+                "checks",
+                skip=TRUNCATED,
+                detail=(
+                    f"the rollup has {total} contexts and the query returned {len(contexts)}; "
+                    "publishing the page as the whole list would under-report the gate"
+                ),
+                endpoint=checks.endpoint,
+            ),
+        )
+        return None
+
+    rollup_sha = _get(nodes[0], "commit", "oid")
+    if head_sha and rollup_sha and rollup_sha != head_sha:
+        skips.add(
+            "checks",
+            Read(
+                "checks",
+                skip=MALFORMED,
+                detail=(
+                    f"the rollup describes commit {rollup_sha[:9]} but the PR's head is "
+                    f"{head_sha[:9]} — the branch moved between reads, so these checks do "
+                    "not belong to the diff in this record"
+                ),
+                endpoint=checks.endpoint,
+            ),
         )
         return None
 
@@ -568,10 +619,15 @@ def build_required_gate(
     ]
 
     if not branch_rules.ok:
-        skips.add("required_gate", branch_rules)
+        skips.add("required_gate.branch_rules", branch_rules)
         return {
             "configured": None if not required_by_check else True,
             "source_endpoint": branch_rules.endpoint if not required_by_check else "graphql:isRequired",
+            # Spread here too. Every other return path carries the review half,
+            # and a consumer written to the five-key contract got a KeyError from
+            # this one — the failure INTERFACE.md's "null means not read" rule
+            # cannot express, because the key was absent rather than null.
+            **review,
         }
 
     if not isinstance(branch_rules.data, list):
@@ -579,7 +635,7 @@ def build_required_gate(
         # [] here would publish `configured: false` — a definite answer — from a
         # response nobody could read.
         skips.add(
-            "required_gate",
+            "required_gate.branch_rules",
             Read(
                 "branch_rules",
                 skip=MALFORMED,
@@ -770,7 +826,9 @@ def build_record(reads: Mapping[str, Read]) -> dict[str, Any]:
     diff_section = build_diff(
         reads["compare"], (pr_section or {}).get("head_sha"), skips
     )
-    checks_section = build_checks(reads["checks"], skips)
+    checks_section = build_checks(
+        reads["checks"], (pr_section or {}).get("head_sha"), skips
+    )
     gate = build_required_gate(
         reads.get("branch_rules", Read("branch_rules", skip=UNREACHABLE, detail="not attempted")),
         reads.get("org_rulesets", Read("org_rulesets", skip=UNREACHABLE, detail="not attempted")),
@@ -807,8 +865,12 @@ FATAL_FIELDS = ("pr", "closing_issue", "diff", "checks", "nearest_rules")
 
 #: Named explicitly rather than matched by prefix, so a new field cannot become
 #: non-fatal by accident of what it is called.
+#: Every sub-gate skip uses the dotted form, so one selector finds them all:
+#: a consumer filtering `field.startswith("required_gate.")` used to miss the
+#: branch-rules entry, which was filed bare.
 NEVER_FATAL_FIELDS = (
     "required_gate",
+    "required_gate.branch_rules",
     "required_gate.org_rulesets",
     "required_gate.review_decision",
     "closing_issue.closing_refs",
