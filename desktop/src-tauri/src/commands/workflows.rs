@@ -47,6 +47,41 @@ pub struct WorkflowSaveWire {
     pub webhook_secret: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WorkflowRunCursorWire {
+    pub before: String,
+    pub before_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WorkflowRunsWire {
+    pub runs: Vec<Value>,
+    pub next: Option<WorkflowRunCursorWire>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WorkflowApprovalsWire {
+    pub approvals: Vec<Value>,
+}
+
+/// Canonical trigger acknowledgement consumed by the Desktop client.
+///
+/// The relay currently returns only `run_id`; the workflow id is the command
+/// input and a newly-created run always begins pending. Keeping that adaptation
+/// here prevents the frontend from guessing fields or confusing the trigger
+/// event id with the persisted run id.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WorkflowTriggerWire {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowTriggerAck {
+    run_id: String,
+}
+
 // ── Reads ────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -122,25 +157,19 @@ pub async fn get_workflow_runs(
     workflow_id: String,
     limit: Option<u32>,
     _state: State<'_, AppState>,
-) -> Result<Vec<Value>, String> {
+) -> Result<WorkflowRunsWire, String> {
     // TODO(workflow-runs): Run reconstruction is a clearly-scoped follow-up.
     // The authoritative run record the frontend's `WorkflowRun` shape needs
     // (status / current_step / execution_trace / error_message) lives in the
     // relay DB and is not exposed to the desktop client as a single queryable
-    // record. If the relay starts emitting lifecycle events (46001–46007, …),
-    // folding that stream into `WorkflowRun` would be another viable design.
-    // The important bit for this command is that raw lifecycle events are not
-    // the `RawWorkflowRun` contract.
-    //
-    // Until then we return a bare empty array — NOT a raw-event wrapper. The
-    // frontend wrapper (`getWorkflowRuns`) does `raw.map(fromRawWorkflowRun)`,
-    // so it must receive an array; the wrapped `{ runs: [...] }` shape would
-    // make `.map()` throw and crash the detail panel (the same TypeError class
-    // as the original page bug). Raw lifecycle events also don't carry the
-    // `id`/`workflow_id`/`status`/… fields `RawWorkflowRun` expects, so an
-    // empty list is the honest, safe placeholder.
+    // record. The backend read command will replace this placeholder.
+    // Keep the command's paginated wire contract truthful in the meantime;
+    // raw lifecycle events are not `RawWorkflowRun` records.
     let _ = (workflow_id, limit);
-    Ok(Vec::new())
+    Ok(WorkflowRunsWire {
+        runs: Vec::new(),
+        next: None,
+    })
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
@@ -242,10 +271,10 @@ pub async fn delete_workflow(
 pub async fn trigger_workflow(
     workflow_id: String,
     state: State<'_, AppState>,
-) -> Result<Value, String> {
+) -> Result<WorkflowTriggerWire, String> {
     let builder = events::build_workflow_trigger(&workflow_id)?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::json!({ "event_id": result.event_id }))
+    trigger_wire_from_message(workflow_id, &result.message)
 }
 
 // ── Approvals ────────────────────────────────────────────────────────────────
@@ -255,14 +284,16 @@ pub async fn get_run_approvals(
     workflow_id: String,
     run_id: String,
     _state: State<'_, AppState>,
-) -> Result<Vec<Value>, String> {
+) -> Result<WorkflowApprovalsWire, String> {
     // TODO(workflow-runs): Like runs (see `get_workflow_runs`), reconstructing
     // approvals into the frontend's `WorkflowApproval` shape from lifecycle
     // events (46010/46011/46012) is a clearly-scoped follow-up tracked under
-    // TODO(workflow-runs). Return a bare empty array so the frontend's
-    // `getRunApprovals` (`raw.map(fromRawApproval)`) is safe.
+    // TODO(workflow-runs). Keep the backend's envelope contract here so the
+    // read adapter can be integrated without another frontend shape change.
     let _ = (workflow_id, run_id);
-    Ok(Vec::new())
+    Ok(WorkflowApprovalsWire {
+        approvals: Vec::new(),
+    })
 }
 
 #[tauri::command]
@@ -288,6 +319,21 @@ pub async fn deny_approval(
 }
 
 // ── Helpers (pure, unit-tested in workflows_tests.rs) ─────────────────────────
+
+fn trigger_wire_from_message(
+    workflow_id: String,
+    message: &str,
+) -> Result<WorkflowTriggerWire, String> {
+    let ack: WorkflowTriggerAck = parse_command_response(message)?;
+    if ack.run_id.trim().is_empty() {
+        return Err("workflow trigger response contained an empty run_id".to_string());
+    }
+    Ok(WorkflowTriggerWire {
+        run_id: ack.run_id,
+        workflow_id,
+        status: "pending".to_string(),
+    })
+}
 
 fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
