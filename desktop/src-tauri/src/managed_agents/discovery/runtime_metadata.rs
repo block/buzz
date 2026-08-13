@@ -137,13 +137,29 @@ mod tests {
     }
 
     #[test]
-    fn grok_default_args_are_the_subscription_acp_argv() {
+    fn grok_emits_no_default_args_and_passes_explicit_overrides() {
+        // The desktop must NOT emit a pinned default argv for Grok — that would
+        // shadow the managed model at the harness. Empty args mean buzz-acp
+        // builds `agent --model <model> stdio` from `BUZZ_ACP_MODEL`.
         assert_eq!(
             super::normalize_agent_args("grok", Vec::new()),
+            Vec::<String>::new()
+        );
+        // Explicit record agent_args remain an operator override that wins.
+        assert_eq!(
+            super::normalize_agent_args(
+                "grok",
+                vec![
+                    "agent".to_string(),
+                    "--model".to_string(),
+                    "grok-5".to_string(),
+                    "stdio".to_string()
+                ]
+            ),
             vec![
                 "agent".to_string(),
                 "--model".to_string(),
-                "grok-4.6".to_string(),
+                "grok-5".to_string(),
                 "stdio".to_string()
             ]
         );

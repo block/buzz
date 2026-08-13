@@ -1696,7 +1696,17 @@ mod tests {
     #[test]
     fn grok_explicit_agent_args_win_over_the_default_argv() {
         assert_eq!(
-            effective_agent_args("grok", vec!["agent".into(), "--model".into(), "grok-5".into(), "stdio".into()], Some("grok-4.6")).unwrap(),
+            effective_agent_args(
+                "grok",
+                vec![
+                    "agent".into(),
+                    "--model".into(),
+                    "grok-5".into(),
+                    "stdio".into()
+                ],
+                Some("grok-4.6")
+            )
+            .unwrap(),
             vec![
                 "agent".to_string(),
                 "--model".to_string(),
@@ -2966,6 +2976,113 @@ channels = "ALL"
         assert!(
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
+        );
+    }
+
+    // --- Grok managed-model bridge regression (PR #5742 fix) ---
+    //
+    // Desktop emits BUZZ_ACP_AGENT_COMMAND=grok, BUZZ_ACP_AGENT_ARGS (empty for
+    // the catalog default) and BUZZ_ACP_MODEL=<managed model>; clap maps those
+    // env vars onto the same CliArgs fields these flags drive, so Config::from_args
+    // here exercises the identical resolution chain: desktop env → clap →
+    // effective_agent_args → real child argv.
+
+    #[test]
+    fn grok_managed_model_reaches_child_argv_end_to_end() {
+        // Catalog default path: no --agent-args (desktop emits none for grok),
+        // managed model grok-4.6 → exact subscription argv.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+            "--model",
+            "grok-4.6",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("from_args should succeed");
+        assert_eq!(
+            config.agent_args,
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_alternate_managed_model_is_not_shadowed() {
+        // A non-default managed model must reach the argv — the desktop emits no
+        // default agent_args, so the model drives the child command.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+            "--model",
+            "grok-5",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("from_args should succeed");
+        assert_eq!(
+            config.agent_args,
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-5".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_blank_model_fails_closed() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+            "--model",
+            "   ",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+        assert!(
+            result.is_err(),
+            "from_args should reject a blank grok model: {result:?}"
+        );
+    }
+
+    #[test]
+    fn grok_explicit_agent_args_override_wins() {
+        // An operator-supplied explicit --agent-args is distinguishable from the
+        // generated catalog default (which the desktop now omits) and wins.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+            "--model",
+            "grok-5",
+            "--agent-args",
+            "agent,--model,grok-9,stdio",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("from_args should succeed");
+        assert_eq!(
+            config.agent_args,
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-9".to_string(),
+                "stdio".to_string()
+            ]
         );
     }
 

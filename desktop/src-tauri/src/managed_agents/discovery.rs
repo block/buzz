@@ -234,8 +234,11 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         skill_dir: None,
         supports_acp_model_switching: false,
         // Grok Build takes the model as an argv argument
-        // (`grok agent --model <model> stdio`), not an env var — the managed
-        // model is bridged into `agent_args` by the harness config bridge.
+        // (`grok agent --model <model> stdio`), not an env var. The desktop
+        // therefore emits NO default `agent_args` for Grok: buzz-acp's
+        // `effective_agent_args` builds the argv from the managed model
+        // (`BUZZ_ACP_MODEL`, default grok-4.6) when the args vector is empty.
+        // Explicit record `agent_args` remain an operator override that wins.
         model_env_var: None,
         provider_env_var: None,
         provider_locked: true,
@@ -483,17 +486,12 @@ pub fn try_record_agent_command(
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
-        // Grok Build speaks ACP directly: `grok agent --model <model> stdio`.
-        // Mirrors the buzz-acp harness default; the managed model is bridged
-        // into the argv by the harness config bridge.
-        "grok" => Some(vec![
-            "agent".to_string(),
-            "--model".to_string(),
-            "grok-4.6".to_string(),
-            "stdio".to_string(),
-        ]),
+        // No default agent_args for Grok: emitting the pinned argv here would
+        // shadow the managed model (`BUZZ_ACP_MODEL`) at the harness — buzz-acp
+        // builds `agent --model <model> stdio` from the model instead. Explicit
+        // record `agent_args` still pass through as an operator override.
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" | "grok" => Some(Vec::new()),
         _ => None,
     }
 }
