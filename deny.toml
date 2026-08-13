@@ -6,6 +6,11 @@ ignore = [
     # paste 1.0.15 — unmaintained. Transitive dep: mesh-llm → iroh → netlink-* → paste.
     # No safe upgrade available; tracked for upstream (iroh/netlink) replacement.
     { id = "RUSTSEC-2024-0436", reason = "transitive dep via mesh-llm → iroh → netlink; no upstream fix available" },
+    # nostr-relay-pool 0.44.3 — retired as a standalone crate after its
+    # functionality moved into nostr-sdk 0.45. Transitive through the pinned
+    # mesh-llm 0.74 release, which still uses nostr-sdk 0.44; cargo-deny reports
+    # no safe compatible upgrade. Remove when mesh-llm updates nostr-sdk.
+    { id = "RUSTSEC-2026-0243", reason = "transitive via mesh-llm 0.74 → nostr-sdk 0.44; migration requires an upstream mesh-llm upgrade" },
     # quick-xml < 0.41: quadratic runtime on duplicate-attribute check (0194) and
     # unbounded namespace-declaration allocation in NsReader (0195). Both DoS-class,
     # requiring attacker-controlled XML. Our two locked versions only parse trusted
