@@ -2010,7 +2010,7 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
-        mcp_servers: build_mcp_servers(&config),
+        mcp_servers: build_mcp_servers(&config)?,
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
@@ -4854,61 +4854,148 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
-    }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
+/// Mirror of the ACP `McpServerStdio` schema used to deserialize
+/// `--extra-mcp-servers`. Kept separate from [`McpServer`] (which is
+/// serialize-only, as it is an ACP wire-output type) and from [`EnvVar`]
+/// for the same reason.
+#[derive(serde::Deserialize)]
+struct ExtraMcpServer {
+    name: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: Vec<ExtraEnvVar>,
+}
+
+#[derive(serde::Deserialize)]
+struct ExtraEnvVar {
+    name: String,
+    value: String,
+}
+
+/// Safety valve mirroring `buzz_agent::mcp::MAX_MCP_SERVERS`: the agent
+/// refuses more than this many servers at `session/new`. We reject earlier,
+/// at harness startup, so a misconfiguration fails loud instead of per-turn.
+const MAX_MCP_SERVERS: usize = 16;
+
+fn build_mcp_servers(config: &Config) -> Result<Vec<McpServer>> {
+    let mut servers: Vec<McpServer> = Vec::new();
+    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Primary dev-mcp server — the ONLY server that receives Buzz identity
+    // (relay URL + private key) so it can sign events on the agent's behalf.
+    if !config.mcp_command.is_empty() {
+        let name = std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("mcp")
-            .to_string(),
-        command: config.mcp_command.clone(),
-        args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
+            .to_string();
+        used_names.insert(name.clone());
+        servers.push(McpServer {
+            name,
+            command: config.mcp_command.clone(),
+            args: vec![],
+            env: {
+                let mut env = vec![
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        // Panic here is correct: injecting a bogus secret would cause
+                        // delayed, hard-to-diagnose agent failures downstream.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ];
+                // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+                // so the MCP server can attach it to every signed event.
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
                 }
-            }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
-            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
-                if !display_name.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
-                        value: display_name,
-                    });
+                // Forward the agent's display name so dev-mcp can use it as the git
+                // author name instead of the raw npub. Read from the process env
+                // rather than Config: this is a pass-through of a contract owned
+                // upstream, and absent simply means dev-mcp falls back to the npub.
+                if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                    if !display_name.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                            value: display_name,
+                        });
+                    }
                 }
+                env
+            },
+        });
+    }
+
+    // Extra MCP servers (e.g. a headless browser via Playwright). These get
+    // ONLY their declared `env` — NO Buzz private key or provider credentials
+    // are injected — so a compromised or chatty subprocess (a browser, a
+    // network fetcher) cannot exfiltrate the agent's Nostr identity. dev-mcp,
+    // which needs the key to sign events, is unaffected.
+    if !config.extra_mcp_servers.is_empty() {
+        let extras: Vec<ExtraMcpServer> = serde_json::from_str(&config.extra_mcp_servers)
+            .map_err(|e| anyhow::anyhow!("invalid --extra-mcp-servers JSON: {e}"))?;
+        for spec in extras {
+            if spec.name.is_empty() {
+                return Err(anyhow::anyhow!("extra MCP server has an empty name"));
             }
-            env
-        },
-    }]
+            // The agent namespaces tools as `server__tool`; a `__` in the name
+            // would collide with that scheme (validated again in buzz-agent).
+            if spec.name.contains("__") {
+                return Err(anyhow::anyhow!(
+                    "extra MCP server name {:?} must not contain \"__\"",
+                    spec.name
+                ));
+            }
+            if spec.command.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "extra MCP server {:?} has an empty command",
+                    spec.name
+                ));
+            }
+            if !used_names.insert(spec.name.clone()) {
+                return Err(anyhow::anyhow!(
+                    "duplicate MCP server name {:?} (extra servers must not collide with the primary server or each other)",
+                    spec.name
+                ));
+            }
+            servers.push(McpServer {
+                name: spec.name,
+                command: spec.command,
+                args: spec.args,
+                env: spec
+                    .env
+                    .into_iter()
+                    .map(|e| EnvVar {
+                        name: e.name,
+                        value: e.value,
+                    })
+                    .collect(),
+            });
+        }
+        if servers.len() > MAX_MCP_SERVERS {
+            return Err(anyhow::anyhow!(
+                "too many MCP servers: {} > {MAX_MCP_SERVERS}",
+                servers.len()
+            ));
+        }
+    }
+
+    Ok(servers)
 }
 
 #[cfg(test)]
@@ -6583,6 +6670,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            extra_mcp_servers: String::new(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -6627,7 +6715,7 @@ mod build_mcp_servers_tests {
     #[test]
     fn session_new_mcp_server_has_required_fields() {
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
         assert_eq!(server.name, "test-mcp-server");
@@ -6648,7 +6736,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         std::env::remove_var("BUZZ_AUTH_TAG");
 
         let server = &servers[0];
@@ -6665,7 +6753,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         std::env::remove_var("BUZZ_AUTH_TAG");
 
         let server = &servers[0];
@@ -6678,7 +6766,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         let entry = servers[0]
@@ -6697,7 +6785,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
 
         // Absent, not empty-valued: dev-mcp distinguishes the two and only
         // falls back to the npub when the key is missing or blank.
@@ -6715,7 +6803,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "");
         let config = test_config();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
         assert!(
@@ -6731,7 +6819,7 @@ mod build_mcp_servers_tests {
     fn empty_mcp_command_returns_no_servers() {
         let mut config = test_config();
         config.mcp_command = "".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         assert!(
             servers.is_empty(),
             "empty mcp_command should produce no MCP servers"
@@ -6742,7 +6830,7 @@ mod build_mcp_servers_tests {
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
         config.mcp_command = "/opt/bin/my-mcp-server".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "my-mcp-server");
     }
@@ -6763,11 +6851,148 @@ mod build_mcp_servers_tests {
 
         // Confirm a non-empty command with no stem (e.g. just a dot) also falls back.
         config.mcp_command = ".".into();
-        let servers = build_mcp_servers(&config);
+        let servers = build_mcp_servers(&config).unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
+        );
+    }
+
+    // --- extra MCP servers (--extra-mcp-servers / BUZZ_ACP_EXTRA_MCP_SERVERS) ---
+
+    fn config_with_extra(extra: &str) -> Config {
+        let mut config = test_config();
+        config.extra_mcp_servers = extra.into();
+        config
+    }
+
+    #[test]
+    fn extra_mcp_server_appended_after_primary_with_args_preserved() {
+        // Mirrors the Playwright config: command + args (npx @playwright/mcp).
+        let config = config_with_extra(
+            r#"[{"name":"browser","command":"npx","args":["@playwright/mcp@latest","--headless"],"env":[]}]"#,
+        );
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers.len(), 2, "primary + one extra");
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "browser");
+        assert_eq!(servers[1].command, "npx");
+        assert_eq!(
+            servers[1].args,
+            vec![
+                "@playwright/mcp@latest".to_string(),
+                "--headless".to_string()
+            ],
+            "args must be parsed and forwarded verbatim"
+        );
+    }
+
+    #[test]
+    fn extra_mcp_server_receives_no_buzz_keys() {
+        // Security pin: only the primary dev-mcp server gets the Nostr identity.
+        // A browser/network subprocess must never see BUZZ_PRIVATE_KEY.
+        let config =
+            config_with_extra(r#"[{"name":"browser","command":"npx","args":[],"env":[]}]"#);
+        let servers = build_mcp_servers(&config).unwrap();
+        let extra_env: Vec<&str> = servers[1].env.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !extra_env.contains(&"BUZZ_PRIVATE_KEY"),
+            "extra server must NOT receive BUZZ_PRIVATE_KEY; got {extra_env:?}"
+        );
+        assert!(
+            !extra_env.contains(&"BUZZ_RELAY_URL"),
+            "extra server must NOT receive BUZZ_RELAY_URL; got {extra_env:?}"
+        );
+        assert!(extra_env.is_empty(), "empty env should stay empty");
+    }
+
+    #[test]
+    fn extra_mcp_server_declared_env_passed_through() {
+        let config = config_with_extra(
+            r#"[{"name":"browser","command":"npx","args":[],"env":[{"name":"DISPLAY","value":":0"}]}]"#,
+        );
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers[1].env.len(), 1);
+        assert_eq!(servers[1].env[0].name, "DISPLAY");
+        assert_eq!(servers[1].env[0].value, ":0");
+    }
+
+    #[test]
+    fn extra_mcp_server_works_without_primary() {
+        // mcp_command unset, only extras — extras stand alone.
+        let mut config = test_config();
+        config.mcp_command = String::new();
+        config.extra_mcp_servers =
+            r#"[{"name":"browser","command":"npx","args":[],"env":[]}]"#.into();
+        let servers = build_mcp_servers(&config).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "browser");
+    }
+
+    #[test]
+    fn extra_mcp_server_invalid_json_rejected() {
+        let config = config_with_extra(r#"not valid json"#);
+        let err = build_mcp_servers(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid --extra-mcp-servers JSON"),
+            "expected JSON parse error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn extra_mcp_server_empty_name_rejected() {
+        let config = config_with_extra(r#"[{"name":"","command":"npx","args":[],"env":[]}]"#);
+        let err = build_mcp_servers(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("empty name"),
+            "expected empty-name error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn extra_mcp_server_double_underscore_name_rejected() {
+        // The agent namespaces tools as server__tool; a "__" in the name collides.
+        let config =
+            config_with_extra(r#"[{"name":"bad__name","command":"npx","args":[],"env":[]}]"#);
+        let err = build_mcp_servers(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("__"),
+            "expected double-underscore rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn extra_mcp_server_empty_command_rejected() {
+        let config = config_with_extra(r#"[{"name":"browser","command":"","args":[],"env":[]}]"#);
+        let err = build_mcp_servers(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("empty command"),
+            "expected empty-command error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn extra_mcp_server_duplicate_of_primary_rejected() {
+        // Primary derives its name from "test-mcp-server" → "test-mcp-server".
+        let config =
+            config_with_extra(r#"[{"name":"test-mcp-server","command":"npx","args":[],"env":[]}]"#);
+        let err = build_mcp_servers(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate MCP server name"),
+            "expected duplicate-name error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn extra_mcp_server_duplicate_within_extras_rejected() {
+        let config = config_with_extra(
+            r#"[{"name":"browser","command":"npx","args":[],"env":[]},{"name":"browser","command":"node","args":[],"env":[]}]"#,
+        );
+        let err = build_mcp_servers(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate MCP server name"),
+            "expected duplicate-name error, got: {err}"
         );
     }
 }
@@ -6807,6 +7032,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            extra_mcp_servers: String::new(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

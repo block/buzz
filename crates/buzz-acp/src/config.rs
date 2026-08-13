@@ -261,6 +261,22 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Extra MCP servers to pass to the agent in addition to the primary
+    /// (`--mcp-command`) server. A JSON array string; each entry is an object
+    /// `{name, command, args, env}` mirroring the ACP `McpServerStdio` schema:
+    ///
+    /// ```json
+    /// [{"name":"browser","command":"npx","args":["@playwright/mcp@latest"],"env":[]}]
+    /// ```
+    ///
+    /// Extra servers receive **only** their declared `env` — no Buzz private
+    /// key or provider credentials are injected (least privilege; keeps
+    /// secrets out of e.g. a browser subprocess). The primary dev-mcp server
+    /// keeps its existing key injection unchanged. Empty (default) means no
+    /// extra servers.
+    #[arg(long, env = "BUZZ_ACP_EXTRA_MCP_SERVERS", default_value = "")]
+    pub extra_mcp_servers: String,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -535,6 +551,7 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    pub extra_mcp_servers: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1109,6 +1126,7 @@ impl Config {
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            extra_mcp_servers: args.extra_mcp_servers,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1176,12 +1194,20 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} auto_publish_reply={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} extra_mcp={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} auto_publish_reply={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
             self.agent_args.join(" "),
             self.mcp_command,
+            // Count only; validation happens in build_mcp_servers at startup.
+            if self.extra_mcp_servers.is_empty() {
+                0
+            } else {
+                serde_json::from_str::<Vec<serde_json::Value>>(&self.extra_mcp_servers)
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+            },
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
@@ -1491,6 +1517,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            extra_mcp_servers: String::new(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
