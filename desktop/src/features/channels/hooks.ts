@@ -484,24 +484,31 @@ export function useOpenDmMutation() {
       );
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+      // The relay-returned DM is already in the cache. Mark the list stale so
+      // the normal live/poll refresh can reconcile it later without putting a
+      // full get_channels round-trip on the critical path to the conversation.
+      void queryClient.invalidateQueries({
+        queryKey: channelsQueryKey,
+        refetchType: "none",
+      });
     },
   });
 }
 
 /**
- * Waits for any active channel-list refresh to settle, then restores a
- * relay-returned channel to the shared cache before a caller depends on it for
- * navigation.
+ * Reasserts a relay-returned channel in the shared cache before a caller
+ * depends on it for navigation. The open-DM mutation already made the relay
+ * write authoritative, so cancel any older list read and stay local rather
+ * than blocking on a read-after-write channel-list refresh.
  */
 export function useUpsertCachedChannel() {
   const queryClient = useQueryClient();
 
   return React.useCallback(
     async (channel: Channel) => {
-      await queryClient.refetchQueries({
+      await queryClient.cancelQueries({
         queryKey: channelsQueryKey,
-        type: "active",
+        exact: true,
       });
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
         reconcileRefreshedCachedChannel(current, channel),

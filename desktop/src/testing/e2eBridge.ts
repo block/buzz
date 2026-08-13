@@ -9087,6 +9087,16 @@ async function handleSendChannelMessage(
     );
   }
 
+  // Mirror the WebSocket send path's failure injection so specs that route
+  // the first message through the acknowledged HTTP transport still exercise
+  // `sendMessageErrors`. The real command rejects on a relay `OK false`, which
+  // surfaces to callers as a thrown error carrying the relay reason.
+  const sendMessageError =
+    kind === 9 ? config?.mock?.sendMessageErrors?.shift() : null;
+  if (sendMessageError) {
+    throw new Error(sendMessageError);
+  }
+
   // NIP-92 imeta attachments. The real relay echoes these back on the stored
   // event; mirror that here so attachment renderers (FileCard, images, video)
   // have the imeta tags they key on. `null`/empty → no extra tags.
