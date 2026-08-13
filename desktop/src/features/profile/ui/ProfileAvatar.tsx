@@ -6,6 +6,7 @@ import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 import { Spinner } from "@/shared/ui/spinner";
 
@@ -30,6 +31,7 @@ export function ProfileAvatar({
   plain = false,
   testId,
 }: ProfileAvatarProps) {
+  useMediaProxyPort();
   const initials = getInitials(label);
   const presentation = useAvatarPresentation(avatarUrl);
   const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;

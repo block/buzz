@@ -4,6 +4,7 @@ import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 
 type UserAvatarSize = "xs" | "sm" | "md";
@@ -33,6 +34,7 @@ export function UserAvatar({
   fallbackDelayMs = 200,
   testId,
 }: UserAvatarProps) {
+  useMediaProxyPort();
   const initials = getInitials(displayName);
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
