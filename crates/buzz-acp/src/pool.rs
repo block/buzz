@@ -129,6 +129,16 @@ pub struct SessionState {
     /// Per-channel successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
     pub deliveries: HashMap<Uuid, ChannelDeliveryState>,
+    /// channel_id → the cwd the live session's `session/new` was called with.
+    ///
+    /// ACP has no way to move a live session to another directory (`cwd` is set
+    /// once, in `session/new`), so this is what a later turn compares against to
+    /// decide whether the cached session is still in the right project. Written
+    /// only by [`SessionState::register_channel_session`] and removed by every
+    /// invalidation path, so it cannot outlive the `sessions` entry it describes.
+    ///
+    /// Heartbeats are deliberately absent: they always run at `ctx.cwd`.
+    pub session_cwds: HashMap<Uuid, String>,
 }
 
 impl SessionState {
@@ -153,7 +163,26 @@ impl SessionState {
         self.core_sections.remove(channel_id);
         self.canvas_sections.remove(channel_id);
         self.deliveries.remove(channel_id);
+        self.session_cwds.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
+    }
+
+    /// The single way a channel's ACP session is recorded.
+    ///
+    /// Session id, the cwd it was created with, and a fresh delivery ledger are
+    /// written together so `session_cwds` structurally cannot drift out of sync
+    /// with `sessions` — a drift that would silently reroute (or fail to
+    /// reroute) later turns.
+    pub(crate) fn register_channel_session(
+        &mut self,
+        channel_id: Uuid,
+        session_id: String,
+        cwd: String,
+    ) {
+        self.sessions.insert(channel_id, session_id);
+        self.session_cwds.insert(channel_id, cwd);
+        self.deliveries
+            .insert(channel_id, ChannelDeliveryState::default());
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
@@ -166,6 +195,7 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.deliveries.clear();
+        self.session_cwds.clear();
     }
 
     pub(crate) fn mark_channel_delivery_success(
@@ -186,6 +216,7 @@ impl SessionState {
             || self.core_sections.contains_key(channel_id)
             || self.canvas_sections.contains_key(channel_id)
             || self.deliveries.contains_key(channel_id)
+            || self.session_cwds.contains_key(channel_id)
     }
 }
 
@@ -582,6 +613,14 @@ pub struct PromptContext {
     /// by [`crate::config::build_channel_cwd_map`]. A channel absent from
     /// this map dispatches with `cwd` (the harness's own default).
     pub channel_cwd: HashMap<Uuid, String>,
+    /// Project id → validated cwd, precomputed once at startup by
+    /// [`crate::config::build_project_cwd_map`] from `--project-paths`.
+    ///
+    /// This is the allow-list that a per-message `["project", <id>]` event tag
+    /// is looked up in. A project id absent from this map is ignored — it is
+    /// **never** treated as, or joined into, a filesystem path. See
+    /// [`resolve_turn_routing`] for the full precedence and threat model.
+    pub project_cwd: HashMap<String, String>,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
     /// Shared channel metadata for startup-known and dynamically joined channels.
@@ -967,12 +1006,99 @@ fn resolve_effective_cwd(ctx: &PromptContext, channel_id: Option<Uuid>) -> &str 
         .unwrap_or(&ctx.cwd)
 }
 
-/// Create a new ACP session via `session_new_full()`, populate model capabilities
-/// on the agent (first session only), and apply `desired_model` if set.
+/// The project id carried by the newest `["project", <id>]` tag in a batch's
+/// **live** events, if any.
 ///
-/// On error from `session_new_full()`, returns the `AcpError` — caller handles
-/// error reporting. Model-switch failures are logged and gracefully ignored
-/// (the agent proceeds with its default model).
+/// Reverse iteration gives last-writer-wins within a single batch: when several
+/// messages flush together, the most recent one decides where the turn runs.
+///
+/// `cancelled_events` are deliberately ignored — they belong to the turn being
+/// superseded, so a merged re-prompt follows the newest request, not the one it
+/// replaced.
+///
+/// The returned string is an opaque lookup key, never a path. See
+/// [`resolve_turn_routing`].
+fn batch_project_tag(batch: Option<&FlushBatch>) -> Option<&str> {
+    batch?.events.iter().rev().find_map(|be| {
+        be.event.tags.iter().find_map(|tag| {
+            let slice = tag.as_slice();
+            match slice {
+                [key, value, ..] if key == "project" && !value.is_empty() => Some(value.as_str()),
+                _ => None,
+            }
+        })
+    })
+}
+
+/// Where this turn's session must run, and whether a live session created
+/// somewhere else has to be torn down first.
+#[derive(Debug, PartialEq, Eq)]
+struct CwdRouting {
+    /// The cwd `session/new` must be called with for this turn.
+    pub cwd: String,
+    /// True when a live session exists for this channel but was created in a
+    /// different cwd. The caller must `invalidate_channel` *before* any code
+    /// that reads `state.sessions` to decide whether it is creating a session.
+    pub must_invalidate: bool,
+}
+
+/// Decide this turn's cwd, and whether the cached session is still usable.
+///
+/// Precedence: per-message `["project", <id>]` tag → channel binding →
+/// harness default.
+///
+/// # Security
+///
+/// `project_tag` originates in an **event tag**, so it is attacker-influencable
+/// — unlike the operator-configured channel binding. It is therefore consulted
+/// strictly as `project_cwd.get(id)`: a key lookup into the operator-supplied
+/// `--project-paths` allow-list. It is never joined onto a base directory,
+/// canonicalized, or otherwise turned into a path. An unknown id — including a
+/// traversal attempt, an absolute path, a UNC path, or one carrying a null byte
+/// — misses the map and falls back to the pre-existing channel/default
+/// behavior, so a hostile tag can only ever select a directory the operator
+/// already configured.
+fn resolve_turn_routing(
+    default_cwd: &str,
+    channel_cwd: &HashMap<Uuid, String>,
+    project_cwd: &HashMap<String, String>,
+    channel_id: Uuid,
+    project_tag: Option<&str>,
+    live_session_cwd: Option<&str>,
+) -> CwdRouting {
+    // The ONLY bridge from an event-supplied id to a filesystem path.
+    let tagged = project_tag.and_then(|id| project_cwd.get(id).map(String::as_str));
+    if let (Some(id), None) = (project_tag, tagged) {
+        tracing::warn!(
+            target: "pool::session",
+            %channel_id,
+            project_id = id,
+            "message carries a project id that is not in --project-paths — \
+             ignoring it and using the channel/default cwd"
+        );
+    }
+
+    let cwd = tagged
+        .or_else(|| channel_cwd.get(&channel_id).map(String::as_str))
+        .unwrap_or(default_cwd)
+        .to_owned();
+
+    // Only a live session whose cwd differs forces a rotation. `None` covers
+    // both "no live session" (the creation path below resolves the right cwd
+    // anyway) and the unreachable-in-production case of a `sessions` entry with
+    // no recorded cwd, which stays on the pre-feature behavior rather than
+    // rotating the session on every single turn.
+    let must_invalidate = match live_session_cwd {
+        Some(live) => live != cwd,
+        None => false,
+    };
+
+    CwdRouting {
+        cwd,
+        must_invalidate,
+    }
+}
+
 struct NewSessionChannelContext<'a> {
     huddle_instructions: Option<&'a str>,
     canvas: Option<&'a str>,
@@ -981,9 +1107,23 @@ struct NewSessionChannelContext<'a> {
     channel_type: Option<&'a str>,
 }
 
+/// Create a new ACP session via `session_new_full()`, populate model capabilities
+/// on the agent (first session only), and apply `desired_model` if set.
+///
+/// On error from `session_new_full()`, returns the `AcpError` — caller handles
+/// error reporting. Model-switch failures are logged and gracefully ignored
+/// (the agent proceeds with its default model).
+///
+/// `effective_cwd` is decided by the caller (see [`resolve_turn_routing`]) and
+/// used verbatim, so the cwd that was *compared* against the live session and
+/// the cwd the replacement session is *created* with can never disagree.
+// Two call sites (channel + heartbeat); every parameter is an independent
+// per-session input, so bundling them would only move the argument list.
+#[allow(clippy::too_many_arguments)]
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
+    effective_cwd: &str,
     agent_core: Option<&str>,
     channel: NewSessionChannelContext<'_>,
 ) -> Result<String, AcpError> {
@@ -994,7 +1134,6 @@ async fn create_session_and_apply_model(
     // its own `[Agent Memory — core]` header, and canvas carries its own
     // `[Channel Canvas]` header; both are appended with a blank-line separator.
     let is_goose = agent.agent_name == "goose";
-    let effective_cwd = resolve_effective_cwd(ctx, channel.id);
     let combined_system_prompt = with_canvas(
         with_huddle_instructions(
             with_core(
@@ -1578,6 +1717,61 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // ── Per-message project routing ──────────────────────────────────────────
+    //
+    // A live ACP session's cwd is fixed at `session/new`, so routing this turn
+    // into a different project means rotating the session. The decision MUST
+    // run before the core-memory block below and the canvas/title block after
+    // it: both gate on `!agent.state.sessions.contains_key(cid)`, and if the
+    // invalidation landed after those reads they would each conclude "not a new
+    // session" for a session about to be destroyed — leaving the replacement
+    // session with no core memory, no canvas, an unqualified title, and no git
+    // origin env. A reroute *is* a rotation, so the replacement has to rebuild
+    // all of that for the project it is actually landing in.
+    //
+    // Both prerequisites hold here: `source` is bound above, the observer
+    // context is installed (so `observe` reaches the frame), and `batch` is
+    // still un-moved.
+    let turn_cwd: Option<String> = match &source {
+        PromptSource::Channel(cid) => {
+            let routing = resolve_turn_routing(
+                &ctx.cwd,
+                &ctx.channel_cwd,
+                &ctx.project_cwd,
+                *cid,
+                batch_project_tag(batch.as_ref()),
+                agent.state.session_cwds.get(cid).map(String::as_str),
+            );
+            if routing.must_invalidate {
+                let previous_session = agent.state.sessions.get(cid).cloned();
+                let from_cwd = agent.state.session_cwds.get(cid).cloned();
+                tracing::info!(
+                    target: "pool::session",
+                    channel = %cid,
+                    ?from_cwd,
+                    to_cwd = %routing.cwd,
+                    "message routes to a different project — rotating the session"
+                );
+                agent.acp.observe(
+                    "session_rerouted",
+                    serde_json::json!({
+                        "channelId": cid.to_string(),
+                        "fromCwd": from_cwd,
+                        "toCwd": routing.cwd,
+                        "previousSessionId": previous_session,
+                    }),
+                );
+                // Single channel only — never `invalidate_all`, which would take
+                // out every other channel's session and the heartbeat with it.
+                agent.state.invalidate_channel(cid);
+            }
+            Some(routing.cwd)
+        }
+        // Heartbeats always run at the harness default; they carry no batch and
+        // so have no project tag to route on.
+        PromptSource::Heartbeat => None,
+    };
+
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `[System]` user-message
@@ -1710,9 +1904,15 @@ pub async fn run_prompt_task(
                 // agent in several channels doesn't produce identical session
                 // rows; `title_channel` comes from the single resolve above and
                 // is `None` for DM, unresolved, and unnamed channels.
+                // Decided above, before core/canvas/title were resolved, so the
+                // session is created in exactly the cwd that was compared.
+                let effective_cwd = turn_cwd
+                    .clone()
+                    .unwrap_or_else(|| resolve_effective_cwd(&ctx, Some(*cid)).to_string());
                 match create_session_and_apply_model(
                     &mut agent,
                     &ctx,
+                    &effective_cwd,
                     agent_core.as_deref(),
                     NewSessionChannelContext {
                         huddle_instructions: huddle_instructions.as_deref(),
@@ -1729,11 +1929,11 @@ pub async fn run_prompt_task(
                             target: "pool::session",
                             "created session {sid} for channel {cid}"
                         );
-                        agent.state.sessions.insert(*cid, sid.clone());
+                        // Session id, its cwd, and a fresh delivery ledger land
+                        // together — see `register_channel_session`.
                         agent
                             .state
-                            .deliveries
-                            .insert(*cid, ChannelDeliveryState::default());
+                            .register_channel_session(*cid, sid.clone(), effective_cwd);
                         // Seed a zero usage baseline: buzz-acp spawned this session
                         // so prior usage is zero by definition — first turn is reliable.
                         agent.acp.notify_session_spawned(&sid);
@@ -1775,9 +1975,11 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
+                // Heartbeats always run at the harness's own cwd.
                 match create_session_and_apply_model(
                     &mut agent,
                     &ctx,
+                    &ctx.cwd,
                     None,
                     NewSessionChannelContext {
                         huddle_instructions: None,
@@ -7594,6 +7796,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             base_prompt: None,
             cwd: ".".to_string(),
             channel_cwd: HashMap::new(),
+            project_cwd: HashMap::new(),
             rest_client: RestClient {
                 http: reqwest::Client::new(),
                 base_url: "http://127.0.0.1:0".to_string(),
@@ -7700,6 +7903,717 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         );
         // A different, unbound channel is unaffected.
         assert_eq!(resolve_effective_cwd(&ctx, Some(Uuid::new_v4())), ctx.cwd);
+    }
+
+    // ── batch_project_tag ────────────────────────────────────────────────────
+
+    fn tagged_event(content: &str, tags: Vec<Tag>) -> crate::queue::BatchEvent {
+        let event = EventBuilder::new(Kind::Custom(9), content)
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        crate::queue::BatchEvent {
+            event,
+            prompt_tag: "test".into(),
+            received_at: std::time::Instant::now(),
+        }
+    }
+
+    fn batch_with(
+        events: Vec<crate::queue::BatchEvent>,
+        cancelled: Vec<crate::queue::BatchEvent>,
+    ) -> FlushBatch {
+        FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events,
+            cancelled_events: cancelled,
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn batch_project_tag_is_none_without_a_batch_or_tag() {
+        assert_eq!(batch_project_tag(None), None);
+        let batch = batch_with(vec![tagged_event("plain", vec![])], vec![]);
+        assert_eq!(batch_project_tag(Some(&batch)), None);
+    }
+
+    #[test]
+    fn batch_project_tag_takes_the_newest_tagged_event() {
+        let batch = batch_with(
+            vec![
+                tagged_event("first", vec![Tag::parse(["project", "alpha"]).unwrap()]),
+                tagged_event("second", vec![Tag::parse(["project", "beta"]).unwrap()]),
+            ],
+            vec![],
+        );
+        assert_eq!(batch_project_tag(Some(&batch)), Some("beta"));
+    }
+
+    #[test]
+    fn batch_project_tag_ignores_cancelled_events() {
+        // The cancelled turn's project must not win over the live request that
+        // superseded it.
+        let batch = batch_with(
+            vec![tagged_event("live", vec![])],
+            vec![tagged_event(
+                "cancelled",
+                vec![Tag::parse(["project", "alpha"]).unwrap()],
+            )],
+        );
+        assert_eq!(batch_project_tag(Some(&batch)), None);
+    }
+
+    #[test]
+    fn batch_project_tag_ignores_malformed_and_empty_project_tags() {
+        // A bare ["project"] tag has no value, and ["project", ""] has an empty
+        // one; neither may be treated as a project id.
+        let batch = batch_with(
+            vec![tagged_event(
+                "malformed",
+                vec![
+                    Tag::parse(["project"]).unwrap(),
+                    Tag::parse(["project", ""]).unwrap(),
+                ],
+            )],
+            vec![],
+        );
+        assert_eq!(batch_project_tag(Some(&batch)), None);
+    }
+
+    // ── resolve_turn_routing ─────────────────────────────────────────────────
+
+    fn project_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn routing_project_tag_beats_the_channel_binding() {
+        let channel_id = Uuid::new_v4();
+        let mut channel_cwd = HashMap::new();
+        channel_cwd.insert(channel_id, "/bound/channel".to_string());
+
+        let routing = resolve_turn_routing(
+            "/harness/default",
+            &channel_cwd,
+            &project_map(&[("alpha", "/projects/alpha")]),
+            channel_id,
+            Some("alpha"),
+            None,
+        );
+        assert_eq!(routing.cwd, "/projects/alpha");
+    }
+
+    #[test]
+    fn routing_falls_back_to_channel_binding_then_default() {
+        let channel_id = Uuid::new_v4();
+        let mut channel_cwd = HashMap::new();
+        channel_cwd.insert(channel_id, "/bound/channel".to_string());
+        let projects = project_map(&[("alpha", "/projects/alpha")]);
+
+        // No tag → channel binding.
+        assert_eq!(
+            resolve_turn_routing(
+                "/harness/default",
+                &channel_cwd,
+                &projects,
+                channel_id,
+                None,
+                None
+            )
+            .cwd,
+            "/bound/channel"
+        );
+        // No tag and no binding → harness default.
+        assert_eq!(
+            resolve_turn_routing(
+                "/harness/default",
+                &channel_cwd,
+                &projects,
+                Uuid::new_v4(),
+                None,
+                None
+            )
+            .cwd,
+            "/harness/default"
+        );
+    }
+
+    #[test]
+    fn routing_invalidates_only_when_the_live_session_cwd_differs() {
+        let channel_id = Uuid::new_v4();
+        let projects = project_map(&[("alpha", "/projects/alpha"), ("beta", "/projects/beta")]);
+        let empty = HashMap::new();
+        let route = |tag, live| {
+            resolve_turn_routing(
+                "/harness/default",
+                &empty,
+                &projects,
+                channel_id,
+                Some(tag),
+                live,
+            )
+        };
+
+        // Same project as the live session → reuse it. This is the guard against
+        // rotating (and so re-fetching core + canvas) on every single message.
+        assert!(!route("alpha", Some("/projects/alpha")).must_invalidate);
+        // Different project → rotate.
+        assert!(route("beta", Some("/projects/alpha")).must_invalidate);
+        // No live session → nothing to invalidate; creation resolves the cwd.
+        assert!(!route("beta", None).must_invalidate);
+    }
+
+    #[test]
+    fn routing_does_not_churn_the_session_when_nothing_is_tagged() {
+        // The overwhelmingly common case: untagged messages on an unbound
+        // channel must never rotate a live session.
+        let channel_id = Uuid::new_v4();
+        let no_bindings = HashMap::new();
+        let no_projects = HashMap::new();
+        let routing = resolve_turn_routing(
+            "/harness/default",
+            &no_bindings,
+            &no_projects,
+            channel_id,
+            None,
+            Some("/harness/default"),
+        );
+        assert_eq!(routing.cwd, "/harness/default");
+        assert!(!routing.must_invalidate);
+    }
+
+    /// A project id arrives in an **event tag**, so it is attacker-controlled.
+    /// It may only ever select a value already present in the operator's
+    /// `--project-paths` map; it must never become a path in its own right.
+    #[test]
+    fn routing_hostile_project_ids_cannot_escape_the_configured_map() {
+        let channel_id = Uuid::new_v4();
+        let mut channel_cwd = HashMap::new();
+        channel_cwd.insert(channel_id, "/bound/channel".to_string());
+        let projects = project_map(&[("alpha", "/projects/alpha")]);
+
+        let hostile = [
+            "../../etc",
+            "../../../../../../etc/passwd",
+            "/etc/passwd",
+            "C:\\Windows\\System32",
+            "\\\\attacker\\share",
+            "//attacker/share",
+            "alpha/../../../etc",
+            "alpha\0extra",
+            "./alpha",
+            "ALPHA",
+            "alpha ",
+            " alpha",
+            "~",
+            "~/.ssh",
+            "$HOME",
+            "%USERPROFILE%",
+            "",
+        ];
+
+        for id in hostile {
+            let routing = resolve_turn_routing(
+                "/harness/default",
+                &channel_cwd,
+                &projects,
+                channel_id,
+                Some(id),
+                None,
+            );
+            // Falls back to the operator-configured channel binding — never to
+            // anything derived from the hostile id.
+            assert_eq!(
+                routing.cwd, "/bound/channel",
+                "hostile project id {id:?} must fall back to the channel binding"
+            );
+            // And the id itself never leaks into the resolved path.
+            if !id.is_empty() {
+                assert!(
+                    !routing.cwd.contains(id),
+                    "hostile project id {id:?} leaked into the resolved cwd"
+                );
+            }
+        }
+
+        // Sanity: the one *configured* id still resolves, so the assertions
+        // above are rejecting hostile input rather than rejecting everything.
+        assert_eq!(
+            resolve_turn_routing(
+                "/harness/default",
+                &channel_cwd,
+                &projects,
+                channel_id,
+                Some("alpha"),
+                None,
+            )
+            .cwd,
+            "/projects/alpha"
+        );
+    }
+
+    #[test]
+    fn routing_unknown_project_id_never_invalidates_a_live_session() {
+        // An unknown id must be inert: it resolves to the same cwd the session
+        // already has, so a stream of bogus tags cannot force session churn.
+        let channel_id = Uuid::new_v4();
+        let no_bindings = HashMap::new();
+        let no_projects = HashMap::new();
+        let routing = resolve_turn_routing(
+            "/harness/default",
+            &no_bindings,
+            &no_projects,
+            channel_id,
+            Some("does-not-exist"),
+            Some("/harness/default"),
+        );
+        assert_eq!(routing.cwd, "/harness/default");
+        assert!(!routing.must_invalidate);
+    }
+
+    // ── session_cwds lifecycle ───────────────────────────────────────────────
+
+    #[test]
+    fn register_channel_session_records_session_cwd_and_delivery_ledger() {
+        let mut s = SessionState::default();
+        let ch = Uuid::new_v4();
+        s.register_channel_session(ch, "sess-1".into(), "/projects/alpha".into());
+
+        assert_eq!(s.sessions[&ch], "sess-1");
+        assert_eq!(s.session_cwds[&ch], "/projects/alpha");
+        assert!(s.deliveries.contains_key(&ch));
+    }
+
+    #[test]
+    fn invalidate_channel_clears_session_cwd_but_leaves_other_channels() {
+        let mut s = SessionState::default();
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        s.register_channel_session(ch_a, "sess-a".into(), "/projects/alpha".into());
+        s.register_channel_session(ch_b, "sess-b".into(), "/projects/beta".into());
+
+        s.invalidate_channel(&ch_a);
+
+        assert!(!s.session_cwds.contains_key(&ch_a));
+        assert_eq!(s.session_cwds[&ch_b], "/projects/beta");
+    }
+
+    #[test]
+    fn invalidate_all_clears_session_cwds() {
+        let mut s = SessionState::default();
+        s.register_channel_session(Uuid::new_v4(), "sess".into(), "/projects/alpha".into());
+        s.invalidate_all();
+        assert!(s.session_cwds.is_empty());
+    }
+
+    #[test]
+    fn has_channel_state_true_when_only_session_cwd_present() {
+        // Guards against a future edit dropping `session_cwds` from
+        // `invalidate_channel` and leaving orphaned per-channel state.
+        let mut s = SessionState::default();
+        let ch = Uuid::new_v4();
+        s.session_cwds.insert(ch, "/projects/alpha".into());
+        assert!(s.has_channel_state(&ch));
+    }
+
+    // ── per-message project routing, end to end ──────────────────────────────
+
+    /// Scratch dir for subprocess-backed tests.
+    ///
+    /// Deliberately under the workspace `target/` rather than
+    /// `std::env::temp_dir()`: the fake agent is a shell script that has to
+    /// reference this path from inside a single-quoted redirect, and a
+    /// backslashed Windows temp path is mangled there (it lands in the CWD under
+    /// a transliterated name instead). A forward-slash path under `target/` is
+    /// handled correctly by every shell and is already git-ignored.
+    /// Not canonicalized: on Windows `canonicalize` returns a `\\?\`-prefixed
+    /// verbatim path, which the shell cannot resolve. The joined path (with
+    /// `..` segments intact) is understood by every shell as-is.
+    fn reroute_scratch_dir() -> std::path::PathBuf {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/acp-reroute-tests");
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// Spawn a fake ACP agent that answers `session/new` with a distinct session
+    /// id and every other request with `end_turn`, appending each request it
+    /// receives to `capture`.
+    ///
+    /// Two deliberate choices, both about surviving Windows:
+    ///
+    /// * The script is written to a **file** and run as `sh <path>` rather than
+    ///   passed via `-c "<script>"`. A script containing quotes and backslashes
+    ///   does not survive Windows→MSYS argv re-parsing, which silently reduces
+    ///   the fake agent to reading a single empty line.
+    /// * The interpreter is `sh`, not `bash`. On a Windows host with WSL
+    ///   installed, `bash` resolves to `C:\Windows\System32\bash.exe`, which
+    ///   runs inside WSL and cannot open the `E:/…` script path at all
+    ///   (`/bin/bash: …: No such file or directory`). There is no `sh.exe` in
+    ///   System32, so `sh` reliably finds the toolchain's own POSIX shell. The
+    ///   script below is POSIX `sh`, with no bashisms.
+    async fn spawn_fake_session_agent(
+        script_path: &std::path::Path,
+        capture: &std::path::Path,
+    ) -> AcpClient {
+        let capture_arg = capture.to_string_lossy().replace('\\', "/");
+        let script = format!(
+            r#"while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{capture_arg}'
+  case "$line" in
+    *'"id":'*) ;;
+    *) continue ;;
+  esac
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"session/new"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"sessionId":"sess-%s"}}}}\n' "$id" "$id" ;;
+    *)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"stopReason":"end_turn"}}}}\n' "$id" ;;
+  esac
+done
+"#
+        );
+        std::fs::write(script_path, script).expect("write fake agent script");
+        let script_arg = script_path.to_string_lossy().replace('\\', "/");
+        AcpClient::spawn("sh", &[script_arg], &[], false)
+            .await
+            .expect("spawn fake ACP agent")
+    }
+
+    fn project_tagged_batch(channel_id: Uuid, project: &str, content: &str) -> FlushBatch {
+        FlushBatch {
+            channel_id,
+            events: vec![tagged_event(
+                content,
+                vec![Tag::parse(["project", project]).unwrap()],
+            )],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    /// The regression this whole slice exists to prevent.
+    ///
+    /// A single-message test passes even when per-message routing is completely
+    /// broken, because message 1 always creates a session and so always resolves
+    /// a cwd. Only a *second* message tagged to a *different* project can
+    /// distinguish working routing from a session frozen at whatever message 1
+    /// picked. Turn 3 repeats turn 2's project as a negative control, so an
+    /// implementation that simply invalidates on every message also fails.
+    ///
+    /// Assertions read `session/new`'s wire `params.cwd` — the only place a cwd
+    /// is observable to the agent — not an internal variable.
+    #[tokio::test]
+    async fn second_message_with_a_different_project_tag_creates_a_session_in_the_new_cwd() {
+        let scratch = reroute_scratch_dir();
+        let stamp = Uuid::new_v4();
+        let capture = scratch.join(format!("reroute-{stamp}.ndjson"));
+        let script_path = scratch.join(format!("reroute-agent-{stamp}.sh"));
+        let _ = std::fs::remove_file(&capture);
+
+        let acp = spawn_fake_session_agent(&script_path, &capture).await;
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        // No pre-seeded session: turn 1 must go through session creation.
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.cwd = "/harness/default".into();
+        // Inserted directly, bypassing `build_project_cwd_map`'s absolute-and-exists
+        // validation — that validation has its own tests in `config`; this test is
+        // about routing.
+        ctx.project_cwd
+            .insert("alpha".into(), "/projects/alpha".into());
+        ctx.project_cwd
+            .insert("beta".into(), "/projects/beta".into());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let channel_id = Uuid::new_v4();
+
+        for (turn, project) in ["alpha", "beta", "beta"].iter().enumerate() {
+            let batch = project_tagged_batch(channel_id, project, &format!("work in {project}"));
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                format!("turn-{turn}"),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            assert!(
+                matches!(result.outcome, PromptOutcome::Ok(StopReason::EndTurn)),
+                "turn {turn} did not end cleanly"
+            );
+            agent = result.agent;
+        }
+
+        let recorded_cwd = agent.state.session_cwds[&channel_id].clone();
+        agent.acp.shutdown().await;
+
+        let captured = std::fs::read_to_string(&capture).expect("read captured ACP requests");
+        let requests: Vec<serde_json::Value> = captured
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("captured request is JSON"))
+            .collect();
+        let _ = std::fs::remove_file(&capture);
+        let _ = std::fs::remove_file(&script_path);
+
+        let by_method = |m: &str| -> Vec<&serde_json::Value> {
+            requests.iter().filter(|r| r["method"] == m).collect()
+        };
+        let news = by_method("session/new");
+        let prompts = by_method("session/prompt");
+
+        assert_eq!(
+            news.len(),
+            2,
+            "a project switch must create a second session, and an unchanged \
+             project must not create a third; got {} session/new requests in {captured}",
+            news.len()
+        );
+        assert_eq!(
+            news[0]["params"]["cwd"], "/projects/alpha",
+            "message 1 must launch in the project it tagged"
+        );
+        assert_eq!(
+            news[1]["params"]["cwd"], "/projects/beta",
+            "message 2 tagged a different project, so its session must be \
+             created in that project's cwd"
+        );
+
+        assert_eq!(prompts.len(), 3, "one prompt per message");
+        let session_of =
+            |r: &serde_json::Value| r["params"]["sessionId"].as_str().unwrap().to_owned();
+        assert_ne!(
+            session_of(prompts[1]),
+            session_of(prompts[0]),
+            "message 2 must run on the session created for the new project, \
+             not the session frozen at message 1"
+        );
+        assert_eq!(
+            session_of(prompts[1]),
+            session_of(prompts[2]),
+            "message 3 repeats message 2's project, so it must reuse that \
+             session — no churn when the project is unchanged"
+        );
+
+        assert_eq!(
+            recorded_cwd, "/projects/beta",
+            "the recorded session cwd must track the last project routed to"
+        );
+    }
+
+    /// Pins the *ordering* constraint, which the cwd assertions cannot see.
+    ///
+    /// The reroute decision has to run before the core-memory and canvas/title
+    /// blocks, because both gate on `!state.sessions.contains_key(cid)`. If the
+    /// invalidation ran after them, they would compute `is_new_channel_session ==
+    /// false` for a session about to be destroyed, and the replacement session
+    /// would silently lose its core memory, canvas, channel-qualified title, and
+    /// git-origin env.
+    ///
+    /// The session title is the cheapest observable proxy: it is channel-qualified
+    /// only when `resolve_new_session_channel_context` ran for this turn. A
+    /// wrong-order implementation still creates the session in the right cwd, but
+    /// emits a bare, unqualified title — so this assertion fails while the cwd
+    /// assertions pass.
+    #[tokio::test]
+    async fn rerouted_session_rebuilds_the_channel_qualified_title() {
+        let scratch = reroute_scratch_dir();
+        let stamp = Uuid::new_v4();
+        let capture = scratch.join(format!("ordering-{stamp}.ndjson"));
+        let script_path = scratch.join(format!("ordering-agent-{stamp}.sh"));
+        let _ = std::fs::remove_file(&capture);
+
+        let acp = spawn_fake_session_agent(&script_path, &capture).await;
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+
+        let channel_id = Uuid::new_v4();
+        let keys = nostr::Keys::generate();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.cwd = "/harness/default".into();
+        ctx.session_title = Some("Agent".to_string());
+        ctx.project_cwd
+            .insert("alpha".into(), "/projects/alpha".into());
+        ctx.project_cwd
+            .insert("beta".into(), "/projects/beta".into());
+        // A named, non-DM channel so a title can be qualified at all.
+        let mut startup = std::collections::HashMap::new();
+        startup.insert(
+            channel_id,
+            crate::relay::ChannelInfo {
+                name: "eng".to_string(),
+                channel_type: "channel".to_string(),
+                description: None,
+            },
+        );
+        ctx.channel_info = ChannelInfoResolver::new(
+            startup,
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url: "http://127.0.0.1:0".to_string(),
+                keys,
+                auth_tag_json: None,
+            },
+        );
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for project in ["alpha", "beta"] {
+            let batch = project_tagged_batch(channel_id, project, &format!("work in {project}"));
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                format!("turn-{project}"),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::Ok(StopReason::EndTurn)
+            ));
+            agent = result.agent;
+        }
+        agent.acp.shutdown().await;
+
+        let captured = std::fs::read_to_string(&capture).expect("read captured ACP requests");
+        let requests: Vec<serde_json::Value> = captured
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("captured request is JSON"))
+            .collect();
+        let _ = std::fs::remove_file(&capture);
+        let _ = std::fs::remove_file(&script_path);
+
+        let news: Vec<&serde_json::Value> = requests
+            .iter()
+            .filter(|r| r["method"] == "session/new")
+            .collect();
+        assert_eq!(news.len(), 2, "the project switch must create a session");
+        assert_eq!(news[1]["params"]["cwd"], "/projects/beta");
+        assert_eq!(
+            news[1]["params"]["_meta"]["sessionTitle"], "Agent · #eng",
+            "the rerouted session must rebuild its channel-qualified title, \
+             which only happens when the reroute decision runs before the \
+             canvas/title block"
+        );
+    }
+
+    /// Untagged traffic is the overwhelmingly common case, and it must never
+    /// rotate the session — a rotation drops core memory, canvas, and the
+    /// delivery ledger, so churning here would be both a perf and a correctness
+    /// regression.
+    #[tokio::test]
+    async fn untagged_messages_reuse_the_same_session_and_never_reroute() {
+        let scratch = reroute_scratch_dir();
+        let stamp = Uuid::new_v4();
+        let capture = scratch.join(format!("noreroute-{stamp}.ndjson"));
+        let script_path = scratch.join(format!("noreroute-agent-{stamp}.sh"));
+        let _ = std::fs::remove_file(&capture);
+
+        let acp = spawn_fake_session_agent(&script_path, &capture).await;
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+
+        let channel_id = Uuid::new_v4();
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.cwd = "/harness/default".into();
+        // A channel binding is configured; untagged messages must sit on it and
+        // stay there.
+        ctx.channel_cwd
+            .insert(channel_id, "/bound/channel".to_string());
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for turn in 0..3 {
+            let batch = FlushBatch {
+                channel_id,
+                events: vec![tagged_event(&format!("plain message {turn}"), vec![])],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                format!("turn-{turn}"),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::Ok(StopReason::EndTurn)
+            ));
+            agent = result.agent;
+        }
+
+        assert_eq!(agent.state.session_cwds[&channel_id], "/bound/channel");
+        agent.acp.shutdown().await;
+
+        let captured = std::fs::read_to_string(&capture).expect("read captured ACP requests");
+        let requests: Vec<serde_json::Value> = captured
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("captured request is JSON"))
+            .collect();
+        let _ = std::fs::remove_file(&capture);
+        let _ = std::fs::remove_file(&script_path);
+
+        let news: Vec<&serde_json::Value> = requests
+            .iter()
+            .filter(|r| r["method"] == "session/new")
+            .collect();
+        assert_eq!(
+            news.len(),
+            1,
+            "three untagged messages must share one session; got {} \
+             session/new requests in {captured}",
+            news.len()
+        );
+        assert_eq!(news[0]["params"]["cwd"], "/bound/channel");
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────

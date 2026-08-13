@@ -4,7 +4,7 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -504,6 +504,82 @@ pub struct CliArgs {
     /// project's cwd instead of the harness's own working directory.
     #[arg(long, env = "BUZZ_ACP_CHANNEL_PROJECTS", value_delimiter = ',')]
     pub channel_projects: Option<Vec<String>>,
+
+    /// Directory of a persona pack (containing `.plugin/plugin.json`) whose
+    /// resolved persona supplies harness *defaults*. Every value a pack
+    /// provides loses to the same value given explicitly on the CLI or through
+    /// an env var. An unreadable or invalid pack is a hard startup error.
+    #[arg(long, env = "BUZZ_ACP_PACK")]
+    pub pack: Option<PathBuf>,
+
+    /// Which persona to load from `--pack`. Required when the pack declares
+    /// more than one persona; optional (and redundant) when it declares one.
+    #[arg(long, env = "BUZZ_ACP_PERSONA")]
+    pub persona: Option<String>,
+}
+
+/// Which `CliArgs` values the caller actually supplied, as opposed to values
+/// clap filled in from a `default_value`.
+///
+/// Four args carry defaults (`agent_command`, `agent_args`, `subscribe`, and
+/// the `no_mention_filter` flag), so after parsing they are byte-identical
+/// whether the operator set them or not. A persona pack must lose to an
+/// operator-supplied value and win over a clap default, and that distinction
+/// is only recoverable from [`clap::ArgMatches::value_source`] — hence this
+/// struct rides alongside the parsed args.
+///
+/// Every other pack-relevant arg is `Option`-typed with no default, so `None`
+/// alone already proves "unset" and needs no entry here.
+#[derive(Debug, Clone, Copy)]
+pub struct ExplicitArgs {
+    /// `--agent-command` / `BUZZ_ACP_AGENT_COMMAND` was supplied.
+    pub agent_command: bool,
+    /// `--agent-args` / `BUZZ_ACP_AGENT_ARGS` was supplied.
+    pub agent_args: bool,
+    /// `--subscribe` / `BUZZ_ACP_SUBSCRIBE` was supplied.
+    pub subscribe: bool,
+    /// `--no-mention-filter` / `BUZZ_ACP_NO_MENTION_FILTER` was supplied.
+    pub no_mention_filter: bool,
+}
+
+impl ExplicitArgs {
+    /// Treat every defaulted arg as operator-supplied.
+    ///
+    /// This is the fail-safe direction for callers that reach [`Config`]
+    /// without an [`clap::ArgMatches`] (notably `Config::from_args`): a pack
+    /// silently losing a value is recoverable, a pack silently overriding an
+    /// operator's explicit flag is not.
+    ///
+    /// Only `Config::from_args` needs it, and that entry point is test-only
+    /// today — production goes through `Config::from_cli`, which always has
+    /// real matches to read provenance from.
+    #[cfg(test)]
+    pub const ALL_EXPLICIT: Self = Self {
+        agent_command: true,
+        agent_args: true,
+        subscribe: true,
+        no_mention_filter: true,
+    };
+
+    /// Read the true provenance of each defaulted arg out of clap's matches.
+    ///
+    /// The ids are clap-derive's verbatim snake_case field names. Passing an
+    /// id that is not an argument panics in debug builds, so
+    /// `explicit_args_ids_match_cli_fields` pins them in a test.
+    fn from_matches(matches: &clap::ArgMatches) -> Self {
+        let explicit = |id: &str| {
+            !matches!(
+                matches.value_source(id),
+                None | Some(clap::parser::ValueSource::DefaultValue)
+            )
+        };
+        Self {
+            agent_command: explicit("agent_command"),
+            agent_args: explicit("agent_args"),
+            subscribe: explicit("subscribe"),
+            no_mention_filter: explicit("no_mention_filter"),
+        }
+    }
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -567,7 +643,15 @@ pub struct Config {
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
-    /// Populated from persona pack resolution. Empty when no pack is configured.
+    ///
+    /// Populated from persona pack resolution when `--pack` is set — these are
+    /// `ResolvedPersona::runtime_env_vars`, appended *before* the generated
+    /// `CODEX_CONFIG` entry so `build_codex_config_env` still sees a
+    /// pack-supplied `CODEX_CONFIG` as its merge base. Without `--pack` the vec
+    /// holds only that generated entry (or is empty for non-Codex agents).
+    ///
+    /// Operator env wins: `AcpClient::spawn` skips any key already present in
+    /// the harness's own environment.
     pub persona_env_vars: Vec<(String, String)>,
     /// Whether `codex_network_env()` successfully injected a `CODEX_CONFIG` entry into
     /// `persona_env_vars`.  When true, `AcpClient::spawn` merges all `CODEX_CONFIG` entries
@@ -601,6 +685,15 @@ pub struct Config {
     /// Resolved through `project_paths` at `PromptContext` build time to
     /// produce the effective per-channel cwd.
     pub channel_projects: HashMap<Uuid, String>,
+    /// Channel *names* the persona pack asked to subscribe to, verbatim from
+    /// the pack (leading `#` and all). Empty when no pack is configured, or
+    /// when `--channels` already pinned the subscription set.
+    ///
+    /// These cannot become `channels_override` here: that field is parsed as
+    /// UUIDs, so names must wait until channel discovery has run. `main()`
+    /// feeds them to [`resolve_subscribe_channels`] once the relay has
+    /// answered. See [`normalize_channel_name`] for the `#` rule.
+    pub pack_subscribe: Vec<String>,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -860,19 +953,155 @@ pub fn propagate_legacy_env_vars() {
     }
 }
 
+/// Map a persona pack's ACP runtime id onto the agent binary buzz-acp spawns.
+///
+/// Deliberately a closed match. Pack files are data, and falling through to
+/// "use the runtime string as the command" would let a pack author name an
+/// arbitrary executable that the harness then spawns at startup.
+fn runtime_to_agent_command(runtime: &str) -> Result<&'static str, ConfigError> {
+    match runtime.trim() {
+        "goose" => Ok("goose"),
+        "buzz-agent" => Ok("buzz-agent"),
+        "claude" => Ok("claude-agent-acp"),
+        "codex" => Ok("codex-acp"),
+        other => Err(ConfigError::ConfigFile(format!(
+            "persona pack requests unknown runtime '{other}' \
+             (supported: goose, claude, codex, buzz-agent)"
+        ))),
+    }
+}
+
+/// Resolve the persona a `--pack` / `--persona` pair selects.
+///
+/// Returns `Ok(None)` only when no pack was requested at all. Anything else —
+/// missing directory, malformed manifest, unknown persona name, an ambiguous
+/// multi-persona pack with no `--persona` — is a hard error. A pack that
+/// "loads" into no persona would leave the harness running under a completely
+/// different identity than the operator asked for, which is worse than
+/// refusing to start.
+fn resolve_pack_persona(
+    pack_dir: Option<&Path>,
+    persona_name: Option<&str>,
+) -> Result<Option<buzz_persona::resolve::ResolvedPersona>, ConfigError> {
+    let Some(dir) = pack_dir else {
+        if let Some(name) = persona_name {
+            tracing::warn!(persona = %name, "--persona given without --pack; ignoring it");
+        }
+        return Ok(None);
+    };
+
+    let pack = buzz_persona::resolve::resolve_pack(dir)
+        .map_err(|e| ConfigError::ConfigFile(format!("persona pack {}: {e}", dir.display())))?;
+
+    let available = || {
+        pack.personas
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let persona = match persona_name {
+        Some(name) => pack
+            .personas
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| {
+                ConfigError::ConfigFile(format!(
+                    "persona pack {}: no persona named '{}' (available: {})",
+                    dir.display(),
+                    name,
+                    available()
+                ))
+            })?
+            .clone(),
+        None if pack.personas.len() == 1 => pack.personas[0].clone(),
+        None => {
+            return Err(ConfigError::ConfigFile(format!(
+                "persona pack {} declares {} personas — pass --pack together with \
+                 --persona to pick one (available: {})",
+                dir.display(),
+                pack.personas.len(),
+                available()
+            )))
+        }
+    };
+
+    tracing::info!(
+        pack = %pack.id,
+        pack_version = %pack.version,
+        persona = %persona.name,
+        "loaded persona pack"
+    );
+    Ok(Some(persona))
+}
+
 impl Config {
     pub fn from_cli() -> Result<Self, ConfigError> {
         // Legacy env-var propagation is intentionally NOT done here.
         // Call `propagate_legacy_env_vars()` before the tokio runtime starts
         // (in the sync `fn main()` wrapper) — see Rust 2024 edition safety.
-        let args = CliArgs::parse();
-        Self::from_args(args)
+        //
+        // Parsed through `ArgMatches` rather than `CliArgs::parse()` so
+        // `ExplicitArgs` can tell an operator-supplied value from a clap
+        // default — the distinction persona-pack precedence rests on.
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = CliArgs::command().get_matches();
+        // Preserve clap's own usage output and exit code 2 on a bad flag,
+        // rather than reformatting it as a ConfigError.
+        let args = CliArgs::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+        Self::from_args_with_sources(args, ExplicitArgs::from_matches(&matches))
+    }
+
+    /// Build a `Config` from an argv vector exactly the way [`Config::from_cli`]
+    /// builds one from the real process args, including explicit-vs-default
+    /// tracking.
+    ///
+    /// This is the entry point to use when persona-pack precedence matters,
+    /// since `Config::from_args` cannot recover argument provenance and
+    /// conservatively assumes everything was explicit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::ConfigFile`] with clap's rendered message when
+    /// argv does not parse, plus every error `Config::from_args` can return.
+    #[cfg(test)]
+    pub fn try_from_argv<I, T>(argv: I) -> Result<Self, ConfigError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = CliArgs::command()
+            .try_get_matches_from(argv)
+            .map_err(|e| ConfigError::ConfigFile(e.to_string()))?;
+        let args = CliArgs::from_arg_matches(&matches)
+            .map_err(|e| ConfigError::ConfigFile(e.to_string()))?;
+        Self::from_args_with_sources(args, ExplicitArgs::from_matches(&matches))
     }
 
     /// Build a `Config` from already-parsed `CliArgs`. Separated from `from_cli()` so
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
-    pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
+    ///
+    /// Argument provenance is unavailable here, so every defaulted arg is
+    /// treated as explicit (`ExplicitArgs::ALL_EXPLICIT`) and a persona pack
+    /// can never override one. Use `Config::try_from_argv` when that
+    /// distinction matters.
+    #[cfg(test)]
+    pub fn from_args(args: CliArgs) -> Result<Self, ConfigError> {
+        Self::from_args_with_sources(args, ExplicitArgs::ALL_EXPLICIT)
+    }
+
+    /// Build a `Config` from parsed args plus the provenance of each defaulted
+    /// arg.
+    ///
+    /// `sources` decides persona-pack precedence: a pack value is applied only
+    /// where the operator did not speak.
+    pub fn from_args_with_sources(
+        mut args: CliArgs,
+        sources: ExplicitArgs,
+    ) -> Result<Self, ConfigError> {
         let keys = Keys::parse(&args.private_key)?;
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
@@ -881,12 +1110,16 @@ impl Config {
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
 
+        // Load the pack once, before anything consults it. A bad pack fails
+        // startup here rather than degrading into a silently unconfigured run.
+        let persona = resolve_pack_persona(args.pack.as_deref(), args.persona.as_deref())?;
+
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
             Some(std::fs::read_to_string(path)?)
         } else {
-            None
+            persona.as_ref().map(|p| p.system_prompt.clone())
         };
 
         if args.heartbeat_interval > 0 && args.heartbeat_interval < 10 {
@@ -937,7 +1170,16 @@ impl Config {
             }
         }
 
-        let agent_command = args.agent_command;
+        // A pack's `runtime` supplies the agent binary only when the operator
+        // left --agent-command at its default.
+        let pack_runtime_command = match persona.as_ref().and_then(|p| p.runtime.as_deref()) {
+            Some(runtime) if !sources.agent_command => Some(runtime_to_agent_command(runtime)?),
+            _ => None,
+        };
+        let agent_command = match pack_runtime_command {
+            Some(command) => command.to_string(),
+            None => args.agent_command,
+        };
 
         if agent_command.trim().is_empty() {
             return Err(ConfigError::ConfigFile(
@@ -945,7 +1187,15 @@ impl Config {
             ));
         }
 
-        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        // When the pack picked the binary, discard the default args that were
+        // computed for the *previous* binary so `normalize_agent_args` applies
+        // the new one's defaults instead.
+        let raw_agent_args = if pack_runtime_command.is_some() && !sources.agent_args {
+            Vec::new()
+        } else {
+            args.agent_args
+        };
+        let agent_args = normalize_agent_args(&agent_command, raw_agent_args);
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1078,7 +1328,16 @@ impl Config {
         // Spawned desktop agents now carry a complete instance snapshot. Team
         // instructions arrive independently so they can be layered at runtime.
         let mut persona_env_vars = Vec::new();
-        let model = args.model;
+        // Pack env MUST land before the generated CODEX_CONFIG below:
+        // `build_codex_config_env` treats the *first* CODEX_CONFIG entry as the
+        // persona base and deep-merges later ones into it. Appending pack env
+        // afterwards would silently invert that merge.
+        if let Some(p) = persona.as_ref() {
+            persona_env_vars.extend(p.runtime_env_vars.iter().cloned());
+        }
+        let model = args
+            .model
+            .or_else(|| persona.as_ref().and_then(|p| p.model.clone()));
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
@@ -1095,6 +1354,42 @@ impl Config {
 
         let project_paths = parse_project_paths(args.project_paths)?;
         let channel_projects = parse_channel_projects(args.channel_projects)?;
+
+        // Pack triggers → subscribe mode / mention gate. `all_messages` is the
+        // only trigger shape ACP can express today.
+        let mut subscribe_mode = args.subscribe;
+        let mut no_mention_filter = args.no_mention_filter;
+        if let Some(triggers) = persona.as_ref().map(|p| &p.triggers) {
+            if triggers.all_messages {
+                if !sources.subscribe {
+                    subscribe_mode = SubscribeMode::All;
+                }
+                if !sources.no_mention_filter {
+                    no_mention_filter = true;
+                }
+            } else if !triggers.mentions && !sources.no_mention_filter {
+                // "respond to neither mentions nor everything" has no ACP
+                // representation — say so rather than inventing one.
+                tracing::warn!(
+                    "persona pack sets triggers.mentions=false with all_messages=false; \
+                     buzz-acp has no such mode — leaving the mention gate unchanged"
+                );
+            }
+            if !triggers.keywords.is_empty() {
+                tracing::warn!(
+                    keywords = triggers.keywords.join(","),
+                    "persona pack triggers.keywords are not wired into buzz-acp \
+                     subscriptions and will be ignored"
+                );
+            }
+        }
+
+        // Channel names, not UUIDs — resolved after discovery in `main()`.
+        // Skipped entirely when --channels already pinned the subscription set.
+        let pack_subscribe = match persona.as_ref() {
+            Some(p) if args.channels.is_none() => p.subscribe.clone(),
+            _ => Vec::new(),
+        };
 
         let config = Config {
             keys,
@@ -1114,15 +1409,16 @@ impl Config {
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(str::to_string),
+                .map(str::to_string)
+                .or_else(|| persona.as_ref().and_then(|p| p.pack_instructions.clone())),
             initial_message: args.initial_message,
-            subscribe_mode: args.subscribe,
+            subscribe_mode,
             dedup_mode: args.dedup,
             multiple_event_handling: args.multiple_event_handling,
             ignore_self: !args.no_ignore_self,
             kinds_override: args.kinds,
             channels_override: args.channels,
-            no_mention_filter: args.no_mention_filter,
+            no_mention_filter,
             config_path: args.config,
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
@@ -1133,6 +1429,7 @@ impl Config {
             session_title: args
                 .session_title
                 .as_deref()
+                .or_else(|| persona.as_ref().map(|p| p.display_name.as_str()))
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
@@ -1149,6 +1446,7 @@ impl Config {
             base_prompt_content,
             project_paths,
             channel_projects,
+            pack_subscribe,
         };
 
         Ok(config)
@@ -1312,6 +1610,109 @@ pub fn resolve_project_path(config: &Config, project_id: &str) -> Option<PathBuf
     config.project_paths.get(project_id).cloned()
 }
 
+/// Normalize a channel name for matching: trim, drop **at most one** leading
+/// `#`, trim again.
+///
+/// `#` is a display sigil, not a repeatable one — `"##ops"` normalizes to
+/// `"#ops"`, not `"ops"`. Trailing and interior `#` are never touched.
+///
+/// This implements the rule
+/// `crates/buzz-persona/PERSONA_PACK_SPEC.md` documents ("buzz-acp strips the
+/// leading `#` before making any relay API calls") and which nothing
+/// implemented. It lives here rather than in `buzz-persona` because that crate
+/// is deliberately pure and ACP-shaped, and because `buzz pack inspect` should
+/// keep echoing the author's literal text — the sigil only matters at the
+/// moment a name is matched against a relay channel.
+fn normalize_channel_name(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed.strip_prefix('#').unwrap_or(trimmed).trim()
+}
+
+/// Map persona-pack `subscribe` channel *names* onto discovered channel UUIDs.
+///
+/// Both sides are put through [`normalize_channel_name`] and compared
+/// case-insensitively, so `"#general"`, `"general"`, `"General"` and
+/// `" #general "` all match a discovered channel named `general`.
+///
+/// Returns `(uuid_strings, unmatched_names)`. The UUID strings are the shape
+/// [`Config::channels_override`] is parsed back out of. Entries that normalize
+/// to empty are dropped into `unmatched_names` so the caller can warn instead
+/// of matching everything or nothing.
+///
+/// Callers must not assign an empty result to `channels_override`: an empty
+/// override resolves to an empty subscription set, which mutes the agent
+/// silently.
+pub fn resolve_subscribe_channels(
+    names: &[String],
+    discovered: &HashMap<Uuid, crate::relay::ChannelInfo>,
+) -> (Vec<String>, Vec<String>) {
+    let mut ids = Vec::new();
+    let mut unmatched = Vec::new();
+    for raw in names {
+        let wanted = normalize_channel_name(raw);
+        if wanted.is_empty() {
+            unmatched.push(raw.clone());
+            continue;
+        }
+        let hit = discovered
+            .iter()
+            .find(|(_, info)| normalize_channel_name(&info.name).eq_ignore_ascii_case(wanted));
+        match hit {
+            Some((id, _)) => {
+                let id = id.to_string();
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            None => unmatched.push(raw.clone()),
+        }
+    }
+    (ids, unmatched)
+}
+
+/// Apply a persona pack's `subscribe:` channel names to `config`, once channel
+/// discovery has produced real UUIDs to match them against.
+///
+/// Precedence: `channels_override.is_some()` means `--channels` /
+/// `BUZZ_ACP_CHANNELS` already pinned the subscription set, so the pack is
+/// skipped entirely.
+///
+/// Refuses to narrow the subscription to nothing. If no pack name matches a
+/// discovered channel, `channels_override` is left alone and the harness keeps
+/// its default scope — assigning `Some(vec![])` would make
+/// [`resolve_channel_filters`] produce an empty target set and
+/// [`resolve_dynamic_channel_filter`] reject every future channel, silently
+/// deafening the agent with no error anywhere.
+pub fn apply_pack_subscribe(
+    config: &mut Config,
+    discovered: &HashMap<Uuid, crate::relay::ChannelInfo>,
+) {
+    if config.channels_override.is_some() || config.pack_subscribe.is_empty() {
+        return;
+    }
+
+    let (ids, unmatched) = resolve_subscribe_channels(&config.pack_subscribe, discovered);
+    for name in &unmatched {
+        tracing::warn!(
+            channel = %name,
+            "persona pack subscribe: no discovered channel with this name"
+        );
+    }
+    if ids.is_empty() {
+        tracing::warn!(
+            "persona pack subscribe matched no discovered channels — \
+             keeping the harness's default channel scope rather than \
+             subscribing to nothing"
+        );
+        return;
+    }
+    tracing::info!(
+        matched = ids.len(),
+        "persona pack subscribe resolved to discovered channels"
+    );
+    config.channels_override = Some(ids);
+}
+
 /// Parse `--channel-projects` entries (`channel_uuid=project_id` pairs).
 ///
 /// Rejects a malformed entry, a non-UUID channel id, or a duplicate channel
@@ -1371,19 +1772,62 @@ pub fn build_channel_cwd_map(config: &Config) -> HashMap<Uuid, String> {
             );
             continue;
         };
-        if !path.is_absolute() || !path.exists() {
+        let Some(cwd) = validated_project_cwd(project_id, &path) else {
             tracing::warn!(
                 %channel_id,
                 project_id,
-                path = %path.display(),
-                "resolved project path is not an absolute, existing directory — \
+                "channel's bound project path is unusable as a cwd — \
                  dispatches in this channel will use the harness's default cwd"
             );
             continue;
-        }
-        result.insert(*channel_id, path.to_string_lossy().into_owned());
+        };
+        result.insert(*channel_id, cwd);
     }
     result
+}
+
+/// Validate a resolved project path for use as an agent subprocess cwd.
+///
+/// Returns the path as a string, or `None` (with a warn) when it is not an
+/// absolute, existing directory. Shared by [`build_channel_cwd_map`] and
+/// [`build_project_cwd_map`] so both entry points enforce the identical
+/// check — a project path is either usable for every routing mechanism or
+/// for none of them.
+fn validated_project_cwd(project_id: &str, path: &Path) -> Option<String> {
+    if !path.is_absolute() || !path.exists() {
+        tracing::warn!(
+            project_id,
+            path = %path.display(),
+            "project path is not an absolute, existing directory — ignoring it as a dispatch cwd"
+        );
+        return None;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// Precompute the effective cwd for every *project* id, once at harness
+/// startup, keyed by the project's NIP-MP `d`-tag id.
+///
+/// This is the allow-list a per-message `["project", <id>]` event tag is
+/// looked up in (see `pool::resolve_effective_cwd`). Unlike
+/// [`build_channel_cwd_map`] it iterates `--project-paths` directly: a
+/// project reachable by tag need not be bound to any channel.
+///
+/// # Security
+///
+/// The returned map is the *only* way a project id from an event can reach a
+/// filesystem path. Every value here is operator-supplied and validated;
+/// nothing derives a path from the id itself. A caller must therefore treat
+/// this strictly as `get(id)` — never join, canonicalize, or otherwise build a
+/// path out of an untrusted project id.
+pub fn build_project_cwd_map(config: &Config) -> HashMap<String, String> {
+    config
+        .project_paths
+        .iter()
+        .filter_map(|(project_id, path)| {
+            validated_project_cwd(project_id, path).map(|cwd| (project_id.clone(), cwd))
+        })
+        .collect()
 }
 
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
@@ -1633,6 +2077,7 @@ mod tests {
             base_prompt_content: None,
             project_paths: HashMap::new(),
             channel_projects: HashMap::new(),
+            pack_subscribe: Vec::new(),
         }
     }
 
@@ -3262,5 +3707,730 @@ channels = "ALL"
 
         let map = build_channel_cwd_map(&config);
         assert!(!map.contains_key(&channel_id));
+    }
+}
+
+/// Persona-pack wiring: does a pack on disk actually change the resulting
+/// `Config`, and does an explicit CLI value still beat it?
+#[cfg(test)]
+mod persona_pack_tests {
+    use super::*;
+    use crate::relay::ChannelInfo;
+
+    const TEST_PRIVATE_KEY: &str =
+        "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+
+    /// A temp directory that deletes itself on drop, so a failing assertion
+    /// can't leave pack fixtures behind.
+    struct PackDir(PathBuf);
+
+    impl Drop for PackDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    impl PackDir {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn as_arg(&self) -> String {
+            self.0.to_string_lossy().into_owned()
+        }
+    }
+
+    /// Write a pack directory: `.plugin/plugin.json` plus one `.persona.md`
+    /// per entry. `persona` entries are `(name, frontmatter_yaml, body)`.
+    fn write_pack(personas: &[(&str, &str, &str)], instructions: Option<&str>) -> PackDir {
+        let root =
+            std::env::temp_dir().join(format!("buzz-acp-pack-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".plugin")).expect("create .plugin");
+        std::fs::create_dir_all(root.join("agents")).expect("create agents");
+
+        let persona_paths: Vec<String> = personas
+            .iter()
+            .map(|(name, _, _)| format!("agents/{name}.persona.md"))
+            .collect();
+        let manifest = serde_json::json!({
+            "id": "test-pack",
+            "name": "Test Pack",
+            "version": "1.2.3",
+            "personas": persona_paths,
+        });
+        std::fs::write(
+            root.join(".plugin").join("plugin.json"),
+            serde_json::to_string(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        for (name, frontmatter, body) in personas {
+            std::fs::write(
+                root.join("agents").join(format!("{name}.persona.md")),
+                format!("---\nname: {name}\n{frontmatter}---\n\n{body}\n"),
+            )
+            .expect("write persona");
+        }
+
+        if let Some(text) = instructions {
+            std::fs::write(root.join("instructions.md"), text).expect("write instructions");
+        }
+
+        PackDir(root)
+    }
+
+    /// A single-persona pack exercising the fields ACP actually maps.
+    fn write_standard_pack() -> PackDir {
+        write_pack(
+            &[(
+                "scout",
+                "display_name: \"Scout\"\n\
+                 description: \"Pack-supplied scout persona.\"\n\
+                 model: \"anthropic:claude-sonnet-4-20250514\"\n\
+                 temperature: 0.25\n\
+                 subscribe:\n  - \"#engineering\"\n  - general\n",
+                "You are Scout, defined entirely by the pack.",
+            )],
+            Some("Pack-wide team instructions."),
+        )
+    }
+
+    fn config_from(argv: &[&str]) -> Config {
+        let mut full = vec!["buzz-acp", "--private-key", TEST_PRIVATE_KEY];
+        full.extend_from_slice(argv);
+        Config::try_from_argv(full).expect("config should build")
+    }
+
+    fn error_from(argv: &[&str]) -> String {
+        let mut full = vec!["buzz-acp", "--private-key", TEST_PRIVATE_KEY];
+        full.extend_from_slice(argv);
+        Config::try_from_argv(full)
+            .expect_err("config should fail")
+            .to_string()
+    }
+
+    fn channel(name: &str) -> ChannelInfo {
+        ChannelInfo {
+            name: name.to_string(),
+            channel_type: "public".to_string(),
+            description: None,
+        }
+    }
+
+    // ── The pack actually changes Config ─────────────────────────────────
+
+    #[test]
+    fn pack_supplies_system_prompt_model_title_and_instructions() {
+        let pack = write_standard_pack();
+        let config = config_from(&["--pack", &pack.as_arg()]);
+
+        // buzz-persona hands the markdown body through verbatim (surrounding
+        // newlines included) — pinned exactly so a future trim is a visible change.
+        assert_eq!(
+            config.system_prompt.as_deref(),
+            Some("\nYou are Scout, defined entirely by the pack.\n"),
+            "system_prompt must come from the pack's persona body"
+        );
+        assert_eq!(
+            config.model.as_deref(),
+            Some("claude-sonnet-4-20250514"),
+            "model must be the post-split plain id, not 'anthropic:...'"
+        );
+        assert_eq!(
+            config.session_title.as_deref(),
+            Some("Scout"),
+            "session_title must come from the persona display_name"
+        );
+        assert_eq!(
+            config.team_instructions.as_deref(),
+            Some("Pack-wide team instructions."),
+            "team_instructions must come from the pack instructions.md"
+        );
+    }
+
+    #[test]
+    fn pack_projects_runtime_env_vars_into_persona_env_vars() {
+        let pack = write_standard_pack();
+        let config = config_from(&["--pack", &pack.as_arg()]);
+
+        let vars: HashMap<&str, &str> = config
+            .persona_env_vars
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(vars.get("GOOSE_MODEL"), Some(&"claude-sonnet-4-20250514"));
+        assert_eq!(vars.get("GOOSE_PROVIDER"), Some(&"anthropic"));
+        assert_eq!(vars.get("GOOSE_TEMPERATURE"), Some(&"0.25"));
+    }
+
+    #[test]
+    fn pack_subscribe_names_are_carried_for_post_discovery_resolution() {
+        let pack = write_standard_pack();
+        let config = config_from(&["--pack", &pack.as_arg()]);
+
+        assert_eq!(
+            config.pack_subscribe,
+            vec!["#engineering".to_string(), "general".to_string()],
+            "subscribe names must reach Config verbatim (# intact) for later resolution"
+        );
+        assert!(
+            config.channels_override.is_none(),
+            "names must NOT be written into channels_override — it is parsed as UUIDs"
+        );
+    }
+
+    #[test]
+    fn pack_runtime_selects_agent_command_and_resets_agent_args() {
+        let pack = write_pack(
+            &[(
+                "coder",
+                "display_name: \"Coder\"\ndescription: \"d\"\nruntime: claude\n",
+                "body",
+            )],
+            None,
+        );
+        let config = config_from(&["--pack", &pack.as_arg()]);
+
+        assert_eq!(config.agent_command, "claude-agent-acp");
+        assert!(
+            config.agent_args.is_empty(),
+            "the goose default 'acp' arg must not survive onto claude-agent-acp: {:?}",
+            config.agent_args
+        );
+    }
+
+    #[test]
+    fn pack_all_messages_trigger_sets_subscribe_all_and_drops_mention_gate() {
+        let pack = write_pack(
+            &[(
+                "watcher",
+                "display_name: \"Watcher\"\ndescription: \"d\"\n\
+                 triggers:\n  mentions: false\n  all_messages: true\n",
+                "body",
+            )],
+            None,
+        );
+        let config = config_from(&["--pack", &pack.as_arg()]);
+
+        assert_eq!(config.subscribe_mode, SubscribeMode::All);
+        assert!(config.no_mention_filter);
+    }
+
+    #[test]
+    fn no_pack_leaves_every_pack_driven_field_at_its_default() {
+        let config = config_from(&[]);
+
+        assert!(config.system_prompt.is_none());
+        assert!(config.model.is_none());
+        assert!(config.session_title.is_none());
+        assert!(config.team_instructions.is_none());
+        assert!(config.pack_subscribe.is_empty());
+        assert_eq!(config.agent_command, "goose");
+        assert_eq!(config.agent_args, vec!["acp".to_string()]);
+        assert_eq!(config.subscribe_mode, SubscribeMode::Mentions);
+        assert!(!config.no_mention_filter);
+    }
+
+    // ── Explicit CLI/env values beat the pack ────────────────────────────
+
+    #[test]
+    fn explicit_system_prompt_and_model_override_pack() {
+        let pack = write_standard_pack();
+        let config = config_from(&[
+            "--pack",
+            &pack.as_arg(),
+            "--system-prompt",
+            "operator prompt wins",
+            "--model",
+            "operator-model",
+        ]);
+
+        assert_eq!(
+            config.system_prompt.as_deref(),
+            Some("operator prompt wins")
+        );
+        assert_eq!(config.model.as_deref(), Some("operator-model"));
+    }
+
+    #[test]
+    fn explicit_agent_command_overrides_pack_runtime() {
+        let pack = write_pack(
+            &[(
+                "coder",
+                "display_name: \"Coder\"\ndescription: \"d\"\nruntime: claude\n",
+                "body",
+            )],
+            None,
+        );
+        let config = config_from(&["--pack", &pack.as_arg(), "--agent-command", "goose"]);
+
+        assert_eq!(
+            config.agent_command, "goose",
+            "an explicitly passed --agent-command must beat the pack's runtime"
+        );
+    }
+
+    #[test]
+    fn explicit_session_title_and_team_instructions_override_pack() {
+        let pack = write_standard_pack();
+        let config = config_from(&[
+            "--pack",
+            &pack.as_arg(),
+            "--session-title",
+            "Operator Title",
+            "--team-instructions",
+            "Operator instructions",
+        ]);
+
+        assert_eq!(config.session_title.as_deref(), Some("Operator Title"));
+        assert_eq!(
+            config.team_instructions.as_deref(),
+            Some("Operator instructions")
+        );
+    }
+
+    #[test]
+    fn explicit_channels_suppresses_pack_subscribe() {
+        let pack = write_standard_pack();
+        let uuid = Uuid::new_v4().to_string();
+        let config = config_from(&["--pack", &pack.as_arg(), "--channels", &uuid]);
+
+        assert!(
+            config.pack_subscribe.is_empty(),
+            "--channels means the operator pinned the subscription set"
+        );
+        assert_eq!(config.channels_override, Some(vec![uuid]));
+    }
+
+    #[test]
+    fn explicit_subscribe_mode_overrides_pack_all_messages_trigger() {
+        let pack = write_pack(
+            &[(
+                "watcher",
+                "display_name: \"Watcher\"\ndescription: \"d\"\n\
+                 triggers:\n  mentions: false\n  all_messages: true\n",
+                "body",
+            )],
+            None,
+        );
+        let config = config_from(&["--pack", &pack.as_arg(), "--subscribe", "mentions"]);
+
+        assert_eq!(
+            config.subscribe_mode,
+            SubscribeMode::Mentions,
+            "an explicit --subscribe must beat the pack's all_messages trigger"
+        );
+    }
+
+    #[test]
+    fn from_args_treats_defaulted_args_as_explicit() {
+        // `from_args` cannot see argument provenance, so a pack must never win
+        // a defaulted arg through that entry point.
+        let pack = write_pack(
+            &[(
+                "coder",
+                "display_name: \"Coder\"\ndescription: \"d\"\nruntime: claude\n",
+                "body",
+            )],
+            None,
+        );
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--pack",
+            &pack.as_arg(),
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("config should build");
+
+        assert_eq!(
+            config.agent_command, "goose",
+            "from_args is fail-safe: the clap default must hold"
+        );
+        assert_eq!(
+            config.system_prompt.as_deref(),
+            Some("\nbody\n"),
+            "Option-typed args carry no default, so the pack still supplies them"
+        );
+    }
+
+    // ── A bad pack fails startup loudly ──────────────────────────────────
+
+    #[test]
+    fn missing_pack_directory_is_a_hard_startup_error() {
+        let missing =
+            std::env::temp_dir().join(format!("buzz-acp-absent-{}", uuid::Uuid::new_v4()));
+        let msg = error_from(&["--pack", &missing.to_string_lossy()]);
+
+        assert!(
+            msg.contains("persona pack"),
+            "error must name the pack: {msg}"
+        );
+    }
+
+    #[test]
+    fn malformed_manifest_is_a_hard_startup_error() {
+        let pack = write_standard_pack();
+        std::fs::write(pack.path().join(".plugin").join("plugin.json"), "{not json")
+            .expect("corrupt manifest");
+        let msg = error_from(&["--pack", &pack.as_arg()]);
+
+        assert!(
+            msg.contains("persona pack"),
+            "error must name the pack: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_pack_runtime_is_rejected_rather_than_spawned() {
+        // A pack must not be able to name an arbitrary executable.
+        let pack = write_pack(
+            &[(
+                "evil",
+                "display_name: \"Evil\"\ndescription: \"d\"\nruntime: /bin/sh\n",
+                "body",
+            )],
+            None,
+        );
+        let msg = error_from(&["--pack", &pack.as_arg()]);
+
+        assert!(
+            msg.contains("unknown runtime"),
+            "error should reject the runtime id: {msg}"
+        );
+    }
+
+    #[test]
+    fn multi_persona_pack_without_persona_flag_is_an_error_listing_choices() {
+        let pack = write_pack(
+            &[
+                (
+                    "alpha",
+                    "display_name: \"Alpha\"\ndescription: \"d\"\n",
+                    "a",
+                ),
+                ("beta", "display_name: \"Beta\"\ndescription: \"d\"\n", "b"),
+            ],
+            None,
+        );
+        let msg = error_from(&["--pack", &pack.as_arg()]);
+
+        assert!(
+            msg.contains("--persona"),
+            "error should name the flag: {msg}"
+        );
+        assert!(msg.contains("alpha"), "error should list choices: {msg}");
+        assert!(msg.contains("beta"), "error should list choices: {msg}");
+    }
+
+    #[test]
+    fn persona_flag_selects_one_persona_from_a_multi_persona_pack() {
+        let pack = write_pack(
+            &[
+                (
+                    "alpha",
+                    "display_name: \"Alpha\"\ndescription: \"d\"\n",
+                    "a",
+                ),
+                ("beta", "display_name: \"Beta\"\ndescription: \"d\"\n", "b"),
+            ],
+            None,
+        );
+        let config = config_from(&["--pack", &pack.as_arg(), "--persona", "beta"]);
+
+        assert_eq!(config.system_prompt.as_deref(), Some("\nb\n"));
+        assert_eq!(config.session_title.as_deref(), Some("Beta"));
+    }
+
+    #[test]
+    fn unknown_persona_name_is_an_error_listing_choices() {
+        let pack = write_pack(
+            &[
+                (
+                    "alpha",
+                    "display_name: \"Alpha\"\ndescription: \"d\"\n",
+                    "a",
+                ),
+                ("beta", "display_name: \"Beta\"\ndescription: \"d\"\n", "b"),
+            ],
+            None,
+        );
+        let msg = error_from(&["--pack", &pack.as_arg(), "--persona", "gamma"]);
+
+        assert!(msg.contains("gamma"), "error should name the miss: {msg}");
+        assert!(msg.contains("alpha"), "error should list choices: {msg}");
+    }
+
+    // ── The real shipped example pack ────────────────────────────────────
+
+    #[test]
+    fn the_shipped_meadow_core_example_pack_configures_the_harness() {
+        // Synthetic fixtures can drift from what pack authors actually write.
+        // This loads the pack committed at examples/meadow-core.
+        let pack_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/meadow-core");
+        assert!(
+            pack_dir.join(".plugin").join("plugin.json").exists(),
+            "example pack missing at {}",
+            pack_dir.display()
+        );
+        let pack_arg = pack_dir.to_string_lossy().into_owned();
+
+        // Three personas, so an unqualified --pack must refuse to guess.
+        let msg = error_from(&["--pack", &pack_arg]);
+        assert!(msg.contains("--persona"), "should demand a persona: {msg}");
+
+        let config = config_from(&["--pack", &pack_arg, "--persona", "bana"]);
+        assert_eq!(config.session_title.as_deref(), Some("Bana"));
+        assert!(
+            config
+                .system_prompt
+                .as_deref()
+                .is_some_and(|p| p.contains("architecture reviewer")),
+            "system prompt should be Bana's markdown body"
+        );
+        assert_eq!(
+            config.pack_subscribe,
+            vec!["#architecture".to_string()],
+            "the '#'-prefixed subscribe entry must survive to resolution time"
+        );
+        assert!(
+            config
+                .team_instructions
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty()),
+            "the pack ships instructions.md, which should land as team_instructions"
+        );
+
+        // ...and its '#'-prefixed subscribe resolves against a discovered channel.
+        let architecture = Uuid::new_v4();
+        let discovered = HashMap::from([(architecture, channel("architecture"))]);
+        let mut config = config;
+        apply_pack_subscribe(&mut config, &discovered);
+        assert_eq!(
+            config.channels_override,
+            Some(vec![architecture.to_string()])
+        );
+    }
+
+    // ── Codex merge ordering ─────────────────────────────────────────────
+
+    #[test]
+    fn pack_env_precedes_the_generated_codex_config_entry() {
+        // build_codex_config_env treats the FIRST CODEX_CONFIG in the vec as
+        // the persona base; pack env appended afterwards would invert it.
+        let pack = write_pack(
+            &[(
+                "coder",
+                "display_name: \"Coder\"\ndescription: \"d\"\n\
+                 runtime: codex\nmodel: \"openai:gpt-5\"\n",
+                "body",
+            )],
+            None,
+        );
+        let config = config_from(&["--pack", &pack.as_arg()]);
+
+        assert!(
+            config.has_generated_codex_config,
+            "codex-acp should have produced a generated CODEX_CONFIG"
+        );
+        let generated = config
+            .persona_env_vars
+            .iter()
+            .position(|(k, _)| k == "CODEX_CONFIG")
+            .expect("generated CODEX_CONFIG entry");
+        let pack_var = config
+            .persona_env_vars
+            .iter()
+            .position(|(k, _)| k == "GOOSE_MODEL")
+            .expect("pack-projected env var");
+        assert!(
+            pack_var < generated,
+            "pack env must be appended before the generated CODEX_CONFIG entry"
+        );
+    }
+
+    // ── '#'-stripping channel-name resolution ────────────────────────────
+
+    #[test]
+    fn normalize_channel_name_strips_exactly_one_leading_hash() {
+        assert_eq!(normalize_channel_name("general"), "general");
+        assert_eq!(normalize_channel_name("#general"), "general");
+        assert_eq!(normalize_channel_name("  #general  "), "general");
+        assert_eq!(normalize_channel_name("# general"), "general");
+        assert_eq!(
+            normalize_channel_name("##general"),
+            "#general",
+            "'#' is a display sigil, not a repeatable one"
+        );
+        assert_eq!(
+            normalize_channel_name("general#"),
+            "general#",
+            "a trailing '#' is part of the name"
+        );
+        assert_eq!(normalize_channel_name("#"), "");
+    }
+
+    #[test]
+    fn resolve_subscribe_channels_matches_hashed_and_bare_names() {
+        let engineering = Uuid::new_v4();
+        let general = Uuid::new_v4();
+        let discovered = HashMap::from([
+            (engineering, channel("engineering")),
+            (general, channel("general")),
+        ]);
+
+        let names = vec![
+            "#engineering".to_string(),
+            "general".to_string(),
+            " #General ".to_string(),
+        ];
+        let (ids, unmatched) = resolve_subscribe_channels(&names, &discovered);
+
+        assert!(unmatched.is_empty(), "unexpected misses: {unmatched:?}");
+        assert_eq!(
+            ids,
+            vec![engineering.to_string(), general.to_string()],
+            "case-insensitive duplicate must not be emitted twice"
+        );
+    }
+
+    #[test]
+    fn resolve_subscribe_channels_matches_a_relay_name_that_carries_a_hash() {
+        let id = Uuid::new_v4();
+        let discovered = HashMap::from([(id, channel("#ops"))]);
+
+        let (ids, unmatched) = resolve_subscribe_channels(&["ops".to_string()], &discovered);
+
+        assert!(unmatched.is_empty());
+        assert_eq!(ids, vec![id.to_string()]);
+    }
+
+    #[test]
+    fn resolve_subscribe_channels_reports_misses_instead_of_matching_everything() {
+        let id = Uuid::new_v4();
+        let discovered = HashMap::from([(id, channel("general"))]);
+
+        let names = vec![
+            "##general".to_string(),
+            "nope".to_string(),
+            "#".to_string(),
+            "   ".to_string(),
+        ];
+        let (ids, unmatched) = resolve_subscribe_channels(&names, &discovered);
+
+        assert!(
+            ids.is_empty(),
+            "none of these should match 'general': {ids:?}"
+        );
+        assert_eq!(
+            unmatched.len(),
+            4,
+            "every miss must be reported: {unmatched:?}"
+        );
+    }
+
+    // ── apply_pack_subscribe: never narrow to nothing ────────────────────
+
+    #[test]
+    fn apply_pack_subscribe_sets_channels_override_from_matched_names() {
+        let engineering = Uuid::new_v4();
+        let discovered = HashMap::from([
+            (engineering, channel("engineering")),
+            (Uuid::new_v4(), channel("random")),
+        ]);
+        let mut config = config_from(&[]);
+        config.pack_subscribe = vec!["#engineering".to_string()];
+
+        apply_pack_subscribe(&mut config, &discovered);
+
+        assert_eq!(
+            config.channels_override,
+            Some(vec![engineering.to_string()])
+        );
+    }
+
+    #[test]
+    fn apply_pack_subscribe_never_mutes_the_agent_when_nothing_matches() {
+        // The highest-severity failure mode: assigning Some(vec![]) here makes
+        // resolve_channel_filters produce an empty target set, and the agent
+        // goes deaf with no error anywhere.
+        let discovered = HashMap::from([(Uuid::new_v4(), channel("general"))]);
+        let mut config = config_from(&[]);
+        config.pack_subscribe = vec!["#nonexistent".to_string()];
+
+        apply_pack_subscribe(&mut config, &discovered);
+
+        assert_eq!(
+            config.channels_override, None,
+            "an all-miss pack subscribe must leave the default scope intact"
+        );
+    }
+
+    #[test]
+    fn apply_pack_subscribe_defers_to_an_operator_channels_override() {
+        let engineering = Uuid::new_v4();
+        let discovered = HashMap::from([(engineering, channel("engineering"))]);
+        let operator_pick = Uuid::new_v4().to_string();
+        let mut config = config_from(&[]);
+        config.pack_subscribe = vec!["#engineering".to_string()];
+        config.channels_override = Some(vec![operator_pick.clone()]);
+
+        apply_pack_subscribe(&mut config, &discovered);
+
+        assert_eq!(
+            config.channels_override,
+            Some(vec![operator_pick]),
+            "--channels must win over the pack's subscribe list"
+        );
+    }
+
+    #[test]
+    fn apply_pack_subscribe_is_a_noop_without_a_pack() {
+        let discovered = HashMap::from([(Uuid::new_v4(), channel("general"))]);
+        let mut config = config_from(&[]);
+
+        apply_pack_subscribe(&mut config, &discovered);
+
+        assert_eq!(config.channels_override, None);
+    }
+
+    // ── value_source id guard ────────────────────────────────────────────
+
+    #[test]
+    fn explicit_args_ids_match_cli_fields() {
+        // `ArgMatches::value_source` panics in debug builds on an unknown id,
+        // so a renamed CliArgs field must fail here rather than at startup.
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = CliArgs::command()
+            .try_get_matches_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("clap should parse args");
+        CliArgs::from_arg_matches(&matches).expect("args should build");
+
+        let sources = ExplicitArgs::from_matches(&matches);
+        assert!(!sources.agent_command);
+        assert!(!sources.agent_args);
+        assert!(!sources.subscribe);
+        assert!(!sources.no_mention_filter);
+
+        let matches = CliArgs::command()
+            .try_get_matches_from([
+                "buzz-acp",
+                "--private-key",
+                TEST_PRIVATE_KEY,
+                "--agent-command",
+                "codex",
+                "--agent-args",
+                "acp",
+                "--subscribe",
+                "all",
+                "--no-mention-filter",
+            ])
+            .expect("clap should parse args");
+        let sources = ExplicitArgs::from_matches(&matches);
+        assert!(sources.agent_command);
+        assert!(sources.agent_args);
+        assert!(sources.subscribe);
+        assert!(sources.no_mention_filter);
     }
 }

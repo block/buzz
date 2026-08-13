@@ -2069,6 +2069,10 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
+    // Persona-pack `subscribe:` holds channel NAMES, so it can only be applied
+    // now that discovery has answered.
+    config::apply_pack_subscribe(&mut config, &channel_info_map);
+
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
             vec![SubscriptionRule {
@@ -2183,6 +2187,7 @@ async fn tokio_main() -> Result<()> {
             .to_string_lossy()
             .to_string(),
         channel_cwd: crate::config::build_channel_cwd_map(&config),
+        project_cwd: crate::config::build_project_cwd_map(&config),
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -6768,6 +6773,7 @@ mod build_mcp_servers_tests {
             base_prompt_content: None,
             project_paths: std::collections::HashMap::new(),
             channel_projects: std::collections::HashMap::new(),
+            pack_subscribe: Vec::new(),
         }
     }
 
@@ -6993,6 +6999,7 @@ mod error_outcome_emission_tests {
             base_prompt_content: None,
             project_paths: std::collections::HashMap::new(),
             channel_projects: std::collections::HashMap::new(),
+            pack_subscribe: Vec::new(),
         }
     }
 
