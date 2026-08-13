@@ -272,9 +272,15 @@ STEP 12 Open the PR against launchpad — AGENT_PR_TEMPLATE.md filled,      [nee
         `Closes #116`, `by:agent`, raw output pasted, and Escalations naming
         both deferrals: no workflow file until #110 decides where this runs, and
         the required-check contradiction found in ALREADY TRUE.
+        SUPERSEDED 2026-08-13: a workflow job IS added, running this stage's
+        controls and its mutation harness on every PR. That is not the invocation
+        #110 gates — it needs no token and no network — and the deferral of the
+        live pre-flight run to #119 stands.
         done when: the PR is open against launchpad with the by:agent label, the
         "launchpad — PR body check" check is green, and the body names #110 as
-        the reason no .github/workflows file is added.
+        the reason no .github/workflows file INVOKES THE PRE-FLIGHT. A workflow
+        job running the controls was added on 2026-08-13; it needs no credential,
+        so #110 never gated it.
 
 PARALLEL  Nothing here should be fanned out as written. Steps 4, 5 and 6 are
   logically independent and all tagged [needs 3], but all three edit

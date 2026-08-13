@@ -8,8 +8,8 @@ between the pre-flight and the stages that read it.
 python3 launchpad/scripts/pr-preflight.py 86            # JSON on stdout
 python3 launchpad/scripts/pr-preflight.py --help        # the SKIP taxonomy and exit codes
 python3 launchpad/scripts/mutation_harness.py           # prove the controls can fail
-python3 -m unittest discover -s launchpad/scripts -t launchpad/scripts   # 157, incl. #126's
-cd launchpad/scripts && python3 -m unittest test_preflight_core test_no_model   # 113, this stage's
+python3 -m unittest discover -s launchpad/scripts -t launchpad/scripts   # 165, incl. #126's
+cd launchpad/scripts && python3 -m unittest test_preflight_core test_no_model   # 121, this stage's
 ```
 
 `launchpad/scripts/` is shared — [#126](https://github.com/launchpad-26/buzz/pull/126)

@@ -7,7 +7,7 @@ value — an input that could not be read comes back `null` with an enumerated r
 as an empty answer. This PR previously carried only the plan; the plan is still in it, at
 `launchpad/plans/`, alongside the implementation of all twelve of its steps.
 
-This body describes commit `34d50e425`.
+This body describes commit `b783c83fd` plus the corrections in the commit that follows it.
 
 **On the commit list.** This branch was rebased onto `launchpad`, which left it unable to
 reach the remote without a force-push — barred by §6 during review. It was reconciled by
@@ -48,7 +48,7 @@ pre-flight record for any PR number, with the fixtures and controls that prove i
 launchpad/scripts/pr-preflight.py          new — the CLI entry point
 launchpad/scripts/preflight_core.py        new — the record, pure functions, no I/O
 launchpad/scripts/preflight_fetch.py       new — the fetch layer and the exit contract
-launchpad/scripts/test_preflight_core.py   new — 101 controls over record, CLI, exit codes
+launchpad/scripts/test_preflight_core.py   new — 109 controls over record, CLI, exit codes
 launchpad/scripts/test_no_model.py         new — 12 controls, the no-model property by AST
 launchpad/scripts/mutation_harness.py      new — proves the controls can fail, 3 phases
 launchpad/scripts/INTERFACE.md             new — the record contract for #117/#118/#119
@@ -109,16 +109,22 @@ python3 launchpad/scripts/pr-preflight.py 0 1>/dev/null ; echo "exit=$?"
 Raw output:
 ```
 $ cd launchpad/scripts && python3 -m unittest test_preflight_core test_no_model
-.................................................................................................................
+.........................................................................................................................
 ----------------------------------------------------------------------
-Ran 113 tests in 0.261s
+Ran 121 tests in 0.259s
 
 OK
 
 $ python3 -m unittest discover -s launchpad/scripts -t launchpad/scripts   # incl. PR #126's suite
-.............................................................................................................................................................
+.....................................................................................................................................................................
 ----------------------------------------------------------------------
-Ran 157 tests in 0.269s
+Ran 165 tests in 0.266s
+
+OK
+
+$ env -i "$(command -v python3)" -m unittest discover -s launchpad/scripts -t launchpad/scripts   # no HOME, no GH_TOKEN
+----------------------------------------------------------------------
+Ran 165 tests in 0.263s
 
 OK
 
@@ -146,25 +152,25 @@ pr-preflight.py: error: PR number must be positive
 exit=1
 ```
 
-The harness output is 132 lines across three phases. Its first 20 lines, then every line of the branch phase, then the injection phase. The three summary lines are `24/24 mutants killed`, `15/15 branches checked` and `15/15 injected imports refused`, and it exits 0 only if all three hold:
+The harness output is 140 lines across three phases. Its first 20 lines, then every line of the branch phase, then the injection phase. The three summary lines are `24/24 mutants killed`, `18/18 branches checked` and `15/15 injected imports refused`, and it exits 0 only if all three hold:
 
 ```
 baseline: suite GREEN — OK
 
   preflight_core.py::build_pr                   -> return None                                    RED  (control works)
-      FAILED (failures=22, errors=30)
+      FAILED (failures=22, errors=32)
   preflight_core.py::build_closing_issue        -> return {'present': True, 'keyword': None, 'i   RED  (control works)
       FAILED (failures=10)
   preflight_core.py::build_diff                 -> return {'merge_base_sha': 'x', 'head_sha': '   RED  (control works)
       FAILED (failures=12)
   preflight_core.py::build_checks               -> return []                                      RED  (control works)
-      FAILED (failures=11)
+      FAILED (failures=15)
   preflight_core.py::build_required_gate        -> return {'configured': False, 'source_endpoin   RED  (control works)
-      FAILED (failures=14, errors=6)
+      FAILED (failures=15, errors=6)
   preflight_core.py::build_nearest_rules        -> return {}                                      RED  (control works)
       FAILED (failures=11, errors=11)
   preflight_core.py::build_record               -> return dict.fromkeys(RECORD_FIELDS)            RED  (control works)
-      FAILED (failures=21, errors=58)
+      FAILED (failures=21, errors=60)
   preflight_core.py::_nearest                   -> return None                                    RED  (control works)
       FAILED (failures=10)
   preflight_core.py::_normalise_check           -> return {'name': None, 'workflow': None, 'sta   RED  (control works)
@@ -184,10 +190,13 @@ baseline: suite GREEN — OK
   preflight_core.py    a tree entry's type stops being checked              RED  (branch is checked)
   preflight_core.py    an empty head tree stops being a failure             RED  (branch is checked)
   preflight_core.py    an unpinned diff stops being a failure               RED  (branch is checked)
+  preflight_core.py    a capped check page stops being truncated            RED  (branch is checked)
+  preflight_core.py    checks stop being pinned to the PR's head commit     RED  (branch is checked)
+  preflight_core.py    the unreadable-rules path drops the review half again RED  (branch is checked)
   preflight_core.py    an unreadable review decision becomes 'not required' RED  (branch is checked)
   preflight_core.py    a null review decision stops being distinguishable from a required one RED  (branch is checked)
   preflight_core.py    a malformed rules probe is coerced to empty again    RED  (branch is checked)
-15/15 branches checked
+18/18 branches checked
 ```
 
 ```
@@ -222,10 +231,14 @@ check — only field paths and lengths.
 
 ### Not verified
 
-- **No `.github/workflows` file, so this has never run in CI.** Every run above is local,
-  under a token holding `gist, project, read:org, repo, workflow` — not the scoped token
-  #110 specifies and #119 will provision. Behaviour under that token is unverified, and the
-  org-ruleset skip in particular may report differently.
+- **The pre-flight itself has never run in CI.** A workflow job added by this PR runs the
+  *controls* and the mutation harness on every pull request, which needs no credential —
+  but no workflow invokes `pr-preflight.py` against a live PR. Every live run above is
+  local, under a token holding `gist, project, read:org, repo, workflow` — not the scoped
+  token #110 specifies and #119 will provision. Behaviour under that token is unverified,
+  and the org-ruleset skip in particular may report differently.
+- **The new CI job has not been observed on GitHub's runners**, only locally, including
+  under `env -i` with no `HOME` and no `GH_TOKEN`.
 - **`gh` version-specific behaviour.** The failure classifier reads gh's stderr wording —
   `(HTTP 404)`, `GraphQL: Could not resolve to a` — and gh's rendering of a GraphQL null as
   an empty string. Those are output format, not API contract, verified against gh 2.93.0
@@ -267,7 +280,7 @@ control that counts `subprocess.run` call nodes and requires the single one to s
 It makes **no model call**, and that is checked by AST rather than by grep: every imported
 module name in both modules must be on an allowlist written in the test, so an unanticipated
 import fails by default, and `importlib.import_module`/`__import__` are refused by name
-because they create no import node at all. 13 injected imports were each shown turning that
+because they create no import node at all. 15 injected imports were each shown turning that
 check red.
 
 Author-controlled PR text (title, body, file paths) is carried as **data** in separately
@@ -278,10 +291,14 @@ stage making no model call, so the AST check above is what keeps it true.
 Two exposures worth naming rather than dismissing. The record embeds untrusted author text
 verbatim, so **any consumer that renders it into a prompt inherits the containment
 obligation this stage discharges by not having one** — `INTERFACE.md` says so. And the
-trigger this will eventually run under is `pull_request`, not `pull_request_target`: the
-suite under test lives in this repository, so a PR can modify the code the job runs. That is
-the correct choice for an escalate-only reviewer and it is the reason no workflow file is
-added here.
+workflow job this PR adds runs on `pull_request`, not `pull_request_target` — deliberately.
+The code under test lives in this repository, so a PR can modify the very controls the job
+runs. That is acceptable *for this job* for the reason the file's existing comment gives: a
+fork-triggered run gets a read-only `GITHUB_TOKEN` with no repository secrets, its checkout
+now sets `persist-credentials: false`, and merging needs two approving reviews. A defeated
+control suite misleads a reviewer; it cannot merge anything or write anywhere. The same
+reasoning does **not** extend to invoking the pre-flight itself against a live PR, which
+carries a credential and stays with #119.
 
 ### Escalations
 
@@ -314,10 +331,11 @@ added here.
      repository today — so it is a Task, not a Bug, since nothing has been observed failing.
    - **Not fixable retroactively**: the plan's GATES clause required all four reviews before
      the push, and the push happened first. Disclosed in escalations 1 and 2.
-5. **No `.github/workflows` file.** #110 has decided — GitHub Actions for Phase 1 — so this
-   is a scoping choice rather than a blocker, and #119 is its natural home. The plan file
-   said #110 was open, which was true when it was written; that line now records the
-   decision instead.
+5. **A workflow job is added; the pre-flight invocation is not.** The job runs this stage's
+   controls and mutation harness on every PR and needs no credential, so #110 never gated
+   it. Invoking `pr-preflight.py` against a live PR does need the scoped token and stays
+   with #119. The plan's own text is corrected in place rather than left to contradict the
+   diff.
 6. **The required-check contradiction is resolved, not deferred.** §6 was rewritten by #126
    and now answers it: two approving reviews, ruleset invisible without `admin:org`,
    `reviewDecision` readable. The record reports both gates. What remains a cohort decision

@@ -87,7 +87,14 @@ jobs:
   scripts:
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials: false for the same reason the job above gives, and
+      # more sharply here: the next step runs mutation_harness.py, which rewrites
+      # and executes repository source by design, from the fork's own commit. The
+      # token is read-only on a public repo either way — leaving it in the git
+      # config would still be a credential this job never needs.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Controls
         run: python3 -m unittest discover -s launchpad/scripts -t launchpad/scripts -v
