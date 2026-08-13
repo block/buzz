@@ -577,6 +577,11 @@ pub struct PromptContext {
     /// (`include_str!`) is inherently `'static`.
     pub base_prompt: Option<&'static str>,
     pub cwd: String,
+    /// Per-channel cwd override for channels bound to an external project via
+    /// `--channel-projects` / `--project-paths`, precomputed once at startup
+    /// by [`crate::config::build_channel_cwd_map`]. A channel absent from
+    /// this map dispatches with `cwd` (the harness's own default).
+    pub channel_cwd: HashMap<Uuid, String>,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
     /// Shared channel metadata for startup-known and dynamically joined channels.
@@ -952,6 +957,16 @@ async fn resolve_new_session_channel_context(
     (is_dm, title_channel, Some(info.channel_type))
 }
 
+/// Resolve the cwd a new session in `channel_id` should launch with: the
+/// channel's bound-project override if one is configured, otherwise the
+/// harness's own default cwd.
+fn resolve_effective_cwd(ctx: &PromptContext, channel_id: Option<Uuid>) -> &str {
+    channel_id
+        .and_then(|id| ctx.channel_cwd.get(&id))
+        .map(String::as_str)
+        .unwrap_or(&ctx.cwd)
+}
+
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
 ///
@@ -979,11 +994,12 @@ async fn create_session_and_apply_model(
     // its own `[Agent Memory — core]` header, and canvas carries its own
     // `[Channel Canvas]` header; both are appended with a blank-line separator.
     let is_goose = agent.agent_name == "goose";
+    let effective_cwd = resolve_effective_cwd(ctx, channel.id);
     let combined_system_prompt = with_canvas(
         with_huddle_instructions(
             with_core(
                 with_team(
-                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                    framed_system_prompt(effective_cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
                     ctx.team_instructions.as_deref(),
                 ),
                 agent_core,
@@ -1007,7 +1023,7 @@ async fn create_session_and_apply_model(
     let resp = agent
         .acp
         .session_new_full(
-            &ctx.cwd,
+            effective_cwd,
             mcp_servers,
             session_new_system_prompt(
                 is_goose,
@@ -7577,6 +7593,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             heartbeat_prompt: None,
             base_prompt: None,
             cwd: ".".to_string(),
+            channel_cwd: HashMap::new(),
             rest_client: RestClient {
                 http: reqwest::Client::new(),
                 base_url: "http://127.0.0.1:0".to_string(),
@@ -7654,6 +7671,35 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &owner.public_key(),
         )
         .is_none());
+    }
+
+    // ── resolve_effective_cwd ────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_effective_cwd_falls_back_to_default_when_channel_unbound() {
+        let ctx = make_prompt_context_no_owner();
+        assert_eq!(resolve_effective_cwd(&ctx, Some(Uuid::new_v4())), ctx.cwd);
+    }
+
+    #[test]
+    fn resolve_effective_cwd_falls_back_to_default_when_no_channel() {
+        let ctx = make_prompt_context_no_owner();
+        assert_eq!(resolve_effective_cwd(&ctx, None), ctx.cwd);
+    }
+
+    #[test]
+    fn resolve_effective_cwd_uses_bound_project_path() {
+        let mut ctx = make_prompt_context_no_owner();
+        let channel_id = Uuid::new_v4();
+        ctx.channel_cwd
+            .insert(channel_id, "E:/Projects/buildbid".to_string());
+
+        assert_eq!(
+            resolve_effective_cwd(&ctx, Some(channel_id)),
+            "E:/Projects/buildbid"
+        );
+        // A different, unbound channel is unaffected.
+        assert_eq!(resolve_effective_cwd(&ctx, Some(Uuid::new_v4())), ctx.cwd);
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────
