@@ -435,6 +435,16 @@ export function useAnchoredScroll({
     ): boolean => {
       const container = scrollContainerRef.current;
       if (!container) return false;
+      // A mount bottom-pin queued by `pinToBottomOnMount` is cancelled only by
+      // the channelId reset effect, and the thread panel is keyed by a
+      // constant so it never remounts per thread. Left armed, that rAF fires
+      // after this centering and yanks the reader to the bottom permanently.
+      // Deliberate navigation to a message outranks it. Callers that fail
+      // below re-arm the pin themselves.
+      if (mountPinRafIdRef.current !== null) {
+        cancelAnimationFrame(mountPinRafIdRef.current);
+        mountPinRafIdRef.current = null;
+      }
       const el = container.querySelector<HTMLElement>(
         `[data-message-id="${messageId}"]`,
       );
