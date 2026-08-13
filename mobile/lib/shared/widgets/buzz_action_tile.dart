@@ -8,6 +8,7 @@ import 'buzz_loading_indicator.dart';
 
 /// Equal-width icon action used by profile and profile-adjacent surfaces.
 class BuzzActionTile extends StatelessWidget {
+  /// Creates an action tile with an optional loading state.
   const BuzzActionTile({
     super.key,
     required this.icon,
@@ -18,11 +19,22 @@ class BuzzActionTile extends StatelessWidget {
     this.loadingSemanticLabel,
   });
 
+  /// Icon shown when the tile is not loading.
   final IconData? icon;
+
+  /// Label shown below the icon.
   final String label;
+
+  /// Called when the tile is tapped.
   final VoidCallback onTap;
+
+  /// Whether the tile accepts taps.
   final bool isEnabled;
+
+  /// Whether to show a loading indicator instead of [icon].
   final bool isLoading;
+
+  /// Accessibility label for the loading indicator.
   final String? loadingSemanticLabel;
 
   @override

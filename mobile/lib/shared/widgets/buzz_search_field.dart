@@ -3,7 +3,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
 
+/// Height of an idle [BuzzSearchField].
 const double buzzSearchIdleFieldHeight = 45;
+
+/// Font size used for idle [BuzzSearchField] text.
 const double buzzSearchIdleTextSize = 15;
 const double _searchIdleIconSize = 26;
 const double _searchCompactIconSize = 18;
@@ -15,6 +18,7 @@ const double _searchCompactTextInset =
 
 /// Buzz's global-search text field treatment, shared by search-like inputs.
 class BuzzSearchField extends StatelessWidget {
+  /// Creates a search field with Buzz's shared styling.
   const BuzzSearchField({
     required this.controller,
     required this.focusNode,
@@ -37,23 +41,58 @@ class BuzzSearchField extends StatelessWidget {
     super.key,
   });
 
+  /// Controller that owns the field's editable text.
   final TextEditingController controller;
+
+  /// Node that controls the field's focus.
   final FocusNode focusNode;
+
+  /// Placeholder shown while the field is idle and empty.
   final String hintText;
+
+  /// Color applied to the search icon.
   final Color iconColor;
+
+  /// Color applied to entered text.
   final Color inputColor;
+
+  /// Color applied to [hintText].
   final Color placeholderColor;
+
+  /// Background color of the field.
   final Color surfaceColor;
+
+  /// Whether the field is in its compact editing state.
   final bool isEditing;
+
+  /// Whether to suppress field animations for reduced-motion users.
   final bool reduceMotion;
+
+  /// Duration used by the field's editing-state animation.
   final Duration motionDuration;
+
+  /// Called when the field is tapped.
   final VoidCallback onTap;
+
+  /// Called whenever the field's text changes.
   final ValueChanged<String> onChanged;
+
+  /// Called when the user submits the field.
   final ValueChanged<String> onSubmitted;
+
+  /// Key assigned to the underlying text field.
   final Key fieldKey;
+
+  /// Whether the text field should autocorrect user input.
   final bool autocorrect;
+
+  /// Whether the platform should offer text suggestions.
   final bool enableSuggestions;
+
+  /// Whether the text field accepts user input.
   final bool enabled;
+
+  /// Action displayed on the keyboard's submit key.
   final TextInputAction textInputAction;
 
   @override
