@@ -17,7 +17,7 @@ on:
       - ".github/workflows/push-gateway-helm-chart.yml"
 permissions: {}
 env:
-  CHART_REPO: ${{ vars.GHCR_CHART_REPO != '' && vars.GHCR_CHART_REPO || 'oci://ghcr.io/saleda/zorro/charts' }}
+  CHART_REPO: ${{ vars.GHCR_CHART_REPO != '' && vars.GHCR_CHART_REPO || 'oci://ghcr.io/saledaai/zorro/charts' }}
 jobs:
   validate:
     runs-on: ubuntu-latest

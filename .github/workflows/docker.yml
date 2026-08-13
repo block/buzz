@@ -1,6 +1,6 @@
 name: Docker image
 
-# Builds and publishes the public Zorro relay images as ghcr.io/saleda/zorro.
+# Builds and publishes the public Zorro relay images as ghcr.io/saledaai/zorro.
 # Normal tags contain stripped binaries; matching debug-* tags contain the same
 # optimized binaries with line-table debug information for native profilers.
 #
@@ -76,8 +76,8 @@ env:
   # Single source of truth for the image name. Set GHCR_IMAGE as a repo
   # variable to override (e.g., for forks that want to push to their own
   # namespace without forking this file).
-  IMAGE_NAME: ${{ vars.GHCR_IMAGE != '' && vars.GHCR_IMAGE || 'ghcr.io/saleda/zorro' }}
-  PUSH_GATEWAY_IMAGE: ${{ vars.GHCR_PUSH_GATEWAY_IMAGE != '' && vars.GHCR_PUSH_GATEWAY_IMAGE || 'ghcr.io/saleda/zorro-push-gateway' }}
+  IMAGE_NAME: ${{ vars.GHCR_IMAGE != '' && vars.GHCR_IMAGE || 'ghcr.io/saledaai/zorro' }}
+  PUSH_GATEWAY_IMAGE: ${{ vars.GHCR_PUSH_GATEWAY_IMAGE != '' && vars.GHCR_PUSH_GATEWAY_IMAGE || 'ghcr.io/saledaai/zorro-push-gateway' }}
 
 jobs:
   build:
@@ -311,7 +311,7 @@ jobs:
 
       - name: Attest provenance for the merged image
         # Sigstore-signed in-toto attestation, verifiable with:
-        #   gh attestation verify oci://ghcr.io/saleda/zorro:<tag> --owner SaledaAI
+        #   gh attestation verify oci://ghcr.io/saledaai/zorro:<tag> --owner SaledaAI
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-name: ${{ env.IMAGE_NAME }}
@@ -402,8 +402,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.PUSH_GATEWAY_IMAGE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
-          cache-from: type=registry,ref=ghcr.io/saleda/zorro-push-gateway-buildcache:${{ matrix.arch }}
-          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/saleda/zorro-push-gateway-buildcache:{0},mode=max,compression=zstd', matrix.arch) || '' }}
+          cache-from: type=registry,ref=ghcr.io/saledaai/zorro-push-gateway-buildcache:${{ matrix.arch }}
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/saledaai/zorro-push-gateway-buildcache:{0},mode=max,compression=zstd', matrix.arch) || '' }}
       - name: Export digest
         if: github.event_name != 'pull_request'
         env:
