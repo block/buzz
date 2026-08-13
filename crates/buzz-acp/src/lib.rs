@@ -90,6 +90,27 @@ async fn publish_presence(
     Ok(())
 }
 
+/// Default `channel_add_policy` published when the operator sets none.
+///
+/// Matches the relay's `users.channel_add_policy` column default.
+const DEFAULT_CHANNEL_ADD_POLICY: &str = "anyone";
+
+/// Resolve the `channel_add_policy` this agent should advertise.
+///
+/// kind:10100 is *replaceable*, and `buzz channels set-agent-policy` writes the
+/// same kind carrying only this field. Republishing a hardcoded value would
+/// silently reset an operator's stricter policy (`owner_only` / `nobody`) back
+/// to `anyone` on the next restart or membership change — a security-loosening
+/// regression. Operators who set a non-default policy set this env var so the
+/// harness re-advertises it instead of clobbering it.
+fn resolve_channel_add_policy() -> String {
+    std::env::var("BUZZ_ACP_CHANNEL_ADD_POLICY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CHANNEL_ADD_POLICY.to_string())
+}
+
 /// Build the kind:10100 agent-profile content JSON.
 ///
 /// Field names are the cross-client contract: desktop reads them in
@@ -101,6 +122,7 @@ fn agent_profile_content(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     channel_ids: &HashSet<Uuid>,
+    channel_add_policy: &str,
 ) -> String {
     let mut allow: Vec<String> = allowlist.iter().map(|pk| pk.to_ascii_lowercase()).collect();
     allow.sort();
@@ -110,7 +132,7 @@ fn agent_profile_content(
         "respond_to": respond_to.to_string(),
         "respond_to_allowlist": allow,
         "channel_ids": channels,
-        "channel_add_policy": "anyone",
+        "channel_add_policy": channel_add_policy,
     })
     .to_string()
 }
@@ -132,7 +154,12 @@ async fn publish_agent_profile(
     use buzz_core::kind::KIND_AGENT_PROFILE;
     use nostr::{EventBuilder, Kind};
 
-    let content = agent_profile_content(respond_to, allowlist, channel_ids);
+    let content = agent_profile_content(
+        respond_to,
+        allowlist,
+        channel_ids,
+        &resolve_channel_add_policy(),
+    );
     let event = EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE as u16), content)
         .tags([])
         .sign_with_keys(keys)
@@ -154,7 +181,7 @@ mod agent_profile_content_tests {
         let ch = Uuid::parse_str("af804d33-a3c1-4415-858e-3747c296a613").unwrap();
         channels.insert(ch);
 
-        let content = agent_profile_content(&RespondTo::Allowlist, &allowlist, &channels);
+        let content = agent_profile_content(&RespondTo::Allowlist, &allowlist, &channels, "anyone");
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
 
         assert_eq!(parsed["respond_to"], "allowlist");
@@ -167,6 +194,20 @@ mod agent_profile_content_tests {
     }
 
     #[test]
+    fn channel_add_policy_is_overridable() {
+        // Operators with a stricter policy re-advertise it instead of having
+        // the harness reset them to the default on every republish.
+        let content = agent_profile_content(
+            &RespondTo::Anyone,
+            &HashSet::new(),
+            &HashSet::new(),
+            "owner_only",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["channel_add_policy"], "owner_only");
+    }
+
+    #[test]
     fn respond_to_strings_match_client_comparisons() {
         for (mode, expected) in [
             (RespondTo::Anyone, "anyone"),
@@ -174,7 +215,7 @@ mod agent_profile_content_tests {
             (RespondTo::Allowlist, "allowlist"),
             (RespondTo::Nobody, "nobody"),
         ] {
-            let content = agent_profile_content(&mode, &HashSet::new(), &HashSet::new());
+            let content = agent_profile_content(&mode, &HashSet::new(), &HashSet::new(), "anyone");
             let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
             assert_eq!(parsed["respond_to"], expected);
         }
