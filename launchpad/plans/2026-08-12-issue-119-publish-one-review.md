@@ -717,7 +717,8 @@ STEP 5  The incomplete case — an unfinished stage is never rendered as done. [
            (3) a report's `completion_marker` is absent, or is not the last key
            (4) a report's marker names a dimension other than that report's own
                `dimension` field
-           (5) two reports' markers carry DIFFERENT nonces
+           (5) a report's marker nonce differs from the merged document's `nonce`,
+               or two reports' markers disagree with each other
            (6) `findings_count` does not equal `len(findings)`
            (7) a dimension named by the manifest produced no report at all
            (8) a report has `status: complete` and no `outcome` — moved here from
@@ -730,28 +731,36 @@ STEP 5  The incomplete case — an unfinished stage is never rendered as done. [
                counting to seven, and the realistic bug is six real keys plus one
                typo, which counts to seven and passes. The banner names the
                difference in both directions.
-        On (5), and on what #119 CANNOT check. #117's marker is
-        BUZZ-DIMENSION-COMPLETE:{dimension}:{nonce} and the nonce is what makes it
-        unforgeable — but the nonce appears in NO field of the merged document and
-        in no field of the envelope, so a stage downstream has nothing to compare
-        it against. An earlier revision of this step said the marker is checked for
-        "the wrong dimension or nonce"; the dimension half is checkable against the
-        envelope's own `dimension`, and the nonce half is NOT, from this input.
-        What IS checkable is agreement: every report in one run carries the same
-        run nonce, so a single forged marker differs from its siblings and (5)
-        catches it. A run in which EVERY marker is forged is not detectable here at
-        all, and pretending otherwise would be the fail-open. That residual is
-        named in OPEN and flagged upstream rather than worked around.
-        (5) IS VACUOUS BELOW TWO REPORTS, and this is stated rather than left for a
-        reader to discover. Agreement needs siblings to disagree with, so a
-        single-dimension run — or a three-dimension run where two came back
-        `status: failed` — has NO nonce checking whatever, while (2) and (7) still
-        fire on the failures. The check's strength is proportional to how many
-        reports survived, and it is zero exactly when the run was already degraded.
-        That is not a reason to drop it; it is the reason the upstream fix matters.
-        A `nonce` key on #117's merged document would make the check absolute and
-        independent of report count, which is why OPEN raises it there rather than
-        treating (5) as sufficient.
+        On (5), and on what the nonce does and does not prove. #117's marker is
+        BUZZ-DIMENSION-COMPLETE:{dimension}:{nonce}, and #117 now emits that run
+        nonce as a top-level `nonce` key on the merged document. So the primary
+        check is direct: every report's marker nonce must equal the document's
+        `nonce`. Marker-to-marker agreement stays as a secondary, because a run
+        whose reports disagree with each other is broken whatever the document says.
+        ONE NONCE PER RUN, NOT PER DIMENSION. All reports embed the same value.
+        Two earlier revisions of this step got this wrong in opposite directions and
+        both are recorded so neither returns. The first said the marker is checked
+        for "the wrong dimension or nonce" when the nonce reached no downstream
+        stage at all, making the check unimplementable from this input — that gap
+        was raised against #117 and #117 closed it by adding the key. The second
+        replaced it with marker-to-marker agreement alone and described "another
+        dimension's nonce" as a test input. There is no such thing: one value per
+        run means a fixture built on that phrasing exercises nothing, which is a
+        test that cannot fail dressed as thoroughness.
+        WHAT THE KEY DOES NOT DO, in #117's words rather than this plan's
+        paraphrase: it is "not an authentication token for the document, only for a
+        marker echoed out of author text". A pull-request author can type a fixed
+        marker string into their own diff; they cannot know the run nonce, so a
+        forged marker fails against the document. Nothing here authenticates the
+        document itself — a compromised runner emits a self-consistent document with
+        its own nonce and this stage cannot tell. That residual is real, it is
+        bounded, and it must not be described as making the review unforgeable.
+        (5) is no longer vacuous on a single report. An earlier revision noted that
+        agreement needs siblings, so a one-dimension run — or a three-dimension run
+        where two came back `status: failed` — had no nonce checking at all, exactly
+        when the run was already degraded. The document nonce removes that: one
+        report is enough to check, because the comparison is against the document
+        rather than against a sibling.
         On (10), because a present-but-thin map is the dangerous shape. STEP 4
         derives nothing and `review.render_review` derives its "Incomplete" banner
         from `states` against `UNREADABLE_STATES`. A map populated only for the
@@ -773,8 +782,14 @@ STEP 5  The incomplete case — an unfinished stage is never rendered as done. [
         counted against the numbered list above rather than against the word
         "every"; for an input exhibiting none of them the banner is absent, which
         is the negative control that stops a banner that always fires from passing
-        all ten; a two-report input whose markers carry different nonces is
-        incomplete while the same input with matching nonces is not; a
+        all ten; a SINGLE-report input whose marker nonce differs from the document's
+        `nonce` is incomplete while the same input with a matching nonce is not —
+        one report, because the point of the document key is that agreement between
+        siblings is no longer what the check rests on; a two-report input whose
+        markers disagree with each other is also incomplete; and no fixture anywhere
+        in this step uses "another dimension's nonce", which is an input #117's
+        contract cannot produce — one nonce per run — so a test built on it would
+        pass against any implementation; a
         `containment.states` map naming six of the seven entry points is incomplete,
         AND so is one naming seven keys of which one is not in
         `contain.ENTRY_POINTS` — two inputs, because the second is the one a count
@@ -818,15 +833,23 @@ STEP 6  The clean case — no findings still posts, and says so.               [
 
 STEP 7  Wire the renderer into the CLI.                                  [needs 2, 4]
         `publish.py` gains a `main` reading one JSON document on stdin —
-        `{pr, head_sha, merge_base_sha, stages, reports, containment}`, where each
-        entry of `reports` is a #117 envelope verbatim and `containment` is the
+        `{pr, head_sha, merge_base_sha, stages, reports, containment, nonce}`, where
+        each entry of `reports` is a #117 envelope verbatim and `containment` is the
         block specified in STEP 4 — rendering it through publish_render, and
         calling post_or_update. A `--dry-run` prints the body and posts nothing.
         The document WRAPS #117's envelopes; it does not restate or rename a
         single field inside them, and `containment` is a sibling key precisely so
         that it does not have to. #117's contract quotes this shape back — "`reports`
-        and `containment` mean here exactly what they mean there" — so the six keys
+        and `containment` mean here exactly what they mean there" — so the keys
         are fixed by agreement between two plans and are not #119's to extend.
+        `nonce` IS THE SEVENTH KEY AND IT ARRIVES FROM #117, not from this plan.
+        #117's merged document now carries the run nonce at the top level, and its
+        change list names this step: "#119 should add `nonce` to its STEP 7 stdin
+        document as a sixth key and check each marker against it." Six of #117's
+        keys plus this plan's own `stages` makes seven here. STEP 5 condition (5) is
+        what consumes it, and until this key existed that condition was
+        unimplementable from this input — which is why it was raised upstream rather
+        than worked around locally.
         `--as <login>` IS WIRED HERE, defaulting to `github-actions[bot]`, and passed
         into find_existing as the expected-login parameter STEP 2 defined. The flag
         lives in this step because argument parsing lives in `main`; the comparison
@@ -1118,7 +1141,13 @@ STEP 12 launchpad/review-agent/PUBLISHING.md, and the cross-references.     [nee
         means a published excerpt shows a doubled tilde where the author wrote one,
         so a reader does not mistake the renderer's escape for the author's text;
         that `defect` and `failure` are NOT escaped, with the measured reason —
-        `contain.ESC` is a tilde and `~~` is markdown strikethrough; the credential
+        `contain.ESC` is a tilde and `~~` is markdown strikethrough; that each
+        report's completion-marker nonce is checked against the merged document's
+        `nonce`, that there is ONE nonce per run so no marker can legitimately carry
+        a different dimension's, and — stated as a limit rather than a feature —
+        that the key authenticates a marker echoed out of author text and NOT the
+        document, so a compromised runner is outside what this stage can detect and
+        the review must never be described as unforgeable; the credential
         and its two controls; and the fork-skip behaviour.
         Cross-referenced from CONTAINMENT.md's "Contract for later stages" table
         and from #117's FINDINGS.md, so the three documents point at each other
@@ -1275,23 +1304,28 @@ OPEN  Not for a builder to decide.
   to change to accommodate it; what had to change was ALREADY TRUE's claim that
   the key did not exist.
 
-  A NEW concern with the settled contract, flagged rather than worked around: the
-  marker nonce is unverifiable by this stage. #117 makes the completion marker
-  BUZZ-DIMENSION-COMPLETE:{dimension}:{nonce} and argues, correctly, that the
-  nonce is what stops a pull-request author typing a forged marker into their own
-  diff and a reviewer echoing it back. But the nonce is in no field of the finding
-  record, no field of the envelope, and none of the five merged-document keys — so
-  every stage after the runner receives markers it cannot check. #117's own
-  `validate(report)` has the same problem from the other side: it is specified to
-  reject a marker with the wrong nonce while taking one argument and reading a
-  document that does not carry one.
-  #119 does what it can: STEP 5 condition (5) rejects a run whose reports disagree
-  about the nonce, which catches any single forged marker, and this plan does NOT
-  claim to catch a run in which every marker is forged. The clean fix is upstream
-  and cheap — a `nonce` key on the merged document, which publishes nothing secret
-  because the markers already contain it — and it is #117's or #118's call, not a
-  builder's. Recorded here so that "the marker is unforgeable" is not read as a
-  property this stage enforces.
+  The third concern is ALSO DISCHARGED, and it is worth recording how, because the
+  mechanism is the point. An earlier revision flagged that the marker nonce was
+  unverifiable by this stage: #117 made the completion marker
+  BUZZ-DIMENSION-COMPLETE:{dimension}:{nonce} and argued, correctly, that the nonce
+  is what stops a pull-request author typing a forged marker into their own diff
+  and a reviewer echoing it back — but the nonce appeared in no field of the
+  finding record, no field of the envelope, and none of the merged document's keys,
+  so every stage after the runner received markers it could not check. #117's own
+  `validate(report)` had the same problem from the other side.
+  It was raised rather than worked around, and #117 closed it by adding a top-level
+  `nonce` key. STEP 5 condition (5) now checks each marker against the document's
+  value, STEP 7 takes it as a seventh stdin key, and the single-report blind spot
+  the old agreement-only check had is gone. That is the second time on this issue
+  that flagging a gap upstream produced a contract change rather than a local
+  workaround, and it is cheaper than either plan guessing.
+  WHAT IT STILL DOES NOT DO, kept because discharging a concern is not the same as
+  eliminating the risk. In #117's words, the key is "not an authentication token
+  for the document, only for a marker echoed out of author text". A forged marker
+  fails against the document nonce; a compromised RUNNER emits a self-consistent
+  document with its own nonce, and nothing at this stage can tell. That residual is
+  bounded and real, and no prose in this plan or in PUBLISHING.md may describe the
+  published review as unforgeable.
 
   Whether `defect` and `failure` should be escaped at all is #119's call and this
   plan has made it: yes, through `contain.escape`. They are model-authored prose
