@@ -478,6 +478,13 @@ test("appearance groups theme and preferences into labeled rows", async ({
   page,
 }) => {
   await seedTheme(page, "github-light");
+  await page.addInitScript((prominentActiveTabStorageKey) => {
+    window.localStorage.setItem(prominentActiveTabStorageKey, "true");
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  }, PROMINENT_ACTIVE_TAB_STORAGE_KEY);
   await installMockBridge(page);
   await openAppearance(page, "light");
   const themeCard = page.getByTestId("appearance-theme-card");
@@ -539,6 +546,22 @@ test("appearance groups theme and preferences into labeled rows", async ({
   await themeCard.getByTestId("theme-option-buzz").click();
   await expect(themeStyleTrigger).toHaveAttribute("aria-expanded", "true");
   await expect(themeStyleOptions).toBeVisible();
+  await expect(
+    themeCard.getByTestId("prominent-active-tab-toggle"),
+  ).toBeChecked();
+  const glassBeforeProminent = await themeCard.evaluate((card) => {
+    const glass = card.querySelector('[data-testid="glass-background-toggle"]');
+    const prominent = card.querySelector(
+      '[data-testid="prominent-active-tab-row"]',
+    );
+    return Boolean(
+      glass &&
+        prominent &&
+        glass.compareDocumentPosition(prominent) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+  expect(glassBeforeProminent).toBe(true);
 
   const colorModeLabelBox = await themeCard
     .getByTestId("appearance-color-mode-row")
@@ -1127,6 +1150,49 @@ test("glass background keeps the content panel solid", async ({ page }) => {
     .toBe("false");
 });
 
+test("glass background is unavailable on Linux", async ({ page }) => {
+  await seedTheme(page, "buzz");
+  await page.addInitScript((storageKey) => {
+    window.localStorage.setItem(storageKey, "true");
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "Linux x86_64",
+    });
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      get: () => "Buzz Desktop Linux",
+    });
+  }, GLASS_BACKGROUND_STORAGE_KEY);
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  await expect(page.getByTestId("glass-background-row")).toHaveCount(0);
+  await expect(page.getByTestId("glass-background-toggle")).toHaveCount(0);
+  await expect(page.getByTestId("glass-opacity-slider")).toHaveCount(0);
+  await expect(page.locator("html")).not.toHaveAttribute(
+    "data-glass-background",
+    "",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) => entry.command === "set_window_vibrancy",
+        ),
+      ),
+    )
+    .toBe(false);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => window.localStorage.getItem(storageKey),
+        GLASS_BACKGROUND_STORAGE_KEY,
+      ),
+    )
+    .toBe("true");
+});
+
 test("non-Buzz glass preserves the selected theme sidebar tint", async ({
   page,
 }) => {
@@ -1178,6 +1244,12 @@ test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
   // non-Buzz tile brings it back. Asserts the presence toggle (the motion
   // wrapper) works end to end.
   await seedTheme(page, "github-light");
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
   await installMockBridge(page);
   await openAppearance(page, "light");
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();

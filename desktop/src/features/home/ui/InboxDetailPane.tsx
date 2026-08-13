@@ -102,6 +102,7 @@ type InboxDetailPaneProps = {
   latchedDefaultParentId?: string | null;
   onBack?: () => void;
   onDelete: () => void;
+  onDeleteMessage: (eventId: string) => void;
   onEditTargetChange: React.Dispatch<React.SetStateAction<string | null>>;
   onEditSave: (input: {
     content: string;
@@ -170,6 +171,7 @@ function InboxMessageDetailPane({
   latchedDefaultParentId = null,
   onBack,
   onDelete,
+  onDeleteMessage,
   onEditTargetChange,
   onEditSave,
   onRequestEmptyEditDelete,
@@ -663,6 +665,11 @@ function InboxMessageDetailPane({
                   isFocusHighlightVisible={isFocusHighlightVisible}
                   key={message.id}
                   message={message}
+                  onDelete={
+                    canEditMessage
+                      ? () => onDeleteMessage(message.id)
+                      : undefined
+                  }
                   onEdit={canEditMessage ? handleSelectEditTarget : undefined}
                   onSelectReplyTarget={handleSelectReplyTarget}
                   onToggleReaction={onToggleReaction}

@@ -7,6 +7,7 @@
 
   .buzz-huddle-shell {
     --buzz-huddle-drawer-height: 5rem;
+    --buzz-huddle-drawer-inset: 8px;
     --buzz-huddle-drawer-radius: 24px;
     --buzz-huddle-drawer-ease: cubic-bezier(0.32, 0.72, 0, 1);
     --buzz-huddle-drawer-surface: var(--huddle-drawer-surface, 0 0% 0%);
