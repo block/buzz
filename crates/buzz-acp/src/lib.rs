@@ -3677,6 +3677,20 @@ fn spawn_failure_notice(
     }
 }
 
+/// Spawn a task that publishes the visible text from a successful ACP turn.
+fn spawn_success_reply(
+    rest_client: Option<&relay::RestClient>,
+    batch: FlushBatch,
+    content: String,
+) {
+    if let Some(rest) = rest_client {
+        let rest = rest.clone();
+        tokio::spawn(async move {
+            pool::post_success_reply(&rest, &batch, &content).await;
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -3717,6 +3731,16 @@ fn handle_prompt_result(
                 .mark_channel_delivery_success(*channel_id, false, event_ids);
         }
     }
+
+    // Successful turns retain the triggering batch solely so the streamed ACP
+    // text can be published with the correct channel, thread, and recipient.
+    // Remove it before the failure/requeue state machine below, where any
+    // remaining batch necessarily belongs to an unsuccessful turn.
+    let success_batch = if matches!(result.outcome, PromptOutcome::Ok(_)) {
+        result.batch.take()
+    } else {
+        None
+    };
 
     // The hard-timeout death_message (below) must describe the batch's
     // *actual* fate, not just the `recently_active` eligibility flag — a
@@ -3897,6 +3921,12 @@ fn handle_prompt_result(
     match result.outcome {
         // Successful prompt — return agent to pool.
         PromptOutcome::Ok(_) => {
+            let response_text = result.agent.acp.take_agent_response_text();
+            if let Some(batch) = success_batch {
+                if !removed_channels.contains(&batch.channel_id) {
+                    spawn_success_reply(rest_client, batch, response_text);
+                }
+            }
             tracing::debug!(
                 agent = agent_index,
                 outcome = outcome_label,
