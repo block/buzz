@@ -129,7 +129,7 @@ function New-CodexAcpOfflineBundle {
         $PreviousNpmCache = $env:npm_config_cache
         $env:npm_config_cache = $NpmCache
         try {
-            Invoke-NativeCommand -FilePath $Npm -Arguments @(
+            $null = Invoke-NativeCommand -FilePath $Npm -Arguments @(
                 "install",
                 "--global",
                 "--prefix", $PayloadTools,
