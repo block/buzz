@@ -214,6 +214,10 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Text emitted in `agent_message_chunk` notifications for the current
+    /// `session/prompt` request. The harness uses this as a last-resort reply
+    /// body when an adapter cannot invoke the Buzz CLI itself.
+    turn_agent_message: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +567,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            turn_agent_message: String::new(),
         })
     }
 
@@ -781,6 +786,10 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        // A client can issue an initial-message prompt immediately before the
+        // user turn. Keep only the chunks emitted by this prompt so the
+        // harness fallback never republishes stale setup output.
+        self.turn_agent_message.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1755,6 +1764,7 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.turn_agent_message.push_str(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -1851,6 +1861,11 @@ impl AcpClient {
                 false
             }
         }
+    }
+
+    /// Take the text emitted by the most recent `session/prompt` turn.
+    pub(crate) fn take_turn_agent_message(&mut self) -> String {
+        std::mem::take(&mut self.turn_agent_message)
     }
 
     /// Record the standard ACP cumulative cost notification when emitted by
@@ -3073,6 +3088,39 @@ mod tests {
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "expected IdleTimeout, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_agent_message_is_accumulated_and_reset_per_turn() {
+        let script = r#"
+            read -r _first_prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"hello "}}}}'
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"world"}}}}'
+            echo '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+            read -r _second_prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"next"}}}}'
+            echo '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+        "#;
+        let mut client = spawn_script(script).await;
+        let idle = std::time::Duration::from_secs(2);
+        let hard = std::time::Duration::from_secs(5);
+
+        assert!(matches!(
+            client
+                .session_prompt_with_idle_timeout("session", "first", idle, hard)
+                .await,
+            Ok(StopReason::EndTurn)
+        ));
+        assert_eq!(client.take_turn_agent_message(), "hello world");
+
+        assert!(matches!(
+            client
+                .session_prompt_with_idle_timeout("session", "second", idle, hard)
+                .await,
+            Ok(StopReason::EndTurn)
+        ));
+        assert_eq!(client.take_turn_agent_message(), "next");
+        client.shutdown().await;
     }
 
     #[tokio::test]

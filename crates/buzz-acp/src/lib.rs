@@ -2317,6 +2317,7 @@ async fn tokio_main() -> Result<()> {
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
+                        reply_fallback: None,
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
@@ -3847,6 +3848,35 @@ fn handle_prompt_result(
         result.agent.state.invalidate_channel(ch);
     }
 
+    // Some ACP adapters intentionally keep secret environment variables out
+    // of model-generated terminal commands. If the turn completed with text,
+    // let the authenticated harness publish it — but only after the relay-side
+    // duplicate check in `post_agent_reply_fallback` confirms the agent did not
+    // already send a message itself.
+    let fallback = if matches!(
+        &result.outcome,
+        PromptOutcome::Ok(acp::StopReason::EndTurn | acp::StopReason::Refusal)
+    ) {
+        let content = result.agent.acp.take_turn_agent_message();
+        result
+            .agent
+            .reply_fallback
+            .take()
+            .filter(|context| !removed_channels.contains(&context.channel_id))
+            .map(|context| (context, content))
+            .filter(|(_, content)| !content.trim().is_empty())
+    } else {
+        result.agent.reply_fallback = None;
+        let _ = result.agent.acp.take_turn_agent_message();
+        None
+    };
+    if let (Some(rest), Some((context, content))) = (rest_client, fallback) {
+        let rest = rest.clone();
+        tokio::spawn(async move {
+            pool::post_agent_reply_fallback(&rest, &context, &content).await;
+        });
+    }
+
     let outcome_label = match &result.outcome {
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
@@ -4488,6 +4518,7 @@ async fn initialize_agent_pool(
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
+                            reply_fallback: None,
                         }));
                     }
                     Ok(Err(e)) => {
@@ -6798,6 +6829,7 @@ mod error_outcome_emission_tests {
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
+            reply_fallback: None,
         }
     }
 
