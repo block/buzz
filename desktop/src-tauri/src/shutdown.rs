@@ -7,6 +7,20 @@ use crate::managed_agents::{
 };
 use crate::{prevent_sleep, util};
 
+#[cfg(unix)]
+fn managed_agent_leader_exited(pid: u32, owns_child: bool) -> bool {
+    if owns_child && buzz_terminal::lifecycle::child_exited_without_reaping(pid) {
+        return true;
+    }
+
+    !managed_agents::process_is_running(pid)
+}
+
+#[cfg(not(unix))]
+fn managed_agent_leader_exited(pid: u32, _owns_child: bool) -> bool {
+    !managed_agents::process_is_running(pid)
+}
+
 pub(crate) fn is_restart_request(code: Option<i32>) -> bool {
     code == Some(tauri::RESTART_EXIT_CODE)
 }
@@ -191,12 +205,16 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
             }
         }
 
-        // Wait up to 2s for all to exit, checking in a polling loop.
+        // Wait up to 2s for all leaders to exit. `kill(pid, 0)` alone cannot
+        // detect an exited direct child: it continues to report a zombie as
+        // present until that child is reaped. Observe owned children with
+        // waitid(WNOWAIT) instead, keeping their PIDs reserved until the group
+        // sweep below has killed any surviving descendants.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if to_stop
                 .iter()
-                .all(|a| !managed_agents::process_is_running(a.pid))
+                .all(|agent| managed_agent_leader_exited(agent.pid, agent.runtime.is_some()))
             {
                 break;
             }
@@ -206,7 +224,10 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        // Fan-out: SIGKILL any survivors.
+        // Fan-out: SIGKILL surviving groups even when their leaders exited
+        // politely. A WNOWAIT-observed leader remains a zombie, so kill(0)
+        // still holds the group ID safe while this catches descendants that
+        // did not honor SIGTERM.
         #[cfg(unix)]
         for agent in &to_stop {
             if managed_agents::process_is_running(agent.pid) {
@@ -269,12 +290,56 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
 
 #[cfg(test)]
 mod tests {
-    use super::is_restart_request;
+    use super::{is_restart_request, managed_agent_leader_exited};
 
     #[test]
     fn only_tauri_restart_exit_code_requests_a_relaunch() {
         assert!(is_restart_request(Some(tauri::RESTART_EXIT_CODE)));
         assert!(!is_restart_request(None));
         assert!(!is_restart_request(Some(0)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_agent_leaders_are_observed_before_reaping() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut children: Vec<_> = (0..3)
+            .map(|_| {
+                Command::new("/bin/sh")
+                    .args(["-c", "exit 0"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn cooperative agent fixture")
+            })
+            .collect();
+        let pids: Vec<_> = children.iter().map(std::process::Child::id).collect();
+        let deadline = Instant::now() + Duration::from_millis(500);
+
+        while !pids
+            .iter()
+            .all(|pid| managed_agent_leader_exited(*pid, true))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            pids.iter()
+                .all(|pid| managed_agent_leader_exited(*pid, true)),
+            "cooperative leaders should be detected without reaching the shutdown grace ceiling"
+        );
+        assert!(
+            pids.iter()
+                .all(|pid| crate::managed_agents::process_is_running(*pid)),
+            "the exit probe must leave child PIDs reserved until group cleanup"
+        );
+
+        for child in &mut children {
+            child.wait().expect("reap cooperative agent fixture");
+        }
     }
 }
