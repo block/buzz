@@ -257,6 +257,31 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
             return;
         }
     };
+    // Result-gated task events must use the same per-recipient owner fence on
+    // the Redis path as on local ingest. The shared access filter handles
+    // tenant/channel membership; this gate handles plaintext task privacy.
+    let owner_only_kind = buzz_core::kind::RESULT_GATED_KINDS
+        .contains(&buzz_core::kind::event_kind_u32(&stored.event));
+    let owner_hex = owner_only_kind.then(|| {
+        let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+        stored
+            .event
+            .tags
+            .filter(nostr::TagKind::SingleLetter(p))
+            .find_map(|tag| tag.content().map(str::to_owned))
+    });
+    let owner_hex = owner_hex.flatten();
+    let matches: Vec<_> = matches
+        .into_iter()
+        .filter(|(conn_id, _)| {
+            owner_hex.as_deref().is_none_or(|owner| {
+                state
+                    .conn_manager
+                    .pubkey_for(*conn_id)
+                    .is_some_and(|pubkey| hex::encode(pubkey) == owner)
+            })
+        })
+        .collect();
     let frames = fanout_frame_cache(
         matches.iter().map(|(_, sub_id)| sub_id.as_str()),
         &event_json,

@@ -93,11 +93,13 @@ source identity:
 (community_id, channel_id, source_event_id, assignee_pubkey)
 ```
 
-Exact signed-event replay is a no-op. A transition with a lower or equal
-`sourceVersion` is stored for audit but does not change the projection. A newer
-version may update only an open task and must not move `sourceUpdatedAt`
-backward. `resolved` and `withdrawn` are terminal; later transitions are
-rejected and their event insert is rolled back.
+Exact signed-event replay is a no-op. A lower `sourceVersion` is stored for
+audit but does not change the projection. A conflicting equal `sourceVersion`
+is rejected and its event insert is rolled back, making the committed winner
+publicly deterministic for every Nostr reader. A newer version may update only
+an open task and must not move `sourceUpdatedAt` backward. `resolved` and
+`withdrawn` are terminal; later transitions are rejected and their event insert
+is rolled back.
 
 A kind 5 or kind 9005 deletion of a task event tombstones that event and
 rebuilds the projection from the remaining live signed stream in one
@@ -133,7 +135,9 @@ Content-Type: application/json
 Clients fold task events by `sourceVersion` using the replay rules above. The
 deletion kinds use a separate filter because standard NIP-09 deletions can be
 channel-less (kind 5 derives channel access from its target) and are not
-`p`-tagged task payloads. A client applies a deletion only to an `e`-tag target
+`p`-tagged task payloads. Buzz's relay filter matcher applies `#h` to that
+server-derived target channel for channel-less kind 5 events; clients must use
+the separate deletion filter above. A client applies a deletion only to an `e`-tag target
 that is one of the task events in its local owner fold; unrelated channel
 deletions are ignored. The relay's normal NIP-42/NIP-98 authentication, target
 channel membership, and per-result gates still apply. A deletion event is only

@@ -411,6 +411,11 @@ async fn require_open_newer(
         .ok_or_else(|| DbError::NotFound("Buzz Task transition target".into()))?;
     validate_identity(&existing, task)?;
     if source_version <= existing.source_version {
+        if source_version == existing.source_version {
+            return Err(DbError::InvalidData(
+                "conflicting Buzz Task transition reuses sourceVersion".into(),
+            ));
+        }
         return Ok(None);
     }
     if existing.status != TaskStatus::Open {
@@ -561,11 +566,8 @@ pub async fn soft_delete_task_event_and_rebuild_projection(
                 .then_with(|| left_event.event.id.cmp(&right_event.event.id))
         });
 
-        // Equal sourceVersion transitions are accepted as signed audit events,
-        // but the projection keeps the winner selected by the serialized write
-        // path. The persisted task_event_id above is therefore the tie-breaker
-        // during replay, so deleting a different equal-version loser cannot
-        // flip the projection.
+        // Conflicting equal sourceVersion transitions are rejected at ingest,
+        // so every public Nostr reader and this rebuild see one winner.
         let folded = fold_live_projection(live)?;
         sqlx::query("DELETE FROM buzz_tasks WHERE community_id=$1 AND id=$2")
             .bind(community_id.as_uuid())

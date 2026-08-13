@@ -537,7 +537,7 @@ async fn deleting_task_events_replays_projection_from_remaining_live_events() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn equal_version_replay_keeps_the_persisted_projection_winner() {
+async fn equal_version_transition_is_rejected_without_projection_change() {
     let fixture = Fixture::new().await;
     let task_id = Uuid::new_v4();
     let base = Utc::now().timestamp() as u64;
@@ -548,7 +548,8 @@ async fn equal_version_replay_keeps_the_persisted_projection_winner() {
 
     fixture.apply(&requested).await.unwrap();
     fixture.apply(&resolved).await.unwrap();
-    fixture.apply(&competing_update).await.unwrap();
+    let conflict = fixture.apply(&competing_update).await;
+    assert!(conflict.is_err());
 
     let winner: Vec<u8> =
         sqlx::query_scalar("SELECT task_event_id FROM buzz_tasks WHERE community_id=$1 AND id=$2")
@@ -559,13 +560,6 @@ async fn equal_version_replay_keeps_the_persisted_projection_winner() {
             .unwrap();
     assert_eq!(winner, resolved.id.as_bytes());
 
-    assert!(soft_delete_task_event_and_rebuild_projection(
-        &fixture.pool,
-        fixture.community,
-        competing_update.id.as_bytes(),
-    )
-    .await
-    .unwrap());
     let state: (String, i64, String) = sqlx::query_as(
         "SELECT status, source_version, title FROM buzz_tasks WHERE community_id=$1 AND id=$2",
     )
@@ -575,6 +569,18 @@ async fn equal_version_replay_keeps_the_persisted_projection_winner() {
     .await
     .unwrap();
     assert_eq!(state, ("resolved".into(), 2, "Version one".into()));
+
+    let conflict_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
+            .bind(fixture.community.as_uuid())
+            .bind(competing_update.id.as_bytes().as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        conflict_count, 0,
+        "conflicting transition must roll back event"
+    );
 
     fixture.teardown().await;
 }
