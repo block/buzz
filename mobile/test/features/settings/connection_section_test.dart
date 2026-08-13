@@ -31,6 +31,7 @@ void main() {
         ],
         child: SettingsPage(
           profileHeader: const SizedBox.shrink(),
+          invitePageBuilder: (_) => const SizedBox.shrink(),
           identityRecoveryPageBuilder: (_) =>
               const Scaffold(body: Text('Identity recovery')),
         ),
@@ -68,6 +69,7 @@ void main() {
         ],
         child: SettingsPage(
           profileHeader: const SizedBox.shrink(),
+          invitePageBuilder: (_) => const SizedBox.shrink(),
           identityRecoveryPageBuilder: (_) =>
               const Scaffold(body: Text('Identity recovery')),
         ),
@@ -106,6 +108,7 @@ void main() {
         ],
         child: SettingsPage(
           profileHeader: const SizedBox.shrink(),
+          invitePageBuilder: (_) => const SizedBox.shrink(),
           identityRecoveryPageBuilder: (_) =>
               const Scaffold(body: Text('Identity recovery')),
         ),
