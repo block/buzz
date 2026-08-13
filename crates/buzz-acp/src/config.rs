@@ -489,6 +489,21 @@ pub struct CliArgs {
     /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,
+
+    /// Maps a NIP-MP project `d`-tag id to a local checkout path this harness
+    /// can dispatch agent work into, e.g. `bidcraft=E:/Projects/buildbid`.
+    /// Comma-separated `id=path` pairs. A channel bound to a project (see
+    /// `--channel-projects`) resolves through this map to pick the
+    /// spawned agent's working directory instead of the harness's own cwd.
+    #[arg(long, env = "BUZZ_ACP_PROJECT_PATHS", value_delimiter = ',')]
+    pub project_paths: Option<Vec<String>>,
+
+    /// Binds a channel (UUID) to a project id from `--project-paths`, e.g.
+    /// `3fa85f64-...=bidcraft`. Comma-separated `channel_uuid=project_id`
+    /// pairs. Agent turns dispatched in a bound channel run with that
+    /// project's cwd instead of the harness's own working directory.
+    #[arg(long, env = "BUZZ_ACP_CHANNEL_PROJECTS", value_delimiter = ',')]
+    pub channel_projects: Option<Vec<String>>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -579,6 +594,13 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// NIP-MP project `d`-tag id -> local checkout path this harness may
+    /// dispatch agent work into. Populated from `--project-paths`.
+    pub project_paths: HashMap<String, PathBuf>,
+    /// Channel id -> project id, populated from `--channel-projects`.
+    /// Resolved through `project_paths` at `PromptContext` build time to
+    /// produce the effective per-channel cwd.
+    pub channel_projects: HashMap<Uuid, String>,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -1071,6 +1093,9 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        let project_paths = parse_project_paths(args.project_paths)?;
+        let channel_projects = parse_channel_projects(args.channel_projects)?;
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
@@ -1122,6 +1147,8 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            project_paths,
+            channel_projects,
         };
 
         Ok(config)
@@ -1247,6 +1274,116 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
     }
 
     Ok(config.rules)
+}
+
+/// Parse `--project-paths` entries (`id=path` pairs) into a validated map.
+///
+/// Rejects an empty id, an empty path, or a duplicate id — all indicate a
+/// typo'd flag rather than a deliberate mapping, and failing fast here beats
+/// silently dropping (or overwriting) a project binding at dispatch time.
+fn parse_project_paths(raw: Option<Vec<String>>) -> Result<HashMap<String, PathBuf>, ConfigError> {
+    let mut map = HashMap::new();
+    for entry in raw.into_iter().flatten() {
+        let Some((id, path)) = entry.split_once('=') else {
+            return Err(ConfigError::ConfigFile(format!(
+                "--project-paths entry '{entry}' is not in 'id=path' form"
+            )));
+        };
+        let (id, path) = (id.trim(), path.trim());
+        if id.is_empty() || path.is_empty() {
+            return Err(ConfigError::ConfigFile(format!(
+                "--project-paths entry '{entry}' has an empty id or path"
+            )));
+        }
+        if map.insert(id.to_string(), PathBuf::from(path)).is_some() {
+            return Err(ConfigError::ConfigFile(format!(
+                "--project-paths has duplicate id '{id}'"
+            )));
+        }
+    }
+    Ok(map)
+}
+
+/// Resolve a NIP-MP project id to the local checkout path an agent dispatched
+/// against that project should run in, per `--project-paths` config.
+/// Returns `None` for an unbound/unknown project id — callers fall back to
+/// the harness's own working directory.
+pub fn resolve_project_path(config: &Config, project_id: &str) -> Option<PathBuf> {
+    config.project_paths.get(project_id).cloned()
+}
+
+/// Parse `--channel-projects` entries (`channel_uuid=project_id` pairs).
+///
+/// Rejects a malformed entry, a non-UUID channel id, or a duplicate channel
+/// binding — the same fail-fast rationale as [`parse_project_paths`]. Does
+/// NOT validate the project id exists in `project_paths`; an unbound-at-startup
+/// project id is caught later when the harness resolves cwds and warns instead
+/// of crashing (a project path config change shouldn't require restarting a
+/// harness whose channel bindings didn't move).
+fn parse_channel_projects(raw: Option<Vec<String>>) -> Result<HashMap<Uuid, String>, ConfigError> {
+    let mut map = HashMap::new();
+    for entry in raw.into_iter().flatten() {
+        let Some((channel, project_id)) = entry.split_once('=') else {
+            return Err(ConfigError::ConfigFile(format!(
+                "--channel-projects entry '{entry}' is not in 'channel_uuid=project_id' form"
+            )));
+        };
+        let (channel, project_id) = (channel.trim(), project_id.trim());
+        let channel_id = channel.parse::<Uuid>().map_err(|_| {
+            ConfigError::ConfigFile(format!(
+                "--channel-projects entry '{entry}' has an invalid channel UUID"
+            ))
+        })?;
+        if project_id.is_empty() {
+            return Err(ConfigError::ConfigFile(format!(
+                "--channel-projects entry '{entry}' has an empty project id"
+            )));
+        }
+        if map.insert(channel_id, project_id.to_string()).is_some() {
+            return Err(ConfigError::ConfigFile(format!(
+                "--channel-projects has duplicate channel id '{channel_id}'"
+            )));
+        }
+    }
+    Ok(map)
+}
+
+/// Precompute the effective cwd for every channel bound to a project, once at
+/// harness startup. A channel absent from the returned map has no override —
+/// callers fall back to the harness's own default cwd.
+///
+/// Validates each resolved path is absolute and exists on disk; an invalid or
+/// unbound-project entry is logged and skipped rather than crashing startup —
+/// a stale `--channel-projects` binding (e.g. a project path config change)
+/// shouldn't take down an otherwise-healthy harness. Skipping instead of
+/// silently trusting an unresolvable path also closes the path-traversal
+/// concern of handing an agent subprocess a cwd derived from unvalidated
+/// config.
+pub fn build_channel_cwd_map(config: &Config) -> HashMap<Uuid, String> {
+    let mut result = HashMap::new();
+    for (channel_id, project_id) in &config.channel_projects {
+        let Some(path) = resolve_project_path(config, project_id) else {
+            tracing::warn!(
+                %channel_id,
+                project_id,
+                "channel is bound to an unknown project id (not in --project-paths) — \
+                 dispatches in this channel will use the harness's default cwd"
+            );
+            continue;
+        };
+        if !path.is_absolute() || !path.exists() {
+            tracing::warn!(
+                %channel_id,
+                project_id,
+                path = %path.display(),
+                "resolved project path is not an absolute, existing directory — \
+                 dispatches in this channel will use the harness's default cwd"
+            );
+            continue;
+        }
+        result.insert(*channel_id, path.to_string_lossy().into_owned());
+    }
+    result
 }
 
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
@@ -1494,6 +1631,8 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            project_paths: HashMap::new(),
+            channel_projects: HashMap::new(),
         }
     }
 
@@ -2981,5 +3120,147 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+
+    #[test]
+    fn parse_project_paths_none_is_empty_map() {
+        let map = parse_project_paths(None).unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn parse_project_paths_parses_id_equals_path_pairs() {
+        let raw = vec![
+            "bidcraft=E:/Projects/buildbid".to_string(),
+            "construct-pro=E:/Projects/construct-pro".to_string(),
+        ];
+        let map = parse_project_paths(Some(raw)).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get("bidcraft").unwrap(),
+            &PathBuf::from("E:/Projects/buildbid")
+        );
+        assert_eq!(
+            map.get("construct-pro").unwrap(),
+            &PathBuf::from("E:/Projects/construct-pro")
+        );
+    }
+
+    #[test]
+    fn parse_project_paths_rejects_missing_equals() {
+        let err = parse_project_paths(Some(vec!["bidcraft-only-id".to_string()])).unwrap_err();
+        assert!(matches!(err, ConfigError::ConfigFile(_)));
+    }
+
+    #[test]
+    fn parse_project_paths_rejects_empty_id_or_path() {
+        assert!(parse_project_paths(Some(vec!["=E:/Projects/buildbid".to_string()])).is_err());
+        assert!(parse_project_paths(Some(vec!["bidcraft=".to_string()])).is_err());
+    }
+
+    #[test]
+    fn parse_project_paths_rejects_duplicate_id() {
+        let raw = vec![
+            "bidcraft=E:/Projects/buildbid".to_string(),
+            "bidcraft=E:/Projects/other".to_string(),
+        ];
+        assert!(parse_project_paths(Some(raw)).is_err());
+    }
+
+    #[test]
+    fn resolve_project_path_known_and_unknown_ids() {
+        let mut config = test_config(SubscribeMode::All);
+        config.project_paths.insert(
+            "bidcraft".to_string(),
+            PathBuf::from("E:/Projects/buildbid"),
+        );
+
+        assert_eq!(
+            resolve_project_path(&config, "bidcraft"),
+            Some(PathBuf::from("E:/Projects/buildbid"))
+        );
+        assert_eq!(resolve_project_path(&config, "unknown-project"), None);
+    }
+
+    #[test]
+    fn parse_channel_projects_none_is_empty_map() {
+        assert!(parse_channel_projects(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_channel_projects_parses_uuid_equals_project_id() {
+        let channel_id = Uuid::new_v4();
+        let raw = vec![format!("{channel_id}=bidcraft")];
+        let map = parse_channel_projects(Some(raw)).unwrap();
+        assert_eq!(map.get(&channel_id).unwrap(), "bidcraft");
+    }
+
+    #[test]
+    fn parse_channel_projects_rejects_invalid_uuid() {
+        assert!(parse_channel_projects(Some(vec!["not-a-uuid=bidcraft".to_string()])).is_err());
+    }
+
+    #[test]
+    fn parse_channel_projects_rejects_empty_project_id() {
+        let channel_id = Uuid::new_v4();
+        assert!(parse_channel_projects(Some(vec![format!("{channel_id}=")])).is_err());
+    }
+
+    #[test]
+    fn parse_channel_projects_rejects_duplicate_channel() {
+        let channel_id = Uuid::new_v4();
+        let raw = vec![
+            format!("{channel_id}=bidcraft"),
+            format!("{channel_id}=construct-pro"),
+        ];
+        assert!(parse_channel_projects(Some(raw)).is_err());
+    }
+
+    #[test]
+    fn build_channel_cwd_map_resolves_bound_existing_project() {
+        let mut config = test_config(SubscribeMode::All);
+        let channel_id = Uuid::new_v4();
+        // Use the current crate dir as a real, existing, absolute path stand-in.
+        let existing_dir = std::env::current_dir().unwrap();
+        config
+            .project_paths
+            .insert("bidcraft".to_string(), existing_dir.clone());
+        config
+            .channel_projects
+            .insert(channel_id, "bidcraft".to_string());
+
+        let map = build_channel_cwd_map(&config);
+        assert_eq!(
+            map.get(&channel_id).unwrap(),
+            &existing_dir.to_string_lossy().into_owned()
+        );
+    }
+
+    #[test]
+    fn build_channel_cwd_map_skips_channel_bound_to_unknown_project() {
+        let mut config = test_config(SubscribeMode::All);
+        let channel_id = Uuid::new_v4();
+        config
+            .channel_projects
+            .insert(channel_id, "no-such-project".to_string());
+
+        let map = build_channel_cwd_map(&config);
+        assert!(!map.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn build_channel_cwd_map_skips_nonexistent_path() {
+        let mut config = test_config(SubscribeMode::All);
+        let channel_id = Uuid::new_v4();
+        config.project_paths.insert(
+            "bidcraft".to_string(),
+            PathBuf::from("Z:/definitely/does/not/exist/anywhere"),
+        );
+        config
+            .channel_projects
+            .insert(channel_id, "bidcraft".to_string());
+
+        let map = build_channel_cwd_map(&config);
+        assert!(!map.contains_key(&channel_id));
     }
 }

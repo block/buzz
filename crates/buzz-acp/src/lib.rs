@@ -2182,6 +2182,7 @@ async fn tokio_main() -> Result<()> {
             .unwrap_or_else(|_| std::path::PathBuf::from("/"))
             .to_string_lossy()
             .to_string(),
+        channel_cwd: crate::config::build_channel_cwd_map(&config),
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -6765,6 +6766,8 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            project_paths: std::collections::HashMap::new(),
+            channel_projects: std::collections::HashMap::new(),
         }
     }
 
@@ -6988,6 +6991,8 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            project_paths: std::collections::HashMap::new(),
+            channel_projects: std::collections::HashMap::new(),
         }
     }
 
