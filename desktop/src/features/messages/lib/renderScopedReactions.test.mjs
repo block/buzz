@@ -42,6 +42,15 @@ function makeQueryClientStub(initialEvents = []) {
     getQueryData(key) {
       return store.get(JSON.stringify(key));
     },
+    // Mirrors React Query: an absent key has no state object, a present one
+    // reports its cached data. `updateRetainedMessageUnit`'s fence reads this to
+    // tell an evicted key (skip the write) from a live one.
+    getQueryState(key) {
+      const k = JSON.stringify(key);
+      return store.has(k)
+        ? { data: store.get(k), status: "success", fetchStatus: "idle" }
+        : undefined;
+    },
     setQueryData(key, updater) {
       const k = JSON.stringify(key);
       const next =

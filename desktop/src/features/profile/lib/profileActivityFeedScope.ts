@@ -4,6 +4,7 @@ import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore"
 import { subscribeActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
+  getAgentChannelActivity,
   getAgentObserverSnapshot,
   getAgentTranscript,
   subscribeAgentObserverStore,
@@ -98,6 +99,7 @@ function stableFeedScope(
 function collectChannelIdsFromFeed(
   events: readonly ObserverEvent[],
   transcript: readonly TranscriptItem[],
+  channelActivity: Record<string, number>,
 ): string[] {
   const channelIds = new Set<string>();
   for (const event of events) {
@@ -109,6 +111,13 @@ function collectChannelIdsFromFeed(
     if (item.channelId) {
       channelIds.add(item.channelId);
     }
+  }
+  // Fold in channels from the durable per-agent summary. `events` is truncated
+  // to the unpinned tail, so a channel whose last event fell out of the tail is
+  // absent above but still present here — without this union it would vanish
+  // from the switcher for an idle, unpinned agent.
+  for (const channelId of Object.keys(channelActivity)) {
+    channelIds.add(channelId);
   }
   return [...channelIds].sort((left, right) => left.localeCompare(right));
 }
@@ -143,10 +152,12 @@ function collectLatestActivityAtByChannel({
   activeTurns,
   events,
   transcript,
+  channelActivity,
 }: {
   activeTurns: readonly ActiveTurnSummary[];
   events: readonly ObserverEvent[];
   transcript: readonly TranscriptItem[];
+  channelActivity: Record<string, number>;
 }): Record<string, number> {
   const latestActivityAtByChannel: Record<string, number> = {};
 
@@ -178,6 +189,14 @@ function collectLatestActivityAtByChannel({
     }
   }
 
+  // Fold in the durable per-agent summary last. It carries one recency per
+  // channel that survives the unpinned-tail truncation of `events`, so a
+  // channel dropped from the tail keeps its last-known activity here. `record`
+  // takes the max, so a fresher live event or active turn still wins.
+  for (const [channelId, timestamp] of Object.entries(channelActivity)) {
+    record(channelId, timestamp);
+  }
+
   return latestActivityAtByChannel;
 }
 
@@ -185,17 +204,29 @@ export function deriveProfileActivityFeedScope({
   activeTurns,
   events,
   transcript,
+  channelActivity = {},
 }: {
   activeTurns: readonly ActiveTurnSummary[];
   events: readonly ObserverEvent[];
   transcript: readonly TranscriptItem[];
+  /**
+   * Durable per-agent channel→latest-activity-ms summary. Survives the
+   * unpinned-tail truncation of `events`, so it repairs the channel scope that
+   * truncation would otherwise drop. Defaults to empty for callers that do not
+   * supply it (behaviour is then identical to reading `events`/`transcript`).
+   */
+  channelActivity?: Record<string, number>;
 }): ProfileActivityFeedScope {
-  const hasFeedContent = events.length > 0 || transcript.length > 0;
+  const hasFeedContent =
+    events.length > 0 ||
+    transcript.length > 0 ||
+    Object.keys(channelActivity).length > 0;
   const isLive = activeTurns.length > 0;
   const latestActivityAtByChannel = collectLatestActivityAtByChannel({
     activeTurns,
     events,
     transcript,
+    channelActivity,
   });
 
   if (isLive) {
@@ -212,7 +243,11 @@ export function deriveProfileActivityFeedScope({
     };
   }
 
-  const feedChannelIds = collectChannelIdsFromFeed(events, transcript);
+  const feedChannelIds = collectChannelIdsFromFeed(
+    events,
+    transcript,
+    channelActivity,
+  );
   const latestChannelId = deriveLatestChannelId(events, transcript);
 
   return {
@@ -248,9 +283,15 @@ export function useProfileActivityFeedScope(
 
     const { events } = getAgentObserverSnapshot(activityAgent.pubkey, true);
     const transcript = getAgentTranscript(activityAgent.pubkey, true);
+    const channelActivity = getAgentChannelActivity(activityAgent.pubkey);
     return stableFeedScope(
       agentCacheKey,
-      deriveProfileActivityFeedScope({ activeTurns, events, transcript }),
+      deriveProfileActivityFeedScope({
+        activeTurns,
+        events,
+        transcript,
+        channelActivity,
+      }),
     );
   }, [activeTurns, activityAgent, agentCacheKey, hasObserver]);
 

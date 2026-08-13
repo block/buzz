@@ -13,6 +13,27 @@ import {
 } from "./agentManagement";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
+import {
+  clearChannelActivity,
+  getAgentChannelActivity,
+  recordChannelActivity,
+} from "./channelActivitySummary";
+import {
+  compareObserverEvents,
+  isObserverEventAfter,
+  mergeObserverEventBatch,
+  unwrapObserverBatch,
+} from "./observerEventOrdering";
+import {
+  clearLatestLiveSessions,
+  getLatestLiveSessionId,
+  recordLatestLiveSession,
+} from "./latestLiveSession";
+// Re-export the channel-activity read and the event-ordering helpers off the
+// observer store's public surface; their storage/logic now lives in dedicated
+// modules but callers keep importing them from here.
+export { compareObserverEvents, getAgentChannelActivity, isObserverEventAfter };
+export { getLatestLiveSessionId };
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
 import type {
   ConnectionState,
@@ -25,9 +46,29 @@ import {
   createEmptyTranscriptState,
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
+import { selectArchiveEvictionKeys } from "./lib/observerArchiveEviction";
 
 const MAX_OBSERVER_EVENTS = 3000;
 const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
+
+// Live-event window retained in RAM for an agent that has NO mounted session
+// viewer. The full MAX_OBSERVER_EVENTS window is kept only while a viewer is
+// pinned (see pinObserverAgent); an unpinned agent keeps just the newest tail.
+// A long-lived session observes many agents over time and each unpinned agent
+// would otherwise hold its full window forever — the accumulator this bounds.
+// The tail must stay large enough that the non-viewer consumers keep working:
+// preventSleep reads only the newest event, the active-turns bridge processes
+// each event once as it arrives (turn state then lives in its own store), and
+// the profile activity feed derives a channel set that degrades to the tail.
+const UNPINNED_AGENT_EVENT_TAIL = 100;
+
+// Maximum number of distinct channels whose archive scroll-back is retained in
+// RAM. The archive window grows only by explicit paged loads from SQLite, so
+// without a bound a session that visits many channels accumulates their full
+// history for the lifetime of the app. Eviction drops the least-recently-loaded
+// unpinned channels whole; a revisit re-hydrates from SQLite (cache miss, not
+// data loss). Channels with a mounted panel are pinned and never evicted.
+const MAX_RETAINED_ARCHIVE_CHANNELS = 8;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
@@ -58,40 +99,134 @@ const snapshotByAgent = new Map<string, ObserverSnapshot>();
 // TranscriptState once over the combined window.
 const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 
-// Per-agent, per-channel latest-live-session-id.
-// Key: `${normalizePubkey(agentPubkey)}:${channelId}`.
-// Set when a live relay observer event with a sessionId arrives.
-// Cleared in resetAgentObserverStore.
-//
-// "Latest-live" means: the sessionId that most recently appeared via the
-// live relay path (handleRelayObserverEvent). It is NOT derived from
-// connectionState or an ever-live Set — an ever-live Set would incorrectly
-// mark session A as "current" after session B has started (Thufir Pass 3).
-//
-// Stored as `{ sessionId, timestamp, seq }` so that late-arriving live frames
-// from an older session never regress the latest-live id. We only advance when
-// the parsed event sorts strictly AFTER the stored one, using the same
-// two-key ordering as `compareObserverEvents`: timestamp first, then seq on a
-// tie — so a higher-seq frame at equal timestamp still advances the entry.
-type LatestLiveEntry = { sessionId: string; timestamp: string; seq: number };
-const latestLiveSessionByAgentChannel = new Map<string, LatestLiveEntry>();
+// LRU bookkeeping for `archiveEventsByChannel`. `archiveChannelId` maps a
+// composite key back to its channelId (the eviction unit) so the pure policy
+// can group agent entries by channel. `archiveAccessSeq` records the value of
+// `archiveAccessCounter` at each key's most recent WRITE (a paged load into the
+// archive), giving a total order for least-recently-LOADED selection. This is
+// deliberately a least-recently-*loaded* policy, not least-recently-accessed:
+// reads (`getArchivedChannelEvents`) never touch the sequence, because the read
+// hook pins the channel it reads (`useObserverEvents` calls `pinArchiveChannel`
+// on the same mount), so a channel being read is always pinned and so never an
+// eviction candidate — a read has no reachable state where advancing recency
+// would change the outcome.
+const archiveChannelId = new Map<string, string>();
+const archiveAccessSeq = new Map<string, number>();
+let archiveAccessCounter = 0;
 
-function liveSessionKey(agentPubkey: string, channelId: string | null): string {
-  return `${normalizePubkey(agentPubkey)}:${channelId ?? ""}`;
-}
+// Channels whose archive must never be evicted because a panel is mounted on
+// them. Refcounted so co-mounted panels (e.g. the channel screen and the
+// profile panel viewing the same channel) compose: the channel stays pinned
+// until the last panel unmounts. A channel with a positive count is pinned.
+const pinnedArchiveChannelCounts = new Map<string, number>();
 
-/** Read the latest-live-session-id for a (agent, channel) pair. */
-export function getLatestLiveSessionId(
-  agentPubkey: string | null | undefined,
-  channelId: string | null | undefined,
-): string | null {
-  if (!agentPubkey) return null;
-  return (
-    latestLiveSessionByAgentChannel.get(
-      liveSessionKey(agentPubkey, channelId ?? null),
-    )?.sessionId ?? null
+/**
+ * Pin a channel's archive against eviction while a panel is mounted on it.
+ * Refcounted so multiple mounted consumers of the same channel compose; the
+ * channel is protected until every consumer calls `unpinArchiveChannel`.
+ * No-op for a null/empty channelId (panels open before a channel resolves).
+ */
+export function pinArchiveChannel(channelId: string | null | undefined): void {
+  if (!channelId) return;
+  pinnedArchiveChannelCounts.set(
+    channelId,
+    (pinnedArchiveChannelCounts.get(channelId) ?? 0) + 1,
   );
 }
+
+/**
+ * Release one pin acquired via `pinArchiveChannel`. When the refcount reaches
+ * zero the channel becomes eligible for LRU eviction again. No-op for a
+ * null/empty channelId or a channel with no outstanding pins.
+ */
+export function unpinArchiveChannel(
+  channelId: string | null | undefined,
+): void {
+  if (!channelId) return;
+  const current = pinnedArchiveChannelCounts.get(channelId);
+  if (current === undefined) return;
+  if (current <= 1) {
+    pinnedArchiveChannelCounts.delete(channelId);
+  } else {
+    pinnedArchiveChannelCounts.set(channelId, current - 1);
+  }
+}
+
+// Agents whose full live-event window must be retained because a session viewer
+// is mounted on them (the two session panels and the activity bar). Refcounted
+// so co-mounted viewers of the same agent compose; the agent keeps its full
+// window until the last viewer unmounts. Keyed by normalized pubkey. An agent
+// with a positive count is pinned; an unpinned agent's window is bounded to
+// UNPINNED_AGENT_EVENT_TAIL. Consumers that read the window WITHOUT displaying
+// the transcript (preventSleep, the active-turns bridge, the profile activity
+// feed) intentionally do NOT pin — they tolerate the tail by design.
+const viewerPinnedAgentCounts = new Map<string, number>();
+
+/**
+ * Pin an agent's full live-event window against tail-bounding while a session
+ * viewer is mounted on it. Refcounted so multiple mounted viewers of the same
+ * agent compose. No-op for a null/empty pubkey (viewers mount before an agent
+ * resolves). Pinning does not itself grow the window — it lifts the cap so
+ * subsequent events accumulate up to MAX_OBSERVER_EVENTS.
+ */
+export function pinObserverAgent(agentPubkey: string | null | undefined): void {
+  if (!agentPubkey) return;
+  const key = normalizePubkey(agentPubkey);
+  viewerPinnedAgentCounts.set(key, (viewerPinnedAgentCounts.get(key) ?? 0) + 1);
+}
+
+/**
+ * Release one pin acquired via `pinObserverAgent`. When the refcount reaches
+ * zero the agent's window is immediately bounded back to
+ * UNPINNED_AGENT_EVENT_TAIL (see `truncateUnpinnedAgentWindow`) so closing a
+ * viewer reclaims the deep scroll-back it accumulated. No-op for a null/empty
+ * pubkey or an agent with no outstanding pins.
+ */
+export function unpinObserverAgent(
+  agentPubkey: string | null | undefined,
+): void {
+  if (!agentPubkey) return;
+  const key = normalizePubkey(agentPubkey);
+  const current = viewerPinnedAgentCounts.get(key);
+  if (current === undefined) return;
+  if (current <= 1) {
+    viewerPinnedAgentCounts.delete(key);
+    truncateUnpinnedAgentWindow(key);
+  } else {
+    viewerPinnedAgentCounts.set(key, current - 1);
+  }
+}
+
+/** Retention cap for one agent: full window while a viewer is pinned, else the newest-N tail. */
+function agentEventCap(key: string): number {
+  return viewerPinnedAgentCounts.has(key)
+    ? MAX_OBSERVER_EVENTS
+    : UNPINNED_AGENT_EVENT_TAIL;
+}
+
+/**
+ * Bound a now-unpinned agent's event window to UNPINNED_AGENT_EVENT_TAIL,
+ * dropping the deep scroll-back its viewer accumulated. Atomic with the derived
+ * state: the event array, its transcript, and the memoized snapshot are all
+ * rebuilt from the same truncated window before listeners are notified, so no
+ * consumer can observe a transcript that references dropped events. No-op when
+ * the window already fits, so unpinning an agent that never grew is free.
+ */
+function truncateUnpinnedAgentWindow(key: string): void {
+  const current = eventsByAgent.get(key);
+  if (!current || current.length <= UNPINNED_AGENT_EVENT_TAIL) {
+    return;
+  }
+  const trimmed = current.slice(current.length - UNPINNED_AGENT_EVENT_TAIL);
+  eventsByAgent.set(key, trimmed);
+  transcriptByAgent.set(key, buildTranscriptState(trimmed));
+  invalidateSnapshot(key);
+  notifyListeners();
+}
+
+// Per-agent, per-channel latest-live-session-id lives in latestLiveSession.ts
+// (recorded on the live path, cleared on reset); its reader is re-exported off
+// the store's public surface below.
 
 // Per-agent listeners for `control_result` frames. The ModelPicker subscribes
 // here to learn the async outcome of a `switch_model` frame (the send is
@@ -200,46 +335,26 @@ function appendAgentEvents(
   if (events.length === 0) return false;
 
   const key = normalizePubkey(agentPubkey);
+  for (const event of events) recordChannelActivity(key, event);
   const current = eventsByAgent.get(key) ?? [];
-  const seen = new Set(
-    current.map(
-      (event) => `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
-    ),
-  );
-  const added: ObserverEvent[] = [];
-  for (const event of events) {
-    const eventKey = `${event.timestamp.length}:${event.timestamp}:${event.seq}`;
-    if (seen.has(eventKey)) continue;
-    seen.add(eventKey);
-    added.push(event);
-  }
-  if (added.length === 0) return false;
+  const merged = mergeObserverEventBatch(current, events, agentEventCap(key));
+  if (!merged) return false;
 
-  const sortedAdded = added.sort(compareObserverEvents);
-  const sorted = [...current, ...sortedAdded].sort(compareObserverEvents);
-  const trimmed = sorted.length > MAX_OBSERVER_EVENTS;
-  const final = trimmed
-    ? sorted.slice(sorted.length - MAX_OBSERVER_EVENTS)
-    : sorted;
-  eventsByAgent.set(key, final);
+  eventsByAgent.set(key, merged.final);
 
   // The common live path appends a sorted batch after the retained window. Fold
   // that batch through the transcript state once without rebuilding history.
   // Out-of-order arrivals and cap eviction rebuild from the final window so
   // stateful tool/permission relationships remain correct.
-  const currentLast = current.at(-1);
-  const allAtEnd =
-    !currentLast ||
-    sortedAdded.every((event) => compareObserverEvents(event, currentLast) > 0);
-  if (allAtEnd && !trimmed) {
+  if (merged.canFoldIncrementally) {
     let transcriptState =
       transcriptByAgent.get(key) ?? createEmptyTranscriptState();
-    for (const event of sortedAdded) {
+    for (const event of merged.addedInOrder) {
       transcriptState = processTranscriptEvent(transcriptState, event);
     }
     transcriptByAgent.set(key, transcriptState);
   } else {
-    transcriptByAgent.set(key, buildTranscriptState(final));
+    transcriptByAgent.set(key, buildTranscriptState(merged.final));
   }
 
   invalidateSnapshot(key);
@@ -255,7 +370,7 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
 /**
  * Compose the map key for the channel-scoped archive transcript.
  * Separates agent identity from channel with `:` — the same delimiter used by
- * liveSessionKey so all composite keys in this module are consistently shaped.
+ * the latest-live-session key so composite keys are consistently shaped.
  */
 function archiveChannelKey(agentPubkey: string, channelId: string): string {
   return `${normalizePubkey(agentPubkey)}:${channelId}`;
@@ -298,7 +413,40 @@ function appendArchivedChannelEvent(
   // order for consumers that call buildTranscriptState over the window.
   const sorted = [...current, event].sort(compareObserverEvents);
   archiveEventsByChannel.set(key, sorted);
+  // Record LRU bookkeeping: which channel this key belongs to (the eviction
+  // unit) and its most-recent access, so the policy can pick the least-recently
+  // loaded unpinned channels when the retained-channel cap is exceeded.
+  archiveChannelId.set(key, channelId);
+  archiveAccessSeq.set(key, ++archiveAccessCounter);
   return true;
+}
+
+/**
+ * Evict the least-recently-loaded unpinned channels from the archive window
+ * when the number of distinct retained channels exceeds
+ * `MAX_RETAINED_ARCHIVE_CHANNELS`. Pinned channels (a panel is mounted on them)
+ * are never evicted. Eviction removes every (agent, channel) entry for the
+ * dropped channels and their LRU bookkeeping; a later revisit re-hydrates the
+ * channel from SQLite through the normal paging path. Returns true if any key
+ * was evicted so the caller can decide whether a notify is warranted.
+ */
+function evictArchiveChannelsIfNeeded(): boolean {
+  const entries = Array.from(archiveEventsByChannel.keys(), (key) => ({
+    key,
+    channelId: archiveChannelId.get(key) ?? "",
+    accessSeq: archiveAccessSeq.get(key) ?? 0,
+  }));
+  const evictKeys = selectArchiveEvictionKeys(
+    entries,
+    new Set(pinnedArchiveChannelCounts.keys()),
+    MAX_RETAINED_ARCHIVE_CHANNELS,
+  );
+  for (const key of evictKeys) {
+    archiveEventsByChannel.delete(key);
+    archiveChannelId.delete(key);
+    archiveAccessSeq.delete(key);
+  }
+  return evictKeys.length > 0;
 }
 
 /**
@@ -321,64 +469,6 @@ export function getArchivedChannelEvents(
   );
 }
 
-export function compareObserverEvents(
-  left: ObserverEvent,
-  right: ObserverEvent,
-) {
-  const leftTime = Date.parse(left.timestamp);
-  const rightTime = Date.parse(right.timestamp);
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-    const timeDiff = leftTime - rightTime;
-    if (timeDiff !== 0) {
-      return timeDiff;
-    }
-  }
-
-  return left.seq - right.seq;
-}
-
-/**
- * Returns true if `candidate` sorts strictly after `stored` using the same
- * two-key ordering as `compareObserverEvents`: later timestamp wins; equal
- * timestamp falls back to higher seq.  Extracted so latest-live advancement
- * cannot drift from transcript ordering.
- */
-export function isObserverEventAfter(
-  candidate: { timestamp: string; seq: number },
-  stored: { timestamp: string; seq: number },
-): boolean {
-  const candidateTime = Date.parse(candidate.timestamp);
-  const storedTime = Date.parse(stored.timestamp);
-  if (Number.isFinite(candidateTime) && Number.isFinite(storedTime)) {
-    if (candidateTime !== storedTime) {
-      return candidateTime > storedTime;
-    }
-  }
-  return candidate.seq > stored.seq;
-}
-
-// Observer event kind for a batch envelope wrapping multiple events. The ACP
-// harness publishes one frame per second; everything that accumulated between
-// ticks arrives as `{ kind: "batch", payload: { events: [...] } }` with every
-// inner event carrying its own seq/timestamp. Inner events are processed
-// exactly as unbatched ones; the envelope itself is never stored.
-const OBSERVER_BATCH_KIND = "batch";
-
-// Expand a decrypted observer event into its inner events when it is a batch
-// envelope; a non-batch event passes through as a single-element array. A
-// malformed envelope (no events array) degrades to the envelope itself so a
-// harness bug cannot silently blank the session viewer.
-function unwrapObserverBatch(parsed: ObserverEvent): ObserverEvent[] {
-  if (parsed.kind !== OBSERVER_BATCH_KIND) {
-    return [parsed];
-  }
-  const payload = parsed.payload as { events?: unknown } | null;
-  const events = Array.isArray(payload?.events)
-    ? (payload.events as ObserverEvent[])
-    : null;
-  return events && events.length > 0 ? events : [parsed];
-}
-
 // Per-event processing shared by every event a live frame carries (one for a
 // plain frame, many for a batch envelope).
 function processLiveObserverEvents(
@@ -392,25 +482,10 @@ function processLiveObserverEvents(
   const observerChanged = appendAgentEvents(agentPubkey, events);
 
   for (const parsed of events) {
-    // Track the latest-live-session-id per (agent, channel) on the live path.
-    // Only set when the parsed event carries both a sessionId and channelId,
-    // so we never attribute a session to the wrong channel.
-    if (parsed.sessionId && parsed.channelId) {
-      const key = liveSessionKey(agentPubkey, parsed.channelId);
-      const stored = latestLiveSessionByAgentChannel.get(key);
-      // Advance only when this event sorts strictly AFTER the stored one via
-      // isObserverEventAfter (timestamp then seq — same ordering as
-      // compareObserverEvents). This prevents late-arriving live frames from
-      // older sessions from regressing the latest-live id, while also
-      // correctly advancing on a same-timestamp frame with a higher seq.
-      if (!stored || isObserverEventAfter(parsed, stored)) {
-        latestLiveSessionByAgentChannel.set(key, {
-          sessionId: parsed.sessionId,
-          timestamp: parsed.timestamp,
-          seq: parsed.seq,
-        });
-      }
-    }
+    // Advance the latest-live-session-id for this (agent, channel) on the live
+    // path (no-op unless the frame carries a sessionId + channelId and sorts
+    // after the stored entry).
+    recordLatestLiveSession(agentPubkey, parsed);
     const managementRequest = parseAgentManagementRequest(parsed.payload);
     if (managementRequest) {
       for (const listener of agentManagementListeners) {
@@ -717,14 +792,28 @@ export function useManagedAgentObserverBridge(
  * (e.g. an agent that is stopped but has archived history) are dropped.
  * The caller should ensure the agent is registered before calling.
  *
- * `_decryptFn` is only used by tests to inject a mock decryption function.
- * Production callers must always omit it.
+ * Commit is atomic against channel switches and panel unmounts. Every frame is
+ * decrypted into a staging buffer FIRST (phase 1, the only async work); the
+ * whole page is then applied to the store synchronously under a single
+ * `isStale()` gate (phase 2, no await between the check and the appends). The
+ * caller passes a gate reading `requestGeneration !== resetGeneration ||
+ * disposed`, so a page whose channel was switched away (including A→B→A) or
+ * whose panel unmounted while it decrypted is dropped whole — it can never
+ * commit half a page or resurrect an evicted channel as most-recently-used.
+ *
+ * `_decryptFn` is only used by tests to inject a mock decryption function;
+ * `isStale` defaults to never-stale for direct test calls. Production callers
+ * must omit `_decryptFn` and always pass `isStale`.
  */
 export async function ingestArchivedObserverEvents(
   rawEvents: RelayEvent[],
   _decryptFn: (event: RelayEvent) => Promise<unknown> = decryptObserverEvent,
+  isStale: () => boolean = () => false,
 ): Promise<void> {
-  let archiveChanged = false;
+  // Phase 1: decrypt every frame into a staging buffer. All async work happens
+  // here, before any store write, so no channel switch or unmount can interleave
+  // between a decrypt and its commit.
+  const staged: Array<{ agentPubkey: string; event: ObserverEvent }> = [];
   for (const event of rawEvents) {
     const agentPubkey = observerTag(event, "agent");
     const frame = observerTag(event, "frame");
@@ -740,30 +829,51 @@ export async function ingestArchivedObserverEvents(
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
       for (const inner of unwrapObserverBatch(parsed)) {
-        // Route archived events to the channel-scoped archive window (no cap)
-        // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
-        // Events without a channelId fall through to the live store so they
-        // remain visible in the agent's general transcript.
-        if (inner.channelId) {
-          const added = appendArchivedChannelEvent(
-            agentPubkey,
-            inner.channelId,
-            inner,
-          );
-          if (added) archiveChanged = true;
-        } else {
-          // Live path already calls notifyListeners() inside appendAgentEvent.
-          appendAgentEvent(agentPubkey, inner);
-        }
+        staged.push({ agentPubkey, event: inner });
       }
     } catch {
       // Silently drop decrypt failures — same as live path error handling.
     }
   }
+
+  // Phase 2: commit the whole page synchronously under one staleness gate. The
+  // gate is evaluated once, immediately before the first write, with no await
+  // between the check and the appends — so the request that started this page
+  // is still current and every staged event belongs to the live channel. A
+  // stale page is dropped whole rather than committed partially.
+  if (isStale()) {
+    return;
+  }
+
+  let archiveChanged = false;
+  for (const { agentPubkey, event } of staged) {
+    // Route archived events to the channel-scoped archive window (no cap)
+    // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
+    // Events without a channelId fall through to the live store so they remain
+    // visible in the agent's general transcript.
+    if (event.channelId) {
+      const added = appendArchivedChannelEvent(
+        agentPubkey,
+        event.channelId,
+        event,
+      );
+      if (added) archiveChanged = true;
+    } else {
+      // Live path already calls notifyListeners() inside appendAgentEvent.
+      appendAgentEvent(agentPubkey, event);
+    }
+  }
   // Batch-notify once for the whole page of archive events. appendAgentEvent
   // already notifies individually for live/no-channelId events above, so we
   // only need one extra notify here for the archive path.
-  if (archiveChanged) {
+  //
+  // Enforce the retained-channel bound after the page lands: the channel just
+  // ingested has the highest access seq, so it is safe from its own eviction;
+  // only older unpinned channels are dropped. Fold the eviction result into the
+  // notify decision so a page that only triggers eviction still refreshes any
+  // panel reading an evicted channel.
+  const evicted = evictArchiveChannelsIfNeeded();
+  if (archiveChanged || evicted) {
     notifyListeners();
   }
 }
@@ -808,11 +918,17 @@ export function resetAgentObserverStore() {
   eventsByAgent.clear();
   transcriptByAgent.clear();
   snapshotByAgent.clear();
+  clearChannelActivity();
   archiveEventsByChannel.clear();
+  archiveChannelId.clear();
+  archiveAccessSeq.clear();
+  archiveAccessCounter = 0;
+  pinnedArchiveChannelCounts.clear();
+  viewerPinnedAgentCounts.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
-  latestLiveSessionByAgentChannel.clear();
+  clearLatestLiveSessions();
   agentManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";

@@ -2,6 +2,10 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
+import {
+  messageUnitGeneration,
+  updateRetainedMessageUnit,
+} from "@/features/messages/lib/messageUnitGuard";
 import { mergeMessages } from "@/features/messages/hooks";
 import {
   getChannelIdFromTags,
@@ -77,6 +81,15 @@ export function useLoadMissingAncestors(
 
     let isCancelled = false;
 
+    // Capture the channel unit's generation before the ancestor fetches. If the
+    // window is evicted while a `getEventById` is in flight, the generation
+    // advances and `updateRetainedMessageUnit` drops the merge below — a
+    // deferred ancestor write can neither resurrect the evicted timeline nor
+    // stale-merge onto an A→B→A re-fetch. (`requestedAncestorIdsRef` needs no
+    // matching clear on eviction: it is a per-hook ref already reset whenever
+    // `activeChannel.id` changes, so it never carries ids across channels.)
+    const generationAtStart = messageUnitGeneration(activeChannel.id);
+
     void Promise.all(
       [...missingAncestorIds].map(async (eventId) => {
         try {
@@ -89,9 +102,12 @@ export function useLoadMissingAncestors(
             return;
           }
 
-          queryClient.setQueryData<RelayEvent[]>(
+          updateRetainedMessageUnit<RelayEvent[]>(
+            queryClient,
             channelMessagesKey(activeChannel.id),
-            (current = []) => mergeMessages(current, event),
+            activeChannel.id,
+            generationAtStart,
+            (current) => mergeMessages(current, event),
           );
         } catch (error) {
           console.error("Failed to load ancestor event", eventId, error);

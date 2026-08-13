@@ -1,6 +1,10 @@
 import type { QueryClient } from "@tanstack/react-query";
 
 import { channelMessagesKey, sortMessages } from "./messageQueryKeys";
+import {
+  messageUnitGeneration,
+  updateRetainedMessageUnit,
+} from "./messageUnitGuard";
 import type { MainTimelineEntry } from "./threadPanel";
 import type { TimelineMessage } from "../types";
 import { relayClient } from "@/shared/api/relayClient";
@@ -27,6 +31,17 @@ const hydratedMessageIdsByChannel = new Map<string, Set<string>>();
 
 export function resetRenderScopedReactionHydration() {
   hydratedMessageIdsByChannel.clear();
+}
+
+/**
+ * Drop the hydration claim set for one channel. Called when the channel's
+ * message window is evicted so a revisit re-hydrates its visible reactions from
+ * scratch — without this, the claim set would report every id as already
+ * hydrated and the re-fetched window would render with no reactions until a
+ * live reaction arrived.
+ */
+export function clearChannelRenderScopedReactionHydration(channelId: string) {
+  hydratedMessageIdsByChannel.delete(channelId);
 }
 
 function hydratedSetForChannel(channelId: string): Set<string> {
@@ -117,6 +132,13 @@ export async function hydrateRenderScopedReactions(input: {
     return;
   }
 
+  // Capture the channel unit's generation before the fetch. If the window is
+  // evicted while this reaction fetch is in flight, the generation advances and
+  // `updateRetainedMessageUnit` drops the write below — so a deferred reaction
+  // merge can neither resurrect the evicted timeline nor stale-merge onto an
+  // A→B→A re-fetch.
+  const generationAtStart = messageUnitGeneration(input.channelId);
+
   try {
     const reactionEvents = await (
       input.deps ?? defaultDeps
@@ -125,9 +147,12 @@ export async function hydrateRenderScopedReactions(input: {
       return;
     }
 
-    input.queryClient.setQueryData<RelayEvent[]>(
+    updateRetainedMessageUnit<RelayEvent[]>(
+      input.queryClient,
       channelMessagesKey(input.channelId),
-      (current = []) => sortMessages([...current, ...reactionEvents]),
+      input.channelId,
+      generationAtStart,
+      (current) => sortMessages([...current, ...reactionEvents]),
     );
   } catch (error) {
     releaseRenderScopedReactionIds(input.channelId, messageIds);

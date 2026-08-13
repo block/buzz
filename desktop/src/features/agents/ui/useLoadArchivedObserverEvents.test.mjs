@@ -934,3 +934,80 @@ describe("useLoadArchivedObserverEvents — mounted hook lifecycle regressions",
     await unmount();
   });
 });
+
+describe("useLoadArchivedObserverEvents — post-unmount ingest fence", () => {
+  beforeEach(() => {
+    resetAgentObserverStore();
+    clearIpcHandlers();
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+  });
+
+  /**
+   * Post-unmount fence: a page whose Tauri read is still in flight when the
+   * panel unmounts must NOT write to the archive store. By unmount time the
+   * panel's pin has been released, so the channel may already be evicted;
+   * writing the late page would resurrect a dead channel as most-recently-used
+   * and silently defeat the archive bound.
+   *
+   * Sequence:
+   *   1. Mount on chan-a. Backfill returns immediately (no rows). The archive
+   *      read is DEFERRED so it is still in flight at unmount.
+   *   2. Unmount the hook while the read is deferred (disposedRef → true).
+   *   3. Release the archive read. The resolved page reaches the fence check.
+   *   4. Assert chan-a's archive window is EMPTY — the fence skipped the write.
+   *
+   * Without the disposedRef fence, the late page ingests and the channel window
+   * is non-empty after unmount.
+   */
+  it("test_page_resolving_after_unmount_does_not_write_to_store", async () => {
+    let resolveArchive;
+    const archiveDeferred = new Promise((resolve) => {
+      resolveArchive = resolve;
+    });
+
+    setIpcHandler("list_save_subscriptions", async () =>
+      makeOwnerPSubResponse(),
+    );
+    setIpcHandler("read_unindexed_observer_rows", async () => []);
+    setIpcHandler("index_observer_channel_id", async () => null);
+    setIpcHandler("read_archived_observer_events_for_channel", async (args) => {
+      if (args.channelId === "chan-a") {
+        await archiveDeferred; // hold the read in flight across unmount
+        return [JSON.stringify(makeArchivedRow(1, "chan-a"))];
+      }
+      return [];
+    });
+    setIpcHandler("decrypt_observer_event", async (args) => {
+      try {
+        const event = JSON.parse(args.eventJson);
+        return JSON.parse(event.content);
+      } catch {
+        return { kind: "telemetry", channelId: null };
+      }
+    });
+
+    const qc = makeQueryClient();
+    const { render, unmount } = mountHook("chan-a", qc);
+
+    // Step 1: mount; hydration starts and blocks on the deferred archive read.
+    await render("chan-a");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    // Step 2: unmount while the read is still in flight.
+    await unmount();
+
+    // Step 3: release the archive read; let the resolved page reach the fence.
+    resolveArchive();
+    await settle(10);
+
+    // Step 4: the late page must NOT have been written to the store.
+    const archived = _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-a");
+    assert.equal(
+      archived.length,
+      0,
+      `page resolving after unmount must not write to the store — found ${archived.length} (disposedRef fence missing would leave this 1)`,
+    );
+  });
+});

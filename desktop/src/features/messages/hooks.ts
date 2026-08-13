@@ -12,6 +12,11 @@ import {
   channelWindowKey,
   threadRepliesKey,
 } from "@/features/messages/lib/messageQueryKeys";
+import { scheduleMessageWindowSweep } from "@/features/messages/lib/boundMessageWindows";
+import {
+  messageUnitGeneration,
+  updateRetainedMessageUnit,
+} from "@/features/messages/lib/messageUnitGuard";
 import {
   buildReplyTags,
   getThreadReference,
@@ -697,6 +702,13 @@ export function useSendMessageMutation(
       });
       queryClient.setQueryData(windowKey, next);
       projectChannelWindowMessages(queryClient, context.channelId);
+
+      // Dropping the optimistic pending send releases this unit's pending-send
+      // pin. That drain is a manual `setQueryData`, which `useBoundedMessageWindows`
+      // excludes from its sweep triggers (every live merge is also manual), so
+      // the release would otherwise go unnoticed until an unrelated `added`.
+      // Fire the coalesced sweep explicitly here to close that gap.
+      scheduleMessageWindowSweep(queryClient);
     },
   });
 }
@@ -733,18 +745,34 @@ export function useToggleReactionMutation() {
 export function useDeleteMessageMutation(channel: Channel | null) {
   const queryClient = useQueryClient();
 
-  return useMutation<void, Error, { eventId: string }>({
+  return useMutation<
+    void,
+    Error,
+    { eventId: string },
+    { generationAtStart: number } | undefined
+  >({
     mutationFn: async ({ eventId }) => {
       if (!channel) {
         throw new Error("No channel selected.");
       }
       await deleteMessage(channel.id, eventId);
     },
-    onSuccess: (_data, { eventId }) => {
-      if (!channel) return;
-      queryClient.setQueryData<RelayEvent[]>(
+    // Capture the channel unit's generation before the async delete so the
+    // success write below is dropped if the window is evicted mid-flight (the
+    // user switched channels and roamed past the cap). Without the guard, the
+    // `filter` updater would resurrect the evicted key as a torn empty array.
+    onMutate: () =>
+      channel
+        ? { generationAtStart: messageUnitGeneration(channel.id) }
+        : undefined,
+    onSuccess: (_data, { eventId }, context) => {
+      if (!channel || !context) return;
+      updateRetainedMessageUnit<RelayEvent[]>(
+        queryClient,
         channelMessagesKey(channel.id),
-        (current = []) => current.filter((message) => message.id !== eventId),
+        channel.id,
+        context.generationAtStart,
+        (current) => current.filter((message) => message.id !== eventId),
       );
     },
     onError: (error) => {
@@ -766,7 +794,8 @@ export function useEditMessageMutation(channel: Channel | null) {
       // Pubkeys of mentions *newly added* by this edit, diffed at the composer.
       // Only these receive a `p` tag so a typo-fix edit re-wakes nobody.
       mentionPubkeys?: string[];
-    }
+    },
+    { generationAtStart: number } | undefined
   >({
     mutationFn: async ({ eventId, content, mediaTags, mentionPubkeys }) => {
       if (!channel) {
@@ -794,8 +823,22 @@ export function useEditMessageMutation(channel: Channel | null) {
         mentionTags,
       );
     },
-    onSuccess: (_data, { eventId, content, mediaTags, mentionPubkeys }) => {
-      if (!channel) {
+    // Capture the channel unit's generation before the async edit so the
+    // success writes below are dropped if the window is evicted mid-flight.
+    // Both writes go through `updateRetainedMessageUnit`: the window-store
+    // updater already no-ops on an absent key, but the flattened-array write
+    // would otherwise resurrect an evicted key, and neither guarded stale
+    // merges onto an A→B→A re-fetch.
+    onMutate: () =>
+      channel
+        ? { generationAtStart: messageUnitGeneration(channel.id) }
+        : undefined,
+    onSuccess: (
+      _data,
+      { eventId, content, mediaTags, mentionPubkeys },
+      context,
+    ) => {
+      if (!channel || !context) {
         return;
       }
 
@@ -824,14 +867,19 @@ export function useEditMessageMutation(channel: Channel | null) {
       // flattened array gets reverted by the next live event (see
       // mapChannelWindowEvents). Update the store first, then keep the
       // flattened cache in step for immediate paint.
-      queryClient.setQueryData<ChannelWindowStore>(
+      updateRetainedMessageUnit<ChannelWindowStore>(
+        queryClient,
         channelWindowKey(channel.id),
-        (current) =>
-          current ? mapChannelWindowEvents(current, applyEdit) : current,
+        channel.id,
+        context.generationAtStart,
+        (current) => mapChannelWindowEvents(current, applyEdit),
       );
-      queryClient.setQueryData<RelayEvent[]>(
+      updateRetainedMessageUnit<RelayEvent[]>(
+        queryClient,
         channelMessagesKey(channel.id),
-        (current = []) => current.map(applyEdit),
+        channel.id,
+        context.generationAtStart,
+        (current) => current.map(applyEdit),
       );
     },
   });

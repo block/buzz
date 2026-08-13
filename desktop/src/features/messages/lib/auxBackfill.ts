@@ -4,6 +4,10 @@ import {
   channelMessagesKey,
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
+import {
+  messageUnitGeneration,
+  updateRetainedMessageUnit,
+} from "@/features/messages/lib/messageUnitGuard";
 import { relayClient } from "@/shared/api/relayClient";
 import { buildChannelStructuralAuxFilter } from "@/shared/api/relayChannelFilters";
 import type { RelayEvent } from "@/shared/api/types";
@@ -138,6 +142,13 @@ export async function backfillAuxForMessages(
     return;
   }
 
+  // Capture the channel unit's generation before the aux fetch. If the window
+  // is evicted while this backfill is in flight, the generation advances and
+  // `updateRetainedMessageUnit` drops the write — a deferred aux merge can
+  // neither resurrect the evicted timeline nor stale-merge onto an A→B→A
+  // re-fetch.
+  const generationAtStart = messageUnitGeneration(channelId);
+
   try {
     const cacheKey = channelMessagesKey(channelId);
     const cachedEvents = queryClient.getQueryData<RelayEvent[]>(cacheKey) ?? [];
@@ -157,8 +168,12 @@ export async function backfillAuxForMessages(
       return;
     }
 
-    queryClient.setQueryData<RelayEvent[]>(cacheKey, (current = []) =>
-      sortMessages([...current, ...mergedAuxEvents]),
+    updateRetainedMessageUnit<RelayEvent[]>(
+      queryClient,
+      cacheKey,
+      channelId,
+      generationAtStart,
+      (current) => sortMessages([...current, ...mergedAuxEvents]),
     );
   } catch (error) {
     console.error(

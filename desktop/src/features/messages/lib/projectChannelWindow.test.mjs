@@ -363,3 +363,41 @@ test("test_pageless_live_projection_preserves_cached_timeline", () => {
   assert.deepEqual(contents(harness), ["initial", "live"]);
   assert.equal(harness.client.getQueryData(harness.messagesKey)[0], cached[0]);
 });
+
+test("test_projection_does_not_resurrect_an_evicted_messages_key", () => {
+  // The deferred `refreshChannelWindowMessages` path projects AFTER awaiting an
+  // invalidate — long enough for a fetch-settle resweep to evict the channel.
+  // A bare `(messages = []) => …` updater would resurrect the removed key; the
+  // presence guard must drop the projection so BOTH keys stay absent.
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const channelId = "evicted";
+  // Only the window store survives (a live overlay merge that raced the
+  // eviction); the messages key was removed by the resweep.
+  client.setQueryData(
+    channelWindowKey(channelId),
+    replaceNewestChannelWindow(
+      emptyChannelWindowStore(),
+      newestPage([event("stale", 100)]),
+    ),
+  );
+
+  projectChannelWindowMessages(client, channelId);
+
+  assert.equal(
+    client.getQueryData(channelMessagesKey(channelId)),
+    undefined,
+    "projection must not resurrect the removed messages key",
+  );
+});
+
+test("test_projection_aligns_an_existing_messages_key", () => {
+  // The complement: when the timeline cache is still present (every pin-covered
+  // caller), the projection aligns it from the authoritative window as before —
+  // the guard is a no-op on a live key.
+  const harness = createHarness();
+  appendLiveEvent(harness, event("live", 130));
+
+  assert.deepEqual(contents(harness), ["initial", "live"]);
+});

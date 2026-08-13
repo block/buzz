@@ -1187,3 +1187,134 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
     assert.equal(archived[0].seq, 31);
   });
 });
+
+describe("ingestArchivedObserverEvents — atomic commit under staleness gate", () => {
+  beforeEach(() => {
+    resetAgentObserverStore();
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+  });
+
+  /**
+   * The commit is atomic against a channel switch or panel unmount that lands
+   * WHILE the page is decrypting. Phase 1 (decrypt into staging) is the only
+   * async work; phase 2 evaluates `isStale()` once, with no await before the
+   * appends. Here the caller's gate flips to stale after the page's decrypt is
+   * released — modeling the user switching channels (A→B, or A→B→A) or the
+   * panel unmounting mid-decrypt — so the whole page must be dropped and the
+   * archive must stay empty. Without the gate, a late page resurrects an
+   * evicted/switched-away channel as most-recently-loaded.
+   */
+  it("test_page_going_stale_during_decrypt_commits_nothing", async () => {
+    let releaseDecrypt;
+    const decryptGate = new Promise((resolve) => {
+      releaseDecrypt = resolve;
+    });
+    let stale = false;
+
+    const ingest = ingestArchivedObserverEvents(
+      [makeRawEvent(), makeRawEvent({ id: "f".repeat(64) })],
+      async () => {
+        await decryptGate;
+        return makeObserverEvent({ seq: 1, channelId: "chan-1" });
+      },
+      () => stale,
+    );
+
+    // The channel is switched away (or the panel unmounts) while decrypt is in
+    // flight: the caller's gate now reads stale.
+    stale = true;
+    releaseDecrypt();
+    await ingest;
+
+    assert.deepEqual(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1"),
+      [],
+      "a page that went stale mid-decrypt must commit nothing",
+    );
+  });
+
+  /**
+   * The complement: a page whose gate stays current commits every staged
+   * frame. Proves the gate is not simply dropping all writes — the same
+   * multi-frame page that would be dropped when stale lands whole when live.
+   */
+  it("test_page_staying_current_commits_the_whole_page", async () => {
+    const events = [
+      makeObserverEvent({ seq: 1, timestamp: "2026-01-01T00:00:01.000Z" }),
+      makeObserverEvent({ seq: 2, timestamp: "2026-01-01T00:00:02.000Z" }),
+    ];
+    let idx = 0;
+
+    await ingestArchivedObserverEvents(
+      [makeRawEvent(), makeRawEvent({ id: "f".repeat(64) })],
+      () => Promise.resolve(events[idx++]),
+      () => false,
+    );
+
+    const archived = _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1");
+    assert.equal(
+      archived.length,
+      2,
+      "a current page must commit all its staged frames",
+    );
+    assert.deepEqual(
+      archived.map((event) => event.seq).sort(),
+      [1, 2],
+      "both frames of the current page are present",
+    );
+  });
+
+  /**
+   * The gate is evaluated ONCE, before the first append, against the state at
+   * commit time — not per frame. A page that was current when it started
+   * decrypting but is evaluated as stale at commit is dropped WHOLE: the store
+   * can never hold a torn half-page (frame 1 committed, frame 2 dropped),
+   * which would leave a resurrected channel with a partial timeline.
+   */
+  it("test_stale_gate_drops_the_whole_page_never_a_partial", async () => {
+    let released = 0;
+    const gates = [0, 1].map(() => {
+      let release;
+      const promise = new Promise((resolve) => {
+        release = resolve;
+      });
+      return { promise, release };
+    });
+    let stale = false;
+
+    const ingest = ingestArchivedObserverEvents(
+      [makeRawEvent(), makeRawEvent({ id: "f".repeat(64) })],
+      async () => {
+        const gate = gates[released++];
+        await gate.promise;
+        return makeObserverEvent({ seq: released, channelId: "chan-1" });
+      },
+      () => stale,
+    );
+
+    // Release the first frame's decrypt and drain microtasks until the ingest
+    // loop has fully consumed frame 1 (staged it) and re-entered _decryptFn for
+    // frame 2 — released reaches 2 only after frame 1's decrypt resolved and the
+    // loop resumed. This is the discriminating setup: frame 1 was current at the
+    // moment it was decrypted and staged. A torn design that commits frames per
+    // their decrypt-time currentness would keep frame 1.
+    gates[0].release();
+    while (released < 2) {
+      await Promise.resolve();
+    }
+
+    // The switch lands now — after frame 1 is staged-while-current, before
+    // frame 2 finishes. The single phase-2 gate is evaluated after ALL decrypts,
+    // so the whole page — including the frame that was current when staged —
+    // must be dropped.
+    stale = true;
+    gates[1].release();
+    await ingest;
+
+    assert.deepEqual(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1"),
+      [],
+      "no torn half-page: a stale gate at commit drops every frame, including ones decrypted while the channel was still current",
+    );
+  });
+});

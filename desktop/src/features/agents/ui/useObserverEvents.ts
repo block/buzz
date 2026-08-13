@@ -6,7 +6,11 @@ import {
   getAgentTranscript,
   getArchivedChannelEvents,
   ingestArchivedObserverEvents,
+  pinArchiveChannel,
+  pinObserverAgent,
   subscribeAgentObserverStore,
+  unpinArchiveChannel,
+  unpinObserverAgent,
 } from "@/features/agents/observerRelayStore";
 import {
   listSaveSubscriptions,
@@ -31,10 +35,27 @@ export type { ArchivePagingState } from "./archivePagingState";
 const subscribeToStore = (onStoreChange: () => void) =>
   subscribeAgentObserverStore(onStoreChange);
 
+/**
+ * Pin an agent's full live-event window while a session viewer is mounted, so
+ * the deep scroll-back it displays is not tail-bounded out from under it.
+ * Refcounted in the store, so the two session panels and the activity bar
+ * compose when viewing the same agent. Keyed on pubkey only; `enabled` gates
+ * the relay subscription, not the display, so an idle-agent viewer still pins.
+ */
+function useObserverAgentPin(agentPubkey: string | null | undefined): void {
+  React.useEffect(() => {
+    if (!agentPubkey) return;
+    pinObserverAgent(agentPubkey);
+    return () => unpinObserverAgent(agentPubkey);
+  }, [agentPubkey]);
+}
+
 export function useObserverEvents(
   enabled: boolean,
   agentPubkey?: string | null,
 ) {
+  useObserverAgentPin(agentPubkey);
+
   const getSnapshot = React.useCallback(
     () => getAgentObserverSnapshot(agentPubkey, enabled),
     [agentPubkey, enabled],
@@ -55,6 +76,8 @@ export function useAgentTranscript(
   enabled: boolean,
   agentPubkey?: string | null,
 ): TranscriptItem[] {
+  useObserverAgentPin(agentPubkey);
+
   const getSnapshot = React.useCallback(
     () => getAgentTranscript(agentPubkey, enabled),
     [agentPubkey, enabled],
@@ -81,6 +104,18 @@ export function useArchivedChannelEvents(
   agentPubkey: string | null | undefined,
   channelId: string | null | undefined,
 ): ObserverEvent[] {
+  // Pin this channel's archive against LRU eviction while the panel is mounted,
+  // so the history the user is looking at is never dropped out from under the
+  // view. Refcounted in the store, so co-mounted consumers of the same channel
+  // (this read hook plus the loader below, plus a second panel) compose. The
+  // pin is keyed on channel only — agent identity does not affect eviction,
+  // which is a per-channel operation.
+  React.useEffect(() => {
+    if (!channelId) return;
+    pinArchiveChannel(channelId);
+    return () => unpinArchiveChannel(channelId);
+  }, [channelId]);
+
   const getSnapshot = React.useCallback(
     () => getArchivedChannelEvents(agentPubkey, channelId),
     [agentPubkey, channelId],
@@ -132,6 +167,19 @@ export function useLoadArchivedObserverEvents(
     pagingStateRef.current = createArchivePagingState();
   }
   const ps = pagingStateRef.current;
+
+  // Fence for in-flight fetches that resolve after unmount. Set true by the
+  // cleanup effect below; checked before every store write so a page still
+  // decrypting when the panel closes cannot repopulate a channel whose pin has
+  // just been released — which would otherwise defeat the archive bound by
+  // resurrecting a dead channel as most-recently-used.
+  const disposedRef = React.useRef(false);
+  React.useEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+    };
+  }, []);
 
   // React state mirrors the fields callers observe so re-renders fire on change.
   const [hasSubscription, setHasSubscription] = React.useState<boolean | null>(
@@ -335,7 +383,18 @@ export function useLoadArchivedObserverEvents(
           createdAt: oldestEvent.created_at,
           id: oldestEvent.id,
         };
-        await ingestArchivedObserverEvents(events);
+        // Atomic commit gate: ingest decrypts to a staging buffer, then applies
+        // the whole page synchronously only if this gate reads false at commit
+        // time. It reads true when a channel switch advanced resetGeneration
+        // (including A→B→A) or the panel unmounted (disposedRef) while the page
+        // decrypted — either would otherwise commit stale events onto the live
+        // channel or resurrect an evicted channel as most-recently-used. The
+        // cursor advance above is harmless (the ref is discarded on unmount).
+        await ingestArchivedObserverEvents(events, undefined, () => {
+          return (
+            requestGeneration !== ps.resetGeneration || disposedRef.current
+          );
+        });
       }
 
       // Re-check generation after ingestArchivedObserverEvents: ingestion
