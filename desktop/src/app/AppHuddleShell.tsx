@@ -68,7 +68,7 @@ export function AppHuddleShell({
             {children}
           </div>
           {isRoom || !isCompanionOpen ? (
-            <div className="absolute inset-x-0 bottom-0 z-[2] h-(--buzz-huddle-drawer-height)">
+            <div className="buzz-huddle-drawer-slot absolute inset-x-0 bottom-0 z-[2] h-(--buzz-huddle-drawer-height)">
               <AppHuddleBar
                 mode={isRoom ? "room" : "main"}
                 onOpenHuddleWindow={isRoom ? undefined : onCompanionOpen}
