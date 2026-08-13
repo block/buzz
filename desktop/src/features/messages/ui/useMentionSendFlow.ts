@@ -875,38 +875,37 @@ export function useMentionSendFlow({
     );
     void completeSend(pendingNonMemberSend, mentionPubkeys, outgoingTags);
   }, [completeSend, pendingNonMemberSend]);
-
   const handleInviteNonMembers = React.useCallback(() => {
     if (!pendingNonMemberSend) return;
-    // The dialog hides Invite in this case; this guards the keyboard/programmatic
-    // path so we surface the reason instead of a raw relay rejection.
     if (!canInviteNonMembers) {
       setNonMemberPromptError(PRIVATE_CHANNEL_ADD_DENIED_MESSAGE);
       return;
     }
-
-    const invitedPubkeys = new Set(
-      pendingNonMemberSend.nonMemberPubkeys.map(normalizePubkey),
-    );
-    const mentionPubkeys = uniqueNormalizedPubkeys([
-      ...pendingNonMemberSend.mentionPubkeys,
-      ...pendingNonMemberSend.nonMemberPubkeys,
-    ]);
-    const outgoingTags = (pendingNonMemberSend.outgoingTags ?? []).filter(
-      (tag) =>
-        tag[0] !== MENTION_REFERENCE_TAG ||
-        !invitedPubkeys.has(normalizePubkey(tag[1] ?? "")),
-    );
-
     setNonMemberPromptError(null);
     void (async () => {
+      const mentionPubkeys = uniqueNormalizedPubkeys(
+        await mentions.revalidateMentionPubkeys([
+          ...pendingNonMemberSend.mentionPubkeys,
+          ...pendingNonMemberSend.nonMemberPubkeys,
+        ]),
+      );
+      const admittedMentionPubkeys = new Set(mentionPubkeys);
+      const originalNonMemberPubkeys = new Set(
+        pendingNonMemberSend.nonMemberPubkeys.map(normalizePubkey),
+      );
+      const nonMemberPubkeys = [...originalNonMemberPubkeys].filter(
+        admittedMentionPubkeys.has.bind(admittedMentionPubkeys),
+      );
+      const outgoingTags = (pendingNonMemberSend.outgoingTags ?? []).filter(
+        (tag) =>
+          tag[0] !== MENTION_REFERENCE_TAG ||
+          !originalNonMemberPubkeys.has(normalizePubkey(tag[1] ?? "")),
+      );
       const managedAgentsByPubkey = await getManagedAgentsByPubkey();
+      if (!isMountedRef.current) return;
       const peoplePubkeys: string[] = [];
       const relayAgentPubkeys: string[] = [];
-
-      for (const pubkey of uniqueNormalizedPubkeys(
-        pendingNonMemberSend.nonMemberPubkeys,
-      )) {
+      for (const pubkey of nonMemberPubkeys) {
         if (managedAgentsByPubkey.has(pubkey)) {
           continue;
         }
@@ -962,6 +961,7 @@ export function useMentionSendFlow({
     completeSend,
     getManagedAgentsByPubkey,
     mentions.isAgentPubkey,
+    mentions.revalidateMentionPubkeys,
     pendingNonMemberSend,
   ]);
 
