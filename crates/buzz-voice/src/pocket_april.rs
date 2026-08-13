@@ -1408,6 +1408,20 @@ mod tests {
              makes the first playback unit the whole utterance and delays \
              first audio by the full generation"
         );
+
+        // Calling the isolating splitter is necessary but not sufficient: a
+        // short circuit before the call can return the whole utterance as one
+        // unit while leaving the delegated splitter unchanged. Playback must
+        // delegate unconditionally so sentence one remains the first unit.
+        for control_flow in ["if ", "match ", "else", "return"] {
+            assert!(
+                !playback.contains(control_flow),
+                "split_playback_prompt must delegate unconditionally, found \
+                 `{control_flow}`: a branch before the split can return the \
+                 whole utterance as the first playback unit, delaying first \
+                 audio by the full generation"
+            );
+        }
     }
 
     fn whitespace_token_count(text: &str) -> Result<usize, String> {
