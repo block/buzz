@@ -409,3 +409,44 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
 });
+
+test("shouldHideAgentFromMentions subsumes isAgentIdentityInAllowedList except for directory-less members", () => {
+  const cases = [
+    { agent: true, member: false, allowed: false, dir: false, hidden: true },
+    { agent: true, member: false, allowed: false, dir: true, hidden: true },
+    { agent: true, member: true, allowed: false, dir: true, hidden: true },
+    { agent: true, member: true, allowed: false, dir: false, hidden: false },
+    { agent: true, member: true, allowed: true, dir: true, hidden: false },
+    { agent: true, member: false, allowed: true, dir: false, hidden: false },
+    { agent: false, member: false, allowed: false, dir: false, hidden: false },
+  ];
+
+  for (const { agent, member, allowed, dir, hidden } of cases) {
+    const mentionableAgentPubkeys = new Set(allowed ? [PUB_A] : []);
+    const directoryAgentPubkeys = new Set(dir ? [PUB_A] : []);
+    const label = `agent=${agent} member=${member} allowed=${allowed} dir=${dir}`;
+
+    assert.equal(
+      shouldHideAgentFromMentions({
+        isAgent: agent,
+        isMember: member,
+        pubkey: PUB_A,
+        mentionableAgentPubkeys,
+        directoryAgentPubkeys,
+      }),
+      hidden,
+      `policy mismatch for ${label}`,
+    );
+
+    const allowListWouldAdmit = isAgentIdentityInAllowedList(
+      { isAgent: agent, pubkey: PUB_A },
+      mentionableAgentPubkeys,
+    );
+    const onlyTheAllowListRejects = agent && member && !allowed && !dir;
+    assert.equal(
+      allowListWouldAdmit,
+      !onlyTheAllowListRejects && !hidden,
+      `allow-list divergence expectation wrong for ${label}`,
+    );
+  }
+});
