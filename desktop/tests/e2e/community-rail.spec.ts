@@ -378,20 +378,29 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
-  test("community switch cancels a pending link-preview send", async ({
+  test("community switch cancels a send after its link preview settles", async ({
     page,
   }) => {
+    const agentPubkey =
+      "ee00000000000000000000000000000000000000000000000000000000000001";
     await installMockBridge(
       page,
       {
+        addChannelMembersDelayMs: 10_000,
+        managedAgents: [
+          {
+            pubkey: agentPubkey,
+            name: "SlowBot",
+            status: "running",
+          },
+        ],
         linkPreviewMetadata: {
-          title: "Pending preview",
+          title: "Ready preview",
           siteName: "GitHub",
           description: "Must not cross community boundaries.",
           imageDataUrl: null,
           imageDomain: null,
         },
-        linkPreviewMetadataDelayMs: 10_000,
       },
       { skipCommunitySeed: true },
     );
@@ -399,11 +408,24 @@ test.describe("community rail", () => {
     await page.goto("/");
     await page.getByTestId("channel-general").click();
 
+    const input = page.getByTestId("message-input");
     const previewUrl =
       "https://github.com/block/buzz/pull/5697?community=reset";
-    await page.getByTestId("message-input").fill(previewUrl);
-    await page.getByTestId("message-input").press("Enter");
-    await expect(page.getByTestId("composer-upload-cancel")).toBeVisible();
+    await input.fill("@SlowBot");
+    await expect(page.getByTestId("mention-autocomplete")).toBeVisible();
+    await input.press("Enter");
+    await page.keyboard.type(` ${previewUrl}`);
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "add_channel_members",
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
 
     await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
     await expect
@@ -421,9 +443,6 @@ test.describe("community rail", () => {
       ),
     );
     expect(publications).toHaveLength(0);
-
-    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
-    await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("message-input")).toHaveText("");
   });
 

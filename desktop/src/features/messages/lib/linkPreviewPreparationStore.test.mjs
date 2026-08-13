@@ -231,6 +231,32 @@ test("already-settled partial results contain only successful tags", async () =>
   });
 });
 
+test("reset aborts a promoted send after preview preparation settles", async () => {
+  seed(first, Promise.resolve(firstTag), true);
+
+  const preparation = prepareBackgroundLinkPreviews([first]);
+  assert.ok(preparation);
+  assert.deepEqual(await preparation.promise, {
+    status: "ready",
+    tags: [firstTag],
+  });
+
+  resetLinkPreviewPreparations();
+  assert.equal(preparation.signal.aborted, true);
+});
+
+test("released promoted sends are no longer cancelled by reset", async () => {
+  seed(first, Promise.resolve(firstTag), true);
+
+  const preparation = prepareBackgroundLinkPreviews([first]);
+  assert.ok(preparation);
+  await preparation.promise;
+  preparation.release();
+
+  resetLinkPreviewPreparations();
+  assert.equal(preparation.signal.aborted, false);
+});
+
 test("reset cancels pending preparations instead of authorizing send", async () => {
   const pending = deferred();
   seed(first, pending.promise);

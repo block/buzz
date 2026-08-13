@@ -38,14 +38,19 @@ export type BackgroundLinkPreviewResult =
   | { status: "ready"; tags: string[][] };
 
 export type PreparedBackgroundLinkPreviews = {
+  cancel: () => void;
   promise: Promise<BackgroundLinkPreviewResult>;
+  signal: AbortSignal;
+  release: () => void;
   skip: () => void;
 };
 
 const jobs = new Map<string, PreviewJob>();
 const tasks = new Map<number, BackgroundPreviewTask>();
+const promotedSends = new Map<number, AbortController>();
 const listeners = new Set<() => void>();
 let nextTaskId = 0;
+let nextPromotedSendId = 0;
 let snapshot: BackgroundPreviewSnapshot = {
   canSkip: false,
   isPreparing: false,
@@ -189,17 +194,36 @@ export function prepareBackgroundLinkPreviews(
   );
   if (external.length === 0) return null;
 
+  const sendId = nextPromotedSendId++;
+  const controller = new AbortController();
+  promotedSends.set(sendId, controller);
+  const release = () => {
+    if (promotedSends.get(sendId) === controller) {
+      promotedSends.delete(sendId);
+    }
+  };
+  const preparedSend = (
+    promise: Promise<BackgroundLinkPreviewResult>,
+    skip: () => void,
+  ): PreparedBackgroundLinkPreviews => ({
+    cancel: () => controller.abort(),
+    promise,
+    signal: controller.signal,
+    release,
+    skip,
+  });
+
   const pending = external.some(
     (candidate) => !jobs.get(candidate.href)?.settled,
   );
   if (!pending) {
-    return {
-      promise: Promise.all(external.map(prepareLinkPreview)).then((tags) => ({
+    return preparedSend(
+      Promise.all(external.map(prepareLinkPreview)).then((tags) => ({
         status: "ready" as const,
         tags: tags.filter((tag): tag is string[] => tag !== null),
       })),
-      skip: () => undefined,
-    };
+      () => undefined,
+    );
   }
 
   const availableTags = () =>
@@ -239,7 +263,7 @@ export function prepareBackgroundLinkPreviews(
     });
   });
 
-  return { promise, skip };
+  return preparedSend(promise, skip);
 }
 
 export function skipBackgroundLinkPreviews(): void {
@@ -253,6 +277,8 @@ export function skipBackgroundLinkPreviews(): void {
 }
 
 export function resetLinkPreviewPreparations(): void {
+  for (const controller of promotedSends.values()) controller.abort();
+  promotedSends.clear();
   for (const task of [...tasks.values()]) task.cancel();
   jobs.clear();
 }
