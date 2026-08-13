@@ -309,6 +309,33 @@ pub async fn query_relay(
     query_relay_at(state, &relay_api_base_url_with_override(state), filters).await
 }
 
+pub async fn get_relay_json<T: DeserializeOwned>(
+    state: &AppState,
+    path_with_query: &str,
+) -> Result<T, String> {
+    if !path_with_query.starts_with('/') {
+        return Err("relay GET path must begin with '/'".to_string());
+    }
+    crate::relay_admission::wait_for_rate_limit().await;
+    let url = format!(
+        "{}{}",
+        relay_api_base_url_with_override(state),
+        path_with_query
+    );
+    let auth = build_nip98_auth_header(&Method::GET, &url, &[], state)?;
+    let response = state
+        .http_client
+        .get(&url)
+        .header("Authorization", auth)
+        .send()
+        .await
+        .map_err(|error| classify_request_error(&error))?;
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+    parse_json_response(response).await
+}
+
 /// Like [`query_relay`] but targets an explicit HTTP API base URL instead of
 /// the workspace override. Used when a query must hit a specific relay (e.g.
 /// reconciling an agent's profile on the relay where it was published).

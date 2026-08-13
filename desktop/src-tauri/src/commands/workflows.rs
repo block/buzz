@@ -5,7 +5,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    relay::{parse_command_response, query_relay, submit_event},
+    relay::{get_relay_json, parse_command_response, query_relay, submit_event},
 };
 
 // ── Wire shapes (snake_case, consumed by tauriWorkflows.ts) ──────────────────
@@ -47,19 +47,19 @@ pub struct WorkflowSaveWire {
     pub webhook_secret: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq)]
 pub struct WorkflowRunCursorWire {
     pub before: String,
     pub before_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq)]
 pub struct WorkflowRunsWire {
     pub runs: Vec<Value>,
     pub next: Option<WorkflowRunCursorWire>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize, PartialEq)]
 pub struct WorkflowApprovalsWire {
     pub approvals: Vec<Value>,
 }
@@ -156,20 +156,16 @@ pub async fn get_workflow(
 pub async fn get_workflow_runs(
     workflow_id: String,
     limit: Option<u32>,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<WorkflowRunsWire, String> {
-    // TODO(workflow-runs): Run reconstruction is a clearly-scoped follow-up.
-    // The authoritative run record the frontend's `WorkflowRun` shape needs
-    // (status / current_step / execution_trace / error_message) lives in the
-    // relay DB and is not exposed to the desktop client as a single queryable
-    // record. The backend read command will replace this placeholder.
-    // Keep the command's paginated wire contract truthful in the meantime;
-    // raw lifecycle events are not `RawWorkflowRun` records.
-    let _ = (workflow_id, limit);
-    Ok(WorkflowRunsWire {
-        runs: Vec::new(),
-        next: None,
-    })
+    let workflow_id =
+        uuid::Uuid::parse_str(&workflow_id).map_err(|_| "invalid workflow id".to_string())?;
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    get_relay_json(
+        &state,
+        &format!("/workflows/{workflow_id}/runs?limit={limit}"),
+    )
+    .await
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
@@ -283,17 +279,17 @@ pub async fn trigger_workflow(
 pub async fn get_run_approvals(
     workflow_id: String,
     run_id: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<WorkflowApprovalsWire, String> {
-    // TODO(workflow-runs): Like runs (see `get_workflow_runs`), reconstructing
-    // approvals into the frontend's `WorkflowApproval` shape from lifecycle
-    // events (46010/46011/46012) is a clearly-scoped follow-up tracked under
-    // TODO(workflow-runs). Keep the backend's envelope contract here so the
-    // read adapter can be integrated without another frontend shape change.
-    let _ = (workflow_id, run_id);
-    Ok(WorkflowApprovalsWire {
-        approvals: Vec::new(),
-    })
+    let workflow_id =
+        uuid::Uuid::parse_str(&workflow_id).map_err(|_| "invalid workflow id".to_string())?;
+    let run_id =
+        uuid::Uuid::parse_str(&run_id).map_err(|_| "invalid workflow run id".to_string())?;
+    get_relay_json(
+        &state,
+        &format!("/workflows/{workflow_id}/runs/{run_id}/approvals"),
+    )
+    .await
 }
 
 #[tauri::command]
