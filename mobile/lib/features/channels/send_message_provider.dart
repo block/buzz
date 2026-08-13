@@ -4,13 +4,16 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
+import 'channel.dart';
 import 'channel_messages_provider.dart';
+import 'channels_provider.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
 class SendMessage {
   final SignedEventRelay _signedEventRelay;
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
+  final Channel? Function(String channelId) _readChannel;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
   final void Function(String channelId, String eventId) _completeLocalMessage;
@@ -21,6 +24,7 @@ class SendMessage {
     required SignedEventRelay signedEventRelay,
     required Future<List<ChannelMember>> Function(String channelId)
     fetchMembers,
+    required Channel? Function(String channelId) readChannel,
     required Map<String, UserProfile> Function() readUserCache,
     required void Function(String channelId, NostrEvent event) addLocalMessage,
     required void Function(String channelId, String eventId)
@@ -29,6 +33,7 @@ class SendMessage {
     bool Function()? isDeliveryValid,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
+       _readChannel = readChannel,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
@@ -56,14 +61,21 @@ class SendMessage {
     final resolvedMentions =
         mentionPubkeys ?? await _resolveMentions(content, channelId);
     final authorPubkey = _signedEventRelay.pubkey;
+    final channel = _readChannel(channelId);
+    final recipientPubkeys = <String>[
+      ...resolvedMentions,
+      if (channel?.isDm == true) ...channel!.participantPubkeys,
+    ];
 
-    // Normalize mentions: lowercase, deduplicate, exclude self (matching
-    // the desktop's normalizeMentionPubkeys).
+    // A DM addresses every other participant even when the composer text has
+    // no @mention. Agent harnesses and human notification subscriptions rely
+    // on those p tags, matching the desktop's messageMentionPubkeys.
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
+      for (final pk in recipientPubkeys)
+        if (pk.trim().isNotEmpty && seenMentions.add(pk.trim().toLowerCase()))
+          pk.trim().toLowerCase(),
     ];
 
     final tags = <List<String>>[
@@ -182,6 +194,14 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     ),
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
+    readChannel: (channelId) {
+      final channels = ref.read(channelsProvider).value;
+      if (channels == null) return null;
+      for (final channel in channels) {
+        if (channel.id == channelId) return channel;
+      }
+      return null;
+    },
     readUserCache: () => ref.read(userCacheProvider),
     addLocalMessage: (channelId, event) => ref
         .read(channelMessagesProvider(channelId).notifier)

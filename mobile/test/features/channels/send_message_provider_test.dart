@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
@@ -20,6 +21,7 @@ void main() {
           nsec: nostr.Keys.generate().nsec,
         ),
         fetchMembers: (_) async => const [],
+        readChannel: (_) => _streamChannel,
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
         completeLocalMessage: (_, eventId) => completedIds.add(eventId),
@@ -53,6 +55,7 @@ void main() {
         nsec: nostr.Keys.generate().nsec,
       ),
       fetchMembers: (_) async => const [],
+      readChannel: (_) => _streamChannel,
       readUserCache: () => const {},
       addLocalMessage: (_, event) => localMessages.add(event),
       completeLocalMessage: (_, eventId) => completedIds.add(eventId),
@@ -66,6 +69,75 @@ void main() {
     await expectLater(result, throwsException);
     expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
+  });
+
+  test('adds every other DM participant as a p tag', () async {
+    final session = _PendingPublishRelaySession();
+    final keys = nostr.Keys.generate();
+    const recipient =
+        'ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789';
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+      fetchMembers: (_) async => const [],
+      readChannel: (_) => Channel(
+        id: _channelId,
+        name: 'Direct message',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: keys.public,
+        createdAt: DateTime.utc(2026),
+        memberCount: 2,
+        participantPubkeys: [recipient, keys.public, recipient],
+        isMember: true,
+      ),
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'hello without a mention',
+      mentionPubkeys: const [],
+    );
+    await session.published;
+
+    expect(session.event.tags.where((tag) => tag.first == 'p'), [
+      ['p', recipient.toLowerCase()],
+    ]);
+
+    session.accept();
+    await result;
+  });
+
+  test('does not add channel participants to stream messages', () async {
+    final session = _PendingPublishRelaySession();
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async => const [],
+      readChannel: (_) => _streamChannel,
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'hello without a mention',
+      mentionPubkeys: const [],
+    );
+    await session.published;
+
+    expect(session.event.tags.where((tag) => tag.first == 'p'), isEmpty);
+
+    session.accept();
+    await result;
   });
 
   test('cancels delivery after the active community changes', () async {
@@ -94,6 +166,18 @@ void main() {
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
+final _streamChannel = Channel(
+  id: _channelId,
+  name: 'General',
+  channelType: 'stream',
+  visibility: 'open',
+  description: '',
+  createdBy: 'creator',
+  createdAt: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+  memberCount: 2,
+  participantPubkeys: ['participant'],
+  isMember: true,
+);
 
 class _PendingPublishRelaySession extends RelaySessionNotifier {
   final Completer<NostrEvent> _result = Completer<NostrEvent>();
