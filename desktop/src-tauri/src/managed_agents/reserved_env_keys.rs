@@ -59,6 +59,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Remote lifetime/presence policy: user env must not disable the
     // desktop/provider-owned bounds while the saved record still promises them.
     "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
+    // Desktop-owned pool lifetime policy: user env must not disable or reset
+    // the idle worker-reclamation window while the desktop launcher sets it.
+    "BUZZ_ACP_IDLE_POOL_SLEEP",
     "BUZZ_ACP_NO_PRESENCE",
     // Readiness handoff: desktop is the ONLY readiness source. A saved or
     // ambient env var must not be able to forge setup mode (NotReady) on a

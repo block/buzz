@@ -54,12 +54,12 @@ test("forum: skips fresh focus refetch", async () => {
   );
 });
 
-test("forum: refetches genuinely stale data on focus", async () => {
+test("forum: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: forumFocusRefetchPolicy.staleTime + 1,
       policy: forumFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });

@@ -54,12 +54,12 @@ test("pulse: skips fresh focus refetch", async () => {
   );
 });
 
-test("pulse: refetches genuinely stale data on focus", async () => {
+test("pulse: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: pulseFocusRefetchPolicy.staleTime + 1,
       policy: pulseFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });

@@ -315,6 +315,10 @@ type E2eConfig = {
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
+    /** Return not-modified for this many reads before resuming full payloads. */
+    channelsNotModifiedResponses?: number;
+    /** When true, a matching knownHash returns a not-modified channel payload. */
+    honorChannelsKnownHash?: boolean;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
     feedReadError?: string;
@@ -3356,6 +3360,7 @@ type RawWorkflowRun = {
   execution_trace: RawWorkflowTraceEntry[];
   started_at: number | null;
   completed_at: number | null;
+  error_code: string | null;
   error_message: string | null;
   created_at: number;
 };
@@ -3515,6 +3520,7 @@ function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
     execution_trace: executionTrace,
     started_at: startedAt,
     completed_at: completedAt,
+    error_code: null,
     error_message: null,
     created_at: createdAt,
   };
@@ -3539,11 +3545,14 @@ function handleGetWorkflowRuns(args: {
   const runs = mockWorkflowRuns.filter(
     (run) => run.workflow_id === args.workflowId,
   );
-  return args.limit ? runs.slice(0, args.limit) : runs;
+  return {
+    runs: args.limit ? runs.slice(0, args.limit) : runs,
+    next: null,
+  };
 }
 
 function handleGetRunApprovals(_args: { workflowId: string; runId: string }) {
-  return [];
+  return { approvals: [] };
 }
 
 const mockProfiles = new Map<string, RawProfile>([
@@ -5711,7 +5720,10 @@ function buildLastMessages(
   return map;
 }
 
-async function handleGetChannels(config: E2eConfig | undefined) {
+async function handleGetChannels(
+  payload: unknown,
+  config: E2eConfig | undefined,
+) {
   const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
   if (channelsReadDelayMs > 0) {
     await new Promise((resolve) =>
@@ -5728,15 +5740,25 @@ async function handleGetChannels(config: E2eConfig | undefined) {
 
   const identity = getIdentity(config);
   if (!identity) {
-    // The hash is constant ("mock-hash") and channels are always returned in
-    // full — the not-modified short-circuit is intentionally never exercised
-    // here: mock channel data mutates during tests (last_message_at updates on
-    // message emission) while the hash never changes, so honoring knownHash
-    // would wrongly short-circuit after mutations.
+    // The hash is constant ("mock-hash") and full lists remain the default:
+    // mock channel data mutates during tests while the hash does not. Focused
+    // snapshot specs can opt into the not-modified branch explicitly.
     const channels = listMockChannels(config);
+    const hash = "mock-hash";
+    const knownHash = (payload as { knownHash?: unknown } | null)?.knownHash;
+    const forcedNotModified =
+      (config?.mock?.channelsNotModifiedResponses ?? 0) > 0;
+    if (forcedNotModified && config?.mock) {
+      config.mock.channelsNotModifiedResponses =
+        (config.mock.channelsNotModifiedResponses ?? 1) - 1;
+    }
     return {
-      hash: "mock-hash",
-      channels,
+      hash,
+      channels:
+        forcedNotModified ||
+        (config?.mock?.honorChannelsKnownHash && knownHash === hash)
+          ? null
+          : channels,
       last_messages: buildLastMessages(channels),
     };
   }
@@ -8123,10 +8145,11 @@ function upsertMockPersonaRelayEvent(event: RelayEvent): void {
   mockPersonaEvents.push(event);
 }
 
-function upsertMockPersonaEvent(persona: RawPersona): void {
-  const event: RelayEvent = {
-    id: mockEventId(),
-    pubkey: MOCK_IDENTITY_PUBKEY,
+function upsertMockPersonaEvent(
+  persona: RawPersona,
+  identity?: TestIdentity,
+): void {
+  const template = {
     created_at: Math.floor(Date.now() / 1_000),
     kind: KIND_PERSONA,
     tags: [["d", persona.id], ...(persona.shared ? [["shared", "true"]] : [])],
@@ -8142,8 +8165,15 @@ function upsertMockPersonaEvent(persona: RawPersona): void {
       respond_to_allowlist: persona.respond_to_allowlist ?? [],
       parallelism: persona.parallelism ?? null,
     }),
-    sig: "0".repeat(128),
   };
+  const event: RelayEvent = identity
+    ? finalizeEvent(template, hexToBytes(identity.privateKey))
+    : {
+        ...template,
+        id: mockEventId(),
+        pubkey: MOCK_IDENTITY_PUBKEY,
+        sig: "0".repeat(128),
+      };
   upsertMockPersonaRelayEvent(event);
   emitMockGlobalEvent(event);
 }
@@ -8168,7 +8198,7 @@ function publishMockPersonaHead(
       personaSharePublicationCallCount++
     ] ?? "published";
   if (publicationStatus === "published") {
-    upsertMockPersonaEvent(persona);
+    upsertMockPersonaEvent(persona, getActiveIdentity(config));
   }
   return {
     persona: { ...persona },
@@ -11943,7 +11973,7 @@ export function maybeInstallE2eTauriMocks() {
         // invocation's completion. Later reads pass through and cannot join it.
         const deferred = deferNextChannelsRead;
         deferNextChannelsRead = false;
-        const channels = handleGetChannels(activeConfig);
+        const channels = handleGetChannels(payload, activeConfig);
         if (deferred) {
           await new Promise<void>((resolve) => {
             deferredChannelsReadResolve = resolve;

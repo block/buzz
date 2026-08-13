@@ -4051,6 +4051,27 @@ impl Db {
         workflow::list_workflow_runs(&self.pool, community_id, workflow_id, limit).await
     }
 
+    /// List one keyset-paginated page of workflow runs.
+    #[datastore_span(name = "list_workflow_runs_page", system = "postgresql")]
+    pub async fn list_workflow_runs_page(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        before_id: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<workflow::WorkflowRunRecord>> {
+        workflow::list_workflow_runs_page(
+            &self.pool,
+            community_id,
+            workflow_id,
+            before,
+            before_id,
+            limit,
+        )
+        .await
+    }
+
     /// Update a workflow run's status.
     #[datastore_span(name = "update_workflow_run", system = "postgresql")]
     pub async fn update_workflow_run(
@@ -4060,7 +4081,7 @@ impl Db {
         status: workflow::RunStatus,
         current_step: i32,
         trace: &serde_json::Value,
-        error: Option<&str>,
+        failure: Option<workflow::WorkflowRunFailure<'_>>,
     ) -> Result<()> {
         workflow::update_workflow_run(
             &self.pool,
@@ -4069,7 +4090,7 @@ impl Db {
             status,
             current_step,
             trace,
-            error,
+            failure,
         )
         .await
     }

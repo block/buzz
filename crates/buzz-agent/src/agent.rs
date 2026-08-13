@@ -31,12 +31,7 @@ const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support
 /// its output-token limit. This is a user message rather than a synthetic tool
 /// result because truncation can happen without a tool call (and an unpaired
 /// tool result is invalid on every provider wire format).
-const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response exceeded the model's output token limit and was truncated. Any incomplete tool call was not run. Continue the task, breaking the work or tool call into smaller steps and keeping the response concise.";
-
-/// A provider can repeatedly spend its entire output allowance without making
-/// progress, while `max_rounds` is unbounded by default. Keep the in-turn rescue
-/// finite so a persistently truncating model eventually surfaces `max_tokens`.
-const MAX_TOKENS_RECOVERIES_PER_RUN: u32 = 2;
+const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response reached the model's output token limit and was truncated. Any incomplete tool calls were discarded and were not run. Stop prolonged internal reasoning now. Use the available tools immediately: write a script or artifact to a file and run it in small, verifiable steps instead of emitting the entire solution inline. Continue the task concisely from the preserved text.";
 
 /// Remove image blocks that the provider has explicitly rejected while keeping
 /// their surrounding tool result (and therefore the tool-call/result pairing)
@@ -667,9 +662,10 @@ impl RunCtx<'_> {
                     tool_calls: Vec::new(),
                     reasoning_details: response.reasoning_details,
                 });
-                if max_tokens_recoveries >= MAX_TOKENS_RECOVERIES_PER_RUN {
+                if max_tokens_recoveries >= self.cfg.max_token_recoveries {
                     tracing::warn!(
                         recoveries = max_tokens_recoveries,
+                        max_recoveries = self.cfg.max_token_recoveries,
                         "provider repeatedly hit output token limit; recovery budget exhausted"
                     );
                     return Ok(StopReason::MaxTokens);
@@ -677,8 +673,7 @@ impl RunCtx<'_> {
                 max_tokens_recoveries = max_tokens_recoveries.saturating_add(1);
                 tracing::warn!(
                     recovery = max_tokens_recoveries,
-                    max_recoveries = MAX_TOKENS_RECOVERIES_PER_RUN,
-                    discarded_tool_calls = response.tool_calls.len(),
+                    max_recoveries = self.cfg.max_token_recoveries,
                     "provider hit output token limit; asking model to continue in smaller steps"
                 );
                 self.history
