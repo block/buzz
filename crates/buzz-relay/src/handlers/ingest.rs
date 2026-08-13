@@ -50,6 +50,156 @@ use crate::conformance::{
     state_for_request, EmitGuard, TraceAction, Verdict,
 };
 
+/// Observable outcome of the prepared-event membership race probe.
+#[derive(Debug)]
+pub struct MembershipRevisionRaceReport {
+    /// Whether both operations addressed the canonical membership lock domain.
+    pub used_existing_membership_advisory_lock: bool,
+    /// Whether the prepared insertion remained blocked until removal committed.
+    pub removal_and_publish_were_serialized: bool,
+    /// Whether the post-lock revision re-read rejected the stale event.
+    pub stale_publish_rejected: bool,
+    /// Whether the rejected stale event nevertheless appeared in storage.
+    pub stale_event_was_stored: bool,
+}
+
+/// Exercise the lock/revision state transition used by the database admission
+/// path without requiring a relay process. Database integration coverage drives
+/// the same exported lock-key and revision helpers against Postgres.
+pub async fn run_membership_revision_race_probe_for_test(
+) -> Result<MembershipRevisionRaceReport, String> {
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    let database_url = std::env::var("BUZZ_TEST_DATABASE_URL").map_err(|_| {
+        "BUZZ_TEST_DATABASE_URL must name an explicit isolated migrated Postgres".to_string()
+    })?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .map_err(|error| format!("requires reachable migrated Postgres: {error}"))?;
+    let db = buzz_db::Db::from_pool(pool.clone());
+    let host = format!("prepared-race-{}.example", Uuid::new_v4().simple());
+    let community_record = db
+        .ensure_configured_community(&host)
+        .await
+        .map_err(|error| error.to_string())?;
+    let community = community_record.id;
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let owner_bytes = owner.public_key().to_bytes();
+    let agent_bytes = agent.public_key().to_bytes();
+    buzz_db::user::ensure_user(&pool, community, &owner_bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    buzz_db::user::ensure_user(&pool, community, &agent_bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    let channel = db
+        .create_channel(
+            community,
+            "prepared-race",
+            buzz_db::channel::ChannelType::Dm,
+            buzz_db::channel::ChannelVisibility::Private,
+            None,
+            &owner_bytes,
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    db.add_member(
+        community,
+        channel.id,
+        &agent_bytes,
+        buzz_db::channel::MemberRole::Member,
+        Some(&owner_bytes),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let revision = buzz_db::channel::membership_revision(
+        channel.id,
+        &[
+            (owner_bytes.to_vec(), "owner".to_string()),
+            (agent_bytes.to_vec(), "member".to_string()),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    let event = EventBuilder::new(Kind::Custom(9), "prepared race reply")
+        .tags([
+            Tag::parse(["h", channel.id.to_string().as_str()])
+                .map_err(|error| error.to_string())?,
+            Tag::parse(["buzz_membership_revision", revision.as_str()])
+                .map_err(|error| error.to_string())?,
+        ])
+        .sign_with_keys(&agent)
+        .map_err(|error| error.to_string())?;
+
+    // Begin the removal transaction, take the exact shared advisory key, and
+    // mutate membership without committing. A prepared insert started now must
+    // block on the same key; after commit it must re-read and reject the old
+    // signed revision rather than storing the event.
+    let mut removal = pool.begin().await.map_err(|error| error.to_string())?;
+    let lock_key = buzz_db::channel::channel_membership_lock_key(community, channel.id);
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *removal)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query(
+        "UPDATE channel_members SET removed_at = NOW(), removed_by = $1 \
+         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL",
+    )
+    .bind(owner_bytes.as_slice())
+    .bind(community.as_uuid())
+    .bind(channel.id)
+    .bind(agent_bytes.as_slice())
+    .execute(&mut *removal)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let publish_db = db.clone();
+    let publish_event = event.clone();
+    let publish_revision = revision.clone();
+    let mut publish = tokio::spawn(async move {
+        publish_db
+            .insert_prepared_event_with_thread_metadata(
+                community,
+                &publish_event,
+                channel.id,
+                None,
+                &publish_revision,
+            )
+            .await
+    });
+    let blocked = tokio::time::timeout(std::time::Duration::from_millis(500), &mut publish)
+        .await
+        .is_err();
+    removal.commit().await.map_err(|error| error.to_string())?;
+    let publish_result = publish.await.map_err(|error| error.to_string())?;
+    let stale_rejected = matches!(
+        publish_result,
+        Err(buzz_db::DbError::AccessDenied(ref reason))
+            if reason == "channel membership revision mismatch"
+    );
+    let stored: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(event.id.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    let _ = sqlx::query("DELETE FROM communities WHERE id = $1")
+        .bind(community.as_uuid())
+        .execute(&pool)
+        .await;
+    Ok(MembershipRevisionRaceReport {
+        used_existing_membership_advisory_lock: lock_key.starts_with("buzz_channel_membership:"),
+        removal_and_publish_were_serialized: blocked,
+        stale_publish_rejected: stale_rejected,
+        stale_event_was_stored: stored != 0,
+    })
+}
+
 fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
@@ -63,6 +213,40 @@ fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
             .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
     }
     Ok(())
+}
+
+fn prepared_membership_revision(event: &Event) -> Result<Option<&str>, IngestError> {
+    let revision_tags = event
+        .tags
+        .iter()
+        .filter(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("buzz_membership_revision")
+        })
+        .collect::<Vec<_>>();
+    if revision_tags.is_empty() {
+        return Ok(None);
+    }
+    if event.kind.as_u16() != KIND_STREAM_MESSAGE as u16
+        || revision_tags.len() != 1
+        || revision_tags[0].as_slice().len() != 2
+    {
+        return Err(IngestError::Rejected(
+            "invalid: membership revision is allowed exactly once on kind 9".into(),
+        ));
+    }
+    let revision = &revision_tags[0].as_slice()[1];
+    let Some(hex) = revision.strip_prefix("v1:") else {
+        return Err(IngestError::Rejected(
+            "invalid: membership revision must use v1".into(),
+        ));
+    };
+    if hex.len() != 64 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(IngestError::Rejected(
+            "invalid: membership revision digest must be 64 hex characters".into(),
+        ));
+    }
+    Ok(Some(revision))
 }
 
 fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError> {
@@ -2019,6 +2203,7 @@ async fn ingest_event_inner(
             event.content.len()
         )));
     }
+    let prepared_revision = prepared_membership_revision(&event)?;
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !is_gift_wrap {
@@ -2934,16 +3119,37 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
-        match state
-            .db
-            .insert_event_with_thread_metadata(
-                tenant.community(),
-                &event,
-                channel_id,
-                thread_params,
-            )
-            .await
-        {
+        let insert_result = match (prepared_revision, channel_id) {
+            (Some(revision), Some(channel_id)) => {
+                state
+                    .db
+                    .insert_prepared_event_with_thread_metadata(
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                        revision,
+                    )
+                    .await
+            }
+            (Some(_), None) => {
+                return Err(IngestError::Rejected(
+                    "invalid: prepared event requires a channel".into(),
+                ));
+            }
+            (None, _) => {
+                state
+                    .db
+                    .insert_event_with_thread_metadata(
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                    )
+                    .await
+            }
+        };
+        match insert_result {
             Ok(result) => result,
             Err(e) => {
                 // Compensate: if we pre-created a channel for kind:9007,
@@ -2961,6 +3167,13 @@ async fn ingest_event_inner(
                 return Err(match e {
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
+                    }
+                    buzz_db::DbError::AccessDenied(reason)
+                        if reason == "channel membership revision mismatch" =>
+                    {
+                        IngestError::Rejected(
+                            "restricted: channel membership changed after reply preparation".into(),
+                        )
                     }
                     other => IngestError::Internal(format!("error: database error: {other}")),
                 });

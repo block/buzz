@@ -872,6 +872,9 @@ pub async fn dispatch(
 ) -> Result<(), CliError> {
     use crate::MessagesCmd;
     match cmd {
+        MessagesCmd::Prepare { .. } | MessagesCmd::PublishPrepared { .. } => {
+            unreachable!("prepared commands are dispatched by the top-level IO-safe path")
+        }
         MessagesCmd::Send {
             channel,
             content,

@@ -580,6 +580,13 @@ impl BuzzClient {
             .and_then(|slice| slice.get(1).cloned())
     }
 
+    /// SHA-256 fingerprint of the canonical verified NIP-OA auth tag.
+    pub fn auth_tag_hash(&self) -> Option<String> {
+        self.auth_tag_json
+            .as_ref()
+            .map(|value| hex::encode(Sha256::digest(value.as_bytes())))
+    }
+
     /// Sign an event builder, injecting the NIP-OA auth tag if configured.
     ///
     /// All event creation should go through this method to ensure consistent
@@ -1022,11 +1029,31 @@ impl BuzzClient {
     /// Content-addressed uploads are exempt: same bytes ⇒ same hash, so outer
     /// re-run is safe regardless of the failure kind.
     async fn submit_stored_event(&self, event: nostr::Event) -> Result<String, CliError> {
-        let url = format!("{}/events", self.relay_url);
         let body = bytes::Bytes::from(
             serde_json::to_vec(&event)
                 .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?,
         );
+        self.submit_stored_event_body(body, event.kind.as_u16())
+            .await
+    }
+
+    /// Submit the exact pre-signed event bytes persisted by `messages prepare`.
+    /// No event field is reconstructed and no Nostr signature is regenerated.
+    pub async fn submit_prepared_event_bytes(
+        &self,
+        body: Vec<u8>,
+        kind: u16,
+    ) -> Result<String, CliError> {
+        self.submit_stored_event_body(bytes::Bytes::from(body), kind)
+            .await
+    }
+
+    async fn submit_stored_event_body(
+        &self,
+        body: bytes::Bytes,
+        kind: u16,
+    ) -> Result<String, CliError> {
+        let url = format!("{}/events", self.relay_url);
         let result = self
             .with_retry_body(|| {
                 let body = body.clone();
@@ -1056,9 +1083,8 @@ impl BuzzClient {
         // Canonical pre-ingest 429 (Relay{429}) stays retryable — definitively not stored.
         if let Err(ref e) = result {
             if is_stored_event_exhaustion_ambiguous(e) {
-                let kind_u16 = event.kind.as_u16();
                 return Err(CliError::DeliveryUnknown(format!(
-                    "stored event (kind {kind_u16}) outcome unknown after all attempts: {e}"
+                    "stored event (kind {kind}) outcome unknown after all attempts: {e}"
                 )));
             }
         }

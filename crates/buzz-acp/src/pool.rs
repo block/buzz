@@ -600,8 +600,11 @@ pub struct PromptContext {
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
-    /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
+    /// frozen executable/argument pair at startup (e.g. `"goose"`, `"gabe-acp"`).
     pub harness_name: String,
+    /// Startup-captured non-secret identity pin for the trusted Gabe harness.
+    /// Ordinary ACP runtimes leave this unset and retain legacy prompt framing.
+    pub managed_agent_pubkey_pin: Option<String>,
     /// Relay URL this harness is connected to. Rides in observer payloads that
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
@@ -2047,7 +2050,7 @@ pub async fn run_prompt_task(
             tracing::info!(
                 target: "pool::prompt",
                 channel = %b.channel_id,
-                command = %cmd,
+                command_bytes = cmd.len(),
                 "slash-command pass-through"
             );
         }
@@ -2105,6 +2108,33 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
+    let verified_prompt_params = match build_verified_buzz_prompt_params_for_batch(
+        batch.as_ref(),
+        &session_id,
+        &prompt_blocks,
+        &ctx,
+    )
+    .await
+    {
+        Ok(params) => params,
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::prompt",
+                error_class = "buzz_envelope_rejected",
+                "trusted Buzz prompt envelope could not be built"
+            );
+            agent.state.invalidate(&source);
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(error),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        }
+    };
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
     let has_standing_context = match &source {
         PromptSource::Channel(_) => !standing.sections().is_empty(),
@@ -2149,10 +2179,9 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
+                result = send_prompt_with_optional_buzz_envelope(
+                    &mut agent.acp, &session_id, &prompt_blocks,
+                    verified_prompt_params.as_ref(), ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
             }
@@ -2160,10 +2189,9 @@ pub async fn run_prompt_task(
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
+                result = send_prompt_with_optional_buzz_envelope(
+                    &mut agent.acp, &session_id, &prompt_blocks,
+                    verified_prompt_params.as_ref(), ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
                 mode = rx => {
@@ -2595,8 +2623,18 @@ pub(crate) async fn fetch_channel_info(
         {
             Ok(Ok(json)) => {
                 let events = json.as_array()?;
-                let ev = events.first()?;
-                let tags = ev.get("tags")?.as_array()?;
+                let event: nostr::Event = serde_json::from_value(events.first()?.clone()).ok()?;
+                event.verify().ok()?;
+                let channel_text = channel_id.to_string();
+                if !event.tags.iter().any(|tag| {
+                    let values = tag.as_slice();
+                    values.first().map(String::as_str) == Some("d")
+                        && values.get(1).map(String::as_str) == Some(channel_text.as_str())
+                }) {
+                    return None;
+                }
+                let tag_values = serde_json::to_value(&event.tags).ok()?;
+                let tags = tag_values.as_array()?;
                 let mut name = None;
                 let mut description = None;
                 for tag in tags {
@@ -2636,6 +2674,167 @@ pub(crate) async fn fetch_channel_info(
         }
     })
     .await
+}
+
+/// Fetch and verify the current replaceable membership event for one channel.
+/// The authenticated relay query supplies the authoritative snapshot; the
+/// embedded Nostr signature and channel `d` tag are still checked before use.
+async fn fetch_verified_channel_members(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Result<Vec<(String, String)>, AcpError> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+        ))
+        .custom_tags(d_tag, [channel_id.to_string()]);
+    let response = timeout(CONTEXT_FETCH_TIMEOUT, rest.query(&[filter]))
+        .await
+        .map_err(|_| AcpError::Protocol("Buzz membership lookup timed out".into()))?
+        .map_err(|_| AcpError::Protocol("Buzz membership lookup failed".into()))?;
+    let event_value = response
+        .as_array()
+        .and_then(|events| events.first())
+        .cloned()
+        .ok_or_else(|| AcpError::Protocol("Buzz membership snapshot is absent".into()))?;
+    let event: nostr::Event = serde_json::from_value(event_value)
+        .map_err(|_| AcpError::Protocol("Buzz membership snapshot is malformed".into()))?;
+    event
+        .verify()
+        .map_err(|_| AcpError::Protocol("Buzz membership signature is invalid".into()))?;
+
+    let channel_text = channel_id.to_string();
+    let has_channel = event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.first().map(String::as_str) == Some("d")
+            && values.get(1).map(String::as_str) == Some(channel_text.as_str())
+    });
+    if !has_channel {
+        return Err(AcpError::Protocol(
+            "Buzz membership snapshot channel does not match".into(),
+        ));
+    }
+    let members = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let values = tag.as_slice();
+            if values.first().map(String::as_str) != Some("p") {
+                return None;
+            }
+            Some((values.get(1)?.clone(), values.get(3)?.clone()))
+        })
+        .collect::<Vec<_>>();
+    if members.is_empty() {
+        return Err(AcpError::Protocol(
+            "Buzz membership snapshot contains no members".into(),
+        ));
+    }
+    Ok(members)
+}
+
+async fn build_verified_buzz_prompt_params_for_batch(
+    batch: Option<&FlushBatch>,
+    session_id: &str,
+    prompt_blocks: &[&str],
+    ctx: &PromptContext,
+) -> Result<Option<serde_json::Value>, AcpError> {
+    let Some(batch) = batch else {
+        return Ok(None);
+    };
+    if ctx.harness_name != crate::config::GABE_CONTEXT_ENGINE_HARNESS {
+        return Ok(None);
+    }
+    let pinned_agent = require_managed_agent_pin(ctx.managed_agent_pubkey_pin.as_deref())?;
+    let actual_agent = ctx.agent_keys.public_key().to_hex().to_ascii_lowercase();
+    if pinned_agent != actual_agent {
+        return Err(AcpError::Protocol(
+            "managed Buzz agent identity does not match BUZZ_GABE_AGENT_PUBKEY".into(),
+        ));
+    }
+    if !batch.cancelled_events.is_empty() {
+        return Err(AcpError::Protocol(
+            "trusted Buzz P0 deliveries require queue mode".into(),
+        ));
+    }
+    let channel_info = ctx
+        .channel_info
+        .resolve(batch.channel_id)
+        .await
+        .ok_or_else(|| AcpError::Protocol("Buzz channel metadata is unavailable".into()))?;
+    let owner = ctx
+        .agent_owner_pubkey
+        .as_ref()
+        .ok_or_else(|| AcpError::Protocol("Buzz owner identity is unavailable".into()))?;
+    let members = fetch_verified_channel_members(batch.channel_id, &ctx.rest_client).await?;
+    let events = batch
+        .events
+        .iter()
+        .map(|batch_event| batch_event.event.clone())
+        .collect::<Vec<_>>();
+    crate::buzz_envelope::build_verified_buzz_prompt_params(
+        crate::buzz_envelope::VerifiedBuzzPromptInput {
+            session_id,
+            prompt_blocks,
+            channel_id: &batch.channel_id.to_string(),
+            channel_type: &channel_info.channel_type,
+            owner_pubkey: &owner.to_hex(),
+            agent_keys: &ctx.agent_keys,
+            members: &members,
+            events: &events,
+        },
+    )
+    .map(Some)
+    .map_err(|_| AcpError::Protocol("Buzz prompt envelope validation failed".into()))
+}
+
+fn require_managed_agent_pin(configured: Option<&str>) -> Result<String, AcpError> {
+    let normalized = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            AcpError::Protocol(
+                "BUZZ_GABE_AGENT_PUBKEY is required for trusted Buzz deliveries".into(),
+            )
+        })?;
+    nostr::PublicKey::from_hex(&normalized).map_err(|_| {
+        AcpError::Protocol("BUZZ_GABE_AGENT_PUBKEY is malformed for trusted Buzz deliveries".into())
+    })?;
+    Ok(normalized)
+}
+
+async fn send_prompt_with_optional_buzz_envelope(
+    acp: &mut AcpClient,
+    session_id: &str,
+    prompt_blocks: &[&str],
+    verified_params: Option<&serde_json::Value>,
+    idle_timeout: Duration,
+    max_duration: Duration,
+) -> Result<StopReason, AcpError> {
+    match verified_params {
+        Some(params) => {
+            acp.session_prompt_params_with_idle_timeout(
+                session_id,
+                params.clone(),
+                idle_timeout,
+                max_duration,
+            )
+            .await
+        }
+        None => {
+            acp.session_prompt_blocks_with_idle_timeout(
+                session_id,
+                prompt_blocks,
+                idle_timeout,
+                max_duration,
+            )
+            .await
+        }
+    }
 }
 
 /// Fetch the latest canvas event for `channel_id` and return a rendered
@@ -7492,6 +7691,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             harness_name: "goose".to_string(),
+            managed_agent_pubkey_pin: None,
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
     }
@@ -7854,9 +8054,190 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     }
 
     fn channel_metadata_response(id: Uuid, tags: &[[&str; 2]]) -> serde_json::Value {
-        let mut event_tags = vec![json!(["d", id.to_string()])];
-        event_tags.extend(tags.iter().map(|[k, v]| json!([k, v])));
-        json!([{ "tags": event_tags }])
+        let id_text = id.to_string();
+        let mut event_tags =
+            vec![nostr::Tag::parse(["d", id_text.as_str()]).expect("metadata d tag")];
+        event_tags.extend(
+            tags.iter().map(|[key, value]| {
+                nostr::Tag::parse([*key, *value]).expect("metadata fixture tag")
+            }),
+        );
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16),
+            "",
+        )
+        .tags(event_tags)
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("signed metadata fixture");
+        serde_json::to_value(vec![event]).expect("metadata response")
+    }
+
+    #[test]
+    fn trusted_buzz_delivery_requires_managed_agent_pin() {
+        let error = require_managed_agent_pin(None).expect_err("missing pin must fail closed");
+        assert!(matches!(
+            error,
+            AcpError::Protocol(message)
+                if message == "BUZZ_GABE_AGENT_PUBKEY is required for trusted Buzz deliveries"
+        ));
+        let malformed = require_managed_agent_pin(Some("not-a-pubkey"))
+            .expect_err("malformed pin must fail closed");
+        assert!(matches!(
+            malformed,
+            AcpError::Protocol(message)
+                if message == "BUZZ_GABE_AGENT_PUBKEY is malformed for trusted Buzz deliveries"
+        ));
+        let valid = Keys::generate().public_key().to_hex();
+        assert_eq!(
+            require_managed_agent_pin(Some(&format!(" {} ", valid.to_ascii_uppercase())))
+                .expect("configured pin"),
+            valid,
+        );
+    }
+
+    #[tokio::test]
+    async fn gabe_pin_failures_emit_no_session_prompt_while_legacy_remains_compatible() {
+        struct Case {
+            name: &'static str,
+            harness: &'static str,
+            pin: Option<String>,
+            expected_prompt_count: usize,
+            expected_error: Option<&'static str>,
+        }
+
+        let channel_id = Uuid::new_v4();
+        let channel_text = channel_id.to_string();
+        let owner = Keys::generate();
+        let managed_agent = Keys::generate();
+        let mismatched_agent = Keys::generate().public_key().to_hex();
+        let cases = [
+            Case {
+                name: "ordinary legacy ACP",
+                harness: "goose",
+                pin: None,
+                expected_prompt_count: 1,
+                expected_error: None,
+            },
+            Case {
+                name: "Gabe missing pin",
+                harness: crate::config::GABE_CONTEXT_ENGINE_HARNESS,
+                pin: None,
+                expected_prompt_count: 0,
+                expected_error: Some("BUZZ_GABE_AGENT_PUBKEY is required"),
+            },
+            Case {
+                name: "Gabe malformed pin",
+                harness: crate::config::GABE_CONTEXT_ENGINE_HARNESS,
+                pin: Some("not-a-pubkey".to_string()),
+                expected_prompt_count: 0,
+                expected_error: Some("BUZZ_GABE_AGENT_PUBKEY is malformed"),
+            },
+            Case {
+                name: "Gabe mismatched pin",
+                harness: crate::config::GABE_CONTEXT_ENGINE_HARNESS,
+                pin: Some(mismatched_agent),
+                expected_prompt_count: 0,
+                expected_error: Some("managed Buzz agent identity does not match"),
+            },
+        ];
+
+        for case in cases {
+            let capture = std::env::temp_dir().join(format!(
+                "buzz-acp-gabe-pin-policy-{}.ndjson",
+                Uuid::new_v4()
+            ));
+            let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+            let script = format!(
+                r#"while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+done"#
+            );
+            let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+                .await
+                .expect("spawn pin-policy capture ACP");
+            let mut agent = OwnedAgent {
+                index: 0,
+                acp,
+                state: SessionState::default(),
+                model_capabilities: None,
+                desired_model: None,
+                model_overridden: false,
+                agent_name: "pin-policy-test-agent".into(),
+                goose_system_prompt_supported: None,
+                protocol_version: 1,
+            };
+            agent
+                .state
+                .sessions
+                .insert(channel_id, "live-session".into());
+            agent
+                .state
+                .deliveries
+                .insert(channel_id, ChannelDeliveryState::default());
+
+            let event = EventBuilder::new(Kind::Custom(9), "pin policy prompt")
+                .tags([Tag::parse(["h", channel_text.as_str()]).expect("channel tag")])
+                .sign_with_keys(&owner)
+                .expect("signed owner event");
+            let batch = FlushBatch {
+                channel_id,
+                events: vec![crate::queue::BatchEvent {
+                    event,
+                    prompt_tag: "test".into(),
+                    received_at: std::time::Instant::now(),
+                }],
+                cancelled_events: Vec::new(),
+                cancel_reason: None,
+            };
+            let mut ctx = make_prompt_context_with_owner(&managed_agent, owner.public_key());
+            ctx.harness_name = case.harness.to_string();
+            ctx.managed_agent_pubkey_pin = case.pin;
+            let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::new(ctx),
+                result_tx,
+                None,
+                format!("pin-policy-{}", case.name),
+            )
+            .await;
+            let mut result = result_rx.recv().await.expect("pin-policy result");
+            match case.expected_error {
+                None => assert!(
+                    matches!(result.outcome, PromptOutcome::Ok(StopReason::EndTurn)),
+                    "{} must keep the legacy prompt path",
+                    case.name,
+                ),
+                Some(expected) => assert!(
+                    matches!(
+                        &result.outcome,
+                        PromptOutcome::Error(AcpError::Protocol(message))
+                            if message.contains(expected)
+                    ),
+                    "{} must fail before ACP prompt emission",
+                    case.name,
+                ),
+            }
+            result.agent.acp.shutdown().await;
+
+            let requests = std::fs::read_to_string(&capture).unwrap_or_default();
+            if capture.exists() {
+                std::fs::remove_file(&capture).expect("remove pin-policy capture");
+            }
+            let prompt_count = requests
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|request| request["method"] == "session/prompt")
+                .count();
+            assert_eq!(
+                prompt_count, case.expected_prompt_count,
+                "{} emitted an unexpected ACP prompt count",
+                case.name,
+            );
+        }
     }
 
     /// A normal channel yields a non-DM (canvas allowed) and its name for the

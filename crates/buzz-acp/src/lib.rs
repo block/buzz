@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod buzz_envelope;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -13,6 +14,203 @@ mod setup_mode;
 mod usage;
 
 pub use usage::TurnUsage;
+
+/// Build verified ACP prompt parameters for Buzz transport integration tests
+/// and protocol adapters.
+pub use buzz_envelope::{
+    build_verified_buzz_prompt_params as build_verified_buzz_prompt_params_for_test,
+    VerifiedBuzzPromptInput,
+};
+
+/// Captured process output from the ACP trace-redaction integration probe.
+pub struct TraceRedactionCapture {
+    pub status_success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Exercise a real ACP subprocess while trace logging is enabled.
+///
+/// This public seam exists so integration tests can inject unique canaries into
+/// prompt, thought, tool-output, system-prompt, and credential-shaped fields
+/// and then inspect the harness trace stream without exposing those values.
+pub async fn run_trace_redaction_probe_for_test(
+    canaries: &[(&str, &str)],
+) -> Result<TraceRedactionCapture> {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+    struct CaptureGuard(Arc<Mutex<Vec<u8>>>);
+    impl Write for CaptureGuard {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("trace capture lock poisoned"))?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CaptureWriter {
+        type Writer = CaptureGuard;
+        fn make_writer(&'writer self) -> Self::Writer {
+            CaptureGuard(Arc::clone(&self.0))
+        }
+    }
+
+    let find = |class: &str| {
+        canaries
+            .iter()
+            .find_map(|(candidate, value)| (*candidate == class).then_some(*value))
+            .unwrap_or("redaction-probe")
+    };
+    let thought = find("thought");
+    let tool_output = find("tool_output");
+    let child_stdout = find("child_stdout");
+    let child_stderr = find("child_stderr");
+    let thought_frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"text": thought}
+        }}
+    });
+    let tool_frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": find("tool_id"),
+            "status": find("status"),
+            "content": [{"type": "content", "content": {"type": "text", "text": tool_output}}]
+        }}
+    });
+    let tool_start_frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {
+            "sessionUpdate": "tool_call",
+            "title": find("title"),
+            "kind": find("kind"),
+        }}
+    });
+    let command_frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [{"name": find("command")}],
+        }}
+    });
+    let run_frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {
+            "sessionUpdate": "session_info_update",
+            "_meta": {"goose": {"activeRunId": find("run_id")}},
+        }}
+    });
+    let unknown_update_frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {"sessionUpdate": find("update_type")}}
+    });
+    let child_stdout_frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {"update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"text": child_stdout},
+        }}
+    });
+    let script = format!(
+        "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{}}}}'; \
+         read -r _new; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"sessionId\":\"trace-session\"}}}}'; \
+         read -r _prompt; printf '%s\\n' '{}' '{}' '{}' '{}' '{}' '{}' '{}'; \
+         printf '%s\\n' '{}' >&2; \
+         printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"stopReason\":\"end_turn\"}}}}'; \
+         sleep 1",
+        thought_frame,
+        tool_start_frame,
+        tool_frame,
+        command_frame,
+        run_frame,
+        unknown_update_frame,
+        child_stdout_frame,
+        child_stderr,
+    );
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(CaptureWriter(Arc::clone(&captured)))
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _default_guard = tracing::dispatcher::set_default(&dispatch);
+
+    let mcp_env = canaries
+        .iter()
+        .map(|(class, value)| EnvVar {
+            name: format!("BUZZ_REDACTION_{}", class.to_ascii_uppercase()),
+            value: (*value).to_string(),
+        })
+        .collect::<Vec<_>>();
+    let extra_env = canaries
+        .iter()
+        .map(|(class, value)| {
+            (
+                format!("BUZZ_REDACTION_{}", class.to_ascii_uppercase()),
+                (*value).to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let args = vec!["-c".to_string(), script];
+    let mut client = AcpClient::spawn("/bin/sh", &args, &extra_env, false).await?;
+    let result = async {
+        client.initialize().await?;
+        let session_id = client
+            .session_new(
+                "/",
+                vec![McpServer {
+                    name: "redaction-probe".to_string(),
+                    command: "/usr/bin/true".to_string(),
+                    args: Vec::new(),
+                    env: mcp_env,
+                }],
+                Some(acp::SystemPromptTransport::Field(find(
+                    "hostile_system_prompt",
+                ))),
+                None,
+            )
+            .await?;
+        client
+            .session_prompt_with_idle_timeout(
+                &session_id,
+                find("content"),
+                Duration::from_secs(2),
+                Duration::from_secs(3),
+            )
+            .await?;
+        Ok::<(), acp::AcpError>(())
+    }
+    .await;
+    client.shutdown().await;
+    let bytes = captured
+        .lock()
+        .map_err(|_| anyhow::anyhow!("trace capture lock poisoned"))?
+        .clone();
+    Ok(TraceRedactionCapture {
+        status_success: result.is_ok(),
+        stdout: String::new(),
+        stderr: String::from_utf8_lossy(&bytes).into_owned(),
+    })
+}
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -1755,10 +1953,19 @@ async fn tokio_main() -> Result<()> {
         return run_authenticate(args).await;
     }
 
+    // Network-stack TRACE events can contain complete WebSocket/HTTP frames,
+    // including signed message bodies and authorization material. Keep those
+    // crates disabled even when an operator enables broad `RUST_LOG=trace`;
+    // Buzz's own structured trace events remain available.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("buzz_acp=info"))
+        .add_directive("tungstenite=off".parse()?)
+        .add_directive("tokio_tungstenite=off".parse()?)
+        .add_directive("hyper=off".parse()?)
+        .add_directive("hyper_util=off".parse()?)
+        .add_directive("reqwest=off".parse()?);
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
-        )
+        .with_env_filter(filter)
         .compact()
         .init();
 
@@ -2009,6 +2216,13 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let harness_name =
+        crate::config::configured_harness_identity(&config.agent_command, &config.agent_args);
+    let managed_agent_pubkey_pin = if harness_name == crate::config::GABE_CONTEXT_ENGINE_HARNESS {
+        std::env::var("BUZZ_GABE_AGENT_PUBKEY").ok()
+    } else {
+        None
+    };
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2041,7 +2255,8 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
-        harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
+        harness_name,
+        managed_agent_pubkey_pin,
         relay_url: config.relay_url.clone(),
     });
 
@@ -5398,9 +5613,21 @@ mod author_gate_tests {
         use std::sync::atomic::Ordering;
 
         let id = Uuid::new_v4();
-        let response = serde_json::json!([{
-            "tags": [["d", id.to_string()], ["name", "DM"], ["t", "dm"]]
-        }]);
+        let id_text = id.to_string();
+        let response = {
+            let event = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16),
+                "",
+            )
+            .tags([
+                nostr::Tag::parse(["d", id_text.as_str()]).expect("d tag"),
+                nostr::Tag::parse(["name", "DM"]).expect("name tag"),
+                nostr::Tag::parse(["t", "dm"]).expect("type tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("signed metadata fixture");
+            serde_json::to_value(vec![event]).expect("metadata response")
+        };
         let (resolver, requests, server) = lazy_resolver_with_response(response).await;
 
         assert!(is_dm_channel(id, &resolver).await);
