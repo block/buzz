@@ -708,6 +708,25 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+/// Frozen harness identity for the owner-reviewed Gabe Context Engine runtime.
+pub(crate) const GABE_CONTEXT_ENGINE_HARNESS: &str = "gabe-acp";
+
+/// Derive the configured harness identity from the executable and its first
+/// argument. The production Gabe profile is intentionally exact: Node running
+/// `gabe-acp.mjs`. Merely setting a Gabe environment variable cannot opt an
+/// ordinary ACP runtime into the trusted transport path.
+pub(crate) fn configured_harness_identity(command: &str, args: &[String]) -> String {
+    let command_identity = normalize_agent_command_identity(command);
+    let script_identity = args
+        .first()
+        .map(|value| normalize_agent_command_identity(value));
+    if command_identity == "node" && script_identity.as_deref() == Some("gabe-acp.mjs") {
+        GABE_CONTEXT_ENGINE_HARNESS.to_string()
+    } else {
+        command_identity
+    }
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
@@ -1651,6 +1670,25 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn derives_gabe_context_engine_harness_only_from_frozen_node_script_pair() {
+        let script = vec![
+            "/Users/gabriel/.openclaw/extensions/context-engine/scripts/gabe-acp.mjs".to_string(),
+        ];
+        assert_eq!(
+            configured_harness_identity(
+                "/Users/gabriel/.nvm/versions/node/v24.13.1/bin/node",
+                &script,
+            ),
+            GABE_CONTEXT_ENGINE_HARNESS,
+        );
+        assert_eq!(configured_harness_identity("goose", &script), "goose");
+        assert_eq!(
+            configured_harness_identity("node", &["ordinary-acp.mjs".to_string()]),
+            "node",
+        );
     }
 
     #[test]

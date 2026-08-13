@@ -2243,6 +2243,35 @@ impl Db {
         Ok(result)
     }
 
+    /// Atomically enforce a prepared message membership revision and insert
+    /// the event plus thread metadata.
+    pub async fn insert_prepared_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        expected_membership_revision: &str,
+    ) -> Result<(StoredEvent, bool)> {
+        let result = event::insert_prepared_event_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+            expected_membership_revision,
+        )
+        .await?;
+        if result.1 {
+            if let Err(error) =
+                insert_mentions(&self.pool, community_id, event, Some(channel_id)).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {error}");
+            }
+        }
+        Ok(result)
+    }
+
     /// Atomically insert a kind:7 reaction event and its reaction row.
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(
