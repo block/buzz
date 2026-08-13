@@ -15,6 +15,7 @@ import {
 import {
   getTextPayload,
   type ConnectionState,
+  type LiveSubscriptionOptions,
   type LiveSubscriptionReadiness,
   type PendingEvent,
   type RelaySubscription,
@@ -414,8 +415,9 @@ export class RelayClient {
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
     onReady?: (readiness: LiveSubscriptionReadiness) => void,
+    options?: LiveSubscriptionOptions,
   ) {
-    return this.subscribe(filter, onEvent, onReady);
+    return this.subscribe(filter, onEvent, onReady, options);
   }
   async subscribeToChannelMentionEvents(
     channelId: string,
@@ -436,12 +438,7 @@ export class RelayClient {
     await this.connectBypassingBackoff();
   }
 
-  /**
-   * Environment-driven resume (online/focus/visibility): bypasses a pending
-   * backoff timer but preserves the terminal latch and AUTH rejection streak
-   * — only `preconnect()` clears those, so resume events during repeated
-   * AUTH rejection cannot defeat the consecutive-rejection cap.
-   */
+  /** Resume without clearing the terminal latch or AUTH rejection streak. */
   async resumeReconnect() {
     if (this.terminal) return;
     await this.connectBypassingBackoff();
@@ -600,6 +597,7 @@ export class RelayClient {
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
     onReady?: (readiness: LiveSubscriptionReadiness) => void,
+    options?: LiveSubscriptionOptions,
   ) {
     await this.ensureConnected();
 
@@ -622,6 +620,7 @@ export class RelayClient {
       filter,
       onEvent,
       resolveReady,
+      ...options,
     });
 
     try {

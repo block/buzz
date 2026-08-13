@@ -56,11 +56,23 @@ type FirstEventSubscription = {
 
 export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
 
+export type LiveSubscriptionOptions = {
+  /** Reconnect without a `since` cursor or history replay. */
+  reconnectMode?: "cursor" | "live-only";
+  /** Fail-closed admission gate evaluated before replay/watermark mutation. */
+  admitEvent?: (event: RelayEvent) => boolean;
+  /** Persistent CLOSED notification, including post-readiness revocation. */
+  onClosed?: (message: string, terminal: boolean) => void;
+};
+
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
+  reconnectMode?: LiveSubscriptionOptions["reconnectMode"];
+  admitEvent?: LiveSubscriptionOptions["admitEvent"];
+  onClosed?: LiveSubscriptionOptions["onClosed"];
   lastSeenCreatedAt?: number;
   /**
    * Lower bound of a reconnect backfill window that has not yet completed.
