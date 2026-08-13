@@ -133,7 +133,7 @@ export function SettingsSegmentedControl<Value extends string>({
   return (
     <fieldset
       className={cn(
-        "relative isolate grid h-8 w-60 shrink-0 grid-cols-3 overflow-hidden rounded-md bg-muted/45 p-0.5",
+        "relative isolate h-8 w-60 shrink-0 overflow-hidden rounded-md bg-muted/45 p-0.5",
         onPreviewChange && "touch-none select-none cursor-ew-resize",
         className,
       )}
@@ -156,30 +156,34 @@ export function SettingsSegmentedControl<Value extends string>({
           width: `calc((100% - 0.25rem) / ${options.length})`,
         }}
       />
-      {options.map(({ value: optionValue, label, Icon }) => (
-        <button
-          aria-pressed={value === optionValue}
-          className={cn(
-            "relative z-10 flex h-full items-center justify-center gap-1.5 rounded-md bg-transparent px-2.5 text-xs font-medium transition-colors duration-150 ease-out focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
-            displayedValue === optionValue
-              ? "text-foreground"
-              : "text-muted-foreground hover:text-foreground",
-          )}
-          data-testid={`${optionTestIdPrefix}-${optionValue}`}
-          key={optionValue}
-          onClick={(event) => {
-            if (event.detail > 0 && skipPointerClickRef.current) {
-              skipPointerClickRef.current = false;
-              return;
-            }
-            onValueChange(optionValue);
-          }}
-          type="button"
-        >
-          {Icon ? <Icon className="h-3.5 w-3.5" /> : null}
-          {label}
-        </button>
-      ))}
+      {/* Legends escape grid/flex layout on a fieldset, so the columns live
+          on an inner wrapper the legend is not part of. */}
+      <div className="grid h-full auto-cols-fr grid-flow-col">
+        {options.map(({ value: optionValue, label, Icon }) => (
+          <button
+            aria-pressed={value === optionValue}
+            className={cn(
+              "relative z-10 flex h-full items-center justify-center gap-1.5 rounded-md bg-transparent px-2.5 text-xs font-medium transition-colors duration-150 ease-out focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+              displayedValue === optionValue
+                ? "text-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+            data-testid={`${optionTestIdPrefix}-${optionValue}`}
+            key={optionValue}
+            onClick={(event) => {
+              if (event.detail > 0 && skipPointerClickRef.current) {
+                skipPointerClickRef.current = false;
+                return;
+              }
+              onValueChange(optionValue);
+            }}
+            type="button"
+          >
+            {Icon ? <Icon className="h-3.5 w-3.5" /> : null}
+            {label}
+          </button>
+        ))}
+      </div>
     </fieldset>
   );
 }

@@ -23,6 +23,7 @@ const DEFAULT_THREAD_VIEW_MODE: ThreadViewMode = "split";
 const listeners = new Set<() => void>();
 
 let threadViewMode = readStoredThreadViewMode();
+let previewOverride: ThreadViewMode | null = null;
 
 function parseThreadViewMode(value: string | null | undefined): ThreadViewMode {
   return value === "focus" || value === "split"
@@ -46,7 +47,7 @@ function subscribe(listener: () => void): () => void {
 }
 
 function getSnapshot(): ThreadViewMode {
-  return threadViewMode;
+  return previewOverride ?? threadViewMode;
 }
 
 function getServerSnapshot(): ThreadViewMode {
@@ -60,6 +61,7 @@ export function getThreadViewMode(): ThreadViewMode {
 
 /** Update the thread layout preference and notify all subscribed components. */
 export function setThreadViewMode(mode: ThreadViewMode): void {
+  previewOverride = null;
   threadViewMode = mode;
 
   try {
@@ -68,6 +70,15 @@ export function setThreadViewMode(mode: ThreadViewMode): void {
     // Persistence is best-effort; the in-memory value still applies.
   }
 
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+/** Temporarily apply a layout without changing the saved preference. */
+export function previewThreadViewMode(mode: ThreadViewMode | null): void {
+  if (previewOverride === mode) return;
+  previewOverride = mode;
   for (const listener of listeners) {
     listener();
   }

@@ -11,9 +11,9 @@ export const DEFAULT_FONT_SIZE: FontSize = "default";
  * prevents a text preference from also resizing rem-based layout geometry.
  */
 const TYPE_REM_SIZE_PX: Record<FontSize, number> = {
-  smaller: 14 / 0.875,
-  default: 15 / 0.875,
-  larger: 16 / 0.875,
+  smaller: 13 / 0.875,
+  default: 14 / 0.875,
+  larger: 15 / 0.875,
 };
 
 const TYPE_REM_PROPERTY = "--buzz-type-rem";

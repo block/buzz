@@ -9,6 +9,7 @@ export const DEFAULT_LINK_PREVIEW_STYLE: LinkPreviewStyle = "compact";
 
 const listeners = new Set<() => void>();
 let linkPreviewStyle = readStoredLinkPreviewStyle();
+let previewOverride: LinkPreviewStyle | null = null;
 
 export function parseLinkPreviewStyle(
   value: string | null | undefined,
@@ -34,16 +35,24 @@ function subscribe(listener: () => void): () => void {
 }
 
 export function getLinkPreviewStyle(): LinkPreviewStyle {
-  return linkPreviewStyle;
+  return previewOverride ?? linkPreviewStyle;
 }
 
 export function setLinkPreviewStyle(style: LinkPreviewStyle): void {
+  previewOverride = null;
   linkPreviewStyle = style;
   try {
     globalThis.localStorage?.setItem(LINK_PREVIEW_STYLE_STORAGE_KEY, style);
   } catch {
     // Persistence is best-effort; the in-memory preference still applies.
   }
+  for (const listener of listeners) listener();
+}
+
+/** Temporarily apply a style without changing the saved preference. */
+export function previewLinkPreviewStyle(style: LinkPreviewStyle | null): void {
+  if (previewOverride === style) return;
+  previewOverride = style;
   for (const listener of listeners) listener();
 }
 
