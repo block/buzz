@@ -473,6 +473,11 @@ type MockBridgeOptions = {
     messageId?: string | null;
     threadRootId?: string | null;
   }>;
+  /** Entity links captured by Rust before the React listener mounts. */
+  pendingEntityDeepLinks?: Array<{
+    id: string;
+    href: string;
+  }>;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
    * an empty config (no provider, model, or env vars) if not specified.

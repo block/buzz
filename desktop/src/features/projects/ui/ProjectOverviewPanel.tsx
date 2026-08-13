@@ -36,6 +36,8 @@ type ProjectOverviewPanelProps = {
   externalUrl?: string | null;
   files: ProjectRepoFile[];
   gitDataState: GitDataState;
+  /** Hide the readme header rows when the workspace renders them itself. */
+  hideReadmeHeader?: boolean;
   project: Project;
   onViewContributors: () => void;
   profiles?: UserProfileLookup;
@@ -149,6 +151,7 @@ export function ProjectOverviewPanel({
   externalUrl,
   files,
   gitDataState,
+  hideReadmeHeader,
   onViewContributors,
   project,
   profiles,
@@ -182,6 +185,7 @@ export function ProjectOverviewPanel({
           externalUrl={externalUrl}
           file={readmeFile}
           gitDataState={gitDataState}
+          hideHeader={hideReadmeHeader}
           sourceControls={sourceControls}
           unavailableReason={unavailableReason}
         />

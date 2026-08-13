@@ -51,6 +51,10 @@ export function ProjectInboxDetailPane({
   const inboxTitle = `${authorLabel} sent you ${
     workItem.type === "pull-request" ? "a pull request" : "an issue"
   }`;
+  // The action deep-links to this specific work item in the project view,
+  // so the label names the entity, not the project.
+  const openLabel =
+    workItem.type === "pull-request" ? "Open pull request" : "Open issue";
   const handleOpenMergeRecoveryTerminal = React.useCallback(
     async (input: {
       expectedCommit: string;
@@ -110,16 +114,16 @@ export function ProjectInboxDetailPane({
               </h2>
             </div>
             <Button
-              aria-label="Open project"
+              aria-label={openLabel}
               className="shrink-0"
               onClick={onOpenProject}
               size={showSideRail ? "sm" : "icon"}
-              title="Open project"
+              title={openLabel}
               type="button"
               variant="ghost"
             >
               <ExternalLink className="h-4 w-4" />
-              {showSideRail ? "Open project" : null}
+              {showSideRail ? openLabel : null}
             </Button>
           </div>
         </div>
