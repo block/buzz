@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::managed_agents::{
@@ -10,11 +11,34 @@ use crate::managed_agents::{
 
 use super::{cli_probe, Requirement};
 
+pub(super) fn codex_requirements(
+    runtime: &KnownAcpRuntime,
+    effective_env: &BTreeMap<String, String>,
+) -> Vec<Requirement> {
+    requirements_with_env_auth(
+        &["codex", "login", "status"],
+        "run `codex login`",
+        runtime,
+        crate::managed_agents::config_bridge::codex_env_key_auth_satisfied(effective_env),
+    )
+}
+
 /// Requirements for CLI-login runtimes (claude, codex).
 pub(super) fn requirements(
     probe_args: &[&str],
     setup_copy: &str,
     runtime: &KnownAcpRuntime,
+) -> Vec<Requirement> {
+    requirements_with_env_auth(probe_args, setup_copy, runtime, false)
+}
+
+/// Requirements for a CLI-login runtime that may also be authenticated by an
+/// environment credential outside the CLI's persisted login store.
+pub(super) fn requirements_with_env_auth(
+    probe_args: &[&str],
+    setup_copy: &str,
+    runtime: &KnownAcpRuntime,
+    env_auth_satisfied: bool,
 ) -> Vec<Requirement> {
     let adapter_result = runtime
         .commands
@@ -39,6 +63,9 @@ pub(super) fn requirements(
 
     match availability {
         AcpAvailabilityStatus::Available => {
+            if env_auth_satisfied {
+                return vec![];
+            }
             let Some(binary_path) = resolve_command(probe_args[0]) else {
                 return vec![missing_requirement(
                     probe_args,
@@ -76,5 +103,99 @@ fn missing_requirement(
         probe_args: probe_args.iter().map(|value| value.to_string()).collect(),
         setup_copy: setup_copy.to_string(),
         availability,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn present_binary_str() -> &'static str {
+        Box::leak(
+            std::env::current_exe()
+                .expect("test executable path")
+                .to_string_lossy()
+                .into_owned()
+                .into_boxed_str(),
+        )
+    }
+
+    fn static_commands(commands: Vec<&'static str>) -> &'static [&'static str] {
+        Box::leak(commands.into_boxed_slice())
+    }
+
+    fn make_runtime(
+        commands: &'static [&'static str],
+        underlying_cli: Option<&'static str>,
+    ) -> KnownAcpRuntime {
+        KnownAcpRuntime {
+            id: "test-cli-runtime",
+            label: "Test CLI",
+            commands,
+            aliases: &[],
+            avatar_url: "",
+            mcp_command: None,
+            mcp_hooks: false,
+            underlying_cli,
+            cli_install_commands: &[],
+            cli_install_commands_windows: &[],
+            adapter_install_commands: &[],
+            cli_install_instructions_url: "",
+            adapter_install_instructions_url: "",
+            cli_install_hint: "",
+            adapter_install_hint: "",
+            skill_dir: None,
+            supports_acp_model_switching: false,
+            model_env_var: None,
+            provider_env_var: None,
+            provider_locked: false,
+            default_env: &[],
+            config_file_path: None,
+            config_file_format: None,
+            supports_acp_native_config: false,
+            thinking_env_var: None,
+            max_tokens_env_var: None,
+            context_limit_env_var: None,
+            max_rounds_env_var: None,
+            required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
+        }
+    }
+
+    #[test]
+    fn satisfied_env_auth_bypasses_login_probe() {
+        let exe = present_binary_str();
+        let runtime = make_runtime(static_commands(vec![exe]), Some(exe));
+        let requirements = requirements_with_env_auth(
+            &[exe, "--buzz-probe-must-not-run"],
+            "this should not show",
+            &runtime,
+            true,
+        );
+
+        assert!(requirements.is_empty());
+    }
+
+    #[test]
+    fn env_auth_does_not_hide_missing_tooling() {
+        let runtime = make_runtime(
+            &["__buzz_nonexistent_adapter_env_auth__"],
+            Some("__buzz_nonexistent_cli_env_auth__"),
+        );
+        let requirements = requirements_with_env_auth(
+            &["__buzz_nonexistent_cli_env_auth__", "status"],
+            "install the tool",
+            &runtime,
+            true,
+        );
+
+        assert!(matches!(
+            requirements.as_slice(),
+            [Requirement::CliLogin {
+                availability: AcpAvailabilityStatus::NotInstalled,
+                ..
+            }]
+        ));
     }
 }

@@ -16,3 +16,11 @@ pub(crate) use types::*;
 pub(crate) fn read_goose_file_config() -> Option<RuntimeFileConfig> {
     goose::read_config_file()
 }
+
+/// Whether the active custom Codex provider is authenticated by the env key
+/// declared in its config.
+pub(crate) fn codex_env_key_auth_satisfied(
+    effective_env: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    codex::env_key_auth_satisfied(effective_env)
+}

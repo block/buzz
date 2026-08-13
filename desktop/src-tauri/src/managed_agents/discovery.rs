@@ -10,6 +10,7 @@ use crate::managed_agents::{
     HarnessSource,
 };
 mod presets;
+mod runtime_auth;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
@@ -19,7 +20,6 @@ pub(crate) use presets::{
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
-
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
@@ -1382,7 +1382,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             id: runtime.id.to_string(),
             label: runtime.label.to_string(),
             avatar_url: runtime.avatar_url.to_string(),
-            availability,
+            availability: availability.clone(),
             command,
             binary_path,
             default_args,
@@ -1399,8 +1399,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             requires_external_cli: runtime.underlying_cli.is_some(),
             underlying_cli_path,
             node_required,
-            // Filled in by the auth-probe phase in full catalog discovery.
-            auth_status: AuthStatus::Unknown,
+            // Filled in here for env auth, or by the auth-probe phase below.
+            auth_status: runtime_auth::initial_status(runtime.id, &availability),
             login_hint: None,
             source: HarnessSource::Builtin,
             definition_env: Default::default(),
@@ -1451,7 +1451,7 @@ pub fn discover_acp_runtimes_from(
         .iter()
         .enumerate()
         .filter_map(|(idx, partial)| {
-            if partial.entry.availability != AcpAvailabilityStatus::Available {
+            if !runtime_auth::needs_probe(&partial.entry) {
                 return None;
             }
             let probe_args = partial.runtime.auth_probe_args?;

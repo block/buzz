@@ -1,10 +1,56 @@
 use super::types::{ExtensionEntry, RuntimeFileConfig};
+use std::collections::BTreeMap;
 
 /// Read Codex config from `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     let path = codex_config_path()?;
     let raw = std::fs::read_to_string(path).ok()?;
     parse_codex_config(&raw)
+}
+
+/// Return whether the active custom Codex provider has a usable env-backed
+/// credential. Codex accepts provider API keys through
+/// `[model_providers.<id>] env_key`, but `codex login status` only checks its
+/// persisted credential store. Buzz must account for both authentication
+/// paths before deciding that the runtime is logged out.
+pub(crate) fn env_key_auth_satisfied(effective_env: &BTreeMap<String, String>) -> bool {
+    let Some(env_key) = read_active_provider_env_key() else {
+        return false;
+    };
+
+    env_key_value_is_set(effective_env, &env_key)
+}
+
+fn env_key_value_is_set(effective_env: &BTreeMap<String, String>, env_key: &str) -> bool {
+    effective_env
+        .get(env_key)
+        .is_some_and(|value| !value.is_empty())
+        || std::env::var_os(env_key).is_some_and(|value| !value.is_empty())
+}
+
+fn read_active_provider_env_key() -> Option<String> {
+    let path = codex_config_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    parse_active_provider_env_key(&raw)
+}
+
+fn parse_active_provider_env_key(toml_str: &str) -> Option<String> {
+    let table: toml::Table = toml_str.parse().ok()?;
+    let provider = toml_string(&table, "model_provider")?;
+    let env_key = table
+        .get("model_providers")?
+        .as_table()?
+        .get(&provider)?
+        .as_table()?
+        .get("env_key")?
+        .as_str()?
+        .trim();
+
+    if crate::managed_agents::env_vars::is_well_formed_env_key(env_key) {
+        Some(env_key.to_string())
+    } else {
+        None
+    }
 }
 
 fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
@@ -178,6 +224,59 @@ base_url = "http://localhost:8080"
         let cfg = parse_codex_config(toml).unwrap();
         assert_eq!(cfg.provider.as_deref(), Some("custom-provider"));
         assert!(cfg.extra.contains_key("model_providers.custom-provider"));
+    }
+
+    #[test]
+    fn parses_active_custom_provider_env_key() {
+        let toml = r#"
+model_provider = "custom-provider"
+
+[model_providers.custom-provider]
+env_key = "CUSTOM_API_KEY"
+"#;
+
+        assert_eq!(
+            parse_active_provider_env_key(toml).as_deref(),
+            Some("CUSTOM_API_KEY")
+        );
+    }
+
+    #[test]
+    fn ignores_env_key_for_inactive_provider() {
+        let toml = r#"
+model_provider = "active-provider"
+
+[model_providers.inactive-provider]
+env_key = "INACTIVE_API_KEY"
+"#;
+
+        assert_eq!(parse_active_provider_env_key(toml), None);
+    }
+
+    #[test]
+    fn rejects_malformed_provider_env_key() {
+        let toml = r#"
+model_provider = "custom-provider"
+
+[model_providers.custom-provider]
+env_key = "CUSTOM_API_KEY=secret"
+"#;
+
+        assert_eq!(parse_active_provider_env_key(toml), None);
+    }
+
+    #[test]
+    fn accepts_non_empty_effective_env_credential() {
+        let env = BTreeMap::from([("BUZZ_TEST_CODEX_API_KEY".to_string(), "secret".to_string())]);
+
+        assert!(env_key_value_is_set(&env, "BUZZ_TEST_CODEX_API_KEY"));
+    }
+
+    #[test]
+    fn rejects_empty_effective_env_credential() {
+        let env = BTreeMap::from([("BUZZ_TEST_CODEX_API_KEY".to_string(), String::new())]);
+
+        assert!(!env_key_value_is_set(&env, "BUZZ_TEST_CODEX_API_KEY"));
     }
 
     #[test]
