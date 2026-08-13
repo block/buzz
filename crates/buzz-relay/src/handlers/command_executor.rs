@@ -964,7 +964,10 @@ async fn handle_workflow_trigger(
                         RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
-                        Some(&format!("definition parse error: {e}")),
+                        Some(buzz_db::workflow::WorkflowRunFailure {
+                            code: "invalid_definition",
+                            message: &format!("definition parse error: {e}"),
+                        }),
                     )
                     .await
                 {
@@ -1261,7 +1264,10 @@ async fn handle_approval_deny(
                 RunStatus::Cancelled,
                 run.current_step,
                 &run.execution_trace,
-                Some(&cancel_msg),
+                Some(buzz_db::workflow::WorkflowRunFailure {
+                    code: "approval_denied",
+                    message: &cancel_msg,
+                }),
             )
             .await
         {
@@ -1329,7 +1335,10 @@ async fn resume_workflow_after_approval(
                     RunStatus::Failed,
                     run.current_step,
                     &run.execution_trace,
-                    Some(&format!("definition parse error: {e}")),
+                    Some(buzz_db::workflow::WorkflowRunFailure {
+                        code: "invalid_definition",
+                        message: &format!("definition parse error: {e}"),
+                    }),
                 )
                 .await
             {

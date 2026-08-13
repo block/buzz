@@ -16,6 +16,12 @@ class _MarkdownRule {
 
 class _MarkdownEditingController extends TextEditingController {
   final Set<String> _agentMentionNames = <String>{};
+  TextSpan? _cachedTextSpan;
+  String? _cachedText;
+  TextRange? _cachedComposingRange;
+  TextStyle? _cachedBaseStyle;
+  Color? _cachedOnSurface;
+  Color? _cachedSurface;
 
   static final _rules = [
     _MarkdownRule(
@@ -45,6 +51,7 @@ class _MarkdownEditingController extends TextEditingController {
     _agentMentionNames
       ..clear()
       ..addAll(next);
+    _cachedTextSpan = null;
     notifyListeners();
   }
 
@@ -59,7 +66,16 @@ class _MarkdownEditingController extends TextEditingController {
         withComposing && value.composing.isValid && !value.composing.isCollapsed
         ? value.composing
         : TextRange.empty;
-    return TextSpan(
+    final colors = context.colors;
+    if (_cachedTextSpan case final cached?
+        when _cachedText == text &&
+            _cachedComposingRange == composingRange &&
+            _cachedBaseStyle == baseStyle &&
+            _cachedOnSurface == colors.onSurface &&
+            _cachedSurface == colors.surface) {
+      return cached;
+    }
+    final span = TextSpan(
       style: baseStyle,
       children: _buildMarkdownSpans(
         context,
@@ -69,6 +85,13 @@ class _MarkdownEditingController extends TextEditingController {
         composingRange: composingRange,
       ),
     );
+    _cachedText = text;
+    _cachedComposingRange = composingRange;
+    _cachedBaseStyle = baseStyle;
+    _cachedOnSurface = colors.onSurface;
+    _cachedSurface = colors.surface;
+    _cachedTextSpan = span;
+    return span;
   }
 
   List<InlineSpan> _buildMarkdownSpans(
