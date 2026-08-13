@@ -131,6 +131,16 @@ class SendMessage {
       final name = match.group(1)?.toLowerCase();
       if (name == null || name.isEmpty) continue;
 
+      // Collect every profile whose display name matches, rather than taking
+      // the first one and breaking out. Two members can legitimately share a
+      // display name — a stale identity left behind by a re-key is the common
+      // case — and `cache` is a Map, so "the first match" really means
+      // "whichever entry the map happened to yield first". That made mention
+      // delivery depend on map ordering: for some names the `p` tag landed on
+      // the live identity and the mention worked, for others it landed on a
+      // dead one and the mention silently reached nobody, with nothing in the
+      // UI to distinguish the two.
+      final candidates = <String>[];
       for (final profile in cache.values) {
         final displayName = profile.displayName?.toLowerCase();
         if (displayName == null) continue;
@@ -145,9 +155,16 @@ class SendMessage {
           continue;
         }
 
-        pubkeys.add(profile.pubkey);
-        break;
+        candidates.add(profile.pubkey);
       }
+
+      // An ambiguous @name tags every candidate. `buzz-cli` rejects the send
+      // outright here and tells the user to retry with an explicit
+      // `--mention <pubkey>`, but mobile has no way to supply one, so failing
+      // would leave a duplicated name permanently unmentionable. Tagging all
+      // candidates keeps the intended recipient reachable; the cost is a
+      // redundant `p` tag on the identities sharing that name.
+      pubkeys.addAll(candidates);
     }
 
     return pubkeys.toList();
