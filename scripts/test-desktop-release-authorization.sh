@@ -15,14 +15,14 @@ printf '\n' >>"$GH_CALLS"
 if [[ "${2:-}" == graphql ]]; then
   expected_query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewDecision}}}'
   [[ "$#" -eq 12 && "$3" == -f && "$4" == "query=$expected_query" &&
-    "$5" == -F && "$6" == owner=block &&
-    "$7" == -F && "$8" == repo=buzz &&
+    "$5" == -F && "$6" == owner=SaledaAI &&
+    "$7" == -F && "$8" == repo=saleda-buzz &&
     "$9" == -F && "${10}" == number=123 &&
     "${11}" == --jq && "${12}" == '.data.repository.pullRequest' ]] || {
     echo "GraphQL call does not match the deployed query contract" >&2; exit 92;
   }
   if [[ -n "${REVIEW_DECISION:-}" ]]; then printf '%s\n' "$REVIEW_DECISION"; else printf '%s\n' '{"reviewDecision":"APPROVED"}'; fi
-elif [[ "$#" -eq 4 && "$2" == --paginate && "$3" == --slurp && "$4" == "repos/block/buzz/pulls/123/reviews?per_page=100&page=1" ]]; then
+elif [[ "$#" -eq 4 && "$2" == --paginate && "$3" == --slurp && "$4" == "repos/SaledaAI/saleda-buzz/pulls/123/reviews?per_page=100&page=1" ]]; then
   [[ "${GH_FAIL_REVIEWS:-false}" != true ]] || { echo "simulated reviews API failure" >&2; exit 94; }
   if [[ -n "${REVIEWS:-}" ]]; then printf '%s\n' "$REVIEWS"; else printf '%s\n' '[[],[{"state":"APPROVED","commit_id":"head","author_association":"MEMBER"}]]'; fi
 else
@@ -34,7 +34,7 @@ chmod +x "$tmp/bin/gh"
 
 run_authorization() {
   (cd "$repo_root" && PATH="$tmp/bin:$PATH" GH_CALLS="$tmp/calls" GH_TOKEN=test \
-    GITHUB_REPOSITORY=block/buzz PR_NUMBER=123 PR_HEAD_SHA=head \
+    GITHUB_REPOSITORY=SaledaAI/saleda-buzz PR_NUMBER=123 PR_HEAD_SHA=head \
     REVIEW_DECISION="${REVIEW_DECISION-}" REVIEWS="${REVIEWS-}" GH_FAIL_REVIEWS="${GH_FAIL_REVIEWS-false}" \
     scripts/verify-desktop-release-authorization.sh)
 }

@@ -16,7 +16,7 @@ permissions:
 jobs:
   build:
     name: Build Windows canary
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'SaledaAI/saleda-buzz'
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:

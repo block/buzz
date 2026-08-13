@@ -46,11 +46,11 @@ permissions: {}
 
 env:
   # Single source of truth for the OCI chart repository (helm appends the chart
-  # name `buzz`, yielding oci://ghcr.io/block/buzz/charts/buzz, which is exactly
+  # name `buzz`, yielding oci://ghcr.io/saleda/zorro/charts/buzz, which is exactly
   # the install ref documented in deploy/charts/buzz/README.md). Set
   # GHCR_CHART_REPO as a repo variable to override (e.g., forks pushing to their
   # own namespace without editing this file) — mirrors docker.yml's GHCR_IMAGE.
-  CHART_REPO: ${{ vars.GHCR_CHART_REPO != '' && vars.GHCR_CHART_REPO || 'oci://ghcr.io/block/buzz/charts' }}
+  CHART_REPO: ${{ vars.GHCR_CHART_REPO != '' && vars.GHCR_CHART_REPO || 'oci://ghcr.io/saleda/zorro/charts' }}
 
 jobs:
   lint-and-unittest:
@@ -105,7 +105,7 @@ jobs:
           done
 
   install-on-kind:
-    # Full end-to-end install requires the public ghcr.io/block/buzz image to
+    # Full end-to-end install requires the public ghcr.io/saleda/zorro image to
     # exist and to embed Max's startup migrations. Runs only after Sami's
     # image PR merges (`workflow_dispatch`) or on a schedule once main carries
     # both prerequisites. Render/lint above is the per-PR signal.
@@ -241,7 +241,7 @@ jobs:
           CHART_REPO: ${{ env.CHART_REPO }}
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          # CHART_REPO is oci://ghcr.io/block/buzz/charts; helm push appends the
+          # CHART_REPO is oci://ghcr.io/saleda/zorro/charts; helm push appends the
           # chart name, so the install ref is .../charts/buzz.
           INSTALL_REF="${CHART_REPO}/buzz"
           {

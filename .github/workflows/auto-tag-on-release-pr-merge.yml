@@ -20,7 +20,7 @@ name: Auto-tag on Release PR Merge
 # App, so the consumer's `on.push.tags` trigger runs normally. The workflow's
 # default GITHUB_TOKEN remains read-only and is never used to create a tag.
 #
-# Mobile is manual-only by infosec necessity: OSS `block/buzz` CI must
+# Mobile is manual-only by infosec necessity: OSS `SaledaAI/saleda-buzz` CI must
 # not trigger CI in the private `buzz-releases` repo. A human feeds the exact
 # mobile candidate tag to the private Buildkite pipeline, which builds and
 # ships mobile.

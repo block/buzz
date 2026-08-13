@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-readonly RELEASE_TAG_RULESET_ID=14378754
+readonly RELEASE_TAG_RULESET_ID="${RELEASE_TAG_RULESET_ID:-}"
 
 fail_release_ruleset() {
   echo "Error: $*" >&2
@@ -11,12 +11,12 @@ require_canonical_repository() {
   local origin_url
 
   origin_url="$(git config --get remote.origin.url 2>/dev/null)" || \
-    fail_release_ruleset "origin is required and must point to block/buzz" || return 1
+    fail_release_ruleset "origin is required and must point to SaledaAI/saleda-buzz" || return 1
   case "$origin_url" in
-    git@github.com:block/buzz.git|ssh://git@github.com/block/buzz.git|https://github.com/block/buzz.git|https://github.com/block/buzz)
+    git@github.com:SaledaAI/saleda-buzz.git|ssh://git@github.com/SaledaAI/saleda-buzz.git|https://github.com/SaledaAI/saleda-buzz.git|https://github.com/SaledaAI/saleda-buzz)
       ;;
     *)
-      fail_release_ruleset "origin must point to canonical block/buzz, not '$origin_url'" || return 1
+      fail_release_ruleset "origin must point to canonical SaledaAI/saleda-buzz, not '$origin_url'" || return 1
       ;;
   esac
 }
@@ -25,7 +25,9 @@ require_release_tag_ruleset() {
   local ruleset_endpoint state can_bypass rule_types includes excludes
 
   command -v gh >/dev/null 2>&1 || fail_release_ruleset "gh is required" || return 1
-  ruleset_endpoint="repos/block/buzz/rulesets/$RELEASE_TAG_RULESET_ID"
+  [[ "$RELEASE_TAG_RULESET_ID" =~ ^[0-9]+$ ]] || \
+    fail_release_ruleset "RELEASE_TAG_RULESET_ID must name the SaledaAI/saleda-buzz release-tag ruleset" || return 1
+  ruleset_endpoint="repos/SaledaAI/saleda-buzz/rulesets/$RELEASE_TAG_RULESET_ID"
 
   state="$(gh api "$ruleset_endpoint" --jq .enforcement)" || \
     fail_release_ruleset "could not verify Release tag ruleset $RELEASE_TAG_RULESET_ID" || return 1

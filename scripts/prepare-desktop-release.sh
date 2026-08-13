@@ -22,7 +22,7 @@ fi
 
 git checkout -B "$branch" "$base_sha"
 just bump-desktop-version "$version"
-scripts/desktop_release.py generate "$version" --base "$base_sha" --repo block/buzz
+scripts/desktop_release.py generate "$version" --base "$base_sha" --repo SaledaAI/saleda-buzz
 
 git add \
   .release/desktop-candidate.json \
@@ -44,7 +44,7 @@ Co-authored-by: $agent_name <$agent_email>
 EOF
 git -c user.name='Wes' -c user.email='wesbillman@users.noreply.github.com' \
   commit -s -F "$msg"
-scripts/desktop_release.py validate --candidate HEAD --version "$version" --repo block/buzz
+scripts/desktop_release.py validate --candidate HEAD --version "$version" --repo SaledaAI/saleda-buzz
 
 candidate_sha="$(git rev-parse HEAD)"
 previous_tag="$(python3 -c 'import json; print(json.load(open(".release/desktop-candidate.json"))["previous_tag"] or "initial")')"

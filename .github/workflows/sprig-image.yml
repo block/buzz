@@ -1,7 +1,7 @@
 name: Sprig image
 
 # Builds and publishes the public agent container image as
-# ghcr.io/block/buzz-sprig — the digest-pinned box the Kubernetes backend
+# ghcr.io/saleda/zorro-sprig — the digest-pinned box the Kubernetes backend
 # deploys agents into (see Dockerfile.sprig and docs/remote-agents.md).
 #
 # Strategy mirrors docker.yml (the relay image): each architecture builds on
@@ -17,7 +17,7 @@ name: Sprig image
 #   - workflow_dispatch             → manual publish at the current ref
 #
 # NOTE: the first push creates the GHCR package PRIVATE by default. An org
-# admin must flip ghcr.io/block/buzz-sprig to public once (Package settings →
+# admin must flip ghcr.io/saleda/zorro-sprig to public once (Package settings →
 # Change visibility). Subsequent pushes keep the visibility.
 
 on:
@@ -48,7 +48,7 @@ permissions: {}
 env:
   # Single source of truth for the image name; override with the
   # GHCR_SPRIG_IMAGE repo variable (same pattern as docker.yml).
-  IMAGE_NAME: ${{ vars.GHCR_SPRIG_IMAGE != '' && vars.GHCR_SPRIG_IMAGE || 'ghcr.io/block/buzz-sprig' }}
+  IMAGE_NAME: ${{ vars.GHCR_SPRIG_IMAGE != '' && vars.GHCR_SPRIG_IMAGE || 'ghcr.io/saleda/zorro-sprig' }}
 
 jobs:
   build:
@@ -213,7 +213,7 @@ jobs:
           echo "digest=${merged_digest}" >> "$GITHUB_OUTPUT"
 
       - name: Attest provenance for the merged image
-        # Verify with: gh attestation verify oci://ghcr.io/block/buzz-sprig:<tag> --owner block
+        # Verify with: gh attestation verify oci://ghcr.io/saleda/zorro-sprig:<tag> --owner SaledaAI
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-name: ${{ env.IMAGE_NAME }}

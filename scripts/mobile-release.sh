@@ -7,7 +7,7 @@ usage:
   scripts/mobile-release.sh candidate X.Y.Z
 
 candidate  Publish the next immutable mobile-vX.Y.Z-rc.N candidate tag at the
-           exact current commit of block/buzz's remote main branch.
+           exact current commit of SaledaAI/saleda-buzz's remote main branch.
 USAGE
   exit 2
 }
@@ -131,7 +131,7 @@ case "$command" in
     tag="mobile-v${version}-rc.${next}"
     workflow="mobile-release-candidate.yml"
     if dispatch_output="$(gh workflow run "$workflow" \
-      --repo block/buzz \
+      --repo SaledaAI/saleda-buzz \
       --ref main \
       -f "version=$version" \
       -f "candidate_number=$next" \
@@ -143,12 +143,12 @@ case "$command" in
       fi
       fail "could not dispatch App-backed publication for $tag: $dispatch_output"
     fi
-    run_url="$(printf '%s\n' "$dispatch_output" | awk '/^https:\/\/github\.com\/block\/buzz\/actions\/runs\/[0-9]+$/ { if (found) exit 2; found = $0 } END { if (found) print found }')" || \
+    run_url="$(printf '%s\n' "$dispatch_output" | awk '/^https:\/\/github\.com\/SaledaAI\/saleda-buzz\/actions\/runs\/[0-9]+$/ { if (found) exit 2; found = $0 } END { if (found) print found }')" || \
       fail "GitHub returned multiple workflow run URLs for one candidate dispatch"
     [[ -n "$run_url" ]] || \
       fail "GitHub accepted the candidate dispatch but returned no workflow run URL"
     run_id="${run_url##*/}"
-    gh run watch "$run_id" --repo block/buzz --exit-status --compact || \
+    gh run watch "$run_id" --repo SaledaAI/saleda-buzz --exit-status --compact || \
       fail "App-backed publication failed: $run_url"
 
     current_main_sha="$(remote_main_commit_sha)" || fail "origin/main does not exist after publication"

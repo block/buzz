@@ -11,7 +11,7 @@ permissions:
 jobs:
   macos:
     name: Prove macOS ${{ matrix.target }} cache visibility
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'SaledaAI/saleda-buzz'
     runs-on: macos-latest
     timeout-minutes: 15
     strategy:
@@ -65,7 +65,7 @@ jobs:
 
   linux:
     name: Prove Linux cache visibility
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'SaledaAI/saleda-buzz'
     runs-on: ubuntu-latest
     container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     timeout-minutes: 15
@@ -117,7 +117,7 @@ jobs:
 
   windows:
     name: Prove Windows cache visibility
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'SaledaAI/saleda-buzz'
     runs-on: windows-latest
     timeout-minutes: 15
     steps:

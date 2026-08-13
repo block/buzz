@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       target_sha:
-        description: Exact current block/buzz main commit
+        description: Exact current SaledaAI/saleda-buzz main commit
         required: true
         type: string
 
@@ -47,8 +47,8 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
         run: |
-          if [ "$REPOSITORY" != "block/buzz" ]; then
-            echo "::error::Mobile candidate publication is restricted to block/buzz"
+          if [ "$REPOSITORY" != "SaledaAI/saleda-buzz" ]; then
+            echo "::error::Mobile candidate publication is restricted to SaledaAI/saleda-buzz"
             exit 1
           fi
 
@@ -63,6 +63,7 @@ jobs:
       - name: Publish annotated candidate tag
         env:
           GH_TOKEN: ${{ steps.release-tagger.outputs.token }}
+          RELEASE_TAG_RULESET_ID: ${{ vars.RELEASE_TAG_RULESET_ID }}
           MOBILE_VERSION: ${{ inputs.version }}
           CANDIDATE_NUMBER: ${{ inputs.candidate_number }}
           TARGET_SHA: ${{ inputs.target_sha }}

@@ -164,7 +164,7 @@ def validate(args: argparse.Namespace) -> None:
             f"recorded previous tag {previous or '<none>'} does not match "
             f"nearest release tag {actual_previous or '<none>'}"
         )
-    repo = args.repo or "block/buzz"
+    repo = args.repo or "SaledaAI/saleda-buzz"
     expected_block, shas = render(version, data["base_sha"], previous, repo)
     text = CHANGELOG.read_text()
     blocks = re.findall(rf"(?ms)^## v{re.escape(version)}\n.*?(?=^## v|\Z)", text)
