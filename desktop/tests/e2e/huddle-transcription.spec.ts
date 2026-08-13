@@ -264,6 +264,117 @@ test("keeps the drawer open until the huddle is expanded", async ({ page }) => {
   expect(closedGradient).toBe(openGradient);
 });
 
+test("floats the in-app huddle tray over the glass background", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-glass-background", "true");
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page, {
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [
+        { pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" },
+        { pubkey: TEST_IDENTITIES.alice.pubkey, role: "bot" },
+      ],
+      transcriptionEnabled: true,
+    },
+  });
+
+  await page.goto("/");
+
+  const root = page.locator("html");
+  const shell = page.locator('.buzz-huddle-shell[data-huddle-window="false"]');
+  const slot = shell.locator(".buzz-huddle-drawer-slot");
+  const drawer = slot.locator(":scope > .buzz-huddle-drawer");
+  const backdrop = shell.locator(".buzz-huddle-drawer-backdrop");
+  const transcriptButton = drawer.getByRole("button", {
+    name: "Stop transcript",
+  });
+
+  await expect(root).toHaveAttribute("data-glass-background", "");
+  await expect(shell).toHaveAttribute("data-huddle-open", "true");
+  await expect(shell).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(backdrop).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(drawer).toHaveCSS("border-top-left-radius", "16px");
+  await expect(drawer).toHaveCSS("border-top-right-radius", "16px");
+  await expect(drawer).toHaveCSS("border-bottom-right-radius", "16px");
+  await expect(drawer).toHaveCSS("border-bottom-left-radius", "16px");
+  await expect(drawer).toHaveCSS("padding-top", "8px");
+  await expect(drawer).toHaveCSS("padding-right", "8px");
+  await expect(drawer).toHaveCSS("padding-bottom", "8px");
+  await expect(drawer).toHaveCSS("padding-left", "8px");
+
+  const geometry = await Promise.all([
+    slot.boundingBox(),
+    drawer.boundingBox(),
+    transcriptButton.boundingBox(),
+  ]);
+  const [slotBox, drawerBox, transcriptButtonBox] = geometry;
+  expect(slotBox).not.toBeNull();
+  expect(drawerBox).not.toBeNull();
+  expect(transcriptButtonBox).not.toBeNull();
+  if (!slotBox || !drawerBox || !transcriptButtonBox) return;
+  expect(drawerBox.x - slotBox.x).toBe(8);
+  expect(drawerBox.y - slotBox.y).toBe(8);
+  expect(slotBox.x + slotBox.width - (drawerBox.x + drawerBox.width)).toBe(8);
+  expect(slotBox.y + slotBox.height - (drawerBox.y + drawerBox.height)).toBe(8);
+  expect(
+    Math.abs(
+      transcriptButtonBox.y +
+        transcriptButtonBox.height / 2 -
+        (drawerBox.y + drawerBox.height / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+});
+
+test("keeps the popped-out huddle dock full-width over glass", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-glass-background", "true");
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page, {
+    windowLabel: `huddle-${HUDDLE_CHANNEL_ID}`,
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [
+        { pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" },
+        { pubkey: TEST_IDENTITIES.alice.pubkey, role: "bot" },
+      ],
+      transcriptionEnabled: true,
+    },
+  });
+
+  await page.goto("/");
+
+  const root = page.locator("html");
+  const shell = page.locator('.buzz-huddle-shell[data-huddle-window="true"]');
+  const slot = shell.locator(".buzz-huddle-drawer-slot");
+  const drawer = slot.locator(":scope > .buzz-huddle-drawer");
+
+  await expect(root).toHaveAttribute("data-glass-background", "");
+  await expect(shell).toHaveAttribute("data-huddle-open", "true");
+  await expect(shell).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(slot).toHaveCSS("padding-top", "0px");
+  await expect(drawer).toHaveCSS("border-top-left-radius", "0px");
+  await expect(drawer).toHaveCSS("border-top-right-radius", "0px");
+});
+
 test("shows speaker identity on every huddle chat message", async ({
   page,
 }) => {
