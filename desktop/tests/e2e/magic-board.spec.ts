@@ -103,6 +103,18 @@ test("Dispatch opens as a board and keeps the stream one click away", async ({
     page.getByText("5 members · 3 agents tending this room."),
   ).toBeVisible();
 
+  const authoredCards = page.locator("[data-testid^='magic-board-card-']");
+  await expect(authoredCards).toHaveCount(5);
+  for (const card of await authoredCards.all()) {
+    await card.hover();
+    await expect(card).toBeVisible();
+    await expect
+      .poll(() =>
+        card.evaluate((element) => getComputedStyle(element).transform),
+      )
+      .toBe("none");
+  }
+
   await captureBoard(page, testInfo, "magic-board-desktop");
 
   await page.getByTestId("channel-view-stream").click();

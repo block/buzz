@@ -87,7 +87,7 @@ function BoardCard({
   return (
     <Card
       className={cn(
-        "mb-4 break-inside-avoid overflow-hidden shadow-sm transition-transform duration-200 hover:-translate-y-0.5 hover:shadow-md",
+        "mb-4 break-inside-avoid overflow-hidden shadow-sm transition-shadow duration-200 hover:shadow-md",
         CARD_STYLES[card.kind],
       )}
       data-board-kind={card.kind}
