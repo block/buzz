@@ -509,7 +509,8 @@ fn linked_instance_ignores_model_provider_prompt_writes() {
         Some(Some("explicit-model".to_string())),
         Some(Some("explicit-prov".to_string())),
         Some(Some("explicit-prompt".to_string())),
-    );
+    )
+    .unwrap();
 
     assert!(
         record.model.is_none(),
@@ -560,7 +561,8 @@ fn definition_less_instance_accepts_model_provider_prompt_writes() {
         Some(Some("new-model".to_string())),
         Some(Some("new-prov".to_string())),
         Some(Some("new-prompt".to_string())),
-    );
+    )
+    .unwrap();
 
     assert_eq!(record.model.as_deref(), Some("new-model"));
     assert_eq!(record.provider.as_deref(), Some("new-prov"));
