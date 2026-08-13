@@ -964,6 +964,7 @@ async fn handle_workflow_trigger(
                         RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
+                        Some("invalid_definition"),
                         Some(&format!("definition parse error: {e}")),
                     )
                     .await
@@ -1261,6 +1262,7 @@ async fn handle_approval_deny(
                 RunStatus::Cancelled,
                 run.current_step,
                 &run.execution_trace,
+                Some("approval_denied"),
                 Some(&cancel_msg),
             )
             .await
@@ -1329,6 +1331,7 @@ async fn resume_workflow_after_approval(
                     RunStatus::Failed,
                     run.current_step,
                     &run.execution_trace,
+                    Some("invalid_definition"),
                     Some(&format!("definition parse error: {e}")),
                 )
                 .await

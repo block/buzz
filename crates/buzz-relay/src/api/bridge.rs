@@ -1938,6 +1938,7 @@ pub async fn workflow_webhook(
                         buzz_db::workflow::RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
+                        Some("invalid_definition"),
                         Some(&format!("definition parse error: {e}")),
                     )
                     .await

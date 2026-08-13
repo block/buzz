@@ -216,8 +216,11 @@ pub struct WorkflowRunRecord {
     pub started_at: Option<DateTime<Utc>>,
     /// When execution finished (success or failure).
     pub completed_at: Option<DateTime<Utc>>,
-    /// Error message if the run failed.
+    /// Redacted human-readable diagnostic for failed or cancelled runs.
     pub error_message: Option<String>,
+    /// Stable machine-readable failure or cancellation classification.
+    /// Kept separate from `error_message` so callers never parse diagnostics.
+    pub error_code: Option<String>,
     /// When the run record was created.
     pub created_at: DateTime<Utc>,
 }
@@ -831,7 +834,7 @@ pub async fn get_workflow_run(
     let row = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, created_at
+               execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND id = $2
         "#,
@@ -856,7 +859,7 @@ pub async fn list_workflow_runs(
     let rows = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, created_at
+               execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND workflow_id = $2
         ORDER BY created_at DESC
@@ -885,6 +888,7 @@ pub async fn update_workflow_run(
     status: RunStatus,
     current_step: i32,
     trace: &serde_json::Value,
+    error_code: Option<&str>,
     error: Option<&str>,
 ) -> Result<()> {
     let status_str = status.to_string();
@@ -894,17 +898,19 @@ pub async fn update_workflow_run(
         SET status        = $1::run_status,
             current_step  = $2,
             execution_trace = $3,
-            error_message = $4,
-            started_at    = CASE WHEN $5 = 'running' AND started_at IS NULL
+            error_code    = $4,
+            error_message = $5,
+            started_at    = CASE WHEN $6 = 'running' AND started_at IS NULL
                                  THEN NOW() ELSE started_at END,
-            completed_at  = CASE WHEN $6 IN ('completed','failed','cancelled')
+            completed_at  = CASE WHEN $7 IN ('completed','failed','cancelled')
                                  THEN NOW() ELSE completed_at END
-        WHERE community_id = $7 AND id = $8
+        WHERE community_id = $8 AND id = $9
         "#,
     )
     .bind(&status_str)
     .bind(current_step)
     .bind(trace)
+    .bind(error_code)
     .bind(error)
     .bind(&status_str) // for started_at CASE
     .bind(&status_str) // for completed_at CASE
@@ -1169,6 +1175,7 @@ fn row_to_run_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRunRecord> {
         started_at: row.try_get("started_at")?,
         completed_at: row.try_get("completed_at")?,
         error_message: row.try_get("error_message")?,
+        error_code: row.try_get("error_code")?,
         created_at: row.try_get("created_at")?,
     })
 }
@@ -1473,6 +1480,7 @@ mod tests {
             started_at: Some(now),
             completed_at: None,
             error_message: None,
+            error_code: None,
             created_at: now,
         };
 
@@ -1501,6 +1509,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             error_message: None,
+            error_code: None,
             created_at: now,
         };
 
@@ -1524,6 +1533,7 @@ mod tests {
             started_at: Some(now),
             completed_at: Some(now),
             error_message: Some("step timeout exceeded".to_owned()),
+            error_code: Some("step_timeout".to_owned()),
             created_at: now,
         };
 
@@ -1555,6 +1565,7 @@ mod tests {
             started_at: Some(now),
             completed_at: Some(now),
             error_message: None,
+            error_code: None,
             created_at: now,
         };
 
@@ -1577,6 +1588,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             error_message: None,
+            error_code: None,
             created_at: now,
         };
 

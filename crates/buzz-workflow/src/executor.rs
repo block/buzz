@@ -1028,6 +1028,7 @@ pub async fn execute_run(
             0,
             &serde_json::json!([]),
             None,
+            None,
         )
         .await
         .map_err(|e| {
@@ -1089,6 +1090,7 @@ pub async fn execute_from_step(
             buzz_db::workflow::RunStatus::Running,
             start_index as i32,
             &existing_trace,
+            None,
             None,
         )
         .await
