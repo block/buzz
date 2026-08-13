@@ -1355,6 +1355,61 @@ mod tests {
         assert_eq!(shape_len(&[2, 1, 8, 1000, 64]).expect("shape"), 1_024_000);
     }
 
+    /// The two engine splitters must keep OPPOSITE isolation polarity.
+    ///
+    /// The guards in `pocket.rs` pin which engine method each public API calls,
+    /// but they cannot see what the method itself does: pointing
+    /// `split_playback_prompt` at the model wrapper leaves every call site's
+    /// source text untouched while first-sentence isolation silently stops
+    /// happening, so the first playback unit becomes the whole utterance and
+    /// first audio waits on generating all of it.
+    #[test]
+    fn engine_splitters_keep_opposite_isolation_polarity() {
+        let source = include_str!("pocket_april.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(production, _)| production);
+
+        let (_, model) = production
+            .split_once("fn split_prompt")
+            .expect("model splitter exists");
+        let (model, _) = model
+            .split_once("fn split_playback_prompt")
+            .expect("model splitter precedes the playback splitter");
+        let (_, playback) = production
+            .split_once("fn split_playback_prompt")
+            .expect("playback splitter exists");
+        let (playback, _) = playback
+            .split_once("\n    pub(crate) fn ")
+            .expect("playback splitter is followed by another method");
+
+        assert_eq!(
+            (
+                model.matches("split_model_at_natural_boundaries(").count(),
+                model
+                    .matches("split_playback_at_natural_boundaries(")
+                    .count(),
+            ),
+            (1, 0),
+            "split_prompt must pack sentences: isolating here peels sentence \
+             one off every already-packed unit"
+        );
+        assert_eq!(
+            (
+                playback
+                    .matches("split_playback_at_natural_boundaries(")
+                    .count(),
+                playback
+                    .matches("split_model_at_natural_boundaries(")
+                    .count(),
+            ),
+            (1, 0),
+            "split_playback_prompt must isolate sentence one: packing here \
+             makes the first playback unit the whole utterance and delays \
+             first audio by the full generation"
+        );
+    }
+
     fn whitespace_token_count(text: &str) -> Result<usize, String> {
         Ok(text.split_whitespace().count())
     }

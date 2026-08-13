@@ -205,42 +205,65 @@ mod tests {
             .any(|artifact| artifact.filename == "flow_lm_main.onnx"));
     }
 
-    #[test]
-    fn playback_api_delegates_to_first_sentence_splitter() {
-        let source = include_str!("pocket.rs");
-        let (_, playback_api) = source
-            .split_once("pub fn split_text_for_playback")
-            .expect("playback API exists");
-        let (playback_api, _) = playback_api
-            .split_once("pub fn synth_chunk")
-            .expect("playback API ends before synthesis API");
-
-        assert_eq!(playback_api.matches(".split_playback_prompt(").count(), 1);
-        assert_eq!(playback_api.matches(".split_prompt(").count(), 0);
+    /// Which splitter each production function delegates to, across the whole
+    /// file rather than one hand-picked window.
+    ///
+    /// A wrong delegation can reinstate either shipped defect in one token:
+    /// removing first-sentence priority from playback, or re-isolating sentence
+    /// one inside units that already fit. Asserting the whole map means a new
+    /// delegation must be declared here to compile green.
+    fn splitter_delegations(source: &str) -> Vec<(String, Vec<String>)> {
+        let production = source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(production, _)| production);
+        let mut out = Vec::new();
+        let mut rest = production;
+        while let Some((_, after)) = rest.split_once(" fn ") {
+            let (name, body) = after
+                .split_once('(')
+                .expect("a function signature has an argument list");
+            let body = body.split(" fn ").next().expect("split yields one part");
+            let mut calls = Vec::new();
+            // Check the isolating spelling first: ".split_prompt(" is a
+            // substring of neither, but a naive contains() on the shorter name
+            // would also match the longer one.
+            for _ in 0..body.matches(".split_playback_prompt(").count() {
+                calls.push("split_playback_prompt".to_string());
+            }
+            let plain = body.matches(".split_prompt(").count();
+            for _ in 0..plain {
+                calls.push("split_prompt".to_string());
+            }
+            if !calls.is_empty() {
+                out.push((name.trim().to_string(), calls));
+            }
+            rest = after;
+        }
+        out
     }
 
-    /// Mirror of the playback guard: the model API must NOT isolate the first
-    /// sentence, or every already-packed playback unit gets sentence one peeled
-    /// off again — the exact double-split this PR removes.
     #[test]
-    fn model_api_delegates_to_non_isolating_splitter() {
+    fn every_production_splitter_delegation_is_declared() {
         let source = include_str!("pocket.rs");
-        let (_, model_api) = source
-            .split_once("pub fn split_text_into_chunks")
-            .expect("model API exists");
-        let (model_api, _) = model_api
-            .split_once("pub fn split_text_for_playback")
-            .expect("model API ends before the playback API");
-
+        let actual = splitter_delegations(source);
+        let expected: Vec<(String, Vec<String>)> = vec![
+            // Model units: pack sentences, never isolate.
+            ("split_text_into_chunks".into(), vec!["split_prompt".into()]),
+            // Playback units: isolate sentence one for time-to-first-audio.
+            (
+                "split_text_for_playback".into(),
+                vec!["split_playback_prompt".into()],
+            ),
+            // Synthesis receives an already-packed unit: re-isolating here
+            // re-adds the per-sentence seam this PR removes.
+            ("synth_chunk".into(), vec!["split_prompt".into()]),
+            ("synth_chunk_streaming".into(), vec!["split_prompt".into()]),
+        ];
         assert_eq!(
-            model_api.matches(".split_prompt(").count(),
-            1,
-            "the model splitter must pack sentences, not isolate the first one"
-        );
-        assert_eq!(
-            model_api.matches(".split_playback_prompt(").count(),
-            0,
-            "isolating inside the model split reinstates the per-sentence seam"
+            actual, expected,
+            "a production function changed which splitter it calls (or a new \
+             one appeared); isolating outside split_text_for_playback delays \
+             first audio, packing inside it removes the guarantee"
         );
     }
 
