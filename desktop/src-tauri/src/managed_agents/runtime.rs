@@ -351,6 +351,25 @@ pub fn find_managed_agent_mut<'a>(
         .ok_or_else(|| format!("agent {pubkey} not found"))
 }
 
+/// Return the first keyed managed instance whose trimmed name matches `candidate`
+/// (case-insensitive).
+///
+/// A keyed instance has a non-empty `pubkey`.  Keyless definition rows are
+/// excluded so that rename-collision logic never trips on persona /
+/// template definitions.
+pub fn find_duplicate_keyed_name<'a>(
+    records: &'a [ManagedAgentRecord],
+    candidate: &str,
+    exclude_pubkey: Option<&str>,
+) -> Option<&'a ManagedAgentRecord> {
+    let target = candidate.trim().to_lowercase();
+    records.iter().find(|r| {
+        !r.pubkey.is_empty()
+            && exclude_pubkey.map_or(true, |pk| r.pubkey != pk)
+            && r.name.trim().to_lowercase() == target
+    })
+}
+
 /// Pure decision function for the inbound author gate env vars.
 ///
 /// Returns the env vars to **set** and the env vars to **remove**. Removal is
