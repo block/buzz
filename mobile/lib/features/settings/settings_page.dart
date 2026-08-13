@@ -26,6 +26,7 @@ part 'settings_page/community_section.dart';
 part 'settings_page/connection_section.dart';
 
 class SettingsPage extends HookConsumerWidget {
+  /// Creates the settings page.
   const SettingsPage({
     super.key,
     required this.profileHeader,
@@ -33,8 +34,13 @@ class SettingsPage extends HookConsumerWidget {
     required this.identityRecoveryPageBuilder,
   });
 
+  /// Header widget displayed at the top of settings.
   final Widget profileHeader;
+
+  /// Builds the community-invite page pushed from the invite settings row.
   final WidgetBuilder invitePageBuilder;
+
+  /// Builds the identity-recovery page pushed from the recovery settings row.
   final WidgetBuilder identityRecoveryPageBuilder;
 
   @override
