@@ -23,6 +23,8 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+// Generic x.ai pointer; a dedicated Grok Build logo asset URL is a follow-up.
+const GROK_AVATAR_URL: &str = "https://x.ai";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 fn common_binary_paths() -> &'static [PathBuf] {
@@ -47,6 +49,8 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
                 home.join(".bun/bin"),
+                // Grok Build's official CLI installs to ~/.grok/bin/grok.
+                home.join(".grok/bin"),
             ]);
         }
         // Windows well-known dirs for npm global shims and standalone installer targets.
@@ -209,6 +213,42 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
+        auth_probe_args: None,
+    },
+    KnownAcpRuntime {
+        id: "grok",
+        label: "Grok Build",
+        commands: &["grok"],
+        aliases: &[],
+        avatar_url: GROK_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("grok"),
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://x.ai",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz talks to Grok through the official Grok Build CLI, which must be installed and logged into a grok.com subscription.",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        // Grok Build takes the model as an argv argument
+        // (`grok agent --model <model> stdio`), not an env var — the managed
+        // model is bridged into `agent_args` by the harness config bridge.
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &["model"],
+        login_hint: Some("Run the Grok Build CLI and log in to grok.com to use your subscription."),
         auth_probe_args: None,
     },
 ];
@@ -443,6 +483,15 @@ pub fn try_record_agent_command(
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        // Grok Build speaks ACP directly: `grok agent --model <model> stdio`.
+        // Mirrors the buzz-acp harness default; the managed model is bridged
+        // into the argv by the harness config bridge.
+        "grok" => Some(vec![
+            "agent".to_string(),
+            "--model".to_string(),
+            "grok-4.6".to_string(),
+            "stdio".to_string(),
+        ]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,

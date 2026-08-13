@@ -711,6 +711,17 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        // Grok Build speaks ACP directly from its CLI:
+        // `grok agent --model <model> stdio`. The model defaults to the
+        // subscription-backed grok-4.6 release; an explicit model (from the
+        // managed-agent config) is substituted as a discrete argument by
+        // `effective_agent_args` below — never shell-interpolated.
+        "grok" => Some(vec![
+            "agent".to_string(),
+            "--model".to_string(),
+            "grok-4.6".to_string(),
+            "stdio".to_string(),
+        ]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -787,6 +798,44 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
         "CODEX_CONFIG".into(),
         "{\"sandbox_workspace_write\":{\"network_access\":true}}".into(),
     ))
+}
+
+/// Build the effective agent argv for a managed agent launch.
+///
+/// For Grok Build the managed model is part of the ACP argv
+/// (`grok agent --model <model> stdio`), so it is substituted here as a
+/// discrete argument from the resolved model — never via a shell string.
+/// A non-empty model is required; an absent model falls back to the pinned
+/// subscription default `grok-4.6`. Explicitly supplied `agent_args` for
+/// Grok are normalized and used as-is (they win over the default).
+///
+/// Every other runtime keeps the existing [`normalize_agent_args`] behaviour.
+pub fn effective_agent_args(
+    command: &str,
+    agent_args: Vec<String>,
+    model: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if normalize_agent_command_identity(command).as_str() != "grok" {
+        return Ok(normalize_agent_args(command, agent_args));
+    }
+    let normalized = agent_args
+        .into_iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+    if !normalized.is_empty() {
+        return Ok(normalized);
+    }
+    let resolved_model = model.unwrap_or("grok-4.6");
+    if resolved_model.trim().is_empty() {
+        return Err("grok agent model must be a non-empty string".to_string());
+    }
+    Ok(vec![
+        "agent".to_string(),
+        "--model".to_string(),
+        resolved_model.trim().to_string(),
+        "stdio".to_string(),
+    ])
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -923,7 +972,9 @@ impl Config {
             ));
         }
 
-        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let agent_args =
+            effective_agent_args(&agent_command, args.agent_args, args.model.as_deref())
+                .map_err(ConfigError::ConfigFile)?;
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1586,6 +1637,83 @@ mod tests {
         );
         assert_eq!(
             normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn grok_default_args_are_the_subscription_acp_argv() {
+        // Pinned subscription-backed contract: `grok agent --model grok-4.6 stdio`.
+        assert_eq!(
+            normalize_agent_args("grok", Vec::new()),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_effective_args_substitute_the_managed_model_as_discrete_arg() {
+        assert_eq!(
+            effective_agent_args("grok", Vec::new(), Some("grok-4.6")).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+        // Absent model falls back to the pinned default.
+        assert_eq!(
+            effective_agent_args("grok", Vec::new(), None).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_fails_closed_on_empty_model_and_windows_stem_normalization() {
+        assert!(effective_agent_args("grok", Vec::new(), Some("   ")).is_err());
+        // `grok.exe` normalizes to the same identity as `grok`.
+        assert_eq!(
+            effective_agent_args("grok.exe", Vec::new(), Some("grok-4.6")).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_explicit_agent_args_win_over_the_default_argv() {
+        assert_eq!(
+            effective_agent_args("grok", vec!["agent".into(), "--model".into(), "grok-5".into(), "stdio".into()], Some("grok-4.6")).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-5".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn non_grok_runtimes_keep_existing_args_behavior() {
+        assert_eq!(
+            effective_agent_args("goose", Vec::new(), Some("whatever")).unwrap(),
+            vec!["acp".to_string()]
+        );
+        assert_eq!(
+            effective_agent_args("codex-acp", Vec::new(), None).unwrap(),
             Vec::<String>::new()
         );
     }

@@ -123,4 +123,29 @@ mod tests {
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
     }
+
+    #[test]
+    fn grok_metadata_is_a_direct_acp_runtime_with_locked_provider() {
+        let grok = known_acp_runtime_exact("grok").unwrap();
+        assert_eq!(grok.commands, &["grok"]);
+        assert!(grok.provider_locked);
+        // The model travels in the argv (`grok agent --model <model> stdio`),
+        // not an env var — no model/provider env bridge for Grok.
+        assert_eq!(grok.model_env_var, None);
+        assert_eq!(grok.provider_env_var, None);
+        assert_eq!(grok.required_normalized_fields, &["model"]);
+    }
+
+    #[test]
+    fn grok_default_args_are_the_subscription_acp_argv() {
+        assert_eq!(
+            super::normalize_agent_args("grok", Vec::new()),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
 }
