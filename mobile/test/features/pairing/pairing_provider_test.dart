@@ -500,6 +500,57 @@ void main() {
         },
       );
 
+      test(
+        'malformed payload invalidates authorization before another session',
+        () async {
+          expect(
+            await notifier.authorizeIdentityExport(
+              community: _exportCommunity(SensitiveActionPolicy.disabledByUser),
+            ),
+            isTrue,
+          );
+          await notifier.pair(recoveryCode);
+          notifier.confirmSas();
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'sas-confirm'},
+            includeTranscriptHash: true,
+          );
+          await Future<void>.delayed(Duration.zero);
+
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'payload', 'payload_type': 'nsec'},
+          );
+          expect(container.read(pairingProvider).status, PairingStatus.error);
+
+          await notifier.pair(recoveryCode);
+          final replacementSocket = socket;
+          notifier.confirmSas();
+          replacementSocket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'sas-confirm'},
+            includeTranscriptHash: true,
+          );
+          await Future<void>.delayed(Duration.zero);
+
+          final state = container.read(pairingProvider);
+          expect(state.status, PairingStatus.confirmingSas);
+          expect(state.userConfirmedSas, isFalse);
+          expect(state.errorMessage, contains('active community changed'));
+          expect(authorizer.calls, 1);
+          expect(
+            replacementSocket
+                .decryptedPublishedMessages(sourceSecret)
+                .any((message) => message['type'] == 'payload'),
+            isFalse,
+          );
+        },
+      );
+
       test('skipped preflight authorization sends no identity', () async {
         await notifier.pair(recoveryCode);
         notifier.confirmSas();

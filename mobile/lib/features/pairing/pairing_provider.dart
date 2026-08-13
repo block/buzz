@@ -646,6 +646,7 @@ class PairingNotifier extends Notifier<PairingState> {
     final payloadType = msg['payload_type'] as String?;
     final payload = msg['payload'] as String?;
     if (payload == null) {
+      _cleanup();
       state = const PairingState(
         status: PairingStatus.error,
         errorMessage: 'Received empty payload from source.',
