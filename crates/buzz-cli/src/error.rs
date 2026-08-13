@@ -14,6 +14,10 @@ pub enum CliError {
     #[error("network error: {}", fmt_reqwest_error(.0))]
     Network(#[from] reqwest::Error),
 
+    /// Non-HTTP transport failure, such as a WebSocket disconnect or timeout.
+    #[error("network error: {0}")]
+    Transport(String),
+
     /// Auth missing or rejected (401/403)
     #[error("auth error: {0}")]
     Auth(String),
@@ -78,6 +82,7 @@ pub fn is_retryable_error(e: &CliError) -> bool {
                 || net_err.is_body()
                 || net_err.is_decode()
         }
+        CliError::Transport(_) => true,
         CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
         CliError::DeliveryUnknown(_) => false,
         _ => false,
@@ -98,6 +103,7 @@ pub fn exit_code(e: &CliError) -> i32 {
             }
         }
         CliError::Network(_) => 2,
+        CliError::Transport(_) => 2,
         CliError::Auth(_) => 3,
         CliError::Key(_) => 3,
         CliError::Conflict(_) => 5,
@@ -120,6 +126,7 @@ pub fn print_error(e: &CliError) {
             }
         }
         CliError::Network(_) => "network_error",
+        CliError::Transport(_) => "network_error",
         CliError::Auth(_) => "auth_error",
         CliError::Key(_) => "key_error",
         CliError::Conflict(_) => "conflict",
@@ -181,6 +188,9 @@ mod tests {
     #[test]
     fn other_errors_are_not_retryable() {
         assert!(!is_retryable_error(&CliError::Usage("bad flag".into())));
+        assert!(is_retryable_error(&CliError::Transport(
+            "connection closed".into()
+        )));
         assert!(!is_retryable_error(&CliError::Auth("missing key".into())));
         assert!(!is_retryable_error(&CliError::Key("bad key".into())));
         assert!(!is_retryable_error(&CliError::Conflict(
