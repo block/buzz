@@ -848,6 +848,47 @@ pub async fn get_workflow_run(
     row_to_run_record(row)
 }
 
+/// List runs for a workflow using a stable newest-first keyset.
+///
+/// Rows are ordered by `(created_at DESC, id DESC)`. A cursor is valid only
+/// when both `before` and `before_id` are supplied; callers should pass the
+/// final row from the previous page. `limit` is clamped to the shared list
+/// bounds.
+pub async fn list_workflow_runs_page(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    before: Option<DateTime<Utc>>,
+    before_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<WorkflowRunRecord>> {
+    let limit = limit.clamp(1, LIST_MAX_LIMIT);
+    let rows = sqlx::query(
+        r#"
+        SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
+               execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
+        FROM workflow_runs
+        WHERE community_id = $1 AND workflow_id = $2
+          AND (
+              $3::timestamptz IS NULL
+              OR $4::uuid IS NULL
+              OR (created_at, id) < ($3, $4)
+          )
+        ORDER BY created_at DESC, id DESC
+        LIMIT $5
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(before)
+    .bind(before_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(row_to_run_record).collect()
+}
+
 /// List runs for a workflow, newest first, up to `limit` rows.
 pub async fn list_workflow_runs(
     pool: &PgPool,
@@ -855,24 +896,7 @@ pub async fn list_workflow_runs(
     workflow_id: Uuid,
     limit: i64,
 ) -> Result<Vec<WorkflowRunRecord>> {
-    let limit = limit.min(1000);
-    let rows = sqlx::query(
-        r#"
-        SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
-        FROM workflow_runs
-        WHERE community_id = $1 AND workflow_id = $2
-        ORDER BY created_at DESC
-        LIMIT $3
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(workflow_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    rows.into_iter().map(row_to_run_record).collect()
+    list_workflow_runs_page(pool, community_id, workflow_id, None, None, limit).await
 }
 
 /// Update run status, current step, execution trace, and optional error message.
