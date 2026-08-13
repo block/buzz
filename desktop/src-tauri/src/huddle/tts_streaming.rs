@@ -29,7 +29,6 @@ pub(super) fn streaming_emit_frames() -> Option<usize> {
 pub(super) struct StreamingPlayback<'a> {
     pub(super) player: &'a rodio::Player,
     pub(super) first_append: &'a mut bool,
-    pub(super) silence_buf_len: usize,
     pub(super) route_id: u64,
 }
 
@@ -56,7 +55,6 @@ pub(super) fn synthesize_streaming(
     let StreamingPlayback {
         player,
         first_append,
-        silence_buf_len,
         route_id,
     } = playback;
     let mut playback_audio = PlaybackChunkAudio::new();
@@ -70,13 +68,9 @@ pub(super) fn synthesize_streaming(
         }
         let chunk_index = delta_index;
         delta_index += 1;
-        if let Some(prepared) = playback_audio.push(
-            samples,
-            chunk_index,
-            first_append,
-            silence_buf_len,
-            player.empty(),
-        ) {
+        if let Some(prepared) =
+            playback_audio.push(samples, chunk_index, first_append, player.empty())
+        {
             if !append_audio(prepared) {
                 return false;
             }
@@ -85,9 +79,7 @@ pub(super) fn synthesize_streaming(
     });
     match stream_result {
         Ok(true) => {
-            if let Some(prepared) =
-                playback_audio.finish(first_append, silence_buf_len, player.empty())
-            {
+            if let Some(prepared) = playback_audio.finish(first_append, player.empty()) {
                 if !append_audio(prepared) {
                     *first_append = true;
                     return Some("cancelled");

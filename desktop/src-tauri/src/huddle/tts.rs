@@ -7,9 +7,9 @@
 //!   → bounded sync_channel (TEXT_QUEUE_DEPTH = 8)
 //!   → tts_worker thread (owns 1 Pocket TTS engine + 1 persistent Player)
 //!       1. Preprocess text
-//!       2. Split into sentences
-//!       3. Synthesize each sentence individually → f32 PCM
-//!       4. Clamp to full scale + fade out each sentence
+//!       2. Split into tokenizer-safe natural units, prioritizing sentence one
+//!       3. Synthesize each unit → f32 PCM
+//!       4. Clamp to full scale + fade out each unit
 //!       5. Append each buffer to the persistent rodio Player (gapless)
 //!       6. While audio is draining, keep pulling queued text items and
 //!          synthesizing ahead — playback of item N overlaps synthesis of
@@ -50,7 +50,7 @@ use std::{
 use super::pocket::{
     load_text_to_speech, load_voice_style, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
 };
-use super::preprocessing::{preprocess_for_tts, split_sentences};
+use super::preprocessing::preprocess_for_tts;
 
 #[path = "tts_voice_transition.rs"]
 mod voice_transition;
@@ -102,37 +102,10 @@ const SYNTH_STEPS: usize = 1;
 /// the leading waveform is important.
 const FADE_OUT_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.008) as usize;
 
-/// Length of the zero-sample cushion prepended before each synthesized
-/// sentence chunk, so the OS audio device / rodio mixer has a fully-quiet
-/// ramp-up window before the real onset hits.
-///
-/// This used to be applied only before the first sentence of a whole response.
-/// That still left later sentence chunks vulnerable to first-syllable clipping
-/// when their first phoneme was soft (notably `I'm` / `I've`) and rodio crossed
-/// from an explicit silence buffer straight into non-zero speech. 20 ms ≈ 480
-/// samples is enough to cover a CoreAudio buffer turnover without being audible
-/// as latency. At sentence boundaries this lead-in is budgeted out of the
-/// existing inter-sentence pause, so it does not lengthen multi-sentence gaps.
+/// Length of the zero-sample cushion prepended when playback is idle, so the
+/// OS audio device / rodio mixer has a fully-quiet ramp-up window before the
+/// real onset hits. Continuously queued chunks receive no synthetic padding.
 const SENTENCE_LEAD_IN_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.020) as usize;
-
-/// Approximate character budget for one synthesis chunk.
-///
-/// Upstream pocket-tts groups sentences into chunks of up to
-/// `MAX_TOKEN_PER_CHUNK = 50` tokenizer tokens (`default_parameters.py`) —
-/// typically multi-sentence chunks — because every `generate()` call is an
-/// independent generation with a cold FlowLM start, and each chunk boundary
-/// is an exposed prosody seam (kyutai-labs/pocket-tts #151; the Kyutai team
-/// names chunk stitching as the reliability lever). Our previous
-/// sentence-per-call path created ~2–4× more seams than upstream.
-///
-/// This character budget performs only coarse sentence packing. The April
-/// engine applies its SentencePiece tokenizer afterward and refines every
-/// result at the bundle's exact 50-token boundary.
-const MAX_CHUNK_CHARS: usize = 200;
-
-/// Silence inserted between sentences by the TTS pipeline (seconds).
-/// Injected as a silent buffer between each synthesized sentence chunk.
-const INTER_SENTENCE_SILENCE: f32 = 0.1;
 
 type WorkerControlState = (
     Arc<AtomicBool>,
@@ -453,7 +426,6 @@ fn tts_worker(
     // `tts_active` lifecycle: set on the first append while idle, cleared
     // whenever the player has fully drained — either in the idle timeout
     // arm or on item receipt before synthesis begins.
-    let silence_buf_len = (INTER_SENTENCE_SILENCE * SAMPLE_RATE as f32) as usize;
     // EXPERIMENTAL (latency bench): `Some(emit_frames)` = stream PCM deltas
     // out of Pocket as they are generated (see tts_streaming.rs).
     let tts_streaming = streaming_emit_frames();
@@ -711,17 +683,20 @@ fn tts_worker(
             continue;
         }
 
-        // Split into sentences, then group into synthesis chunks: the first
-        // sentence stays alone (fast time-to-first-audio), the rest pack
-        // greedily up to MAX_CHUNK_CHARS. Playback of each model unit overlaps
-        // synthesis of the next one. The Pocket engine applies its exact
-        // 50-token split; keeping those units within one playback chunk avoids
-        // adding fades and pauses at token-only boundaries.
-        let sentences: Vec<String> = split_sentences(&text)
-            .into_iter()
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-        let chunks = group_sentences_into_chunks(&sentences, MAX_CHUNK_CHARS);
+        // Let Pocket's tokenizer-aware splitter isolate the first sentence for
+        // minimum time-to-first-audio, then pack later sentences into the
+        // largest natural units within the model's exact 50-token limit. Once
+        // each unit is appended, generation of the next proceeds while rodio
+        // plays the already-queued audio.
+        let chunks = match engine.split_text_into_chunks(&text) {
+            Ok(chunks) => chunks,
+            Err(_) => {
+                eprintln!(
+                    "buzz-desktop: tts stage=synthesis status=failed reason=chunking route_id={route_id}"
+                );
+                continue;
+            }
+        };
         if chunks.is_empty() {
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=empty reason=no_chunks route_id={route_id}"
@@ -765,7 +740,6 @@ fn tts_worker(
                     StreamingPlayback {
                         player: &player,
                         first_append: &mut first_append,
-                        silence_buf_len,
                         route_id,
                     },
                     &mut |prepared| {
@@ -853,7 +827,6 @@ fn tts_worker(
                             samples,
                             chunk_index,
                             &mut first_append,
-                            silence_buf_len,
                             player.empty(),
                         ) {
                             if !append_audio(
@@ -884,9 +857,7 @@ fn tts_worker(
                     }
                 }
             }
-            if let Some(prepared) =
-                playback_audio.finish(&mut first_append, silence_buf_len, player.empty())
-            {
+            if let Some(prepared) = playback_audio.finish(&mut first_append, player.empty()) {
                 if !append_audio(
                     prepared,
                     route_id,
