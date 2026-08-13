@@ -899,7 +899,16 @@ pub async fn list_workflow_runs(
     list_workflow_runs_page(pool, community_id, workflow_id, None, None, limit).await
 }
 
-/// Update run status, current step, execution trace, and optional error message.
+/// Structured failure persisted for a workflow run.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkflowRunFailure<'a> {
+    /// Stable machine-readable failure code.
+    pub code: &'a str,
+    /// Human-readable failure detail.
+    pub message: &'a str,
+}
+
+/// Update run status, current step, execution trace, and optional failure.
 ///
 /// Fix C3: `started_at` is set when the NEW status is 'running' and `started_at`
 /// has not yet been stamped (IS NULL). The original code read `status` from the
@@ -912,10 +921,12 @@ pub async fn update_workflow_run(
     status: RunStatus,
     current_step: i32,
     trace: &serde_json::Value,
-    error_code: Option<&str>,
-    error: Option<&str>,
+    failure: Option<WorkflowRunFailure<'_>>,
 ) -> Result<()> {
     let status_str = status.to_string();
+    let (error_code, error) = failure
+        .map(|failure| (Some(failure.code), Some(failure.message)))
+        .unwrap_or((None, None));
     let affected = sqlx::query(
         r#"
         UPDATE workflow_runs

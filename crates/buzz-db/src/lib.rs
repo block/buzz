@@ -4081,8 +4081,7 @@ impl Db {
         status: workflow::RunStatus,
         current_step: i32,
         trace: &serde_json::Value,
-        error_code: Option<&str>,
-        error: Option<&str>,
+        failure: Option<workflow::WorkflowRunFailure<'_>>,
     ) -> Result<()> {
         workflow::update_workflow_run(
             &self.pool,
@@ -4091,8 +4090,7 @@ impl Db {
             status,
             current_step,
             trace,
-            error_code,
-            error,
+            failure,
         )
         .await
     }
