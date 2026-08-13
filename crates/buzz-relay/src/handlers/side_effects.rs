@@ -301,6 +301,17 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
+/// Format the `owner_only` third-party-add rejection, naming the agent owner so
+/// the actor knows who is authorized to perform the add. The message must keep
+/// the `policy:owner_only` tag for downstream pattern-matching while telling the
+/// actor exactly which pubkey can act (#4225).
+fn owner_only_rejection(owner_bytes: &[u8]) -> String {
+    format!(
+        "policy:owner_only — only the agent owner ({}) can add this agent",
+        hex::encode(owner_bytes)
+    )
+}
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -426,9 +437,7 @@ pub async fn validate_admin_event(
                             anyhow::anyhow!("policy:owner_only — agent has no owner set")
                         })?;
                         if actor_bytes != owner_bytes {
-                            return Err(anyhow::anyhow!(
-                                "policy:owner_only — only the agent owner can add this agent"
-                            ));
+                            return Err(anyhow::anyhow!(owner_only_rejection(&owner_bytes)));
                         }
                     }
                     "nobody" => {
@@ -3371,6 +3380,24 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_only_rejection_message_names_owner_pubkey() {
+        let owner_bytes = [0xabu8; 32];
+        let msg = owner_only_rejection(&owner_bytes);
+        assert!(
+            msg.contains("policy:owner_only"),
+            "should keep the policy tag, got: {msg}"
+        );
+        assert!(
+            msg.contains(&hex::encode(owner_bytes)),
+            "should name the agent owner's pubkey so the actor knows who can act, got: {msg}"
+        );
+        assert!(
+            msg.contains("can add this agent"),
+            "should retain the action denial phrasing, got: {msg}"
+        );
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {

@@ -1429,6 +1429,11 @@ async fn test_nip29_put_user_owner_only_blocks() {
         "rejection message should contain 'policy:owner_only', got: {}",
         ok.message
     );
+    assert!(
+        ok.message.contains("owner"),
+        "rejection should say who can act (the owner), got: {}",
+        ok.message
+    );
 
     ws.disconnect().await.expect("disconnect");
 }
