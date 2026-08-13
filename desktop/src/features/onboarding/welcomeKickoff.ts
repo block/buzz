@@ -46,15 +46,6 @@ export const WELCOME_KICKOFF_PROVIDER_MESSAGE =
 const WELCOME_KICKOFF_CTA =
   "What can we help you build? Bring us something you're working on, or give us a quick challenge to see how we work together.";
 
-function formatAgentNames(agents: readonly ManagedAgent[]) {
-  if (agents.length === 0) return "";
-  if (agents.length === 1) return agents[0]?.name ?? "";
-  return `${agents
-    .slice(0, -1)
-    .map((agent) => agent.name)
-    .join(", ")} and ${agents[agents.length - 1]?.name ?? ""}`;
-}
-
 function formatMentionNames(agents: readonly ManagedAgent[]) {
   if (agents.length === 0) return "";
   if (agents.length === 1) return `@${agents[0]?.name ?? ""}`;
@@ -163,24 +154,16 @@ function resolveWelcomeAgentSetForRelay(
 export function buildWelcomeKickoffOpener(
   lead: ManagedAgent,
   introTeammates: readonly ManagedAgent[],
-  allTeammates: readonly ManagedAgent[] = introTeammates,
-  ownerName?: string | null,
+  _allTeammates: readonly ManagedAgent[] = introTeammates,
+  _ownerName?: string | null,
 ) {
-  // Greet the new user by name when we know it. Paired with their pubkey in
-  // the p tags, the @mention renders as a pill and files the opener into
-  // their Inbox mentions feed.
-  const trimmedOwnerName = ownerName?.trim();
-  const greeting = trimmedOwnerName
-    ? `Hi @${trimmedOwnerName}, I'm ${lead.name}.`
-    : `Hi, I'm ${lead.name}.`;
+  const greeting = `Welcome to Zorro, your interface between your employees and your specialized AI agents. I’m ${lead.name}, the seasoned project manager. Bring me in when you need an ambitious goal turned into a practical plan, risks and dependencies made clear. I can also align teams and stakeholders around concrete next steps.`;
   const introNames = formatMentionNames(introTeammates);
   if (introTeammates.length === 0) {
-    const teammateNames = formatAgentNames(allTeammates);
-    const teammatePhrase = teammateNames ? ` with ${teammateNames}` : "";
-    return `${greeting} Welcome to Zorro. This is your private home base, and I'm here${teammatePhrase} to help you get oriented or work through something you're building.\n\n${WELCOME_KICKOFF_CTA}`;
+    return `${greeting}\n\n${WELCOME_KICKOFF_CTA}`;
   }
 
-  return `${greeting} Welcome to Zorro. This is your private home base, and we're here to help you get oriented or work through something you're building.\n\n${introNames}, introduce ${introTeammates.length === 1 ? "yourself" : "yourselves"} in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
+  return `${greeting}\n\n${introNames}, introduce ${introTeammates.length === 1 ? "yourself" : "yourselves"} in a sentence or two — share what you're good at and when to bring you in. Don't start any work yet.`;
 }
 
 export function onlineWelcomeTeammates(
@@ -418,9 +401,8 @@ export function buildWelcomeKickoffOpenerSendInput(
   channelId: string,
   owner?: WelcomeKickoffOwner | null,
 ) {
-  // Greet the new user by name and tag their pubkey. The p tag renders the
-  // "@Name" in the copy as a mention pill and files the opener into their
-  // Inbox mentions feed, so the Inbox isn't an empty state on first visit.
+  // Tag the new user's pubkey so the opener is filed into their Inbox mentions
+  // feed, even though the welcome copy is addressed to the whole workspace.
   const mentionPubkeys = introTeammates.map((agent) => agent.pubkey);
   if (
     owner?.pubkey &&

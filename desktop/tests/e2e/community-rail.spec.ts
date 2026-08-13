@@ -986,8 +986,18 @@ test.describe("community rail", () => {
         }),
       );
     }, `community-rail-button-${COMMUNITY_B.id}`);
+    await expect(page.getByTestId("community-rail-drag-overlay")).toBeVisible();
     // ArrowUp moves the active item one slot up.
     await page.keyboard.press("ArrowUp");
+    await expect
+      .poll(async () => {
+        const [boxA, boxB] = await Promise.all([
+          buttonA.boundingBox(),
+          buttonB.boundingBox(),
+        ]);
+        return boxA && boxB ? boxB.y < boxA.y : false;
+      })
+      .toBe(true);
     // Space drops the item — same synthetic dispatch for consistency.
     await page.evaluate((testId) => {
       const el = document.querySelector(`[data-testid="${testId}"]`);
@@ -1001,6 +1011,9 @@ test.describe("community rail", () => {
         }),
       );
     }, `community-rail-button-${COMMUNITY_B.id}`);
+    await expect(page.getByTestId("community-rail-drag-overlay")).toHaveCount(
+      0,
+    );
 
     // The community list in localStorage must now be [B, A].
     await expect

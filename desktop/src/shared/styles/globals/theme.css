@@ -48,11 +48,11 @@
     --sidebar-border: 225 13.56% 76.86%;
     --sidebar-ring: 225 13.56% 76.86%;
     /* Zorro red-orange palette; legacy variable names remain compatible. */
-    --buzz-gradient-light-top: #ffb950;
-    --buzz-gradient-light-bottom: #ff7e33;
-    --buzz-gradient-dark-top: #7a0103;
-    --buzz-gradient-dark-bottom: #7a0103;
-    --buzz-content-dark: 6.9 97.8% 36.5%;
+    --buzz-gradient-light-top: #fffaf2;
+    --buzz-gradient-light-bottom: #ffdfc2;
+    --buzz-gradient-dark-top: #260001;
+    --buzz-gradient-dark-bottom: #260001;
+    --buzz-content-dark: 357.6 100% 9.8%;
     /* Hosted-community onboarding intentionally keeps this light palette in
        both app themes; semantic tokens keep component code color-agnostic. */
     --buzz-hosted-community-surface-fg: 23 23 23;
@@ -231,9 +231,9 @@
 :root[data-buzz-sidebar].dark {
   --buzz-gradient-top: var(--buzz-gradient-dark-top);
   --buzz-gradient-bottom: var(--buzz-gradient-dark-bottom);
-  --buzz-muted-foreground: rgb(255 185 80 / 70%);
+  --buzz-muted-foreground: rgb(212 212 212 / 75%);
   --buzz-search-surface: rgb(255 255 255 / 4%);
-  --buzz-chrome-foreground: rgb(255 185 80 / 85%);
+  --buzz-chrome-foreground: rgb(212 212 212 / 90%);
   --buzz-hover-surface: rgb(255 255 255 / 4%);
   --buzz-active-fill: 0 0% 100%;
   --buzz-active-surface: color-mix(

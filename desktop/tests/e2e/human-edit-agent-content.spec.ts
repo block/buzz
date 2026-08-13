@@ -67,7 +67,7 @@ test.beforeEach(async ({ page }) => {
         // in mockProfiles when a managed agent is seeded.
         pubkey: OWNED_AGENT_PUBKEY,
         name: "OwnedBot",
-        personaId: "builtin:fizz",
+        personaId: "builtin:diego",
         status: "running",
         // Seed into #agents so the bridge seeds a message from this agent.
         channelNames: ["agents"],

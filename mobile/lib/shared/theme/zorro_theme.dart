@@ -14,10 +14,10 @@ bool isZorroTheme(String themeName) =>
     themeName == zorroThemeName || themeName == zorroDarkThemeName;
 
 /// Gradient stops, matching desktop's Zorro custom properties.
-const _lightTop = Color(0xFFFFB950);
-const _lightBottom = Color(0xFFFF7E33);
-const _darkTop = Color(0xFF7A0103);
-const _darkBottom = Color(0xFF7A0103);
+const _lightTop = Color(0xFFFFFAF2);
+const _lightBottom = Color(0xFFFFDFC2);
+const _darkTop = Color(0xFF260001);
+const _darkBottom = Color(0xFF260001);
 
 /// The Zorro gradient for the app's top section, or null when [themeName] is
 /// not a Zorro theme — in which case the section keeps its default frosted fill.

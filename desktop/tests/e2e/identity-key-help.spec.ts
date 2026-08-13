@@ -83,11 +83,11 @@ test("identity key help stays readable when the app resolves dark mode", async (
   await expect(dialog).toBeVisible();
   await waitForAnimations(page);
 
-  // The textured powder card is baked light in both themes, so the dialog pins
-  // the neutral onboarding theme to its light variant. Without the pin the
-  // dark theme flips --foreground to near-white and the title disappears
-  // against the white card.
+  // The textured card is baked light in both themes, so the dialog pins the
+  // neutral Zorro onboarding theme to its light variant. Without the pin the
+  // dark theme flips --foreground to near-white and the title loses contrast
+  // against the warm light card.
   await expect(
     dialog.getByRole("heading", { name: "What’s an identity key?" }),
-  ).toHaveCSS("color", "rgb(23, 23, 23)");
+  ).toHaveCSS("color", "rgb(122, 1, 3)");
 });

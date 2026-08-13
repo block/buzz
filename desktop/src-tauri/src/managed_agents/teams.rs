@@ -35,7 +35,7 @@ const BUILT_IN_TEAMS: &[BuiltInTeam] = &[BuiltInTeam {
     id: "builtin-team:welcome",
     name: "Welcome Team",
     description: Some("A friendly starter trio ready to help you plan, create, and ship."),
-    persona_ids: &["builtin:fizz", "builtin:honey", "builtin:bumble"],
+    persona_ids: &["builtin:diego", "builtin:murietta", "builtin:montero"],
 }];
 
 // Built-in teams that have been retired. A stored copy that still exactly
@@ -43,10 +43,10 @@ const BUILT_IN_TEAMS: &[BuiltInTeam] = &[BuiltInTeam {
 // copies are demoted to user-owned teams by the retirement loop in
 // merge_teams_impl.
 const RETIRED_BUILT_IN_TEAMS: &[BuiltInTeam] = &[BuiltInTeam {
-    id: "builtin-team:fizz",
-    name: "Fizz",
-    description: Some("Fizz works carefully and collaboratively."),
-    persona_ids: &["builtin:fizz"],
+    id: "builtin-team:diego",
+    name: "Diego",
+    description: Some("Diego works carefully and collaboratively."),
+    persona_ids: &["builtin:diego"],
 }];
 
 fn built_in_team_records(built_ins: &[BuiltInTeam], now: &str) -> Vec<TeamRecord> {

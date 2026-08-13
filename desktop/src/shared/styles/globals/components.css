@@ -262,9 +262,14 @@
   }
 
   .buzz-onboarding-neutral-theme.buzz-startup-shell {
-    /* Dot grid over the Zorro amber-to-red onboarding gradient. */
+    /* Dot grid over the same warm, near-white canvas as Zorro Light. */
+    background-color: var(--buzz-onboarding-landing-background);
     background-image:
-      radial-gradient(circle, rgb(122 1 3 / 0.12) 1px, transparent 1px),
+      radial-gradient(
+        circle,
+        var(--buzz-onboarding-grid-dot) 1px,
+        transparent 1px
+      ),
       linear-gradient(
         to bottom,
         var(--buzz-onboarding-gradient-top),
@@ -278,10 +283,14 @@
 
   .buzz-onboarding-neutral-theme.buzz-startup-shell.buzz-onboarding-welcome {
     background-color: var(--buzz-onboarding-landing-background);
-    /* An orange diagonal sweep distinguishes the landing composition while
-       staying connected to the amber/red setup pages. */
+    /* A diagonal sweep distinguishes the landing composition while staying
+       connected to the rest of the setup flow. */
     background-image:
-      radial-gradient(circle, rgb(122 1 3 / 0.14) 1px, transparent 1px),
+      radial-gradient(
+        circle,
+        var(--buzz-onboarding-grid-dot-strong) 1px,
+        transparent 1px
+      ),
       linear-gradient(
         145deg,
         var(--buzz-onboarding-gradient-top) 0%,
@@ -294,30 +303,32 @@
   }
 
   .buzz-onboarding-neutral-theme {
-    --buzz-onboarding-gradient-top: #ffb950;
-    --buzz-onboarding-landing-background: #ff931f;
-    --buzz-onboarding-landing-bottom: #ec3f13;
+    --buzz-onboarding-gradient-top: #fffaf2;
+    --buzz-onboarding-landing-background: #fff1e3;
+    --buzz-onboarding-landing-bottom: #ffdfc2;
+    --buzz-onboarding-grid-dot: rgb(122 1 3 / 0.08);
+    --buzz-onboarding-grid-dot-strong: rgb(122 1 3 / 0.1);
     /* Legacy variable name retained for setup-state accents. */
     --buzz-welcome-chartreuse: #fa5e1f;
     /* Bottom stop of the onboarding shell gradient; also the docked-footer
        scrim color so content scrolling under the CTA fades into the page. */
-    --buzz-onboarding-shell-bottom: #ff7e33;
-    --buzz-onboarding-button: #a50104;
-    --buzz-onboarding-button-hover: #b81702;
+    --buzz-onboarding-shell-bottom: #ffdfc2;
+    --buzz-onboarding-button: #ec3f13;
+    --buzz-onboarding-button-hover: #fa5e1f;
     --buzz-onboarding-cta-label: #fff8ed;
-    --buzz-onboarding-secondary-bg: rgb(255 173 51 / 0.35);
-    --buzz-onboarding-secondary-bg-hover: rgb(255 173 51 / 0.56);
-    --buzz-onboarding-secondary-border: rgb(236 63 19 / 0.46);
+    --buzz-onboarding-secondary-bg: rgb(255 173 51 / 0.16);
+    --buzz-onboarding-secondary-bg-hover: rgb(255 173 51 / 0.28);
+    --buzz-onboarding-secondary-border: rgb(236 63 19 / 0.34);
     --buzz-onboarding-secondary-ink: #7a0103;
     /* Deep warm ink for the backup step's private key and caption. */
     --buzz-onboarding-backup-ink: #7a0103;
     --background: 36.7 100% 96.5%;
     --foreground: 359 98.4% 24.1%;
-    --primary: 358.9 98.8% 32.5%;
+    --primary: 12.2 85.1% 50%;
     --primary-foreground: 36.7 100% 96.5%;
-    --secondary: 36 100% 65.7%;
+    --secondary: 31.1 100% 60%;
     --secondary-foreground: 359 98.4% 24.1%;
-    --muted: 35.9 100% 60%;
+    --muted: 30.4 100% 88%;
     --muted-foreground: 359 98.4% 24.1%;
     --accent: 17.3 95.6% 55.1%;
     --accent-foreground: 359 98.4% 24.1%;
@@ -328,9 +339,9 @@
     --buzz-onboarding-emoji-picker-color: 23, 23, 23;
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
     --buzz-onboarding-avatar-dialog-bg: 255 255 255;
-    --buzz-onboarding-avatar-accent-bg: 255 185 80;
+    --buzz-onboarding-avatar-accent-bg: 255 173 51;
     --buzz-onboarding-avatar-accent-fg: 122 1 3;
-    --buzz-onboarding-avatar-action-bg: 165 1 4;
+    --buzz-onboarding-avatar-action-bg: 236 63 19;
     --buzz-onboarding-avatar-action-fg: 255 248 237;
     --buzz-onboarding-avatar-control-fg: 122 1 3;
     --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
@@ -471,54 +482,52 @@
     }
   }
 
-  /*
-   * Backup options and password backup intentionally leave the bright
-   * onboarding world for a dark security-focused subview. Keep these semantic
-   * overrides on a reusable class as well as the shell so portaled
-   * popovers/dialogs can opt into the same treatment.
-   */
+  /* Backup options and password backup use the Zorro Dark treatment even when
+     onboarding began in light mode. Keep these overrides reusable so portaled
+     popovers and dialogs can opt into the same treatment. */
   .buzz-onboarding-security-theme {
     color-scheme: dark;
-    --buzz-onboarding-shell-bottom: #082b49;
-    --buzz-onboarding-cta-label: #f5f5f5;
-    --buzz-onboarding-button: #292929;
-    --buzz-onboarding-button-hover: #363636;
-    --buzz-onboarding-secondary-bg: rgb(255 255 255 / 0.08);
-    --buzz-onboarding-secondary-bg-hover: rgb(255 255 255 / 0.14);
-    --buzz-onboarding-secondary-border: rgb(255 255 255 / 0.16);
-    --buzz-onboarding-secondary-ink: #f5f5f5;
-    --background: 222 45% 4%;
-    --foreground: 0 0% 96%;
-    --card: 220 14% 11%;
-    --card-foreground: 0 0% 96%;
-    --popover: 220 14% 9%;
-    --popover-foreground: 0 0% 96%;
-    --primary: 0 0% 16%;
-    --primary-foreground: 0 0% 96%;
-    --secondary: 0 0% 12%;
-    --secondary-foreground: 0 0% 96%;
-    --muted: 0 0% 12%;
-    --muted-foreground: 0 0% 72%;
-    --accent: 0 0% 16%;
-    --accent-foreground: 0 0% 96%;
+    --buzz-onboarding-shell-bottom: #320002;
+    --buzz-onboarding-cta-label: #fff8ed;
+    --buzz-onboarding-button: #ec3f13;
+    --buzz-onboarding-button-hover: #fa5e1f;
+    --buzz-onboarding-secondary-bg: rgb(255 185 80 / 0.1);
+    --buzz-onboarding-secondary-bg-hover: rgb(255 185 80 / 0.18);
+    --buzz-onboarding-secondary-border: rgb(255 173 51 / 0.3);
+    --buzz-onboarding-secondary-ink: #fff8ed;
+    --buzz-onboarding-backup-ink: #ffad33;
+    --background: 357.6 100% 9.8%;
+    --foreground: 0 0% 100%;
+    --card: 359 85% 12%;
+    --card-foreground: 0 0% 100%;
+    --popover: 359 85% 12%;
+    --popover-foreground: 0 0% 100%;
+    --primary: 12.2 85.1% 50%;
+    --primary-foreground: 36.7 100% 96.5%;
+    --secondary: 359 98.4% 24.1%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 359 90% 16%;
+    --muted-foreground: 0 0% 82.7%;
+    --accent: 17.3 95.6% 55.1%;
+    --accent-foreground: 36.7 100% 96.5%;
     --destructive: 0 84% 70%;
-    --destructive-foreground: 0 0% 4%;
-    --border: 0 0% 22%;
-    --input: 0 0% 22%;
-    --ring: 0 0% 84%;
+    --destructive-foreground: 357.6 100% 9.8%;
+    --border: 359.1 98.6% 28%;
+    --input: 359.1 98.6% 28%;
+    --ring: 31.1 100% 60%;
   }
 
   .buzz-onboarding-neutral-theme.buzz-startup-shell.buzz-onboarding-security-theme {
-    background-color: #010103;
+    background-color: #260001;
     background-image:
-      radial-gradient(circle, rgb(143 211 255 / 0.11) 1px, transparent 1px),
+      radial-gradient(circle, rgb(255 185 80 / 0.08) 1px, transparent 1px),
       radial-gradient(
         ellipse at 50% 58%,
-        rgb(28 112 196 / 0.24) 0%,
-        rgb(18 76 138 / 0.1) 38%,
+        rgb(236 63 19 / 0.16) 0%,
+        rgb(165 1 4 / 0.1) 38%,
         transparent 66%
       ),
-      linear-gradient(to bottom, #010103 0%, #040914 46%, #082b49 100%);
+      linear-gradient(to bottom, #260001 0%, #320002 52%, #3d0504 100%);
     background-size:
       24px 24px,
       auto,
@@ -531,88 +540,59 @@
     color: var(--buzz-onboarding-backup-ink);
   }
 
-  .dark .buzz-onboarding-neutral-theme:not(.buzz-startup-shell) {
-    --background: 0 0% 3.9%;
-    --foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 9%;
-    --secondary: 0 0% 14.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 14.9%;
-    --muted-foreground: 0 0% 63.9%;
-    --accent: 0 0% 14.9%;
-    --accent-foreground: 0 0% 98%;
-    --border: 0 0% 14.9%;
-    --input: 0 0% 14.9%;
-    --ring: 0 0% 83.1%;
-    --buzz-onboarding-emoji-picker-background: 38, 38, 38;
-    --buzz-onboarding-emoji-picker-color: 250, 250, 250;
-    --buzz-onboarding-emoji-picker-input: 10, 10, 10;
-    --buzz-onboarding-avatar-dialog-bg: 24 24 20;
-    --buzz-onboarding-avatar-accent-bg: 211 211 163;
-    --buzz-onboarding-avatar-accent-fg: 24 24 20;
-    --buzz-onboarding-avatar-action-bg: 113 113 6;
-    --buzz-onboarding-avatar-action-fg: 240 240 205;
-    --buzz-onboarding-avatar-control-fg: 224 224 176;
-    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
-  }
-
-  .buzz-onboarding-neutral-theme[data-system-color-scheme="light"],
   .dark
-    .buzz-onboarding-neutral-theme[data-system-color-scheme="light"]:not(
-      .buzz-startup-shell
-    ) {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.1%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
-    --accent: 0 0% 96.1%;
-    --accent-foreground: 0 0% 9%;
-    --border: 0 0% 89.8%;
-    --input: 0 0% 89.8%;
-    --ring: 0 0% 9%;
-    --buzz-onboarding-emoji-picker-background: 245, 245, 245;
-    --buzz-onboarding-emoji-picker-color: 23, 23, 23;
-    --buzz-onboarding-emoji-picker-input: 255, 255, 255;
-    --buzz-onboarding-avatar-dialog-bg: 255 255 255;
-    --buzz-onboarding-avatar-accent-bg: 240 240 205;
-    --buzz-onboarding-avatar-accent-fg: 113 113 6;
-    --buzz-onboarding-avatar-action-bg: 23 23 23;
-    --buzz-onboarding-avatar-action-fg: 240 240 205;
-    --buzz-onboarding-avatar-control-fg: 113 113 6;
+    .buzz-onboarding-neutral-theme:not([data-system-color-scheme="light"]):not(
+      .buzz-onboarding-security-theme
+    ),
+  .buzz-onboarding-neutral-theme[data-system-color-scheme="dark"]:not(
+    .buzz-onboarding-security-theme
+  ) {
+    color-scheme: dark;
+    --buzz-onboarding-gradient-top: #260001;
+    --buzz-onboarding-landing-background: #320002;
+    --buzz-onboarding-landing-bottom: #3d0504;
+    --buzz-onboarding-grid-dot: rgb(255 185 80 / 0.07);
+    --buzz-onboarding-grid-dot-strong: rgb(255 185 80 / 0.1);
+    --buzz-onboarding-shell-bottom: #3d0504;
+    --buzz-onboarding-button: #ec3f13;
+    --buzz-onboarding-button-hover: #fa5e1f;
+    --buzz-onboarding-cta-label: #fff8ed;
+    --buzz-onboarding-secondary-bg: rgb(255 185 80 / 0.1);
+    --buzz-onboarding-secondary-bg-hover: rgb(255 185 80 / 0.18);
+    --buzz-onboarding-secondary-border: rgb(255 173 51 / 0.3);
+    --buzz-onboarding-secondary-ink: #fff8ed;
+    --buzz-onboarding-backup-ink: #ffad33;
+    --background: 357.6 100% 9.8%;
+    --foreground: 0 0% 100%;
+    --card: 359 85% 12%;
+    --card-foreground: 0 0% 100%;
+    --popover: 359 85% 12%;
+    --popover-foreground: 0 0% 100%;
+    --primary: 12.2 85.1% 50%;
+    --primary-foreground: 36.7 100% 96.5%;
+    --secondary: 359 98.4% 24.1%;
+    --secondary-foreground: 0 0% 100%;
+    --muted: 359 90% 16%;
+    --muted-foreground: 0 0% 82.7%;
+    --accent: 17.3 95.6% 55.1%;
+    --accent-foreground: 36.7 100% 96.5%;
+    --border: 359.1 98.6% 28%;
+    --input: 359.1 98.6% 28%;
+    --ring: 31.1 100% 60%;
+    --buzz-onboarding-emoji-picker-background: 50, 0, 2;
+    --buzz-onboarding-emoji-picker-color: 255, 255, 255;
+    --buzz-onboarding-emoji-picker-input: 38, 0, 1;
+    --buzz-onboarding-avatar-dialog-bg: 50 0 2;
+    --buzz-onboarding-avatar-accent-bg: 236 63 19;
+    --buzz-onboarding-avatar-accent-fg: 255 248 237;
+    --buzz-onboarding-avatar-action-bg: 236 63 19;
+    --buzz-onboarding-avatar-action-fg: 255 248 237;
+    --buzz-onboarding-avatar-control-fg: 255 173 51;
     --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
   }
 
-  .buzz-onboarding-neutral-theme[data-system-color-scheme="dark"]:not(
-    .buzz-startup-shell
-  ) {
-    --background: 0 0% 3.9%;
-    --foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 9%;
-    --secondary: 0 0% 14.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 14.9%;
-    --muted-foreground: 0 0% 63.9%;
-    --accent: 0 0% 14.9%;
-    --accent-foreground: 0 0% 98%;
-    --border: 0 0% 14.9%;
-    --input: 0 0% 14.9%;
-    --ring: 0 0% 83.1%;
-    --buzz-onboarding-emoji-picker-background: 38, 38, 38;
-    --buzz-onboarding-emoji-picker-color: 250, 250, 250;
-    --buzz-onboarding-emoji-picker-input: 10, 10, 10;
-    --buzz-onboarding-avatar-dialog-bg: 24 24 20;
-    --buzz-onboarding-avatar-accent-bg: 211 211 163;
-    --buzz-onboarding-avatar-accent-fg: 24 24 20;
-    --buzz-onboarding-avatar-action-bg: 113 113 6;
-    --buzz-onboarding-avatar-action-fg: 240 240 205;
-    --buzz-onboarding-avatar-control-fg: 224 224 176;
-    --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
+  .buzz-onboarding-neutral-theme[data-system-color-scheme="light"] {
+    color-scheme: light;
   }
 
   /* The key-import card is viewport-centered on ordinary windows, independent

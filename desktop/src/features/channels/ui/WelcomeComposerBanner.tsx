@@ -4,7 +4,7 @@ import { Bot, Check } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 
-const WELCOME_PERSONA_NAMES = ["Fizz"] as const;
+const WELCOME_PERSONA_NAMES = ["Diego"] as const;
 export const WELCOME_PERSONA_ROTATION_MS = 3200;
 export const WELCOME_PERSONA_EASE = [0.22, 1, 0.36, 1] as const;
 const WELCOME_PERSONA_EXIT_EASE = [0.64, 0, 0.78, 0] as const;
@@ -243,7 +243,7 @@ function WelcomeComposerPersonaMention() {
         ...(mentionWidth === null ? {} : { width: mentionWidth }),
       }}
     >
-      <span className="sr-only">@Fizz</span>
+      <span className="sr-only">@Diego</span>
       <span
         aria-hidden
         className="pointer-events-none invisible inline-block whitespace-nowrap leading-[inherit]"

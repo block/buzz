@@ -243,8 +243,8 @@ async function expectWelcomePersonaMention(page: Page) {
   const banner = page.getByTestId("welcome-composer-guide-banner");
   const personaMention = page.getByTestId("welcome-composer-persona-mention");
   await expect(personaMention).toBeVisible();
-  await expect(personaMention).toHaveAttribute("data-persona-options", "Fizz");
-  await expect(personaMention).toHaveAttribute("data-active-persona", "Fizz");
+  await expect(personaMention).toHaveAttribute("data-persona-options", "Diego");
+  await expect(personaMention).toHaveAttribute("data-active-persona", "Diego");
   await expect(personaMention).toHaveAttribute(
     "data-animation-target",
     "per-character",
@@ -386,7 +386,7 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   const banner = page.getByTestId("welcome-composer-guide-banner");
   const channelIntro = page.getByTestId("message-channel-intro");
 
-  await page.getByTestId("message-input").fill("Thanks @Fizz");
+  await page.getByTestId("message-input").fill("Thanks @Diego");
   await page.getByTestId("send-message").click();
 
   await expect(banner).toHaveAttribute("data-state", "complete");
@@ -557,31 +557,32 @@ async function expectWelcomeGuideIntro(
           Array<{ pubkey: string; name: string; persona_id: string | null }>
         >(page, "list_managed_agents"),
       ]);
-      const fizz = agents.find(
-        (agent) => agent.name === "Fizz" && agent.persona_id === "builtin:fizz",
+      const diego = agents.find(
+        (agent) =>
+          agent.name === "Diego" && agent.persona_id === "builtin:diego",
       );
-      const fizzMember = fizz
-        ? members.members.find((member) => member.pubkey === fizz.pubkey)
+      const diegoMember = diego
+        ? members.members.find((member) => member.pubkey === diego.pubkey)
         : null;
-      const profileAvatarUrl = fizz
+      const profileAvatarUrl = diego
         ? (
             await invokeMockCommand<{
               profiles: Record<string, { avatar_url: string | null }>;
             }>(page, "get_users_batch", {
-              pubkeys: [fizz.pubkey],
+              pubkeys: [diego.pubkey],
             })
-          ).profiles[fizz.pubkey]?.avatar_url
+          ).profiles[diego.pubkey]?.avatar_url
         : null;
 
       return {
-        fizzIsBot: fizzMember?.role === "bot" && fizzMember.is_agent,
-        fizzPersonaId: fizz?.persona_id ?? null,
+        diegoIsBot: diegoMember?.role === "bot" && diegoMember.is_agent,
+        diegoPersonaId: diego?.persona_id ?? null,
         profileAvatarUrl,
       };
     })
     .toEqual({
-      fizzIsBot: true,
-      fizzPersonaId: "builtin:fizz",
+      diegoIsBot: true,
+      diegoPersonaId: "builtin:diego",
       profileAvatarUrl: null,
     });
 
@@ -1726,12 +1727,12 @@ test("connected first-community profile step offers equal-width Next and Back co
   await expect(page.getByText("Your username", { exact: true })).toBeVisible();
   await expect(page.getByTestId("community-onboarding-flow")).toHaveAttribute(
     "data-system-color-scheme",
-    /^(light|dark)$/,
+    "light",
   );
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(page.getByTestId("community-onboarding-flow")).toHaveAttribute(
     "data-system-color-scheme",
-    "dark",
+    "light",
   );
   await avatarButton.click();
   const avatarDialog = page.getByRole("dialog", { name: "Edit your avatar" });
@@ -2863,7 +2864,7 @@ test("successful starter channel retry clears its actionable toast", async ({
   await expectStarterChannels(page);
 });
 
-test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
+test("first-run onboarding posts the live Diego kickoff", async ({ page }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
@@ -2882,13 +2883,13 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
   await completeProfileOnboarding(page);
 
   await expectPrivateWelcomeLanding(page);
-  // Greeted by the name typed above — the @mention pill also files the opener
-  // into the new user's Inbox mentions feed.
+  // The owner pubkey tag files the workspace greeting into the new user's
+  // Inbox mentions feed without putting their name in the shared opener.
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi @Morty QA, I'm Fizz. Welcome to Zorro.",
+    "Welcome to Zorro, your interface between your employees and your specialized AI agents. I’m Diego, the seasoned project manager.",
   );
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Honey and Bumble, introduce yourselves",
+    "Murietta and Montero, introduce yourselves",
   );
 });
 
@@ -2909,7 +2910,7 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
   await expectPrivateWelcomeLanding(page);
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi @Morty QA, I'm Fizz. Welcome to Zorro.",
+    "Welcome to Zorro, your interface between your employees and your specialized AI agents. I’m Diego, the seasoned project manager.",
   );
   await page.waitForTimeout(1_500);
   expect(await commandCount(page, "create_managed_agent")).toBe(3);

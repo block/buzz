@@ -567,7 +567,7 @@ fn display_name_edit_changes_snapshot() {
     // until it restarts, and the operator has to be told that.
     let rec = record();
     let mut renamed = record();
-    renamed.display_name = Some("Fizz".into());
+    renamed.display_name = Some("Diego".into());
     assert_ne!(
         snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
         snapshot(&renamed, &[], &[], "wss://ws.example", &Default::default()),
@@ -600,7 +600,7 @@ fn display_name_edit_does_not_change_snapshot_under_an_explicit_title_override()
     rec.env_vars
         .insert("BUZZ_ACP_SESSION_TITLE".into(), "Pinned Title".into());
     let mut renamed = rec.clone();
-    renamed.display_name = Some("Fizz".into());
+    renamed.display_name = Some("Diego".into());
     assert_eq!(
         snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
         snapshot(&renamed, &[], &[], "wss://ws.example", &Default::default()),

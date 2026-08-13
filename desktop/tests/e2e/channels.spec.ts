@@ -714,7 +714,7 @@ test("sends the first message from the new direct message composer", async ({
 
 test("creates the DM before preparing a persona mention", async ({ page }) => {
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:fizz"],
+    activePersonaIds: ["builtin:diego"],
     createManagedAgentDelayMs: 1_000,
   });
   await page.goto("/");
@@ -726,12 +726,12 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     .click();
 
   const input = page.getByTestId("message-input");
-  await input.fill("Ask @fi");
+  await input.fill("Ask @di");
   await expect(
     page
       .getByTestId("message-composer")
       .getByTestId("mention-autocomplete")
-      .locator("button", { hasText: "Fizz" }),
+      .locator("button", { hasText: "Diego" }),
   ).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" for a hand");
@@ -759,7 +759,7 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     )
     .toBeGreaterThan(baselineCreateCount);
   await expect(page.getByTestId("chat-title")).toContainText("charlie");
-  await expect(page.getByTestId("chat-title")).toContainText("Fizz");
+  await expect(page.getByTestId("chat-title")).toContainText("Diego");
   // Assert popover hidden after chat-title settles — by this point the send
   // flow has completed and the UI has fully transitioned away from the popover.
   await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
@@ -818,7 +818,7 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     page
       .getByTestId("message-row")
       .last()
-      .locator("[data-mention].agent-mention-highlight", { hasText: "Fizz" }),
+      .locator("[data-mention].agent-mention-highlight", { hasText: "Diego" }),
   ).toBeVisible();
 });
 
@@ -828,7 +828,7 @@ test("routes an agent mention from an existing DM to the expanded conversation",
   // Delay persona provisioning so the follow-up expanded-DM open/start sequence
   // cannot collapse into the same fast CI tick before assertions observe it.
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:fizz"],
+    activePersonaIds: ["builtin:diego"],
     createManagedAgentDelayMs: 100,
   });
   await page.goto("/");
@@ -841,12 +841,12 @@ test("routes an agent mention from an existing DM to the expanded conversation",
 
   const messageTail = "in this DM";
   const input = page.getByTestId("message-input");
-  await input.fill("Ask @fi");
+  await input.fill("Ask @di");
   await expect(
     page
       .getByTestId("message-composer")
       .getByTestId("mention-autocomplete")
-      .locator("button", { hasText: "Fizz" }),
+      .locator("button", { hasText: "Diego" }),
   ).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" in this DM");
@@ -862,8 +862,8 @@ test("routes an agent mention from an existing DM to the expanded conversation",
     page.locator("[data-active='true'][data-channel-id]"),
   ).toHaveAttribute("data-channel-id", sentChannelId ?? "");
   await expect(page.getByTestId("chat-title")).toContainText("alice");
-  await expect(page.getByTestId("chat-title")).toContainText("Fizz");
-  await expect(sourceDm).not.toContainText("Fizz");
+  await expect(page.getByTestId("chat-title")).toContainText("Diego");
+  await expect(sourceDm).not.toContainText("Diego");
   const sendCommands = (await readCommandPayloadLog(page)).slice(
     baselineCommands.length,
   );
@@ -952,7 +952,7 @@ test("does not reroute an expanded DM after the user navigates away", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:fizz"],
+    activePersonaIds: ["builtin:diego"],
     sendMessageDelayMs: 1_000,
   });
   await page.goto("/");
@@ -960,12 +960,12 @@ test("does not reroute an expanded DM after the user navigates away", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Ask @fi");
+  await input.fill("Ask @di");
   await expect(
     page
       .getByTestId("message-composer")
       .getByTestId("mention-autocomplete")
-      .locator("button", { hasText: "Fizz" }),
+      .locator("button", { hasText: "Diego" }),
   ).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" while I leave");
@@ -984,7 +984,7 @@ test("does not reroute an expanded DM after the channel pane unmounts", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:fizz"],
+    activePersonaIds: ["builtin:diego"],
     openDmDelayMs: 1_000,
   });
   await page.goto("/");
@@ -992,12 +992,12 @@ test("does not reroute an expanded DM after the channel pane unmounts", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Ask @fi");
+  await input.fill("Ask @di");
   await expect(
     page
       .getByTestId("message-composer")
       .getByTestId("mention-autocomplete")
-      .locator("button", { hasText: "Fizz" }),
+      .locator("button", { hasText: "Diego" }),
   ).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" while I open settings");
@@ -1019,7 +1019,7 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   // Delay persona provisioning so the follow-up expanded-DM open/start sequence
   // cannot collapse into the same fast CI tick before assertions observe it.
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:fizz"],
+    activePersonaIds: ["builtin:diego"],
     createManagedAgentDelayMs: 100,
     sendMessageErrors: [sendError],
   });
@@ -1032,19 +1032,19 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
     .click();
 
   const input = page.getByTestId("message-input");
-  await input.fill("Ask @fi");
+  await input.fill("Ask @di");
   await expect(
     page
       .getByTestId("message-composer")
       .getByTestId("mention-autocomplete")
-      .locator("button", { hasText: "Fizz" }),
+      .locator("button", { hasText: "Diego" }),
   ).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" for a hand");
   await page.getByTestId("send-message").click();
 
   await expect(page.getByText(sendError)).toBeVisible();
-  await expect(input).toContainText("Fizz");
+  await expect(input).toContainText("Diego");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
   const failedSendChannelId = await readOutgoingChannelId(page, "for a hand");
@@ -1108,7 +1108,7 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
   const retryMessage = "Retry after agent startup failed";
   const startError = "Mock agent startup failed.";
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:fizz"],
+    activePersonaIds: ["builtin:diego"],
     startManagedAgentErrors: [startError],
   });
   await page.goto("/");
@@ -1120,12 +1120,12 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
     .click();
 
   const input = page.getByTestId("message-input");
-  await input.fill("Ask @fi");
+  await input.fill("Ask @di");
   await expect(
     page
       .getByTestId("message-composer")
       .getByTestId("mention-autocomplete")
-      .locator("button", { hasText: "Fizz" }),
+      .locator("button", { hasText: "Diego" }),
   ).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" before startup fails");
@@ -1134,7 +1134,7 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
   await expect(
     page.getByText(startError, { exact: false }).first(),
   ).toBeVisible();
-  await expect(input).toContainText("Fizz");
+  await expect(input).toContainText("Diego");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
   const openDmCallsAfterFailure = commandsAfterFailure.filter(
@@ -1168,7 +1168,7 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
   expect(
     (retryOpenDm?.payload as { pubkeys?: string[] } | undefined)?.pubkeys,
   ).toEqual([TEST_IDENTITIES.charlie.pubkey]);
-  await expect(page.getByTestId("chat-title")).not.toContainText("Fizz");
+  await expect(page.getByTestId("chat-title")).not.toContainText("Diego");
 });
 
 test("closes direct message results while opening", async ({ page }) => {
@@ -3709,13 +3709,13 @@ test("members sidebar collapses same-persona managed agents", async ({
       {
         pubkey: outOfChannelAgentPubkey,
         name: "Pinky",
-        personaId: "builtin:fizz",
+        personaId: "builtin:diego",
         status: "stopped",
       },
       {
         pubkey: inChannelAgentPubkey,
         name: "Pinky",
-        personaId: "builtin:fizz",
+        personaId: "builtin:diego",
         status: "running",
         channelNames: ["general"],
       },

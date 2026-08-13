@@ -123,8 +123,8 @@ test("row 3: plain avatar URLs pass through; base64 data URIs upload via the inj
 test("row 3: failed persona avatar upload never substitutes the runtime avatar", async () => {
   const input = await buildInstanceInputForDefinition(
     persona({
-      id: "builtin:fizz",
-      displayName: "Fizz",
+      id: "builtin:diego",
+      displayName: "Diego",
       avatarUrl: "data:image/png;base64,aGk=",
     }),
     claudeRuntime,

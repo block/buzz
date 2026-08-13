@@ -13,9 +13,9 @@ void main() {
       expect(light.bg, const Color(0xFFFFF8ED));
       expect(light.fg, const Color(0xFF7A0103));
       expect(light.comment, const Color(0xFFA50104));
-      expect(dark.bg, const Color(0xFFB81702));
-      expect(dark.fg, const Color(0xFFF5F3ED));
-      expect(dark.comment, const Color(0xFFFFB950));
+      expect(dark.bg, const Color(0xFF320002));
+      expect(dark.fg, const Color(0xFFFFFFFF));
+      expect(dark.comment, const Color(0xFFD4D4D4));
       expect(light.isDark, isFalse);
       expect(dark.isDark, isTrue);
       expect(themePairFor(zorroThemeName), zorroDarkThemeName);
@@ -70,8 +70,8 @@ void main() {
       final light = zorroTopSectionGradient(zorroThemeName, Brightness.light)!;
       final dark = zorroTopSectionGradient(zorroThemeName, Brightness.dark)!;
 
-      expect(light.colors, const [Color(0xFFFFB950), Color(0xFFFF7E33)]);
-      expect(dark.colors, const [Color(0xFF7A0103), Color(0xFF7A0103)]);
+      expect(light.colors, const [Color(0xFFFFFAF2), Color(0xFFFFDFC2)]);
+      expect(dark.colors, const [Color(0xFF260001), Color(0xFF260001)]);
     });
   });
 

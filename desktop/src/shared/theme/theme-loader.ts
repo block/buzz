@@ -393,13 +393,13 @@ export function extractThemeInfo(
   const bg = zorroLight
     ? "#fff8ed"
     : zorroDark
-      ? "#b81702"
+      ? "#320002"
       : (theme.colors?.["editor.background"] as string | undefined) ||
         "#1e1e1e";
   const fg = zorroLight
     ? "#7a0103"
     : zorroDark
-      ? "#f5f3ed"
+      ? "#ffffff"
       : (theme.colors?.["editor.foreground"] as string | undefined) ||
         "#d4d4d4";
   const gitColors = extractGitColors(
@@ -412,7 +412,7 @@ export function extractThemeInfo(
     comment: zorroLight
       ? "#a50104"
       : zorroDark
-        ? "#ffb950"
+        ? "#d4d4d4"
         : extractCommentColor(
             theme.settings as ReadonlyArray<ThemeSetting> | undefined,
             fg,

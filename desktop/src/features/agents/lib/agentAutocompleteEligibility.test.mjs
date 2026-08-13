@@ -201,7 +201,7 @@ test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () =>
   );
 });
 
-test("shouldHideAgentFromMentions: hides member agents with an explicit not-invocable directory entry (Fizz)", () => {
+test("shouldHideAgentFromMentions: hides member agents with an explicit not-invocable directory entry (Diego)", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,

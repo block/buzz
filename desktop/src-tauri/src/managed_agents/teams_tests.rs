@@ -152,7 +152,7 @@ fn merge_teams_repromotes_existing_builtin_marked_as_custom() {
 
 #[test]
 fn validate_team_deletion_rejects_built_ins() {
-    let mut built_in = team("builtin-team:fizz", "Fizz");
+    let mut built_in = team("builtin-team:diego", "Diego");
     built_in.is_builtin = true;
 
     let err = validate_team_deletion(&built_in).unwrap_err();
@@ -264,15 +264,15 @@ fn agents_referencing_team_empty_when_no_matches() {
 // Migration pins — exercise the real merge_teams wrapper (with production consts).
 
 #[test]
-fn migration_pristine_fizz_is_purged() {
-    // A stored record that exactly matches the retired Fizz seed is dropped
+fn migration_pristine_diego_is_purged() {
+    // A stored record that exactly matches the retired Diego seed is dropped
     // on load — the user never touched it, so nothing is lost.
     let pristine = TeamRecord {
-        id: "builtin-team:fizz".to_string(),
-        name: "Fizz".to_string(),
-        description: Some("Fizz works carefully and collaboratively.".to_string()),
+        id: "builtin-team:diego".to_string(),
+        name: "Diego".to_string(),
+        description: Some("Diego works carefully and collaboratively.".to_string()),
         instructions: None,
-        persona_ids: vec!["builtin:fizz".to_string()],
+        persona_ids: vec!["builtin:diego".to_string()],
         is_builtin: true,
         source_dir: None,
         is_symlink: false,
@@ -285,19 +285,19 @@ fn migration_pristine_fizz_is_purged() {
     let (records, changed) = merge_teams(vec![pristine], "2026-07-01T00:00:00Z");
 
     assert!(changed);
-    assert!(!records.iter().any(|t| t.id == "builtin-team:fizz"));
+    assert!(!records.iter().any(|t| t.id == "builtin-team:diego"));
 }
 
 #[test]
-fn migration_customized_fizz_is_demoted_to_user_team() {
-    // A stored Fizz that was renamed (or had a persona added) is retained
+fn migration_customized_diego_is_demoted_to_user_team() {
+    // A stored Diego that was renamed (or had a persona added) is retained
     // but demoted to a user-owned team so the user can edit or delete it.
     let customized = TeamRecord {
-        id: "builtin-team:fizz".to_string(),
-        name: "Fizz (customized)".to_string(),
-        description: Some("Fizz works carefully and collaboratively.".to_string()),
+        id: "builtin-team:diego".to_string(),
+        name: "Diego (customized)".to_string(),
+        description: Some("Diego works carefully and collaboratively.".to_string()),
         instructions: None,
-        persona_ids: vec!["builtin:fizz".to_string(), "extra:persona".to_string()],
+        persona_ids: vec!["builtin:diego".to_string(), "extra:persona".to_string()],
         is_builtin: true,
         source_dir: None,
         is_symlink: false,
@@ -312,8 +312,8 @@ fn migration_customized_fizz_is_demoted_to_user_team() {
     assert!(changed);
     let demoted = records
         .iter()
-        .find(|t| t.id == "builtin-team:fizz")
-        .expect("customized fizz should be retained as a user-owned team");
+        .find(|t| t.id == "builtin-team:diego")
+        .expect("customized diego should be retained as a user-owned team");
     assert!(!demoted.is_builtin);
     assert_eq!(demoted.updated_at, "2026-07-01T00:00:00Z");
 }
@@ -334,9 +334,9 @@ fn welcome_team_is_seeded_and_idempotent() {
     assert_eq!(
         welcome.persona_ids,
         vec![
-            "builtin:fizz".to_string(),
-            "builtin:honey".to_string(),
-            "builtin:bumble".to_string(),
+            "builtin:diego".to_string(),
+            "builtin:murietta".to_string(),
+            "builtin:montero".to_string(),
         ]
     );
     assert!(welcome.is_builtin);
@@ -359,7 +359,7 @@ fn welcome_team_seed_does_not_overwrite_customization() {
         .expect("welcome team should be seeded");
     welcome.name = "My Welcome Team".to_string();
     welcome.description = Some("My customized starter team.".to_string());
-    welcome.persona_ids = vec!["builtin:honey".to_string()];
+    welcome.persona_ids = vec!["builtin:murietta".to_string()];
 
     let (records, changed) = merge_teams(records, "2026-07-02T00:00:00Z");
 
@@ -373,7 +373,7 @@ fn welcome_team_seed_does_not_overwrite_customization() {
         welcome.description.as_deref(),
         Some("My customized starter team.")
     );
-    assert_eq!(welcome.persona_ids, vec!["builtin:honey".to_string()]);
+    assert_eq!(welcome.persona_ids, vec!["builtin:murietta".to_string()]);
     assert!(welcome.is_builtin);
 }
 

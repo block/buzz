@@ -193,6 +193,7 @@ function CommunityDragOverlay({
     <div
       className="flex h-9 w-9 cursor-grabbing items-center justify-center overflow-hidden rounded-xl bg-primary text-xs font-semibold text-primary-foreground opacity-90 shadow-lg ring-1 ring-sidebar-border"
       data-buzz-flat
+      data-testid="community-rail-drag-overlay"
     >
       {iconUrl ? (
         <img

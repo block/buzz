@@ -27,7 +27,6 @@ import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
@@ -50,9 +49,9 @@ function isRelayMembershipDeniedError(error: unknown): boolean {
 }
 
 const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
-  Fizz: "/onboarding/starter-team/fizz.png",
-  Honey: "/onboarding/starter-team/honey.png",
-  Bumble: "/onboarding/starter-team/bumble.png",
+  Diego: "/onboarding/starter-team/diego.png",
+  Murietta: "/onboarding/starter-team/murietta.png",
+  Montero: "/onboarding/starter-team/montero.png",
 };
 
 /** Fade duration for the "entering" curtain over the mounting app. */
@@ -150,7 +149,6 @@ export function CommunityOnboardingFlow({
 }) {
   const { transaction, update, clear } = useCommunityOnboarding();
   const queryClient = useQueryClient();
-  const systemColorScheme = useSystemColorScheme();
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const avatarPresentation = useAvatarPresentation(avatarUrl);
@@ -185,7 +183,7 @@ export function CommunityOnboardingFlow({
     void listPersonas()
       .then((personas) =>
         setStarterPersonas(
-          ["Fizz", "Honey", "Bumble"].flatMap((name) => {
+          ["Diego", "Murietta", "Montero"].flatMap((name) => {
             const persona = personas.find(
               (candidate) => candidate.displayName === name,
             );
@@ -455,7 +453,7 @@ export function CommunityOnboardingFlow({
         isCurtainFading &&
           "pointer-events-none opacity-0 transition-opacity ease-out motion-reduce:transition-none",
       )}
-      data-system-color-scheme={systemColorScheme}
+      data-system-color-scheme="light"
       data-testid="community-onboarding-flow"
       style={
         isCurtainFading

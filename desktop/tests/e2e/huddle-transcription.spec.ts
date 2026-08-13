@@ -700,12 +700,14 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
   });
   expect(new Set(assignedVoices).size).toBe(2);
 
-  await page.getByRole("button", { name: "Voice settings for alice" }).click();
-  await waitForAnimations(page);
-  const voiceMenu = page.locator(
-    '[data-testid="huddle-agent-voice-menu-content"][data-state="open"]',
-  );
+  const aliceVoiceMenu = page.getByRole("button", {
+    name: "Voice settings for alice",
+  });
+  await aliceVoiceMenu.focus();
+  await aliceVoiceMenu.press("Enter");
+  const voiceMenu = page.getByTestId("huddle-agent-voice-menu-content");
   await expect(voiceMenu).toBeVisible();
+  await waitForAnimations(page);
   await expect(
     voiceMenu.getByText("Agent text-to-speech", { exact: true }),
   ).toBeVisible();
@@ -715,16 +717,16 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
     voiceMenu.getByTestId("huddle-agent-voice-selector"),
   ).toContainText("Vera");
 
-  await ttsToggle.click();
+  await ttsToggle.press("Space");
   await expect(
     voiceMenu.getByTestId("huddle-agent-voice-selector"),
   ).toHaveCount(0);
-  await ttsToggle.click();
+  await voiceMenu.getByTestId("huddle-agent-tts-toggle").press("Space");
   await expect(ttsToggle).toBeChecked();
   const voiceSelector = voiceMenu.getByTestId("huddle-agent-voice-selector");
   await expect(voiceSelector).toBeEnabled();
-  await voiceSelector.click();
-  await page.getByRole("menuitemradio", { name: "Jane" }).click();
+  await voiceSelector.press("Enter");
+  await page.getByRole("menuitemradio", { name: "Jane" }).press("Enter");
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -848,7 +850,7 @@ test("keeps the colored startup surface while huddle controls connect", async ({
     page.getByRole("status", { name: "Starting huddle" }),
   ).toBeVisible();
   await expect(
-    page.getByTestId("huddle-starting-view").locator(".bee-sprite"),
+    page.getByTestId("huddle-starting-view").locator(".zorro-loader-mark"),
   ).toBeVisible();
   await expect(page.getByTestId("setup-grainient-background")).toBeVisible();
   await expect(

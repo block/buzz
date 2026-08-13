@@ -301,7 +301,7 @@ test("Welcome failure retries once before allowing starter channel setup to be s
   );
   await page.goto("/");
 
-  for (const name of ["fizz", "honey", "bumble"]) {
+  for (const name of ["diego", "murietta", "montero"]) {
     const character = page.getByTestId(`starter-persona-${name}`);
     await expect(character).toBeVisible();
     await expect(character).toHaveAttribute(

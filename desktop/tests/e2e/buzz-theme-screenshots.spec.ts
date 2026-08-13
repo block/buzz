@@ -54,7 +54,7 @@ async function openChannel(page: Page) {
 
 async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
   const mutedColor =
-    mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(255, 185, 80, 0.7)";
+    mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(212, 212, 212, 0.75)";
   const searchSurface =
     mode === "light" ? "rgba(0, 0, 0, 0.04)" : "rgba(255, 255, 255, 0.04)";
   const hoverSurface =
@@ -62,7 +62,7 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
   const activeSurface =
     mode === "light" ? "rgba(0, 0, 0, 0.07)" : "color(srgb 1 1 1 / 0.16)";
   const chromeColor =
-    mode === "light" ? "rgba(0, 0, 0, 0.5)" : "rgba(255, 185, 80, 0.85)";
+    mode === "light" ? "rgba(0, 0, 0, 0.5)" : "rgba(212, 212, 212, 0.9)";
   const search = page.getByTestId("open-search");
   const pinnedHeader = page.getByTestId("sidebar-pinned-header");
   const sidebarScroller = page.locator(".buzz-sidebar-scrollbar");
@@ -284,7 +284,7 @@ async function expectBuzzGradientPaint(
 
 async function expectBuzzSettingsPalette(page: Page, mode: "light" | "dark") {
   const mutedColor =
-    mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(255, 185, 80, 0.7)";
+    mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(212, 212, 212, 0.75)";
   const sidebar = page.getByTestId("settings-sidebar");
   const sectionLabel = sidebar
     .locator('[data-sidebar="group-label"]')
@@ -330,8 +330,8 @@ async function expectAppliedBuzzTheme(
       storedTheme,
       isDark,
       buzzTheme: themeName,
-      gradientTop: isDark ? "#4a4616" : "#e6e6b6",
-      gradientBottom: isDark ? "#0a1423" : "#c4d0da",
+      gradientTop: isDark ? "#260001" : "#fffaf2",
+      gradientBottom: isDark ? "#260001" : "#ffdfc2",
     });
 }
 
@@ -380,7 +380,7 @@ test("Zorro Dark sidebar gradient", async ({ page }) => {
   await expectIconlessSectionTitleAligned(page, "dm-list");
   await expect(page.locator("[data-buzz-content-surface]")).toHaveCSS(
     "background-color",
-    "rgb(184, 23, 2)",
+    "rgb(50, 0, 2)",
   );
   await waitForAnimations(page);
   await page
@@ -511,7 +511,7 @@ test("settings nav uses Zorro active pill + hover (dark)", async ({ page }) => {
   await expectBuzzSettingsPalette(page, "dark");
   await expect(page.getByTestId("settings-content-surface")).toHaveCSS(
     "background-color",
-    "rgb(184, 23, 2)",
+    "rgb(50, 0, 2)",
   );
   await waitForAnimations(page);
   await sidebar.screenshot({ path: `${SHOTS}/07-settings-nav-dark.png` });
@@ -572,27 +572,27 @@ test("appearance hides accent picker under Zorro", async ({ page }) => {
   await seedTheme(page, "zorro");
   await installMockBridge(page);
   const panel = await openAppearance(page, "light");
-  // The accent picker is hidden while a Buzz theme is active. Its neutral
+  // The accent picker is hidden while a Zorro theme is active. Its neutral
   // swatch testid must not be present.
   await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
   await panel.screenshot({ path: `${SHOTS}/10-appearance-no-accent.png` });
 });
 
 test("accent picker reveals/hides when toggling Zorro", async ({ page }) => {
-  // Start on a non-Buzz theme so the accent picker is present, then select the
-  // Buzz tile — the picker should animate out and unmount. Reselecting a
-  // non-Buzz tile brings it back. Asserts the presence toggle (the motion
+  // Start on a non-Zorro theme so the accent picker is present, then select the
+  // Zorro tile — the picker should animate out and unmount. Reselecting a
+  // non-Zorro tile brings it back. Asserts the presence toggle (the motion
   // wrapper) works end to end.
   await seedTheme(page, "github-light");
   await installMockBridge(page);
   await openAppearance(page, "light");
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
 
-  // Switch to Buzz — picker should leave (allow the exit animation to settle).
-  await page.getByTestId("theme-option-buzz").click();
+  // Switch to Zorro — picker should leave (allow the exit animation to settle).
+  await page.getByTestId("theme-option-zorro").click();
   await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
 
-  // Back to a non-Buzz theme — picker returns.
+  // Back to a non-Zorro theme — picker returns.
   await page.getByTestId("theme-option-github-light").click();
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
 });

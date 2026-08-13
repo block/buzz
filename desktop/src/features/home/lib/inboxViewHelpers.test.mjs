@@ -442,7 +442,7 @@ function makeNudgeEvent(overrides = {}) {
     pubkey: NUDGE_AGENT_SIGNER,
     kind: 9,
     created_at: 1_700_000_000,
-    content: "**Fizz** needs configuration.\n\n```buzz:config-nudge\n{}\n```",
+    content: "**Diego** needs configuration.\n\n```buzz:config-nudge\n{}\n```",
     tags: [["h", NUDGE_CHANNEL_ID]],
     sig: "sig",
     ...overrides,

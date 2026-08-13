@@ -190,7 +190,7 @@ mod tests {
             dir.path(),
             &serde_json::json!([
                 custom_persona_json("custom:one", "goose"),
-                { "id": "builtin:fizz", "display_name": "Fizz", "system_prompt": "P",
+                { "id": "builtin:diego", "display_name": "Diego", "system_prompt": "P",
                   "is_builtin": true,
                   "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z" }
             ]),

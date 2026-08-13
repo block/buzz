@@ -1,7 +1,8 @@
 use super::{
-    built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
-    merge_personas, migrate_retired_personas, validate_persona_activation_change,
-    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    built_in_persona_avatar_url, built_in_persona_records, ensure_persona_ids_are_active,
+    ensure_persona_is_active, merge_personas, migrate_retired_personas,
+    validate_persona_activation_change, validate_persona_deletion, BUILT_IN_PERSONAS,
+    RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
@@ -40,12 +41,12 @@ fn merge_personas_adds_missing_built_ins() {
     assert!(records.iter().all(|record| record.is_builtin));
     assert!(records
         .iter()
-        .any(|record| record.id == "builtin:fizz" && record.runtime.is_none()));
+        .any(|record| record.id == "builtin:diego" && record.runtime.is_none()));
     let display_names: Vec<&str> = records
         .iter()
         .map(|record| record.display_name.as_str())
         .collect();
-    assert_eq!(display_names, vec!["Fizz", "Honey", "Bumble"]);
+    assert_eq!(display_names, vec!["Diego", "Murietta", "Montero"]);
     let active_ids: Vec<&str> = records
         .iter()
         .filter(|record| record.is_active)
@@ -53,8 +54,33 @@ fn merge_personas_adds_missing_built_ins() {
         .collect();
     assert_eq!(
         active_ids,
-        vec!["builtin:fizz", "builtin:honey", "builtin:bumble"]
+        vec!["builtin:diego", "builtin:murietta", "builtin:montero"]
     );
+}
+
+#[test]
+fn built_in_persona_avatars_are_transparent_384px_pngs() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    for persona_id in ["builtin:diego", "builtin:murietta", "builtin:montero"] {
+        let data_url = built_in_persona_avatar_url(persona_id).unwrap();
+        let encoded = data_url.strip_prefix("data:image/png;base64,").unwrap();
+        let png = STANDARD.decode(encoded).unwrap();
+        let image = image::load_from_memory(&png).unwrap().to_rgba8();
+
+        assert_eq!(image.dimensions(), (384, 384));
+        for (x, y) in [(0, 0), (383, 0), (0, 383), (383, 383)] {
+            assert_eq!(
+                image.get_pixel(x, y).0[3],
+                0,
+                "{persona_id} must have transparent corners"
+            );
+        }
+        assert!(
+            image.pixels().any(|pixel| pixel.0[3] == 255),
+            "{persona_id} must contain opaque avatar artwork"
+        );
+    }
 }
 
 #[test]
@@ -68,7 +94,7 @@ fn merge_personas_preserves_custom_records() {
 
 #[test]
 fn merge_personas_preserves_builtin_edits() {
-    let mut edited_builtin = custom_persona("builtin:fizz", "My Fizz");
+    let mut edited_builtin = custom_persona("builtin:diego", "My Diego");
     edited_builtin.is_builtin = true;
     edited_builtin.is_active = true;
     edited_builtin.system_prompt = "User-edited instructions".to_string();
@@ -79,35 +105,35 @@ fn merge_personas_preserves_builtin_edits() {
     let (records, changed) = merge_personas(vec![edited_builtin.clone()], "2026-03-19T00:00:00Z");
 
     assert!(changed); // The remaining seeded built-ins are added.
-    let fizz = records
+    let diego = records
         .iter()
-        .find(|record| record.id == "builtin:fizz")
-        .expect("fizz built-in should exist");
-    assert_eq!(fizz.display_name, edited_builtin.display_name);
-    assert_eq!(fizz.system_prompt, edited_builtin.system_prompt);
-    assert_eq!(fizz.name_pool, edited_builtin.name_pool);
-    assert_eq!(fizz.env_vars, edited_builtin.env_vars);
-    assert_eq!(fizz.is_active, edited_builtin.is_active);
+        .find(|record| record.id == "builtin:diego")
+        .expect("diego built-in should exist");
+    assert_eq!(diego.display_name, edited_builtin.display_name);
+    assert_eq!(diego.system_prompt, edited_builtin.system_prompt);
+    assert_eq!(diego.name_pool, edited_builtin.name_pool);
+    assert_eq!(diego.env_vars, edited_builtin.env_vars);
+    assert_eq!(diego.is_active, edited_builtin.is_active);
 }
 
 #[test]
 fn merge_personas_restores_builtin_marker_without_resetting_edits() {
-    let mut edited_builtin = custom_persona("builtin:fizz", "My Fizz");
+    let mut edited_builtin = custom_persona("builtin:diego", "My Diego");
     edited_builtin.is_builtin = false;
 
     let (records, changed) = merge_personas(vec![edited_builtin], "2026-03-19T00:00:00Z");
 
     assert!(changed);
-    let fizz = records
+    let diego = records
         .iter()
-        .find(|record| record.id == "builtin:fizz")
-        .expect("fizz built-in should exist");
-    assert!(fizz.is_builtin);
-    assert_eq!(fizz.display_name, "My Fizz");
+        .find(|record| record.id == "builtin:diego")
+        .expect("diego built-in should exist");
+    assert!(diego.is_builtin);
+    assert_eq!(diego.display_name, "My Diego");
 }
 
 #[test]
-fn merge_personas_adds_fizz_and_retires_old_builtins_for_existing_store() {
+fn merge_personas_adds_diego_and_retires_old_builtins_for_existing_store() {
     let mut legacy_builtins = vec![custom_persona("builtin:solo", "Solo")];
     for persona in &mut legacy_builtins {
         persona.is_builtin = true;
@@ -117,12 +143,12 @@ fn merge_personas_adds_fizz_and_retires_old_builtins_for_existing_store() {
     let (records, changed) = merge_personas(legacy_builtins, "2026-03-19T00:00:00Z");
 
     assert!(changed);
-    let fizz = records
+    let diego = records
         .iter()
-        .find(|record| record.id == "builtin:fizz")
-        .expect("fizz built-in should exist");
-    assert!(fizz.is_builtin);
-    assert!(fizz.is_active);
+        .find(|record| record.id == "builtin:diego")
+        .expect("diego built-in should exist");
+    assert!(diego.is_builtin);
+    assert!(diego.is_active);
 
     let solo = records
         .iter()
@@ -167,13 +193,13 @@ fn ensure_persona_is_active_rejects_missing_personas() {
 
 #[test]
 fn ensure_persona_is_active_rejects_inactive_personas() {
-    let mut persona = custom_persona("builtin:fizz", "Fizz");
+    let mut persona = custom_persona("builtin:diego", "Diego");
     persona.is_builtin = true;
     persona.is_active = false;
 
-    let err = ensure_persona_is_active(&[persona], "builtin:fizz").unwrap_err();
+    let err = ensure_persona_is_active(&[persona], "builtin:diego").unwrap_err();
 
-    assert_eq!(err, "Fizz is not in My Agents.");
+    assert_eq!(err, "Diego is not in My Agents.");
 }
 
 #[test]
@@ -204,33 +230,33 @@ fn validate_persona_activation_change_rejects_non_builtins() {
 
 #[test]
 fn validate_persona_activation_change_rejects_managed_agent_references() {
-    let mut persona = custom_persona("builtin:fizz", "Fizz");
+    let mut persona = custom_persona("builtin:diego", "Diego");
     persona.is_builtin = true;
 
     let err = validate_persona_activation_change(&persona, false, true, false).unwrap_err();
 
     assert_eq!(
         err,
-        "Fizz is still assigned to a managed agent. Remove or reassign those agents first."
+        "Diego is still assigned to a managed agent. Remove or reassign those agents first."
     );
 }
 
 #[test]
 fn validate_persona_activation_change_rejects_team_references() {
-    let mut persona = custom_persona("builtin:fizz", "Fizz");
+    let mut persona = custom_persona("builtin:diego", "Diego");
     persona.is_builtin = true;
 
     let err = validate_persona_activation_change(&persona, false, false, true).unwrap_err();
 
     assert_eq!(
         err,
-        "Fizz is still referenced by a team. Remove it from those teams first."
+        "Diego is still referenced by a team. Remove it from those teams first."
     );
 }
 
 #[test]
 fn validate_persona_activation_change_allows_safe_builtin_updates() {
-    let mut persona = custom_persona("builtin:fizz", "Fizz");
+    let mut persona = custom_persona("builtin:diego", "Diego");
     persona.is_builtin = true;
 
     assert!(validate_persona_activation_change(&persona, true, false, false).is_ok());
@@ -239,7 +265,7 @@ fn validate_persona_activation_change_allows_safe_builtin_updates() {
 
 #[test]
 fn validate_persona_deletion_rejects_builtins() {
-    let mut persona = custom_persona("builtin:fizz", "Fizz");
+    let mut persona = custom_persona("builtin:diego", "Diego");
     persona.is_builtin = true;
 
     let err = validate_persona_deletion(&persona, false).unwrap_err();
@@ -271,7 +297,7 @@ fn validate_persona_deletion_allows_safe_custom_personas() {
 #[test]
 fn migrate_retires_unmodified_personas() {
     let now = "2026-04-01T00:00:00Z";
-    // Simulate a store from before the Fizz transition: all 6
+    // Simulate a store from before the Diego transition: all 6
     // retired personas with original system prompts.
     let mut stored: Vec<AgentDefinition> = RETIRED_PERSONAS
         .iter()
@@ -377,36 +403,36 @@ fn migrate_is_idempotent() {
     assert!(!migrate_retired_personas(&mut stored_pre_demotion, now));
 }
 
-// ── Fizz default harness ──────────────────────────────────────────────────────
+// ── Diego default harness ──────────────────────────────────────────────────────
 
 #[test]
-fn fizz_builtin_has_no_pinned_runtime() {
-    // The Fizz built-in must not hard-pin a runtime so it inherits the
+fn diego_builtin_has_no_pinned_runtime() {
+    // The Diego built-in must not hard-pin a runtime so it inherits the
     // bundled default (buzz-agent) rather than requiring goose on PATH.
     let records = built_in_persona_records("2026-01-01T00:00:00Z");
-    let fizz = records
+    let diego = records
         .iter()
-        .find(|r| r.id == "builtin:fizz")
-        .expect("builtin:fizz must exist");
+        .find(|r| r.id == "builtin:diego")
+        .expect("builtin:diego must exist");
     assert_eq!(
-        fizz.runtime, None,
-        "Fizz built-in must not pin a runtime — it should inherit the default"
+        diego.runtime, None,
+        "Diego built-in must not pin a runtime — it should inherit the default"
     );
 }
 
 #[test]
-fn fizz_builtin_resolves_to_buzz_agent() {
+fn diego_builtin_resolves_to_buzz_agent() {
     // With no runtime pin, effective_agent_command must fall through to
     // default_agent_command(), which resolves the bundled buzz-agent.
     let records = built_in_persona_records("2026-01-01T00:00:00Z");
     assert_eq!(
-        effective_agent_command(Some("builtin:fizz"), &records, None),
+        effective_agent_command(Some("builtin:diego"), &records, None),
         default_agent_command(),
-        "Fizz must resolve to the bundled default harness, not goose"
+        "Diego must resolve to the bundled default harness, not goose"
     );
     assert_eq!(
-        effective_agent_command(Some("builtin:fizz"), &records, None),
+        effective_agent_command(Some("builtin:diego"), &records, None),
         "buzz-agent",
-        "Fizz must resolve to buzz-agent specifically"
+        "Diego must resolve to buzz-agent specifically"
     );
 }

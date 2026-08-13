@@ -13,7 +13,6 @@ import {
   importIdentity,
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
-import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { AvatarStep } from "./AvatarStep";
@@ -185,7 +184,6 @@ export function OnboardingFlow({
   } | null>(null);
   const [transitionDirection, setTransitionDirection] =
     React.useState<OnboardingTransitionDirection>("forward");
-  const systemColorScheme = useSystemColorScheme();
 
   const resetProfileSaveError = React.useCallback(() => {
     profileUpdateMutation.reset();
@@ -454,7 +452,7 @@ export function OnboardingFlow({
       <div
         className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-start justify-center overflow-y-auto bg-background px-4 pb-28 pt-[106px] text-foreground"
         data-testid="onboarding-gate"
-        data-system-color-scheme={systemColorScheme}
+        data-system-color-scheme="light"
       >
         <StartupWindowDragRegion />
         <OnboardingChrome current={currentStep} total={totalOnboardingSteps} />

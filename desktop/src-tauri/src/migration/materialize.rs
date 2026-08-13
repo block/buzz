@@ -79,7 +79,7 @@ mod tests {
         );
         write_agents_json(
             dir.path(),
-            &serde_json::json!([{ "name": "Fizz", "persona_id": "persona-1" }]),
+            &serde_json::json!([{ "name": "Diego", "persona_id": "persona-1" }]),
         );
         materialize_runtimes_in_file(&dir.path().join("agents/managed-agents.json"));
         let records = read_agents_json(dir.path());
@@ -98,7 +98,7 @@ mod tests {
         write_agents_json(
             dir.path(),
             &serde_json::json!([
-                { "name": "Fizz", "persona_id": "persona-1", "runtime": "claude" },
+                { "name": "Diego", "persona_id": "persona-1", "runtime": "claude" },
                 { "name": "Zorro", "persona_id": "persona-1" }
             ]),
         );

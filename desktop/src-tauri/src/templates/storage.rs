@@ -145,7 +145,7 @@ mod tests {
             canvas_template: Some("# {channel.name}\n\nSprint goals here".to_string()),
             agents: TemplateAgentRoster {
                 personas: vec![TemplateAgentEntry {
-                    persona_id: "builtin:fizz".to_string(),
+                    persona_id: "builtin:diego".to_string(),
                     runtime: Some("claude".to_string()),
                     model: Some("opus".to_string()),
                     role: Some("bot".to_string()),
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(parsed.canvas_template, original.canvas_template);
         assert_eq!(parsed.agents.personas.len(), 1);
         assert_eq!(parsed.agents.teams.len(), 1);
-        assert_eq!(parsed.agents.personas[0].persona_id, "builtin:fizz");
+        assert_eq!(parsed.agents.personas[0].persona_id, "builtin:diego");
         assert_eq!(parsed.agents.personas[0].runtime.as_deref(), Some("claude"));
         assert_eq!(parsed.agents.teams[0].team_id, "team-1");
         assert!(!parsed.is_builtin);
@@ -200,7 +200,7 @@ mod tests {
     fn deserialization_backward_compat_provider_alias() {
         use crate::templates::{TemplateAgentEntry, TemplateTeamEntry};
 
-        let agent_json = r#"{"personaId":"builtin:fizz","provider":"goose"}"#;
+        let agent_json = r#"{"personaId":"builtin:diego","provider":"goose"}"#;
         let agent: TemplateAgentEntry = serde_json::from_str(agent_json).unwrap();
         assert_eq!(agent.runtime.as_deref(), Some("goose"));
 

@@ -32,7 +32,7 @@
           cached = window.localStorage.getItem("buzz-theme-cache");
           if (cached) {
             parsed = JSON.parse(cached);
-            if (parsed.version !== 6) {
+            if (parsed.version !== 10) {
               window.localStorage.removeItem("buzz-theme-cache");
               cached = null;
               parsed = null;
@@ -45,7 +45,7 @@
             // loads asynchronously.
             if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
               document.documentElement.classList.add("dark");
-              document.documentElement.style.backgroundColor = "#b81702";
+              document.documentElement.style.backgroundColor = "#320002";
             } else {
               document.documentElement.classList.add("light");
               document.documentElement.style.backgroundColor = "#fff8ed";

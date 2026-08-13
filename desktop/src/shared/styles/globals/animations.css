@@ -720,8 +720,11 @@
 }
 
 /* Keep the cold-boot gate on Zorro's current palette instead of inheriting
-   stale chart colors from an older cached version of the theme. */
+   chart colors from the syntax theme. */
 :root[data-buzz-sidebar] .buzz-setup-loading-shell {
+  --buzz-grainient-alpha-strong: 0.28;
+  --buzz-grainient-alpha-medium: 0.2;
+  --buzz-grainient-alpha-soft: 0.14;
   --buzz-grainient-color-0: rgb(
     255 185 80 /
     var(--buzz-grainient-alpha-strong)
@@ -731,13 +734,26 @@
     var(--buzz-grainient-alpha-strong)
   );
   --buzz-grainient-color-2: rgb(236 63 19 / var(--buzz-grainient-alpha-medium));
-  --buzz-grainient-color-3: rgb(165 1 4 / var(--buzz-grainient-alpha-strong));
+  --buzz-grainient-color-3: rgb(
+    255 173 51 /
+    var(--buzz-grainient-alpha-strong)
+  );
 }
 
 .dark .buzz-setup-loading-shell {
   --buzz-grainient-alpha-strong: 0.68;
   --buzz-grainient-alpha-medium: 0.5;
   --buzz-grainient-alpha-soft: 0.34;
+}
+
+:root[data-buzz-sidebar].dark .buzz-setup-loading-shell {
+  --buzz-grainient-alpha-strong: 0.26;
+  --buzz-grainient-alpha-medium: 0.18;
+  --buzz-grainient-alpha-soft: 0.12;
+  --buzz-grainient-color-0: rgb(236 63 19 / var(--buzz-grainient-alpha-strong));
+  --buzz-grainient-color-1: rgb(184 23 2 / var(--buzz-grainient-alpha-strong));
+  --buzz-grainient-color-2: rgb(250 94 31 / var(--buzz-grainient-alpha-medium));
+  --buzz-grainient-color-3: rgb(165 1 4 / var(--buzz-grainient-alpha-strong));
 }
 
 .buzz-setup-grainient {

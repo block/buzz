@@ -94,9 +94,9 @@ const themeCatalog = <ThemeColors>[
   ),
   ThemeColors(
     name: 'zorro-dark',
-    bg: Color(0xFFB81702),
-    fg: Color(0xFFF5F3ED),
-    comment: Color(0xFFFFB950),
+    bg: Color(0xFF320002),
+    fg: Color(0xFFFFFFFF),
+    comment: Color(0xFFD4D4D4),
     added: Color(0xFFFFAD33),
     deleted: Color(0xFFFF7E33),
   ),

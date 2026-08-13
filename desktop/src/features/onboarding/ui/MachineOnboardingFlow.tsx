@@ -176,6 +176,7 @@ export function MachineOnboardingFlow({
           ? "buzz-onboarding-welcome py-8"
           : "pb-28 pt-[106px]"
       }`}
+      data-system-color-scheme="light"
       data-testid="machine-onboarding-gate"
     >
       <StartupWindowDragRegion />

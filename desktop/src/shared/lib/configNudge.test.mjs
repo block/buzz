@@ -16,7 +16,7 @@ const CODEX_PUBKEY = "112233aabbccddee";
 
 test("extractConfigNudge returns null when no sentinel present", () => {
   assert.equal(
-    extractConfigNudge("**Fizz** needs configuration before it can respond."),
+    extractConfigNudge("**Diego** needs configuration before it can respond."),
     null,
   );
 });
@@ -27,12 +27,12 @@ test("extractConfigNudge returns null for empty string", () => {
 
 test("extractConfigNudge parses env_key requirement", () => {
   const payload = {
-    agent_name: "Fizz",
+    agent_name: "Diego",
     agent_pubkey: FIZZ_PUBKEY,
     requirements: [{ surface: "env_key", key: "ANTHROPIC_API_KEY" }],
   };
   const content = [
-    "**Fizz** needs configuration before it can respond:",
+    "**Diego** needs configuration before it can respond:",
     "- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables",
     "",
     "Open Edit Agent in the Zorro app to set these.",
@@ -157,7 +157,7 @@ test("extractConfigNudge returns null when JSON is valid but missing agent_name"
 
 test("extractConfigNudge returns null when JSON is valid but missing agent_pubkey", () => {
   const content = withSentinel("prose", {
-    agent_name: "Fizz",
+    agent_name: "Diego",
     requirements: [],
   });
   assert.equal(extractConfigNudge(content), null);
@@ -165,7 +165,7 @@ test("extractConfigNudge returns null when JSON is valid but missing agent_pubke
 
 test("extractConfigNudge returns null when requirements contain unknown surface", () => {
   const content = withSentinel("prose", {
-    agent_name: "Fizz",
+    agent_name: "Diego",
     agent_pubkey: FIZZ_PUBKEY,
     requirements: [{ surface: "unknown_surface", data: "x" }],
   });
@@ -174,7 +174,7 @@ test("extractConfigNudge returns null when requirements contain unknown surface"
 
 test("extractConfigNudge returns null when requirements is not an array", () => {
   const content = withSentinel("prose", {
-    agent_name: "Fizz",
+    agent_name: "Diego",
     agent_pubkey: FIZZ_PUBKEY,
     requirements: "bad",
   });
@@ -188,7 +188,7 @@ test("extractConfigNudge ignores regular code blocks with other language tags", 
 
 test("extractConfigNudge handles empty requirements array", () => {
   const payload = {
-    agent_name: "Fizz",
+    agent_name: "Diego",
     agent_pubkey: FIZZ_PUBKEY,
     requirements: [],
   };
@@ -203,9 +203,9 @@ test("stripConfigNudgeSentinel returns content unchanged when no sentinel", () =
 });
 
 test("stripConfigNudgeSentinel strips the sentinel block", () => {
-  const prose = "**Fizz** needs configuration.\n\nOpen Edit Agent.";
+  const prose = "**Diego** needs configuration.\n\nOpen Edit Agent.";
   const payload = {
-    agent_name: "Fizz",
+    agent_name: "Diego",
     agent_pubkey: FIZZ_PUBKEY,
     requirements: [],
   };
@@ -256,11 +256,11 @@ const OTHER_PUBKEY = "ffffffffffffffffffffffffffffffffffffffff";
 
 function makeNudgeBody(agentPubkey) {
   const payload = {
-    agent_name: "Fizz",
+    agent_name: "Diego",
     agent_pubkey: agentPubkey,
     requirements: [{ surface: "env_key", key: "ANTHROPIC_API_KEY" }],
   };
-  return `**Fizz** needs configuration.\n\n\`\`\`buzz:config-nudge\n${JSON.stringify(payload)}\n\`\`\``;
+  return `**Diego** needs configuration.\n\n\`\`\`buzz:config-nudge\n${JSON.stringify(payload)}\n\`\`\``;
 }
 
 test("authGuard_noAuthorPubkey_returnsNull", () => {
@@ -374,9 +374,9 @@ test("authGuard_signerIsHuman_tagAttributedToAgent_returnsNull", () => {
 
 test("nudgePresent_extractNonNull_and_stripRemovesSentinel", () => {
   const prose =
-    "**Fizz** needs configuration before it can respond:\n- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables\n\nOpen Edit Agent in the Zorro app to set these.";
+    "**Diego** needs configuration before it can respond:\n- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables\n\nOpen Edit Agent in the Zorro app to set these.";
   const payload = {
-    agent_name: "Fizz",
+    agent_name: "Diego",
     agent_pubkey: FIZZ_PUBKEY,
     requirements: [{ surface: "env_key", key: "ANTHROPIC_API_KEY" }],
   };

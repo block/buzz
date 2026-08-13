@@ -63,7 +63,9 @@ export function ProfileAvatar({
         "shrink-0 text-primary shadow-xs",
         // Animated avatars carry their own backdrop disc and transparent
         // surroundings — any container fill would flatten the pop-out.
-        plain || animated ? "bg-transparent shadow-none" : "bg-primary/20",
+        plain || animated
+          ? "bg-transparent shadow-none"
+          : "bg-primary/20 dark:bg-foreground/20 dark:ring-1 dark:ring-foreground/30 dark:shadow-sm",
         className,
       )}
       data-testid={testId}

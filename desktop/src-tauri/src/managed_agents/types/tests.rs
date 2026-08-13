@@ -5,8 +5,8 @@ use std::path::PathBuf;
 fn persona_record_defaults_active_when_field_is_missing() {
     let record: AgentDefinition = serde_json::from_str(
         r#"{
-            "id": "builtin:fizz",
-            "display_name": "Fizz",
+            "id": "builtin:diego",
+            "display_name": "Diego",
             "avatar_url": null,
             "system_prompt": "Prompt",
             "created_at": "2026-03-19T00:00:00Z",

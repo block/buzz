@@ -2,7 +2,7 @@ import { getCanvas, setCanvas } from "@/shared/api/tauri";
 
 export const WELCOME_CANVAS_CONTENT = `# Welcome to Zorro
 
-This private channel is your home base for getting oriented. Fizz, Honey, and Bumble can help you learn the app, troubleshoot setup, and work through something you are building.
+This private channel is your home base for getting oriented. Diego, Murietta, and Montero can help you learn the app, troubleshoot setup, and work through something you are building.
 
 ## Work with your agents
 

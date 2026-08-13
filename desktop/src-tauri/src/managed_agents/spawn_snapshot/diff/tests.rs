@@ -21,7 +21,7 @@ fn base() -> SpawnConfigSnapshot {
         system_prompt: Some("You are a test agent.".into()),
         model: Some("gpt-5".into()),
         provider: Some("openai".into()),
-        session_title: Some("Fizz".into()),
+        session_title: Some("Diego".into()),
         auth_tag: Some("tag-abcdefgh".into()),
         respond_to: "owner-only".into(),
         respond_to_allowlist: Some(vec!["a".repeat(64)]),

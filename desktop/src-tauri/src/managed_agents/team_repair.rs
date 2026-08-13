@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn team_persona_key_falls_back_to_id() {
-        let t = team("builtin-team:fizz");
-        assert_eq!(team_persona_key(&t), "builtin-team:fizz");
+        let t = team("builtin-team:diego");
+        assert_eq!(team_persona_key(&t), "builtin-team:diego");
     }
 }

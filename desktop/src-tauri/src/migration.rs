@@ -157,9 +157,8 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
 
     migrate_legacy_app_data_dir(app);
     sync_shared_agent_data(app);
-    // Dev-build-only: copy any agent keys that exist in the production
-    // keyring ("buzz-desktop") into the dev service ("buzz-desktop-dev")
-    // so existing agents don't lose their keys after the service-name split.
+    legacy_personas::rename_legacy_built_in_personas(app);
+    // Dev-build-only: copy production agent keys into the renamed dev service.
     // Must run after sync_shared_agent_data (JSON symlinked) and before
     // any load_managed_agents call (which runs hydrate_keys against the
     // dev service and would log "has no key" for un-migrated entries).
@@ -529,19 +528,19 @@ struct LegacyBuiltInAvatar<'a> {
 
 const LEGACY_BUILTIN_AVATARS: &[LegacyBuiltInAvatar<'static>] = &[
     LegacyBuiltInAvatar {
-        persona_id: "builtin:fizz",
+        persona_id: "builtin:diego",
         data_url_sha256: "2771b8c9c46aa3c8ac1c4d2acfa23fa9ba35b79c4b1694554e923081e3b8b4d0",
         sanitized_media_sha256: "1a4964ff4cf6c499df1a77a941c211c7d1e7ef755f1c395bc9a3b0f2878114a6",
         persona_content_hash: "b36381d042c8eb5c786a1a692c7ba5a47ae129b9972a1473b64d8fe03f4817c1",
     },
     LegacyBuiltInAvatar {
-        persona_id: "builtin:honey",
+        persona_id: "builtin:murietta",
         data_url_sha256: "1979e54ef77fc94ec688170bd74dade35c563e7fcc82bb0714c672dfb018eab9",
         sanitized_media_sha256: "0e0ed9a35d4050bdd290aa8138d5ab811f222549f6acc3cee40a7feb65933e1f",
         persona_content_hash: "9c9b6b11f1cdd56ba645de02213c562e59c3690bf3f217f74a85df8e6575fd06",
     },
     LegacyBuiltInAvatar {
-        persona_id: "builtin:bumble",
+        persona_id: "builtin:montero",
         data_url_sha256: "c08cf3b8b4c3f8721df6143367ababdebae8f913b9c654401ba74bb3d233655b",
         sanitized_media_sha256: "9f798c61f8965b80beb808f505feb0a5b33726545188ea8212cc9ab22d05f0b6",
         persona_content_hash: "544a73f9106a3c8848b0f308b7a8b6f95077ac8deccdb9ed5552caa833d66c95",
@@ -1378,6 +1377,7 @@ mod detach;
 pub use detach::detach_directory_backed_teams;
 mod team_suffix;
 pub use team_suffix::strip_baked_team_instructions;
+mod legacy_personas;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]

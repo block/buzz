@@ -80,7 +80,7 @@ fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     .unwrap();
     std::fs::write(
         canonical.join("agents/personas.json"),
-        r#"[{"id":"builtin:fizz"}]"#,
+        r#"[{"id":"builtin:diego"}]"#,
     )
     .unwrap();
     std::fs::write(canonical.join("agents/teams.json"), r#"[{"id":"team-1"}]"#).unwrap();
@@ -89,7 +89,7 @@ fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let team_dir = main_instance.join("agents/teams/com.example.test-pack");
     std::fs::create_dir_all(&team_dir).unwrap();
     std::fs::write(team_dir.join("instructions.md"), "# Test pack").unwrap();
-    std::fs::write(team_dir.join("fizz.persona.md"), "# Fizz").unwrap();
+    std::fs::write(team_dir.join("diego.persona.md"), "# Diego").unwrap();
 
     (parent, canonical, worktree)
 }
@@ -321,7 +321,7 @@ fn writes_through_symlink_reach_canonical() {
     let canonical_path = canonical.join("agents/personas.json");
 
     // Write through the symlink using the same pattern as atomic_write_json.
-    let new_content = r#"[{"id":"builtin:fizz","updated":true}]"#;
+    let new_content = r#"[{"id":"builtin:diego","updated":true}]"#;
     let resolved = std::fs::canonicalize(&worktree_path).unwrap();
     let tmp = resolved.with_extension("json.tmp");
     std::fs::write(&tmp, new_content.as_bytes()).unwrap();
@@ -406,7 +406,7 @@ fn seed_up_skipped_when_canonical_has_file() {
     // Canonical's original content is untouched; the sibling did not seed it.
     assert_eq!(
         std::fs::read_to_string(canonical.join(rel)).unwrap(),
-        r#"[{"id":"builtin:fizz"}]"#,
+        r#"[{"id":"builtin:diego"}]"#,
     );
     // Pull-symlink path is unchanged: worktree links to canonical.
     let dst = worktree.join(rel);
@@ -632,7 +632,7 @@ fn reconcile_mcp_commands_clears_stale_buzz_mcp_server() {
     write_agents_json(
         dir.path(),
         &serde_json::json!([{
-            "name": "Fizz",
+            "name": "Diego",
             "agent_command": "goose",
             "mcp_command": "buzz-mcp-server"
         }]),
@@ -662,7 +662,7 @@ fn reconcile_mcp_commands_sets_canonical_for_buzz_agent() {
 fn reconcile_mcp_commands_leaves_custom_value_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let json = serde_json::json!([{
-        "name": "Fizz",
+        "name": "Diego",
         "agent_command": "goose",
         "mcp_command": "my-custom-mcp"
     }]);
@@ -694,7 +694,7 @@ fn reconcile_mcp_commands_is_idempotent() {
     write_agents_json(
         dir.path(),
         &serde_json::json!([{
-            "name": "Fizz",
+            "name": "Diego",
             "agent_command": "goose",
             "mcp_command": "buzz-mcp-server"
         }]),
@@ -735,7 +735,7 @@ fn reconcile_mcp_commands_resolves_persona_runtime_over_stale_snapshot() {
     write_agents_json(
         dir.path(),
         &serde_json::json!([{
-            "name": "Fizz",
+            "name": "Diego",
             "persona_id": "p1",
             "agent_command": "buzz-agent",
             "mcp_command": "buzz-mcp-server"
@@ -763,7 +763,7 @@ fn reconcile_mcp_commands_sees_team_dir_runtime_edit_same_launch() {
     write_agents_json(
         dir.path(),
         &serde_json::json!([{
-            "name": "Fizz",
+            "name": "Diego",
             "persona_id": "p1",
             "agent_command": "buzz-agent",
             "mcp_command": ""
@@ -806,7 +806,7 @@ fn reconcile_mcp_commands_honors_explicit_override_over_persona() {
     write_agents_json(
         dir.path(),
         &serde_json::json!([{
-            "name": "Fizz",
+            "name": "Diego",
             "persona_id": "p1",
             "agent_command": "goose",
             "agent_command_override": "buzz-agent",

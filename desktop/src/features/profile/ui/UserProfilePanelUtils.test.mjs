@@ -12,7 +12,7 @@ import {
 function agent(overrides = {}) {
   return {
     pubkey: "deadbeef".repeat(8),
-    name: "Fizz",
+    name: "Diego",
     personaId: "persona-1",
     relayUrl: "ws://localhost:3000",
     acpCommand: "buzz-acp",
@@ -48,7 +48,7 @@ function agent(overrides = {}) {
 function persona(overrides = {}) {
   return {
     id: "persona-1",
-    displayName: "Fizz Prime",
+    displayName: "Diego Prime",
     avatarUrl: null,
     systemPrompt: "New prompt",
     runtime: "goose",
@@ -85,7 +85,7 @@ function runtime(overrides = {}) {
 test("personaManagedAgentUpdate syncs edited persona identity to linked agent", () => {
   assert.deepEqual(personaManagedAgentUpdate(agent(), persona()), {
     pubkey: "deadbeef".repeat(8),
-    name: "Fizz Prime",
+    name: "Diego Prime",
     systemPrompt: "New prompt",
     model: "new-model",
     envVars: { NEW_KEY: "2" },
@@ -100,7 +100,7 @@ test("personaManagedAgentUpdate skips unrelated or unchanged agents", () => {
   assert.equal(
     personaManagedAgentUpdate(
       agent({
-        name: "Fizz Prime",
+        name: "Diego Prime",
         avatarUrl: null,
         systemPrompt: "New prompt",
         model: "new-model",
@@ -120,7 +120,7 @@ test("personaManagedAgentUpdate maps changed persona runtime to linked agent com
     }),
     {
       pubkey: "deadbeef".repeat(8),
-      name: "Fizz Prime",
+      name: "Diego Prime",
       systemPrompt: "New prompt",
       model: "new-model",
       envVars: { NEW_KEY: "2" },
@@ -135,7 +135,7 @@ test("personaManagedAgentUpdate leaves runtime fields alone when runtime is unch
   assert.equal(
     personaManagedAgentUpdate(
       agent({
-        name: "Fizz Prime",
+        name: "Diego Prime",
         avatarUrl: null,
         systemPrompt: "New prompt",
         model: "new-model",
