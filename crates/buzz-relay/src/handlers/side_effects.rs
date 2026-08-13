@@ -1033,6 +1033,18 @@ async fn emit_addressable_discovery_event(
     Ok(())
 }
 
+fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Result<Vec<Tag>> {
+    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
+    tags.push(Tag::parse(["d", group_id])?);
+    for member in members {
+        let pubkey_hex = hex::encode(&member.pubkey);
+        // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
+        // because the canonical relay is implicit (this event is signed by it).
+        tags.push(Tag::parse(["p", &pubkey_hex, "", &member.role])?);
+    }
+    Ok(tags)
+}
+
 /// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
 /// Called after group creation, metadata changes, or membership changes.
 /// Events are stored channel-scoped (`channel_id = Some(...)`) so that existing
@@ -1136,13 +1148,7 @@ pub async fn emit_group_discovery_events(
     }
 
     {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        for m in &members {
-            let pubkey_hex = hex::encode(&m.pubkey);
-            // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
-            // because the canonical relay is implicit (this event is signed by it).
-            tags.push(Tag::parse(["p", &pubkey_hex, "", &m.role])?);
-        }
+        let tags = group_members_tags(&group_id, &members)?;
         emit_addressable_discovery_event(
             tenant,
             state,
@@ -3371,6 +3377,33 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_members_snapshot_keeps_members_past_one_thousand() {
+        let channel_id = Uuid::new_v4();
+        let members: Vec<MemberRecord> = (0_u16..1_501)
+            .map(|index| MemberRecord {
+                channel_id,
+                pubkey: vec![(index >> 8) as u8, index as u8],
+                role: if index == 1_500 { "owner" } else { "member" }.to_string(),
+                joined_at: chrono::Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            })
+            .collect();
+
+        let tags = group_members_tags(&channel_id.to_string(), &members).expect("build tags");
+        assert_eq!(tags.len(), 1_502, "d tag plus every member p tag");
+
+        let late_pubkey = hex::encode(&members[1_500].pubkey);
+        assert!(tags.iter().any(|tag| {
+            let fields = tag.as_slice();
+            fields.len() == 4
+                && fields[0] == "p"
+                && fields[1] == late_pubkey
+                && fields[3] == "owner"
+        }));
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {
