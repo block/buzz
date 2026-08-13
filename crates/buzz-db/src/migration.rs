@@ -1037,13 +1037,17 @@ mod tests {
         let deletion_recovery = migrations[29].sql.as_str();
         assert!(deletion_recovery.contains("SET LOCAL lock_timeout = '5s'"));
 
-        // Buzz Tasks projection and its FTS privacy exclusion are additive.
+        // Buzz Tasks projection is additive. Search privacy is enforced in the
+        // query layer, so relay startup never rewrites events or rebuilds GIN.
         assert_eq!(migrations[30].version, 31);
         let buzz_tasks = migrations[30].sql.as_str();
         assert!(buzz_tasks.contains("CREATE TABLE buzz_tasks"));
         assert!(buzz_tasks
             .contains("UNIQUE (community_id, channel_id, source_event_id, assignee_pubkey)"));
-        assert!(buzz_tasks.contains("kind IN (44300, 44301, 44302)"));
+        assert!(buzz_tasks.contains("Global search excludes kinds 44300-44302"));
+        assert!(buzz_tasks.contains("SET LOCAL lock_timeout = '5s'"));
+        assert!(!buzz_tasks.contains("ALTER TABLE events DROP COLUMN search_tsv"));
+        assert!(!buzz_tasks.contains("CREATE INDEX idx_events_search_tsv"));
         assert!(buzz_tasks.contains("attach_community_write_fence('buzz_tasks')"));
         assert!(desired_schema.contains("CREATE TABLE buzz_tasks"));
     }

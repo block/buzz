@@ -279,9 +279,10 @@ CREATE INDEX idx_events_not_before ON events (community_id, not_before)
 CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
 
 -- ── Buzz Tasks projection ────────────────────────────────────────────────────
--- Rebuildable owner-private read model derived atomically from kinds
+-- Rebuildable internal validation/replay model derived atomically from kinds
 -- 44300/44301/44302. Source identity is stored as tenant + channel + event id;
--- the buzz:// navigation URL is built only after API authorization.
+-- public reads remain signed Nostr events, and clients build buzz:// only after
+-- validating the authorized event envelope.
 
 CREATE TABLE buzz_tasks (
     community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,

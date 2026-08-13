@@ -9,7 +9,8 @@
 use buzz_core::{
     kind::{
         AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_MEMBER_ADDED_NOTIFICATION,
-        KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
+        KIND_MEMBER_REMOVED_NOTIFICATION, KIND_TASK_REQUESTED, KIND_TASK_RESOLVED,
+        KIND_TASK_UPDATED, P_GATED_KINDS,
     },
     CommunityId,
 };
@@ -1142,6 +1143,78 @@ async fn very_long_query_is_bounded_before_pg_parse() {
         .await
         .expect("long search query should be capped before Postgres parses it");
 
+    assert!(result.hits.is_empty());
+
+    teardown(pool, &schema).await;
+}
+
+/// Brownfield safety gate: task privacy must not depend on rewriting the
+/// generated search column. Simulate an old broad expression that indexes all
+/// content, prove the rows physically match, then prove the public search query
+/// still excludes every task kind even when explicitly requested by `kinds`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn task_kinds_are_query_excluded_without_a_storage_rewrite() {
+    let (pool, schema) = setup().await;
+
+    pool.execute(
+        "ALTER TABLE events DROP COLUMN search_tsv; \
+         ALTER TABLE events ADD COLUMN search_tsv TSVECTOR GENERATED ALWAYS AS \
+             (to_tsvector('simple', content)) STORED; \
+         CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);",
+    )
+    .await
+    .expect("simulate broad brownfield search expression");
+
+    let c = mk_community(&pool, "task-query-exclusion.example").await;
+    let token = "buzz_task_private_marker_xyzzy";
+    for (index, kind) in [KIND_TASK_REQUESTED, KIND_TASK_UPDATED, KIND_TASK_RESOLVED]
+        .into_iter()
+        .enumerate()
+    {
+        insert_event(
+            &pool,
+            c,
+            rand_bytes32(),
+            rand_bytes32(),
+            kind as i32,
+            token,
+            None,
+            1_700_000_000 + index as i64,
+        )
+        .await;
+    }
+
+    let physically_indexed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE community_id=$1 \
+         AND search_tsv @@ plainto_tsquery('simple', $2)",
+    )
+    .bind(c.as_uuid())
+    .bind(token)
+    .fetch_one(&pool)
+    .await
+    .expect("probe brownfield storage index");
+    assert_eq!(physically_indexed, 3);
+
+    let result = SearchService::new(pool.clone())
+        .search(&SearchQuery {
+            community: c,
+            q: token.into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![
+                KIND_TASK_REQUESTED as i32,
+                KIND_TASK_UPDATED as i32,
+                KIND_TASK_RESOLVED as i32,
+            ]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+            mode: buzz_search::SearchMode::FullText,
+        })
+        .await
+        .expect("search task kinds");
     assert!(result.hits.is_empty());
 
     teardown(pool, &schema).await;

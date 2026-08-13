@@ -1,13 +1,14 @@
 use buzz_core::kind::{
     KIND_STREAM_MESSAGE, KIND_TASK_REQUESTED, KIND_TASK_RESOLVED, KIND_TASK_UPDATED,
 };
-use buzz_core::task::{TaskEventV1, TaskTarget};
+use buzz_core::task::TaskEventV1;
 use buzz_core::CommunityId;
 use buzz_db::task::{
-    get_task_for_owner, insert_task_event_with_projection, list_tasks_for_owner, TaskListQuery,
-    TaskProjectionOutcome, TaskStatus,
+    insert_task_event_with_projection, soft_delete_task_event_and_rebuild_projection,
+    TaskProjectionOutcome,
 };
-use chrono::{DateTime, TimeZone, Utc};
+use buzz_db::EventQuery;
+use chrono::{TimeZone, Utc};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 use uuid::Uuid;
@@ -135,13 +136,35 @@ impl Fixture {
         title: &str,
         created_at: u64,
     ) -> nostr::Event {
+        self.task_event_for_source(
+            kind,
+            task_id,
+            source_version,
+            title,
+            created_at,
+            &self.source,
+        )
+    }
+
+    fn task_event_for_source(
+        &self,
+        kind: u32,
+        task_id: Uuid,
+        source_version: i64,
+        title: &str,
+        created_at: u64,
+        source: &nostr::Event,
+    ) -> nostr::Event {
+        let source_updated_at = chrono::DateTime::from_timestamp(created_at as i64, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let content = if kind == KIND_TASK_RESOLVED {
             format!(
-                r#"{{"resolution":"resolved","sourceVersion":{source_version},"sourceUpdatedAt":"2026-08-13T09:00:00Z"}}"#
+                r#"{{"resolution":"resolved","sourceVersion":{source_version},"sourceUpdatedAt":"{source_updated_at}"}}"#
             )
         } else {
             format!(
-                r#"{{"taskType":"review","title":"{title}","context":null,"priority":"medium","dueAt":null,"agentName":"Review Agent","sourceVersion":{source_version},"sourceUpdatedAt":"2026-08-13T08:18:00Z"}}"#
+                r#"{{"taskType":"review","title":"{title}","context":null,"priority":"medium","dueAt":null,"agentName":"Review Agent","sourceVersion":{source_version},"sourceUpdatedAt":"{source_updated_at}"}}"#
             )
         };
         EventBuilder::new(Kind::Custom(kind as u16), content)
@@ -150,11 +173,29 @@ impl Fixture {
                 Tag::parse(["p", &self.owner.public_key().to_hex()]).unwrap(),
                 Tag::parse(["agent", &self.agent.public_key().to_hex()]).unwrap(),
                 Tag::parse(["h", &self.channel_id.to_string()]).unwrap(),
-                Tag::parse(["e", &self.source.id.to_hex(), "", "source"]).unwrap(),
+                Tag::parse(["e", &source.id.to_hex(), "", "source"]).unwrap(),
             ])
             .custom_created_at(Timestamp::from(created_at))
             .sign_with_keys(&self.agent)
             .unwrap()
+    }
+
+    async fn insert_source(&self, label: &str, created_at: u64) -> nostr::Event {
+        let source = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), label)
+            .tags([Tag::parse(["h", &self.channel_id.to_string()]).unwrap()])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(&self.agent)
+            .unwrap();
+        buzz_db::event::insert_event_with_thread_metadata(
+            &self.pool,
+            self.community,
+            &source,
+            Some(self.channel_id),
+            None,
+        )
+        .await
+        .unwrap();
+        source
     }
 
     async fn apply(&self, event: &nostr::Event) -> buzz_db::Result<TaskProjectionOutcome> {
@@ -197,17 +238,15 @@ async fn duplicate_requested_event_creates_one_projection_row() {
         fixture.apply(&requested).await.unwrap(),
         TaskProjectionOutcome::DuplicateEvent
     );
-    let task = get_task_for_owner(
-        &fixture.pool,
-        fixture.community,
-        fixture.owner.public_key().as_bytes(),
-        task_id,
+    let task: (i64, String) = sqlx::query_as(
+        "SELECT source_version, status FROM buzz_tasks WHERE community_id=$1 AND id=$2",
     )
+    .bind(fixture.community.as_uuid())
+    .bind(task_id)
+    .fetch_one(&fixture.pool)
     .await
-    .unwrap()
     .unwrap();
-    assert_eq!(task.source_version, 1);
-    assert_eq!(task.status, TaskStatus::Open);
+    assert_eq!(task, (1, "open".into()));
 
     fixture.teardown().await;
 }
@@ -237,17 +276,15 @@ async fn newer_update_wins_and_older_replay_is_ignored() {
         TaskProjectionOutcome::Stale
     );
 
-    let task = get_task_for_owner(
-        &fixture.pool,
-        fixture.community,
-        fixture.owner.public_key().as_bytes(),
-        task_id,
+    let task: (String, i64) = sqlx::query_as(
+        "SELECT title, source_version FROM buzz_tasks WHERE community_id=$1 AND id=$2",
     )
+    .bind(fixture.community.as_uuid())
+    .bind(task_id)
+    .fetch_one(&fixture.pool)
     .await
-    .unwrap()
     .unwrap();
-    assert_eq!(task.title, "V3");
-    assert_eq!(task.source_version, 3);
+    assert_eq!(task, ("V3".into(), 3));
 
     fixture.teardown().await;
 }
@@ -270,16 +307,14 @@ async fn terminal_transition_removes_open_task_and_rejects_reopen() {
         TaskProjectionOutcome::Resolved
     );
 
-    let open = list_tasks_for_owner(
-        &fixture.pool,
-        fixture.community,
-        fixture.owner.public_key().as_bytes(),
-        &[fixture.channel_id],
-        &TaskListQuery::open(100, 0, Utc::now()),
-    )
-    .await
-    .unwrap();
-    assert!(open.is_empty());
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM buzz_tasks WHERE community_id=$1 AND id=$2")
+            .bind(fixture.community.as_uuid())
+            .bind(task_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "resolved");
 
     let reopen = fixture
         .apply(&fixture.task_event(KIND_TASK_UPDATED, task_id, 3, "Reopen", now + 2))
@@ -308,87 +343,194 @@ async fn terminal_transition_removes_open_task_and_rejects_reopen() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn owner_tenant_and_channel_filters_are_all_required_for_reads() {
+async fn nostr_keyset_has_no_duplicates_or_holes_across_task_mutations() {
     let fixture = Fixture::new().await;
-    let task_id = Uuid::new_v4();
-    let now = Utc::now().timestamp() as u64;
-    fixture
-        .apply(&fixture.task_event(KIND_TASK_REQUESTED, task_id, 1, "Private", now))
+    let base = (Utc::now().timestamp() - 120) as u64;
+    let mut original = Vec::new();
+    for index in 0..4_u64 {
+        let source = fixture
+            .insert_source(&format!("source {index}"), base - 20 + index)
+            .await;
+        let task_id = Uuid::new_v4();
+        let requested = fixture.task_event_for_source(
+            KIND_TASK_REQUESTED,
+            task_id,
+            1,
+            &format!("Task {index}"),
+            base + 1,
+            &source,
+        );
+        fixture.apply(&requested).await.unwrap();
+        original.push((task_id, source, requested));
+    }
+
+    let mut first_query = EventQuery::for_community(fixture.community);
+    first_query.channel_id = Some(fixture.channel_id);
+    first_query.kinds = Some(vec![
+        KIND_TASK_REQUESTED as i32,
+        KIND_TASK_UPDATED as i32,
+        KIND_TASK_RESOLVED as i32,
+    ]);
+    first_query.p_tag_hex = Some(fixture.owner.public_key().to_hex());
+    first_query.limit = Some(2);
+    let page_one = buzz_db::event::query_events(&fixture.pool, &first_query)
         .await
         .unwrap();
+    assert_eq!(page_one.len(), 2);
+    let cursor = page_one.last().unwrap();
 
-    let stranger = Keys::generate();
-    assert!(get_task_for_owner(
+    let new_source = fixture.insert_source("new between pages", base - 10).await;
+    let new_task = fixture.task_event_for_source(
+        KIND_TASK_REQUESTED,
+        Uuid::new_v4(),
+        1,
+        "Created between pages",
+        base + 10,
+        &new_source,
+    );
+    fixture.apply(&new_task).await.unwrap();
+    let updated_target = original
+        .iter()
+        .find(|(_, _, event)| event.id == page_one[0].event.id)
+        .unwrap();
+    let resolved_target = original
+        .iter()
+        .find(|(_, _, event)| event.id == page_one[1].event.id)
+        .unwrap();
+    let updated = fixture.task_event_for_source(
+        KIND_TASK_UPDATED,
+        updated_target.0,
+        2,
+        "Updated between pages",
+        base + 9,
+        &updated_target.1,
+    );
+    fixture.apply(&updated).await.unwrap();
+    let resolved = fixture.task_event_for_source(
+        KIND_TASK_RESOLVED,
+        resolved_target.0,
+        2,
+        "",
+        base + 8,
+        &resolved_target.1,
+    );
+    fixture.apply(&resolved).await.unwrap();
+
+    let mut second_query = first_query.clone();
+    second_query.until = Some(
+        chrono::DateTime::from_timestamp(cursor.event.created_at.as_secs() as i64, 0).unwrap(),
+    );
+    second_query.before_id = Some(cursor.event.id.as_bytes().to_vec());
+    let page_two = buzz_db::event::query_events(&fixture.pool, &second_query)
+        .await
+        .unwrap();
+    assert_eq!(page_two.len(), 2);
+
+    let delivered: std::collections::HashSet<_> = page_one
+        .iter()
+        .chain(page_two.iter())
+        .map(|stored| stored.event.id)
+        .collect();
+    let expected: std::collections::HashSet<_> =
+        original.iter().map(|(_, _, event)| event.id).collect();
+    assert_eq!(page_one.len() + page_two.len(), delivered.len());
+    assert_eq!(
+        delivered, expected,
+        "snapshot events must appear exactly once"
+    );
+    for mutation in [&new_task, &updated, &resolved] {
+        assert!(
+            !page_two.iter().any(|stored| stored.event.id == mutation.id),
+            "events accepted above the cursor belong to the live/head side"
+        );
+    }
+
+    fixture.teardown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deleting_task_events_replays_projection_from_remaining_live_events() {
+    let fixture = Fixture::new().await;
+    let task_id = Uuid::new_v4();
+    let base = Utc::now().timestamp() as u64;
+    let requested = fixture.task_event(KIND_TASK_REQUESTED, task_id, 1, "Version one", base);
+    let updated = fixture.task_event(KIND_TASK_UPDATED, task_id, 2, "Version two", base + 1);
+    let resolved = fixture.task_event(KIND_TASK_RESOLVED, task_id, 3, "", base + 2);
+
+    fixture.apply(&requested).await.unwrap();
+    fixture.apply(&updated).await.unwrap();
+    fixture.apply(&resolved).await.unwrap();
+
+    assert!(soft_delete_task_event_and_rebuild_projection(
         &fixture.pool,
         fixture.community,
-        stranger.public_key().as_bytes(),
-        task_id,
+        resolved.id.as_bytes(),
     )
     .await
-    .unwrap()
-    .is_none());
-    assert!(get_task_for_owner(
-        &fixture.pool,
-        CommunityId::from_uuid(Uuid::new_v4()),
-        fixture.owner.public_key().as_bytes(),
-        task_id,
-    )
-    .await
-    .unwrap()
-    .is_none());
-    let hidden = list_tasks_for_owner(
-        &fixture.pool,
-        fixture.community,
-        fixture.owner.public_key().as_bytes(),
-        &[],
-        &TaskListQuery::open(100, 0, Utc::now()),
-    )
-    .await
-    .unwrap();
-    assert!(hidden.is_empty());
-
-    let task = get_task_for_owner(
-        &fixture.pool,
-        fixture.community,
-        fixture.owner.public_key().as_bytes(),
-        task_id,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let target =
-        TaskTarget::from_bytes(task.community_id, task.channel_id, &task.source_event_id).unwrap();
-    assert_eq!(target.source_event_id(), fixture.source.id);
-
-    sqlx::query(
-        "UPDATE channel_members SET removed_at=now() \
-         WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3",
+    .unwrap());
+    let after_resolve_delete: (String, i64, String) = sqlx::query_as(
+        "SELECT status, source_version, title FROM buzz_tasks WHERE community_id=$1 AND id=$2",
     )
     .bind(fixture.community.as_uuid())
-    .bind(fixture.channel_id)
-    .bind(fixture.owner.public_key().as_bytes())
-    .execute(&fixture.pool)
+    .bind(task_id)
+    .fetch_one(&fixture.pool)
     .await
     .unwrap();
-    assert!(get_task_for_owner(
+    assert_eq!(
+        after_resolve_delete,
+        ("open".into(), 2, "Version two".into())
+    );
+
+    assert!(soft_delete_task_event_and_rebuild_projection(
         &fixture.pool,
         fixture.community,
-        fixture.owner.public_key().as_bytes(),
-        task_id,
+        updated.id.as_bytes(),
     )
     .await
-    .unwrap()
-    .is_none());
-    assert!(list_tasks_for_owner(
+    .unwrap());
+    let after_update_delete: (String, i64, String) = sqlx::query_as(
+        "SELECT status, source_version, title FROM buzz_tasks WHERE community_id=$1 AND id=$2",
+    )
+    .bind(fixture.community.as_uuid())
+    .bind(task_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after_update_delete,
+        ("open".into(), 1, "Version one".into())
+    );
+
+    assert!(soft_delete_task_event_and_rebuild_projection(
         &fixture.pool,
         fixture.community,
-        fixture.owner.public_key().as_bytes(),
-        &[fixture.channel_id],
-        &TaskListQuery::open(100, 0, Utc::now()),
+        requested.id.as_bytes(),
     )
     .await
-    .unwrap()
-    .is_empty());
+    .unwrap());
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM buzz_tasks WHERE community_id=$1 AND id=$2")
+            .bind(fixture.community.as_uuid())
+            .bind(task_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0);
+
+    let tombstones: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE community_id=$1 AND id = ANY($2) AND deleted_at IS NOT NULL",
+    )
+    .bind(fixture.community.as_uuid())
+    .bind(vec![
+        requested.id.as_bytes().to_vec(),
+        updated.id.as_bytes().to_vec(),
+        resolved.id.as_bytes().to_vec(),
+    ])
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(tombstones, 3);
 
     fixture.teardown().await;
 }
@@ -431,13 +573,4 @@ async fn source_message_identity_is_checked_inside_the_atomic_write() {
     assert_eq!(stored, 0, "invalid source must roll back the task event");
 
     fixture.teardown().await;
-}
-
-#[test]
-fn query_snapshot_time_is_preserved_for_cursor_sorting() {
-    let as_of: DateTime<Utc> = "2026-08-13T09:30:00Z".parse().unwrap();
-    let query = TaskListQuery::open(25, 50, as_of);
-    assert_eq!(query.limit, 25);
-    assert_eq!(query.offset, 50);
-    assert_eq!(query.as_of, as_of);
 }

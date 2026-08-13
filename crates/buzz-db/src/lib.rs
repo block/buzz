@@ -2256,34 +2256,18 @@ impl Db {
         task::insert_task_event_with_projection(&self.pool, community_id, event, task).await
     }
 
-    /// Fetch one projected task for its signed owner in one community.
-    #[datastore_span(name = "get_task_for_owner", system = "postgresql")]
-    pub async fn get_task_for_owner(
+    /// Atomically soft-delete a task event and rebuild its derived projection.
+    #[datastore_span(
+        name = "soft_delete_task_event_and_rebuild_projection",
+        system = "postgresql"
+    )]
+    pub async fn soft_delete_task_event_and_rebuild_projection(
         &self,
         community_id: CommunityId,
-        owner_pubkey: &[u8],
-        task_id: Uuid,
-    ) -> Result<Option<task::TaskRecord>> {
-        task::get_task_for_owner(&self.pool, community_id, owner_pubkey, task_id).await
-    }
-
-    /// List projected tasks for an owner within their current channel access set.
-    #[datastore_span(name = "list_tasks_for_owner", system = "postgresql")]
-    pub async fn list_tasks_for_owner(
-        &self,
-        community_id: CommunityId,
-        owner_pubkey: &[u8],
-        accessible_channel_ids: &[Uuid],
-        query: &task::TaskListQuery,
-    ) -> Result<Vec<task::TaskRecord>> {
-        task::list_tasks_for_owner(
-            &self.pool,
-            community_id,
-            owner_pubkey,
-            accessible_channel_ids,
-            query,
-        )
-        .await
+        event_id: &[u8],
+    ) -> Result<bool> {
+        task::soft_delete_task_event_and_rebuild_projection(&self.pool, community_id, event_id)
+            .await
     }
 
     /// Atomically insert a kind:7 reaction event and its reaction row.

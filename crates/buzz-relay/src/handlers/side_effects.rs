@@ -11,7 +11,7 @@ use buzz_core::kind::{
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
     KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_TASK_REQUESTED, KIND_TASK_RESOLVED, KIND_TASK_UPDATED, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -1683,6 +1683,7 @@ async fn handle_delete_event_side_effect(
     // Verify the target event belongs to the same channel as the h-tag.
     // Without this check, an admin of channel A could delete events in channel B
     // by sending h=A, e=<event-in-B>.
+    let mut target_is_task = false;
     if let Some(target_event) = state
         .db
         .get_event_by_id_including_deleted(tenant.community(), &target_id)
@@ -1700,30 +1701,39 @@ async fn handle_delete_event_side_effect(
             }
             _ => {} // Same channel — OK
         }
+        target_is_task = [KIND_TASK_REQUESTED, KIND_TASK_UPDATED, KIND_TASK_RESOLVED]
+            .contains(&u32::from(target_event.event.kind.as_u16()));
     }
 
-    // Look up thread metadata so we can pass parent/root IDs to the
-    // transactional delete function.
-    let meta = state
-        .db
-        .get_thread_metadata_by_event(tenant.community(), &target_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("get_thread_metadata failed: {e}"))?;
-
-    let parent_id = meta.as_ref().and_then(|m| m.parent_event_id.clone());
-    let root_id = meta.as_ref().and_then(|m| m.root_event_id.clone());
-
-    // Atomically soft-delete the event and decrement thread counters in one transaction.
-    let deleted = state
-        .db
-        .soft_delete_event_and_update_thread(
-            tenant.community(),
-            &target_id,
-            parent_id.as_deref(),
-            root_id.as_deref(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("soft_delete_event failed: {e}"))?;
+    let (deleted, root_id) = if target_is_task {
+        let deleted = state
+            .db
+            .soft_delete_task_event_and_rebuild_projection(tenant.community(), &target_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("task projection delete failed: {e}"))?;
+        (deleted, None)
+    } else {
+        // Look up thread metadata so we can pass parent/root IDs to the
+        // transactional delete function.
+        let meta = state
+            .db
+            .get_thread_metadata_by_event(tenant.community(), &target_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("get_thread_metadata failed: {e}"))?;
+        let parent_id = meta.as_ref().and_then(|m| m.parent_event_id.clone());
+        let root_id = meta.as_ref().and_then(|m| m.root_event_id.clone());
+        let deleted = state
+            .db
+            .soft_delete_event_and_update_thread(
+                tenant.community(),
+                &target_id,
+                parent_id.as_deref(),
+                root_id.as_deref(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("soft_delete_event failed: {e}"))?;
+        (deleted, root_id)
+    };
 
     if !deleted {
         warn!(target_event = %hex::encode(&target_id), "event already deleted or not found");
@@ -2232,11 +2242,20 @@ async fn handle_standard_deletion_event(
             Some(target) => target,
             None => continue,
         };
-        if u32::from(target_event.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE {
+        let target_kind = u32::from(target_event.event.kind.as_u16());
+        if target_kind == super::push_lease::KIND_PUSH_LEASE {
             tracing::debug!(
                 target_id = %hex::encode(&target_id),
                 "NIP-09 deletion ignored for push lease"
             );
+            continue;
+        }
+
+        if [KIND_TASK_REQUESTED, KIND_TASK_UPDATED, KIND_TASK_RESOLVED].contains(&target_kind) {
+            state
+                .db
+                .soft_delete_task_event_and_rebuild_projection(tenant.community(), &target_id)
+                .await?;
             continue;
         }
 
@@ -2267,7 +2286,7 @@ async fn handle_standard_deletion_event(
             emit_live_thread_summary(tenant, state, channel_id, root_id);
         }
 
-        if u32::from(target_event.event.kind.as_u16()) == KIND_REACTION {
+        if target_kind == KIND_REACTION {
             // Try by reaction_event_id first; fall back to tuple-based removal
             // if the backfill was missed (set_reaction_event_id is best-effort).
             let removed = state

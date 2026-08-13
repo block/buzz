@@ -138,6 +138,10 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// bridge uses page 1), but clamp here too so a future caller cannot accidentally
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
+/// Owner-private Buzz Task kinds are excluded at the query boundary even on a
+/// brownfield database whose generated `search_tsv` expression still indexes
+/// every kind. This is intentionally independent of caller-supplied filters.
+const GLOBAL_SEARCH_EXCLUDED_KINDS: [i32; 3] = [44_300, 44_301, 44_302];
 
 fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
     match mode {
@@ -251,6 +255,9 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push(" AS query) AS search_query WHERE community_id = ");
     qb.push_bind(*query.community.as_uuid());
     qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
+    qb.push(" AND kind <> ALL(");
+    qb.push_bind(GLOBAL_SEARCH_EXCLUDED_KINDS.to_vec());
+    qb.push(")");
 
     // Channel scope — see `ChannelScope` doc for the four-case mapping. The
     // emitted SQL fragments are identical to the legacy 2x2 tuple for the

@@ -1,9 +1,19 @@
--- Buzz Tasks PR 1: owner-private event projection and search exclusion.
+-- Buzz Tasks PR 1: owner-private event projection.
 --
 -- Rollback strategy (operator-run only): stop task event publishers/readers,
--- DROP TABLE buzz_tasks, then restore the prior search_tsv expression using
--- the same generated-column replacement pattern below. Signed task events
--- remain in `events`, so the projection can be rebuilt after a forward fix.
+-- then DROP TABLE buzz_tasks. Signed task events remain in `events`, so the
+-- projection can be rebuilt after a forward fix.
+--
+-- This migration deliberately does not replace events.search_tsv or rebuild
+-- idx_events_search_tsv. Global search excludes kinds 44300-44302 in the
+-- query layer on every database. Fresh databases also inherit the positive
+-- storage allowlist from migration 0008. Any brownfield storage rewrite is a
+-- separate, sized maintenance operation, never a relay-startup migration.
+
+-- Foreign-key creation takes SHARE ROW EXCLUSIVE on the referenced parent
+-- tables. Fail fast instead of extending a write pause behind a long-lived
+-- production transaction; SQLx rolls the entire migration back on timeout.
+SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE buzz_tasks (
     community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
@@ -63,31 +73,3 @@ BEGIN
     END IF;
 END
 $$;
-
--- Kinds 44300-44302 contain plaintext owner-private titles and context. Preserve
--- the current search policy for every other kind on both fresh and brownfield
--- databases, while making task content mathematically unsearchable (`NULL @@`).
-DO $$
-DECLARE
-    existing_expression TEXT;
-BEGIN
-    SELECT pg_get_expr(d.adbin, d.adrelid)
-      INTO existing_expression
-      FROM pg_attrdef d
-      JOIN pg_attribute a
-        ON a.attrelid = d.adrelid
-       AND a.attnum = d.adnum
-     WHERE d.adrelid = 'events'::regclass
-       AND a.attname = 'search_tsv';
-
-    IF existing_expression IS NULL THEN
-        RAISE EXCEPTION 'events.search_tsv generated expression not found';
-    END IF;
-
-    ALTER TABLE events DROP COLUMN search_tsv;
-    EXECUTE format(
-        'ALTER TABLE events ADD COLUMN search_tsv TSVECTOR GENERATED ALWAYS AS (CASE WHEN kind IN (44300, 44301, 44302) THEN NULL::tsvector ELSE (%s) END) STORED',
-        existing_expression
-    );
-    CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
-END $$;

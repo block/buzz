@@ -2,13 +2,14 @@
 //!
 //! A task event and its projection transition commit in one transaction. The
 //! signed event stream remains the source of truth, while this table provides a
-//! small owner-scoped read model for list and detail APIs.
+//! small internal read model for validation and efficient replay. Public reads
+//! stay on the relay's existing Nostr/bridge query surface.
 
 use buzz_core::task::{TaskEventPayloadV1, TaskEventV1, TaskPriority, TaskResolution, TaskType};
 use buzz_core::{CommunityId, StoredEvent};
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::error::{DbError, Result};
@@ -43,91 +44,6 @@ impl TaskStatus {
             ))),
         }
     }
-}
-
-/// Due-date slice applied by the task list query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskDueBucket {
-    /// No due-date filter.
-    All,
-    /// Overdue tasks and tasks due before the supplied local-day end.
-    Today {
-        /// Exclusive UTC boundary for the caller's next local midnight.
-        end: DateTime<Utc>,
-    },
-    /// Tasks due on/after the supplied local-day end, plus tasks without a due date.
-    Later {
-        /// Inclusive UTC boundary for the caller's next local midnight.
-        start: DateTime<Utc>,
-    },
-}
-
-/// Stable inputs for an owner-scoped task page.
-#[derive(Debug, Clone, Copy)]
-pub struct TaskListQuery {
-    /// Optional status filter. The public API defaults to `open`.
-    pub status: Option<TaskStatus>,
-    /// Due-date bucket.
-    pub bucket: TaskDueBucket,
-    /// Maximum rows, clamped to 101 by the database boundary so an API can
-    /// request one look-ahead row for a 100-item page.
-    pub limit: i64,
-    /// Opaque-cursor offset.
-    pub offset: i64,
-    /// Snapshot time used by overdue sorting across every page in one cursor chain.
-    pub as_of: DateTime<Utc>,
-}
-
-impl TaskListQuery {
-    /// Construct the default open/all query.
-    pub fn open(limit: i64, offset: i64, as_of: DateTime<Utc>) -> Self {
-        Self {
-            status: Some(TaskStatus::Open),
-            bucket: TaskDueBucket::All,
-            limit,
-            offset,
-            as_of,
-        }
-    }
-}
-
-/// One row from the owner-private task projection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskRecord {
-    /// Server-resolved community identity.
-    pub community_id: CommunityId,
-    /// Stable task UUID.
-    pub id: Uuid,
-    /// Owner pubkey that must act.
-    pub assignee_pubkey: Vec<u8>,
-    /// Source channel UUID.
-    pub channel_id: Uuid,
-    /// Exact source Nostr event ID bytes.
-    pub source_event_id: Vec<u8>,
-    /// Agent pubkey that authored the task.
-    pub agent_pubkey: Vec<u8>,
-    /// Display name snapshot.
-    pub agent_name: String,
-    /// Owner action type.
-    pub task_type: String,
-    /// Short title.
-    pub title: String,
-    /// Optional short context.
-    pub context: Option<String>,
-    /// Priority string.
-    pub priority: String,
-    /// Optional due time.
-    pub due_at: Option<DateTime<Utc>>,
-    /// Current task status.
-    pub status: TaskStatus,
-    /// Source message creation time.
-    pub source_created_at: DateTime<Utc>,
-    /// Monotonic source version.
-    pub source_version: i64,
-    /// Source-side update time.
-    pub source_updated_at: DateTime<Utc>,
-    /// Terminal time for resolved/withdrawn tasks.
-    pub resolved_at: Option<DateTime<Utc>>,
 }
 
 /// Result of an atomic task-event/projection write.
@@ -271,6 +187,24 @@ pub async fn insert_task_event_with_projection(
         tx.rollback().await?;
         return Ok(TaskProjectionOutcome::DuplicateEvent);
     }
+
+    // Task reads use the relay's ordinary `#p` filter, whose SQL path joins
+    // `event_mentions`. Keep that index row in the same transaction as the
+    // signed event and projection so an accepted task is immediately readable
+    // through both WS delivery and the authenticated bridge.
+    sqlx::query(
+        "INSERT INTO event_mentions \
+         (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
+    )
+    .bind(community_id.as_uuid())
+    .bind(task.owner_pubkey.to_hex())
+    .bind(event.id.as_bytes().as_slice())
+    .bind(event_created_at(event)?)
+    .bind(task.channel_id)
+    .bind(event.kind.as_u16() as i32)
+    .execute(&mut *tx)
+    .await?;
 
     let outcome = apply_projection(
         &mut tx,
@@ -416,6 +350,8 @@ struct ProjectionIdentity {
     status: TaskStatus,
     source_version: i64,
     source_updated_at: DateTime<Utc>,
+    source_created_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
 }
 
 async fn select_projection_identity(
@@ -425,7 +361,7 @@ async fn select_projection_identity(
 ) -> Result<Option<ProjectionIdentity>> {
     let row = sqlx::query(
         "SELECT assignee_pubkey, channel_id, source_event_id, agent_pubkey, status, \
-                source_version, source_updated_at \
+                source_version, source_updated_at, source_created_at, created_at \
          FROM buzz_tasks WHERE community_id=$1 AND id=$2 FOR UPDATE",
     )
     .bind(community_id.as_uuid())
@@ -441,6 +377,8 @@ async fn select_projection_identity(
             status: TaskStatus::parse(row.try_get("status")?)?,
             source_version: row.try_get("source_version")?,
             source_updated_at: row.try_get("source_updated_at")?,
+            source_created_at: row.try_get("source_created_at")?,
+            created_at: row.try_get("created_at")?,
         })
     })
     .transpose()
@@ -508,127 +446,232 @@ fn event_created_at(event: &Event) -> Result<DateTime<Utc>> {
     DateTime::from_timestamp(seconds, 0).ok_or(DbError::InvalidTimestamp(seconds))
 }
 
-/// Fetch one task for its owner inside one server-resolved community.
+#[derive(Debug)]
+struct FoldedTaskProjection {
+    agent_name: String,
+    task_type: TaskType,
+    title: String,
+    context: Option<String>,
+    priority: TaskPriority,
+    due_at: Option<DateTime<Utc>>,
+    status: TaskStatus,
+    source_version: i64,
+    source_updated_at: DateTime<Utc>,
+    resolved_at: Option<DateTime<Utc>>,
+    task_event_id: Vec<u8>,
+    task_event_created_at: DateTime<Utc>,
+}
+
+/// Soft-delete one signed task event and rebuild its projection from the
+/// remaining live event stream in the same transaction.
 ///
-/// The HTTP boundary must additionally re-check current access to the returned
-/// channel before serializing this row or its navigation URL.
-pub async fn get_task_for_owner(
+/// The projection is derived state: deleting the current update reverts to the
+/// preceding live version, deleting a terminal event reopens the last live
+/// open version, and deleting the only request removes the projection. This
+/// function holds the task projection row lock across both the event tombstone
+/// and rebuild, so concurrent task transitions cannot observe an intermediate
+/// state.
+pub async fn soft_delete_task_event_and_rebuild_projection(
     pool: &PgPool,
     community_id: CommunityId,
-    owner_pubkey: &[u8],
-    task_id: Uuid,
-) -> Result<Option<TaskRecord>> {
+    event_id: &[u8],
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
     let row = sqlx::query(
-        "SELECT t.community_id, t.id, t.assignee_pubkey, t.channel_id, t.source_event_id, \
-                t.agent_pubkey, t.agent_name, t.task_type, t.title, t.context, t.priority, \
-                t.due_at, t.status, t.source_created_at, t.source_version, \
-                t.source_updated_at, t.resolved_at \
-         FROM buzz_tasks t WHERE t.community_id=$1 AND t.assignee_pubkey=$2 AND t.id=$3 \
-           AND EXISTS (SELECT 1 FROM channel_members cm \
-                       WHERE cm.community_id=t.community_id AND cm.channel_id=t.channel_id \
-                         AND cm.pubkey=t.assignee_pubkey AND cm.removed_at IS NULL) \
-           AND EXISTS (SELECT 1 FROM events e \
-                       WHERE e.community_id=t.community_id AND e.id=t.source_event_id \
-                         AND e.channel_id=t.channel_id AND e.pubkey=t.agent_pubkey \
-                         AND e.deleted_at IS NULL)",
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events WHERE community_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(community_id.as_uuid())
-    .bind(owner_pubkey)
-    .bind(task_id)
-    .fetch_optional(pool)
+    .bind(event_id)
+    .fetch_optional(&mut *tx)
     .await?;
-    row.map(row_to_task).transpose()
-}
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let stored = crate::event::row_to_stored_event(row)?.ok_or_else(|| {
+        DbError::InvalidData("could not reconstruct stored Buzz Task event".into())
+    })?;
+    let deleted_task = TaskEventV1::parse(&stored.event)
+        .map_err(|error| DbError::InvalidData(format!("stored task event contract: {error}")))?;
 
-/// List tasks visible to one owner in their currently accessible channels.
-pub async fn list_tasks_for_owner(
-    pool: &PgPool,
-    community_id: CommunityId,
-    owner_pubkey: &[u8],
-    accessible_channel_ids: &[Uuid],
-    query: &TaskListQuery,
-) -> Result<Vec<TaskRecord>> {
-    if accessible_channel_ids.is_empty() {
-        return Ok(Vec::new());
+    let existing = select_projection_identity(&mut tx, community_id, deleted_task.task_id).await?;
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at=now() \
+         WHERE community_id=$1 AND id=$2 AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
     }
 
-    let mut builder = QueryBuilder::<Postgres>::new(
-        "SELECT t.community_id, t.id, t.assignee_pubkey, t.channel_id, t.source_event_id, \
-                t.agent_pubkey, t.agent_name, t.task_type, t.title, t.context, t.priority, \
-                t.due_at, t.status, t.source_created_at, t.source_version, \
-                t.source_updated_at, t.resolved_at \
-         FROM buzz_tasks t WHERE t.community_id=",
-    );
-    builder
-        .push_bind(community_id.as_uuid())
-        .push(" AND t.assignee_pubkey=")
-        .push_bind(owner_pubkey)
-        .push(" AND t.channel_id = ANY(")
-        .push_bind(accessible_channel_ids)
-        .push(
-            ") AND EXISTS (SELECT 1 FROM channel_members cm \
-               WHERE cm.community_id=t.community_id AND cm.channel_id=t.channel_id \
-                 AND cm.pubkey=t.assignee_pubkey AND cm.removed_at IS NULL) \
-               AND EXISTS (SELECT 1 FROM events e \
-               WHERE e.community_id=t.community_id AND e.id=t.source_event_id \
-                 AND e.channel_id=t.channel_id AND e.pubkey=t.agent_pubkey \
-                 AND e.deleted_at IS NULL)",
-        );
-    if let Some(status) = query.status {
-        builder.push(" AND t.status=").push_bind(status.as_str());
-    }
-    match query.bucket {
-        TaskDueBucket::All => {}
-        TaskDueBucket::Today { end } => {
-            builder.push(" AND t.due_at < ").push_bind(end);
-        }
-        TaskDueBucket::Later { start } => {
-            builder
-                .push(" AND (t.due_at IS NULL OR t.due_at >= ")
-                .push_bind(start)
-                .push(")");
-        }
-    }
-    builder
-        .push(" ORDER BY (t.due_at IS NOT NULL AND t.due_at < ")
-        .push_bind(query.as_of)
-        .push(
-            ") DESC, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC, \
-               t.due_at ASC NULLS LAST, t.source_created_at DESC, t.id ASC LIMIT ",
+    if let Some(existing) = existing {
+        let rows = sqlx::query(
+            "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+             FROM events \
+             WHERE community_id=$1 AND tags @> $2 \
+               AND kind IN ($3,$4,$5) AND deleted_at IS NULL \
+             ORDER BY received_at ASC, id ASC",
         )
-        .push_bind(query.limit.clamp(1, 101))
-        .push(" OFFSET ")
-        .push_bind(query.offset.max(0));
+        .bind(community_id.as_uuid())
+        .bind(serde_json::json!([["d", deleted_task.task_id.to_string()]]))
+        .bind(buzz_core::kind::KIND_TASK_REQUESTED as i32)
+        .bind(buzz_core::kind::KIND_TASK_UPDATED as i32)
+        .bind(buzz_core::kind::KIND_TASK_RESOLVED as i32)
+        .fetch_all(&mut *tx)
+        .await?;
 
-    builder
-        .build()
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(row_to_task)
-        .collect()
+        let mut live = Vec::with_capacity(rows.len());
+        for row in rows {
+            let stored = crate::event::row_to_stored_event(row)?.ok_or_else(|| {
+                DbError::InvalidData("could not reconstruct live Buzz Task event".into())
+            })?;
+            let parsed = TaskEventV1::parse(&stored.event).map_err(|error| {
+                DbError::InvalidData(format!("live task event contract: {error}"))
+            })?;
+            validate_identity(&existing, &parsed)?;
+            live.push((parsed, stored));
+        }
+        live.sort_by(|(left_task, left_event), (right_task, right_event)| {
+            left_task
+                .payload
+                .source_version()
+                .cmp(&right_task.payload.source_version())
+                .then_with(|| left_event.received_at.cmp(&right_event.received_at))
+                .then_with(|| left_event.event.id.cmp(&right_event.event.id))
+        });
+
+        let folded = fold_live_projection(live)?;
+        sqlx::query("DELETE FROM buzz_tasks WHERE community_id=$1 AND id=$2")
+            .bind(community_id.as_uuid())
+            .bind(deleted_task.task_id)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(folded) = folded {
+            sqlx::query(
+                "INSERT INTO buzz_tasks (\
+                    community_id, id, assignee_pubkey, channel_id, source_event_id, \
+                    agent_pubkey, agent_name, task_type, title, context, priority, due_at, \
+                    status, source_created_at, source_version, source_updated_at, resolved_at, \
+                    task_event_id, task_event_created_at, created_at, updated_at\
+                 ) VALUES (\
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,now()\
+                 )",
+            )
+            .bind(community_id.as_uuid())
+            .bind(deleted_task.task_id)
+            .bind(&existing.owner)
+            .bind(existing.channel_id)
+            .bind(&existing.source_event_id)
+            .bind(&existing.agent)
+            .bind(&folded.agent_name)
+            .bind(task_type_str(folded.task_type))
+            .bind(&folded.title)
+            .bind(&folded.context)
+            .bind(priority_str(folded.priority))
+            .bind(folded.due_at)
+            .bind(folded.status.as_str())
+            .bind(existing.source_created_at)
+            .bind(folded.source_version)
+            .bind(folded.source_updated_at)
+            .bind(folded.resolved_at)
+            .bind(&folded.task_event_id)
+            .bind(folded.task_event_created_at)
+            .bind(existing.created_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(true)
 }
 
-fn row_to_task(row: sqlx::postgres::PgRow) -> Result<TaskRecord> {
-    let community_id: Uuid = row.try_get("community_id")?;
-    let status: &str = row.try_get("status")?;
-    Ok(TaskRecord {
-        community_id: CommunityId::from_uuid(community_id),
-        id: row.try_get("id")?,
-        assignee_pubkey: row.try_get("assignee_pubkey")?,
-        channel_id: row.try_get("channel_id")?,
-        source_event_id: row.try_get("source_event_id")?,
-        agent_pubkey: row.try_get("agent_pubkey")?,
-        agent_name: row.try_get("agent_name")?,
-        task_type: row.try_get("task_type")?,
-        title: row.try_get("title")?,
-        context: row.try_get("context")?,
-        priority: row.try_get("priority")?,
-        due_at: row.try_get("due_at")?,
-        status: TaskStatus::parse(status)?,
-        source_created_at: row.try_get("source_created_at")?,
-        source_version: row.try_get("source_version")?,
-        source_updated_at: row.try_get("source_updated_at")?,
-        resolved_at: row.try_get("resolved_at")?,
-    })
+fn fold_live_projection(
+    live: Vec<(TaskEventV1, StoredEvent)>,
+) -> Result<Option<FoldedTaskProjection>> {
+    let mut folded: Option<FoldedTaskProjection> = None;
+    for (task, stored) in live {
+        let task_event_id = stored.event.id.as_bytes().to_vec();
+        let task_event_created_at = event_created_at(&stored.event)?;
+        match task.payload {
+            TaskEventPayloadV1::Requested(payload) if folded.is_none() => {
+                folded = Some(FoldedTaskProjection {
+                    agent_name: payload.agent_name,
+                    task_type: payload.task_type,
+                    title: payload.title,
+                    context: payload.context,
+                    priority: payload.priority,
+                    due_at: payload.due_at,
+                    status: TaskStatus::Open,
+                    source_version: payload.source_version,
+                    source_updated_at: payload.source_updated_at,
+                    resolved_at: None,
+                    task_event_id,
+                    task_event_created_at,
+                });
+            }
+            TaskEventPayloadV1::Requested(_) => {}
+            TaskEventPayloadV1::Updated(payload) => {
+                let Some(current) = folded.as_mut() else {
+                    continue;
+                };
+                if payload.source_version <= current.source_version {
+                    continue;
+                }
+                if current.status != TaskStatus::Open {
+                    return Err(DbError::InvalidData(
+                        "live Buzz Task stream transitions after terminal state".into(),
+                    ));
+                }
+                if payload.source_updated_at < current.source_updated_at {
+                    return Err(DbError::InvalidData(
+                        "live Buzz Task stream moves sourceUpdatedAt backward".into(),
+                    ));
+                }
+                current.agent_name = payload.agent_name;
+                current.task_type = payload.task_type;
+                current.title = payload.title;
+                current.context = payload.context;
+                current.priority = payload.priority;
+                current.due_at = payload.due_at;
+                current.source_version = payload.source_version;
+                current.source_updated_at = payload.source_updated_at;
+                current.task_event_id = task_event_id;
+                current.task_event_created_at = task_event_created_at;
+            }
+            TaskEventPayloadV1::Resolved(payload) => {
+                let Some(current) = folded.as_mut() else {
+                    continue;
+                };
+                if payload.source_version <= current.source_version {
+                    continue;
+                }
+                if current.status != TaskStatus::Open {
+                    return Err(DbError::InvalidData(
+                        "live Buzz Task stream transitions after terminal state".into(),
+                    ));
+                }
+                if payload.source_updated_at < current.source_updated_at {
+                    return Err(DbError::InvalidData(
+                        "live Buzz Task stream moves sourceUpdatedAt backward".into(),
+                    ));
+                }
+                current.status = match payload.resolution {
+                    TaskResolution::Resolved => TaskStatus::Resolved,
+                    TaskResolution::Withdrawn => TaskStatus::Withdrawn,
+                };
+                current.source_version = payload.source_version;
+                current.source_updated_at = payload.source_updated_at;
+                current.resolved_at = Some(payload.source_updated_at);
+                current.task_event_id = task_event_id;
+                current.task_event_created_at = task_event_created_at;
+            }
+        }
+    }
+    Ok(folded)
 }

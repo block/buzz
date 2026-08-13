@@ -397,8 +397,8 @@ impl TaskTarget {
 
     /// Build the existing Buzz native navigation URL.
     ///
-    /// This is navigation metadata only. Callers must complete NIP-98 and
-    /// channel-access authorization before returning it.
+    /// This is navigation metadata only. Callers must obtain the target through
+    /// an authenticated, owner- and channel-authorized Nostr read before using it.
     pub fn navigation_url(&self) -> String {
         format!(
             "buzz://message?channel={}&id={}",

@@ -15,8 +15,9 @@ Those actions remain in the referenced Buzz message thread.
 | 44302 | `buzz.task.resolved.v1` | Mark a task `resolved` or `withdrawn` |
 
 All three kinds are regular persistent, channel-scoped events. They require
-`messages:write` and are both `p`-gated and result-gated. Their plaintext
-content is excluded from the global full-text-search vector.
+`messages:write` and are both `p`-gated and result-gated. The global search
+query unconditionally excludes their plaintext content; fresh databases also
+exclude it from the generated full-text-search vector.
 
 ## Signed identity envelope
 
@@ -98,27 +99,49 @@ version may update only an open task and must not move `sourceUpdatedAt`
 backward. `resolved` and `withdrawn` are terminal; later transitions are
 rejected and their event insert is rolled back.
 
-## Read API
+A kind 5 or kind 9005 deletion of a task event tombstones that event and
+rebuilds the projection from the remaining live signed stream in one
+transaction. Deleting a terminal event reopens the last live version, deleting
+an update restores the preceding version, and deleting the sole request removes
+the projection. A missing/already-deleted target is idempotent.
 
-PR 1 exposes only:
+## Nostr read surface
+
+PR 1 adds no task-specific HTTP endpoint. Clients read signed task events using
+the relay's existing Nostr query contract. The authenticated bridge form is:
 
 ```http
-GET /api/buzz-tasks?status=open&bucket=all|today|later&cursor=...
-GET /api/buzz-tasks/{taskId}
+POST /query
+Authorization: Nostr <NIP-98 event>
+Content-Type: application/json
+
+[
+  {
+    "kinds": [44300, 44301, 44302],
+    "#p": ["<authenticated owner pubkey>"],
+    "limit": 50
+  }
+]
 ```
 
-`status` supports `open`, `resolved`, `withdrawn`, and `all`; it defaults to
-`open`. `today` and `later` require `tz_offset_minutes`. Results sort by
-overdue, priority, due time, newest source event, and stable task ID.
+Clients fold each task's events by `sourceVersion` using the replay rules above.
+To continue a bridge page, echo the last event's complete deterministic cursor:
+`until = created_at` and `before_id = event id`. Results are ordered by
+`(created_at DESC, id ASC)` and the keyset predicate is
+`created_at < until OR (created_at = until AND id > before_id)`. Both cursor
+fields are required together. Events created, updated, or resolved above that
+cursor belong to the live/head side and cannot duplicate or displace the
+remaining historical page.
 
-Each GET requires a NIP-98 signature for the exact host, path, and raw query,
-then the shared replay fence, HTTP admission limit, relay membership,
-`messages:read`, exact `p`-owner match, and current channel access. Detail
-misses and unauthorized identities both return not found. Responses are
-`private, no-store`.
+The bridge verifies NIP-98 against the exact host, `/query` path, HTTP method,
+and body, then applies the shared replay fence, admission limit, relay
+membership, exact `#p = authenticated owner`, current channel access, and a
+per-result owner gate. The WebSocket REQ form uses the same standard Nostr
+filter and NIP-42 identity, but the bridge is the pagination contract because
+standard NIP-01 filters do not carry `before_id`.
 
-There are intentionally no reply, approve, reject, comment, resolve, or
-preferences mutation endpoints in PR 1.
+There are intentionally no task-specific list/detail, reply, approve, reject,
+comment, resolve, preferences, or UI endpoints in PR 1.
 
 ## Native navigation target
 
@@ -128,8 +151,8 @@ The projection stores only the canonical target identity:
 community_id + channel_id + source Nostr event ID
 ```
 
-After read authorization, the API boundary validates those typed values and
-constructs:
+After read authorization, the client validates the signed `h` and source `e`
+tags and constructs:
 
 ```text
 buzz://message?channel=<channel UUID>&id=<source event ID hex>
