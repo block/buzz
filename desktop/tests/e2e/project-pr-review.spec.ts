@@ -937,7 +937,9 @@ test("project issues preserve partial results from aggregate queries", async ({
   await expect(
     page.getByText("Some issue details could not be loaded."),
   ).toBeVisible();
-  await expect(page.getByText(/Missing comments\./)).toBeVisible();
+  // Rejecting kind 1 fails both the comment window and the exhaustive
+  // assignment-operation query, so both sections are reported missing.
+  await expect(page.getByText(/Missing assignments, comments\./)).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
 
   await page.evaluate(() => {

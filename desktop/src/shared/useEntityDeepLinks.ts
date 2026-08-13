@@ -23,7 +23,10 @@ export function useEntityDeepLinks(enabled = true) {
     const unlistenPromise = listenForEntityDeepLinks((href) => {
       if (cancelled) return false;
       const parsed = parseEntityLink(href);
-      if (!parsed.ok) return false;
+      // Ack-and-drop unparseable links: leaving one queued would wedge every
+      // later link behind the bad head forever. Unmount (`cancelled`) keeps
+      // links queued for the next listener instead.
+      if (!parsed.ok) return true;
       openEntityLink(parsed.value);
       return true;
     });

@@ -173,6 +173,15 @@ fn validate_project_owner_announcement(
     if !has_valid_d_tag {
         return Err("Project and repository announcements require a non-empty d tag.".to_string());
     }
+    if let Some(created_at) = input.created_at {
+        // Mirror the ACP publish path (`build_project_owner_announcement_events`):
+        // these are addressable events where the latest created_at wins, so a
+        // far-future timestamp would wedge the head until that time. Reject
+        // anything more than 5 minutes ahead.
+        if created_at > Timestamp::now().as_secs().saturating_add(300) {
+            return Err("Announcement timestamp is too far in the future.".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -727,6 +736,29 @@ mod tests {
         assert_eq!(
             validate_project_owner_announcement(&input),
             Err("Project and repository announcements require a non-empty d tag.".to_string())
+        );
+    }
+
+    #[test]
+    fn project_owner_announcement_rejects_far_future_timestamps() {
+        // Mirrors the ACP path's +300s cap: an addressable head stamped far in
+        // the future could not be superseded until that time.
+        let base = ProjectOwnerAnnouncementInput {
+            target_owner: "a".repeat(64),
+            kind: 30_621,
+            content: String::new(),
+            created_at: Some(Timestamp::now().as_secs() + 200),
+            tags: vec![vec!["d".to_string(), "project".to_string()]],
+        };
+        assert!(validate_project_owner_announcement(&base).is_ok());
+
+        let far_future = ProjectOwnerAnnouncementInput {
+            created_at: Some(Timestamp::now().as_secs() + 301),
+            ..base
+        };
+        assert_eq!(
+            validate_project_owner_announcement(&far_future),
+            Err("Announcement timestamp is too far in the future.".to_string())
         );
     }
 
