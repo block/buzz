@@ -14,7 +14,7 @@ use crate::{
     util::now_iso,
 };
 
-use super::claude_config::apply_claude_model_env;
+use super::claude_config::{apply_claude_model_env, apply_effort_env};
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
@@ -807,6 +807,14 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+
+    // B5: carry persisted effort; harness resolves thought_level configId at first session.
+    // Written AFTER descriptor.env so the canonical persisted value wins over any
+    // user-supplied BUZZ_ACP_EFFORT_LEVEL entry, mirroring the A1 model-authority pattern
+    // (ANTHROPIC_MODEL is applied post-loop for the same reason). When effort_level is
+    // None there is no canonical value to assert, so env passthrough stands — user env
+    // legitimately seeds startup effort in that case.
+    apply_effort_env(&mut command, record.effort_level.as_deref());
 
     // A1: for local claude agents, ANTHROPIC_MODEL is the single startup model authority.
     // BUZZ_ACP_MODEL is removed (live ACP switches only; two authorities in the same env

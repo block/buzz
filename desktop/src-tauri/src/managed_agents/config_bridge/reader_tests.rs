@@ -116,6 +116,7 @@ fn test_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
         agent_command_override: None,
         persona_source_version: None,
         provider: None,
@@ -897,6 +898,9 @@ fn no_effort_anywhere_yields_no_thinking_effort_field() {
 
 /// AC-5 (conflicting-ACP): inherited effort set (global=high) + live ACP effort=low
 /// → ACP wins as primary (AcpConfigOption), global is the overridden secondary.
+///
+/// The ACP entry uses the real adapter shape: category `thought_level` with an
+/// adapter-defined config id (`effort`), NOT category `effort`.
 #[test]
 fn acp_effort_wins_over_inherited_global_effort_as_secondary() {
     let record = test_record();
@@ -904,7 +908,7 @@ fn acp_effort_wins_over_inherited_global_effort_as_secondary() {
     let cache = SessionConfigCache {
         config_options: vec![AcpConfigOptionEntry {
             config_id: "effort".to_string(),
-            category: Some("effort".to_string()),
+            category: Some("thought_level".to_string()),
             display_name: Some("Effort".to_string()),
             current_value: Some("low".to_string()),
             options: vec![],

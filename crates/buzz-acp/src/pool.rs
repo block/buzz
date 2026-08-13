@@ -30,9 +30,9 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, model_in_catalog,
-    resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
-    StopReason, SystemPromptTransport,
+    extract_model_config_options, extract_model_state, extract_thought_level_config_id,
+    model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
+    ModelSwitchMethod, StopReason, SystemPromptTransport,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -88,6 +88,12 @@ pub struct AgentModelCapabilities {
     pub config_options_raw: Vec<serde_json::Value>,
     /// Unstable: SessionModelState from session/new.
     pub available_models_raw: Option<serde_json::Value>,
+    /// B5: configId for the `thought_level` category option, if the adapter
+    /// advertised one in session/new. Resolved at session time so the
+    /// spawn-scoped effort application forwards the adapter's real configId
+    /// instead of hardcoding it. `None` when the adapter advertises no
+    /// `thought_level` option.
+    pub thought_level_config_id: Option<String>,
 }
 
 /// Successful deliveries associated with one live channel session.
@@ -203,6 +209,14 @@ pub struct OwnedAgent {
     /// desktop reader to distinguish a genuine runtime override from a stale
     /// session whose persona model was edited. Reset on spawn/restart.
     pub model_overridden: bool,
+    /// Persisted startup effort value from `BUZZ_ACP_EFFORT_LEVEL` (carried from
+    /// the Desktop record via `Config.effort_level`). Held per-worker and applied
+    /// once, at the first session creation, by pairing with the adapter's
+    /// advertised `thought_level` configId. This is spawn-scoped only — there is
+    /// no pool-level effort state and no live mid-conversation effort switching.
+    /// Non-fatal when absent or when the adapter does not advertise
+    /// `thought_level`.
+    pub startup_effort: Option<String>,
     /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
     pub agent_name: String,
     /// Whether Goose accepted its custom system-prompt method. `None` probes on
@@ -1044,6 +1058,7 @@ async fn create_session_and_apply_model(
         agent.model_capabilities = Some(AgentModelCapabilities {
             config_options_raw: extract_model_config_options(&resp.raw),
             available_models_raw: extract_model_state(&resp.raw),
+            thought_level_config_id: extract_thought_level_config_id(&resp.raw),
         });
     }
 
@@ -1080,15 +1095,40 @@ async fn create_session_and_apply_model(
         false
     };
 
+    // Apply the worker's spawn-scoped startup effort, if configured and the
+    // current model advertises a `thought_level` option. Runs on every session
+    // creation (config options are per-session), mirroring the model-switch
+    // application above. The held value comes from `BUZZ_ACP_EFFORT_LEVEL` and
+    // never mutates — there is no pool-level effort state and no live switching.
+    // Computed BEFORE the capture emission so the cached configOptions tell the
+    // truth about the running session's effort.
+    let effort_outcome = apply_startup_effort(agent, &resp.raw, &resp.session_id).await?;
+
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
     // post-switch state. modelOverridden reflects whether the switch actually
     // applied — false on the unsupported arm so the panel doesn't show a
     // stale override badge.
+    //
+    // Truthful capture: after a successful effort application the session/new
+    // snapshot still carries the pre-set `currentValue`, so patch the applied
+    // option to the value the session is actually running. A rejected effort or
+    // a model with no `thought_level` option leaves the snapshot untouched.
+    let config_options_for_cache = {
+        let mut opts = resp
+            .raw
+            .get("configOptions")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if let Some(StartupEffortOutcome::Applied { config_id, value }) = &effort_outcome {
+            patch_config_option_current_value(&mut opts, config_id, value);
+        }
+        opts
+    };
     agent.acp.observe(
         "session_config_captured",
         serde_json::json!({
-            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "configOptions": config_options_for_cache,
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
             "modelOverridden": agent.model_overridden && switch_succeeded,
@@ -1212,6 +1252,120 @@ async fn apply_model_switch(
         }
     }
     Ok(())
+}
+
+/// Outcome of applying a worker's spawn-scoped startup effort at session creation.
+///
+/// Drives truthful capture: only `Applied` patches the cached `currentValue`.
+/// `Rejected` (adapter refused) and the `None` return (model advertises no
+/// `thought_level` option, or no effort was configured) leave the session/new
+/// snapshot untouched so the panel reflects the session's real state.
+enum StartupEffortOutcome {
+    Applied { config_id: String, value: String },
+    Rejected,
+}
+
+/// Apply the worker's held `startup_effort` via `session/set_config_option`, if
+/// set and the current model advertises a `thought_level` option.
+///
+/// Returns `Ok(None)` when there is nothing to apply (no configured effort, or
+/// the model has no `thought_level` option) or `Ok(Some(_))` describing whether
+/// the adapter accepted the value. Transport-class errors propagate as `Err` so
+/// the caller respawns the worker rather than reuse a poisoned stream — mirroring
+/// [`apply_model_switch`]'s classification. Application-level rejection is
+/// non-fatal: the session proceeds on the model's default effort.
+async fn apply_startup_effort(
+    agent: &mut OwnedAgent,
+    session_new_result: &serde_json::Value,
+    session_id: &str,
+) -> Result<Option<StartupEffortOutcome>, AcpError> {
+    let Some(value) = agent.startup_effort.clone() else {
+        return Ok(None);
+    };
+    let Some(config_id) = extract_thought_level_config_id(session_new_result) else {
+        tracing::info!(
+            target: "pool::effort",
+            "startup effort {value} configured but model advertises no thought_level option — leaving agent default"
+        );
+        return Ok(None);
+    };
+
+    let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
+        agent
+            .acp
+            .session_set_config_option(session_id, &config_id, &value)
+            .await
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            tracing::info!(
+                target: "pool::effort",
+                "applied startup effort {value} via configId={config_id} on session {session_id}"
+            );
+            Ok(Some(StartupEffortOutcome::Applied { config_id, value }))
+        }
+        // Transport-class errors may have corrupted the stdio stream — propagate
+        // so the caller can respawn the agent instead of reusing a poisoned one.
+        Ok(Err(e @ AcpError::Io(_)))
+        | Ok(Err(e @ AcpError::WriteTimeout(_)))
+        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Protocol(_)))
+        | Ok(Err(e @ AcpError::AgentExited)) => {
+            tracing::error!(
+                target: "pool::effort",
+                "fatal error applying startup effort {value} via configId={config_id}: {e}"
+            );
+            Err(e)
+        }
+        // Application-level rejection (e.g. Json) — agent is fine, uses default effort.
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "pool::effort",
+                "adapter rejected startup effort {value} via configId={config_id}: {e} — proceeding with agent default"
+            );
+            Ok(Some(StartupEffortOutcome::Rejected))
+        }
+        Err(_) => {
+            // Outer timeout fired — the inner send_request may have left the
+            // stream in an unknown state. Treat as transport error.
+            tracing::error!(
+                target: "pool::effort",
+                "startup effort {value} via configId={config_id} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
+            );
+            Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
+        }
+    }
+}
+
+/// Patch the `currentValue` of the configOption whose `configId`/`id` matches
+/// `config_id` in a session/new `configOptions` array, in place.
+///
+/// Used by truthful capture: a successful `session/set_config_option` is not
+/// reflected in the original session/new snapshot, so the accepted value is
+/// written back before the snapshot is cached. A no-op when `options` is not an
+/// array or no entry matches (the id came from the same array, so a match is
+/// expected in practice).
+fn patch_config_option_current_value(
+    options: &mut serde_json::Value,
+    config_id: &str,
+    value: &str,
+) {
+    let Some(arr) = options.as_array_mut() else {
+        return;
+    };
+    for opt in arr {
+        let matches = opt
+            .get("configId")
+            .or_else(|| opt.get("id"))
+            .and_then(|v| v.as_str())
+            == Some(config_id);
+        if matches {
+            opt["currentValue"] = serde_json::Value::String(value.to_string());
+            return;
+        }
+    }
 }
 
 /// Set the session permission mode via `session/set_config_option`.
@@ -5685,6 +5839,7 @@ done"#
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            startup_effort: None,
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
@@ -5779,6 +5934,7 @@ done"#
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            startup_effort: None,
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
@@ -5951,6 +6107,7 @@ done"#
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            startup_effort: None,
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
@@ -6101,6 +6258,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            startup_effort: None,
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
@@ -7088,6 +7246,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            startup_effort: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -7146,6 +7305,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            startup_effort: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -7581,7 +7741,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         );
     }
 
-    fn make_prompt_context_no_owner() -> PromptContext {
+    pub(super) fn make_prompt_context_no_owner() -> PromptContext {
         let agent_keys = nostr::Keys::generate();
         make_prompt_context_impl(&agent_keys, None)
     }
@@ -8171,5 +8331,208 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod startup_effort_tests {
+    use super::*;
+    use crate::acp::AcpClient;
+    use tests::make_prompt_context_no_owner;
+
+    /// Build a protocol-v2, non-goose agent whose only ACP requests will be
+    /// `session/new` (id 0) then the startup-effort `session/set_config_option`
+    /// (id 1). `startup_effort` is the held spawn-scoped value under test.
+    fn effort_agent(acp: AcpClient, startup_effort: Option<&str>) -> OwnedAgent {
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            startup_effort: startup_effort.map(str::to_string),
+            agent_name: "effort-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        }
+    }
+
+    /// Spawn a scripted ACP that answers `session/new` (request #1) with the
+    /// given configOptions, then replies to the effort `set_config_option`
+    /// (request #2) with `effort_reply` (a JSON-RPC `result`/`error` body, minus
+    /// the id which is filled in). Any later request gets `{"ok":true}`.
+    async fn spawn_effort_acp(session_new_config_options: &str, effort_reply: &str) -> AcpClient {
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  id=$((count - 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configOptions":{session_new_config_options}}}}}'
+  elif [ "$count" -eq 2 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',{effort_reply}}}'
+  else
+    printf '%s\n' '{{"jsonrpc":"2.0","id":'"$id"',"result":{{"ok":true}}}}'
+  fi
+done"#
+        );
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn effort ACP script")
+    }
+
+    fn captured_config_options(obs: &observer::ObserverHandle) -> serde_json::Value {
+        obs.snapshot()
+            .into_iter()
+            .find(|e| e.kind == "session_config_captured")
+            .expect("session_config_captured emitted")
+            .payload["configOptions"]
+            .clone()
+    }
+
+    fn effort_current_value(options: &serde_json::Value) -> Option<String> {
+        options
+            .as_array()?
+            .iter()
+            .find(|o| o["category"] == "thought_level")
+            .and_then(|o| o["currentValue"].as_str())
+            .map(str::to_string)
+    }
+
+    const OPTS_WITH_EFFORT_DEFAULT_LOW: &str = r#"[{"configId":"effort","category":"thought_level","currentValue":"low","options":[{"value":"low"},{"value":"high"}]}]"#;
+
+    #[tokio::test]
+    async fn test_applied_effort_patches_captured_current_value_to_high() {
+        let acp = spawn_effort_acp(OPTS_WITH_EFFORT_DEFAULT_LOW, r#""result":{"ok":true}"#).await;
+        let mut agent = effort_agent(acp, Some("high"));
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
+            .await
+            .expect("session creation must succeed");
+
+        let opts = captured_config_options(&obs);
+        assert_eq!(
+            effort_current_value(&opts).as_deref(),
+            Some("high"),
+            "applied effort must overwrite the pre-set currentValue in the capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rejected_effort_retains_captured_current_value() {
+        // Adapter answers the effort set with a JSON-RPC error → AgentError →
+        // application-level rejection: non-fatal, capture keeps the default.
+        let acp = spawn_effort_acp(
+            OPTS_WITH_EFFORT_DEFAULT_LOW,
+            r#""error":{"code":-32602,"message":"unsupported effort value"}"#,
+        )
+        .await;
+        let mut agent = effort_agent(acp, Some("high"));
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
+            .await
+            .expect("rejection is non-fatal; session creation still succeeds");
+
+        let opts = captured_config_options(&obs);
+        assert_eq!(
+            effort_current_value(&opts).as_deref(),
+            Some("low"),
+            "a rejected effort must not falsify the capture — keep the running value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_thought_level_model_leaves_capture_unpatched() {
+        // Model advertises only a `model` option — no thought_level. The held
+        // effort is silently ignored and no set_config_option is sent.
+        let opts_no_effort = r#"[{"configId":"model","category":"model","currentValue":"m-a","options":[{"value":"m-a"}]}]"#;
+        let acp = spawn_effort_acp(opts_no_effort, r#""result":{"ok":true}"#).await;
+        let mut agent = effort_agent(acp, Some("high"));
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
+            .await
+            .expect("session creation must succeed");
+
+        let opts = captured_config_options(&obs);
+        assert_eq!(
+            opts,
+            serde_json::from_str::<serde_json::Value>(opts_no_effort).unwrap(),
+            "no thought_level option → capture is the untouched session/new snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_startup_effort_leaves_capture_unpatched() {
+        // No held effort at all: the set_config_option is never sent and the
+        // default currentValue survives into the capture.
+        let acp = spawn_effort_acp(OPTS_WITH_EFFORT_DEFAULT_LOW, r#""result":{"ok":true}"#).await;
+        let mut agent = effort_agent(acp, None);
+        let obs = observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(obs.clone()), 0);
+
+        let ctx = make_prompt_context_no_owner();
+        create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
+            .await
+            .expect("session creation must succeed");
+
+        let opts = captured_config_options(&obs);
+        assert_eq!(
+            effort_current_value(&opts).as_deref(),
+            Some("low"),
+            "with no configured effort the capture reflects the model default"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transport_error_on_effort_propagates_for_respawn() {
+        // Adapter exits after answering session/new but before the effort set →
+        // AgentExited (transport class) → Err so the caller respawns the worker
+        // instead of reusing a possibly-poisoned stream.
+        let script = format!(
+            r#"IFS= read -r _new
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configOptions":{OPTS_WITH_EFFORT_DEFAULT_LOW}}}}}'
+IFS= read -r _effort
+exit 0"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn transport-exit ACP script");
+        let mut agent = effort_agent(acp, Some("high"));
+
+        let ctx = make_prompt_context_no_owner();
+        let err = create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
+            .await
+            .expect_err("transport-class effort failure must propagate as Err");
+        assert!(
+            matches!(err, AcpError::AgentExited | AcpError::Io(_)),
+            "process exit mid-effort is a transport error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_patch_config_option_current_value_matches_by_id_key() {
+        // The `id` key (claude-agent-acp) must also match, not just `configId`.
+        let mut opts = serde_json::json!([
+            { "id": "effort", "category": "thought_level", "currentValue": "low" }
+        ]);
+        patch_config_option_current_value(&mut opts, "effort", "high");
+        assert_eq!(opts[0]["currentValue"], "high");
+    }
+
+    #[test]
+    fn test_patch_config_option_current_value_noop_on_non_array() {
+        let mut opts = serde_json::Value::Null;
+        patch_config_option_current_value(&mut opts, "effort", "high");
+        assert!(opts.is_null(), "a null snapshot must stay null");
     }
 }

@@ -54,7 +54,14 @@ pub(crate) fn read_config_surface(
             .or_else(|| find_config_option_value(c, "model"))
     });
     let acp_mode = session_cache.and_then(|c| find_config_option_value(c, "mode"));
-    let acp_effort = session_cache.and_then(|c| find_config_option_value(c, "effort"));
+
+    // B5: the adapter-advertised effort control, selected ONCE by its category.
+    // The adapter defines it as category `thought_level` with its own config id
+    // (Claude Code emits `id="effort"`); reading by the literal category `effort`
+    // would miss it entirely. The running value, the write config id, and the
+    // picker options all derive from this single entry.
+    let effort_option = session_cache.and_then(find_effort_option);
+    let acp_effort = effort_option.and_then(|o| o.current_value.clone());
 
     let model_overridden = session_cache.is_some_and(|c| c.model_overridden);
 
@@ -84,9 +91,9 @@ pub(crate) fn read_config_surface(
             record,
             &file_config.thinking_effort,
             &acp_effort,
+            effort_option.map(|o| o.config_id.as_str()),
             thinking_env_var,
             is_pre_spawn,
-            session_cache,
             tiers,
         ),
         max_output_tokens: build_numeric_env_field(
@@ -185,6 +192,12 @@ pub(crate) fn read_config_surface(
         mcp_config_file_path,
     };
 
+    // B5: the adapter-advertised effort control, discovered once above. The UI
+    // uses `effort_config_id` to send `set_config_option` and renders
+    // `effort_options` instead of hardcoded values (never hardcoded here).
+    let effort_config_id = effort_option.map(|o| o.config_id.clone());
+    let effort_options = effort_option.map(|o| o.options.clone()).unwrap_or_default();
+
     RuntimeConfigSurface {
         runtime_id: runtime_meta.map(|m| m.id.to_string()),
         runtime_label: runtime_meta.map(|m| m.label.to_string()),
@@ -194,6 +207,8 @@ pub(crate) fn read_config_surface(
         extensions,
         sources,
         claude_config_dir_custom: claude_config_dir.is_some(),
+        effort_config_id,
+        effort_options,
     }
 }
 
@@ -525,12 +540,20 @@ fn build_thinking_field(
     record: &ManagedAgentRecord,
     file_effort: &Option<String>,
     acp_effort: &Option<String>,
+    effort_config_id: Option<&str>,
     thinking_env_var: Option<&str>,
     is_pre_spawn: bool,
-    session_cache: Option<&SessionConfigCache>,
     tiers: &InheritedConfigTiers,
 ) -> Option<NormalizedField> {
-    // Tier ordering: record env > ACP > persona env > global env > definition env > config file.
+    // Tier ordering:
+    //   record env > record.effort_level (canonical Buzz-persisted) > ACP >
+    //   persona env > global env > definition env > config file.
+    //
+    // `record.effort_level` is the B5 canonical value: the effort a spawn will
+    // actually apply at next session start (via `apply_effort_env`). Sitting it
+    // above ACP means the panel shows the *configured* value the agent will
+    // launch with rather than a stale live-session reading — the record can't
+    // be masked by, nor mask, the running value silently.
     let [rec_env, pers_env, glob_env, def_env] = thinking_env_var
         .map(|k| {
             env_candidates(
@@ -543,8 +566,11 @@ fn build_thinking_field(
         })
         .unwrap_or([None, None, None, None]);
 
+    let canonical_effort = record.effort_level.as_deref();
+
     let tiers_list: &[(Option<&str>, ConfigOrigin)] = &[
         (rec_env, ConfigOrigin::BuzzExplicit),
+        (canonical_effort, ConfigOrigin::BuzzExplicit),
         (acp_effort.as_deref(), ConfigOrigin::AcpConfigOption),
         (pers_env, ConfigOrigin::PersonaDefault),
         (glob_env, ConfigOrigin::GlobalDefault),
@@ -553,16 +579,14 @@ fn build_thinking_field(
     ];
     let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers_list)?;
 
-    let write_via = if !is_pre_spawn && has_config_option(session_cache, "effort") {
-        ConfigWriteMechanism::AcpSetConfigOption {
-            config_id: "effort".to_string(),
-        }
-    } else if let Some(env_key) = thinking_env_var {
-        ConfigWriteMechanism::RespawnWithEnvVar {
+    let write_via = match (is_pre_spawn, effort_config_id, thinking_env_var) {
+        (false, Some(config_id), _) => ConfigWriteMechanism::AcpSetConfigOption {
+            config_id: config_id.to_string(),
+        },
+        (_, _, Some(env_key)) => ConfigWriteMechanism::RespawnWithEnvVar {
             env_key: env_key.to_string(),
-        }
-    } else {
-        ConfigWriteMechanism::ReadOnly
+        },
+        _ => ConfigWriteMechanism::ReadOnly,
     };
 
     Some(NormalizedField {
@@ -714,6 +738,19 @@ fn find_config_option_value(cache: &SessionConfigCache, category: &str) -> Optio
         .iter()
         .find(|o| o.category.as_deref() == Some(category))
         .and_then(|o| o.current_value.clone())
+}
+
+/// Selects the adapter-advertised effort control from the session cache.
+///
+/// The adapter emits effort under category `thought_level` with its own
+/// config id (Claude Code uses `id="effort"`). Selecting by category — not by
+/// a hardcoded id — is what lets the running value, the write config id, and
+/// the picker options all derive from one entry.
+fn find_effort_option(cache: &SessionConfigCache) -> Option<&AcpConfigOptionEntry> {
+    cache
+        .config_options
+        .iter()
+        .find(|o| o.category.as_deref() == Some("thought_level"))
 }
 
 fn has_config_option(cache: Option<&SessionConfigCache>, category: &str) -> bool {

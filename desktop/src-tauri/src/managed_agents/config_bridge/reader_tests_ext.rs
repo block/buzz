@@ -257,6 +257,76 @@ fn reserved_key_absent_from_definition_env_falls_through() {
     assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
 }
 
+// ── B4/B5 canonical effort_level tier tests ────────────────────────────────
+//
+// record.effort_level is the Buzz-canonical seeded value (the effort a spawn
+// applies at next session start via `apply_effort_env`). It must surface as
+// BuzzExplicit and take precedence over the config-file tier, but not over a
+// record env var override.
+
+/// B4: record.effort_level surfaces as BuzzExplicit when no env var is set.
+#[test]
+fn b4_canonical_effort_level_surfaces_as_buzz_explicit() {
+    let mut record = test_record();
+    record.effort_level = Some("high".to_string());
+    let runtime = buzz_agent_runtime();
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("effort must surface from canonical record tier");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+    assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
+}
+
+/// B4: record.effort_level shadows the config-file tier.
+#[test]
+fn b4_canonical_effort_level_shadows_file_tier() {
+    let mut record = test_record();
+    record.effort_level = Some("medium".to_string());
+    // No env var set — the config-file tier would win if canonical were absent.
+    let runtime = buzz_agent_runtime();
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("canonical effort must shadow file tier");
+    assert_eq!(effort.value.as_deref(), Some("medium"));
+    assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
+}
+
+/// B4: a record env var override still wins over record.effort_level, which
+/// becomes the overridden baseline.
+#[test]
+fn b4_record_env_var_wins_over_canonical_effort_level() {
+    let mut record = test_record();
+    record.effort_level = Some("low".to_string());
+    record
+        .env_vars
+        .insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string());
+    let runtime = buzz_agent_runtime();
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("env var must win over canonical effort");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+    assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
+    assert_eq!(effort.overridden_value.as_deref(), Some("low"));
+}
+
+/// B4: None effort_level does not introduce a spurious tier.
+#[test]
+fn b4_none_canonical_effort_does_not_surface() {
+    let record = test_record(); // effort_level defaults to None
+    let runtime = buzz_agent_runtime();
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    assert!(
+        surface.normalized.thinking_effort.is_none(),
+        "effort field must be absent when no tier has a value"
+    );
+}
+
 // ── CLAUDE_CONFIG_DIR path resolution (#3493) ─────────────────────────────────
 
 #[test]
@@ -311,6 +381,82 @@ fn claude_config_dir_none_falls_back_to_home_claude_json() {
         "mcp path must fall back to ~/.claude.json when no custom dir"
     );
 }
+
+/// F1 regression: the effort control is selected by its `thought_level` category,
+/// and the running value, the write config id, and the picker options all derive
+/// from that single entry — even when the adapter's config id is a nonliteral
+/// value and differs from the canonical (configured) effort.
+///
+/// Live shape: `id="thinking-level", category="thought_level", currentValue="default"`
+/// while canonical `record.effort_level=high`. Both facts must render: configured
+/// `high` as the value and running `default` as the overridden secondary; the
+/// write mechanism must carry the adapter's real id, never a hardcoded `"effort"`.
+#[test]
+fn effort_option_selected_by_category_drives_all_facts() {
+    let mut record = test_record();
+    record.effort_level = Some("high".to_string());
+    let runtime = buzz_agent_rt();
+    let cache = SessionConfigCache {
+        config_options: vec![AcpConfigOptionEntry {
+            config_id: "thinking-level".to_string(),
+            category: Some("thought_level".to_string()),
+            display_name: Some("Thinking level".to_string()),
+            current_value: Some("default".to_string()),
+            options: vec![
+                AcpConfigOptionValue {
+                    value: "default".to_string(),
+                    display_name: Some("Default".to_string()),
+                },
+                AcpConfigOptionValue {
+                    value: "high".to_string(),
+                    display_name: Some("High".to_string()),
+                },
+            ],
+        }],
+        available_modes: vec![],
+        available_models: vec![],
+        current_model: None,
+        model_overridden: false,
+        goose_native_config: None,
+        captured_at: "".to_string(),
+    };
+    let tiers = InheritedConfigTiers::default();
+
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), &tiers, None);
+
+    // Two-facts display: configured `high` wins, running `default` is the secondary.
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("effort must surface with both configured and running facts");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+    assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
+    assert_eq!(effort.overridden_value.as_deref(), Some("default"));
+    assert_eq!(
+        effort.overridden_origin,
+        Some(ConfigOrigin::AcpConfigOption)
+    );
+
+    // Write mechanism carries the adapter's real id, never a hardcoded "effort".
+    match &effort.write_via {
+        ConfigWriteMechanism::AcpSetConfigOption { config_id } => {
+            assert_eq!(config_id, "thinking-level");
+        }
+        other => panic!("expected AcpSetConfigOption with adapter id, got {other:?}"),
+    }
+
+    // Picker metadata derives from the same entry.
+    assert_eq!(surface.effort_config_id.as_deref(), Some("thinking-level"));
+    assert_eq!(
+        surface
+            .effort_options
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["default", "high"],
+    );
+}
+
 // ── #3493: config_file_path follows a custom CLAUDE_CONFIG_DIR ─────────────────
 
 #[test]

@@ -339,16 +339,9 @@ export type ManagedAgent = {
   modelSource: "definition" | "global" | "instance_legacy" | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
-  /**
-   * `true` when the linked persona was edited after this agent was created; the
-   * running agent uses the older pinned snapshot. Surface an "out of date"
-   * marker and prompt delete + respawn. `false` for non-persona/orphaned agents.
-   */
+  /** True when the linked persona has been edited since this agent was created. */
   personaOutOfDate: boolean;
-  /**
-   * `true` when the agent's linked persona no longer exists. Unlike out-of-date
-   * there is no persona to respawn into; the pinned snapshot is all that remains.
-   */
+  /** True when this agent's linked persona no longer exists. */
   personaOrphaned: boolean;
   /**
    * `true` when the running process was spawned with a config that no longer
@@ -655,6 +648,9 @@ export type ConfigSourceReport = {
 
 export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
 
+/** B5/I-7: a single adapter-advertised value for an ACP config option. */
+export type AcpConfigOptionValue = { value: string; displayName?: string };
+
 export type NormalizedConfig = {
   model: NormalizedField | null;
   provider: NormalizedField | null;
@@ -675,6 +671,10 @@ export type RuntimeConfigSurface = {
   sources: ConfigSourceReport;
   /** #3493: `true` when the surface was read from a user-set `CLAUDE_CONFIG_DIR` — drives the Keychain caveat note in the panel. */
   claudeConfigDirCustom?: boolean;
+  /** B5: the adapter-advertised `thought_level` configId, discovered from the running session. Present only for claude after the first session. Drives the effort picker. */
+  effortConfigId?: string;
+  /** B5/I-7: adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
+  effortOptions?: AcpConfigOptionValue[];
 };
 
 export type UpdateManagedAgentInput = {

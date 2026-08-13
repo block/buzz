@@ -429,6 +429,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
+    /// Persisted effort level value (e.g. "high", "medium", "low") to apply via
+    /// `session/set_config_option` at the first session creation. The configId is
+    /// resolved from the adapter's advertised `thought_level` capability — not
+    /// hardcoded. Non-fatal: if the adapter does not advertise `thought_level`,
+    /// the value is silently ignored and the persisted effort is not overwritten.
+    #[arg(long, env = "BUZZ_ACP_EFFORT_LEVEL")]
+    pub effort_level: Option<String>,
+
     /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
     /// `_meta`. Adapters that recognize it name the session after this value;
     /// others ignore it. Never enters the prompt.
@@ -546,6 +554,12 @@ pub struct Config {
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
+    /// Persisted effort level value (e.g. "high", "medium", "low"). Held as a
+    /// per-worker spawn-scoped value and applied at the first session creation
+    /// by pairing with the adapter's advertised `thought_level` configId.
+    /// Non-fatal when absent or when the adapter does not advertise
+    /// `thought_level`.
+    pub effort_level: Option<String>,
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
@@ -1111,6 +1125,7 @@ impl Config {
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
+            effort_level: args.effort_level,
             session_title: args
                 .session_title
                 .as_deref()
@@ -1486,6 +1501,7 @@ mod tests {
             typing_enabled: true,
             memory_enabled: true,
             model: None,
+            effort_level: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
