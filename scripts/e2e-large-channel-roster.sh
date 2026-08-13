@@ -83,8 +83,40 @@ buzz messages get --channel "$CHANNEL" --limit 10 \
   | jq -e --arg id "$ACTION_ID" 'any(.[]; .id == $id and .content == "member-1501-action")' >/dev/null
 printf 'PASS late-member-action event_id=%s\n' "$ACTION_ID"
 
+# Targeted roster repair must not replace canonical metadata or admin events.
+# Preserve both the event ID and complete tags, including fields this backfill
+# command does not know how to rebuild (DM participants, topic, TTL, etc.).
+DISCOVERY_BEFORE="$(psql "$DATABASE_URL" -AtX -v ON_ERROR_STOP=1 \
+  --set=channel="$CHANNEL" <<'SQL'
+SELECT jsonb_object_agg(kind::text, jsonb_build_object(
+  'id', encode(id, 'hex'),
+  'tags', tags
+) ORDER BY kind)::text
+FROM events
+WHERE channel_id = :'channel'::uuid
+  AND kind IN (39000, 39001)
+  AND deleted_at IS NULL;
+SQL
+)"
+jq -e 'has("39000") and has("39001")' <<<"$DISCOVERY_BEFORE" >/dev/null
+
 DATABASE_URL="$DATABASE_URL" RELAY_URL="$RELAY_URL" \
   buzz-admin reconcile-channels --channel "$CHANNEL" >/dev/null
+
+DISCOVERY_AFTER="$(psql "$DATABASE_URL" -AtX -v ON_ERROR_STOP=1 \
+  --set=channel="$CHANNEL" <<'SQL'
+SELECT jsonb_object_agg(kind::text, jsonb_build_object(
+  'id', encode(id, 'hex'),
+  'tags', tags
+) ORDER BY kind)::text
+FROM events
+WHERE channel_id = :'channel'::uuid
+  AND kind IN (39000, 39001)
+  AND deleted_at IS NULL;
+SQL
+)"
+[[ "$DISCOVERY_AFTER" == "$DISCOVERY_BEFORE" ]]
+printf 'PASS targeted-repair-preserves-metadata-and-admin-events channel=%s\n' "$CHANNEL"
 
 AFTER="$(buzz channels members --channel "$CHANNEL")"
 AFTER_COUNT="$(jq 'length' <<<"$AFTER")"

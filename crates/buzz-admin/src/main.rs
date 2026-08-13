@@ -88,11 +88,12 @@ enum Command {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
     },
-    /// Emit or republish kind:39000/39001/39002 channel discovery events.
+    /// Emit missing kind:39000/39001/39002 channel discovery events, or
+    /// republish only a targeted channel's kind:39002 roster.
     ///
     /// Without `--channel`, only channels missing discovery metadata are
-    /// reconciled. With `--channel`, that channel's events are replaced even if
-    /// they already exist, which repairs stale roster snapshots after a deploy.
+    /// reconciled. With `--channel`, only that channel's member snapshot is
+    /// replaced; canonical metadata and admin events remain untouched.
     ReconcileChannels {
         /// Optional channel UUID to force-republish.
         #[arg(long)]
@@ -550,50 +551,57 @@ async fn reconcile_channels(
 
         let members = db.get_members(tenant.community(), channel.id).await?;
 
-        // kind:39000 — channel metadata
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            tags.push(Tag::parse(["name", &channel.name])?);
-            if let Some(ref desc) = channel.description {
-                if !desc.is_empty() {
-                    tags.push(Tag::parse(["about", desc])?);
-                }
-            }
-            if channel.visibility == "private" {
-                tags.push(Tag::parse(["private"])?);
-            } else {
-                tags.push(Tag::parse(["public"])?);
-            }
-            if channel.channel_type == "dm" {
-                tags.push(Tag::parse(["hidden"])?);
-            }
-            tags.push(Tag::parse(["closed"])?);
-            tags.push(Tag::parse(["t", &channel.channel_type])?);
-
-            let event = EventBuilder::new(Kind::Custom(39000), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
-        }
-
-        // kind:39001 — admins
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in members
-                .iter()
-                .filter(|m| m.role == "owner" || m.role == "admin")
+        // A targeted repair is deliberately roster-only. kind:39000 metadata
+        // is richer than this legacy backfill builder, and kind:39001 is not
+        // part of the stale-roster incident; replacing either can destroy
+        // canonical state. Full backfill still creates all three event kinds
+        // for channels with no discovery metadata.
+        if target_channel.is_none() {
+            // kind:39000 — channel metadata
             {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, &m.role])?);
+                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
+                tags.push(Tag::parse(["name", &channel.name])?);
+                if let Some(ref desc) = channel.description {
+                    if !desc.is_empty() {
+                        tags.push(Tag::parse(["about", desc])?);
+                    }
+                }
+                if channel.visibility == "private" {
+                    tags.push(Tag::parse(["private"])?);
+                } else {
+                    tags.push(Tag::parse(["public"])?);
+                }
+                if channel.channel_type == "dm" {
+                    tags.push(Tag::parse(["hidden"])?);
+                }
+                tags.push(Tag::parse(["closed"])?);
+                tags.push(Tag::parse(["t", &channel.channel_type])?);
+
+                let event = EventBuilder::new(Kind::Custom(39000), "")
+                    .tags(tags)
+                    .sign_with_keys(&relay_keys)
+                    .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
+                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
+                    .await?;
             }
-            let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
+
+            // kind:39001 — admins
+            {
+                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
+                for m in members
+                    .iter()
+                    .filter(|m| m.role == "owner" || m.role == "admin")
+                {
+                    let pk = hex::encode(&m.pubkey);
+                    tags.push(Tag::parse(["p", &pk, &m.role])?);
+                }
+                let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
+                    .tags(tags)
+                    .sign_with_keys(&relay_keys)
+                    .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
+                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
+                    .await?;
+            }
         }
 
         // kind:39002 — members

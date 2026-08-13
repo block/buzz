@@ -180,13 +180,15 @@ export BUZZ_RELAY_PRIVATE_KEY="<same key used by buzz-relay>"
 scripts/e2e-large-channel-roster.sh
 ```
 
-Success is directly observable as three `PASS` lines. The first and third
+Success is directly observable as four `PASS` lines. The first and fourth
 include a member count greater than 1,000 and the same late-member pubkey; the
-middle line includes the accepted kind 9 event ID:
+second includes the accepted kind 9 event ID, and the third proves targeted
+repair left kind 39000/39001 IDs and tags unchanged:
 
 ```text
 PASS discovery-before-republish channel=<uuid> members=1502 late_pubkey=<hex>
 PASS late-member-action event_id=<hex>
+PASS targeted-repair-preserves-metadata-and-admin-events channel=<uuid>
 PASS discovery-after-republish channel=<uuid> members=1502 late_pubkey=<hex>
 ```
 
