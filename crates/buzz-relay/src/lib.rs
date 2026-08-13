@@ -46,6 +46,8 @@ pub mod telemetry;
 pub mod tenant;
 /// Relay-side tunnel session directory and routing.
 pub mod tunnel;
+/// Twilio inbound request signature validation.
+pub mod twilio_auth;
 /// Webhook secret generation and constant-time comparison.
 pub mod webhook_secret;
 /// Workflow action sink — relay-side implementation of [`buzz_workflow::ActionSink`].

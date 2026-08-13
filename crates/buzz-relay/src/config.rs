@@ -269,6 +269,20 @@ pub struct Config {
     /// Used to authenticate internal policy endpoint requests.
     pub git_hook_hmac_secret: String,
 
+    /// Twilio Auth Token, used to validate `X-Twilio-Signature` on inbound
+    /// SMS webhook requests (`POST /hooks/sms/inbound`). When unset, the
+    /// inbound SMS route rejects every request — there is no permissive
+    /// fallback, unlike `git_hook_hmac_secret`'s auto-generated default,
+    /// because this secret must match Twilio's own console configuration
+    /// exactly and a locally-generated substitute could never do that.
+    pub twilio_auth_token: Option<String>,
+    /// The exact, full URL configured in the Twilio console for the inbound
+    /// SMS webhook (e.g. `https://relay.example.com/hooks/sms/inbound`).
+    /// Twilio signs requests against this exact string, so it's taken from
+    /// config rather than reconstructed from request headers (which can
+    /// disagree with what Twilio actually signed behind a proxy/LB).
+    pub twilio_webhook_url: Option<String>,
+
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
     /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
@@ -986,6 +1000,13 @@ impl Config {
             ));
         }
 
+        let twilio_auth_token = std::env::var("TWILIO_AUTH_TOKEN")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let twilio_webhook_url = std::env::var("TWILIO_WEBHOOK_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -1034,6 +1055,8 @@ impl Config {
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,
+            twilio_auth_token,
+            twilio_webhook_url,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,

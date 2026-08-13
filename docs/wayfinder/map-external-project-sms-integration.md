@@ -8,6 +8,50 @@ Let a message arriving in Buzz (from a channel or, eventually, an SMS) trigger a
 
 **Corrected local path (verified 2026-08-12):** `E:/Projects/buildbid` itself is NOT a git checkout — it's a parent folder holding many separate clones/worktrees (`bidcraft-repo`, `bidcraft-repo-claude2`, `bidcraft-cruft-cleanup`, etc.), each with its own `.git`. The canonical checkout is **`E:/Projects/buildbid/bidcraft-repo`** (`origin` = `git@github.com:mfethe1/bidcraft.git`, confirmed via `git remote -v`). Any `--project-paths` entry for `bidcraft` must point here, not at the bare `E:/Projects/buildbid` folder.
 
+## Privacy (bidcraft/construct-pro are private repos — verified 2026-08-12)
+
+Nothing in this design requires making either repo public. Repo *content* never
+needs to transit a public surface — the harness just points an agent's working
+directory at your existing private local clone. But two Buzz primitives used
+by this design default to discoverable, and must be overridden explicitly:
+
+1. **NIP-MP project visibility defaults to `listed`.** `ProjectVisibility::Listed`
+   is documented as "Project appears in public listings **(default)**"
+   (`crates/buzz-cli/src/lib.rs:1262-1263`). Creating a `bidcraft` or
+   `construct-pro` project via `buzz projects create`/`update` without
+   `--visibility unlisted` makes the *existence* of that project binding
+   discoverable to anyone who can browse projects on the relay — not the
+   code, but the fact that you have a project by that name wired up.
+   **Action: always pass `--visibility unlisted` when creating or updating
+   the bidcraft/construct-pro project bindings.**
+2. **Channel visibility defaults to `open`.** `default_visibility()` in
+   `crates/buzz-cli/src/commands/channel_templates.rs:60` returns `"open"`
+   — "searchable, anyone can join without an invite"
+   (`ChannelVisibility::Open`, `crates/buzz-core/src/channel.rs:20-27`), vs.
+   `Private` ("hidden, requires an invite"). Any channel bound to bidcraft/
+   construct-pro, and the future SMS-inbox channel, **must be created with
+   `visibility: private`**, not left at the open default.
+3. **"Unlisted"/"private" are discoverability controls, not encryption.**
+   Events are still stored plaintext in the relay's own database. The real
+   privacy boundary is who can authenticate to *this* relay/community at
+   all (NIP-42 auth, `require_auth_token`, community host-scoping) — these
+   two settings only prevent casual browse-discovery by users who already
+   have access to the relay, they don't add a second layer of access
+   control on top of it.
+
+**Latest code, not a stale snapshot:** dispatch already points at your live
+local checkout, so it always sees whatever's currently on disk. Nothing here
+forks or mirrors the repo into a Buzz-controlled copy. The one open gap:
+`resolve_effective_cwd`/`build_channel_cwd_map` (`crates/buzz-acp/src/pool.rs`,
+`config.rs`) don't currently `git fetch`/pull before dispatch, so a checkout
+that's fallen behind its remote (e.g. someone else pushed) won't be
+automatically refreshed — tracked as a new task (see plan below).
+
+**New capability lands in Buzz itself:** the project→path and channel→project
+config added in slices 1+2 is first-class `buzz-acp`/`buzz-cli` config, not a
+one-off script bolted on the side — any future project gets the same
+treatment for free.
+
 ## Part A: Buzz ↔ bidcraft/construct-pro agent dispatch
 
 **Project representation — reuse `KIND_PROJECT` (30621, NIP-MP), don't overload community.** Community is the relay-tenant boundary (one relay/host); project is already the right-sized primitive for "which repo(s) does this dispatch target" — it groups `kind:30617` git-repo announcements via `a`-tag coordinates and already has CLI surface (`buzz-cli/src/lib.rs:215-220`, `projects`/`repos` subcommands). No new event kind needed for project scoping itself.
@@ -65,12 +109,13 @@ Let a message arriving in Buzz (from a channel or, eventually, an SMS) trigger a
 3. **`buzz-cli` project-binding subcommand** → verify: run the new subcommand against a running relay, confirm it reads/writes the channel↔project binding and that a subsequent dispatch (slice 2) picks it up without a harness restart, if config is live-reloaded — otherwise document the restart requirement.
 4. **First live external dispatch — bidcraft/BuildBid (read-only)** → verify: bind a test channel to bidcraft's project id (`E:/Projects/buildbid/bidcraft-repo`), post a message asking the agent to summarize open work, confirm the response reflects real repo state. **Deferred pending a supervised session** — needs a running relay + real harness process, a bigger step than a code change.
 5. **First live external dispatch — construct-pro (code change)** → verify: bind a channel to construct-pro, dispatch against WF-01 (open, unblocked, smallest ticket per `docs/wayfinder/map.md`), confirm the agent works inside a fresh `.claude/worktrees/buzz-<slug>` worktree and produces a diff addressing the ticket's cited evidence lines. **Deferred pending a supervised session** — this dispatches a real agent that writes into a shared, actively-worked repo (multiple other agents have branches in flight there); not something to run unattended.
-6. **`sms_identities` migration + allow-list enforcement** → verify: run the migration locally, hit `/hooks/sms/inbound` with a forged Twilio-shaped POST for an unlisted number, confirm 403 and no event written; add an allowed row and confirm the same request now produces a `KIND_STREAM_MESSAGE_V2` event with correct tags.
-7. **Twilio signature validation** → verify: send a request with a wrong/missing `X-Twilio-Signature`, confirm 403; send one with a correctly computed signature (using a test Auth Token), confirm it passes and reaches the allow-list check.
-8. **Operator persona — fast path (default_project set)** → verify: seed an `sms_identities` row with `default_project` = bidcraft or construct-pro, post a synthetic inbound-SMS event into the SMS-inbox channel, confirm the persona dispatches via the Part A path (slice 2) into the correct project's `cwd`.
+6. **`sms_identities` migration + allow-list enforcement** ✅ done — `migrations/0031_sms_identities.sql`, `crates/buzz-db/src/sms.rs`. Not yet applied against a live Postgres (no infra spun up this pass).
+7. **Twilio signature validation + inbound webhook route** ✅ done — `crates/buzz-relay/src/twilio_auth.rs` (HMAC-SHA1 validation, test vectors independently cross-checked via `openssl` and Python outside this codebase), `crates/buzz-relay/src/api/sms.rs` wired at `POST /hooks/sms/inbound`. Verified: unit tests pass, `cargo clippy -D warnings` clean. **Stops at "allowed → 200 OK acknowledged"** — does not yet synthesize a `KIND_STREAM_MESSAGE_V2` event; that lands with slice 8.
+8. **Operator persona — fast path (default_project set)** → verify: seed an `sms_identities` row with `default_project` = bidcraft or construct-pro, post a synthetic inbound-SMS event into the SMS-inbox channel, confirm the persona dispatches via the Part A path (slice 2) into the correct project's `cwd`. Also where `sms.rs`'s handler grows the actual `KIND_STREAM_MESSAGE_V2` event synthesis it currently stops short of.
 9. **Operator persona — ambiguous path** → verify: seed a row with `default_project = NULL`, post an inbound event, confirm the persona posts a disambiguation reply event instead of dispatching.
 10. **Outbound SMS sink** → verify: with real (or Twilio test-credential sandbox) SID/token configured, post a reply event tagged back to an inbound message, confirm `sms_sink.rs` calls Twilio's API and the test phone number (or Twilio's magic test number) receives/logs the outbound message.
 11. **End-to-end SMS → project dispatch → reply** → verify: full loop — real inbound SMS from an allow-listed number with a clear `default_project`, agent dispatches and completes, outbound reply SMS arrives back at the sending number.
+12. **Fetch-before-dispatch freshness check (new — from privacy/freshness review)** → verify: point `--project-paths` at a checkout that's behind its remote, dispatch into it, confirm the harness either fast-forwards it first or at minimum logs a clear staleness warning rather than silently working off outdated code.
 
 ## Open questions for Michael
 
