@@ -100,9 +100,9 @@ void spliceAndMoveCursor(
 
   final before = text.substring(0, start);
   final after = text.substring(cursor);
-  controller.text = '$before$replacement$after';
-  controller.selection = TextSelection.collapsed(
-    offset: start + replacement.length,
+  controller.value = TextEditingValue(
+    text: '$before$replacement$after',
+    selection: TextSelection.collapsed(offset: start + replacement.length),
   );
   focusNode.requestFocus();
 }
@@ -124,9 +124,9 @@ void _insertTriggerAtCursor(
   final insert = needsSpace ? ' $trigger' : trigger;
   final before = text.substring(0, cursor);
   final after = text.substring(cursor);
-  controller.text = '$before$insert$after';
-  controller.selection = TextSelection.collapsed(
-    offset: cursor + insert.length,
+  controller.value = TextEditingValue(
+    text: '$before$insert$after',
+    selection: TextSelection.collapsed(offset: cursor + insert.length),
   );
   focusNode.requestFocus();
 }

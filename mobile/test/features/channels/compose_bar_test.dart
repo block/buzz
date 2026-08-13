@@ -173,8 +173,10 @@ Widget _buildComposeBar({
   Future<List<ChannelMember>>? membersFuture,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
+  List<ChannelMember> cachedMembers = const <ChannelMember>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
+  bool? disableAnimations,
   TextScaler? textScaler,
   List<CustomEmoji> customEmoji = const <CustomEmoji>[],
   RelayConfigNotifier Function()? relayConfig,
@@ -198,14 +200,22 @@ Widget _buildComposeBar({
         relayConfig ?? _FakeRelayConfigNotifier.new,
       ),
       savedPrefsProvider.overrideWithValue(_testPrefs),
-      channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
+      channelsProvider.overrideWith(
+        () => _FakeChannelsNotifier(channels, cachedMembers: cachedMembers),
+      ),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      builder: supportsShowingSystemContextMenu == null && textScaler == null
+      builder:
+          supportsShowingSystemContextMenu == null &&
+              disableAnimations == null &&
+              textScaler == null
           ? null
           : (context, child) => MediaQuery(
               data: MediaQuery.of(context).copyWith(
+                disableAnimations:
+                    disableAnimations ??
+                    MediaQuery.disableAnimationsOf(context),
                 supportsShowingSystemContextMenu:
                     supportsShowingSystemContextMenu ??
                     MediaQuery.of(context).supportsShowingSystemContextMenu,
@@ -396,8 +406,16 @@ class _RecordingRelaySocket extends RelaySocket {
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
   final List<Channel> _channels;
+  final List<ChannelMember> _cachedMembers;
 
-  _FakeChannelsNotifier(this._channels);
+  _FakeChannelsNotifier(
+    this._channels, {
+    List<ChannelMember> cachedMembers = const [],
+  }) : _cachedMembers = cachedMembers;
+
+  @override
+  List<ChannelMember> cachedMembersForChannel(String channelId) =>
+      channelId == 'channel-1' ? _cachedMembers : const [];
 
   @override
   Future<List<Channel>> build() async => _channels;
@@ -405,6 +423,10 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   @override
   Future<void> refresh() async {
     state = AsyncData(_channels);
+  }
+
+  void notifyWithCopy() {
+    state = AsyncData([..._channels]);
   }
 }
 
@@ -550,6 +572,116 @@ void main() {
       expect(
         tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
         isTrue,
+      );
+    });
+
+    testWidgets('return inserts a newline and sending stays on the button', (
+      tester,
+    ) async {
+      var sendCount = 0;
+      String? sentContent;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sendCount += 1;
+                sentContent = content;
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      expect(textField.keyboardType, TextInputType.multiline);
+      expect(textField.textInputAction, TextInputAction.newline);
+      expect(textField.onSubmitted, isNull);
+
+      await tester.enterText(find.byType(TextField), 'First line\nSecond line');
+      await tester.pumpAndSettle();
+
+      expect(sendCount, 0);
+      expect(textField.controller!.text, 'First line\nSecond line');
+
+      final sendButton = find
+          .ancestor(
+            of: find.byIcon(LucideIcons.arrowUp),
+            matching: find.byType(IconButton),
+          )
+          .hitTestable();
+      await tester.tap(sendButton);
+      await tester.pumpAndSettle();
+
+      expect(sendCount, 1);
+      expect(sentContent, 'First line\nSecond line');
+    });
+
+    testWidgets('smoothly resizes the text field when a new line is added', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'First line');
+      await tester.pumpAndSettle();
+
+      final heightMotion = find.byKey(
+        const ValueKey('composer-text-height-motion'),
+      );
+      final animation = tester.widget<AnimatedSize>(heightMotion);
+      expect(animation.duration, const Duration(milliseconds: 140));
+      expect(animation.curve, Curves.easeOutCubic);
+      final oneLineHeight = tester.getSize(heightMotion).height;
+
+      await tester.enterText(
+        find.byType(TextField),
+        'First line\nSecond line\nThird line',
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 70));
+      final midResizeHeight = tester.getSize(heightMotion).height;
+      await tester.pumpAndSettle();
+      final threeLineHeight = tester.getSize(heightMotion).height;
+
+      expect(midResizeHeight, greaterThan(oneLineHeight));
+      expect(midResizeHeight, lessThan(threeLineHeight));
+    });
+
+    testWidgets('skips composer height motion when animations are disabled', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          disableAnimations: true,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      expect(find.byType(AnimatedSize), findsNothing);
+      expect(
+        find.byKey(const ValueKey('composer-text-height-motion')),
+        findsOneWidget,
       );
     });
 
@@ -702,6 +834,98 @@ void main() {
       expect(textField.focusNode!.hasFocus, isTrue);
     });
 
+    testWidgets('iOS selection handles resize a draft with the system menu', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            supportsShowingSystemContextMenu: true,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'abc def ghi');
+        await tester.pump();
+
+        final editableState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final renderEditable = editableState.renderEditable;
+        Offset textPosition(int offset) {
+          final point = renderEditable
+              .getEndpointsForSelection(TextSelection.collapsed(offset: offset))
+              .single;
+          return renderEditable.localToGlobal(point.point) - const Offset(0, 2);
+        }
+
+        final wordPosition = textPosition(5);
+        await tester.tapAt(wordPosition, pointer: 7);
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.tapAt(wordPosition, pointer: 7);
+        await tester.pumpAndSettle();
+
+        final controller = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        expect(
+          tester
+              .widget<TextField>(find.byType(TextField))
+              .magnifierConfiguration,
+          same(TextMagnifierConfiguration.disabled),
+        );
+        expect(
+          controller.selection,
+          const TextSelection(baseOffset: 4, extentOffset: 7),
+        );
+
+        final contextMenuBuilder = tester
+            .widget<TextField>(find.byType(TextField))
+            .contextMenuBuilder;
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+        (container.read(channelsProvider.notifier) as _FakeChannelsNotifier)
+            .notifyWithCopy();
+        await tester.pump();
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).contextMenuBuilder,
+          same(contextMenuBuilder),
+        );
+        expect(tester.takeException(), isNull);
+
+        final endpoint = renderEditable
+            .getEndpointsForSelection(controller.selection)
+            .last;
+        final gesture = await tester.startGesture(
+          renderEditable.localToGlobal(endpoint.point),
+          pointer: 7,
+        );
+        await tester.pump();
+        await gesture.moveTo(textPosition(11));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        expect(controller.selection.baseOffset, 4);
+        expect(controller.selection.extentOffset, 11);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        tester.view.reset();
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('composer controls use selection haptics', (tester) async {
       final hapticCalls = <MethodCall>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -786,6 +1010,141 @@ void main() {
         tester.widget<Text>(find.text('general')).style?.fontFamily,
         'Inter',
       );
+    });
+
+    testWidgets('shows cached member mentions before the refresh completes', (
+      tester,
+    ) async {
+      final pendingMembers = Completer<List<ChannelMember>>();
+      addTearDown(() {
+        if (!pendingMembers.isCompleted) pendingMembers.complete(const []);
+      });
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          membersFuture: pendingMembers.future,
+          cachedMembers: [
+            ChannelMember(
+              pubkey: 'a' * 64,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+              displayName: 'Alice',
+            ),
+          ],
+          channels: [_makeCurrentChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.atSign));
+      await tester.pump();
+
+      expect(pendingMembers.isCompleted, isFalse);
+      expect(
+        find.byKey(const ValueKey('mention-suggestions-popover')),
+        findsOneWidget,
+      );
+      expect(find.text('Alice'), findsOneWidget);
+    });
+
+    testWidgets('dismisses mention suggestions in the selection frame', (
+      tester,
+    ) async {
+      final signer = nostr.Keys.generate();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [_testAgent('f' * 64)],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('mention-suggestions-popover')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('mention-suggestions-popover')),
+        findsNothing,
+      );
+      expect(find.byType(AnimatedSize), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('composer-text-height-motion')),
+        findsOneWidget,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      expect(controller.text, '@Helper Bot ');
+      expect(controller.selection, const TextSelection.collapsed(offset: 12));
+
+      // Rendering the selected agent chip notifies the editor again. That
+      // display-only update must not restart the completed mention query.
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.byKey(const ValueKey('mention-suggestions-popover')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('reuses rich text layout for selection-only movement', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'abc def ghi');
+      await tester.pump();
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final controller = textField.controller!;
+      final editableContext = tester.element(find.byType(EditableText));
+      final before = controller.buildTextSpan(
+        context: editableContext,
+        style: textField.style,
+        withComposing: true,
+      );
+
+      controller.selection = const TextSelection(
+        baseOffset: 4,
+        extentOffset: 7,
+      );
+      final after = controller.buildTextSpan(
+        context: editableContext,
+        style: textField.style,
+        withComposing: true,
+      );
+
+      expect(after, same(before));
     });
 
     testWidgets('native All Photos picker failures show an error', (
@@ -2438,8 +2797,17 @@ void main() {
                 )
                 as SystemContextMenu;
         final pasteImage = menu.items.first as IOSSystemContextMenuItemCustom;
+        final rebuiltMenu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as SystemContextMenu;
+        final rebuiltPasteImage =
+            rebuiltMenu.items.first as IOSSystemContextMenuItemCustom;
 
         expect(pasteImage.title, 'Paste Image');
+        expect(rebuiltPasteImage.onPressed, same(pasteImage.onPressed));
         expect(menu.items.skip(1), orderedEquals(defaultItems));
         pasteImage.onPressed();
         await tester.pumpAndSettle();
@@ -3431,6 +3799,29 @@ void main() {
       // [start=6, cursor=10) → "hello " + "@Alice " + " world"
       expect(controller.text, 'hello @Alice  world');
       expect(controller.selection.baseOffset, 13); // after "@Alice "
+    });
+
+    test('updates text and selection in one editor notification', () {
+      final controller = TextEditingController(text: '@ali');
+      controller.selection = const TextSelection.collapsed(offset: 4);
+      var notifications = 0;
+      controller.addListener(() => notifications += 1);
+
+      spliceAndMoveCursor(
+        controller,
+        FocusNode(),
+        start: 0,
+        replacement: '@Alice ',
+      );
+
+      expect(notifications, 1);
+      expect(
+        controller.value,
+        const TextEditingValue(
+          text: '@Alice ',
+          selection: TextSelection.collapsed(offset: 7),
+        ),
+      );
     });
 
     test('replaces #channel query with channel name', () {
