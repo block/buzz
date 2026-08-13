@@ -1,13 +1,5 @@
 part of '../compose_bar.dart';
 
-/// Rich compose bar used in channels and threads; [onSend] handles submission.
-typedef ComposeBarOnSend =
-    Future<void> Function(
-      String content,
-      List<String> mentionPubkeys, {
-      List<List<String>> mediaTags,
-    });
-
 class ComposeBar extends HookConsumerWidget {
   final String channelId;
   final String channelName;
@@ -839,15 +831,10 @@ class ComposeBar extends HookConsumerWidget {
       attachmentSurface.value = _AttachmentSurface.camera;
     }
 
-    final motionDuration = reducedMotion
-        ? Duration.zero
-        : Duration(
-            milliseconds:
-                attachmentSurface.value == _AttachmentSurface.camera ||
-                    attachmentSurface.value == _AttachmentSurface.photos
-                ? 320
-                : 250,
-          );
+    final motionDuration = _composerMotionDuration(
+      reducedMotion,
+      attachmentSurface.value,
+    );
     final resizeDuration = reducedMotion
         ? Duration.zero
         : const Duration(milliseconds: 140);
@@ -862,64 +849,28 @@ class ComposeBar extends HookConsumerWidget {
       return null;
     }, [suggestionOverlayController]);
 
-    void expandComposer() {
-      if (isComposerExpanded.value) return;
-      attachmentSurface.value = _AttachmentSurface.closed;
-      onFocusRequested?.call();
-      isComposerExpanded.value = true;
-      // The collapsed surface deliberately stays out of the focus system so
-      // native focus restoration cannot reopen a composer behind a popped
-      // route. Attach the editor first, then request focus on the next frame.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted && isComposerExpanded.value) {
-          focusNode.requestFocus();
-        }
-      });
-      if (defaultTargetPlatform == TargetPlatform.android) {
-        androidImeFallbackTimer.value?.cancel();
-        if (appView.viewInsets.bottom > 0) {
-          androidImeTransitionStarted.value = true;
-        } else {
-          androidImeTransitionStarted.value = false;
-          androidImeFallbackTimer.value = Timer(
-            const Duration(milliseconds: 250),
-            () {
-              if (context.mounted && isComposerExpanded.value) {
-                androidImeTransitionStarted.value = true;
-              }
-            },
-          );
-        }
-      }
-    }
+    void expandComposer() => _expandComposer(
+      context: context,
+      isExpanded: isComposerExpanded,
+      attachmentSurface: attachmentSurface,
+      onFocusRequested: onFocusRequested,
+      focusNode: focusNode,
+      view: appView,
+      androidImeTransitionStarted: androidImeTransitionStarted,
+      androidImeFallbackTimer: androidImeFallbackTimer,
+    );
 
-    final suggestionPanel = channelSuggestions.isNotEmpty
-        ? KeyedSubtree(
-            key: const ValueKey('channel-suggestions'),
-            child: _ChannelSuggestions(
-              suggestions: channelSuggestions,
-              onSelect: insertChannel,
-            ),
-          )
-        : suggestions.isNotEmpty
-        ? KeyedSubtree(
-            key: const ValueKey('mention-suggestions'),
-            child: _MentionSuggestions(
-              suggestions: suggestions,
-              userCache: userCache,
-              currentPubkey: currentPubkey,
-              isDmChannel: isDmChannel,
-              onSelect: insertMention,
-            ),
-          )
-        : const SizedBox.shrink(key: ValueKey('no-suggestions'));
+    final suggestionPanel = _composerSuggestionPanel(
+      channelSuggestions: channelSuggestions,
+      mentionSuggestions: suggestions,
+      userCache: userCache,
+      currentPubkey: currentPubkey,
+      isDmChannel: isDmChannel,
+      onChannelSelect: insertChannel,
+      onMentionSelect: insertMention,
+    );
     Widget buildOverlayPanel(_AttachmentSurface surface) {
-      return _AttachmentSurfacePanel(
-        key: ValueKey(
-          surface == _AttachmentSurface.closed
-              ? 'composer-suggestions'
-              : 'attachment-surface',
-        ),
+      return _composerAttachmentPanel(
         surface: surface,
         suggestionPanel: suggestionPanel,
         onBack: () => attachmentSurface.value = _AttachmentSurface.menu,

@@ -25,10 +25,10 @@ import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'ime_metrics_settle_observer.dart';
-import 'latest_message_button.dart';
-import '../profile/user_profile_sheet.dart';
 import 'initial_thread_tail_settle.dart';
 import 'laid_out_viewport.dart';
+import 'latest_message_button.dart';
+import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
@@ -39,8 +39,8 @@ import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'timeline_message.dart';
 
-part 'thread_detail_helpers.dart';
 part 'thread_detail_page/nested_thread_summary_row.dart';
+part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 
@@ -78,12 +78,20 @@ class ThreadDetailPage extends HookConsumerWidget {
           : 0.0,
     );
     final sendMessage = ref.read(sendMessageProvider);
+    // Relay thread queries are keyed by the outermost root, even when this
+    // page displays a nested branch. Query that root, then select this head's
+    // direct children from the returned subtree below.
     final queryRootId = threadHead.rootId ?? threadHead.id;
     final repliesState = ref.watch(
       threadRepliesWithLocalProvider(
         ThreadRepliesArgs(channelId: channelId, rootId: queryRootId),
       ),
     );
+    // The thread query is one-shot and asks only for content kinds, so a
+    // reaction, edit, or deletion that lands while the thread is open never
+    // reaches it — a new pill (and its burst) only showed up after leaving and
+    // re-entering, which refetched. The channel socket already receives those
+    // events, so union the two sources and format once.
     final liveChannelEvents =
         ref.watch(channelMessagesProvider(channelId)).value ??
         const <NostrEvent>[];
@@ -102,12 +110,18 @@ class ThreadDetailPage extends HookConsumerWidget {
     final allMsgs = fetchedReplies == null
         ? allMessages
         : [
+            // Only fall back to the pushed-route snapshot when neither source
+            // carries the head, and no live deletion has suppressed it. That
+            // keeps a temporarily unavailable head visible without restoring
+            // a head that was deleted while this page was open.
             if (!liveDeletionHidesHead &&
                 !fetchedReplies.any((message) => message.id == threadHead.id))
               threadHead,
             ...fetchedReplies,
           ];
 
+    // Index all messages by parentId so we can find direct children of any
+    // message and compute thread summaries for nested threads.
     final childrenByParent = <String, List<TimelineMessage>>{};
     for (final msg in allMsgs) {
       final pid = msg.parentId;
@@ -123,12 +137,13 @@ class ThreadDetailPage extends HookConsumerWidget {
     final didJumpToInitialMessage = useRef(false);
     final followsThreadTail = useRef(false);
     final userOptedOutOfTailFollow = useRef(false);
+    final userDragDetachedTailFollow = useRef(false);
     final tailIntent = useMemoized(_ThreadTailIntent.new);
-    final pendingTailAlignment = useRef<double?>(null);
-    final isAtThreadTail = useState(true);
-    final tailRealignmentQueued = useRef(false);
-    final tailCorrectionInProgress = useRef(false);
     final initialTailSettle = useMemoized(InitialThreadTailSettle.new);
+    final isAtThreadTail = useState(true);
+    final tailCorrectionInProgress = useRef(false);
+    final viewportHeight = useListenable(listViewport.height).value;
+    final previousViewportHeight = useRef(viewportHeight);
     final settledImeLift = usesFixedAndroidImeViewport
         ? (settledImeBottomInset.value -
                   MediaQuery.viewPaddingOf(context).bottom)
@@ -137,7 +152,9 @@ class ThreadDetailPage extends HookConsumerWidget {
         : 0.0;
     final timelineBottomInset =
         composerDockHeight.value +
-        (isAtThreadTail.value || followsThreadTail.value ? settledImeLift : 0);
+        (followsThreadTail.value || !initialTailSettle.isComplete
+            ? settledImeLift
+            : 0);
     final navigationBottomInset = composerDockHeight.value + settledImeLift;
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
@@ -146,9 +163,13 @@ class ThreadDetailPage extends HookConsumerWidget {
     final tailAnchorIndex = replies.length + 1;
 
     double threadTailAlignment() => _threadTailAlignmentForViewport(
-      fullHeight: MediaQuery.sizeOf(context).height,
-      imeBottomInset: appView.viewInsets.bottom / appView.devicePixelRatio,
-      usesFixedImeViewport: usesFixedAndroidImeViewport,
+      // This reporter already reflects Scaffold resize, typing rows, and every
+      // other layout consumer above or below the list.
+      fullHeight: viewportHeight > 0
+          ? viewportHeight
+          : MediaQuery.sizeOf(context).height,
+      imeBottomInset: 0,
+      usesFixedImeViewport: true,
       bottomInset:
           Grid.xs +
           composerDockHeight.value +
@@ -156,11 +177,21 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
 
     bool threadTailIsVisible() {
-      final targetAlignment = threadTailAlignment();
+      if (isMember &&
+          !isArchived &&
+          (!viewportHeight.isFinite ||
+              viewportHeight <= 0 ||
+              composerDockHeight.value <= 0)) {
+        return false;
+      }
+      if (!viewportHeight.isFinite || viewportHeight <= 0) return false;
+      final trailingBoundary =
+          1 - ((Grid.xs + timelineBottomInset) / viewportHeight) + 0.001;
+      final lastMessageIndex = _threadTailIndex(replies.length);
       return itemPositionsListener.itemPositions.value.any(
         (position) =>
-            position.index == tailAnchorIndex &&
-            position.itemLeadingEdge <= targetAlignment + 0.01,
+            position.index == lastMessageIndex &&
+            position.itemTrailingEdge <= trailingBoundary,
       );
     }
 
@@ -181,18 +212,14 @@ class ThreadDetailPage extends HookConsumerWidget {
     }
 
     void followThreadTailFromComposer() {
+      if (userDragDetachedTailFollow.value) return;
+      initialTailSettle.abandon();
+      tailIntent.endDrag();
+      tailIntent.detach();
       userOptedOutOfTailFollow.value = false;
       followsThreadTail.value = true;
       isAtThreadTail.value = true;
-      tailIntent.schedule(
-        allowed: true,
-        revalidate: () =>
-            context.mounted &&
-            itemScrollController.isAttached &&
-            !tailIntent.isDragging &&
-            !userOptedOutOfTailFollow.value,
-        action: correctThreadTailInstantly,
-      );
+      if (!threadTailIsVisible()) correctThreadTailInstantly();
     }
 
     useEffect(() {
@@ -213,33 +240,38 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
     }, [itemPositionsListener, replies.length]);
 
-    void scrollToThreadLatest() {
+    Future<void> scrollToThreadLatest() async {
       if (!itemScrollController.isAttached) return;
+      initialTailSettle.abandon();
+      tailIntent.endDrag();
       userOptedOutOfTailFollow.value = false;
+      userDragDetachedTailFollow.value = false;
       followsThreadTail.value = true;
-      // This state change rebuilds Android's keyboard-aware trailing padding
-      // before the animated scroll targets the stable tail anchor.
       isAtThreadTail.value = true;
-      tailIntent.schedule(
+      tailIntent.scheduleNextFrame(
         allowed: true,
         revalidate: () =>
             context.mounted &&
             itemScrollController.isAttached &&
-            !tailIntent.isDragging &&
-            !userOptedOutOfTailFollow.value,
-        action: () {
-          itemScrollController.scrollTo(
+            !tailIntent.isDragging,
+        action: () async {
+          await itemScrollController.scrollTo(
             index: tailAnchorIndex,
             alignment: threadTailAlignment(),
             duration: const Duration(milliseconds: 220),
             curve: Curves.easeOutCubic,
           );
+          if (context.mounted && threadTailIsVisible()) {
+            isAtThreadTail.value = true;
+          }
         },
       );
     }
 
     useEffect(() {
       final messageId = initialMessageId;
+      // Wait for the authoritative thread query before consuming the one-shot
+      // jump; the fallback main-timeline list can contain only the linked reply.
       if (messageId == null || fetchedReplies == null) return null;
       final chronologicalIndex = replies.indexWhere(
         (reply) => reply.id == messageId,
@@ -251,6 +283,9 @@ class ThreadDetailPage extends HookConsumerWidget {
           : indexForReply(chronologicalIndex);
       if (targetIndex == null || didJumpToInitialMessage.value) return null;
       didJumpToInitialMessage.value = true;
+      initialTailSettle.abandon();
+      userOptedOutOfTailFollow.value = true;
+      userDragDetachedTailFollow.value = false;
       tailIntent.schedule(
         allowed: true,
         revalidate: () =>
@@ -258,130 +293,100 @@ class ThreadDetailPage extends HookConsumerWidget {
             itemScrollController.isAttached &&
             !tailIntent.isDragging,
         action: () {
+          // The provisional route snapshot can make the linked reply look like
+          // the tail. This authoritative deep-link jump intentionally leaves
+          // the user at an older item, so it must opt out of follow-tail first.
           tailIntent.detach();
-          initialTailSettle.abandon();
-          userOptedOutOfTailFollow.value = true;
           followsThreadTail.value = false;
           isAtThreadTail.value = false;
-          pendingTailAlignment.value = null;
           itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
         },
       );
       return null;
     }, [initialMessageId, fetchedReplies, replies.length]);
 
+    // A top-anchored list doesn't stick to the newest item the way the old
+    // reversed one did, so follow the tail explicitly: when a reply arrives
+    // while the last item is on screen, scroll it into view. If the user has
+    // scrolled up to read, leave them where they are.
     final hasFetchedReplies = fetchedReplies != null;
     final previousReplyCount = useRef(replies.length);
-    final viewportHeight = useListenable(listViewport.height).value;
-    final previousViewportHeight = useRef(viewportHeight);
-    final topOverlayFraction = frostedAppBarHeight(context) / viewportHeight;
-    final settleGeometry = (composerDockHeight.value, viewportHeight);
-    bool currentIntentAllowsTailMutation({bool allowIdleDetached = false}) {
-      if (tailIntent.isDragging) return false;
-      if (allowIdleDetached) return true;
-      return !userOptedOutOfTailFollow.value &&
-          (followsThreadTail.value || threadTailIsVisible());
-    }
-
-    void queueTailRealignment({
-      bool allowIdleDetached = false,
-      bool restoreFollow = false,
-      bool animate = false,
-    }) {
-      if (!initialTailSettle.isComplete ||
-          viewportHeight <= 0 ||
-          !currentIntentAllowsTailMutation(
-            allowIdleDetached: allowIdleDetached,
-          )) {
-        return;
-      }
-      if (!allowIdleDetached) followsThreadTail.value = true;
-      isAtThreadTail.value = true;
-      tailIntent.schedule(
-        allowed: true,
-        revalidate: () =>
-            context.mounted &&
-            itemScrollController.isAttached &&
-            currentIntentAllowsTailMutation(
-              allowIdleDetached: allowIdleDetached,
-            ),
-        action: () {
-          if (restoreFollow) {
-            userOptedOutOfTailFollow.value = false;
-            followsThreadTail.value = true;
-          }
-          if (animate) {
-            itemScrollController.scrollTo(
-              index: tailAnchorIndex,
-              alignment: threadTailAlignment(),
-              duration: const Duration(milliseconds: 220),
-              curve: Curves.easeOutCubic,
-            );
-          } else {
-            itemScrollController.jumpTo(
-              index: tailAnchorIndex,
-              alignment: threadTailAlignment(),
-            );
-          }
-        },
-      );
-    }
-
+    final topOverlayFraction = viewportHeight > 0
+        ? frostedAppBarHeight(context) / viewportHeight
+        : 0.0;
+    final settleGeometry = (
+      composerDockHeight.value,
+      settledImeLift,
+      viewportHeight,
+    );
     useEffect(() {
       if (!hasFetchedReplies || viewportHeight <= 0) return null;
+      if (initialMessageId != null) {
+        initialTailSettle.abandon();
+        previousReplyCount.value = replies.length;
+        return null;
+      }
       if (isMember && !isArchived && composerDockHeight.value <= 0) {
         return null;
       }
       if (!initialTailSettle.isComplete) {
         previousReplyCount.value = replies.length;
-        previousViewportHeight.value = viewportHeight;
+        followsThreadTail.value = true;
         initialTailSettle.schedule(
           context: context,
           controller: itemScrollController,
           positionsListener: itemPositionsListener,
-          targetIndex: initialMessageId == null && replies.isNotEmpty
-              ? indexForReply(replies.length - 1)
-              : null,
+          targetIndex: replies.isEmpty
+              ? null
+              : indexForReply(replies.length - 1),
           hiddenTopFraction: topOverlayFraction,
-          hiddenBottomFraction: timelineBottomInset / viewportHeight,
+          hiddenBottomFraction:
+              (composerDockHeight.value + settledImeLift) / viewportHeight,
         );
         return null;
       }
+
       final previous = previousReplyCount.value;
       previousReplyCount.value = replies.length;
-      final viewportChanged =
-          (viewportHeight - previousViewportHeight.value).abs() >= 0.5;
-      previousViewportHeight.value = viewportHeight;
-      if (replies.length <= previous) {
-        // Preserve a short thread's valid top anchor when resize leaves its
-        // tail inside the newly measured usable viewport. Long/clipped tails
-        // still follow through the shared intent-serialized correction path.
-        if (viewportChanged && !threadTailIsVisible()) {
-          queueTailRealignment(animate: false);
-        }
-        return null;
-      }
+      if (replies.length <= previous) return null;
       final positions = itemPositionsListener.itemPositions.value;
       // Positions still describe the list as it was *before* these replies, so
       // compare against the old tail. Measuring against the new one only reads
       // as "at the tail" when exactly one reply arrived.
       final previousTailAnchorIndex = previous + 1;
-      final wasAtTail = positions.any(
-        (position) => position.index == previousTailAnchorIndex,
-      );
+      final wasAtTail =
+          positions.isEmpty ||
+          positions.any(
+            (position) => position.index >= previousTailAnchorIndex,
+          );
       final localPubkey = currentPubkey?.toLowerCase();
       final hasNewLocalReply =
           localPubkey != null &&
           replies
               .skip(previous)
               .any((reply) => reply.pubkey.toLowerCase() == localPubkey);
+      // A reply the current user just sent must be visible even if they were
+      // reading at the head of a long thread. Remote arrivals still respect
+      // the user's scroll position.
       if (tailIntent.isDragging) return null;
       if (!hasNewLocalReply && (userOptedOutOfTailFollow.value || !wasAtTail)) {
         return null;
       }
-      queueTailRealignment(
-        allowIdleDetached: hasNewLocalReply,
-        restoreFollow: hasNewLocalReply,
+      if (hasNewLocalReply) {
+        userOptedOutOfTailFollow.value = false;
+        userDragDetachedTailFollow.value = false;
+      }
+      followsThreadTail.value = true;
+      tailIntent.scheduleNextFrame(
+        allowed: true,
+        revalidate: () =>
+            context.mounted &&
+            itemScrollController.isAttached &&
+            !tailIntent.isDragging &&
+            !userOptedOutOfTailFollow.value,
+        // A reply arrival changes list geometry. Keep this correction instant;
+        // only an explicit tap on Latest should animate navigation.
+        action: correctThreadTailInstantly,
       );
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry]);
@@ -402,6 +407,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [threadHead.id, readState.isReady, visibleReplyReadKey]);
 
+    // Thread-scoped typing indicators (exclude self).
     final allTyping = ref.watch(channelTypingProvider(channelId));
     final threadTyping = allTyping
         .where((e) => e.threadHeadId == threadHead.id)
@@ -412,9 +418,12 @@ class ThreadDetailPage extends HookConsumerWidget {
         )
         .toList();
 
+    // Resolve thread head from live data (reactions/edits may have changed).
     final liveHead =
         allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
 
+    // The root of the entire thread chain. If the current thread head is
+    // itself a root message its rootId is null, so fall back to its own id.
     final effectiveRootId = threadHead.rootId ?? threadHead.id;
 
     // Composer size changes and keyboard metrics changes are independent:
@@ -424,24 +433,52 @@ class ThreadDetailPage extends HookConsumerWidget {
     void realignThreadTailAfterMetricsChange() {
       listViewport.reportAfterLayout();
       final shouldFollowTail =
+          !tailIntent.isDragging &&
           !userOptedOutOfTailFollow.value &&
           (followsThreadTail.value || threadTailIsVisible());
-      if (!shouldFollowTail || tailRealignmentQueued.value) return;
+      if (!shouldFollowTail || !initialTailSettle.isComplete) return;
       followsThreadTail.value = true;
-      isAtThreadTail.value = true;
-      tailRealignmentQueued.value = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        tailRealignmentQueued.value = false;
-        if (!context.mounted ||
-            !itemScrollController.isAttached ||
-            userOptedOutOfTailFollow.value ||
-            !followsThreadTail.value ||
-            tailIntent.isDragging) {
-          return;
-        }
-        queueTailRealignment();
-      });
+      tailIntent.scheduleNextFrame(
+        allowed: true,
+        revalidate: () =>
+            context.mounted &&
+            itemScrollController.isAttached &&
+            !tailIntent.isDragging &&
+            !userOptedOutOfTailFollow.value &&
+            followsThreadTail.value,
+        action: () {
+          final targetAlignment = threadTailAlignment();
+          final positions = itemPositionsListener.itemPositions.value;
+          final anchorPosition = positions
+              .where((position) => position.index == tailAnchorIndex)
+              .firstOrNull;
+          final headIsVisible = positions.any(
+            (position) =>
+                position.index == headIndex && position.itemTrailingEdge > 0,
+          );
+          if (anchorPosition != null &&
+              ((anchorPosition.itemLeadingEdge - targetAlignment).abs() <
+                      0.005 ||
+                  (headIsVisible &&
+                      anchorPosition.itemLeadingEdge < targetAlignment))) {
+            return;
+          }
+          // This runs once after Android's frame-by-frame IME metrics settle.
+          // Keep the resulting layout correction instant.
+          correctThreadTailInstantly();
+        },
+      );
     }
+
+    useEffect(() {
+      final previousHeight = previousViewportHeight.value;
+      previousViewportHeight.value = viewportHeight;
+      if ((viewportHeight - previousHeight).abs() >= 0.5 &&
+          initialTailSettle.isComplete) {
+        realignThreadTailAfterMetricsChange();
+      }
+      return null;
+    }, [viewportHeight]);
 
     void updateComposerDockHeight(double height) {
       listViewport.reportAfterLayout();
@@ -450,41 +487,12 @@ class ThreadDetailPage extends HookConsumerWidget {
       if (heightDelta.abs() < 0.5) return;
 
       final shouldFollowTail =
+          !tailIntent.isDragging &&
           !userOptedOutOfTailFollow.value &&
           (followsThreadTail.value || threadTailIsVisible());
-      if (shouldFollowTail) {
-        followsThreadTail.value = true;
-        isAtThreadTail.value = true;
-      }
+      if (shouldFollowTail) followsThreadTail.value = true;
       composerDockHeight.value = height;
-      if (heightDelta <= 0 ||
-          !shouldFollowTail ||
-          !viewportHeight.isFinite ||
-          viewportHeight <= 0 ||
-          !initialTailSettle.isComplete) {
-        pendingTailAlignment.value = null;
-        return;
-      }
-      final anchorPosition = itemPositionsListener.itemPositions.value
-          .where((position) => position.index == tailAnchorIndex)
-          .firstOrNull;
-      if (anchorPosition == null) return;
-      final targetAlignment =
-          (pendingTailAlignment.value ?? anchorPosition.itemLeadingEdge) -
-          (heightDelta / viewportHeight);
-      pendingTailAlignment.value = targetAlignment;
-
-      tailIntent.schedule(
-        allowed: true,
-        revalidate: () =>
-            context.mounted &&
-            itemScrollController.isAttached &&
-            currentIntentAllowsTailMutation(),
-        action: () => itemScrollController.jumpTo(
-          index: tailAnchorIndex,
-          alignment: targetAlignment,
-        ),
-      );
+      if (shouldFollowTail) realignThreadTailAfterMetricsChange();
     }
 
     useEffect(() {
@@ -515,6 +523,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [settledImeBottomInset.value]);
 
+    // Channel names for message content rendering.
     final channelsAsync = ref.watch(channelsProvider);
     final channel = channelsAsync.value
         ?.where((candidate) => candidate.id == channelId)
@@ -545,9 +554,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                       initialTailSettle.abandon();
                       tailIntent.beginDrag();
                       userOptedOutOfTailFollow.value = true;
+                      userDragDetachedTailFollow.value = true;
                       followsThreadTail.value = false;
-                      isAtThreadTail.value = false;
-                      pendingTailAlignment.value = null;
                     },
                     onUserScrollEnd: () {
                       tailIntent.endDrag();
@@ -564,8 +572,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                             userOptedOut: userOptedOutOfTailFollow,
                             followsTail: followsThreadTail,
                           );
-                          if (threadTailIsVisible()) {
-                            isAtThreadTail.value = true;
+                          if (!userOptedOutOfTailFollow.value) {
+                            userDragDetachedTailFollow.value = false;
                           }
                         },
                       );
@@ -766,7 +774,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 ),
               ),
             ),
-          if (!isAtThreadTail.value)
+          if (hasFetchedReplies && !isAtThreadTail.value)
             Positioned(
               left: 0,
               right: 0,

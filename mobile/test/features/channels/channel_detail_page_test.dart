@@ -5086,7 +5086,11 @@ void main() {
         final list = find.byKey(const ValueKey('thread-message-list'));
         final listHeight = tester.getSize(list).height;
         final mediaQueryHeight = MediaQuery.sizeOf(tester.element(list)).height;
-        expect(listHeight, lessThan(mediaQueryHeight));
+        expect(
+          listHeight,
+          closeTo(mediaQueryHeight, 0.5),
+          reason: 'Android keeps the thread viewport fixed behind the IME.',
+        );
 
         completer.complete(replies);
         await tester.pumpAndSettle();
@@ -6181,7 +6185,8 @@ void main() {
         }
         expect(
           find.byKey(const ValueKey('thread-jump-to-latest')),
-          findsNothing,
+          findsOneWidget,
+          reason: 'Browsing away from the tail should offer Latest.',
         );
         final visibleBeforeResize = tester
             .widgetList<Widget>(
