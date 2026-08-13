@@ -231,17 +231,24 @@ def find_lookalikes(text: str, entry_point: str) -> list[Finding]:
     # review at all. Collapsing duplicates is ``_dedupe``'s job, and it keys on the
     # evidence, so a genuinely distinct probe survives it while a re-report of the same
     # span does not.
+    #
+    # **Every occurrence, not just the first.** ``.index()`` found only the first
+    # ``TOKEN`` in the winning candidate, so a benign mention ahead of a genuine forged
+    # marker reported the decoy and left the real probe out of the evidence entirely —
+    # the count of findings looked right, but nothing in the published review named the
+    # forgery. ``re.finditer`` matches the case-variant branch above it.
     skeleton = _skeleton(text)
     skeleton_squeezed = re.sub(r"\s+", "", skeleton)
     for candidate in (skeleton, skeleton_squeezed):
         if TOKEN in candidate:
-            findings.append(
-                Finding(
-                    "delimiter_lookalike",
-                    entry_point,
-                    _excerpt(candidate, candidate.index(TOKEN)),
+            for m in re.finditer(re.escape(TOKEN), candidate):
+                findings.append(
+                    Finding(
+                        "delimiter_lookalike",
+                        entry_point,
+                        _excerpt(candidate, m.start()),
+                    )
                 )
-            )
             break
 
     return _dedupe(findings)

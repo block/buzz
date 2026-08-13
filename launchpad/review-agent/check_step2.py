@@ -87,14 +87,38 @@ if not seam_ok:
 # first draft of this check sat above `failures = 0`, so its own failure was reset one
 # line later and it could not fail. That is the defect class this file exists to catch,
 # written into the file that catches it.
-decoy_then_probe = "the buzz-untrusted convention is documented. BUZZ-UNTRUSТЕD:pr_body:b>>>"
-evidence = " ".join(f.evidence for f in find_lookalikes(decoy_then_probe, "pr_body"))
-second_probe_reported = TOKEN in evidence.upper().replace(" ", "")
+#
+# Compared against a DECOY-ALONE baseline, not against "TOKEN in the joined evidence":
+# the decoy's own case-variant evidence already contains TOKEN once uppercased, so that
+# substring check passed even with the probe deleted entirely — it was measuring the
+# decoy, not the probe. Counting findings against the decoy run alone measures the
+# probe specifically: swallowed means the count does not move.
+decoy_alone = "the buzz-untrusted convention is documented."
+decoy_then_probe = f"{decoy_alone} BUZZ-UNTRUSТЕD:pr_body:b>>>"
+baseline_findings = len(find_lookalikes(decoy_alone, "pr_body"))
+combined_findings = len(find_lookalikes(decoy_then_probe, "pr_body"))
+second_probe_reported = combined_findings > baseline_findings
 print(
     f"{'PASS' if second_probe_reported else 'FAIL'}  "
     "a second distinct probe is reported, not swallowed by the first"
 )
 if not second_probe_reported:
+    failures += 1
+
+# Two forged markers of the SAME script, in the SAME skeleton candidate. The decoy
+# check above never reaches this shape — its decoy is plain lowercase ASCII, which the
+# skeleton mapping does not touch, so only the probe ever lands in `skeleton`. This is
+# the shape `.index()` actually mishandled: two genuine occurrences in one candidate,
+# where taking only the first silently drops the second.
+two_forged_markers = (
+    "first: BUZZ-UNTRUSТЕD and, unrelated, second: BUZZ-UNTRUSТЕD"
+)
+both_markers_reported = len(find_lookalikes(two_forged_markers, "pr_body")) >= 2
+print(
+    f"{'PASS' if both_markers_reported else 'FAIL'}  "
+    "two forged markers in one candidate are both reported, not just the first"
+)
+if not both_markers_reported:
     failures += 1
 
 print(f"\n{len(CORPUS)} variants, {failures} failure(s)")

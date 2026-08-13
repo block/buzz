@@ -99,6 +99,37 @@ MUTATIONS = [
         "boundary probe that is pixel-identical to the real marker passes unreported",
     ),
     (
+        "restore-homoglyph-gate",
+        "contain.py",
+        "    for candidate in (skeleton, skeleton_squeezed):",
+        "    if not findings:\n"
+        "      for candidate in (skeleton, skeleton_squeezed):",
+        "the homoglyph pass is gated on 'nothing found anywhere in the text' again, so "
+        "a benign decoy mention ahead of a forged cross-script marker reports the "
+        "decoy and the real marker never reaches the review",
+    ),
+    (
+        "homoglyph-first-occurrence-only",
+        "contain.py",
+        "            for m in re.finditer(re.escape(TOKEN), candidate):\n"
+        "                findings.append(\n"
+        "                    Finding(\n"
+        '                        "delimiter_lookalike",\n'
+        "                        entry_point,\n"
+        "                        _excerpt(candidate, m.start()),\n"
+        "                    )\n"
+        "                )",
+        "            findings.append(\n"
+        "                Finding(\n"
+        '                    "delimiter_lookalike",\n'
+        "                    entry_point,\n"
+        "                    _excerpt(candidate, candidate.index(TOKEN)),\n"
+        "                )\n"
+        "            )",
+        "only the first forged marker in a candidate is reported, so a second, "
+        "distinct forgery of the same script in the same text is silently dropped",
+    ),
+    (
         "newline-split-restored",
         "detect.py",
         '        joined = re.sub(r"\\s+", " ", " ".join(passage))\n'
