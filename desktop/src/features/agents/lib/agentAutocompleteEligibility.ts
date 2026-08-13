@@ -92,6 +92,25 @@ export function isAgentIdentityInAllowedList(
   );
 }
 
+/**
+ * Managed-list membership alone cannot admit remote agents: managed agents
+ * are never minted from relay events (see apply_inbound_managed_agent), so a
+ * shared relay agent has no local record on this device. Mention candidacy
+ * therefore checks the mentionable set from getMentionableAgentPubkeys —
+ * locally managed agents plus directory-mentionable relay agents, the same
+ * eligibility `useNewMessageRecipients` already trusts. An agent identity
+ * outside that set stays hidden.
+ */
+export function isAgentIdentityMentionable(
+  candidate: { isAgent?: boolean; pubkey: string },
+  mentionableAgentPubkeys: ReadonlySet<string>,
+) {
+  return (
+    candidate.isAgent !== true ||
+    mentionableAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+  );
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,
