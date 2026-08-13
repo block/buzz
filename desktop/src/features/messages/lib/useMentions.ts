@@ -17,9 +17,8 @@ import {
   filterCachedAgentSuggestions,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInAllowedList,
   isAgentMentionChannelType,
-  shouldHideAgentFromMentions,
+  shouldOfferAgentIdentityForMentions,
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -257,16 +256,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)) {
-        return;
-      }
       if (
-        shouldHideAgentFromMentions({
-          isAgent: candidate.isAgent === true,
-          isMember: candidate.isMember === true,
-          pubkey,
+        !shouldOfferAgentIdentityForMentions({
+          candidate: { ...candidate, pubkey },
+          managedAgentPubkeys,
           mentionableAgentPubkeys,
           directoryAgentPubkeys,
+          relayAgentDirectoryReady,
         })
       ) {
         return;
@@ -431,12 +427,14 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
+    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,
     mentionableAgentPubkeys,
     personaNameByPubkey,
     profiles,
+    relayAgentDirectoryReady,
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
   ]);
