@@ -135,6 +135,7 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     useEffect(() {
       void onPositionsChanged() {
+        if (itemPositionsListener.itemPositions.value.isEmpty) return;
         final tailVisible = threadTailIsVisible();
         if (!userOptedOutOfTailFollow.value && tailVisible) {
           followsThreadTail.value = true;
@@ -222,6 +223,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           if (restoreFollow) {
             userOptedOutOfTailFollow.value = false;
             followsThreadTail.value = true;
+            isAtLatest.value = true;
           }
           if (animate) {
             itemScrollController.scrollTo(

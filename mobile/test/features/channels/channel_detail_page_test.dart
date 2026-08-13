@@ -6156,9 +6156,15 @@ void main() {
       await tester.pumpAndSettle();
 
       final list = find.byKey(const ValueKey('thread-message-list'));
-      await tester.drag(list, const Offset(0, 24));
-      await tester.pumpAndSettle();
+      for (var i = 0; i < 8; i++) {
+        await tester.drag(list, const Offset(0, 100));
+        await tester.pumpAndSettle();
+      }
 
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-29')),
+        findsNothing,
+      );
       expect(
         find.byKey(const ValueKey('thread-jump-to-latest')),
         findsOneWidget,
