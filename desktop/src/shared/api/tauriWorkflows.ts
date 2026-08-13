@@ -43,12 +43,23 @@ type RawWorkflowRun = {
   execution_trace: RawTraceEntry[];
   started_at: number | null;
   completed_at: number | null;
+  error_code?: string | null;
   error_message: string | null;
   created_at: number;
 };
 
+type RawWorkflowRunCursor = {
+  before: string;
+  before_id: string;
+};
+
+type RawWorkflowRunsResponse = {
+  runs: RawWorkflowRun[];
+  next: RawWorkflowRunCursor | null;
+};
+
 type RawWorkflowApproval = {
-  token: string;
+  approval_ref: string;
   workflow_id: string;
   run_id: string;
   step_id: string;
@@ -59,6 +70,10 @@ type RawWorkflowApproval = {
   note: string | null;
   expires_at: string;
   created_at: number;
+};
+
+type RawWorkflowApprovalsResponse = {
+  approvals: RawWorkflowApproval[];
 };
 
 type RawTriggerWorkflowResponse = {
@@ -116,6 +131,7 @@ function fromRawWorkflowRun(raw: RawWorkflowRun): WorkflowRun {
     executionTrace: raw.execution_trace.map(fromRawTraceEntry),
     startedAt: raw.started_at,
     completedAt: raw.completed_at,
+    errorCode: raw.error_code ?? null,
     errorMessage: raw.error_message,
     createdAt: raw.created_at,
   };
@@ -123,7 +139,7 @@ function fromRawWorkflowRun(raw: RawWorkflowRun): WorkflowRun {
 
 export function fromRawApproval(raw: RawWorkflowApproval): WorkflowApproval {
   return {
-    token: raw.token,
+    approvalRef: raw.approval_ref,
     workflowId: raw.workflow_id,
     runId: raw.run_id,
     stepId: raw.step_id,
@@ -220,22 +236,25 @@ export async function getWorkflowRuns(
   workflowId: string,
   limit?: number,
 ): Promise<WorkflowRun[]> {
-  const raw = await invokeTauri<RawWorkflowRun[]>("get_workflow_runs", {
+  const raw = await invokeTauri<RawWorkflowRunsResponse>("get_workflow_runs", {
     workflowId,
     limit: limit ?? null,
   });
-  return raw.map(fromRawWorkflowRun);
+  return raw.runs.map(fromRawWorkflowRun);
 }
 
 export async function getRunApprovals(
   workflowId: string,
   runId: string,
 ): Promise<WorkflowApproval[]> {
-  const raw = await invokeTauri<RawWorkflowApproval[]>("get_run_approvals", {
-    workflowId,
-    runId,
-  });
-  return raw.map(fromRawApproval);
+  const raw = await invokeTauri<RawWorkflowApprovalsResponse>(
+    "get_run_approvals",
+    {
+      workflowId,
+      runId,
+    },
+  );
+  return raw.approvals.map(fromRawApproval);
 }
 
 export async function triggerWorkflow(
