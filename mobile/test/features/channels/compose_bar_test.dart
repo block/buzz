@@ -20,6 +20,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/photo_library.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/identity_archive/archived_identities_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -172,6 +173,8 @@ Widget _buildComposeBar({
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
+  Set<String> archivedPubkeys = const <String>{},
+  Future<Set<String>>? archivedPubkeysFuture,
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
@@ -191,6 +194,9 @@ Widget _buildComposeBar({
       ).overrideWith((ref) => membersFuture ?? Future.value(members)),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
+      archivedIdentityPubkeysProvider.overrideWith(
+        (ref) => archivedPubkeysFuture ?? Future.value(archivedPubkeys),
+      ),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
@@ -2890,6 +2896,90 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
+    });
+
+    testWidgets('hides archived agents from mention suggestions', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: signer.nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          currentPubkey: signer.public,
+          archivedPubkeys: {agentPubkey},
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Archived Helper Bot',
+              respondTo: 'anyone',
+              channelIds: const ['shared-channel'],
+            ),
+          ],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+
+      expect(find.text('Archived Helper Bot'), findsNothing);
+    });
+
+    testWidgets('hides mention suggestions while archive state loads', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: signer.nsec,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          currentPubkey: signer.public,
+          archivedPubkeysFuture: Completer<Set<String>>().future,
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Potentially Archived Bot',
+              respondTo: 'anyone',
+              channelIds: const ['shared-channel'],
+            ),
+          ],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pump();
+
+      expect(find.text('Potentially Archived Bot'), findsNothing);
     });
 
     testWidgets('adds a selected non-member agent as a bot before sending', (

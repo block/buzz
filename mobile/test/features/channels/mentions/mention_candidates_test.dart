@@ -78,6 +78,28 @@ void main() {
   });
 
   group('buildMentionCandidates', () {
+    test('excludes archived identities but keeps the current user', () {
+      final archivedMember = '4' * 64;
+      final archivedAgent = '5' * 64;
+      final candidates = buildMentionCandidates(
+        members: [member(archivedMember), member(userPubkey)],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: archivedAgent,
+            respondTo: 'anyone',
+            channelIds: const ['chan-1'],
+          ),
+        ],
+        sharedChannelIds: const {'chan-1'},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        archivedPubkeys: {archivedMember, archivedAgent, userPubkey},
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates.map((candidate) => candidate.pubkey), [userPubkey]);
+    });
+
     test('members come first; eligible non-member agents follow', () {
       final candidates = buildMentionCandidates(
         members: [member(memberPubkey), member(userPubkey)],
