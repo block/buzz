@@ -119,12 +119,26 @@ Content-Type: application/json
   {
     "kinds": [44300, 44301, 44302],
     "#p": ["<authenticated owner pubkey>"],
+    "#h": ["<accessible channel UUID>"],
+    "limit": 50
+  },
+  {
+    "kinds": [5, 9005],
+    "#h": ["<accessible channel UUID>"],
     "limit": 50
   }
 ]
 ```
 
-Clients fold each task's events by `sourceVersion` using the replay rules above.
+Clients fold task events by `sourceVersion` using the replay rules above. The
+deletion kinds use a separate filter because standard NIP-09 deletions can be
+channel-less (kind 5 derives channel access from its target) and are not
+`p`-tagged task payloads. A client applies a deletion only to an `e`-tag target
+that is one of the task events in its local owner fold; unrelated channel
+deletions are ignored. The relay's normal NIP-42/NIP-98 authentication, target
+channel membership, and per-result gates still apply. A deletion event is only
+a live invalidation signal, never a task-content or access grant. A full
+historical read remains the recovery path after a missed live deletion.
 To continue a bridge page, echo the last event's complete deterministic cursor:
 `until = created_at` and `before_id = event id`. Results are ordered by
 `(created_at DESC, id ASC)` and the keyset predicate is

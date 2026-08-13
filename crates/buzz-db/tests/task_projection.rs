@@ -537,6 +537,50 @@ async fn deleting_task_events_replays_projection_from_remaining_live_events() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn equal_version_replay_keeps_the_persisted_projection_winner() {
+    let fixture = Fixture::new().await;
+    let task_id = Uuid::new_v4();
+    let base = Utc::now().timestamp() as u64;
+    let requested = fixture.task_event(KIND_TASK_REQUESTED, task_id, 1, "Version one", base);
+    let resolved = fixture.task_event(KIND_TASK_RESOLVED, task_id, 2, "", base + 1);
+    let competing_update =
+        fixture.task_event(KIND_TASK_UPDATED, task_id, 2, "Equal loser", base + 2);
+
+    fixture.apply(&requested).await.unwrap();
+    fixture.apply(&resolved).await.unwrap();
+    fixture.apply(&competing_update).await.unwrap();
+
+    let winner: Vec<u8> =
+        sqlx::query_scalar("SELECT task_event_id FROM buzz_tasks WHERE community_id=$1 AND id=$2")
+            .bind(fixture.community.as_uuid())
+            .bind(task_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(winner, resolved.id.as_bytes());
+
+    assert!(soft_delete_task_event_and_rebuild_projection(
+        &fixture.pool,
+        fixture.community,
+        competing_update.id.as_bytes(),
+    )
+    .await
+    .unwrap());
+    let state: (String, i64, String) = sqlx::query_as(
+        "SELECT status, source_version, title FROM buzz_tasks WHERE community_id=$1 AND id=$2",
+    )
+    .bind(fixture.community.as_uuid())
+    .bind(task_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, ("resolved".into(), 2, "Version one".into()));
+
+    fixture.teardown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn source_message_identity_is_checked_inside_the_atomic_write() {
     let fixture = Fixture::new().await;
     let now = Utc::now().timestamp() as u64;

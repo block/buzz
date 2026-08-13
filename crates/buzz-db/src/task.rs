@@ -351,6 +351,7 @@ struct ProjectionIdentity {
     source_version: i64,
     source_updated_at: DateTime<Utc>,
     source_created_at: DateTime<Utc>,
+    pub(crate) task_event_id: Vec<u8>,
     created_at: DateTime<Utc>,
 }
 
@@ -361,7 +362,7 @@ async fn select_projection_identity(
 ) -> Result<Option<ProjectionIdentity>> {
     let row = sqlx::query(
         "SELECT assignee_pubkey, channel_id, source_event_id, agent_pubkey, status, \
-                source_version, source_updated_at, source_created_at, created_at \
+                source_version, source_updated_at, source_created_at, task_event_id, created_at \
          FROM buzz_tasks WHERE community_id=$1 AND id=$2 FOR UPDATE",
     )
     .bind(community_id.as_uuid())
@@ -378,6 +379,7 @@ async fn select_projection_identity(
             source_version: row.try_get("source_version")?,
             source_updated_at: row.try_get("source_updated_at")?,
             source_created_at: row.try_get("source_created_at")?,
+            task_event_id: row.try_get("task_event_id")?,
             created_at: row.try_get("created_at")?,
         })
     })
@@ -541,10 +543,29 @@ pub async fn soft_delete_task_event_and_rebuild_projection(
                 .payload
                 .source_version()
                 .cmp(&right_task.payload.source_version())
+                .then_with(|| {
+                    right_event
+                        .event
+                        .id
+                        .as_bytes()
+                        .eq(existing.task_event_id.as_slice())
+                        .cmp(
+                            &left_event
+                                .event
+                                .id
+                                .as_bytes()
+                                .eq(existing.task_event_id.as_slice()),
+                        )
+                })
                 .then_with(|| left_event.received_at.cmp(&right_event.received_at))
                 .then_with(|| left_event.event.id.cmp(&right_event.event.id))
         });
 
+        // Equal sourceVersion transitions are accepted as signed audit events,
+        // but the projection keeps the winner selected by the serialized write
+        // path. The persisted task_event_id above is therefore the tie-breaker
+        // during replay, so deleting a different equal-version loser cannot
+        // flip the projection.
         let folded = fold_live_projection(live)?;
         sqlx::query("DELETE FROM buzz_tasks WHERE community_id=$1 AND id=$2")
             .bind(community_id.as_uuid())
