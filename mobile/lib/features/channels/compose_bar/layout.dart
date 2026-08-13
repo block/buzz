@@ -19,6 +19,7 @@ class _ComposeBarLayout extends StatelessWidget {
   final bool formattingOpen;
   final VoidCallback onCloseFormatting;
   final Duration motionDuration;
+  final Duration resizeDuration;
   final void Function(String prefix, [String? suffix]) onFormat;
   final VoidCallback onMention;
   final VoidCallback onChannel;
@@ -47,6 +48,7 @@ class _ComposeBarLayout extends StatelessWidget {
     required this.formattingOpen,
     required this.onCloseFormatting,
     required this.motionDuration,
+    required this.resizeDuration,
     required this.onFormat,
     required this.onMention,
     required this.onChannel,
@@ -105,34 +107,18 @@ class _ComposeBarLayout extends StatelessWidget {
           // Keep the default state out of the focus system entirely so
           // restored native focus cannot expand a newly opened channel.
           if (isExpanded)
-            TextField(
-              controller: controller,
-              focusNode: focusNode,
-              textInputAction: TextInputAction.send,
-              contextMenuBuilder: contextMenuBuilder,
-              contentInsertionConfiguration: ContentInsertionConfiguration(
-                allowedMimeTypes: _pastedImageMimeTypes,
-                onContentInserted: onContentInserted,
-              ),
-              onSubmitted: (_) => onSend(),
-              minLines: 1,
-              maxLines: 5,
-              style: context.textTheme.bodyLarge,
-              decoration: InputDecoration(
-                hintText: resolvedHint,
-                hintStyle: context.textTheme.bodyLarge?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                ),
-                border: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: Grid.half,
-                  vertical: Grid.half,
-                ),
-                isDense: true,
-              ),
-            )
+            resizeDuration == Duration.zero
+                ? KeyedSubtree(
+                    key: const ValueKey('composer-text-height-motion'),
+                    child: _buildTextField(context),
+                  )
+                : AnimatedSize(
+                    key: const ValueKey('composer-text-height-motion'),
+                    alignment: Alignment.topCenter,
+                    duration: resizeDuration,
+                    curve: Curves.easeOutCubic,
+                    child: _buildTextField(context),
+                  )
           else
             Row(
               children: [
@@ -260,6 +246,43 @@ class _ComposeBarLayout extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTextField(BuildContext context) {
+    return TextField(
+      controller: controller,
+      focusNode: focusNode,
+      keyboardType: TextInputType.multiline,
+      textInputAction: TextInputAction.newline,
+      contextMenuBuilder: contextMenuBuilder,
+      // Flutter's Cupertino magnifier rebuilds its overlay on every
+      // selection-handle update. Keep the iOS handles and native edit menu,
+      // but let the handles track the finger directly here.
+      magnifierConfiguration: defaultTargetPlatform == TargetPlatform.iOS
+          ? TextMagnifierConfiguration.disabled
+          : null,
+      contentInsertionConfiguration: ContentInsertionConfiguration(
+        allowedMimeTypes: _pastedImageMimeTypes,
+        onContentInserted: onContentInserted,
+      ),
+      minLines: 1,
+      maxLines: 5,
+      style: context.textTheme.bodyLarge,
+      decoration: InputDecoration(
+        hintText: resolvedHint,
+        hintStyle: context.textTheme.bodyLarge?.copyWith(
+          color: context.colors.onSurfaceVariant,
+        ),
+        border: InputBorder.none,
+        enabledBorder: InputBorder.none,
+        focusedBorder: InputBorder.none,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: Grid.half,
+          vertical: Grid.half,
+        ),
+        isDense: true,
       ),
     );
   }

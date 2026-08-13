@@ -42,7 +42,11 @@ void _useComposeDraftLifecycle({
       controller.text = saved;
     }
 
+    var lastPersistedText = controller.text;
     void persistDraft() {
+      final text = controller.text;
+      if (text == lastPersistedText) return;
+      lastPersistedText = text;
       draftRevision.value += 1;
       ref
           .read(composeDraftsProvider.notifier)
@@ -50,7 +54,7 @@ void _useComposeDraftLifecycle({
             key: draftKey,
             channelId: channelId,
             threadHeadId: threadHeadId,
-            text: controller.text,
+            text: text,
           );
     }
 
