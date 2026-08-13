@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createInputForTeamPersonaDeploy,
+  isTeamDeploySourceReady,
   runtimeForTeamPersonaDeploy,
   sourceAgentForPersona,
 } from "./teamDeployRuntime.ts";
@@ -48,62 +50,140 @@ function managedAgent(overrides = {}) {
     pubkey: "aa",
     personaId: "p-1",
     teamId: null,
-    agentCommandOverride: "/home/user/.local/bin/openclaw-acp-buzz",
-    mcpCommand: "openclaw-mcp",
+    backend: { type: "local" },
+    agentCommandOverride: "goose-cmd",
+    agentArgs: ["--acp"],
+    mcpCommand: "ignored-by-create",
     ...overrides,
   };
 }
 
-test("team deploy copies personal agent_command_override and sets harnessOverride", () => {
-  const result = runtimeForTeamPersonaDeploy({
+test("delayed managed-agents query blocks deploy until fetched", () => {
+  assert.deepEqual(
+    isTeamDeploySourceReady({
+      isPending: true,
+      isError: false,
+      isFetched: false,
+    }),
+    { ready: false, blockReason: "loading" },
+  );
+  assert.deepEqual(
+    isTeamDeploySourceReady({
+      isPending: false,
+      isError: true,
+      isFetched: true,
+    }),
+    { ready: false, blockReason: "error" },
+  );
+  assert.deepEqual(
+    isTeamDeploySourceReady({
+      isPending: false,
+      isError: false,
+      isFetched: true,
+    }),
+    { ready: true, blockReason: null },
+  );
+});
+
+test("team deploy copies a local pin onto create command, args, and harnessOverride", () => {
+  const plan = runtimeForTeamPersonaDeploy({
     persona: persona(),
     runtimes: [gooseRuntime, buzzAgentRuntime],
     defaultProvider: buzzAgentRuntime,
     managedAgents: [managedAgent()],
   });
-  assert.ok(result);
-  assert.equal(result.harnessOverride, true);
-  assert.equal(result.runtime.command, "/home/user/.local/bin/openclaw-acp-buzz");
-  assert.equal(result.runtime.id, "custom");
-  assert.equal(result.runtime.mcpCommand, "openclaw-mcp");
+  assert.equal(plan.status, "ready");
+  if (plan.status !== "ready") {
+    return;
+  }
+  const create = createInputForTeamPersonaDeploy({
+    persona: persona(),
+    teamId: "team-1",
+    plan,
+  });
+  assert.equal(create.agentCommand, "goose-cmd");
+  assert.equal(create.harnessOverride, true);
+  assert.deepEqual(create.agentArgs, ["--acp"]);
+  assert.equal(create.backend?.type, "local");
+  assert.equal(
+    "mcpCommand" in create,
+    false,
+    "create must not send mcpCommand — backend derives MCP from the catalog command",
+  );
 });
 
-test("team deploy matches an available runtime by command and keeps that id", () => {
-  const result = runtimeForTeamPersonaDeploy({
+test("unresolved local pin is Setup required, not a silent default fallback", () => {
+  const plan = runtimeForTeamPersonaDeploy({
     persona: persona(),
     runtimes: [gooseRuntime, buzzAgentRuntime],
     defaultProvider: buzzAgentRuntime,
-    managedAgents: [managedAgent({ agentCommandOverride: "goose-cmd" })],
+    managedAgents: [
+      managedAgent({
+        agentCommandOverride: "/home/user/.local/bin/openclaw-acp-buzz",
+        agentArgs: ["--acp"],
+      }),
+    ],
   });
-  assert.ok(result);
-  assert.equal(result.harnessOverride, true);
-  assert.equal(result.runtime.id, "goose");
-  assert.equal(result.runtime.command, "goose-cmd");
+  assert.equal(plan.status, "setup-required");
+  if (plan.status !== "setup-required") {
+    return;
+  }
+  assert.match(plan.reason, /Setup required/);
 });
 
-test("team deploy without override falls back to persona runtime", () => {
-  const result = runtimeForTeamPersonaDeploy({
+test("team deploy without override falls back to persona runtime with empty args", () => {
+  const plan = runtimeForTeamPersonaDeploy({
     persona: persona(),
     runtimes: [gooseRuntime, buzzAgentRuntime],
     defaultProvider: buzzAgentRuntime,
-    managedAgents: [managedAgent({ agentCommandOverride: null })],
+    managedAgents: [managedAgent({ agentCommandOverride: null, agentArgs: [] })],
   });
-  assert.ok(result);
-  assert.equal(result.harnessOverride, false);
-  assert.equal(result.runtime.id, "goose");
+  assert.equal(plan.status, "ready");
+  if (plan.status !== "ready") {
+    return;
+  }
+  assert.equal(plan.harnessOverride, false);
+  assert.equal(plan.runtime.id, "goose");
+  assert.deepEqual(plan.agentArgs, []);
 });
 
-test("sourceAgentForPersona prefers the personal instance that has an override", () => {
+test("sourceAgentForPersona ignores provider-backed and team clones", () => {
   const source = sourceAgentForPersona(
     [
+      managedAgent({
+        pubkey: "remote",
+        backend: { type: "provider", id: "blox", config: {} },
+        agentCommandOverride: "/remote/openclaw",
+      }),
       managedAgent({ pubkey: "team-clone", teamId: "t-1" }),
       managedAgent({
         pubkey: "plain",
         agentCommandOverride: null,
+        agentArgs: [],
       }),
       managedAgent({ pubkey: "pinned" }),
     ],
     "p-1",
   );
   assert.equal(source?.pubkey, "pinned");
+});
+
+test("provider-backed pin is not copied onto a local clone", () => {
+  const plan = runtimeForTeamPersonaDeploy({
+    persona: persona(),
+    runtimes: [gooseRuntime, buzzAgentRuntime],
+    defaultProvider: buzzAgentRuntime,
+    managedAgents: [
+      managedAgent({
+        backend: { type: "provider", id: "blox", config: {} },
+        agentCommandOverride: "/remote/openclaw",
+      }),
+    ],
+  });
+  assert.equal(plan.status, "ready");
+  if (plan.status !== "ready") {
+    return;
+  }
+  assert.equal(plan.harnessOverride, false);
+  assert.equal(plan.runtime.id, "goose");
 });

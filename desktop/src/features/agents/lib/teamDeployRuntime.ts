@@ -1,4 +1,9 @@
-import type { AcpRuntime, AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AcpRuntime,
+  AgentPersona,
+  CreateManagedAgentInput,
+  ManagedAgent,
+} from "@/shared/api/types";
 import {
   getDefaultPersonaRuntime,
   resolvePersonaRuntime,
@@ -9,23 +14,42 @@ export type TeamDeployRuntimePick = Pick<
   "id" | "label" | "command" | "defaultArgs" | "mcpCommand"
 >;
 
-export type TeamPersonaDeployRuntime = {
+export type TeamPersonaDeployReady = {
+  status: "ready";
   runtime: TeamDeployRuntimePick;
   harnessOverride: boolean;
+  agentArgs: string[];
+};
+
+export type TeamPersonaDeploySetupRequired = {
+  status: "setup-required";
+  reason: string;
+};
+
+export type TeamPersonaDeployPlan =
+  | TeamPersonaDeployReady
+  | TeamPersonaDeploySetupRequired;
+
+export type TeamDeploySourceQuery = {
+  isPending: boolean;
+  isError: boolean;
+  isFetched: boolean;
 };
 
 /**
- * Prefer the personal (non-team) instance's explicit harness pin when
- * minting a team clone. Team deploy has no runtime selector, so without
- * this the clone falls back to `resolvePersonaRuntime` + the global
- * default and silently drops `agent_command_override`.
+ * Personal (non-team) **local** instance for this persona. Provider-backed
+ * agents are not portable runtime intent: their command/path is an execution
+ * target, not a harness pin we can mint onto a new local clone.
  */
 export function sourceAgentForPersona(
   managedAgents: readonly ManagedAgent[],
   personaId: string,
 ): ManagedAgent | undefined {
   const matches = managedAgents.filter(
-    (agent) => agent.personaId === personaId && !agent.teamId,
+    (agent) =>
+      agent.personaId === personaId &&
+      !agent.teamId &&
+      agent.backend?.type === "local",
   );
   return (
     matches.find((agent) => Boolean(agent.agentCommandOverride?.trim())) ??
@@ -33,30 +57,47 @@ export function sourceAgentForPersona(
   );
 }
 
+export function isTeamDeploySourceReady(
+  query: TeamDeploySourceQuery,
+): { ready: boolean; blockReason: "loading" | "error" | null } {
+  if (query.isPending || !query.isFetched) {
+    return { ready: false, blockReason: "loading" };
+  }
+  if (query.isError) {
+    return { ready: false, blockReason: "error" };
+  }
+  return { ready: true, blockReason: null };
+}
+
+/**
+ * Prefer the personal local instance's explicit harness pin when minting a
+ * team clone. Team deploy has no runtime selector. An unresolved pin must
+ * fail with Setup required instead of silently falling back to the global
+ * default (block/buzz#5694).
+ */
 export function runtimeForTeamPersonaDeploy(input: {
   persona: AgentPersona;
   runtimes: readonly AcpRuntime[];
   defaultProvider: AcpRuntime | undefined;
   managedAgents: readonly ManagedAgent[];
-}): TeamPersonaDeployRuntime | null {
+}): TeamPersonaDeployPlan {
   const source = sourceAgentForPersona(input.managedAgents, input.persona.id);
   const override = source?.agentCommandOverride?.trim();
   if (override) {
     const matching = input.runtimes.find(
       (runtime) => runtime.command === override || runtime.id === override,
     );
-    if (matching) {
-      return { runtime: matching, harnessOverride: true };
+    if (!matching) {
+      return {
+        status: "setup-required",
+        reason: `Setup required: ${input.persona.displayName}'s pinned runtime is not available locally.`,
+      };
     }
     return {
-      runtime: {
-        id: "custom",
-        label: override,
-        command: override,
-        defaultArgs: [],
-        mcpCommand: source?.mcpCommand || "",
-      },
+      status: "ready",
+      runtime: matching,
       harnessOverride: true,
+      agentArgs: [...(source?.agentArgs ?? [])],
     };
   }
 
@@ -67,9 +108,73 @@ export function runtimeForTeamPersonaDeploy(input: {
   );
   const runtime = personaRuntime ?? input.defaultProvider;
   if (!runtime) {
-    return null;
+    return {
+      status: "setup-required",
+      reason: `Setup required: no local runtime is available for ${input.persona.displayName}.`,
+    };
   }
-  return { runtime, harnessOverride: false };
+  return {
+    status: "ready",
+    runtime,
+    harnessOverride: false,
+    agentArgs: [],
+  };
+}
+
+/**
+ * Create-input fields that `provisionChannelManagedAgent` must forward so
+ * spawn derives command/args/MCP from the same pin the source local agent
+ * used. `mcpCommand` is omitted: create derives MCP from the catalog by
+ * command and ignores the request field.
+ */
+export function createInputForTeamPersonaDeploy(input: {
+  persona: AgentPersona;
+  teamId: string;
+  plan: TeamPersonaDeployReady;
+}): Pick<
+  CreateManagedAgentInput,
+  | "agentCommand"
+  | "harnessOverride"
+  | "agentArgs"
+  | "backend"
+  | "personaId"
+  | "teamId"
+  | "name"
+> {
+  return {
+    name: input.persona.displayName,
+    personaId: input.persona.id,
+    teamId: input.teamId,
+    agentCommand: input.plan.runtime.command,
+    harnessOverride: input.plan.harnessOverride,
+    agentArgs: input.plan.agentArgs,
+    backend: { type: "local" },
+  };
+}
+
+export function runtimeLabelForTeamDeployPlan(
+  plan: TeamPersonaDeployPlan | undefined,
+  sourceBlockReason: "loading" | "error" | null,
+): string {
+  if (!plan) {
+    if (sourceBlockReason === "loading") {
+      return "Loading runtime…";
+    }
+    if (sourceBlockReason === "error") {
+      return "Runtime unavailable";
+    }
+    return "Runtime pending";
+  }
+  switch (plan.status) {
+    case "ready":
+      return plan.runtime.label;
+    case "setup-required":
+      return "Setup required";
+    default: {
+      const _exhaustive: never = plan;
+      return _exhaustive;
+    }
+  }
 }
 
 export function defaultTeamDeployRuntime(
