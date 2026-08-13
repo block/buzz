@@ -237,6 +237,14 @@ def find_lookalikes(text: str, entry_point: str) -> list[Finding]:
     # marker reported the decoy and left the real probe out of the evidence entirely —
     # the count of findings looked right, but nothing in the published review named the
     # forgery. ``re.finditer`` matches the case-variant branch above it.
+    #
+    # **Both candidates, not just the first that matches.** ``break`` stopped after
+    # ``skeleton`` won, so a benign mention that lands in ``skeleton`` (spacing intact)
+    # still hid a genuine letter-spaced forgery that only ``skeleton_squeezed`` can see
+    # (spacing removed) — the identical swallowed-forgery harm the fix above closed, one
+    # level up. Scanning both is the cost of one extra near-duplicate Blocker on the
+    # common case where a single unspaced forgery matches both candidates; ``_dedupe``
+    # collapses what it can, and the rest is noise, not silence.
     skeleton = _skeleton(text)
     skeleton_squeezed = re.sub(r"\s+", "", skeleton)
     for candidate in (skeleton, skeleton_squeezed):
@@ -249,7 +257,6 @@ def find_lookalikes(text: str, entry_point: str) -> list[Finding]:
                         _excerpt(candidate, m.start()),
                     )
                 )
-            break
 
     return _dedupe(findings)
 

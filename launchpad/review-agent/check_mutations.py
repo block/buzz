@@ -130,6 +130,20 @@ MUTATIONS = [
         "distinct forgery of the same script in the same text is silently dropped",
     ),
     (
+        "restore-skeleton-candidate-break",
+        "contain.py",
+        "                )\n"
+        "\n"
+        "    return _dedupe(findings)",
+        "                )\n"
+        "            break\n"
+        "\n"
+        "    return _dedupe(findings)",
+        "stops scanning after the first winning candidate (skeleton vs "
+        "skeleton_squeezed), so a decoy that lands in one hides a genuine "
+        "letter-spaced forgery that only the OTHER candidate can see",
+    ),
+    (
         "newline-split-restored",
         "detect.py",
         '        joined = re.sub(r"\\s+", " ", " ".join(passage))\n'
