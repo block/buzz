@@ -72,6 +72,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
+        // Buzz Tasks PR 1: owner-private, read-only projection surface.
+        .route("/api/buzz-tasks", get(api::tasks::list_tasks))
+        .route("/api/buzz-tasks/{task_id}", get(api::tasks::get_task))
         .route(
             "/operator/communities",
             get(api::operator::list_owned_communities).post(api::operator::provision_community),

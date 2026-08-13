@@ -219,9 +219,9 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005 + 0009).
+    -- Keep in sync with migrations (final state: 0001 + FTS privacy migrations through 0031).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200, 44300, 44301, 44302) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,
@@ -277,6 +277,58 @@ CREATE INDEX idx_events_not_before ON events (community_id, not_before)
 -- stays a single-column GIN. The search lane confirms the final spelling with
 -- EXPLAIN before its work lands (Quinn option A; Max's index-spelling caveat).
 CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
+
+-- ── Buzz Tasks projection ────────────────────────────────────────────────────
+-- Rebuildable owner-private read model derived atomically from kinds
+-- 44300/44301/44302. Source identity is stored as tenant + channel + event id;
+-- the buzz:// navigation URL is built only after API authorization.
+
+CREATE TABLE buzz_tasks (
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+    id UUID NOT NULL,
+    assignee_pubkey BYTEA NOT NULL CHECK (length(assignee_pubkey) = 32),
+    channel_id UUID NOT NULL,
+    source_event_id BYTEA NOT NULL CHECK (length(source_event_id) = 32),
+    agent_pubkey BYTEA NOT NULL CHECK (length(agent_pubkey) = 32),
+    agent_name TEXT NOT NULL CHECK (octet_length(agent_name) BETWEEN 1 AND 100),
+    task_type TEXT NOT NULL CHECK (task_type IN ('reply', 'approval', 'choice', 'review')),
+    title TEXT NOT NULL CHECK (octet_length(title) BETWEEN 1 AND 200),
+    context TEXT CHECK (context IS NULL OR octet_length(context) BETWEEN 1 AND 500),
+    priority TEXT NOT NULL CHECK (priority IN ('low', 'medium', 'high')),
+    due_at TIMESTAMPTZ,
+    status TEXT NOT NULL CHECK (status IN ('open', 'resolved', 'withdrawn')),
+    source_created_at TIMESTAMPTZ NOT NULL,
+    source_version BIGINT NOT NULL CHECK (source_version > 0),
+    source_updated_at TIMESTAMPTZ NOT NULL,
+    resolved_at TIMESTAMPTZ,
+    task_event_id BYTEA NOT NULL CHECK (length(task_event_id) = 32),
+    task_event_created_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, id),
+    FOREIGN KEY (community_id, channel_id)
+        REFERENCES channels(community_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, assignee_pubkey)
+        REFERENCES users(community_id, pubkey) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, agent_pubkey)
+        REFERENCES users(community_id, pubkey) ON DELETE CASCADE,
+    UNIQUE (community_id, channel_id, source_event_id, assignee_pubkey),
+    CHECK (
+        (status = 'open' AND resolved_at IS NULL)
+        OR (status IN ('resolved', 'withdrawn') AND resolved_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX buzz_tasks_owner_status_sort
+    ON buzz_tasks (
+        community_id,
+        assignee_pubkey,
+        status,
+        priority,
+        due_at,
+        source_created_at DESC,
+        id
+    );
 
 -- ── Event mentions ────────────────────────────────────────────────────────────
 -- Conformance: "Channel-less global events and DMs" (#p fan-out). The join to
@@ -1642,6 +1694,7 @@ $$;
 SELECT attach_community_write_fence('api_tokens');
 SELECT attach_community_write_fence('archived_identities');
 SELECT attach_community_write_fence('audit_log');
+SELECT attach_community_write_fence('buzz_tasks');
 SELECT attach_community_write_fence('channel_members');
 SELECT attach_community_write_fence('channels');
 SELECT attach_community_write_fence('community_bans');

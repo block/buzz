@@ -47,6 +47,8 @@ pub mod relay_invite;
 pub mod relay_members;
 /// Replica freshness fence for keyset-cursor read routing.
 pub mod replica_fence;
+/// Rebuildable Buzz Tasks read projection.
+pub mod task;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.
@@ -2241,6 +2243,47 @@ impl Db {
             }
         }
         Ok(result)
+    }
+
+    /// Atomically store a signed Buzz Task event and update its owner-private projection.
+    #[datastore_span(name = "insert_task_event_with_projection", system = "postgresql")]
+    pub async fn insert_task_event_with_projection(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        task: &buzz_core::task::TaskEventV1,
+    ) -> Result<task::TaskProjectionOutcome> {
+        task::insert_task_event_with_projection(&self.pool, community_id, event, task).await
+    }
+
+    /// Fetch one projected task for its signed owner in one community.
+    #[datastore_span(name = "get_task_for_owner", system = "postgresql")]
+    pub async fn get_task_for_owner(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+        task_id: Uuid,
+    ) -> Result<Option<task::TaskRecord>> {
+        task::get_task_for_owner(&self.pool, community_id, owner_pubkey, task_id).await
+    }
+
+    /// List projected tasks for an owner within their current channel access set.
+    #[datastore_span(name = "list_tasks_for_owner", system = "postgresql")]
+    pub async fn list_tasks_for_owner(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+        accessible_channel_ids: &[Uuid],
+        query: &task::TaskListQuery,
+    ) -> Result<Vec<task::TaskRecord>> {
+        task::list_tasks_for_owner(
+            &self.pool,
+            community_id,
+            owner_pubkey,
+            accessible_channel_ids,
+            query,
+        )
+        .await
     }
 
     /// Atomically insert a kind:7 reaction event and its reaction row.

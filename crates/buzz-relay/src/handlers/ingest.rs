@@ -31,11 +31,13 @@ use buzz_core::kind::{
     KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
     KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
     KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER,
+    KIND_TASK_REQUESTED, KIND_TASK_RESOLVED, KIND_TASK_UPDATED, KIND_TEAM, KIND_TEAM_CATALOG,
+    KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
+use buzz_core::task::TaskEventV1;
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
@@ -339,6 +341,18 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
     }
 }
 
+fn map_task_projection_error(error: buzz_db::DbError) -> IngestError {
+    match error {
+        buzz_db::DbError::AccessDenied(reason) => {
+            IngestError::AuthFailed(format!("restricted: {reason}"))
+        }
+        buzz_db::DbError::InvalidData(reason) | buzz_db::DbError::NotFound(reason) => {
+            IngestError::Rejected(format!("invalid: {reason}"))
+        }
+        other => IngestError::Internal(format!("error: task projection failed: {other}")),
+    }
+}
+
 /// Determine the required scope for a given event kind.
 ///
 /// Returns `Err` for unknown kinds — the relay rejects them.
@@ -389,7 +403,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_DIFF
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
-        | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
+        | KIND_FORUM_COMMENT
+        | KIND_TASK_REQUESTED
+        | KIND_TASK_UPDATED
+        | KIND_TASK_RESOLVED => Ok(Scope::MessagesWrite),
         KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
             Ok(Scope::AdminChannels)
         }
@@ -624,6 +641,9 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
             | KIND_FORUM_COMMENT
+            | KIND_TASK_REQUESTED
+            | KIND_TASK_UPDATED
+            | KIND_TASK_RESOLVED
             // NIP-29 admin kinds (except CREATE_GROUP which creates the channel)
             | KIND_NIP29_PUT_USER
             | KIND_NIP29_REMOVE_USER
@@ -2332,6 +2352,57 @@ async fn ingest_event_inner(
         }
     }
 
+    let task_event =
+        if [KIND_TASK_REQUESTED, KIND_TASK_UPDATED, KIND_TASK_RESOLVED].contains(&kind_u32) {
+            let task = TaskEventV1::parse(&event)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+            let agent_bytes = task.agent_pubkey.to_bytes();
+            let owner_bytes = task.owner_pubkey.to_bytes();
+            let owner_matches = state
+                .db
+                .is_agent_owner(
+                    tenant.community(),
+                    agent_bytes.as_slice(),
+                    owner_bytes.as_slice(),
+                )
+                .await
+                .map_err(|error| {
+                    IngestError::Internal(format!("error: task owner validation failed: {error}"))
+                })?;
+            if !owner_matches {
+                return Err(IngestError::AuthFailed(
+                    "restricted: task p tag must be the registered owner of the task agent".into(),
+                ));
+            }
+
+            let agent_is_member = state
+                .db
+                .is_member(tenant.community(), task.channel_id, agent_bytes.as_slice())
+                .await
+                .map_err(|error| {
+                    IngestError::Internal(format!(
+                        "error: task agent membership check failed: {error}"
+                    ))
+                })?;
+            let owner_is_member = state
+                .db
+                .is_member(tenant.community(), task.channel_id, owner_bytes.as_slice())
+                .await
+                .map_err(|error| {
+                    IngestError::Internal(format!(
+                        "error: task owner membership check failed: {error}"
+                    ))
+                })?;
+            if !agent_is_member || !owner_is_member {
+                return Err(IngestError::AuthFailed(
+                    "restricted: task agent and owner must both be channel members".into(),
+                ));
+            }
+            Some(task)
+        } else {
+            None
+        };
+
     // Handled directly — these mutate relay_members and do NOT get stored.
     // The handler enforces the durable community ban itself: the write-path
     // gate above exempts relay-admin kinds so timed-out admins keep their
@@ -2909,6 +2980,60 @@ async fn ingest_event_inner(
         });
     }
 
+    if let Some(task) = task_event.as_ref() {
+        let outcome = state
+            .db
+            .insert_task_event_with_projection(tenant.community(), &event, task)
+            .await
+            .map_err(map_task_projection_error)?;
+        if outcome == buzz_db::task::TaskProjectionOutcome::DuplicateEvent {
+            return Ok(IngestResult {
+                event_id: event_id_hex,
+                accepted: true,
+                message: "duplicate:".into(),
+            });
+        }
+
+        let stored_event = state
+            .db
+            .get_event_by_id(tenant.community(), event.id.as_bytes())
+            .await
+            .map_err(|error| {
+                IngestError::Internal(format!("error: task event reload failed: {error}"))
+            })?
+            .ok_or_else(|| {
+                IngestError::Internal(
+                    "error: committed task event was not found for dispatch".into(),
+                )
+            })?;
+        emit(
+            tracer,
+            TraceAction::WriteInsert {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                channel: channel_label(task.channel_id),
+                claimed_community: claimed_community_from_event(&event),
+            },
+            state_for_request(tenant, auth.pubkey()),
+        );
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &stored_event,
+            kind_u32,
+            &auth.pubkey().to_hex(),
+            threaded_visibility.clone(),
+        )
+        .await;
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: match outcome {
+                buzz_db::task::TaskProjectionOutcome::Stale => "stale:".into(),
+                _ => String::new(),
+            },
+        });
+    }
+
     let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
@@ -3078,6 +3203,19 @@ mod tests {
             .expect("sign reaction");
 
         assert!(validate_reaction_emoji(&event, &event.content).is_ok());
+    }
+
+    #[test]
+    fn task_kinds_require_message_write_scope_and_channel_identity() {
+        let event = make_dummy_event();
+        for kind in [KIND_TASK_REQUESTED, KIND_TASK_UPDATED, KIND_TASK_RESOLVED] {
+            assert_eq!(
+                required_scope_for_kind(kind, &event).unwrap(),
+                Scope::MessagesWrite
+            );
+            assert!(requires_h_channel_scope(kind));
+            assert!(!is_global_only_kind(kind));
+        }
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub mod presence;
 pub mod private_managed_agent;
 /// Canonical relay runtime identities.
 pub mod relay;
+/// Buzz Tasks v1 event payloads, private envelope validation, and navigation targets.
+pub mod task;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// Schnorr signature and event ID verification.

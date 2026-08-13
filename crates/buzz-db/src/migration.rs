@@ -625,7 +625,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 30);
+        assert_eq!(migrations.len(), 31);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1036,6 +1036,16 @@ mod tests {
         assert_eq!(migrations[29].version, 30);
         let deletion_recovery = migrations[29].sql.as_str();
         assert!(deletion_recovery.contains("SET LOCAL lock_timeout = '5s'"));
+
+        // Buzz Tasks projection and its FTS privacy exclusion are additive.
+        assert_eq!(migrations[30].version, 31);
+        let buzz_tasks = migrations[30].sql.as_str();
+        assert!(buzz_tasks.contains("CREATE TABLE buzz_tasks"));
+        assert!(buzz_tasks
+            .contains("UNIQUE (community_id, channel_id, source_event_id, assignee_pubkey)"));
+        assert!(buzz_tasks.contains("kind IN (44300, 44301, 44302)"));
+        assert!(buzz_tasks.contains("attach_community_write_fence('buzz_tasks')"));
+        assert!(desired_schema.contains("CREATE TABLE buzz_tasks"));
     }
 
     #[test]
@@ -1464,6 +1474,11 @@ mod tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        // Scoped tables added after 0029 attach themselves in their additive
+        // migration because 0029's checksum is immutable on brownfield installs.
+        for later in MIGRATOR.iter().filter(|migration| migration.version > 30) {
+            expected_fences.extend(surface(later.sql.as_ref()).fence_attachments);
+        }
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

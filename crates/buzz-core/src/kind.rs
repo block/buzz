@@ -139,7 +139,13 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_TASK_REQUESTED,
+    KIND_TASK_UPDATED,
+    KIND_TASK_RESOLVED,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -166,6 +172,11 @@ pub const P_GATED_KINDS: &[u32] = &[
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+    // Buzz Tasks contain plaintext task titles and short context. The owner
+    // `p` tag is the sole viewer boundary for stored event reads.
+    KIND_TASK_REQUESTED,
+    KIND_TASK_UPDATED,
+    KIND_TASK_RESOLVED,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
@@ -544,6 +555,14 @@ pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 /// See `docs/nips/NIP-AM.md`.
 pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 
+// Agent-to-owner task protocol (44300–44399)
+/// Buzz Tasks v1: an agent requests an action from its registered owner.
+pub const KIND_TASK_REQUESTED: u32 = 44300;
+/// Buzz Tasks v1: an agent updates the mutable fields of an open task.
+pub const KIND_TASK_UPDATED: u32 = 44301;
+/// Buzz Tasks v1: an agent resolves or withdraws an open task.
+pub const KIND_TASK_RESOLVED: u32 = 44302;
+
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
@@ -725,6 +744,9 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
+    KIND_TASK_REQUESTED,
+    KIND_TASK_UPDATED,
+    KIND_TASK_RESOLVED,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
@@ -885,6 +907,11 @@ const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
+// Compile-time: Buzz Tasks v1 kinds are append-only stored events.
+const _: () = assert!(!is_ephemeral(KIND_TASK_REQUESTED));
+const _: () = assert!(!is_replaceable(KIND_TASK_REQUESTED));
+const _: () = assert!(!is_parameterized_replaceable(KIND_TASK_REQUESTED));
+const _: () = assert!(KIND_TASK_RESOLVED <= u16::MAX as u32);
 // Moderation kinds fit u16 and are neither replaceable nor ephemeral:
 // 1984 is a regular event (persisted to the queue, never fanned out);
 // 9040–9044 are direct commands (executed, never stored).
