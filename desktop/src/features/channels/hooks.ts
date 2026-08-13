@@ -41,6 +41,9 @@ import {
   type ChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
+import { relayClient } from "@/shared/api/relayClient";
+import { buildChannelCanvasLiveFilter } from "@/shared/api/relayChannelFilters";
+import { relayEventInvalidationQueryKeys } from "@/shared/api/relayQueryInvalidation";
 
 export const channelsQueryKey = ["channels"] as const;
 /** Keeps focused polling at the established one-minute cadence. */
@@ -911,6 +914,41 @@ export function useCanvasQuery(channelId: string | null, enabled = true) {
     },
     enabled: enabled && channelId !== null,
   });
+}
+
+/** Keep one exact canvas subscription alive while its management panel is open. */
+export function useCanvasLiveUpdates(channelId: string | null, enabled = true) {
+  const queryClient = useQueryClient();
+  const subscriptionEnabled = enabled && channelId !== null;
+
+  React.useEffect(() => {
+    if (!subscriptionEnabled || channelId === null) return;
+
+    let disposed = false;
+    let unsubscribe: (() => Promise<void>) | null = null;
+
+    void relayClient
+      .subscribeLive(buildChannelCanvasLiveFilter(channelId), (event) => {
+        for (const queryKey of relayEventInvalidationQueryKeys(event)) {
+          void queryClient.invalidateQueries({ queryKey });
+        }
+      })
+      .then((nextUnsubscribe) => {
+        if (disposed) {
+          void nextUnsubscribe();
+          return;
+        }
+        unsubscribe = nextUnsubscribe;
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to subscribe to channel canvas updates", error);
+      });
+
+    return () => {
+      disposed = true;
+      if (unsubscribe) void unsubscribe();
+    };
+  }, [channelId, queryClient, subscriptionEnabled]);
 }
 
 export function useSetCanvasMutation(channelId: string | null) {

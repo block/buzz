@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isRelayDependentQueryKey } from "./relayQueryInvalidation.ts";
+import {
+  isRelayDependentQueryKey,
+  relayEventInvalidationQueryKeys,
+} from "./relayQueryInvalidation.ts";
 
 test("relay invalidation includes relay-backed channel and profile queries", () => {
   for (const queryKey of [
@@ -78,4 +81,35 @@ test("relay invalidation separates relay project queries from local repo work", 
   ]) {
     assert.equal(isRelayDependentQueryKey(queryKey), false, queryKey.join("/"));
   }
+});
+
+test("remote canvas events invalidate only that channel's canvas query", () => {
+  assert.deepEqual(
+    relayEventInvalidationQueryKeys({
+      kind: 40100,
+      tags: [["h", "channel-1"]],
+    }),
+    [["channel-canvas", "channel-1"]],
+  );
+});
+
+test("relay event invalidation ignores unrelated or unscoped events", () => {
+  assert.deepEqual(
+    relayEventInvalidationQueryKeys({
+      kind: 7,
+      tags: [["h", "channel-1"]],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    relayEventInvalidationQueryKeys({ kind: 40100, tags: [] }),
+    [],
+  );
+  assert.deepEqual(
+    relayEventInvalidationQueryKeys({
+      kind: 40100,
+      tags: [["h", "   "]],
+    }),
+    [],
+  );
 });

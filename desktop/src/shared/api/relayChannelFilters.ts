@@ -3,6 +3,7 @@ import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
+  KIND_CANVAS,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
@@ -40,6 +41,25 @@ export function buildChannelFilter(
   }
 
   return filter;
+}
+
+/**
+ * Canvas subscription for the channel-management surface.
+ *
+ * Canvas is intentionally absent from {@link CHANNEL_EVENT_KINDS}: it does
+ * not render in the message timeline, and adding it there would subscribe
+ * every channel-tail consumer to an event only this surface needs. Replaying
+ * one latest row closes the query/subscription startup race without widening
+ * the subscription beyond one channel and one kind.
+ */
+export function buildChannelCanvasLiveFilter(
+  channelId: string,
+): RelaySubscriptionFilter {
+  return {
+    kinds: [KIND_CANVAS],
+    "#h": [channelId],
+    limit: 1,
+  };
 }
 
 /**

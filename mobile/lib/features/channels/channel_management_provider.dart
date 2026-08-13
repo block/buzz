@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -466,6 +467,62 @@ final channelCanvasProvider = FutureProvider.family<ChannelCanvas, String>((
     authorPubkey: event.pubkey,
   );
 });
+
+/// Live canvas events while the management surface for [channelId] is open.
+///
+/// The canvas does not belong in the all-channel message subscription: it is
+/// only visible in channel management. Keeping this auto-disposed stream next
+/// to [channelCanvasProvider] scopes the extra relay traffic to one kind and
+/// one open channel, while replaying the latest event closes the initial
+/// fetch/subscription race.
+final channelCanvasLiveProvider = StreamProvider.autoDispose
+    .family<NostrEvent, String>((ref, channelId) {
+      final status = ref.watch(
+        relaySessionProvider.select((session) => session.status),
+      );
+      if (status != SessionStatus.connected) {
+        return const Stream<NostrEvent>.empty();
+      }
+
+      final controller = StreamController<NostrEvent>();
+      final session = ref.watch(relaySessionProvider.notifier);
+      var disposed = false;
+      void Function()? unsubscribe;
+
+      ref.onDispose(() {
+        disposed = true;
+        unsubscribe?.call();
+        unawaited(controller.close());
+      });
+
+      Future<void> subscribe() async {
+        try {
+          final nextUnsubscribe = await session.subscribe(
+            NostrFilters.canvas(channelId),
+            (event) {
+              if (!disposed) controller.add(event);
+            },
+          );
+          if (disposed) {
+            nextUnsubscribe();
+          } else {
+            unsubscribe = nextUnsubscribe;
+          }
+        } catch (error, stack) {
+          if (!disposed) {
+            debugPrint(
+              '[channelCanvasLiveProvider] subscription failed: '
+              '$error\n$stack',
+            );
+            controller.addError(error, stack);
+          }
+        }
+      }
+
+      unawaited(subscribe());
+
+      return controller.stream;
+    });
 
 /// Channel-scoped kind:5 deletion tags. The `h` tag lets channel-scoped
 /// subscriptions observe the delete; the `e` tag points at the target event.
