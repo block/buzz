@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
@@ -17,6 +18,38 @@ use super::{atomic_write_json_restricted, managed_agents_base_dir};
 
 const SHARED_RUNTIME_CONFIG_VERSION: u32 = 1;
 const SHARED_RUNTIME_COMMAND_ENV: &str = "BUZZ_CODEX_APP_SERVER_COMMAND";
+const SHARED_RUNTIME_ERROR_TAIL_BYTES: u64 = 4096;
+#[cfg(windows)]
+const WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT: &str = r#"
+param([Parameter(Mandatory=$true)][string]$ConfigPath)
+$ErrorActionPreference='Stop'
+$config=Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+try {
+  Start-Process `
+    -FilePath ([string]$config.executable) `
+    -ArgumentList @('-c','features.code_mode_host=true','app-server','--listen',([string]$config.url)) `
+    -WindowStyle Hidden `
+    -RedirectStandardOutput ([string]$config.stdout_log) `
+    -RedirectStandardError ([string]$config.stderr_log) | Out-Null
+} catch {
+  $message='buzz shared runtime launcher failed: ' + $_.Exception.Message + [Environment]::NewLine
+  [IO.File]::AppendAllText([string]$config.stderr_log,$message,[Text.Encoding]::UTF8)
+  exit 1
+}
+"#;
+#[cfg(windows)]
+const WINDOWS_CODEX_SHARED_RUNTIME_WMI_SCRIPT: &str = r#"
+$ErrorActionPreference='Stop'
+$startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}
+$result=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+  CommandLine=$env:BUZZ_CODEX_SHARED_RUNTIME_COMMAND_LINE
+  ProcessStartupInformation=$startup
+}
+if ($result.ReturnValue -ne 0) {
+  throw "Win32_Process.Create returned $($result.ReturnValue)"
+}
+$result.ProcessId
+"#;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CodexSharedRuntimeConfig {
     version: u32,
@@ -379,6 +412,44 @@ async fn probe_codex_shared_runtime(url: &str) -> Result<(), String> {
     Ok(initialized)
 }
 
+fn read_shared_runtime_log_tail(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let start = length.saturating_sub(SHARED_RUNTIME_ERROR_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    if start > 0 {
+        if let Some(first_newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=first_newline);
+        }
+    }
+    let tail = String::from_utf8_lossy(&bytes).trim().to_string();
+    (!tail.is_empty()).then_some(tail)
+}
+
+fn append_shared_runtime_log_detail(error: String, log_path: &Path) -> String {
+    let Some(tail) = read_shared_runtime_log_tail(log_path) else {
+        return error;
+    };
+    format!(
+        "{error}\n\nCodex runtime log ({}):\n{tail}",
+        log_path.display()
+    )
+}
+
+fn shared_runtime_failure_detail(app: &AppHandle, error: String) -> String {
+    let Ok(base_dir) = managed_agents_base_dir(app) else {
+        return error;
+    };
+    append_shared_runtime_log_detail(
+        error,
+        &base_dir
+            .join("logs")
+            .join("codex-shared-runtime.stderr.log"),
+    )
+}
+
 pub async fn codex_shared_runtime_status(
     app: &AppHandle,
 ) -> Result<CodexSharedRuntimeStatus, String> {
@@ -410,7 +481,7 @@ pub async fn codex_shared_runtime_status(
             enabled: true,
             state: CodexSharedRuntimeState::Unavailable,
             url,
-            detail: Some(error),
+            detail: Some(shared_runtime_failure_detail(app, error)),
             desktop_process_ids: Vec::new(),
             private_app_server_process_ids: Vec::new(),
             desktop_detection_error: None,
@@ -493,15 +564,49 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
     {
         use std::os::windows::process::CommandExt;
 
-        // Create the long-lived server through WMI so closing or updating Buzz
-        // does not tear down the backend currently shared with Codex Desktop.
+        let base_dir = managed_agents_base_dir(app)?;
+        let logs_dir = base_dir.join("logs");
+        fs::create_dir_all(&logs_dir)
+            .map_err(|error| format!("failed to create {}: {error}", logs_dir.display()))?;
+        let launcher_path = base_dir.join("codex-shared-runtime-launcher.ps1");
+        fs::write(&launcher_path, WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT)
+            .map_err(|error| format!("failed to write {}: {error}", launcher_path.display()))?;
+        let stdout_log = logs_dir.join("codex-shared-runtime.stdout.log");
+        let stderr_log = logs_dir.join("codex-shared-runtime.stderr.log");
+        fs::write(&stdout_log, [])
+            .map_err(|error| format!("failed to reset {}: {error}", stdout_log.display()))?;
+        fs::write(&stderr_log, [])
+            .map_err(|error| format!("failed to reset {}: {error}", stderr_log.display()))?;
+        let launcher_config_path = base_dir.join("codex-shared-runtime-launcher.json");
+        let launcher_config = serde_json::to_vec_pretty(&serde_json::json!({
+            "executable": executable,
+            "url": url,
+            "stdout_log": stdout_log,
+            "stderr_log": stderr_log,
+        }))
+        .map_err(|error| format!("failed to serialize Codex runtime launcher: {error}"))?;
+        fs::write(&launcher_config_path, launcher_config).map_err(|error| {
+            format!(
+                "failed to write {}: {error}",
+                launcher_config_path.display()
+            )
+        })?;
+
+        // WMI owns the transient launcher, so the shared backend survives Buzz
+        // updates. Both the launcher and Codex run without console windows.
         let command_line = format!(
-            "\"{}\" -c features.code_mode_host=true app-server --listen \"{url}\"",
-            executable.display()
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\" -ConfigPath \"{}\"",
+            launcher_path.display(),
+            launcher_config_path.display()
         );
-        let script = "$result=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:BUZZ_CODEX_SHARED_RUNTIME_COMMAND_LINE}; if ($result.ReturnValue -ne 0) { throw \"Win32_Process.Create returned $($result.ReturnValue)\" }; $result.ProcessId";
         let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                WINDOWS_CODEX_SHARED_RUNTIME_WMI_SCRIPT,
+            ])
             .env("BUZZ_CODEX_SHARED_RUNTIME_COMMAND_LINE", command_line)
             .creation_flags(0x0800_0000)
             .output()
@@ -514,8 +619,7 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
                 detail
             });
         }
-        let _ = app;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(windows))]
@@ -582,7 +686,7 @@ pub async fn enable_codex_shared_runtime(
                 enabled: true,
                 state: CodexSharedRuntimeState::Unavailable,
                 url,
-                detail: Some(error),
+                detail: Some(shared_runtime_failure_detail(app, error)),
                 desktop_process_ids: Vec::new(),
                 private_app_server_process_ids: Vec::new(),
                 desktop_detection_error: None,
@@ -983,6 +1087,36 @@ mod tests {
             ensure_ordinary_desktop_launch_allowed(&CodexDesktopProcessSnapshot::default()).is_ok()
         );
         assert!(ensure_post_launch_snapshot(&CodexDesktopProcessSnapshot::default()).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shared_runtime_launch_is_hidden_and_logged() {
+        assert!(WINDOWS_CODEX_SHARED_RUNTIME_WMI_SCRIPT.contains("ShowWindow"));
+        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-WindowStyle Hidden"));
+        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-RedirectStandardOutput"));
+        assert!(WINDOWS_CODEX_SHARED_RUNTIME_LAUNCHER_SCRIPT.contains("-RedirectStandardError"));
+    }
+
+    #[test]
+    fn unavailable_status_includes_a_bounded_runtime_log_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("codex-shared-runtime.stderr.log");
+        fs::write(
+            &log_path,
+            format!(
+                "{}\ncurrent startup failure",
+                "old diagnostics ".repeat(400)
+            ),
+        )
+        .unwrap();
+
+        let detail = append_shared_runtime_log_detail("runtime unavailable".to_string(), &log_path);
+
+        assert!(detail.contains("runtime unavailable"));
+        assert!(detail.contains("current startup failure"));
+        assert!(!detail.contains("old diagnostics"));
+        assert!(detail.contains(log_path.to_string_lossy().as_ref()));
     }
 
     #[test]
