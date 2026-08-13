@@ -438,6 +438,9 @@ fn no_sentinel_reaches_the_owning_process_debug_output() {
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
         log_path: std::path::PathBuf::new(),
+        // Token-bearing URL: the process Debug impl must mask this field,
+        // exactly like the snapshot masks its own relay_url.
+        connect_relay_url: RELAY_WITH_TOKEN.to_string(),
         spawn_config: seeded_with_sentinels(),
         setup_mode: false,
         adapter_availability: None,

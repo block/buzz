@@ -458,10 +458,16 @@ pub struct RelayMeshConfig {
     pub model_ref: String,
 }
 
-#[derive(Debug)]
 pub struct ManagedAgentProcess {
     pub child: Child,
     pub log_path: PathBuf,
+    /// The exact relay URL this child was told to dial (`BUZZ_RELAY_URL`).
+    /// May differ from the canonical `ManagedAgentRuntimeKey::relay_url`
+    /// spelling — the tenancy boundary is host-derived, so restarts must
+    /// reuse this URL, never the canonical form. Stamped from the same
+    /// string passed to the child env; receipts persist it alongside the
+    /// pair identity.
+    pub connect_relay_url: String,
     /// The effective spawn config this process was launched with (see
     /// `spawn_snapshot::SpawnConfigSnapshot`). Runtime-only — never persisted.
     /// The summary builder recomputes a prospective snapshot and reports
@@ -488,6 +494,27 @@ pub struct ManagedAgentProcess {
     /// if job creation/assignment failed (we fall back to `Child::kill()`).
     #[cfg(windows)]
     pub job: Option<crate::managed_agents::JobHandle>,
+}
+
+/// Hand-written so `connect_relay_url` never renders verbatim:
+/// `normalize_relay_url` rejects userinfo but deliberately preserves query
+/// strings, so `wss://relay.example/ws?token=...` is a valid value. Same
+/// masking policy as `SpawnConfigSnapshot`'s `relay_url` (its single
+/// redaction authority), pinned by the owning-process Debug sentinel test.
+impl std::fmt::Debug for ManagedAgentProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("ManagedAgentProcess");
+        s.field("child", &self.child)
+            .field("log_path", &self.log_path)
+            .field("connect_relay_url", &super::spawn_snapshot::diff::MASK)
+            .field("spawn_config", &self.spawn_config)
+            .field("setup_mode", &self.setup_mode)
+            .field("adapter_availability", &self.adapter_availability)
+            .field("start_nonce", &self.start_nonce);
+        #[cfg(windows)]
+        s.field("job", &self.job);
+        s.finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

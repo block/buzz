@@ -19,6 +19,23 @@ pub(crate) fn managed_agent_runtime_keys<T>(
         .collect()
 }
 
+/// The relay URLs to dial when restarting `pubkey`'s live pairs: each pair's
+/// stamped connection URL. Restart paths must use this instead of
+/// `key.relay_url` — the canonical spelling folds loopback hosts, and on a
+/// host-scoped multi-tenant relay that lands the child in the wrong (empty)
+/// community. Collect before stopping: stopping removes the pair, and with it
+/// the only in-memory copy of the configured spelling.
+pub(crate) fn managed_agent_restart_targets(
+    runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    pubkey: &str,
+) -> Vec<String> {
+    runtimes
+        .iter()
+        .filter(|(key, _)| key.pubkey.eq_ignore_ascii_case(pubkey))
+        .map(|(_, runtime)| runtime.connect_relay_url.clone())
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) fn managed_agent_runtime_relay_urls<T>(
     runtimes: &HashMap<ManagedAgentRuntimeKey, T>,

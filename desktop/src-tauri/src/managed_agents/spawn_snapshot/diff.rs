@@ -21,7 +21,7 @@ use crate::managed_agents::AcpAvailabilityStatus;
 /// the process was spawned with.
 const ADAPTER_AVAILABILITY_FIELD: &str = "adapter_availability";
 
-const MASK: &str = "••••";
+pub(crate) const MASK: &str = "••••";
 
 /// One changed field. `field` is a dotted path built from serde field names,
 /// with dynamic map keys appended verbatim (`env.OPENAI_API_KEY`). The UI

@@ -408,7 +408,16 @@ pub(crate) fn valid_agent_runtime_receipt_with(
     else {
         return false;
     };
+    // A stored connection URL must belong to this pair: canonicalizing it has
+    // to reproduce the receipt's own key. Absent is fine (pre-field receipts);
+    // present-but-foreign or unparseable is a corrupt receipt, not a fallback.
+    let connect_url_matches_key = match receipt.connect_relay_url.as_deref() {
+        None => true,
+        Some(connect_url) => ManagedAgentRuntimeKey::new(receipt.key.pubkey.clone(), connect_url)
+            .is_ok_and(|from_connect| from_connect == receipt.key),
+    };
     canonical == receipt.key
+        && connect_url_matches_key
         && path.file_name().and_then(|name| name.to_str())
             == Some(&format!("{}.json", receipt.key.runtime_id()))
         && receipt.desktop_instance_id == instance_id

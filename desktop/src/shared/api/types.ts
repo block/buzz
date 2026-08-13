@@ -289,7 +289,9 @@ export type ManagedAgentRuntimeLifecycle =
 
 export type ManagedAgentRuntimeStatus = {
   pubkey: string;
-  /** Exact submitted descriptor, present only on startup reconcile results. */
+  /** The requested (non-canonical) URL when known: the exact submitted
+   * descriptor on reconcile results, otherwise the live pair's actual
+   * connection spelling. */
   requestedRelayUrl?: string;
   /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
   relayUrl: string;

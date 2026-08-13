@@ -27,7 +27,7 @@ pub(crate) use metadata::{
 };
 
 mod stop;
-pub(crate) use stop::managed_agent_runtime_keys;
+pub(crate) use stop::{managed_agent_restart_targets, managed_agent_runtime_keys};
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
@@ -916,6 +916,7 @@ pub fn spawn_agent_child(
     return Ok(super::process_lifecycle::finish_spawn(
         child,
         log_path,
+        effective_relay_url,
         spawn_config,
         spawned_setup_mode,
         spawned_adapter_availability,
@@ -926,6 +927,9 @@ pub fn spawn_agent_child(
     Ok(crate::managed_agents::ManagedAgentProcess {
         child,
         log_path,
+        // The trimmed value that actually went into the child's
+        // BUZZ_RELAY_URL above, not the raw `relay_url` parameter.
+        connect_relay_url: effective_relay_url,
         spawn_config,
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
@@ -980,6 +984,10 @@ pub fn start_managed_agent_process(
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(app),
         started_at: now.clone(),
+        // The URL the child actually dialed, not the local `relay_url`
+        // binding — same string by construction here, but reading it off the
+        // process keeps every receipt site identical to the spawn.
+        connect_relay_url: Some(process.connect_relay_url.clone()),
     };
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
         let _ = terminate_process(process.child.id());

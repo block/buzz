@@ -60,7 +60,12 @@ fn status_for_with(
     ManagedAgentRuntimeStatus {
         pubkey: key.pubkey.clone(),
         relay_url: key.relay_url.clone(),
-        requested_relay_url,
+        // Callers that know the exact descriptor URL (reconcile) pass it in;
+        // otherwise fall back to the live pair's stamped connection URL so
+        // frontend start/restart actions re-dial the configured spelling
+        // instead of the canonical form.
+        requested_relay_url: requested_relay_url
+            .or_else(|| runtime.map(|runtime| runtime.connect_relay_url.clone())),
         local_setup,
         lifecycle: runtime
             .map(|runtime| runtime.lifecycle.clone())
@@ -290,6 +295,7 @@ fn start_pair(
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(&app),
         started_at: now.clone(),
+        connect_relay_url: Some(process.connect_relay_url.clone()),
     };
     if let Err(error) = write_agent_runtime_receipt(&app, &receipt) {
         let _ = terminate_process(process.child.id());

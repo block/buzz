@@ -390,6 +390,11 @@ pub async fn restore_managed_agents_on_launch(
                     pid: process.child.id(),
                     desktop_instance_id: super::current_instance_id(app),
                     started_at: now.clone(),
+                    // Phase B stamped the dial URL onto the process at spawn;
+                    // reading it back here (not recomputing from the record)
+                    // keeps the receipt truthful even if the workspace relay
+                    // changed between phases.
+                    connect_relay_url: Some(process.connect_relay_url.clone()),
                 };
                 if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
                     let _ = super::terminate_process(process.child.id());
