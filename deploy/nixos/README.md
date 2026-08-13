@@ -21,6 +21,25 @@ nix run .#buzz-admin -- --help
 The `buzz-relay` package contains both `buzz-relay` and `buzz-admin`. The named
 apps select the appropriate executable.
 
+## Development shells
+
+The default shell intentionally contains only the pinned Rust toolchain and
+`just`, so `nix develop` does not pull the large desktop GUI and audio closure:
+
+```bash
+nix develop
+```
+
+Use the explicit desktop shell when working on the Tauri application:
+
+```bash
+nix develop .#desktop
+```
+
+On a cold Linux Nix store, the desktop shell can download more than 1 GiB of
+GTK, WebKit, and audio dependencies. Check the plan first with
+`nix build --dry-run .#devShells.x86_64-linux.desktop` on constrained systems.
+
 ### Codex ACP adapter
 
 The desktop package includes Buzz's own agent sidecars, but external managed
@@ -67,7 +86,8 @@ The module supports x86-64 and ARM64 Linux.
 
 The module runs the relay but does not provision PostgreSQL, Redis, object
 storage, DNS, or TLS. Those services may run on the same host or be provided
-externally.
+externally. In particular, the module does not depend on or install MinIO;
+choose a maintained S3-compatible service appropriate for the deployment.
 
 ```nix
 {

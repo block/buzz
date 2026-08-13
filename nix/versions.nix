@@ -22,20 +22,13 @@
     };
   };
 
-  # Cargo.lock output hashes for workspace builds (root Cargo.lock).
-  # Regenerate after Cargo.lock changes: remove one, nix build will error with the correct hash.
-  workspaceCargoOutputHashes = {
-    "aws-creds-0.39.1" = "sha256-QAAm1phmeLFtDRgfDCoHijN1ce/rYzh18KziOUbL+hw=";
-    "mesh-llm-api-client-0.73.1" = "sha256-2ArkxK7Ze13mqkQB+JkuqVSCLeHpdxXHMZ0592VyEWw=";
-  };
-
-  # Cargo.lock output hashes for the desktop Tauri build (desktop/src-tauri/Cargo.lock).
-  # Same package may have a different hash vs. sidecars due to different dep trees.
-  desktopCargoOutputHashes = {
-    "mesh-llm-api-client-0.73.1" = "sha256-OItlWwacyTtdS6LQCQDPlLmB09l4bbTX27uI8AGDQpk=";
-  };
+  # Vendored dependency hashes for the root and desktop Cargo.lock files.
+  # Regenerate after either lock file changes by replacing its hash with
+  # lib.fakeHash in nix/buzz.nix and building the affected package.
+  workspaceCargoHash = "sha256-7BQWBpHdmwt9BAbDlsEmk4PIYkeRDZwYIck3kgIJolo=";
+  desktopCargoHash = "sha256-ISS7c03+n2RRq4DT+gBXbS4ZHnjgjAvXnDYSvVPO4Ww=";
 
   # Hash for pnpm dependencies (desktop frontend).
   # Regenerate after package.json / pnpm-lock.yaml changes: remove and let nix build fetch.
-  pnpmHash = "sha256-k5bRDcNSNN9a/xeBtcZYmtiW5d0NN+uDHl2LM+94F4A=";
+  pnpmHash = "sha256-+YUfxmJOyPE5dB4vVVuArBcEliTb+sZSJoFjuPwUvx0=";
 }

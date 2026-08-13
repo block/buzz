@@ -4,8 +4,7 @@
   fetchPnpmDeps,
   fetchurl,
   linkFarm,
-  jq,
-  moreutils,
+  perl,
   cmake,
   cargo-tauri,
   nodejs,
@@ -14,7 +13,6 @@
   pkg-config,
   autoPatchelfHook,
   wrapGAppsHook3,
-  yq,
   gst_all_1,
   glib-networking,
   bzip2,
@@ -60,6 +58,7 @@ let
   sidecarPackages = [
     "buzz-acp"
     "buzz-agent"
+    "buzz-backend-kubernetes"
     "buzz-dev-mcp"
     "git-credential-nostr"
     "buzz-cli"
@@ -67,31 +66,18 @@ let
   sidecarBinNames = [
     "buzz-acp"
     "buzz-agent"
+    "buzz-backend-kubernetes"
     "buzz-dev-mcp"
     "git-credential-nostr"
     "buzz"
   ];
-  prunePnpmDevTools = ''
-    jq 'del(.devDependencies["@biomejs/biome"])' package.json \
-      | sponge package.json
-    jq 'del(.devDependencies["@tauri-apps/cli"])' desktop/package.json \
-      | sponge desktop/package.json
-
-    yq -y -i \
-      'del(.importers["."].devDependencies["@biomejs/biome"])
-       | del(.importers.desktop.devDependencies["@tauri-apps/cli"])' \
-      pnpm-lock.yaml
-  '';
   sidecars = rustPlatform.buildRustPackage {
     pname = "buzz-sidecars";
     version = desktopVersion;
 
     inherit src;
 
-    cargoLock = {
-      lockFileContents = builtins.readFile (src + "/Cargo.lock");
-      outputHashes = versions.workspaceCargoOutputHashes;
-    };
+    cargoHash = versions.workspaceCargoHash;
 
     cargoBuildFlags = lib.concatLists (
       map (p: [
@@ -127,10 +113,7 @@ let
 
     inherit src;
 
-    cargoLock = {
-      lockFileContents = builtins.readFile (src + "/Cargo.lock");
-      outputHashes = versions.workspaceCargoOutputHashes;
-    };
+    cargoHash = versions.workspaceCargoHash;
 
     cargoBuildFlags = [
       "-p"
@@ -170,29 +153,19 @@ in
     cargoRoot = "desktop/src-tauri";
     buildAndTestSubdir = "desktop/src-tauri";
 
-    cargoLock = {
-      lockFileContents = builtins.readFile (src + "/desktop/src-tauri/Cargo.lock");
-      outputHashes = versions.desktopCargoOutputHashes;
-    };
+    cargoHash = versions.desktopCargoHash;
 
     doCheck = false;
 
+    AWS_LC_SYS_CMAKE_BUILDER = 1;
+
     pnpmDeps = fetchPnpmDeps {
-      inherit (finalAttrs) pname version src;
+      pname = "buzz-workspace";
+      inherit (finalAttrs) version src;
       inherit pnpm;
-      pnpmWorkspaces = [ "buzz" ];
       fetcherVersion = 4;
       hash = versions.pnpmHash;
-      postPatch = prunePnpmDevTools;
-      prePnpmInstall = ''
-        pnpm config set network-concurrency 4
-        pnpm config set fetch-retries 5
-        pnpm config set fetch-retry-maxtimeout 120000
-        pnpm config set fetch-timeout 600000
-      '';
     };
-
-    postPatch = prunePnpmDevTools;
 
     pnpmWorkspaces = [ "buzz" ];
 
@@ -211,13 +184,11 @@ in
     nativeBuildInputs = [
       cmake
       cargo-tauri.hook
-      jq
-      moreutils
       nodejs
+      perl
       pnpmConfigHook
       pnpm
       pkg-config
-      yq
     ]
     ++ lib.optionals stdenv.hostPlatform.isLinux [
       autoPatchelfHook
@@ -252,7 +223,9 @@ in
     meta = with lib; {
       description = "Buzz desktop app";
       homepage = "https://buzz.ai";
-      license = licenses.asl20;
+      # sherpa-onnx statically links GPL-3.0-or-later eSpeak NG code.
+      license = licenses.gpl3Plus;
+      sourceProvenance = [ sourceTypes.binaryNativeCode ];
       platforms = [
         "x86_64-linux"
         "aarch64-linux"

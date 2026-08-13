@@ -38,6 +38,7 @@ let
     BUZZ_REDIS_POOL_SIZE = cfg.redisPoolSize;
     BUZZ_DB_POOL_SIZE = cfg.databasePoolSize;
     BUZZ_REPLICA_READ_MAX_AGE_MS = cfg.replicaReadMaxAgeMs;
+    BUZZ_DRAIN_JITTER_MS = cfg.drainJitterMs;
     BUZZ_MAX_CONNECTIONS = cfg.maxConnections;
     BUZZ_MAX_CONCURRENT_HANDLERS = cfg.maxConcurrentHandlers;
     BUZZ_SEND_BUFFER = cfg.sendBuffer;
@@ -47,7 +48,6 @@ let
     BUZZ_REQUIRE_RELAY_MEMBERSHIP = cfg.requireRelayMembership;
     BUZZ_ALLOW_NIP_OA_AUTH = cfg.allowNipOaAuth;
     BUZZ_PUBKEY_ALLOWLIST = cfg.pubkeyAllowlist;
-    BUZZ_REQUIRE_MEDIA_GET_AUTH = cfg.requireMediaGetAuth;
     BUZZ_HUDDLE_AUDIO_AVAILABLE = cfg.huddleAudioAvailable;
     BUZZ_AUDIT_ENABLED = cfg.auditEnabled;
     BUZZ_AUTO_MIGRATE = cfg.autoMigrate;
@@ -269,12 +269,6 @@ in
       description = "Whether pubkey-only NIP-42 authentication uses the allowlist.";
     };
 
-    requireMediaGetAuth = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Whether media downloads require authentication.";
-    };
-
     huddleAudioAvailable = mkOption {
       type = types.bool;
       default = true;
@@ -309,6 +303,12 @@ in
       type = types.ints.positive;
       default = 1000;
       description = "Per-connection outbound message buffer size.";
+    };
+
+    drainJitterMs = mkOption {
+      type = types.ints.between 0 20000;
+      default = 0;
+      description = "Maximum randomized WebSocket drain delay during graceful shutdown, in milliseconds.";
     };
 
     maxFrameBytes = mkOption {

@@ -108,6 +108,7 @@
                         openFirewall = true;
                         readDatabasePoolSize = 24;
                         replicaReadMaxAgeMs = 1000;
+                        drainJitterMs = 750;
                         s3AddressingStyle = "virtual";
                         environmentFile = [ "-/run/secrets/buzz-relay" ];
                         environment.BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN = 120;
@@ -122,6 +123,7 @@
               assert environment.BUZZ_AUTO_MIGRATE == "false";
               assert environment.BUZZ_DB_READ_POOL_SIZE == "24";
               assert environment.BUZZ_REPLICA_READ_MAX_AGE_MS == "1000";
+              assert environment.BUZZ_DRAIN_JITTER_MS == "750";
               assert environment.BUZZ_S3_ADDRESSING_STYLE == "virtual";
               assert environment.BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN == "120";
               assert
@@ -138,13 +140,24 @@
 
           formatter = pkgs.nixfmt;
 
-          devShells.default = pkgs.mkShell {
-            inputsFrom = [ buzzPackages.buzz-desktop ];
-            packages = [
-              toolchain
-              pkgs.just
-            ];
-            SHERPA_ONNX_ARCHIVE_DIR = buzzPackages.buzz-desktop.passthru.sherpaOnnxArchiveDir;
+          devShells = {
+            # Keep the default shell small: desktop native inputs exceed 1 GiB
+            # on a cold Linux store and should only be pulled intentionally.
+            default = pkgs.mkShell {
+              packages = [
+                toolchain
+                pkgs.just
+              ];
+            };
+
+            desktop = pkgs.mkShell {
+              inputsFrom = [ buzzPackages.buzz-desktop ];
+              packages = [
+                toolchain
+                pkgs.just
+              ];
+              SHERPA_ONNX_ARCHIVE_DIR = buzzPackages.buzz-desktop.passthru.sherpaOnnxArchiveDir;
+            };
           };
         }
       )
