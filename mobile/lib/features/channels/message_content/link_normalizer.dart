@@ -6,8 +6,15 @@ final _autolinkPattern = RegExp(
 final _bareLinkPattern = RegExp(
   r'(?:https?://|buzz://(?:message\?|join\?|channel/))[^\s)>\]]+',
 );
-final _trailingPunctuationPattern = RegExp(r'[.,!?:;]+$');
-final _trailingQuotePattern = RegExp(r'''['"]+$''');
+// Bare Buzz URLs stop at whitespace and Markdown's structural closers in the
+// scanner above. Peel Unicode closing punctuation, final quotes, and terminal
+// punctuation that can be adjacent in prose. ASCII apostrophe and quotation
+// mark are not Unicode closing punctuation, so include them explicitly. This
+// is intentionally Buzz-only so existing HTTP(S) normalization is unchanged.
+final _trailingProseDelimiterPattern = RegExp(
+  r'''(?:['"]|[\p{Pe}\p{Pf}]|\p{Terminal_Punctuation})+$''',
+  unicode: true,
+);
 final _backtickRunPattern = RegExp(r'`+');
 
 /// Converts supported Buzz and HTTP(S) autolinks and bare links into Markdown
@@ -155,15 +162,10 @@ String _normalizeBareLink(String segment, Match match) {
   }
 
   if (isBuzzUrl) {
-    final outsidePunctuation = _trailingPunctuationPattern.firstMatch(url);
-    if (outsidePunctuation != null) {
-      url = url.substring(0, outsidePunctuation.start);
-      trailing = outsidePunctuation[0]!;
-    }
-    final outsideQuotes = _trailingQuotePattern.firstMatch(url);
-    if (outsideQuotes != null) {
-      url = url.substring(0, outsideQuotes.start);
-      trailing = '${outsideQuotes[0]}$trailing';
+    final outsideDelimiters = _trailingProseDelimiterPattern.firstMatch(url);
+    if (outsideDelimiters != null) {
+      url = url.substring(0, outsideDelimiters.start);
+      trailing = outsideDelimiters[0]!;
     }
   }
 
@@ -185,10 +187,10 @@ String _normalizeBareLink(String segment, Match match) {
   }
 
   if (isBuzzUrl) {
-    final punctuation = _trailingPunctuationPattern.firstMatch(url);
-    if (punctuation != null) {
-      url = url.substring(0, punctuation.start);
-      trailing = '${punctuation[0]}$trailing';
+    final delimiters = _trailingProseDelimiterPattern.firstMatch(url);
+    if (delimiters != null) {
+      url = url.substring(0, delimiters.start);
+      trailing = '${delimiters[0]}$trailing';
     }
   }
 

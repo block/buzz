@@ -24,13 +24,43 @@ void main() {
     );
   });
 
-  test('keeps quotes outside bare Buzz URLs', () {
+  test('keeps prose closing delimiters outside bare Buzz URLs', () {
     const channelUrl = 'buzz://channel/550e8400-e29b-41d4-a716-446655440000';
     const messageUrl = 'buzz://message?channel=channel-1&id=message-1';
+    final cases = <(String, String)>[
+      ('"', '"'),
+      ("'", "'"),
+      ('“', '”'),
+      ('‘', '’'),
+      ('«', '»'),
+      ('‹', '›'),
+      ('《', '》'),
+      ('〈', '〉'),
+      ('「', '」'),
+      ('『', '』'),
+      ('【', '】'),
+      ('〔', '〕'),
+      ('〖', '〗'),
+      ('〘', '〙'),
+      ('〚', '〛'),
+    ];
+
+    for (final (opening, closing) in cases) {
+      expect(
+        normalizeBareLinks('$opening$channelUrl$closing'),
+        '$opening[$channelUrl]($channelUrl)$closing',
+      );
+      expect(
+        normalizeBareLinks('$opening$messageUrl$closing.'),
+        '$opening[$messageUrl]($messageUrl)$closing.',
+      );
+    }
     expect(
-      normalizeBareLinks('See "$channelUrl" and \'$messageUrl\'.'),
-      'See "[$channelUrl]($channelUrl)" and '
-      "'[$messageUrl]($messageUrl)'.",
+      normalizeBareLinks(
+        'See $channelUrl。 Then $messageUrl！ Also $channelUrl．',
+      ),
+      'See [$channelUrl]($channelUrl)。 Then [$messageUrl]($messageUrl)！ '
+      'Also [$channelUrl]($channelUrl)．',
     );
   });
 
