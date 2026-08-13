@@ -25,6 +25,7 @@ import {
   getAgentObserverSnapshot,
   getAgentTranscript,
   resetAgentObserverStore,
+  subscribeAgentObserverStore,
   syncAgentObserverEvents,
 } from "@/features/agents/observerRelayStore.ts";
 import { buildTranscript } from "@/features/agents/ui/agentSessionTranscript.ts";
@@ -178,6 +179,127 @@ describe("live observer journal retention — amortized eviction", () => {
       getAgentObserverSnapshot(AGENT_PUBKEY).events.at(-1).seq,
       MAX_OBSERVER_EVENTS + 900,
       "the newest event of an over-cap batch is retained",
+    );
+  });
+});
+
+describe("live observer journal retention — eviction floor (reconnect replay)", () => {
+  // The dedup set is built only from the retained array, so once eviction
+  // discards the oldest frames the journal no longer remembers them. Relay
+  // reconnect replays old frames as a normal behavior; without a floor a
+  // replayed pre-eviction frame is re-admitted into the headroom and a later
+  // refill to the cap trims away legitimate retained events with no new
+  // activity. These pin the floor that rejects already-evicted history.
+  beforeEach(() => {
+    resetAgentObserverStore();
+  });
+
+  it("test_replayed_pre_floor_frames_do_not_change_retained_window", () => {
+    // Overflow to the low-water mark, then replay the discarded oldest frames.
+    // They are at or below the eviction floor, so none is re-admitted: the
+    // retained window is byte-identical and no listener is notified.
+    fillSequential(MAX_OBSERVER_EVENTS + 1);
+    const before = getAgentObserverSnapshot(AGENT_PUBKEY).events;
+    assert.equal(before.length, OBSERVER_EVENTS_LOW_WATER);
+    const beforeFirstSeq = before.at(0).seq;
+
+    let notifications = 0;
+    const unsubscribe = subscribeAgentObserverStore(() => {
+      notifications += 1;
+    });
+    try {
+      // seq 1..(beforeFirstSeq - 1) were discarded; replay a spread of them
+      // plus the boundary event itself (beforeFirstSeq - 1 is the floor).
+      for (let seq = 1; seq < beforeFirstSeq; seq += 1) {
+        syncAgentObserverEvents(AGENT_PUBKEY, [makeEvent(seq)]);
+      }
+    } finally {
+      unsubscribe();
+    }
+
+    const after = getAgentObserverSnapshot(AGENT_PUBKEY).events;
+    assert.deepEqual(
+      after,
+      before,
+      "replaying already-evicted frames must not change the retained window",
+    );
+    assert.equal(
+      notifications,
+      0,
+      "a stale-only replay does no work and notifies no listener",
+    );
+  });
+
+  it("test_pre_floor_frame_after_refill_drops_no_retained_events", () => {
+    // Overflow to low-water, refill to the cap through ordinary appends, then
+    // inject a single pre-floor (already-evicted) frame. Pre-fix this pushed
+    // length to cap+1 and trimmed away 300 legitimate retained events; the
+    // floor now rejects it, so the retained window is untouched.
+    fillSequential(MAX_OBSERVER_EVENTS + 1);
+    const floorBoundarySeq =
+      getAgentObserverSnapshot(AGENT_PUBKEY).events.at(0).seq;
+    const headroom = MAX_OBSERVER_EVENTS - OBSERVER_EVENTS_LOW_WATER;
+    for (let i = 1; i <= headroom; i += 1) {
+      syncAgentObserverEvents(AGENT_PUBKEY, [
+        makeEvent(MAX_OBSERVER_EVENTS + 1 + i),
+      ]);
+    }
+    const atCap = getAgentObserverSnapshot(AGENT_PUBKEY).events;
+    assert.equal(atCap.length, MAX_OBSERVER_EVENTS, "refilled back to the cap");
+
+    // A pre-floor frame (seq strictly below the boundary that was evicted).
+    syncAgentObserverEvents(AGENT_PUBKEY, [makeEvent(floorBoundarySeq - 1)]);
+
+    const after = getAgentObserverSnapshot(AGENT_PUBKEY).events;
+    assert.equal(
+      after.length,
+      MAX_OBSERVER_EVENTS,
+      "a rejected pre-floor frame must not trigger a trim below the cap",
+    );
+    assert.deepEqual(
+      after,
+      atCap,
+      "no legitimate retained event is dropped by a pre-floor arrival",
+    );
+  });
+
+  it("test_out_of_order_frame_newer_than_floor_is_still_admitted", () => {
+    // The floor must reject only already-evicted history, never a legitimate
+    // out-of-order frame that sorts after the floor. Such a frame lands in the
+    // retained window (via the rebuild fallback) and advances the length.
+    fillSequential(MAX_OBSERVER_EVENTS + 1);
+    const retained = getAgentObserverSnapshot(AGENT_PUBKEY).events;
+    const oldestRetainedSeq = retained.at(0).seq;
+    const lengthBefore = retained.length;
+
+    // The eviction floor is the boundary event just below the retained window
+    // (seq oldestRetainedSeq - 1). Construct a never-seen frame whose timestamp
+    // sits strictly between the floor and the oldest retained event — out of
+    // order versus the tail, but newer than the floor, so it must be admitted.
+    const floorSeq = oldestRetainedSeq - 1;
+    const oooEvent = {
+      seq: 1_000_000_000,
+      timestamp: new Date(
+        1_760_000_000_000 + floorSeq * 1000 + 500,
+      ).toISOString(),
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: "chan-1",
+      sessionId: "sess-1",
+      turnId: "turn-ooo",
+      payload: {},
+    };
+    syncAgentObserverEvents(AGENT_PUBKEY, [oooEvent]);
+
+    const after = getAgentObserverSnapshot(AGENT_PUBKEY).events;
+    assert.equal(
+      after.length,
+      lengthBefore + 1,
+      "an out-of-order frame newer than the floor is admitted, not rejected",
+    );
+    assert.ok(
+      after.some((event) => event.seq === oooEvent.seq),
+      "the admitted frame is present in the retained window",
     );
   });
 });
