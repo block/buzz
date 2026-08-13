@@ -6045,6 +6045,214 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets('thread jump-to-latest is hidden while settled on the tail', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
+    });
+
+    testWidgets('thread jump-to-latest appears after leaving the tail', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final list = find.byKey(const ValueKey('thread-message-list'));
+      await tester.drag(list, const Offset(0, 24));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('thread-jump-to-latest')),
+        findsOneWidget,
+      );
+      final latestSurface = tester.widget<Container>(
+        find.byKey(const ValueKey('thread-jump-to-latest-surface')),
+      );
+      final latestDecoration = latestSurface.decoration! as BoxDecoration;
+      expect(latestDecoration.borderRadius, BorderRadius.circular(Radii.full));
+    });
+
+    testWidgets('thread jump-to-latest returns to the newest reply', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final list = find.byKey(const ValueKey('thread-message-list'));
+      for (var i = 0; i < 8; i++) {
+        await tester.drag(list, const Offset(0, 100));
+        await tester.pumpAndSettle();
+      }
+
+      expect(
+        find.byKey(const ValueKey('thread-jump-to-latest')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-29')),
+        findsNothing,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('thread-jump-to-latest')));
+      await tester.pumpAndSettle();
+
+      final latestReply = find.byKey(
+        const ValueKey('thread-message-group-reply-29'),
+      );
+      expect(latestReply, findsOneWidget);
+      expect(
+        tester.getBottomLeft(latestReply).dy,
+        lessThanOrEqualTo(
+          tester.getTopLeft(find.byKey(const ValueKey('composer-surface'))).dy,
+        ),
+      );
+      expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
+    });
   });
 }
 

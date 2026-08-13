@@ -550,74 +550,14 @@ class _MessageList extends HookConsumerWidget {
             right: 0,
             bottom: composerBottomInset + Grid.xs,
             child: Center(
-              child: _JumpToLatestButton(
+              child: JumpToLatestButton(
                 key: const ValueKey('channel-jump-to-latest'),
+                surfaceKey: const ValueKey('channel-jump-to-latest-surface'),
                 onPressed: scrollToLatest,
               ),
             ),
           ),
       ],
-    );
-  }
-}
-
-class _JumpToLatestButton extends StatelessWidget {
-  final VoidCallback onPressed;
-
-  const _JumpToLatestButton({required this.onPressed, super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final borderRadius = BorderRadius.circular(Radii.full);
-    return Semantics(
-      button: true,
-      child: ClipRRect(
-        borderRadius: borderRadius,
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-          child: Container(
-            key: const ValueKey('channel-jump-to-latest-surface'),
-            decoration: BoxDecoration(
-              color: context.colors.surface.withValues(alpha: 0.5),
-              borderRadius: borderRadius,
-              border: Border.all(
-                color: Colors.black.withValues(alpha: 0.04),
-                width: 1,
-              ),
-            ),
-            child: Material(
-              type: MaterialType.transparency,
-              child: InkWell(
-                onTap: onPressed,
-                borderRadius: borderRadius,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.gutter,
-                    vertical: Grid.xxs,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        LucideIcons.arrowDown,
-                        size: 16,
-                        color: context.colors.onSurface,
-                      ),
-                      const SizedBox(width: Grid.half),
-                      Text(
-                        'Latest',
-                        style: context.textTheme.labelLarge?.copyWith(
-                          color: context.colors.onSurface,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

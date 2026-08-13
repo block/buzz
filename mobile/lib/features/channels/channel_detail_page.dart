@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' show min;
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
@@ -54,6 +53,7 @@ import 'reaction_row.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'small_avatar.dart';
+import 'jump_to_latest_button.dart';
 import 'thread_detail_page.dart';
 import 'timeline_message.dart';
 
