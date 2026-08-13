@@ -19,9 +19,11 @@ Launchpad rather than Block. **Five files are sanctioned to carry Launchpad valu
 is a third deliberate exception to [`../AGENTS.md` §3](../AGENTS.md), alongside the two
 already recorded there.
 
-| File | What it carries | Why not an override |
+**This record precedes its implementation.** #144 makes these changes; at the time of writing none of them have landed on `launchpad`, so the table below states what each file is *sanctioned to carry*, not what it carries today. The check described under Enforcement reports that gap rather than hiding it, and will stay red until #144 merges. That is the intended behaviour: a sanctioned exception nobody is using is a claim this record should not be making silently.
+
+| File | What it is sanctioned to carry | Why not an override |
 |---|---|---|
-| `deploy/compose/compose.yml` | `${BUZZ_IMAGE:?…}` — the `ghcr.io/block/buzz:main` default **removed** | A Compose override file can add or replace a default; it cannot remove one. Structurally impossible elsewhere. |
+| `deploy/compose/compose.yml` | `${BUZZ_IMAGE:?…}`, with the `ghcr.io/block/buzz:main` default **removed** | A Compose override file can add or replace a default; it cannot remove one. Structurally impossible elsewhere. |
 | `.github/workflows/docker.yml` | Publication trigger (`launchpad`, not `main`) and target namespace | A parallel `launchpad-docker.yml` was considered and rejected — see Consequences |
 | `deploy/compose/.env.example` | The checked-in example image reference | It is the file operators copy; a Launchpad-specific twin invites copying the wrong one |
 | `Dockerfile` | OCI `source`, `url`, `documentation` labels | Labels are baked at build time by the file itself |
@@ -53,6 +55,13 @@ somebody something:
 - **It fails closed.** A missing checker, a missing record, or a partial checkout fails
   rather than passes. The cost is real and falls on everyone: a branch created before this
   record existed genuinely lacks these files and fails until it rebases onto `launchpad`.
+- **It measures the boundary, not the presence of files.** An earlier version asserted only
+  that the five files exist — and they exist upstream anyway, so it reported success on a
+  tree where none of the exceptions were in use. Combined with §3 telling reviewers not to
+  raise this in review, that removed the prompt to look and replaced it with a tick that
+  measured nothing. The check now asserts that each sanctioned file no longer carries the
+  upstream value it was sanctioned to replace, and a file listed here with no content
+  assertion fails rather than passing quietly.
 - **A deterministic check may gate; a model verdict may not.** #118 records agent judges
   scoring AUROC 0.48–0.64 against 6,642 human-verified labels on adversarial security
   claims. A required check that goes red on a model's opinion produces false blocks, and
