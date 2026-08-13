@@ -69,6 +69,28 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   return [for (final event in events) AgentDirectoryEntry.fromEvent(event)];
 });
 
+/// NIP-IA archived-identity pubkeys (kind:13535 snapshot).
+///
+/// The relay emits a single relay-signed `p`-tag-per-identity snapshot listing
+/// identities archived on the relay. Mobile folds those identities out of
+/// mention autocomplete (desktop does the same via `useIsArchivedPredicate`).
+///
+/// Fail-open by construction: while the snapshot is missing or unfetched the
+/// set is empty, so a cold start or a relay without any archives never briefly
+/// hides everyone.
+final archivedAgentPubkeysProvider = FutureProvider<Set<String>>((ref) async {
+  final sessionState = ref.watch(relaySessionProvider);
+  if (sessionState.status != SessionStatus.connected) return const {};
+  final session = ref.read(relaySessionProvider.notifier);
+  final events = await session.fetchHistory(NostrFilters.archivedIdentities());
+  if (events.isEmpty) return const {};
+  return _AgentPubkeySet({
+    for (final tag in events.first.tags)
+      if (tag.length >= 2 && tag[0] == 'p') tag[1].toLowerCase(),
+  });
+});
+
+
 /// Verified NIP-OA owner pubkey per agent pubkey, from the agents' kind:0
 /// profiles. An entry exists only when the `auth` tag verifies — mirrors
 /// desktop's `profile_valid_oa_owner_pubkey`.

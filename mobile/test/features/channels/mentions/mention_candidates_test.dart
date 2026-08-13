@@ -280,5 +280,54 @@ void main() {
       expect(candidates, hasLength(1));
       expect(candidates.single.isMember, isTrue);
     });
+
+    test('archived agent identities are hidden from mention candidates', () {
+      final candidates = buildMentionCandidates(
+        members: [member(agentPubkey, role: 'bot')],
+        relayAgents: const [],
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        archivedPubkeys: {agentPubkey},
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates.any((c) => c.pubkey == agentPubkey), isFalse);
+    });
+
+    test('the current user is exempt from the archived fold', () {
+      final candidates = buildMentionCandidates(
+        members: [member(agentPubkey, role: 'bot')],
+        relayAgents: const [],
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        archivedPubkeys: {agentPubkey},
+        currentPubkey: agentPubkey,
+      );
+
+      expect(
+        candidates.any((c) => c.pubkey == agentPubkey),
+        isTrue,
+        reason: 'NIP-IA anti-shadowban: the archived self must remain visible',
+      );
+    });
+
+    test('a non-archived agent candidate remains when others are archived',
+        () {
+      const keptPubkey = 'b' * 64;
+      final candidates = buildMentionCandidates(
+        members: [
+          member(agentPubkey, role: 'bot'),
+          member(keptPubkey, role: 'bot'),
+        ],
+        relayAgents: const [],
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        archivedPubkeys: {agentPubkey},
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates.any((c) => c.pubkey == agentPubkey), isFalse);
+      expect(candidates.any((c) => c.pubkey == keptPubkey), isTrue);
+    });
   });
 }
