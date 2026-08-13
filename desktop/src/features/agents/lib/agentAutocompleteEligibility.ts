@@ -82,6 +82,18 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+/**
+ * Gate for *non-member* agent identities in autocomplete / add-member search.
+ *
+ * Returns true when the candidate should stay in the pipeline:
+ * - humans always pass
+ * - agents pass only if they are in the caller's allowed/mentionable set
+ *
+ * Channel *members* that are agents are handled separately by the caller
+ * (see `useMentions`): they bypass this gate so `shouldHideAgentFromMentions`
+ * can apply Option B invocability (member bots with unknown/allowed
+ * invocability remain mentionable — required for self-hosted ACP agents).
+ */
 export function isAgentIdentityInAllowedList(
   candidate: { isAgent?: boolean; pubkey: string },
   allowedAgentPubkeys: ReadonlySet<string>,
