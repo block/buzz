@@ -480,3 +480,90 @@ test("composer refetches a cached negative when a link is pasted into an empty d
     ipcHandlers.clear();
   }
 });
+// A concurrent render may execute the hook and then suspend before commit. No
+// href presence, block, generation, or tag mutation from that abandoned render
+// may affect the previously committed composer.
+test("an abandoned concurrent render cannot invalidate the committed snapshot tag", async () => {
+  const React = await import("react");
+  const { act, cleanup, render } = await import("@testing-library/react");
+  const { resetLinkPreviewMetadataCache } = await import(
+    "@/shared/lib/useResolvedLinkPreviews.ts"
+  );
+  const { useComposerLinkPreviews } = await import(
+    "./useComposerLinkPreviews.tsx"
+  );
+
+  resetLinkPreviewMetadataCache();
+  ipcHandlers.clear();
+  ipcHandlers.set("get_relay_http_url", () =>
+    Promise.resolve("https://relay.example.com"),
+  );
+  ipcHandlers.set("upload_media_bytes", () =>
+    Promise.resolve({
+      url: "https://relay.example.com/media/stable",
+      sha256: "57ab1e",
+      size: 1,
+      type: "image/png",
+      uploaded: 0,
+    }),
+  );
+  ipcHandlers.set("fetch_link_preview_metadata", () =>
+    Promise.resolve(
+      metadata({
+        imageFetchState: "transient_failure",
+        imageRetryAfterMs: 900_000,
+      }),
+    ),
+  );
+
+  let latest;
+  const never = new Promise(() => {});
+  function Suspender() {
+    throw never;
+  }
+  function Harness({ content, suspend }) {
+    latest = useComposerLinkPreviews(content);
+    return suspend ? React.createElement(Suspender) : null;
+  }
+
+  try {
+    const view = render(
+      React.createElement(Harness, { content: `see ${HREF}`, suspend: false }),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+    });
+    assert.equal(latest.getReadyTags().length, 1);
+
+    // Render a clear that executes the hook but suspends before commit, then
+    // supersede it with the unchanged committed content.
+    await act(async () => {
+      React.startTransition(() =>
+        view.rerender(
+          React.createElement(Harness, { content: "", suspend: true }),
+        ),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      view.rerender(
+        React.createElement(Harness, {
+          content: `see ${HREF}`,
+          suspend: false,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    assert.equal(
+      latest.getReadyTags().length,
+      1,
+      "the committed tag remains sendable after the abandoned render",
+    );
+    assert.equal(latest.hasPendingSnapshots, false);
+    view.unmount();
+  } finally {
+    cleanup();
+    ipcHandlers.clear();
+  }
+});
