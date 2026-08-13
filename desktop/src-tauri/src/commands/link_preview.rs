@@ -15,15 +15,18 @@ mod rate_limit;
 #[path = "link_preview_youtube.rs"]
 mod youtube;
 
-use rate_limit::{image_host_cooldown_remaining, retry_after_duration, set_image_host_cooldown};
+use rate_limit::{
+    image_host_cooldown_remaining, is_transient_status, permanently_rejected_error,
+    rate_limited_response_error, retry_after_duration, set_image_host_cooldown,
+};
 
 const MAX_PREVIEW_FETCH_BYTES: usize = 256 * 1024;
 const MAX_IMAGE_FETCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 const MAX_SANITIZED_DIMENSION: u32 = 1200;
-const PREVIEW_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
-const PREVIEW_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+const PREVIEW_FETCH_TIMEOUT: Duration = Duration::from_secs(6);
+const PREVIEW_TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_REDIRECTS: usize = 3;
 const MAX_METADATA_CHARS: usize = 180;
 const MAX_METADATA_DESCRIPTION_CHARS: usize = 280;
@@ -65,7 +68,8 @@ pub async fn fetch_link_preview_metadata(
 async fn fetch_link_preview_metadata_inner(
     href: String,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
-    let mut url = Url::parse(href.trim()).map_err(|error| format!("invalid URL: {error}"))?;
+    let mut url = Url::parse(href.trim())
+        .map_err(|error| permanently_rejected_error(&format!("invalid URL: {error}")))?;
     validate_public_https_url(&url).await?;
 
     if youtube::is_video_url(&url) {
@@ -82,17 +86,31 @@ async fn fetch_link_preview_metadata_inner(
             let Some(location) = response.headers().get(LOCATION) else {
                 return Ok(None);
             };
-            let location = location
-                .to_str()
-                .map_err(|_| "link preview redirect has an invalid location".to_string())?;
-            url = url
-                .join(location)
-                .map_err(|error| format!("invalid link preview redirect: {error}"))?;
+            let location = location.to_str().map_err(|_| {
+                permanently_rejected_error("link preview redirect has an invalid location")
+            })?;
+            url = url.join(location).map_err(|error| {
+                permanently_rejected_error(&format!("invalid link preview redirect: {error}"))
+            })?;
             validate_public_https_url(&url).await?;
             continue;
         }
 
-        if !response.status().is_success() || !is_html_response(&response) {
+        if !response.status().is_success() {
+            // A retryable status (rate limit, request timeout, too early, or a
+            // server error) is transient: surface it as an error so the caller
+            // retries soon instead of caching an empty card for the full miss
+            // TTL. Any other non-success (e.g. 404) is a genuine hard miss.
+            let status = response.status();
+            if let Some(error) = rate_limited_response_error(&response) {
+                return Err(error);
+            }
+            if is_transient_status(status) {
+                return Err(format!("link preview request failed: HTTP {status}"));
+            }
+            return Ok(None);
+        }
+        if !is_html_response(&response) {
             return Ok(None);
         }
         let body = read_bytes_prefix(response, MAX_PREVIEW_FETCH_BYTES).await?;
@@ -163,15 +181,19 @@ fn apply_image_result(
 
 async fn validate_public_https_url(url: &Url) -> Result<(), String> {
     if url.scheme() != "https" || url.username() != "" || url.password().is_some() {
-        return Err("link previews require an HTTPS URL without credentials".to_string());
+        return Err(permanently_rejected_error(
+            "link previews require an HTTPS URL without credentials",
+        ));
     }
     if url.port().is_some_and(|port| port != 443) {
-        return Err("link previews require the default HTTPS port".to_string());
+        return Err(permanently_rejected_error(
+            "link previews require the default HTTPS port",
+        ));
     }
 
     let host = url
         .host_str()
-        .ok_or_else(|| "link preview URL has no host".to_string())?;
+        .ok_or_else(|| permanently_rejected_error("link preview URL has no host"))?;
     resolve_public_addresses(host).await.map(|_| ())
 }
 
@@ -187,7 +209,9 @@ async fn resolve_public_addresses(host: &str) -> Result<Vec<IpAddr>, String> {
         return Err("link preview DNS resolution returned no addresses".to_string());
     }
     if addresses.iter().any(buzz_core_pkg::network::is_private_ip) {
-        return Err("link preview host resolved to a private or reserved address".to_string());
+        return Err(permanently_rejected_error(
+            "link preview host resolved to a private or reserved address",
+        ));
     }
 
     Ok(addresses)
@@ -355,11 +379,7 @@ async fn fetch_sanitized_image(
         }
         if !response.status().is_success() {
             let status = response.status();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status == reqwest::StatusCode::REQUEST_TIMEOUT
-                || status == reqwest::StatusCode::TOO_EARLY
-                || status.is_server_error()
-            {
+            if is_transient_status(status) {
                 let retry_after = retry_after_duration(&response);
                 if let Some(retry_after) = retry_after {
                     set_image_host_cooldown(&url, retry_after);
@@ -656,9 +676,9 @@ mod tests {
     use super::rate_limit::MAX_IMAGE_RETRY_AFTER;
     use super::{
         apply_image_result, declares_animation, extract_favicon_url, extract_image_url,
-        extract_link_preview_metadata, is_html_response, read_bytes_prefix, retry_after_duration,
-        sanitize_image, ImageFetchError, LinkPreviewImageFetchState, LinkPreviewMetadata,
-        MAX_METADATA_DESCRIPTION_CHARS,
+        extract_link_preview_metadata, is_html_response, is_transient_status, read_bytes_prefix,
+        retry_after_duration, sanitize_image, ImageFetchError, LinkPreviewImageFetchState,
+        LinkPreviewMetadata, MAX_METADATA_DESCRIPTION_CHARS,
     };
     use axum::{body::Body, http::Response, routing::get, Router};
     use base64::Engine as _;
@@ -961,5 +981,25 @@ mod tests {
     fn metadata_requires_a_non_empty_title() {
         assert_eq!(extract_link_preview_metadata("<title>   </title>"), None);
         assert_eq!(extract_link_preview_metadata("<html></html>"), None);
+    }
+
+    #[test]
+    fn transient_statuses_are_distinguished_from_hard_misses() {
+        use reqwest::StatusCode;
+        // Retryable: surfaced as an error so the caller retries soon instead of
+        // caching an empty card for the full miss TTL.
+        assert!(is_transient_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_transient_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(is_transient_status(StatusCode::TOO_EARLY));
+        assert!(is_transient_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_transient_status(StatusCode::BAD_GATEWAY));
+        assert!(is_transient_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_transient_status(StatusCode::GATEWAY_TIMEOUT));
+        // Genuine hard misses: cached for the full miss TTL, not retried early.
+        assert!(!is_transient_status(StatusCode::NOT_FOUND));
+        assert!(!is_transient_status(StatusCode::FORBIDDEN));
+        assert!(!is_transient_status(StatusCode::UNAUTHORIZED));
+        assert!(!is_transient_status(StatusCode::GONE));
+        assert!(!is_transient_status(StatusCode::OK));
     }
 }
