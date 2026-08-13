@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod error;
 mod links;
+mod prepared_event;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -51,6 +52,21 @@ where
             }
         }
     };
+    if prepared_command(&cli).is_some() {
+        let mut input = Vec::new();
+        if let Err(error) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input) {
+            error::print_error(&CliError::Other(format!("failed to read stdin: {error}")));
+            return 4;
+        }
+        let output = execute_prepared_cli(&cli, &input).await;
+        if let Some(value) = output.stdout {
+            println!("{value}");
+        }
+        if let Some(value) = output.stderr {
+            eprintln!("{value}");
+        }
+        return output.exit_code;
+    }
     match run(cli).await {
         Ok(()) => 0,
         Err(e) => {
@@ -58,6 +74,53 @@ where
             error::exit_code(&e)
         }
     }
+}
+
+/// Run a prepared-event CLI command with explicit byte streams.
+///
+/// This keeps private reply content off argv and gives adapter recovery code a
+/// deterministic JSON-only interface without replacing process-global stdio.
+pub async fn run_from_args_with_io<I, S, O, E>(
+    args: I,
+    input: &[u8],
+    stdout: &mut O,
+    stderr: &mut E,
+) -> i32
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+    O: std::io::Write,
+    E: std::io::Write,
+{
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let target: &mut dyn std::io::Write = if error.use_stderr() { stderr } else { stdout };
+            let _ = writeln!(target, "{}", error.render());
+            return if error.use_stderr() { 1 } else { 0 };
+        }
+    };
+    if prepared_command(&cli).is_none() {
+        let _ = writeln!(
+            stderr,
+            "{}",
+            serde_json::json!({
+                "error": "user_error",
+                "retryable": false,
+                "message": "explicit IO is supported only for messages prepare and publish-prepared"
+            })
+        );
+        return 1;
+    }
+    let output = execute_prepared_cli(&cli, input).await;
+    if let Some(value) = output.stdout {
+        let _ = writeln!(stdout, "{value}");
+    }
+    if let Some(value) = output.stderr {
+        let _ = writeln!(stderr, "{value}");
+    }
+    output.exit_code
 }
 
 #[derive(Parser)]
@@ -369,6 +432,36 @@ buzz agents archived"
 
 #[derive(Subcommand)]
 pub enum MessagesCmd {
+    /// Prepare and fsync one fully signed message without publishing it
+    Prepare {
+        /// Channel UUID for the owner DM
+        #[arg(long)]
+        channel: String,
+        /// Must be '-' so private reply text is read from stdin
+        #[arg(long)]
+        content: String,
+        /// Immediate parent event ID
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Authoritative thread root event ID
+        #[arg(long)]
+        thread_root: Option<String>,
+        /// Durable Context Engine execution ID (64 hexadecimal characters)
+        #[arg(long)]
+        execution_id: String,
+        /// Explicit mentioned pubkey; repeatable
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
+        /// Absolute no-clobber path for the prepared record
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Publish or replay a previously prepared exact signed event
+    PublishPrepared {
+        /// Absolute path to the prepared record
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
     /// Send a message to a channel
     #[command(
         after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
@@ -1948,6 +2041,86 @@ fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
+fn build_client(cli: &Cli, relay_url: String) -> Result<BuzzClient, CliError> {
+    let private_key_str = cli.private_key.as_ref().ok_or_else(|| {
+        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
+    })?;
+    let keys = Keys::parse(private_key_str)
+        .map_err(|error| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {error}")))?;
+    let (auth_tag, auth_tag_json) = match cli.auth_tag.as_deref() {
+        Some(input) if !input.is_empty() => {
+            let json = normalize_auth_tag_input(input);
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
+                .map_err(|error| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {error}")))?;
+            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|error| {
+                CliError::Auth(format!(
+                    "BUZZ_AUTH_TAG verification failed for pubkey {}: {error}",
+                    keys.public_key().to_hex()
+                ))
+            })?;
+            let canonical = serde_json::to_string(tag.as_slice()).map_err(|error| {
+                CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {error}"))
+            })?;
+            (Some(tag), Some(canonical))
+        }
+        _ => (None, None),
+    };
+    BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)
+}
+
+fn prepared_command(cli: &Cli) -> Option<prepared_event::PreparedCommand<'_>> {
+    match &cli.command {
+        Cmd::Messages(MessagesCmd::Prepare {
+            channel,
+            content,
+            reply_to,
+            thread_root,
+            execution_id,
+            mentions,
+            out,
+        }) => Some(prepared_event::PreparedCommand::Prepare {
+            channel,
+            content_flag: content,
+            reply_to: reply_to.as_deref(),
+            thread_root: thread_root.as_deref(),
+            execution_id,
+            mentions,
+            out,
+        }),
+        Cmd::Messages(MessagesCmd::PublishPrepared { file }) => {
+            Some(prepared_event::PreparedCommand::Publish { file })
+        }
+        _ => None,
+    }
+}
+
+async fn execute_prepared_cli(cli: &Cli, input: &[u8]) -> prepared_event::PreparedCommandOutput {
+    let Some(command) = prepared_command(cli) else {
+        return prepared_event::PreparedCommandOutput {
+            exit_code: 1,
+            stdout: None,
+            stderr: Some(serde_json::json!({
+                "error": "user_error",
+                "retryable": false,
+                "message": "not a prepared-event command"
+            })),
+        };
+    };
+    let relay_url = client::normalize_relay_url(&cli.relay);
+    match build_client(cli, relay_url) {
+        Ok(client) => prepared_event::execute(&client, command, input).await,
+        Err(error) => prepared_event::PreparedCommandOutput {
+            exit_code: error::exit_code(&error),
+            stdout: None,
+            stderr: Some(serde_json::json!({
+                "error": "auth_error",
+                "retryable": false,
+                "message": error.to_string(),
+            })),
+        },
+    }
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -1959,45 +2132,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Auth: private key is required for all relay operations.
-    // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
-
-    // NIP-OA: parse and verify the auth tag if provided.
-    //
-    // `BUZZ_AUTH_TAG` is hand-authored configuration, so the unquoted raw
-    // shorthand `[auth,hex,,hex]` is normalized to JSON here — at this input
-    // edge only. The SDK grammar and the `x-auth-tag` wire format stay strict
-    // JSON; all validation and signature verification happen on the strict
-    // path below, unchanged.
-    let (auth_tag, auth_tag_json) = match cli.auth_tag {
-        Some(ref input) if !input.is_empty() => {
-            let json = normalize_auth_tag_input(input);
-            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
-            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|e| {
-                CliError::Auth(format!(
-                    "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
-                    keys.public_key().to_hex()
-                ))
-            })?;
-            // Canonical wire form derives from the parsed-and-verified tag
-            // (same shape as buzz-acp's RestClient), never from raw input.
-            let canonical = serde_json::to_string(tag.as_slice())
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {e}")))?;
-            (Some(tag), Some(canonical))
-        }
-        _ => (None, None),
-    };
-
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+    let client = build_client(&cli, relay_url)?;
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Messages(MessagesCmd::Prepare { .. } | MessagesCmd::PublishPrepared { .. }) => {
+            unreachable!("prepared commands are dispatched before the ordinary CLI path")
+        }
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -2184,6 +2325,8 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "prepare",
+                "publish-prepared",
                 "search",
                 "send",
                 "send-diff",
@@ -2321,7 +2464,7 @@ mod tests {
             ("feed", 1),
             ("issues", 4),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 10),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

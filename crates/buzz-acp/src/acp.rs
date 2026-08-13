@@ -21,6 +21,77 @@ use crate::usage::{
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+/// Child diagnostics are line-oriented and intentionally much smaller than ACP
+/// protocol frames. Oversized lines are dropped without copying their content.
+const MAX_CHILD_STDERR_LINE_SIZE: usize = 64 * 1024;
+const LOG_HASH_DOMAIN: &[u8] = b"buzz-acp-log-redaction-v1\0";
+
+fn redacted_log_hash(class: &str, value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(LOG_HASH_DOMAIN);
+    hasher.update(class.as_bytes());
+    hasher.update([0]);
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn safe_acp_method(value: Option<&str>) -> &'static str {
+    match value {
+        None => "response",
+        Some("initialize") => "initialize",
+        Some("session/new") => "session/new",
+        Some("session/prompt") => "session/prompt",
+        Some("session/cancel") => "session/cancel",
+        Some("session/update") => "session/update",
+        Some("session/request_permission") => "session/request_permission",
+        Some("_goose/unstable/session/update") => "goose_session_update",
+        Some("_goose/unstable/session/steer") => "goose_session_steer",
+        Some("_session/steering") => "session_steering",
+        Some(_) => "unknown",
+    }
+}
+
+fn safe_update_type(value: &str) -> &'static str {
+    match value {
+        "agent_message_chunk" => "agent_message_chunk",
+        "tool_call" => "tool_call",
+        "tool_call_update" => "tool_call_update",
+        "plan" => "plan",
+        "agent_thought_chunk" => "agent_thought_chunk",
+        "available_commands_update" => "available_commands_update",
+        "session_info_update" => "session_info_update",
+        "usage_update" => "usage_update",
+        "keepalive" => "keepalive",
+        _ => "unknown",
+    }
+}
+
+fn safe_tool_kind(value: &str) -> &'static str {
+    match value {
+        "read" => "read",
+        "edit" => "edit",
+        "delete" => "delete",
+        "move" => "move",
+        "search" => "search",
+        "execute" => "execute",
+        "think" => "think",
+        "fetch" => "fetch",
+        "other" => "other",
+        _ => "unknown",
+    }
+}
+
+fn safe_tool_status(value: &str) -> &'static str {
+    match value {
+        "pending" => "pending",
+        "in_progress" => "in_progress",
+        "completed" => "completed",
+        "failed" => "failed",
+        _ => "unknown",
+    }
+}
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -111,15 +182,12 @@ pub enum AcpError {
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
-/// preserving the numeric code. When the `message` field is missing or
-/// non-string, fall back to the full JSON object so provider-specific
-/// detail (e.g. a `data` field) is not lost.
+/// preserving only the numeric code. Provider error text/data is deliberately
+/// replaced at this boundary so upstream bodies cannot reach logs or observer
+/// frames through a later `Display` call.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-    let message = match error.get("message").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
-        None => error.to_string(),
-    };
+    let message = "agent returned a redacted JSON-RPC error".to_string();
     AcpError::AgentError { code, message }
 }
 
@@ -147,6 +215,8 @@ pub struct AcpClient {
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
     reader: FramedRead<ChildStdout, LinesCodec>,
+    /// Background drain for redacted child stderr diagnostics.
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// Monotonically increasing JSON-RPC request id counter.
     /// Harness-generated IDs are always numeric.
     next_id: u64,
@@ -441,6 +511,14 @@ impl AcpClient {
             Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
             Err(_) => tracing::warn!("child did not exit within 5s after SIGKILL — abandoning"),
         }
+        if let Some(mut stderr_task) = self.stderr_task.take() {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut stderr_task)
+                .await
+                .is_err()
+            {
+                stderr_task.abort();
+            }
+        }
     }
 
     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
@@ -463,8 +541,8 @@ impl AcpClient {
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Inherit stderr so agent logs are visible in the harness terminal.
-            .stderr(Stdio::inherit())
+            // Drain child diagnostics through the redaction boundary below.
+            .stderr(Stdio::piped())
             // Ensure the child is killed when the AcpClient is dropped (best-effort).
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
@@ -544,11 +622,58 @@ impl AcpClient {
             .stdout
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| AcpError::Protocol("failed to open agent stderr".into()))?;
+        let stderr_dispatch = tracing::dispatcher::get_default(|dispatch| dispatch.clone());
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = FramedRead::new(
+                stderr,
+                LinesCodec::new_with_max_length(MAX_CHILD_STDERR_LINE_SIZE),
+            );
+            while let Some(line) = reader.next().await {
+                match line {
+                    Ok(line) => {
+                        let line_bytes = line.len();
+                        let line_hash = redacted_log_hash("child_stderr", &line);
+                        tracing::dispatcher::with_default(&stderr_dispatch, || {
+                            tracing::debug!(
+                                target: "acp::child_stderr",
+                                line_bytes,
+                                line_hash,
+                                "agent child stderr line"
+                            );
+                        });
+                    }
+                    Err(LinesCodecError::MaxLineLengthExceeded) => {
+                        tracing::dispatcher::with_default(&stderr_dispatch, || {
+                            tracing::warn!(
+                                target: "acp::child_stderr",
+                                error_class = "line_too_long",
+                                "agent child stderr line discarded"
+                            );
+                        });
+                    }
+                    Err(_) => {
+                        tracing::dispatcher::with_default(&stderr_dispatch, || {
+                            tracing::warn!(
+                                target: "acp::child_stderr",
+                                error_class = "read_error",
+                                "agent child stderr drain stopped"
+                            );
+                        });
+                        break;
+                    }
+                }
+            }
+        });
 
         Ok(Self {
             child,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
+            stderr_task: Some(stderr_task),
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
@@ -599,6 +724,29 @@ impl AcpClient {
         }
     }
 
+    fn observe_acp_frame(&self, kind: &'static str, frame: &serde_json::Value) {
+        let raw_method = frame.get("method").and_then(serde_json::Value::as_str);
+        let raw_update_type = frame
+            .pointer("/params/update/sessionUpdate")
+            .and_then(serde_json::Value::as_str);
+        let content_bytes = frame
+            .pointer("/params/update/content/text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::len);
+        self.observe(
+            kind,
+            serde_json::json!({
+                "method": safe_acp_method(raw_method),
+                "methodHash": raw_method.map(|value| redacted_log_hash("method", value)),
+                "hasId": frame.get("id").is_some(),
+                "updateType": raw_update_type.map(safe_update_type),
+                "updateTypeHash": raw_update_type
+                    .map(|value| redacted_log_hash("update_type", value)),
+                "contentBytes": content_bytes,
+            }),
+        );
+    }
+
     /// Send the `initialize` request and return the agent's response result value.
     ///
     /// Must be called exactly once, before any other ACP method.
@@ -617,7 +765,11 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        tracing::debug!(target: "acp::init", "initialize response: {result}");
+        tracing::debug!(
+            target: "acp::init",
+            steering_supported = self.steering_supported,
+            "ACP initialize completed"
+        );
         Ok(result)
     }
 
@@ -782,6 +934,20 @@ impl AcpClient {
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
         let params = build_prompt_params(session_id, prompt_blocks);
+        self.session_prompt_params_with_idle_timeout(session_id, params, idle_timeout, max_duration)
+            .await
+    }
+
+    /// Send pre-built `session/prompt` params with the standard idle and hard
+    /// deadlines. The trusted Buzz envelope path uses this after adding
+    /// `_meta.buzz`; ordinary prompts continue through the block helper above.
+    pub async fn session_prompt_params_with_idle_timeout(
+        &mut self,
+        session_id: &str,
+        params: serde_json::Value,
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -802,7 +968,14 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        let prompt_block_count = msg["params"]["prompt"].as_array().map_or(0, Vec::len);
+        tracing::debug!(
+            target: "acp::wire",
+            method = "session/prompt",
+            request_id = id,
+            prompt_block_count,
+            "outbound ACP request"
+        );
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
             self.current_hard_deadline = None;
@@ -1077,7 +1250,7 @@ impl AcpClient {
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
+        self.observe_acp_frame("acp_write", value);
         Ok(())
     }
 
@@ -1108,7 +1281,12 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(
+            target: "acp::wire",
+            method,
+            request_id = id,
+            "outbound ACP request"
+        );
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -1173,7 +1351,11 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ (notification) {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(
+            target: "acp::wire",
+            method,
+            "outbound ACP notification"
+        );
         self.write_ndjson(&msg).await?;
         Ok(())
     }
@@ -1214,27 +1396,36 @@ impl AcpClient {
                 continue;
             }
 
-            // Only log and reset idle after we have a valid non-empty line.
-            tracing::debug!(target: "acp::wire", "← {trimmed}");
-
             let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
                 Err(e) => {
                     self.observe(
                         "acp_parse_error",
                         serde_json::json!({
-                            "line": trimmed,
-                            "error": e.to_string(),
+                            "errorClass": "invalid_json",
+                            "lineBytes": trimmed.len(),
                         }),
                     );
                     tracing::warn!(
                         target: "acp::wire",
-                        "failed to parse line as JSON: {e} — skipping"
+                        error_class = "invalid_json",
+                        line_bytes = trimmed.len(),
+                        line = e.line(),
+                        column = e.column(),
+                        "failed to parse inbound ACP frame"
                     );
                     continue;
                 }
             };
-            self.observe("acp_read", msg.clone());
+            let raw_method = msg.get("method").and_then(serde_json::Value::as_str);
+            tracing::debug!(
+                target: "acp::wire",
+                method = safe_acp_method(raw_method),
+                method_hash = redacted_log_hash("method", raw_method.unwrap_or("response")),
+                has_id = msg.get("id").is_some(),
+                "inbound ACP frame"
+            );
+            self.observe_acp_frame("acp_read", &msg);
 
             // Check if this is a response to our expected request (has matching id
             // AND no `method` field — a `method` field means it's an agent-initiated
@@ -1274,7 +1465,12 @@ impl AcpClient {
                             // agent process is dead and continuing would hang.
                             self.write_ndjson(&err_resp).await?;
                         }
-                        tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
+                        tracing::debug!(
+                            target: "acp::wire",
+                            method = "unknown",
+                            method_hash = redacted_log_hash("method", other),
+                            "ignoring unknown ACP method"
+                        );
                     }
                 }
             }
@@ -1461,8 +1657,9 @@ impl AcpClient {
                             });
                             tracing::debug!(
                                 target: "acp::wire",
-                                "→ {}",
-                                serde_json::to_string(&msg).unwrap_or_default()
+                                method,
+                                request_id = id,
+                                "outbound ACP steer request"
                             );
                             match self.write_ndjson(&msg).await {
                                 Ok(()) => {
@@ -1538,26 +1735,36 @@ impl AcpClient {
                         continue;
                     }
 
-                    tracing::debug!(target: "acp::wire", "← {trimmed}");
-
                     let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                         Ok(v) => v,
                         Err(e) => {
                             self.observe(
                                 "acp_parse_error",
                                 serde_json::json!({
-                                    "line": trimmed,
-                                    "error": e.to_string(),
+                                    "errorClass": "invalid_json",
+                                    "lineBytes": trimmed.len(),
                                 }),
                             );
                             tracing::warn!(
                                 target: "acp::wire",
-                                "failed to parse line as JSON: {e} — skipping"
+                                error_class = "invalid_json",
+                                line_bytes = trimmed.len(),
+                                line = e.line(),
+                                column = e.column(),
+                                "failed to parse inbound ACP frame"
                             );
                             continue;
                         }
                     };
-                    self.observe("acp_read", msg.clone());
+                    let raw_method = msg.get("method").and_then(serde_json::Value::as_str);
+                    tracing::debug!(
+                        target: "acp::wire",
+                        method = safe_acp_method(raw_method),
+                        method_hash = redacted_log_hash("method", raw_method.unwrap_or("response")),
+                        has_id = msg.get("id").is_some(),
+                        "inbound ACP frame"
+                    );
+                    self.observe_acp_frame("acp_read", &msg);
 
                     let activity_now = Instant::now();
                     idle_deadline = activity_now + idle_timeout;
@@ -1583,7 +1790,8 @@ impl AcpClient {
                                             .get("code")
                                             .and_then(|c| c.as_i64())
                                             .unwrap_or(-1);
-                                        let message = error.to_string();
+                                        let message =
+                                            "agent returned a redacted steer error".to_string();
                                         crate::pool::SteerAck::Err(
                                             crate::pool::SteerError::AgentError { code, message },
                                         )
@@ -1722,7 +1930,12 @@ impl AcpClient {
                                     // agent process is dead and continuing would hang.
                                     self.write_ndjson(&err_resp).await?;
                                 }
-                                tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
+                                tracing::debug!(
+                                    target: "acp::wire",
+                                    method = "unknown",
+                                    method_hash = redacted_log_hash("method", other),
+                                    "ignoring unknown ACP method"
+                                );
                             }
                         }
                     }
@@ -1754,9 +1967,8 @@ impl AcpClient {
 
         match update_type {
             "agent_message_chunk" => {
-                if let Some(text) = update["content"]["text"].as_str() {
-                    tracing::info!(target: "acp::stream", "{text}");
-                }
+                let bytes = update["content"]["text"].as_str().map_or(0, str::len);
+                tracing::debug!(target: "acp::stream", bytes, "agent message chunk");
                 false
             }
             "tool_call" => {
@@ -1768,7 +1980,14 @@ impl AcpClient {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                tracing::info!(
+                    target: "acp::tool",
+                    title_bytes = title.len(),
+                    title_hash = redacted_log_hash("tool_title", title),
+                    kind = safe_tool_kind(kind),
+                    kind_hash = redacted_log_hash("tool_kind", kind),
+                    "tool call started"
+                );
                 true
             }
             "tool_call_update" => {
@@ -1777,7 +1996,13 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                tracing::info!(
+                    target: "acp::tool",
+                    tool_id_hash = redacted_log_hash("tool_id", tool_id),
+                    status = safe_tool_status(status),
+                    status_hash = redacted_log_hash("tool_status", status),
+                    "tool call updated"
+                );
                 false
             }
             "plan" => {
@@ -1785,23 +2010,19 @@ impl AcpClient {
                 false
             }
             "agent_thought_chunk" => {
-                if let Some(text) = update["content"]["text"].as_str() {
-                    tracing::debug!(target: "acp::thought", "{text}");
-                }
+                let bytes = update["content"]["text"].as_str().map_or(0, str::len);
+                tracing::debug!(target: "acp::thought", bytes, "agent thought chunk");
                 false
             }
             "available_commands_update" => {
                 // Advertised slash commands (ACP slash-commands extension).
-                // Logged for observability; UI surfacing is a follow-up.
-                let names: Vec<&str> = update["availableCommands"]
-                    .as_array()
-                    .map(|cmds| cmds.iter().filter_map(|c| c["name"].as_str()).collect())
-                    .unwrap_or_default();
+                // Only the bounded count is observable; command names are
+                // agent-controlled content and stay behind the redaction boundary.
+                let command_count = update["availableCommands"].as_array().map_or(0, Vec::len);
                 tracing::info!(
                     target: "acp::update",
-                    "available_commands_update: {} commands [{}]",
-                    names.len(),
-                    names.join(", ")
+                    command_count,
+                    "available commands updated"
                 );
                 false
             }
@@ -1824,7 +2045,8 @@ impl AcpClient {
                         Some(serde_json::Value::String(run_id)) => {
                             tracing::debug!(
                                 target: "acp::update",
-                                "session_info_update: activeRunId={run_id}"
+                                run_id_hash = redacted_log_hash("active_run_id", run_id),
+                                "session active run updated"
                             );
                             self.active_run_id = Some(run_id.clone());
                         }
@@ -1847,7 +2069,12 @@ impl AcpClient {
             }
             "keepalive" => false,
             other => {
-                tracing::debug!(target: "acp::update", "session/update: {other}");
+                tracing::debug!(
+                    target: "acp::update",
+                    update_type = safe_update_type(other),
+                    update_type_hash = redacted_log_hash("update_type", other),
+                    "unknown session update"
+                );
                 false
             }
         }
@@ -2274,6 +2501,9 @@ pub fn model_in_catalog(
 
 impl Drop for AcpClient {
     fn drop(&mut self) {
+        if let Some(stderr_task) = self.stderr_task.take() {
+            stderr_task.abort();
+        }
         // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
         // Kill the process group when possible so subprocesses don't leak.
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
@@ -4698,29 +4928,26 @@ mod tests {
     }
 
     #[test]
-    fn agent_error_from_json_falls_back_to_full_json_when_message_missing() {
-        // Errors without a string `message` field (e.g. only a `data` field) must
-        // not be silently truncated to "unknown error" — the full JSON is preserved.
+    fn agent_error_from_json_redacts_data_when_message_missing() {
         let error = serde_json::json!({"code": -32000, "data": "quota exceeded"});
         match super::agent_error_from_json(&error) {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32000);
-                assert!(
-                    message.contains("quota exceeded"),
-                    "expected full JSON in message, got: {message}"
-                );
+                assert_eq!(message, "agent returned a redacted JSON-RPC error");
+                assert!(!message.contains("quota exceeded"));
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
     }
 
     #[test]
-    fn agent_error_from_json_uses_message_field_when_present() {
+    fn agent_error_from_json_redacts_message_field_when_present() {
         let error = serde_json::json!({"code": -32001, "message": "auth denied"});
         match super::agent_error_from_json(&error) {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32001);
-                assert_eq!(message, "auth denied");
+                assert_eq!(message, "agent returned a redacted JSON-RPC error");
+                assert!(!message.contains("auth denied"));
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
