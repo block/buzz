@@ -681,3 +681,32 @@ fn baked_env_allowlist_is_case_insensitive() {
     // Unknown key → masked by default.
     assert!(!super::is_safe_to_reveal("SOME_UNKNOWN_KEY"));
 }
+
+/// F3 (Desktop-parsing half): the `models` block emitted by an applied live
+/// switch — taken from the post-switch snapshot in `pool.rs` — must parse to the
+/// target model as current. Pairs with the pool test
+/// `test_applied_switch_caches_target_model_not_pre_switch`, which proves the
+/// emitted block already carries `currentModelId=model-b`.
+#[test]
+fn live_switch_models_from_post_switch_snapshot_parses_target_current() {
+    let models = serde_json::json!({
+        "currentModelId": "model-b",
+        "availableModels": [{"modelId": "model-a"}, {"modelId": "model-b"}],
+    });
+    let (available, current) = parse_models(Some(&models));
+    assert_eq!(current.as_deref(), Some("model-b"));
+    assert_eq!(available.len(), 2);
+}
+
+/// F3 (Desktop-parsing half): a Null `models` block — emitted when a successful
+/// switch's target response omits `models` — must parse to no current model, so
+/// the pre-switch model is never revived in the cache.
+#[test]
+fn live_switch_null_models_parses_to_no_current_model() {
+    let (available, current) = parse_models(Some(&serde_json::Value::Null));
+    assert!(
+        current.is_none(),
+        "Null models must not surface any current model"
+    );
+    assert!(available.is_empty());
+}
