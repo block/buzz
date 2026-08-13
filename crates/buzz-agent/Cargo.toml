@@ -41,6 +41,7 @@ axum = { workspace = true }
 base64 = "0.22"
 hex = { workspace = true }
 sha2 = { workspace = true }
+url = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
 dirs = "6"

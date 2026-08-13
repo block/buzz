@@ -4,7 +4,6 @@ import {
   Archive,
   BellRing,
   Bot,
-  Check,
   ChevronDown,
   Cpu,
   Download,
@@ -32,34 +31,10 @@ import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
-import {
-  setThreadViewMode,
-  useThreadViewMode,
-  type ThreadViewMode,
-} from "@/features/channels/lib/threadViewModePreference";
-import {
-  setLinkPreviewStyle,
-  useLinkPreviewStyle,
-  type LinkPreviewStyle,
-} from "@/shared/lib/linkPreviewStylePreference";
 import { cn } from "@/shared/lib/cn";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { Badge } from "@/shared/ui/badge";
-import { Button } from "@/shared/ui/button";
-import { SectionHeader } from "@/shared/ui/PageHeader";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
-import {
-  ACCENT_COLORS,
-  isBuzzTheme,
-  NEUTRAL_ACCENT,
-  useTheme,
-} from "@/shared/theme/ThemeProvider";
+import { isBuzzTheme, useTheme } from "@/shared/theme/ThemeProvider";
 import {
   LIGHT_THEMES,
   SYNTAX_THEMES,
@@ -78,16 +53,21 @@ import {
   withAccentPreviewVars,
 } from "@/shared/theme/useThemePreviewVars";
 import { appearanceCommunityLabel } from "../lib/appearanceScopeCopy";
+import {
+  AccentPickerContent,
+  GlassBackgroundSetting,
+  LinkPreviewStyleSetting,
+  ProminentActiveTabSetting,
+  ThreadLayoutSetting,
+} from "./AppearanceSettingsControls";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
-import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
-import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
-import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
+import { AgentsSettingsPanel } from "./AgentsSettingsPanel";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
@@ -414,6 +394,12 @@ function SingleThemeTile({
 
 type AppearanceMode = "system" | "light" | "dark";
 
+const APPEARANCE_MODE_OPTIONS = [
+  { mode: "system" as const, label: "System", Icon: SunMoon },
+  { mode: "light" as const, label: "Light", Icon: Sun },
+  { mode: "dark" as const, label: "Dark", Icon: Moon },
+] as const;
+
 // Reveal/hide motion for the accent picker: a small translate + opacity fade.
 // The picker sits below the theme grid and reads as tucking up behind it, so
 // it enters from above (slides *down* into place when a non-Buzz theme reveals
@@ -448,7 +434,8 @@ function ThemeSettingsCard() {
   // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
   // so the accent picker is hidden while a Buzz theme is active. `themeName` is
   // the effective theme, so this also covers System mode resolving to Buzz.
-  const accentPickerHidden = isBuzzTheme(themeName);
+  const buzzThemeSelected = isBuzzTheme(themeName);
+  const accentPickerHidden = buzzThemeSelected;
   const shouldReduceMotion = useReducedMotion();
 
   const previewVarsByTheme = useThemePreviewVars();
@@ -462,6 +449,7 @@ function ThemeSettingsCard() {
       : "light";
 
   const [selectedMode, setSelectedMode] = useState<AppearanceMode>(activeMode);
+  const [themeStyleExpanded, setThemeStyleExpanded] = useState(false);
 
   const getVars = (name: SyntaxThemeName) =>
     withAccentPreviewVars(
@@ -534,75 +522,44 @@ function ThemeSettingsCard() {
     const darkName = getThemePair(lightName);
     return selectedThemeName === lightName || selectedThemeName === darkName;
   };
-
-  return (
-    <section
-      className="flex min-h-0 flex-1 flex-col overflow-y-auto"
-      data-testid="settings-theme"
+  const selectedPairedTheme =
+    selectedMode === "system" ? pairedLight.find(isPairActive) : undefined;
+  const selectedTheme = selectedThemeName as SyntaxThemeName;
+  const selectedPairedDarkTheme = selectedPairedTheme
+    ? getThemePair(selectedPairedTheme)
+    : undefined;
+  const selectedThemeLabel = selectedPairedTheme
+    ? pairedThemeLabel(selectedPairedTheme)
+    : formatThemeLabel(selectedTheme);
+  const selectedThemePreview = selectedPairedTheme ? (
+    <SystemPreferencePreviewFrame
+      className="h-[112px] w-[168px] shrink-0"
+      darkGradient={
+        selectedPairedDarkTheme
+          ? BUZZ_GRADIENT_STOPS[selectedPairedDarkTheme]
+          : undefined
+      }
+      darkVars={
+        selectedPairedDarkTheme ? getVars(selectedPairedDarkTheme) : null
+      }
+      lightGradient={BUZZ_GRADIENT_STOPS[selectedPairedTheme]}
+      lightVars={getVars(selectedPairedTheme)}
+    />
+  ) : (
+    <ThemePreviewFrame
+      className="h-[112px] w-[168px] shrink-0"
+      sidebarGradient={BUZZ_GRADIENT_STOPS[selectedTheme]}
+      vars={getVars(selectedTheme)}
+    />
+  );
+  const themeStyleGrid = (
+    <div
+      className="px-4 pb-4 pt-1"
+      data-testid="theme-style-options"
+      id="theme-style-options"
     >
-      <SettingsSectionHeader
-        title="Appearance"
-        description="Choose a theme for Buzz."
-      />
-
-      {/* Mode, theme, and accent are saved per community
-          (CommunityThemeController restores them on switch). When the user is
-          in multiple communities, a subheader with an inline badge names the
-          community being edited; with one community there is nothing to
-          disambiguate, so no scoping labels are shown. */}
-      {showCommunityScope ? (
-        <SectionHeader
-          className="mb-4"
-          title={
-            <span className="flex min-w-0 items-center gap-2">
-              Theme{" "}
-              <span className="font-normal text-muted-foreground">
-                (per community)
-              </span>
-              {activeCommunity ? (
-                <Badge
-                  className="max-w-56 shrink-0 font-medium normal-case tracking-normal"
-                  data-testid="appearance-community-badge"
-                  variant="outline"
-                >
-                  <span className="truncate">{communityLabel}</span>
-                </Badge>
-              ) : null}
-            </span>
-          }
-        />
-      ) : null}
-
-      {/* Mode selector: System / Light / Dark */}
-      <div className="mb-4 flex gap-2">
-        {(
-          [
-            { mode: "system" as const, label: "System", Icon: SunMoon },
-            { mode: "light" as const, label: "Light", Icon: Sun },
-            { mode: "dark" as const, label: "Dark", Icon: Moon },
-          ] as const
-        ).map(({ mode, label, Icon }) => (
-          <button
-            aria-pressed={selectedMode === mode}
-            className={cn(
-              "flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-              selectedMode === mode
-                ? "border-primary bg-primary/10 text-foreground"
-                : "border-border/70 text-muted-foreground hover:border-border hover:text-foreground",
-            )}
-            data-testid={`appearance-mode-${mode}`}
-            key={mode}
-            onClick={() => handleModeSelect(mode)}
-            type="button"
-          >
-            <Icon className="h-4 w-4" />
-            {label}
-          </button>
-        ))}
-      </div>
-
       {/* Theme grid — constrained to ~3 rows, scrolls internally */}
-      <div className="relative mb-6">
+      <div className="relative">
         {/* Top fade */}
         <div
           aria-hidden="true"
@@ -665,257 +622,193 @@ function ThemeSettingsCard() {
           </div>
         </div>
       </div>
+    </div>
+  );
 
-      {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
-          Reveal/hide with the translate-up + opacity fade defined by
-          ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
-          and just renders/unrenders. */}
-      {shouldReduceMotion ? (
-        accentPickerHidden ? null : (
-          <AccentPickerContent
-            accentColor={accentColor}
-            isDark={isDark}
-            setAccentColor={setAccentColor}
-          />
-        )
-      ) : (
-        <AnimatePresence initial={false}>
-          {accentPickerHidden ? null : (
-            <motion.div
-              animate={{ opacity: 1, y: 0 }}
-              className="will-change-[opacity,transform]"
-              exit={{ opacity: 0, y: -10 }}
-              initial={{ opacity: 0, y: -10 }}
-              key="accent-picker"
-              transition={ACCENT_PICKER_TRANSITION}
+  return (
+    <section
+      className="flex min-h-0 flex-1 flex-col overflow-y-auto"
+      data-testid="settings-theme"
+    >
+      <SettingsSectionHeader
+        title="Appearance"
+        description="Choose how Buzz looks and feels."
+      />
+
+      <div className="space-y-12">
+        <SettingsOptionGroup
+          data-testid="appearance-theme-card"
+          headerAction={
+            showCommunityScope && activeCommunity ? (
+              <Badge
+                className="max-w-56 font-medium normal-case tracking-normal"
+                data-testid="appearance-community-badge"
+                variant="outline"
+              >
+                <span className="truncate">{communityLabel}</span>
+              </Badge>
+            ) : null
+          }
+          title={
+            <>
+              Theme
+              {showCommunityScope ? (
+                <span className="ml-1 font-normal text-muted-foreground">
+                  (per community)
+                </span>
+              ) : null}
+            </>
+          }
+        >
+          <SettingsOptionRow data-testid="appearance-color-mode-row">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Color mode</p>
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
+                Follow your system or choose a light or dark appearance.
+              </p>
+            </div>
+            <fieldset
+              className="relative isolate grid h-8 w-[15rem] shrink-0 grid-cols-3 overflow-hidden rounded-md bg-muted/45 p-0.5"
+              data-testid="appearance-color-mode-control"
             >
+              <legend className="sr-only">Color mode</legend>
+              <div
+                aria-hidden="true"
+                className="absolute bottom-0.5 left-0.5 top-0.5 z-0 rounded-md bg-background shadow-sm transition-transform duration-[250ms] ease-out motion-reduce:transition-none"
+                data-testid="appearance-color-mode-indicator"
+                style={{
+                  transform: `translateX(${APPEARANCE_MODE_OPTIONS.findIndex((option) => option.mode === selectedMode) * 100}%)`,
+                  width: "calc((100% - 4px) / 3)",
+                }}
+              />
+              {APPEARANCE_MODE_OPTIONS.map(({ mode, label, Icon }) => (
+                <button
+                  aria-pressed={selectedMode === mode}
+                  className={cn(
+                    "relative z-10 flex h-full items-center justify-center gap-1.5 rounded-md bg-transparent px-2.5 text-xs font-medium transition-colors duration-[250ms] ease-out focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+                    selectedMode === mode
+                      ? "text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                  data-testid={`appearance-mode-${mode}`}
+                  key={mode}
+                  onClick={() => handleModeSelect(mode)}
+                  type="button"
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {label}
+                </button>
+              ))}
+            </fieldset>
+          </SettingsOptionRow>
+
+          <SettingsOptionRow data-testid="theme-style-row">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Theme style</p>
+              <p
+                className="text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
+                Choose the colors used throughout Buzz.
+              </p>
+            </div>
+            <button
+              aria-label={`Theme style, ${selectedThemeLabel}`}
+              aria-controls="theme-style-options"
+              aria-expanded={themeStyleExpanded}
+              className="flex h-auto min-w-0 items-center gap-2 rounded-md bg-transparent p-0 text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="theme-style-trigger"
+              onClick={() => setThemeStyleExpanded((expanded) => !expanded)}
+              type="button"
+            >
+              <span
+                className="shrink-0"
+                data-testid="theme-style-selected-preview"
+              >
+                {selectedThemePreview}
+              </span>
+              <ChevronDown
+                className={cn(
+                  "h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-out motion-reduce:transition-none",
+                  themeStyleExpanded && "rotate-180",
+                )}
+              />
+            </button>
+          </SettingsOptionRow>
+
+          {shouldReduceMotion ? (
+            themeStyleExpanded ? (
+              themeStyleGrid
+            ) : null
+          ) : (
+            <AnimatePresence initial={false}>
+              {themeStyleExpanded ? (
+                <motion.div
+                  animate={{ height: "auto", opacity: 1, y: 0 }}
+                  className="overflow-hidden"
+                  exit={{ height: 0, opacity: 0, y: -6 }}
+                  initial={{ height: 0, opacity: 0, y: -6 }}
+                  key="theme-style-options"
+                  transition={{
+                    duration: 0.22,
+                    ease: [0.23, 1, 0.32, 1],
+                  }}
+                >
+                  {themeStyleGrid}
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          )}
+
+          {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
+              Reveal/hide with the translate-up + opacity fade defined by
+              ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
+              and just renders/unrenders. */}
+          {shouldReduceMotion ? (
+            accentPickerHidden ? null : (
               <AccentPickerContent
                 accentColor={accentColor}
                 isDark={isDark}
                 setAccentColor={setAccentColor}
               />
-            </motion.div>
+            )
+          ) : (
+            <AnimatePresence initial={false}>
+              {accentPickerHidden ? null : (
+                <motion.div
+                  animate={{ opacity: 1, y: 0 }}
+                  className="will-change-[opacity,transform]"
+                  exit={{ opacity: 0, y: -10 }}
+                  initial={{ opacity: 0, y: -10 }}
+                  key="accent-picker"
+                  transition={ACCENT_PICKER_TRANSITION}
+                >
+                  <AccentPickerContent
+                    accentColor={accentColor}
+                    isDark={isDark}
+                    setAccentColor={setAccentColor}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
           )}
-        </AnimatePresence>
-      )}
 
-      <LinkPreviewStyleSetting />
-      <ThreadLayoutSetting />
-    </section>
-  );
-}
+          <GlassBackgroundSetting />
+          {buzzThemeSelected ? <ProminentActiveTabSetting /> : null}
+        </SettingsOptionGroup>
 
-const LINK_PREVIEW_STYLE_OPTIONS: {
-  value: LinkPreviewStyle;
-  label: string;
-  description: string;
-}[] = [
-  {
-    value: "compact",
-    label: "Compact",
-    description: "Show links as compact horizontal cards",
-  },
-  {
-    value: "rich",
-    label: "Rich",
-    description: "Unfurl links with larger images and descriptions",
-  },
-];
-
-function LinkPreviewStyleSetting() {
-  const style = useLinkPreviewStyle();
-  const activeOption =
-    LINK_PREVIEW_STYLE_OPTIONS.find((option) => option.value === style) ??
-    LINK_PREVIEW_STYLE_OPTIONS[0];
-
-  return (
-    <SettingsOptionGroup className="mt-8">
-      <SettingsOptionRow>
-        <div className="min-w-0">
-          <p className="text-sm font-medium">Links</p>
-          <p className="text-sm font-normal text-muted-foreground">
-            {activeOption.description}
-          </p>
-        </div>
-        <DropdownMenu modal={false}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              className="h-7 min-w-28 justify-between gap-1.5 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium text-foreground shadow-none hover:bg-muted/70"
-              data-testid="link-preview-style-trigger"
-              size="sm"
-              type="button"
-              variant="ghost"
-            >
-              <span className="truncate">{activeOption.label}</span>
-              <ChevronDown className="h-4 w-4 text-muted-foreground" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-72">
-            <DropdownMenuRadioGroup
-              onValueChange={(next) =>
-                setLinkPreviewStyle(next as LinkPreviewStyle)
-              }
-              value={style}
-            >
-              {LINK_PREVIEW_STYLE_OPTIONS.map((option) => (
-                <DropdownMenuRadioItem
-                  data-testid={`link-preview-style-${option.value}`}
-                  key={option.value}
-                  value={option.value}
-                >
-                  <span className="flex min-w-0 flex-col">
-                    <span className="font-medium">{option.label}</span>
-                    <span className="text-2xs text-muted-foreground">
-                      {option.description}
-                    </span>
-                  </span>
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </SettingsOptionRow>
-    </SettingsOptionGroup>
-  );
-}
-
-const THREAD_VIEW_MODE_OPTIONS: {
-  value: ThreadViewMode;
-  label: string;
-  description: string;
-}[] = [
-  {
-    value: "focus",
-    label: "Focus",
-    description: "Threads open over the channel, full width",
-  },
-  {
-    value: "split",
-    label: "Split",
-    description: "Threads open in a side panel next to the channel",
-  },
-];
-
-/**
- * Thread layout picker. Uses the same dropdown radio group vocabulary as the
- * other enumerated Settings rows (e.g. {@link SoundPicker}) so each option can
- * carry its own description.
- */
-function ThreadLayoutSetting() {
-  const threadViewMode = useThreadViewMode();
-  // The "(all communities)" qualifier contrasts with the per-community theme
-  // controls above; it's only meaningful when the user has multiple
-  // communities.
-  const { communities } = useCommunities();
-  const showCommunityScope = communities.length > 1;
-  const activeOption =
-    THREAD_VIEW_MODE_OPTIONS.find(
-      (option) => option.value === threadViewMode,
-    ) ?? THREAD_VIEW_MODE_OPTIONS[0];
-
-  return (
-    <SettingsOptionGroup className="mt-8">
-      <SettingsOptionRow>
-        <div className="min-w-0">
-          <p className="text-sm font-medium">
-            Thread layout
-            {showCommunityScope ? (
-              <span className="font-normal text-muted-foreground">
-                {" "}
-                (all communities)
-              </span>
-            ) : null}
-          </p>
-          <p className="text-sm font-normal text-muted-foreground">
-            {activeOption.description}
-          </p>
-        </div>
-        <DropdownMenu modal={false}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              className="h-7 min-w-28 justify-between gap-1.5 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium text-foreground shadow-none hover:bg-muted/70"
-              data-testid="thread-layout-trigger"
-              size="sm"
-              type="button"
-              variant="ghost"
-            >
-              <span className="truncate">{activeOption.label}</span>
-              <ChevronDown className="h-4 w-4 text-muted-foreground" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-72">
-            <DropdownMenuRadioGroup
-              onValueChange={(next) =>
-                setThreadViewMode(next as ThreadViewMode)
-              }
-              value={threadViewMode}
-            >
-              {THREAD_VIEW_MODE_OPTIONS.map((option) => (
-                <DropdownMenuRadioItem
-                  data-testid={`thread-layout-${option.value}`}
-                  key={option.value}
-                  value={option.value}
-                >
-                  <span className="flex min-w-0 flex-col">
-                    <span className="font-medium">{option.label}</span>
-                    <span className="text-2xs text-muted-foreground">
-                      {option.description}
-                    </span>
-                  </span>
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </SettingsOptionRow>
-    </SettingsOptionGroup>
-  );
-}
-
-/** Accent swatch grid — shared by the animated and reduced-motion reveal paths. */
-function AccentPickerContent({
-  accentColor,
-  isDark,
-  setAccentColor,
-}: {
-  accentColor: string;
-  isDark: boolean;
-  setAccentColor: (value: string) => void;
-}) {
-  return (
-    <div className="shrink-0 px-1 pb-2 pt-1">
-      <h3 className="mb-2 text-sm font-medium">Accent color</h3>
-      <div className="flex flex-wrap gap-2 p-1">
-        {ACCENT_COLORS.map((color) => {
-          const isNeutral = color.value === NEUTRAL_ACCENT;
-          const swatchColor = isNeutral
-            ? "hsl(var(--foreground))"
-            : color.value;
-          const checkClassName =
-            isNeutral && isDark ? "text-black" : "text-white";
-
-          return (
-            <button
-              className={cn(
-                "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
-                accentColor === color.value &&
-                  "ring-2 ring-ring ring-offset-2 ring-offset-background",
-              )}
-              data-testid={`accent-color-${color.name.toLowerCase()}`}
-              key={color.value}
-              onClick={() => setAccentColor(color.value)}
-              style={{ backgroundColor: swatchColor }}
-              title={color.name}
-              type="button"
-            >
-              {accentColor === color.value && (
-                <Check className={cn("h-4 w-4", checkClassName)} />
-              )}
-            </button>
-          );
-        })}
+        <SettingsOptionGroup
+          data-testid="appearance-preferences-card"
+          title="Preferences"
+        >
+          <LinkPreviewStyleSetting />
+          <ThreadLayoutSetting />
+        </SettingsOptionGroup>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -953,13 +846,7 @@ export function renderSettingsSection(
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
-      return (
-        <div className="space-y-12">
-          <PreventSleepSettingsCard />
-          <HarnessesSettingsPanel />
-          <AgentDefaultsSettingsCard />
-        </div>
-      );
+      return <AgentsSettingsPanel />;
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":

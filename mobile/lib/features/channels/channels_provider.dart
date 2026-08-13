@@ -9,7 +9,8 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
-import 'channel_management_provider.dart' show channelDetailsProvider;
+import 'channel_management_provider.dart'
+    show ChannelMember, channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
@@ -49,6 +50,16 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Set<String> _authoredRootIds = {};
   String? _threadInterestPubkey;
   bool _hasLoaded = false;
+  String? _memberSnapshotRelayBaseUrl;
+  String? _memberSnapshotPubkey;
+  Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
+
+  /// The member snapshot already returned while loading the channel list.
+  ///
+  /// Mention autocomplete can use this synchronously while its independent
+  /// channel-member refresh is still in flight.
+  List<ChannelMember> cachedMembersForChannel(String channelId) =>
+      _memberSnapshotsByChannelId[channelId] ?? const [];
 
   Map<String, int> get latestObservedByChannel =>
       Map.unmodifiable(_latestObservedByChannel);
@@ -62,7 +73,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   @override
   Future<List<Channel>> build() async {
-    ref.watch(relayConfigProvider);
+    final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
+    final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
+    if (_memberSnapshotRelayBaseUrl != relayBaseUrl ||
+        _memberSnapshotPubkey != pubkey) {
+      _memberSnapshotRelayBaseUrl = relayBaseUrl;
+      _memberSnapshotPubkey = pubkey;
+      _memberSnapshotsByChannelId = const {};
+    }
     final connected = Completer<void>();
     final sessionState = ref.read(relaySessionProvider);
     final waitingForInitialConnection =
@@ -151,6 +169,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         .whereType<String>()
         .toSet()
         .toList();
+    _cacheMemberSnapshots(memberships, replaceAll: true);
     if (channelIds.isEmpty) {
       if (subscribeLive) await _subscribeLive(const []);
       return const [];
@@ -234,6 +253,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         limit: channelIds.length,
       ),
     );
+    if (memberEvents.isNotEmpty) _cacheMemberSnapshots(memberEvents);
     final memberCounts = <String, int>{};
     for (final event in memberEvents) {
       final chId = event.getTagValue('d');
@@ -354,6 +374,40 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       await _subscribeLive(channels);
     }
     return channels;
+  }
+
+  void _cacheMemberSnapshots(
+    Iterable<NostrEvent> events, {
+    bool replaceAll = false,
+  }) {
+    final latestByChannelId = <String, NostrEvent>{};
+    for (final event in events) {
+      final channelId = event.getTagValue('d');
+      if (channelId == null) continue;
+      final current = latestByChannelId[channelId];
+      if (current == null || event.createdAt > current.createdAt) {
+        latestByChannelId[channelId] = event;
+      }
+    }
+
+    final snapshots = replaceAll
+        ? <String, List<ChannelMember>>{}
+        : Map<String, List<ChannelMember>>.of(_memberSnapshotsByChannelId);
+    snapshots.addAll({
+      for (final entry in latestByChannelId.entries)
+        entry.key: List.unmodifiable([
+          for (final member in membersFromEvent(entry.value))
+            ChannelMember(
+              pubkey: member.pubkey,
+              role: member.role,
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(
+                entry.value.createdAt * 1000,
+                isUtc: true,
+              ),
+            ),
+        ]),
+    });
+    _memberSnapshotsByChannelId = Map.unmodifiable(snapshots);
   }
 
   Future<Set<String>> _fetchHiddenDmIds(

@@ -7,6 +7,7 @@ import {
   communityThemeApplyExpectation,
   communityThemeOutboxKey,
   communityThemePersistenceAction,
+  communityThemeScopeFallback,
   communityThemeStorageKey,
   parseCommunityThemePreference,
   readCommunityThemeOutbox,
@@ -160,6 +161,33 @@ test("already-applied relay state leaves the next user edit publishable", () => 
   assert.deepEqual(
     communityThemeApplyExpectation(applied, DEFAULT_COMMUNITY_THEME),
     applied,
+  );
+});
+
+test("no-op initialization remains programmatic", () => {
+  const expectation = communityThemeApplyExpectation(
+    DEFAULT_COMMUNITY_THEME,
+    DEFAULT_COMMUNITY_THEME,
+    true,
+  );
+
+  assert.equal(
+    communityThemePersistenceAction(expectation, DEFAULT_COMMUNITY_THEME),
+    "acknowledge",
+  );
+});
+
+test("confirmed first-community migration isolates later empty scopes", () => {
+  const inherited = {
+    ...DEFAULT_COMMUNITY_THEME,
+    theme: "dracula",
+    followSystem: false,
+  };
+
+  assert.deepEqual(communityThemeScopeFallback(false, inherited), inherited);
+  assert.deepEqual(
+    communityThemeScopeFallback(true, inherited),
+    DEFAULT_COMMUNITY_THEME,
   );
 });
 

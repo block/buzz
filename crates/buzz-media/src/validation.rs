@@ -69,12 +69,23 @@ pub(crate) fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
 /// neutralises them — this allowlist-of-denials is defence in depth, so a future
 /// header regression can't turn an uploaded blob into a stored-XSS vector.
 ///
-/// HTML, JS, and SVG are the classic stored-XSS carriers. Native executables are
+/// JS and SVG are the classic stored-XSS carriers. Native executables are
 /// blocked because there's no legitimate reason to host them inline in chat and
 /// they're a malware-distribution risk.
+///
+/// HTML is intentionally *not* blocked: it is accepted as an inert download
+/// (`serve_inline` returns false for `text/html`, so it is served with
+/// `Content-Disposition: attachment` + `nosniff` + `CSP: default-src 'none'`,
+/// and the desktop renderer never navigates a webview to a generic
+/// attachment). The old sniff-based block only caught the well-formed HTML
+/// `infer` recognises anyway — HTML that evades the sniff already uploaded as
+/// `application/octet-stream` and served as a download, so blocking canonical
+/// HTML was inconsistent rather than a real control. `application/xhtml+xml`
+/// stays listed as dormant defence in depth: `infer` has no XHTML matcher, so
+/// it is unreachable through sniffing, but the entry costs nothing and guards
+/// against a future detector that does classify it.
 const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
     // Active web content — stored-XSS vectors.
-    "text/html",
     "application/xhtml+xml",
     "image/svg+xml",
     "application/javascript",
@@ -135,6 +146,7 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
         // Data / text
         "application/json" => "json",
         "text/csv" => "csv",
+        "text/html" => "html",
         "text/plain" => "txt",
         _ => return None,
     };
@@ -2586,15 +2598,69 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_file_html_rejected() {
-        // HTML is a stored-XSS carrier — blocked even though headers neutralise it.
+    fn test_validate_file_html_accepted_as_inert_download() {
+        // HTML is accepted on the generic file path as an inert attachment.
+        // `infer` recognises canonical HTML as `text/html`; it must map to the
+        // `html` extension and, crucially, NOT be served inline — the serve
+        // layer relies on `serve_inline("text/html") == false` to attach a
+        // `Content-Disposition: attachment` + `nosniff` + restrictive CSP,
+        // which is what keeps the payload from ever executing.
         let config = test_config();
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        let result = validate_file_content(html, &config);
+        // Sanity: this fixture is exactly the shape `infer` classifies as HTML.
+        assert_eq!(infer::get(html).map(|k| k.mime_type()), Some("text/html"));
+        let (mime, ext) = validate_file_content(html, &config).unwrap();
+        assert_eq!(mime, "text/html");
+        assert_eq!(ext, "html");
         assert!(
-            matches!(result, Err(MediaError::DisallowedContentType(ref m)) if m == "text/html"),
-            "expected DisallowedContentType(text/html), got {result:?}"
+            !serve_inline(&mime),
+            "text/html must never be served inline — it must force download"
         );
+    }
+
+    #[test]
+    fn test_validate_file_executable_still_rejected() {
+        // Removing HTML from the deny-list must not weaken the executable
+        // block. `infer` classifies an ELF header as `application/x-executable`,
+        // which the generic path must still reject via the deny-list.
+        let config = test_config();
+        // `infer`'s ELF matcher requires the magic plus >52 bytes of header.
+        let mut elf = b"\x7fELF".to_vec();
+        elf.extend_from_slice(&[0u8; 60]);
+        assert_eq!(
+            infer::get(&elf).map(|k| k.mime_type()),
+            Some("application/x-executable")
+        );
+        assert!(
+            matches!(validate_file_content(&elf, &config), Err(MediaError::DisallowedContentType(ref m)) if m == "application/x-executable"),
+            "ELF executable must still be rejected by the generic file path"
+        );
+    }
+
+    #[test]
+    fn test_generic_deny_list_keeps_active_content_and_executables() {
+        // Static guard on the deny-list itself: HTML is intentionally gone, but
+        // SVG, JavaScript, XHTML, and the native-executable types remain. These
+        // are the entries that keep the inert-download boundary honest even if a
+        // future `infer` upgrade starts classifying more of them by content.
+        assert!(!BLOCKED_FILE_MIME_TYPES.contains(&"text/html"));
+        for kept in [
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "application/javascript",
+            "text/javascript",
+            "application/x-msdownload",
+            "application/x-executable",
+            "application/vnd.microsoft.portable-executable",
+            "application/x-mach-binary",
+            "application/x-msi",
+            "application/x-apple-diskimage",
+        ] {
+            assert!(
+                BLOCKED_FILE_MIME_TYPES.contains(&kept),
+                "{kept} must remain in the generic-file deny-list"
+            );
+        }
     }
 
     #[test]

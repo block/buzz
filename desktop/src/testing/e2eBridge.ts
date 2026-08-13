@@ -61,6 +61,10 @@ import type {
   RawInstallRuntimeResult,
   RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
+import {
+  ensureRelayOriginFetch,
+  resetMediaCaches,
+} from "@/shared/lib/mediaUrl";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   isValidLinkPreviewSnapshotCanonicalUrl,
@@ -289,6 +293,8 @@ type E2eConfig = {
     personaSharePublicationStatuses?: Array<"published" | "queued">;
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
+    /** Reject successive relay-agent directory reads, then resume. */
+    relayAgentListErrors?: (string | null)[];
     /** Native-like huddle state seeded from authoritative role-bearing membership. */
     huddle?: MockHuddleSeed;
     agentListDelayMs?: number;
@@ -309,6 +315,10 @@ type E2eConfig = {
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
+    /** Return not-modified for this many reads before resuming full payloads. */
+    channelsNotModifiedResponses?: number;
+    /** When true, a matching knownHash returns a not-modified channel payload. */
+    honorChannelsKnownHash?: boolean;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
     feedReadError?: string;
@@ -318,6 +328,8 @@ type E2eConfig = {
     applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
+    mediaProxyInitiallyUnavailable?: boolean;
     /** Hold mock send live echoes until the E2E release seam is invoked. */
     deferSendMessageLiveEcho?: boolean;
     /** Close the first channel-window live REQ; its retry is accepted. */
@@ -365,6 +377,13 @@ type E2eConfig = {
     linkPreviewMetadataDelayMs?: number;
     /** Simulates native cold-cache startup work before the async response. */
     linkPreviewMetadataStartBlockMs?: number;
+    /** Delays link-preview snapshot media uploads so specs can exercise the
+     *  composer's settle-gated disabled state before the snapshot tag is ready. */
+    linkPreviewUploadDelayMs?: number;
+    /** Substrings of `link-preview-*` upload filenames whose `upload_media_bytes`
+     *  call should reject, so specs can drive a per-media snapshot upload failure
+     *  (e.g. `["link-preview-image"]` fails only the thumbnail, favicon survives). */
+    linkPreviewUploadErrorFilenames?: string[];
     searchProfiles?: MockSearchProfileSeed[];
     updateAvailable?: boolean;
     updateChannelDelayMs?: number;
@@ -463,6 +482,8 @@ type E2eConfig = {
     // When true, `get_identity` returns `locked: true` until `import_identity` is
     // called. Drives the keyring-locked screen in tests.
     identityLocked?: boolean;
+    /** Delay (ms) applied to identity import so specs can observe pending navigation. */
+    identityImportDelayMs?: number;
     /**
      * Global agent config returned by `get_global_agent_config`. Defaults to
      * an empty config (no provider, model, or env vars) if not specified.
@@ -1092,6 +1113,8 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Release a mock media proxy held at port 0 and return its ready port. */
+    __BUZZ_E2E_RELEASE_MEDIA_PROXY__?: () => number;
     /** Release mock send events that were stored but withheld from live subscribers. */
     __BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__?: () => number;
     __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__?: (input: {
@@ -1331,6 +1354,7 @@ declare global {
     __BUZZ_E2E_MUTATE_CHANNEL__?: (opts: {
       channelId: string;
       channelType?: "stream" | "forum" | "dm";
+      description?: string;
       removeMemberPubkey?: string;
     }) => void;
     /**
@@ -1381,6 +1405,7 @@ const CHANNEL_WINDOW_AUX_DELETION_KINDS = new Set([
 // in e2e (instead of the `buzz-media://` fallback). The reaction guard
 // asserts against this exact port.
 const MOCK_MEDIA_PROXY_PORT = 54321;
+let mockMediaProxyPort = MOCK_MEDIA_PROXY_PORT;
 
 // A relay-hosted custom emoji used by the reaction guard. Its URL matches
 // `rewriteRelayUrl()`'s `/media/{64-hex}.{ext}` pattern on the relay origin, so
@@ -3335,6 +3360,7 @@ type RawWorkflowRun = {
   execution_trace: RawWorkflowTraceEntry[];
   started_at: number | null;
   completed_at: number | null;
+  error_code: string | null;
   error_message: string | null;
   created_at: number;
 };
@@ -3494,6 +3520,7 @@ function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
     execution_trace: executionTrace,
     started_at: startedAt,
     completed_at: completedAt,
+    error_code: null,
     error_message: null,
     created_at: createdAt,
   };
@@ -3518,11 +3545,14 @@ function handleGetWorkflowRuns(args: {
   const runs = mockWorkflowRuns.filter(
     (run) => run.workflow_id === args.workflowId,
   );
-  return args.limit ? runs.slice(0, args.limit) : runs;
+  return {
+    runs: args.limit ? runs.slice(0, args.limit) : runs,
+    next: null,
+  };
 }
 
 function handleGetRunApprovals(_args: { workflowId: string; runId: string }) {
-  return [];
+  return { approvals: [] };
 }
 
 const mockProfiles = new Map<string, RawProfile>([
@@ -5677,7 +5707,23 @@ async function submitSignedEvent(
   });
 }
 
-async function handleGetChannels(config: E2eConfig | undefined) {
+/** Build the channel-id → last-message-at map from the returned channel list. */
+function buildLastMessages(
+  channels: Array<{ id: string; last_message_at: string | null }>,
+): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const ch of channels) {
+    if (ch.last_message_at !== null) {
+      map[ch.id] = ch.last_message_at;
+    }
+  }
+  return map;
+}
+
+async function handleGetChannels(
+  payload: unknown,
+  config: E2eConfig | undefined,
+) {
   const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
   if (channelsReadDelayMs > 0) {
     await new Promise((resolve) =>
@@ -5694,7 +5740,27 @@ async function handleGetChannels(config: E2eConfig | undefined) {
 
   const identity = getIdentity(config);
   if (!identity) {
-    return listMockChannels(config);
+    // The hash is constant ("mock-hash") and full lists remain the default:
+    // mock channel data mutates during tests while the hash does not. Focused
+    // snapshot specs can opt into the not-modified branch explicitly.
+    const channels = listMockChannels(config);
+    const hash = "mock-hash";
+    const knownHash = (payload as { knownHash?: unknown } | null)?.knownHash;
+    const forcedNotModified =
+      (config?.mock?.channelsNotModifiedResponses ?? 0) > 0;
+    if (forcedNotModified && config?.mock) {
+      config.mock.channelsNotModifiedResponses =
+        (config.mock.channelsNotModifiedResponses ?? 1) - 1;
+    }
+    return {
+      hash,
+      channels:
+        forcedNotModified ||
+        (config?.mock?.honorChannelsKnownHash && knownHash === hash)
+          ? null
+          : channels,
+      last_messages: buildLastMessages(channels),
+    };
   }
 
   // Pure Nostr: query kind:39002 (membership) for our pubkey, extract channel
@@ -5740,7 +5806,7 @@ async function handleGetChannels(config: E2eConfig | undefined) {
   );
 
   // Convert kind:39000 events to the RawChannel shape the frontend expects.
-  return metaEvents
+  const channels = metaEvents
     .map((ev) => {
       const tags = (ev.tags ?? []) as string[][];
       const getTag = (name: string) =>
@@ -5783,6 +5849,12 @@ async function handleGetChannels(config: E2eConfig | undefined) {
       };
     })
     .filter((c) => c.channel_type !== "dm" || !hiddenDms.has(c.id));
+
+  return {
+    hash: "mock-hash",
+    channels,
+    last_messages: buildLastMessages(channels),
+  };
 }
 
 async function handleGetProfile(config: E2eConfig | undefined) {
@@ -7393,6 +7465,8 @@ async function handleListRelayAgents(
   config: E2eConfig | undefined,
 ): Promise<RawRelayAgent[]> {
   await delayAgentList(config);
+  const error = config?.mock?.relayAgentListErrors?.shift();
+  if (error) throw new Error(error);
   syncMockRelayAgentsFromManagedAgents();
   return mockRelayAgents.map(cloneRelayAgent);
 }
@@ -8071,10 +8145,11 @@ function upsertMockPersonaRelayEvent(event: RelayEvent): void {
   mockPersonaEvents.push(event);
 }
 
-function upsertMockPersonaEvent(persona: RawPersona): void {
-  const event: RelayEvent = {
-    id: mockEventId(),
-    pubkey: MOCK_IDENTITY_PUBKEY,
+function upsertMockPersonaEvent(
+  persona: RawPersona,
+  identity?: TestIdentity,
+): void {
+  const template = {
     created_at: Math.floor(Date.now() / 1_000),
     kind: KIND_PERSONA,
     tags: [["d", persona.id], ...(persona.shared ? [["shared", "true"]] : [])],
@@ -8090,8 +8165,15 @@ function upsertMockPersonaEvent(persona: RawPersona): void {
       respond_to_allowlist: persona.respond_to_allowlist ?? [],
       parallelism: persona.parallelism ?? null,
     }),
-    sig: "0".repeat(128),
   };
+  const event: RelayEvent = identity
+    ? finalizeEvent(template, hexToBytes(identity.privateKey))
+    : {
+        ...template,
+        id: mockEventId(),
+        pubkey: MOCK_IDENTITY_PUBKEY,
+        sig: "0".repeat(128),
+      };
   upsertMockPersonaRelayEvent(event);
   emitMockGlobalEvent(event);
 }
@@ -8116,7 +8198,7 @@ function publishMockPersonaHead(
       personaSharePublicationCallCount++
     ] ?? "published";
   if (publicationStatus === "published") {
-    upsertMockPersonaEvent(persona);
+    upsertMockPersonaEvent(persona, getActiveIdentity(config));
   }
   return {
     persona: { ...persona },
@@ -8928,6 +9010,16 @@ async function resolveMockUploadDescriptorForBytes(
   args: { data: number[] | Uint8Array; filename?: string | null },
   config: E2eConfig | undefined,
 ): Promise<RawBlobDescriptor> {
+  const uploadDelayMs = config?.mock?.linkPreviewUploadDelayMs ?? 0;
+  if (args.filename?.startsWith("link-preview-")) {
+    if (uploadDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, uploadDelayMs));
+    }
+    const errorFilenames = config?.mock?.linkPreviewUploadErrorFilenames;
+    if (errorFilenames?.some((needle) => args.filename?.includes(needle))) {
+      throw new Error(`mock upload failed for ${args.filename}`);
+    }
+  }
   const configured = config?.mock?.uploadDescriptors;
   if (configured !== undefined) {
     const descriptors = await resolveMockUploadDescriptors(config);
@@ -8982,6 +9074,7 @@ async function handleSendChannelMessage(
     emojiTags?: string[][] | null;
     mentionTags?: string[][] | null;
     linkPreviewTags?: string[][] | null;
+    sentFromThreadTag?: string[] | null;
     suppressLinkPreviews?: boolean;
   },
   config: E2eConfig | undefined,
@@ -8992,6 +9085,16 @@ async function handleSendChannelMessage(
     await new Promise((resolve) =>
       window.setTimeout(resolve, sendMessageDelayMs),
     );
+  }
+
+  // Mirror the WebSocket send path's failure injection so specs that route
+  // the first message through the acknowledged HTTP transport still exercise
+  // `sendMessageErrors`. The real command rejects on a relay `OK false`, which
+  // surfaces to callers as a thrown error carrying the relay reason.
+  const sendMessageError =
+    kind === 9 ? config?.mock?.sendMessageErrors?.shift() : null;
+  if (sendMessageError) {
+    throw new Error(sendMessageError);
   }
 
   // NIP-92 imeta attachments. The real relay echoes these back on the stored
@@ -9041,6 +9144,7 @@ async function handleSendChannelMessage(
     ...emojiTags,
     ...mentionTags,
     ...linkPreviewTags,
+    ...(args.sentFromThreadTag ? [args.sentFromThreadTag] : []),
     ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
   ];
   const identity = getIdentity(config);
@@ -9277,12 +9381,24 @@ async function handleEditMessage(
     content: string;
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    mentionPubkeys?: string[] | null;
+    mentionTags?: string[][] | null;
+    suppressLinkPreviews?: boolean;
   },
   config: E2eConfig | undefined,
 ): Promise<void> {
   const mediaTags = args.mediaTags ?? [];
   const emojiTags = args.emojiTags ?? [];
-  const extraTags = [...mediaTags, ...emojiTags];
+  const mentionPubkeys = args.mentionPubkeys ?? [];
+  const mentionTags = args.mentionTags;
+  const extraTags = [
+    ...mediaTags,
+    ...emojiTags,
+    ...mentionPubkeys.map((pubkey) => ["p", pubkey]),
+    ...(mentionTags ?? []),
+    ...(mentionTags ? [["buzz:mention-snapshot"]] : []),
+    ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
+  ];
   const tags = [["h", args.channelId], ["e", args.eventId], ...extraTags];
   const content = args.content.trim();
   const identity = getIdentity(config);
@@ -10069,6 +10185,15 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
+  mockMediaProxyPort = config.mock?.mediaProxyInitiallyUnavailable
+    ? 0
+    : MOCK_MEDIA_PROXY_PORT;
+  window.__BUZZ_E2E_RELEASE_MEDIA_PROXY__ = () => {
+    mockMediaProxyPort = MOCK_MEDIA_PROXY_PORT;
+    resetMediaCaches();
+    ensureRelayOriginFetch();
+    return mockMediaProxyPort;
+  };
   window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__ = (payload) =>
     emit("huddle-tts-speaker-level", payload);
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
@@ -10198,12 +10323,16 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_MUTATE_CHANNEL__ = ({
     channelId,
     channelType,
+    description,
     removeMemberPubkey,
   }) => {
     const channel = mockChannels.find((ch) => ch.id === channelId);
     if (!channel) return;
     if (channelType !== undefined) {
       channel.channel_type = channelType;
+    }
+    if (description !== undefined) {
+      channel.description = description;
     }
     if (removeMemberPubkey !== undefined) {
       channel.members = channel.members.filter(
@@ -11183,6 +11312,12 @@ export function maybeInstallE2eTauriMocks() {
         };
       }
       case "import_identity": {
+        const importDelayMs = activeConfig?.mock?.identityImportDelayMs ?? 0;
+        if (importDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, importDelayMs),
+          );
+        }
         const request = payload as { nsec?: string; password?: string } | null;
         const input = request?.nsec ?? "";
         if (input.trim().startsWith("ncryptsec1")) {
@@ -11848,7 +11983,7 @@ export function maybeInstallE2eTauriMocks() {
         // invocation's completion. Later reads pass through and cannot join it.
         const deferred = deferNextChannelsRead;
         deferNextChannelsRead = false;
-        const channels = handleGetChannels(activeConfig);
+        const channels = handleGetChannels(payload, activeConfig);
         if (deferred) {
           await new Promise<void>((resolve) => {
             deferredChannelsReadResolve = resolve;
@@ -12623,7 +12758,7 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "get_media_proxy_port":
-        return MOCK_MEDIA_PROXY_PORT;
+        return mockMediaProxyPort;
       case "pick_and_upload_media":
         return await resolveMockUploadDescriptors(activeConfig);
       case "pick_and_upload_image":
@@ -12992,6 +13127,8 @@ export function maybeInstallE2eTauriMocks() {
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
       case "set_prevent_sleep_active":
+        return null;
+      case "set_window_vibrancy":
         return null;
       case "plugin:window|is_fullscreen":
         return false;

@@ -20,6 +20,37 @@ test("parseSupportedLinkPreview parses GitHub pull request URLs", () => {
   );
 });
 
+test("parseSupportedLinkPreview strips the fragment from the preview href", () => {
+  // A `#fragment` is a client-only anchor; the preview and its signed snapshot
+  // canonical URL are of the page. Keeping it would fail the fragmentless
+  // snapshot-URL guard and drop the preview entirely.
+  assert.equal(
+    parseSupportedLinkPreview(
+      "https://github.com/block/sprout/pull/1234#pullrequestreview-99",
+    )?.href,
+    "https://github.com/block/sprout/pull/1234",
+  );
+});
+
+test("extractSupportedLinkPreviews collapses fragment variants of one page", () => {
+  const previews = extractSupportedLinkPreviews(
+    [
+      "https://github.com/block/sprout/pull/1234#pullrequestreview-99",
+      "https://github.com/block/sprout/pull/1234#issuecomment-1",
+      "https://github.com/block/sprout/pull/5678",
+    ].join("\n"),
+  );
+  // Two anchors into the same page dedupe to one card at first occurrence; the
+  // distinct second page keeps its own card.
+  assert.deepEqual(
+    previews.map((preview) => preview.href),
+    [
+      "https://github.com/block/sprout/pull/1234",
+      "https://github.com/block/sprout/pull/5678",
+    ],
+  );
+});
+
 test("parseSupportedLinkPreview parses GitHub repository URLs", () => {
   assert.deepEqual(
     parseSupportedLinkPreview("https://github.com/block/sprout"),

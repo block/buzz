@@ -1,5 +1,98 @@
 # Changelog
 
+## v0.5.11
+
+### Desktop and shared changes
+
+- perf(desktop): persist channel snapshot hash ([#5684](https://github.com/block/buzz/pull/5684)) ([`c86443c5997c96c42829ce200e73e6e6efe52d96`](https://github.com/block/buzz/commit/c86443c5997c96c42829ce200e73e6e6efe52d96))
+- fix(agent): raise output limit and allow 3 recoveries ([#5475](https://github.com/block/buzz/pull/5475)) ([`72d56e7bd3a94fa3ee20b5a50bd1b868a9329d9c`](https://github.com/block/buzz/commit/72d56e7bd3a94fa3ee20b5a50bd1b868a9329d9c))
+- fix(desktop): defer foreground resume work ([#5696](https://github.com/block/buzz/pull/5696)) ([`59f613c404958d8ac99525b4aaaf26843257de31`](https://github.com/block/buzz/commit/59f613c404958d8ac99525b4aaaf26843257de31))
+- perf(desktop): coalesce thread-activity localStorage writes ([#5693](https://github.com/block/buzz/pull/5693)) ([`c6c6e7eca70d6b526c43af925e596e8616b19fb8`](https://github.com/block/buzz/commit/c6c6e7eca70d6b526c43af925e596e8616b19fb8))
+- Batch observer-store publications per relay envelope ([#5680](https://github.com/block/buzz/pull/5680)) ([`c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5`](https://github.com/block/buzz/commit/c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5))
+- feat(buzz-acp): idle re-sleep for woken lazy pools ([#5682](https://github.com/block/buzz/pull/5682)) ([`dc2dbfe0f570abb818d3f3da8a71ea235555ed27`](https://github.com/block/buzz/commit/dc2dbfe0f570abb818d3f3da8a71ea235555ed27))
+- fix(desktop): preserve agent mention separator after send ([#5623](https://github.com/block/buzz/pull/5623)) ([`a8e5c89e23b85ee93306f2c3c11d8fe6300cd360`](https://github.com/block/buzz/commit/a8e5c89e23b85ee93306f2c3c11d8fe6300cd360))
+- fix(link-previews): proxy sent preview media ([#5627](https://github.com/block/buzz/pull/5627)) ([`884ed8a5d35dfba3892fc40437f39e08856dec7d`](https://github.com/block/buzz/commit/884ed8a5d35dfba3892fc40437f39e08856dec7d))
+- feat(deletion): add durable whole-community deletion ([#4425](https://github.com/block/buzz/pull/4425)) ([`8a2c9af2dbe0cf315e77f43a4560d3572da5e554`](https://github.com/block/buzz/commit/8a2c9af2dbe0cf315e77f43a4560d3572da5e554))
+- fix(desktop): preserve live channel timelines ([#5662](https://github.com/block/buzz/pull/5662)) ([`63d14a0e95c8d5ae19f3f80123027729ec209bb2`](https://github.com/block/buzz/commit/63d14a0e95c8d5ae19f3f80123027729ec209bb2))
+- Refine channel settings and profile panels ([#5574](https://github.com/block/buzz/pull/5574)) ([`63f961c7e4818a1d29f1185002c123e486bd4a19`](https://github.com/block/buzz/commit/63f961c7e4818a1d29f1185002c123e486bd4a19))
+- fix(deps): bump webbrowser to 1.2.4 for RUSTSEC-2026-0257 ([#5659](https://github.com/block/buzz/pull/5659)) ([`c966b862fe8b9018c68c384b1680ca0173d0128c`](https://github.com/block/buzz/commit/c966b862fe8b9018c68c384b1680ca0173d0128c))
+- fix(desktop): launch Databricks OAuth from passive model discovery ([#5607](https://github.com/block/buzz/pull/5607)) ([`1ff98fa685fdb7133dbc18437d23dcdeeb42ce6e`](https://github.com/block/buzz/commit/1ff98fa685fdb7133dbc18437d23dcdeeb42ce6e))
+
+### Other repository changes
+
+- feat(acp): report standard adapter usage ([#4950](https://github.com/block/buzz/pull/4950)) ([`4749bc7be3cdb78c2db4ce4864775ba7ab60b4cc`](https://github.com/block/buzz/commit/4749bc7be3cdb78c2db4ce4864775ba7ab60b4cc))
+- fix(mobile): settle hydrated threads on latest reply ([#4702](https://github.com/block/buzz/pull/4702)) ([`7634fe74563ea7f3c86fb6017a0ad647a9934477`](https://github.com/block/buzz/commit/7634fe74563ea7f3c86fb6017a0ad647a9934477))
+- feat(acp): deliver channel description in prompt [Context] ([#4552](https://github.com/block/buzz/pull/4552)) ([`6e0631f6b5d2139e4e080bf94e27ecee8a3d4d74`](https://github.com/block/buzz/commit/6e0631f6b5d2139e4e080bf94e27ecee8a3d4d74))
+
+[Compare desktop-v0.5.10...desktop-v0.5.11](https://github.com/block/buzz/compare/desktop-v0.5.10...desktop-v0.5.11)
+
+## v0.5.10
+
+### Desktop and shared changes
+
+- fix(desktop): remove 0.5.9+ perf regressions, speed up get_channels ([#5599](https://github.com/block/buzz/pull/5599)) ([`f35930104bcbdb1332ff13735214ecb9fce1fc7b`](https://github.com/block/buzz/commit/f35930104bcbdb1332ff13735214ecb9fce1fc7b))
+- perf(desktop): coalesce read state localStorage persistence ([#5591](https://github.com/block/buzz/pull/5591)) ([`9203bf60eea44875cafb36410252f8705ce54e2d`](https://github.com/block/buzz/commit/9203bf60eea44875cafb36410252f8705ce54e2d))
+- fix(desktop): bound initial timeline retention ([#5603](https://github.com/block/buzz/pull/5603)) ([`d9dc76c0aa7ab8a96b2ecf89325eef6b1536039d`](https://github.com/block/buzz/commit/d9dc76c0aa7ab8a96b2ecf89325eef6b1536039d))
+- Improve desktop search scoping ([#5306](https://github.com/block/buzz/pull/5306)) ([`cf03bd7c37cb3918afd4fe2a561360d01e11b68e`](https://github.com/block/buzz/commit/cf03bd7c37cb3918afd4fe2a561360d01e11b68e))
+- Add glass appearance and cohesive settings ([#5478](https://github.com/block/buzz/pull/5478)) ([`cd2aa5c12d1c802ea9d93c30809f3625c49e9bd4`](https://github.com/block/buzz/commit/cd2aa5c12d1c802ea9d93c30809f3625c49e9bd4))
+- Add Send to channel for thread messages ([#5305](https://github.com/block/buzz/pull/5305)) ([`b0795a10ea0f63f2382f4028a1adc2bc3e039d79`](https://github.com/block/buzz/commit/b0795a10ea0f63f2382f4028a1adc2bc3e039d79))
+- Fix macOS attachment picker lifecycle and allow inert HTML downloads ([#5569](https://github.com/block/buzz/pull/5569)) ([`bba3e06386b8a0ca22e9867dc81aac1ca2b1b737`](https://github.com/block/buzz/commit/bba3e06386b8a0ca22e9867dc81aac1ca2b1b737))
+- fix(desktop): preserve fresh channel timelines ([#5577](https://github.com/block/buzz/pull/5577)) ([`d3ec831e0cecbff347d55a236e34b27d79961503`](https://github.com/block/buzz/commit/d3ec831e0cecbff347d55a236e34b27d79961503))
+- fix(desktop): suppress fresh focus-return refetches for channels and home-feed ([#5535](https://github.com/block/buzz/pull/5535)) ([`49357244945c2f4b8432eb8b5cebbba5b1c30a08`](https://github.com/block/buzz/commit/49357244945c2f4b8432eb8b5cebbba5b1c30a08))
+- chore: mesh upgrade, clean up legacy special case code, simplify model selection for mesh ([#5289](https://github.com/block/buzz/pull/5289)) ([`240cdd3ea17a8f4d521c8398a929294210bd1e1a`](https://github.com/block/buzz/commit/240cdd3ea17a8f4d521c8398a929294210bd1e1a))
+- fix(desktop): preserve theme when opening communities ([#5266](https://github.com/block/buzz/pull/5266)) ([`83ca595adadae32238197d9c34a5895a34950968`](https://github.com/block/buzz/commit/83ca595adadae32238197d9c34a5895a34950968))
+- fix(link-preview): resolve YouTube videos through oEmbed ([#5520](https://github.com/block/buzz/pull/5520)) ([`7eb8cc5a5f03c454a84f2b5c4369819ba6d4d11b`](https://github.com/block/buzz/commit/7eb8cc5a5f03c454a84f2b5c4369819ba6d4d11b))
+- fix(buzz-agent): harden Databricks OAuth token cache and callback ([#5534](https://github.com/block/buzz/pull/5534)) ([`5e4d0fe92508fc5e0c812ff3edbe8877d86b8ec6`](https://github.com/block/buzz/commit/5e4d0fe92508fc5e0c812ff3edbe8877d86b8ec6))
+- fix(link-preview): reliably render previews sent right after they resolve ([#5245](https://github.com/block/buzz/pull/5245)) ([`be48ce98bd163899197b79a82ad5b2bcf0bc9b54`](https://github.com/block/buzz/commit/be48ce98bd163899197b79a82ad5b2bcf0bc9b54))
+- fix(link-preview): restore Buzz entity link cards ([#5494](https://github.com/block/buzz/pull/5494)) ([`7e6e9c547fa97abff6929cf2702b956586eec9bc`](https://github.com/block/buzz/commit/7e6e9c547fa97abff6929cf2702b956586eec9bc))
+
+### Other repository changes
+
+- fix(relay): stop panicking the ingest worker on reactions to project events ([#5294](https://github.com/block/buzz/pull/5294)) ([`16b7ae7ce623a57be1461adee3b8fce4115b3c3a`](https://github.com/block/buzz/commit/16b7ae7ce623a57be1461adee3b8fce4115b3c3a))
+- fix(relay): log event kind on the HTTP bridge /events line ([#5291](https://github.com/block/buzz/pull/5291)) ([`e8153f8f27f5a35f56b2a578ab749190787d9e91`](https://github.com/block/buzz/commit/e8153f8f27f5a35f56b2a578ab749190787d9e91))
+- feat(tracing): add PostgreSQL tracing spans ([#3678](https://github.com/block/buzz/pull/3678)) ([`397796c5f343db4251198f44505b1afebe88223f`](https://github.com/block/buzz/commit/397796c5f343db4251198f44505b1afebe88223f))
+
+[Compare desktop-v0.5.9...desktop-v0.5.10](https://github.com/block/buzz/compare/desktop-v0.5.9...desktop-v0.5.10)
+
+## v0.5.9
+
+### Desktop and shared changes
+
+- Polish desktop onboarding flow ([#5310](https://github.com/block/buzz/pull/5310)) ([`3f2f32641f4093d087fd9506bfac1fa0329e8b2e`](https://github.com/block/buzz/commit/3f2f32641f4093d087fd9506bfac1fa0329e8b2e))
+- fix(desktop): quiesce renderer polling while hidden (#3677) ([#5490](https://github.com/block/buzz/pull/5490)) ([`07a3c768d619db31fee3f0590f9433cdd1213e8f`](https://github.com/block/buzz/commit/07a3c768d619db31fee3f0590f9433cdd1213e8f))
+- fix(channels): restore member invitations to private channels ([#5493](https://github.com/block/buzz/pull/5493)) ([`2777189d960fa5b1d863166f36d6e37ff8ce0819`](https://github.com/block/buzz/commit/2777189d960fa5b1d863166f36d6e37ff8ce0819))
+- fix(desktop): bound nine unbounded localStorage stores ([#5454](https://github.com/block/buzz/pull/5454)) ([`9c074bb89b290721f839bbc84fdf4701269e43a0`](https://github.com/block/buzz/commit/9c074bb89b290721f839bbc84fdf4701269e43a0))
+- feat(desktop): time-based sweep for stale localStorage caches ([#5453](https://github.com/block/buzz/pull/5453)) ([`bb9aae1065d4a77ae3dcb36b7b4a4e7ac8e68ead`](https://github.com/block/buzz/commit/bb9aae1065d4a77ae3dcb36b7b4a4e7ac8e68ead))
+- feat(desktop): NIP-AM agent-usage backend — P2 emission/transport/archive + P4a aggregation/D6 ([#4000](https://github.com/block/buzz/pull/4000)) ([`5e4c05f90b062898e1827ba45cb826c6ff913741`](https://github.com/block/buzz/commit/5e4c05f90b062898e1827ba45cb826c6ff913741))
+- fix(desktop): resolve overlapping member mentions ([#5225](https://github.com/block/buzz/pull/5225)) ([`44456e200e3ca6a5d2882b58b447b80474041347`](https://github.com/block/buzz/commit/44456e200e3ca6a5d2882b58b447b80474041347))
+- chore(deps): update rust crate anyhow to v1.0.104 ([#4447](https://github.com/block/buzz/pull/4447)) ([`e1ff91ecc1269682a50c17da2c0708d1448b336f`](https://github.com/block/buzz/commit/e1ff91ecc1269682a50c17da2c0708d1448b336f))
+- fix(desktop): preserve Welcome banner dismissal ([#5406](https://github.com/block/buzz/pull/5406)) ([`97aa9e31856edb9d8abcdcb33c472027f5588890`](https://github.com/block/buzz/commit/97aa9e31856edb9d8abcdcb33c472027f5588890))
+- fix(agent): retry LLM completion on malformed 2xx JSON body ([#5351](https://github.com/block/buzz/pull/5351)) ([`5bf78671f45178f8de02ba18d3d321cbbf19cd1f`](https://github.com/block/buzz/commit/5bf78671f45178f8de02ba18d3d321cbbf19cd1f))
+- fix(desktop): welcome banner overlap and missing dismiss control ([#5330](https://github.com/block/buzz/pull/5330)) ([`f029deafae6ad3b63e13c29104f3be76122cb1df`](https://github.com/block/buzz/commit/f029deafae6ad3b63e13c29104f3be76122cb1df))
+- fix(desktop): prevent horizontal clipping in Prompt Context modal ([#5324](https://github.com/block/buzz/pull/5324)) ([`fbf89e3bed9adebc033a26b7c43362c004e816a2`](https://github.com/block/buzz/commit/fbf89e3bed9adebc033a26b7c43362c004e816a2))
+- fix(buzz-agent): recover from 400-shaped image rejections; unbound benchmark agent rounds ([#5318](https://github.com/block/buzz/pull/5318)) ([`261c46076166c6de5bb9a71fb4a0fd0b70aa1efa`](https://github.com/block/buzz/commit/261c46076166c6de5bb9a71fb4a0fd0b70aa1efa))
+
+### Other repository changes
+
+- feat(cli): add --visibility flag to channels update ([#5119](https://github.com/block/buzz/pull/5119)) ([`f8f2ef0440e7a074223ec04dc3b32d817b8b9d9b`](https://github.com/block/buzz/commit/f8f2ef0440e7a074223ec04dc3b32d817b8b9d9b))
+- perf(ci): experiment with sccache for relay builds ([#5224](https://github.com/block/buzz/pull/5224)) ([`5a3b3d23226474f835a1cf41d2ecc5f53cacb070`](https://github.com/block/buzz/commit/5a3b3d23226474f835a1cf41d2ecc5f53cacb070))
+- ci(release): gate OSS desktop auto-update promotion ([#5398](https://github.com/block/buzz/pull/5398)) ([`43573d114b5bfaf7cefa75eee7e219dc05cf1cd1`](https://github.com/block/buzz/commit/43573d114b5bfaf7cefa75eee7e219dc05cf1cd1))
+- fix(release): pin desktop PR operations to block/buzz ([#5212](https://github.com/block/buzz/pull/5212)) ([`c1e20a814bf694db2af959adacb375ced27af023`](https://github.com/block/buzz/commit/c1e20a814bf694db2af959adacb375ced27af023))
+- fix(search): surface exact short profile names ([#5480](https://github.com/block/buzz/pull/5480)) ([`3c76f682c3c2dfe2cd296c277c5e63799d3424f9`](https://github.com/block/buzz/commit/3c76f682c3c2dfe2cd296c277c5e63799d3424f9))
+- Reduce repeated ACP session context ([#5423](https://github.com/block/buzz/pull/5423)) ([`563e4346da37d0fb2e9ec1c95e7f1eba79f83040`](https://github.com/block/buzz/commit/563e4346da37d0fb2e9ec1c95e7f1eba79f83040))
+- chore(deps): update react monorepo ([#4441](https://github.com/block/buzz/pull/4441)) ([`119a84897f225c1e3213a09cd149abb37dcb3abc`](https://github.com/block/buzz/commit/119a84897f225c1e3213a09cd149abb37dcb3abc))
+- ci(security): allow retired relay pool advisory ([#5404](https://github.com/block/buzz/pull/5404)) ([`d2ebaa95a7d2565fb217fdfae56bafb9509be444`](https://github.com/block/buzz/commit/d2ebaa95a7d2565fb217fdfae56bafb9509be444))
+- chore(deps): update dependency @tanstack/react-virtual to v3.14.9 ([#4439](https://github.com/block/buzz/pull/4439)) ([`c923e89a4b6d43ae0c507dbb5e58f2bdd9ab7888`](https://github.com/block/buzz/commit/c923e89a4b6d43ae0c507dbb5e58f2bdd9ab7888))
+- chore(deps): update all non-major dependencies ([#3049](https://github.com/block/buzz/pull/3049)) ([`856cdb848b0a849e33620887b145b7e598dfd95c`](https://github.com/block/buzz/commit/856cdb848b0a849e33620887b145b7e598dfd95c))
+- chore(deps): update rust crate arc-swap to v1.9.2 ([#4448](https://github.com/block/buzz/pull/4448)) ([`08de85c592106ea2ffe22ba16e3a0fc10687db54`](https://github.com/block/buzz/commit/08de85c592106ea2ffe22ba16e3a0fc10687db54))
+- chore(deps): update rust crate async-trait to v0.1.91 ([#4458](https://github.com/block/buzz/pull/4458)) ([`12b1f566480d4feddc171739097f9359d3f255c1`](https://github.com/block/buzz/commit/12b1f566480d4feddc171739097f9359d3f255c1))
+- chore(deps): update rust crate diffy to v0.5.1 ([#4466](https://github.com/block/buzz/pull/4466)) ([`d7cc724fa5391b23e7fac99fc65dc28b79e4c5c4`](https://github.com/block/buzz/commit/d7cc724fa5391b23e7fac99fc65dc28b79e4c5c4))
+- chore(deps): update rust crate async-compression to v0.4.43 ([#4456](https://github.com/block/buzz/pull/4456)) ([`7dd8791d0765e9f15fed3299b6948e2babbfd763`](https://github.com/block/buzz/commit/7dd8791d0765e9f15fed3299b6948e2babbfd763))
+- chore(deps): update rust crate clap to v4.6.6 ([#4465](https://github.com/block/buzz/pull/4465)) ([`e668c6bb4913e36e58d7f947dbaf982e704e9132`](https://github.com/block/buzz/commit/e668c6bb4913e36e58d7f947dbaf982e704e9132))
+- chore(release): release Buzz Relay version 0.2.1 ([#2856](https://github.com/block/buzz/pull/2856)) ([`6e5c462ac524de60d7edb46c66130fd779cc9006`](https://github.com/block/buzz/commit/6e5c462ac524de60d7edb46c66130fd779cc9006))
+
+[Compare desktop-v0.5.8...desktop-v0.5.9](https://github.com/block/buzz/compare/desktop-v0.5.8...desktop-v0.5.9)
+
 ## v0.5.8
 
 ### Desktop and shared changes

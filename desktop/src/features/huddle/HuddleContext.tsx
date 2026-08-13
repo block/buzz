@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { type AudioInputDevice, useAudioDevices } from "./lib/useAudioDevices";
+import { usePipelineHotstart } from "./lib/usePipelineHotstart";
 import { formatHuddleActionError } from "./lib/huddleError";
 import {
   type VoiceInputMode,
@@ -47,7 +48,6 @@ const HUDDLE_AUDIO_STATE_EVENT = "huddle-audio-state";
 const HUDDLE_AUDIO_LEVEL_EVENT = "huddle-audio-level";
 
 const MIC_ANALYSER_UPDATE_INTERVAL_MS = 33;
-const PIPELINE_HOTSTART_INTERVAL_MS = 15_000;
 const MIC_INITIAL_NOISE_FLOOR = 0.01;
 const MIC_VOICE_GATE_ON_RMS = 0.018;
 const MIC_VOICE_GATE_OFF_RMS = 0.012;
@@ -238,6 +238,10 @@ export function HuddleProvider({
     async (mode: VoiceInputMode) => {
       await invoke("set_voice_input_mode", { mode });
       setVoiceInputModeState(mode);
+      // Re-sync the PTT-only STT gate with the visible mute state (best-effort).
+      void invoke("set_huddle_manual_mic_unmuted", {
+        enabled: !isMutedRef.current,
+      }).catch(() => {});
       if (ownsAudioSession) {
         workletRef.current?.setMode(mode);
       } else {
@@ -640,8 +644,10 @@ export function HuddleProvider({
       tokenRef.current += 1;
       const myToken = tokenRef.current;
 
-      isMutedRef.current = false;
-      setIsMuted(false);
+      // PTT starts muted (must match the Rust manual_mic_unmuted default).
+      const startMuted = getVoiceInputMode() === "push_to_talk";
+      isMutedRef.current = startMuted;
+      setIsMuted(startMuted);
       setHuddleError(null);
       setIsStarting(true);
       onHuddleStartPendingChange?.(true);
@@ -691,6 +697,7 @@ export function HuddleProvider({
       cleanupFailedStart,
       cleanupSupersededStart,
       connectAndSetupMedia,
+      getVoiceInputMode,
       onHuddleStartPendingChange,
       onHuddleStarted,
     ],
@@ -715,8 +722,9 @@ export function HuddleProvider({
       busyRef.current = true;
       tokenRef.current += 1;
       const myToken = tokenRef.current;
-      isMutedRef.current = false;
-      setIsMuted(false);
+      const startMuted = getVoiceInputMode() === "push_to_talk";
+      isMutedRef.current = startMuted;
+      setIsMuted(startMuted);
       setHuddleError(null);
       setIsStarting(true);
 
@@ -766,6 +774,7 @@ export function HuddleProvider({
       cleanupFailedStart,
       cleanupSupersededStart,
       connectAndSetupMedia,
+      getVoiceInputMode,
       onHuddleStarted,
     ],
   );
@@ -778,16 +787,7 @@ export function HuddleProvider({
     selfPubkeyRef,
   );
 
-  // Pipeline hot-start — check if voice models finished downloading mid-huddle
-  React.useEffect(() => {
-    if (!ephemeralChannelId) return;
-    const id = window.setInterval(() => {
-      invoke("check_pipeline_hotstart").catch(() => {
-        /* best-effort */
-      });
-    }, PIPELINE_HOTSTART_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [ephemeralChannelId]);
+  usePipelineHotstart(ephemeralChannelId);
 
   // Mic level analyser — drives the voice activity indicator
   React.useEffect(() => {

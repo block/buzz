@@ -1,10 +1,11 @@
 import type { LucideIcon } from "lucide-react";
+import type { ReactNode, Ref } from "react";
 import {
+  Hand,
+  Headphones,
   MessageSquare,
-  Pencil,
   Play,
   RefreshCw,
-  Sparkles,
   Square,
   UserMinus,
   UserPlus,
@@ -18,40 +19,47 @@ import type {
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { Spinner } from "@/shared/ui/spinner";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 // ── Primary actions ──────────────────────────────────────────────────────────
 
 export function ProfilePrimaryActions({
+  actionGroupRef,
   agentActionDisabled,
   agentActionLabel,
   agentActionLive,
-  canEditAgent,
+  className,
+  concealed = false,
   followMutation,
+  huddlePending,
   isFollowing,
   messagePending,
   onAgentPrimaryAction,
   onAgentRestart,
-  onCreateCard,
-  onEditAgent,
+  onHuddle,
   onMessage,
+  onWave,
   pubkey,
   unfollowMutation,
+  wavePending,
 }: {
+  actionGroupRef?: Ref<HTMLDivElement>;
   agentActionDisabled?: boolean;
   agentActionLabel?: string;
   agentActionLive?: boolean;
-  canEditAgent: boolean;
+  className?: string;
+  concealed?: boolean;
   followMutation: ReturnType<typeof useFollowMutation>;
+  huddlePending?: boolean;
   isFollowing: boolean;
   messagePending?: boolean;
   onAgentPrimaryAction?: () => void;
   onAgentRestart?: () => void;
-  onCreateCard?: () => void;
-  onEditAgent: () => void;
+  onHuddle?: () => void;
   onMessage?: () => void;
+  onWave?: () => void;
   pubkey: string;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
+  wavePending?: boolean;
 }) {
   const showFollowAction = useFeatureEnabled("pulse");
   const followToggleMutation = isFollowing ? unfollowMutation : followMutation;
@@ -65,38 +73,27 @@ export function ProfilePrimaryActions({
     });
   };
 
+  const hasActions =
+    showFollowAction ||
+    onWave !== undefined ||
+    onMessage !== undefined ||
+    onHuddle !== undefined ||
+    (onAgentPrimaryAction !== undefined && agentActionLabel !== undefined) ||
+    onAgentRestart !== undefined;
+
+  if (!hasActions) {
+    return null;
+  }
+
   return (
-    <div className="flex items-center justify-center gap-8">
-      {showFollowAction ? (
-        <ProfileQuickAction
-          active={isFollowing}
-          disabled={followToggleMutation.isPending}
-          icon={isFollowing ? UserMinus : UserPlus}
-          label={isFollowing ? "Unfollow" : "Follow"}
-          onClick={handleFollowClick}
-        />
-      ) : null}
-      {onMessage ? (
-        <ProfileQuickAction
-          disabled={messagePending}
-          icon={MessageSquare}
-          isLoading={messagePending}
-          label="Message"
-          onClick={onMessage}
-          testId="user-profile-message"
-        />
-      ) : null}
-      {canEditAgent ? (
-        <ProfileQuickAction
-          icon={Pencil}
-          label="Edit"
-          onClick={onEditAgent}
-          testId="user-profile-edit-agent"
-        />
-      ) : null}
+    <ProfileActionGroup
+      className={className}
+      concealed={concealed}
+      ref={actionGroupRef}
+    >
       {onAgentPrimaryAction && agentActionLabel ? (
-        <ProfileQuickAction
-          active={agentActionLive}
+        <ProfileActionTile
+          active
           disabled={agentActionDisabled}
           icon={agentActionLive ? Square : Play}
           label={agentActionLabel}
@@ -105,71 +102,113 @@ export function ProfilePrimaryActions({
         />
       ) : null}
       {onAgentRestart ? (
-        <ProfileQuickAction
+        <ProfileActionTile
           disabled={agentActionDisabled}
           icon={RefreshCw}
-          label="Restart Agent"
+          label="Restart agent"
           onClick={onAgentRestart}
           testId="user-profile-agent-restart"
         />
       ) : null}
-      {onCreateCard ? (
-        <ProfileQuickAction
-          icon={Sparkles}
-          label="Create card"
-          onClick={onCreateCard}
-          testId="user-profile-create-card"
+      {onMessage ? (
+        <ProfileActionTile
+          disabled={messagePending}
+          icon={MessageSquare}
+          isLoading={messagePending}
+          label="Message"
+          onClick={onMessage}
+          testId="user-profile-message"
         />
       ) : null}
-    </div>
+      {onHuddle ? (
+        <ProfileActionTile
+          disabled={huddlePending}
+          icon={Headphones}
+          isLoading={huddlePending}
+          label="Huddle"
+          onClick={onHuddle}
+          testId="user-profile-huddle"
+        />
+      ) : null}
+      {onWave ? (
+        <ProfileActionTile
+          disabled={wavePending}
+          icon={Hand}
+          isLoading={wavePending}
+          label="Wave"
+          onClick={onWave}
+          testId="user-profile-wave"
+        />
+      ) : null}
+      {showFollowAction ? (
+        <ProfileActionTile
+          active={isFollowing}
+          disabled={followToggleMutation.isPending}
+          icon={isFollowing ? UserMinus : UserPlus}
+          label={isFollowing ? "Unfollow" : "Follow"}
+          onClick={handleFollowClick}
+        />
+      ) : null}
+    </ProfileActionGroup>
   );
 }
 
 export function ProfilePersonaPrimaryActions({
-  canEditAgent,
+  actionGroupRef,
+  className,
+  concealed = false,
   disabled,
-  onCreateCard,
-  onEditAgent,
   onStartAgent,
 }: {
-  canEditAgent: boolean;
+  actionGroupRef?: Ref<HTMLDivElement>;
+  className?: string;
+  concealed?: boolean;
   disabled: boolean;
-  onCreateCard?: () => void;
-  onEditAgent: () => void;
   onStartAgent: () => void;
 }) {
   return (
-    <div className="flex items-center justify-center gap-8">
-      <ProfileQuickAction
+    <ProfileActionGroup
+      className={className}
+      concealed={concealed}
+      ref={actionGroupRef}
+    >
+      <ProfileActionTile
+        active
         disabled={disabled}
         icon={Play}
-        label="Start Agent"
+        label="Start agent"
         onClick={onStartAgent}
         testId="user-profile-start-agent"
       />
-      {canEditAgent ? (
-        <ProfileQuickAction
-          disabled={disabled}
-          icon={Pencil}
-          label="Edit"
-          onClick={onEditAgent}
-          testId="user-profile-edit-agent"
-        />
-      ) : null}
-      {onCreateCard ? (
-        <ProfileQuickAction
-          disabled={disabled}
-          icon={Sparkles}
-          label="Create card"
-          onClick={onCreateCard}
-          testId="user-profile-create-card"
-        />
-      ) : null}
+    </ProfileActionGroup>
+  );
+}
+
+function ProfileActionGroup({
+  children,
+  className,
+  concealed,
+  ref,
+}: {
+  children: ReactNode;
+  className?: string;
+  concealed: boolean;
+  ref?: Ref<HTMLDivElement>;
+}) {
+  return (
+    <div
+      aria-hidden={concealed || undefined}
+      className={cn("grid grid-flow-col auto-cols-fr gap-2", className)}
+      data-testid="user-profile-primary-actions"
+      inert={concealed || undefined}
+      ref={ref}
+    >
+      {children}
     </div>
   );
 }
 
-function ProfileQuickAction({
+function ProfileActionTile({
   active,
   disabled,
   icon: Icon,
@@ -187,31 +226,26 @@ function ProfileQuickAction({
   testId?: string;
 }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          aria-label={label}
-          className={cn(
-            "flex h-12 w-12 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-            active
-              ? "bg-foreground text-background hover:bg-foreground/90"
-              : "bg-muted/60 text-foreground hover:bg-muted/80",
-          )}
-          data-testid={testId}
-          disabled={disabled}
-          onClick={onClick}
-          type="button"
-        >
-          {isLoading ? (
-            <Spinner aria-hidden="true" className="h-4 w-4 border-2" />
-          ) : (
-            <Icon className="h-4 w-4" />
-          )}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent align="center" side="top">
-        {label}
-      </TooltipContent>
-    </Tooltip>
+    <button
+      aria-label={label}
+      aria-busy={isLoading || undefined}
+      className={cn(
+        "flex min-h-20 w-full flex-col items-center justify-center gap-1.5 rounded-xl bg-muted px-2 py-3 text-center transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+        active && "bg-foreground text-background hover:bg-foreground/90",
+      )}
+      data-testid={testId}
+      disabled={disabled}
+      onClick={onClick}
+      type="button"
+    >
+      {isLoading ? (
+        <Spinner aria-hidden="true" className="h-5 w-5 border-2" />
+      ) : (
+        <Icon
+          className={cn("h-5 w-5 text-foreground", active && "text-background")}
+        />
+      )}
+      <span className="min-w-0 text-xs font-medium leading-tight">{label}</span>
+    </button>
   );
 }

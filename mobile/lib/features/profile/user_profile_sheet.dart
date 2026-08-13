@@ -10,7 +10,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
-import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
@@ -216,7 +216,7 @@ class UserProfileSheet extends HookConsumerWidget {
                       children: [
                         if (pk != currentPubkey) ...[
                           Expanded(
-                            child: _ProfileActionTile(
+                            child: BuzzActionTile(
                               icon: isOpeningDirectMessage.value
                                   ? null
                                   : LucideIcons.messageSquare,
@@ -224,13 +224,14 @@ class UserProfileSheet extends HookConsumerWidget {
                                   ? 'Opening…'
                                   : 'Message',
                               isLoading: isOpeningDirectMessage.value,
+                              loadingSemanticLabel: 'Opening direct message',
                               onTap: openDirectMessage,
                             ),
                           ),
                           const SizedBox(width: Grid.twelve),
                         ],
                         Expanded(
-                          child: _ProfileActionTile(
+                          child: BuzzActionTile(
                             icon: copied.value
                                 ? LucideIcons.check
                                 : LucideIcons.key,
@@ -369,59 +370,6 @@ class _ProfilePresenceChip extends StatelessWidget {
       ),
     );
   }
-}
-
-class _ProfileActionTile extends StatelessWidget {
-  const _ProfileActionTile({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.isLoading = false,
-  });
-
-  final IconData? icon;
-  final String label;
-  final VoidCallback onTap;
-  final bool isLoading;
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    onTap: isLoading
-        ? null
-        : () {
-            unawaited(HapticFeedback.lightImpact());
-            onTap();
-          },
-    behavior: HitTestBehavior.opaque,
-    child: Container(
-      width: double.infinity,
-      height: 68 + (Grid.xxs * 2),
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.dialog),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          if (isLoading)
-            BuzzLoadingIndicator(
-              size: 22,
-              color: context.colors.onSurface,
-              semanticLabel: 'Opening direct message',
-            )
-          else
-            Icon(icon, size: 22, color: context.colors.onSurface),
-          const SizedBox(height: Grid.xxs),
-          Text(
-            label,
-            style: context.textTheme.labelMedium?.copyWith(
-              color: context.colors.onSurface,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
 }
 
 class _ProfileAvatar extends StatelessWidget {

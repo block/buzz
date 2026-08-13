@@ -5,31 +5,53 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
-  Copy,
   Cpu,
   Hash,
   Layers,
   MessageSquare,
+  Pencil,
   PenOff,
   Server,
 } from "lucide-react";
 import { useAgentConfigSurface } from "../hooks";
 import { cn } from "@/shared/lib/cn";
-import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Spinner } from "@/shared/ui/spinner";
-import { McpServersSection } from "./McpServersSection";
+import { PanelSectionGroup } from "@/shared/ui/PanelSectionGroup";
+import {
+  HoverCopyIndicator,
+  useCopyFeedback,
+} from "@/shared/ui/HoverCopyIndicator";
+import { McpServersSection, shouldRenderMcpServers } from "./McpServersSection";
 import type {
   ConfigField,
   ConfigOrigin,
   ConfigWriteMechanism,
   NormalizedConfig,
   NormalizedField,
+  RuntimeConfigSurface,
 } from "@/shared/api/types";
 import { providerDisplayLabel } from "./agentConfigOptions";
+
+export type AgentConfigPanelSection = "model" | "mcp" | "advanced";
+
+const ALL_AGENT_CONFIG_SECTIONS: readonly AgentConfigPanelSection[] = [
+  "model",
+  "mcp",
+  "advanced",
+];
 
 type Props = {
   pubkey: string;
   advancedMode?: "collapsed" | "flat";
+  onEdit?: () => void;
+  sections?: readonly AgentConfigPanelSection[];
+};
+
+type AgentConfigSurfaceRowsProps = {
+  advancedMode?: "collapsed" | "flat";
+  data: RuntimeConfigSurface;
+  onEdit?: () => void;
+  sections?: readonly AgentConfigPanelSection[];
 };
 
 function isReadOnlyField({
@@ -44,7 +66,7 @@ function isReadOnlyField({
 
 function ConfigFieldLabel({ label }: { label: string }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-foreground">
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground">
       <span className="truncate">{label}</span>
     </span>
   );
@@ -53,13 +75,15 @@ function ConfigFieldLabel({ label }: { label: string }) {
 function ProvenanceHint({
   locked,
   provenance,
+  showLockIcon = true,
 }: {
   locked: boolean;
   provenance: string;
+  showLockIcon?: boolean;
 }) {
   return (
     <span className="mt-0.5 flex items-center gap-1 text-2xs text-muted-foreground/70">
-      {locked ? (
+      {locked && showLockIcon ? (
         <PenOff aria-label="Read-only" className="h-3 w-3 shrink-0" />
       ) : null}
       <span className="min-w-0 truncate">{provenance}</span>
@@ -112,12 +136,12 @@ function provenanceSentence(
   origin: ConfigOrigin,
   writeVia: ConfigWriteMechanism,
   configFilePath: string | null,
-): string {
+): string | null {
   switch (origin) {
     case "buzzExplicit":
       return "Set in Buzz";
     case "personaDefault":
-      return "Inherited from template";
+      return null;
     case "runtimeOverride":
       return "Live override (this session only)";
     case "harnessConstraint":
@@ -148,10 +172,10 @@ const NORMALIZED_LABELS: Record<keyof NormalizedConfig, string> = {
   model: "Model",
   provider: "Provider",
   mode: "Mode",
-  thinkingEffort: "Thinking / Effort",
-  maxOutputTokens: "Max Output Tokens",
-  contextLimit: "Context Limit",
-  systemPrompt: "System Prompt",
+  thinkingEffort: "Thinking effort",
+  maxOutputTokens: "Max output tokens",
+  contextLimit: "Context limit",
+  systemPrompt: "System prompt",
 };
 
 const NORMALIZED_ICONS: Record<keyof NormalizedConfig, LucideIcon> = {
@@ -170,6 +194,7 @@ function NormalizedRow({
   field,
   isPreSpawn,
   configFilePath,
+  onEdit,
   variant = "compact",
 }: {
   fieldKey: keyof NormalizedConfig;
@@ -177,6 +202,7 @@ function NormalizedRow({
   field: NormalizedField;
   isPreSpawn: boolean;
   configFilePath: string | null;
+  onEdit?: () => void;
   variant?: RowVariant;
 }) {
   const Icon = NORMALIZED_ICONS[fieldKey];
@@ -195,19 +221,13 @@ function NormalizedRow({
     ? provenanceSentence(field.origin, field.writeVia, configFilePath)
     : null;
   const locked = isReadOnlyField(field);
-  const isCopyable =
-    variant === "profile" &&
-    shouldOfferCopy({
-      fieldKey,
-      origin: field.origin,
-      value: field.value,
-    });
+  const isEditable = variant === "profile" && onEdit !== undefined;
 
   const content = (
     <>
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
-        <Icon className="h-4 w-4 text-muted-foreground" />
-      </span>
+      {variant === "compact" ? (
+        <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      ) : null}
       <span className="min-w-0 flex-1 text-left">
         {variant === "profile" ? (
           <ConfigFieldLabel label={label} />
@@ -234,24 +254,29 @@ function NormalizedRow({
           ) : null}
         </span>
         {provenance ? (
-          <ProvenanceHint locked={locked} provenance={provenance} />
+          <ProvenanceHint
+            locked={locked}
+            provenance={provenance}
+            showLockIcon={variant === "compact"}
+          />
         ) : null}
       </span>
-      {isCopyable ? (
-        <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+      {isEditable ? (
+        <Pencil
+          className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+          data-testid={`agent-config-${fieldKey}-edit-indicator`}
+        />
       ) : null}
     </>
   );
 
-  if (isCopyable && field.value) {
+  if (isEditable) {
     return (
       <button
-        aria-label={`Copy ${label}`}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
-        onClick={() =>
-          copyTextToClipboard(field.value ?? "", `Copied ${label}`)
-        }
-        title={`Copy ${label}`}
+        aria-label={`Edit ${label}`}
+        className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        onClick={onEdit}
+        title={`Edit ${label}`}
         type="button"
       >
         {content}
@@ -259,7 +284,16 @@ function NormalizedRow({
     );
   }
 
-  return <div className="flex items-center gap-3 px-4 py-3">{content}</div>;
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 px-4 py-3",
+        variant === "profile" && "min-h-16",
+      )}
+    >
+      {content}
+    </div>
+  );
 }
 
 // ── Advanced row ──────────────────────────────────────────────────────────────
@@ -277,6 +311,10 @@ function AdvancedRow({
     ? provenanceSentence(field.origin, field.writeVia, configFilePath)
     : null;
   const locked = isReadOnlyField(field);
+  const { copied, copy } = useCopyFeedback({
+    label: field.label,
+    value: field.value ?? "",
+  });
 
   if (variant === "compact") {
     return (
@@ -305,9 +343,6 @@ function AdvancedRow({
   });
   const content = (
     <>
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
-        <Hash className="h-4 w-4 text-muted-foreground" />
-      </span>
       <span className="min-w-0 flex-1 text-left">
         <ConfigFieldLabel label={field.label} />
         <span
@@ -317,11 +352,18 @@ function AdvancedRow({
           {field.value ?? "—"}
         </span>
         {provenance ? (
-          <ProvenanceHint locked={locked} provenance={provenance} />
+          <ProvenanceHint
+            locked={locked}
+            provenance={provenance}
+            showLockIcon={false}
+          />
         ) : null}
       </span>
       {isCopyable ? (
-        <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <HoverCopyIndicator
+          copied={copied}
+          testId={`agent-config-advanced-${field.key}-copy-status`}
+        />
       ) : null}
     </>
   );
@@ -330,10 +372,8 @@ function AdvancedRow({
     return (
       <button
         aria-label={`Copy ${field.label}`}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
-        onClick={() =>
-          copyTextToClipboard(field.value ?? "", `Copied ${field.label}`)
-        }
+        className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        onClick={() => void copy()}
         title={`Copy ${field.label}`}
         type="button"
       >
@@ -342,36 +382,94 @@ function AdvancedRow({
     );
   }
 
-  return <div className="flex items-center gap-3 px-4 py-3">{content}</div>;
+  return (
+    <div className="flex min-h-16 items-center gap-3 px-4 py-3">{content}</div>
+  );
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+function ProfileConfigSection({
+  children,
+  testId,
+  title,
+}: {
+  children: React.ReactNode;
+  testId?: string;
+  title: string;
+}) {
+  return (
+    <PanelSectionGroup testId={testId} title={title}>
+      {children}
+    </PanelSectionGroup>
+  );
+}
+
 export function AgentConfigPanel({
   advancedMode = "collapsed",
+  onEdit,
   pubkey,
+  sections = ALL_AGENT_CONFIG_SECTIONS,
 }: Props) {
-  const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const { data, isLoading, error } = useAgentConfigSurface(pubkey);
+  const flatStateTitle = sections.includes("model")
+    ? "Model settings"
+    : sections.includes("mcp")
+      ? "MCP servers"
+      : "Advanced";
 
   if (isLoading) {
-    return (
-      <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+    const loading = (
+      <div className="flex items-center gap-2 px-4 py-4 text-sm text-muted-foreground">
         <Spinner className="h-3.5 w-3.5" />
-        Loading config…
+        Loading configuration…
       </div>
     );
+    if (advancedMode === "flat") {
+      return (
+        <ProfileConfigSection title={flatStateTitle}>
+          {loading}
+        </ProfileConfigSection>
+      );
+    }
+    return loading;
   }
 
   if (error || !data) {
-    return (
-      <p className="py-3 text-sm text-destructive">
+    const errorMessage = (
+      <p className="px-4 py-3 text-sm text-destructive">
         {error instanceof Error
           ? error.message
-          : "Failed to load agent config."}
+          : "Couldn't load agent configuration."}
       </p>
     );
+    if (advancedMode === "flat") {
+      return (
+        <ProfileConfigSection title={flatStateTitle}>
+          {errorMessage}
+        </ProfileConfigSection>
+      );
+    }
+    return errorMessage;
   }
+
+  return (
+    <AgentConfigSurfaceRows
+      advancedMode={advancedMode}
+      data={data}
+      onEdit={onEdit}
+      sections={sections}
+    />
+  );
+}
+
+export function AgentConfigSurfaceRows({
+  advancedMode = "collapsed",
+  data,
+  onEdit,
+  sections = ALL_AGENT_CONFIG_SECTIONS,
+}: AgentConfigSurfaceRowsProps) {
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
 
   const { normalized, advanced, extensions, runtimeId, sources, isPreSpawn } =
     data;
@@ -399,6 +497,72 @@ export function AgentConfigPanel({
     }
     return true;
   }) as [keyof NormalizedConfig, NormalizedField][];
+  const showMcpServers = shouldRenderMcpServers(runtimeId, extensions);
+  const showModelSection = sections.includes("model");
+  const showMcpSection = sections.includes("mcp");
+  const showAdvancedSection = sections.includes("advanced");
+
+  if (advancedMode === "flat") {
+    return (
+      <div className="space-y-4">
+        {showModelSection && normalizedEntries.length > 0 ? (
+          <ProfileConfigSection
+            testId="user-profile-model-settings-section"
+            title="Model settings"
+          >
+            <div
+              className={cn(
+                "divide-y divide-border/55",
+                isPreSpawn && "opacity-60",
+              )}
+            >
+              {normalizedEntries.map(([key, field]) => (
+                <NormalizedRow
+                  configFilePath={configFilePath}
+                  field={field}
+                  fieldKey={key}
+                  isPreSpawn={isPreSpawn}
+                  key={key}
+                  label={NORMALIZED_LABELS[key]}
+                  onEdit={onEdit}
+                  variant="profile"
+                />
+              ))}
+            </div>
+          </ProfileConfigSection>
+        ) : null}
+
+        {showMcpSection && showMcpServers ? (
+          <ProfileConfigSection
+            testId="user-profile-mcp-servers-section"
+            title="MCP servers"
+          >
+            <McpServersSection
+              extensions={extensions}
+              runtimeId={runtimeId}
+              variant="profile"
+            />
+          </ProfileConfigSection>
+        ) : null}
+
+        {showAdvancedSection && advanced.length > 0 ? (
+          <ProfileConfigSection
+            testId="user-profile-advanced-section"
+            title="Advanced"
+          >
+            {advanced.map((field) => (
+              <AdvancedRow
+                configFilePath={configFilePath}
+                field={field}
+                key={field.key}
+                variant="profile"
+              />
+            ))}
+          </ProfileConfigSection>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-0.5">
@@ -419,7 +583,7 @@ export function AgentConfigPanel({
               field={field}
               isPreSpawn={isPreSpawn}
               configFilePath={configFilePath}
-              variant={advancedMode === "flat" ? "profile" : "compact"}
+              variant="compact"
             />
           ))
         )}
@@ -428,26 +592,10 @@ export function AgentConfigPanel({
       <McpServersSection
         extensions={extensions}
         runtimeId={runtimeId}
-        variant={advancedMode === "flat" ? "profile" : "compact"}
+        variant="compact"
       />
 
-      {advanced.length > 0 && advancedMode === "flat" ? (
-        <div className="divide-y divide-border/50 border-t border-border/50">
-          <p className="px-4 py-3 text-xs font-medium text-foreground">
-            Advanced
-          </p>
-          {advanced.map((field) => (
-            <AdvancedRow
-              key={field.key}
-              field={field}
-              configFilePath={configFilePath}
-              variant="profile"
-            />
-          ))}
-        </div>
-      ) : null}
-
-      {advanced.length > 0 && advancedMode === "collapsed" ? (
+      {advanced.length > 0 ? (
         <div className="mt-3 border-t border-border/50 pt-2">
           <button
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
