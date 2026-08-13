@@ -334,10 +334,12 @@ OPEN  Not for a builder to decide.
   Where this runs was #110's call. RESOLVED after this plan was written: #110
   decided GitHub Actions for Phase 1 at 2026-08-12T07:43Z — 45 minutes after this
   file was committed — and its decision comment names #116's .github/workflows
-  invocation among what it unblocks. No workflow file is added by this work even
-  so, which is now a scoping choice rather than a wait: the token and its scopes
-  belong to #119. That is stated here because this file merges and a PR body does
-  not.
+  invocation among what it unblocks. SUPERSEDED 2026-08-13, the same way STEP 12 above: a
+  workflow job IS added by this work — it runs this stage's controls and its
+  mutation harness on every pull request, needs no token and no network, and so
+  was never what #110 gated. What is still deferred to #119 is invoking the
+  pre-flight itself against a live PR, which does carry a credential. That is
+  stated here because this file merges and a PR body does not.
   What counts as a "required check" has no readable source of truth in this repo
   today: three endpoints report no protection on launchpad, every check on PR 86
   reports isRequired false, and launchpad/AGENTS.md §6 says the branch is

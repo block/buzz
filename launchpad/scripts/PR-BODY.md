@@ -251,7 +251,11 @@ check — only field paths and lengths.
   in-flight external status would arrive as `conclusion: "PENDING", status: null`.
 - **The `truncated: true` guard is verified on a fixture, never against this repo.** This
   fork is 4337 entries; the fixture came from torvalds/linux at 71798.
-- **No PR with more than 100 checks.** The query takes `first: 100` and PR 86 has 47.
+- **No PR with more than 100 checks has been run.** The query takes `first: 100`; PR 86
+  has 47 with `totalCount` 47, verified against both the fixture and the live API. Such a
+  PR now **refuses** rather than truncating: no record, exit 2, and a `truncated` skip.
+  **Pagination is not implemented and no issue tracks it** — refusal is the current answer,
+  and whether it should be the permanent one is a reviewer's call.
 - **The review-gate count is unverified and deliberately unread.** `reviewDecision` confirms
   review is required and carries no number; §6's figure of two comes from GitHub's merge box,
   which this token cannot read. `review_required: true` is therefore proved; "two" is not.
