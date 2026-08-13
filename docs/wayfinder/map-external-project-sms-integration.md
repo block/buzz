@@ -118,7 +118,46 @@ treatment for free.
 11. **End-to-end SMS → project dispatch → reply** → verify: full loop — real inbound SMS from an allow-listed number with a clear `default_project`, agent dispatches and completes, outbound reply SMS arrives back at the sending number.
 12. **Fetch-before-dispatch freshness check (new — from privacy/freshness review)** → verify: point `--project-paths` at a checkout that's behind its remote, dispatch into it, confirm the harness either fast-forwards it first or at minimum logs a clear staleness warning rather than silently working off outdated code.
 
-## ⚠ Two blocking findings (verified 2026-08-13) — these invalidate the original slice-8 plan
+## ✅ RESOLVED 2026-08-13 (commit `2e745cf`) — both blockers below are FIXED
+
+**Read this first: the two findings recorded below were true when written and are now
+addressed.** They are kept for the reasoning, not as current state.
+
+- **Finding 1 (packs inert) — FIXED.** `buzz-acp` now resolves a pack at startup via
+  `--pack`/`--persona`, mapping `ResolvedPersona` onto `Config` (system prompt, model,
+  title, runtime, instructions, env, subscribe). Explicit CLI/env values beat pack values
+  (clap `ArgMatches` value_source), so a pack supplies defaults only. The `#`-stripping
+  for subscribe names that the spec promised is implemented. A bad pack path is a hard
+  startup error, never a silent no-op. **Covered by 29 passing
+  `config::persona_pack_tests`** — including `pack_supplies_system_prompt_model_title_and_instructions`
+  (proves a pack on disk really changes Config, not merely that it parses),
+  `explicit_system_prompt_and_model_override_pack`, and
+  `missing_pack_directory_is_a_hard_startup_error`.
+- **Finding 2 (session caching) — FIXED.** `resolve_turn_routing()` + `batch_project_tag()`
+  plus `session_cwds` on `SessionState`; invalidation fires **only when the resolved cwd
+  actually changes**, ordered before the core-memory and canvas/title blocks so a
+  replacement session rebuilds them. **Covered by 6 passing `pool::tests::routing_*` and
+  `second_message_with_a_different_project_tag_creates_a_session_in_the_new_cwd`** — a
+  three-turn (alpha→beta→beta) test capturing real ACP wire traffic that asserts exactly
+  two `session/new` calls with the second in the new cwd on a different session id. That
+  test **fails** if routing regresses to first-message-only, which was the whole trap.
+
+**Security note (new surface):** the project id now arrives from an event tag and is
+therefore attacker-influencable. It is only ever a lookup key into the operator-configured
+`--project-paths` map, never joined into a path; unknown ids fall back to the channel
+binding. `routing_hostile_project_ids_cannot_escape_the_configured_map` drives 17 hostile
+ids (traversal, absolute, UNC, null byte, `$HOME`, `%USERPROFILE%`, case/whitespace
+variants) and also asserts a legitimate id still resolves, so it is not vacuously
+rejecting everything.
+
+**Still NOT verified:** no live relay, harness, or agent process has been run. All of the
+above is unit-level verification (re-run directly, not taken from build-agent reports).
+
+**Build environment gotcha:** the `C:\` drive on this machine is 100% full, which breaks
+the MSVC linker (`LNK1108: cannot write file at 0x0`). Prefix cargo with
+`TMP=E:/tmp-build TEMP=E:/tmp-build` to build at all.
+
+## ⚠ Two blocking findings (verified 2026-08-13) — these invalidated the original slice-8 plan (NOW FIXED, see above)
 
 Both were found by an adversarial research pass and then **independently re-verified against the
 real code** before being recorded here. They change what "add this as a plugin" can mean today.
