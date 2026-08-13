@@ -40,10 +40,14 @@ export function CodexTaskAgentDialog({
   const sharedRuntimeReady = isCodexSharedRuntimeUsable(
     sharedRuntimeQuery.data,
   );
-  const tasksQuery = useCodexTasksQuery({
-    enabled: open && sharedRuntimeReady,
-  });
   const runtimesQuery = useAvailableAcpRuntimes({ enabled: open });
+  const codexRuntime = (runtimesQuery.data ?? []).find(
+    (runtime) => runtime.id === "codex",
+  );
+  const codexSetupReady = sharedRuntimeReady && Boolean(codexRuntime);
+  const tasksQuery = useCodexTasksQuery({
+    enabled: open && codexSetupReady,
+  });
   const channelsQuery = useChannelsQuery({ enabled: open });
   const createMutation = useCreateManagedAgentMutation();
   const attachMutation = useAttachManagedAgentToChannelMutation(null);
@@ -72,10 +76,6 @@ export function CodexTaskAgentDialog({
   );
   const selectedChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
-  const codexRuntime = (runtimesQuery.data ?? []).find(
-    (runtime) => runtime.id === "codex",
-  );
-
   React.useEffect(() => {
     if (!open || taskId || tasks.length === 0) return;
     setTaskId(tasks[0].id);
@@ -195,7 +195,7 @@ export function CodexTaskAgentDialog({
           </DialogHeader>
 
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
-            {!sharedRuntimeReady ? (
+            {!codexSetupReady ? (
               <CodexSharedRuntimePanel enabled={open} />
             ) : (
               <>
@@ -371,7 +371,7 @@ export function CodexTaskAgentDialog({
             </Button>
             <Button
               disabled={
-                !sharedRuntimeReady ||
+                !codexSetupReady ||
                 !selectedTask ||
                 !codexRuntime ||
                 !name.trim() ||

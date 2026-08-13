@@ -9,6 +9,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 $Target = "x86_64-pc-windows-msvc"
 $ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -17,6 +18,11 @@ $DesktopDirectory = Join-Path $RepositoryRoot "desktop"
 $TauriDirectory = Join-Path $DesktopDirectory "src-tauri"
 $ConfigPath = Join-Path $TauriDirectory "tauri.codex-lab.conf.json"
 $BinariesDirectory = Join-Path $TauriDirectory "binaries"
+$ManagedNodeVersion = "v24.18.0"
+$ManagedNodeArchiveName = "node-v24.18.0-win-x64.zip"
+$ManagedNodeArchiveSha256 = "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821"
+$CodexAcpPackage = "@agentclientprotocol/codex-acp"
+$CodexAcpVersion = "1.2.0"
 
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $RepositoryRoot "dist\codex-lab-windows"
@@ -45,6 +51,150 @@ function Invoke-NativeCommand {
     }
     finally {
         Pop-Location
+    }
+}
+
+function Remove-VerifiedBuildDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $ResolvedTarget = [IO.Path]::GetFullPath($Path)
+    $ResolvedRoot = [IO.Path]::GetFullPath($BuildCacheDirectory).TrimEnd('\') + '\'
+    if (-not $ResolvedTarget.StartsWith($ResolvedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove a directory outside the build cache: $ResolvedTarget"
+    }
+    if (Test-Path -LiteralPath $ResolvedTarget) {
+        Remove-Item -LiteralPath $ResolvedTarget -Recurse -Force
+    }
+}
+
+function New-CodexAcpOfflineBundle {
+    $BundleCache = Join-Path $BuildCacheDirectory "offline-codex-acp\$CodexAcpVersion-win-x64"
+    $ArchivePath = Join-Path $BundleCache "codex-acp-win-x64.zip"
+    $ManifestPath = Join-Path $BundleCache "manifest-win-x64.json"
+
+    if ((Test-Path -LiteralPath $ArchivePath -PathType Leaf) -and
+        (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        $CachedManifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $CachedHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($CachedManifest.adapter_version -eq $CodexAcpVersion -and
+            $CachedManifest.node_version -eq $ManagedNodeVersion -and
+            $CachedManifest.archive_sha256 -eq $CachedHash) {
+            return [pscustomobject]@{
+                ArchivePath = $ArchivePath
+                ManifestPath = $ManifestPath
+                Manifest = $CachedManifest
+            }
+        }
+    }
+
+    New-Item -ItemType Directory -Path $BundleCache -Force | Out-Null
+    $DownloadDirectory = Join-Path $BuildCacheDirectory "downloads"
+    New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
+    $NodeArchive = Join-Path $DownloadDirectory $ManagedNodeArchiveName
+    $NodeArchiveReady = (Test-Path -LiteralPath $NodeArchive -PathType Leaf) -and
+        ((Get-FileHash -LiteralPath $NodeArchive -Algorithm SHA256).Hash.ToLowerInvariant() -eq
+            $ManagedNodeArchiveSha256)
+    if (-not $NodeArchiveReady) {
+        $NodeArchiveDownload = "$NodeArchive.download"
+        Remove-Item -LiteralPath $NodeArchiveDownload -Force -ErrorAction SilentlyContinue
+        $NodeUrl = "https://nodejs.org/dist/$ManagedNodeVersion/$ManagedNodeArchiveName"
+        Invoke-WebRequest -Uri $NodeUrl -OutFile $NodeArchiveDownload -UseBasicParsing
+        $DownloadedHash = (Get-FileHash -LiteralPath $NodeArchiveDownload -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($DownloadedHash -ne $ManagedNodeArchiveSha256) {
+            Remove-Item -LiteralPath $NodeArchiveDownload -Force -ErrorAction SilentlyContinue
+            throw "Managed Node.js archive hash mismatch: $DownloadedHash"
+        }
+        Move-Item -LiteralPath $NodeArchiveDownload -Destination $NodeArchive -Force
+    }
+
+    $Staging = Join-Path $BuildCacheDirectory ("offline-codex-acp\stage-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $Staging -Force | Out-Null
+    try {
+        $Extracted = Join-Path $Staging "extracted"
+        $Payload = Join-Path $Staging "payload"
+        $PayloadNode = Join-Path $Payload "node"
+        $PayloadTools = Join-Path $Payload "node-tools"
+        New-Item -ItemType Directory -Path $Extracted,$Payload,$PayloadTools -Force | Out-Null
+        Expand-Archive -LiteralPath $NodeArchive -DestinationPath $Extracted -Force
+        $ExtractedNode = Join-Path $Extracted "node-v24.18.0-win-x64"
+        if (-not (Test-Path -LiteralPath (Join-Path $ExtractedNode "node.exe") -PathType Leaf)) {
+            throw "Managed Node.js archive did not contain node.exe"
+        }
+        Copy-Item -LiteralPath $ExtractedNode -Destination $PayloadNode -Recurse
+
+        $Npm = Join-Path $PayloadNode "npm.cmd"
+        $NpmCache = Join-Path $BuildCacheDirectory "npm-cache"
+        New-Item -ItemType Directory -Path $NpmCache -Force | Out-Null
+        $PreviousNpmCache = $env:npm_config_cache
+        $env:npm_config_cache = $NpmCache
+        try {
+            Invoke-NativeCommand -FilePath $Npm -Arguments @(
+                "install",
+                "--global",
+                "--prefix", $PayloadTools,
+                "$CodexAcpPackage@$CodexAcpVersion",
+                "--no-audit",
+                "--no-fund"
+            ) -WorkingDirectory $Payload
+        }
+        finally {
+            $env:npm_config_cache = $PreviousNpmCache
+        }
+
+        $AdapterShim = Join-Path $PayloadTools "codex-acp.cmd"
+        $AdapterPackageJson = Join-Path $PayloadTools "node_modules\@agentclientprotocol\codex-acp\package.json"
+        if (-not (Test-Path -LiteralPath $AdapterShim -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $AdapterPackageJson -PathType Leaf)) {
+            throw "Codex ACP package did not produce the expected private-prefix layout"
+        }
+        $InstalledPackage = Get-Content -LiteralPath $AdapterPackageJson -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        if ($InstalledPackage.name -ne $CodexAcpPackage -or
+            $InstalledPackage.version -ne $CodexAcpVersion) {
+            throw "Codex ACP package verification failed"
+        }
+        $PreviousPath = $env:PATH
+        $env:PATH = "$PayloadNode;$PreviousPath"
+        try {
+            $VersionOutput = (& $AdapterShim --version).Trim()
+            if ($LASTEXITCODE -ne 0 -or
+                $VersionOutput -ne "$CodexAcpPackage $CodexAcpVersion") {
+                throw "Codex ACP version probe failed: $VersionOutput"
+            }
+        }
+        finally {
+            $env:PATH = $PreviousPath
+        }
+
+        $StagedArchive = Join-Path $Staging "codex-acp-win-x64.zip"
+        Compress-Archive -Path (Join-Path $Payload "*") -DestinationPath $StagedArchive -CompressionLevel Optimal
+        $ArchiveHash = (Get-FileHash -LiteralPath $StagedArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+        $Manifest = [ordered]@{
+            schema_version = 1
+            platform = "win-x64"
+            node_version = $ManagedNodeVersion
+            adapter_package = $CodexAcpPackage
+            adapter_version = $CodexAcpVersion
+            archive_sha256 = $ArchiveHash
+        }
+        $StagedManifest = Join-Path $Staging "manifest-win-x64.json"
+        [IO.File]::WriteAllText(
+            $StagedManifest,
+            ($Manifest | ConvertTo-Json -Depth 4),
+            $Utf8NoBom
+        )
+        Copy-Item -LiteralPath $StagedArchive -Destination $ArchivePath -Force
+        Copy-Item -LiteralPath $StagedManifest -Destination $ManifestPath -Force
+    }
+    finally {
+        Remove-VerifiedBuildDirectory -Path $Staging
+    }
+
+    return [pscustomobject]@{
+        ArchivePath = $ArchivePath
+        ManifestPath = $ManifestPath
+        Manifest = (Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json)
     }
 }
 
@@ -159,6 +309,19 @@ if (-not $SkipSidecarBuild) {
     }
 }
 
+$CodexAcpBundle = New-CodexAcpOfflineBundle
+$GeneratedConfigPath = Join-Path $BuildCacheDirectory "tauri.codex-lab.generated.conf.json"
+$GeneratedConfig = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$BundledResources = [ordered]@{}
+$BundledResources[[string]$CodexAcpBundle.ArchivePath] = "codex-acp/codex-acp-win-x64.zip"
+$BundledResources[[string]$CodexAcpBundle.ManifestPath] = "codex-acp/manifest-win-x64.json"
+$GeneratedConfig.bundle | Add-Member -MemberType NoteProperty -Name resources -Value $BundledResources -Force
+[IO.File]::WriteAllText(
+    $GeneratedConfigPath,
+    ($GeneratedConfig | ConvertTo-Json -Depth 12),
+    $Utf8NoBom
+)
+
 $RequiredSidecars = @(
     "buzz-acp-$Target.exe",
     "buzz-agent-$Target.exe",
@@ -202,7 +365,7 @@ Invoke-NativeCommand -FilePath "corepack.cmd" -Arguments @(
     "build",
     "--target", $Target,
     "--bundles", "nsis",
-    "--config", $ConfigPath
+    "--config", $GeneratedConfigPath
 ) -WorkingDirectory $DesktopDirectory
 
 $BundleDirectory = Join-Path $CargoTargetDirectory "$Target\release\bundle\nsis"
@@ -247,6 +410,13 @@ $BuildInfo = [ordered]@{
         signed = $false
     }
     bundled_sidecars = $SidecarHashes
+    bundled_codex_acp = [ordered]@{
+        package = $CodexAcpBundle.Manifest.adapter_package
+        version = $CodexAcpBundle.Manifest.adapter_version
+        node_version = $CodexAcpBundle.Manifest.node_version
+        archive_sha256 = $CodexAcpBundle.Manifest.archive_sha256
+        archive_size = (Get-Item -LiteralPath $CodexAcpBundle.ArchivePath).Length
+    }
     embedded_relay_configuration = $false
     embedded_identity_or_api_key = $false
     deep_link_scheme = $DeepLinkScheme

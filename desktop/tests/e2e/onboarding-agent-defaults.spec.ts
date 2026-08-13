@@ -867,15 +867,15 @@ test("defaults requires a choice when multiple visible harnesses are ready", asy
 });
 
 /**
- * Two installs started concurrently — claude fails with a multiline error
- * (rich hint+stderr in the tooltip) while codex succeeds. Each card must
+ * Codex repair starts automatically while a manual Claude install runs —
+ * Claude fails with a multiline error while Codex succeeds. Each card must
  * keep its own independent spinner and its own terminal result; neither card
  * may show the other's outcome.
  *
  * This is the behavioral regression test for the per-card mutation fix
  * (Bug B) and the multiline tooltip fix (Bug A / F3 from Thufir pass 1).
  */
-test("concurrent installs each keep their own state — one fails, one succeeds", async ({
+test("automatic Codex repair and a manual install keep independent state", async ({
   page,
 }) => {
   // Realistic 512-head + 1024-tail shape: many short lines followed by one
@@ -966,9 +966,10 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
   const claudeInstall = page.getByTestId("onboarding-runtime-install-claude");
   const codexInstall = page.getByTestId("onboarding-runtime-install-codex");
 
-  // Start both installs before either settles.
+  // Codex starts automatically because its CLI is present but the adapter is
+  // missing. Start Claude manually before Codex settles.
+  await expect(page.getByLabel("Installing Codex")).toBeVisible();
   await claudeInstall.click();
-  await codexInstall.click();
 
   // While in flight: both install buttons must be absent (no duplicate clicks).
   await expect(claudeInstall).toHaveCount(0);

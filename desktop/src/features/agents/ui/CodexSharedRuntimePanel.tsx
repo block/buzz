@@ -4,10 +4,11 @@ import { toast } from "sonner";
 
 import {
   useCodexSharedRuntimeQuery,
-  useEnableCodexSharedRuntimeMutation,
   useLaunchCodexDesktopSharedMutation,
+  useSetupCodexSharedRuntimeMutation,
   useTakeOverCodexDesktopSharedMutation,
 } from "@/features/agents/codexSharedRuntimeHooks";
+import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
   hasCodexDesktopRuntimeConflict,
   isCodexSharedRuntimeUsable,
@@ -30,27 +31,37 @@ export function CodexSharedRuntimePanel({
   enabled?: boolean;
 }) {
   const statusQuery = useCodexSharedRuntimeQuery({ enabled });
-  const enableMutation = useEnableCodexSharedRuntimeMutation();
+  const runtimesQuery = useAcpRuntimesQuery({ enabled });
+  const setupMutation = useSetupCodexSharedRuntimeMutation();
   const launchMutation = useLaunchCodexDesktopSharedMutation();
   const takeoverMutation = useTakeOverCodexDesktopSharedMutation();
   const [confirmTakeover, setConfirmTakeover] = React.useState(false);
+  const [setupError, setSetupError] = React.useState<string | null>(null);
   const status = statusQuery.data;
   const ready = status?.state === "ready";
   const conflict = hasCodexDesktopRuntimeConflict(status);
   const usable = isCodexSharedRuntimeUsable(status);
+  const codexRuntime = runtimesQuery.data?.find(
+    (runtime) => runtime.id === "codex",
+  );
+  const adapterReady = codexRuntime?.availability === "available";
+  const fullyReady = usable && adapterReady;
+  const checking = statusQuery.isLoading || runtimesQuery.isLoading;
 
-  async function enableRuntime() {
+  async function setupRuntime() {
+    setSetupError(null);
     try {
-      const next = await enableMutation.mutateAsync();
+      const next = await setupMutation.mutateAsync();
       if (next.state === "ready") {
-        toast.success("Codex shared runtime is ready");
+        toast.success("Codex integration is ready");
       } else {
         toast.error("Codex shared runtime did not start", {
           description: next.detail ?? undefined,
         });
       }
     } catch (cause) {
-      toast.error("Could not enable Codex shared runtime", {
+      setSetupError(cause instanceof Error ? cause.message : "Setup failed.");
+      toast.error("Could not set up Codex", {
         description: cause instanceof Error ? cause.message : undefined,
       });
     }
@@ -92,31 +103,35 @@ export function CodexSharedRuntimePanel({
         data-testid="codex-shared-runtime-panel"
       >
         <div className="flex items-start gap-3">
-          {usable ? (
+          {fullyReady ? (
             <CircleCheck className="mt-0.5 size-5 shrink-0 text-emerald-500" />
           ) : (
             <CircleAlert className="mt-0.5 size-5 shrink-0 text-amber-500" />
           )}
           <div className="min-w-0 flex-1 space-y-1">
             <p className="text-sm font-medium">
-              {statusQuery.isLoading
-                ? "Checking Codex shared runtime..."
+              {checking
+                ? "Checking Codex integration..."
                 : conflict
                   ? "Codex Desktop runtime conflict"
                   : status?.desktopDetectionError
                     ? "Could not verify Codex Desktop"
-                    : ready
-                      ? "Codex shared runtime connected"
-                      : status?.state === "unavailable"
-                        ? "Codex shared runtime unavailable"
-                        : "Set up Codex shared runtime"}
+                    : !adapterReady
+                      ? "Codex ACP setup required"
+                      : ready
+                        ? "Codex shared runtime connected"
+                        : status?.state === "unavailable"
+                          ? "Codex shared runtime unavailable"
+                          : "Set up Codex shared runtime"}
             </p>
             <p className="text-sm leading-5 text-muted-foreground">
               {conflict
                 ? "Codex Desktop is running outside the shared runtime. Reconnect it before opening this task from Buzz."
-                : usable
-                  ? "Buzz and Codex Desktop can use existing tasks through the same local app-server."
-                  : "Buzz requires one local Codex app-server. Fully quit Codex Desktop before enabling it, then reopen Desktop from here."}
+                : !adapterReady
+                  ? "Buzz will install its private Codex ACP adapter, verify it, and then start the shared app-server."
+                  : usable
+                    ? "Buzz and Codex Desktop can use existing tasks through the same local app-server."
+                    : "Buzz requires one local Codex app-server. Fully quit Codex Desktop before enabling it, then reopen Desktop from here."}
             </p>
             {status?.url ? (
               <p className="break-all font-mono text-xs text-muted-foreground">
@@ -146,6 +161,16 @@ export function CodexSharedRuntimePanel({
                 {statusQuery.error.message}
               </p>
             ) : null}
+            {runtimesQuery.error instanceof Error ? (
+              <p className="text-xs text-destructive">
+                {runtimesQuery.error.message}
+              </p>
+            ) : null}
+            {setupError ? (
+              <p className="whitespace-pre-wrap text-xs text-destructive">
+                {setupError}
+              </p>
+            ) : null}
           </div>
         </div>
 
@@ -160,18 +185,22 @@ export function CodexSharedRuntimePanel({
             >
               Take over Codex Desktop
             </Button>
-          ) : !ready ? (
+          ) : !fullyReady ? (
             <Button
-              disabled={enableMutation.isPending}
-              onClick={() => void enableRuntime()}
+              disabled={setupMutation.isPending || checking}
+              onClick={() => void setupRuntime()}
               size="sm"
               type="button"
             >
-              {enableMutation.isPending
-                ? "Starting..."
-                : status?.enabled
-                  ? "Start shared runtime"
-                  : "Enable shared runtime"}
+              {setupMutation.isPending
+                ? adapterReady
+                  ? "Starting..."
+                  : "Installing Codex ACP..."
+                : adapterReady
+                  ? status?.enabled
+                    ? "Start shared runtime"
+                    : "Enable shared runtime"
+                  : "Set up Codex"}
             </Button>
           ) : usable ? (
             <Button
@@ -187,15 +216,27 @@ export function CodexSharedRuntimePanel({
           ) : null}
           <Button
             aria-label="Check Codex shared runtime again"
-            disabled={statusQuery.isFetching || takeoverMutation.isPending}
-            onClick={() => void statusQuery.refetch()}
+            disabled={
+              statusQuery.isFetching ||
+              runtimesQuery.isFetching ||
+              takeoverMutation.isPending ||
+              setupMutation.isPending
+            }
+            onClick={() => {
+              void statusQuery.refetch();
+              void runtimesQuery.refetch();
+            }}
             size="icon"
             title="Check again"
             type="button"
             variant="ghost"
           >
             <RefreshCw
-              className={statusQuery.isFetching ? "animate-spin" : ""}
+              className={
+                statusQuery.isFetching || runtimesQuery.isFetching
+                  ? "animate-spin"
+                  : ""
+              }
             />
           </Button>
         </div>

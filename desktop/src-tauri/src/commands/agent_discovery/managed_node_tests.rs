@@ -52,6 +52,59 @@ fn test_shell_quote_escapes_single_quotes() {
     );
 }
 
+#[test]
+fn test_bundled_codex_manifest_requires_expected_runtime() {
+    let valid = BundledCodexAcpManifest {
+        schema_version: 1,
+        platform: "win-x64".to_string(),
+        node_version: "v24.18.0".to_string(),
+        adapter_package: "@agentclientprotocol/codex-acp".to_string(),
+        adapter_version: "1.2.0".to_string(),
+        archive_sha256: "a".repeat(64),
+    };
+    assert!(validate_bundled_codex_acp_manifest(&valid).is_ok());
+
+    let wrong_platform = BundledCodexAcpManifest {
+        platform: "win-arm64".to_string(),
+        ..valid
+    };
+    assert!(validate_bundled_codex_acp_manifest(&wrong_platform).is_err());
+}
+
+#[test]
+fn test_copy_tree_merges_without_removing_other_adapters() {
+    let source = tempfile::TempDir::new().unwrap();
+    let destination = tempfile::TempDir::new().unwrap();
+    let package = source
+        .path()
+        .join("node_modules")
+        .join("@agentclientprotocol")
+        .join("codex-acp");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("package.json"), b"codex").unwrap();
+    std::fs::write(source.path().join("codex-acp.cmd"), b"shim").unwrap();
+
+    let other = destination
+        .path()
+        .join("node_modules")
+        .join("@agentclientprotocol")
+        .join("claude-agent-acp");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("package.json"), b"claude").unwrap();
+
+    copy_tree(source.path(), destination.path()).unwrap();
+
+    assert!(destination.path().join("codex-acp.cmd").is_file());
+    assert!(other.join("package.json").is_file());
+    assert!(destination
+        .path()
+        .join("node_modules")
+        .join("@agentclientprotocol")
+        .join("codex-acp")
+        .join("package.json")
+        .is_file());
+}
+
 // ── zip validation tests ──────────────────────────────────────────────────────
 
 /// Build an in-memory zip archive with the supplied entry names and return

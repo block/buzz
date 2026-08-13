@@ -7,6 +7,22 @@ use crate::managed_agents::{is_npm_global_install, InstallStepResult};
 
 const MANAGED_NODE_VERSION: &str = "v24.18.0";
 const MANAGED_NODE_MAX_BYTES: u64 = 90 * 1024 * 1024;
+const BUNDLED_CODEX_ACP_MAX_BYTES: u64 = 700 * 1024 * 1024;
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const BUNDLED_CODEX_ACP_ARCHIVE: &str = "codex-acp/codex-acp-win-x64.zip";
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const BUNDLED_CODEX_ACP_MANIFEST: &str = "codex-acp/manifest-win-x64.json";
+
+#[derive(Debug, serde::Deserialize)]
+struct BundledCodexAcpManifest {
+    schema_version: u32,
+    platform: String,
+    node_version: String,
+    adapter_package: String,
+    adapter_version: String,
+    archive_sha256: String,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct ManagedNodeArtifact {
@@ -260,6 +276,184 @@ fn managed_node_install_lock() -> &'static Mutex<()> {
 
 pub(super) fn managed_node_runtime_supported() -> bool {
     MANAGED_NODE_ARTIFACT.is_some() && crate::managed_agents::buzz_managed_node_bin_dir().is_some()
+}
+
+fn validate_bundled_codex_acp_manifest(manifest: &BundledCodexAcpManifest) -> Result<(), String> {
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "unsupported bundled Codex ACP manifest schema {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.platform != "win-x64"
+        || manifest.node_version != MANAGED_NODE_VERSION
+        || manifest.adapter_package != "@agentclientprotocol/codex-acp"
+        || manifest.adapter_version.trim().is_empty()
+    {
+        return Err("bundled Codex ACP manifest does not match this runtime".to_string());
+    }
+    if manifest.archive_sha256.len() != 64
+        || !manifest
+            .archive_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("bundled Codex ACP manifest has an invalid archive hash".to_string());
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &std::path::Path, max_bytes: u64) -> Result<String, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("read bundled Codex ACP archive metadata: {error}"))?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "bundled Codex ACP archive is too large: {} bytes",
+            metadata.len()
+        ));
+    }
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open bundled Codex ACP archive: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read bundled Codex ACP archive: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("create '{}': {error}", destination.display()))?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| format!("read '{}': {error}", source.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read bundle entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect '{}': {error}", entry.path().display()))?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &target)
+                .map_err(|error| format!("copy '{}': {error}", target.display()))?;
+        } else {
+            return Err(format!(
+                "bundled Codex ACP contains unsupported entry '{}'",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub(super) fn install_bundled_codex_acp(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri::Manager as _;
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("resolve Buzz resource directory: {error}"))?;
+    let archive_path = resource_dir.join(BUNDLED_CODEX_ACP_ARCHIVE);
+    let manifest_path = resource_dir.join(BUNDLED_CODEX_ACP_MANIFEST);
+    if !archive_path.is_file() || !manifest_path.is_file() {
+        return Ok(None);
+    }
+
+    let manifest: BundledCodexAcpManifest = serde_json::from_slice(
+        &std::fs::read(&manifest_path)
+            .map_err(|error| format!("read bundled Codex ACP manifest: {error}"))?,
+    )
+    .map_err(|error| format!("parse bundled Codex ACP manifest: {error}"))?;
+    validate_bundled_codex_acp_manifest(&manifest)?;
+    let actual_hash = sha256_file(&archive_path, BUNDLED_CODEX_ACP_MAX_BYTES)?;
+    if !actual_hash.eq_ignore_ascii_case(&manifest.archive_sha256) {
+        return Err(format!(
+            "bundled Codex ACP hash mismatch: expected {}, got {actual_hash}",
+            manifest.archive_sha256
+        ));
+    }
+
+    let node_root = crate::managed_agents::buzz_managed_node_root()
+        .ok_or_else(|| "resolve Buzz private Node.js directory".to_string())?;
+    let node_destination = crate::managed_agents::buzz_managed_node_bin_dir()
+        .ok_or_else(|| "resolve Buzz private Node.js platform directory".to_string())?;
+    let npm_prefix = crate::managed_agents::buzz_managed_npm_prefix()
+        .ok_or_else(|| "resolve Buzz private Node tools directory".to_string())?;
+    let app_data_root = node_root
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| "resolve Buzz app-data root".to_string())?;
+    let staging = app_data_root.join("codex-acp-offline.tmp");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .map_err(|error| format!("remove stale Codex ACP staging directory: {error}"))?;
+    }
+    std::fs::create_dir_all(&staging)
+        .map_err(|error| format!("create Codex ACP staging directory: {error}"))?;
+
+    let install_result = (|| {
+        let file = std::fs::File::open(&archive_path)
+            .map_err(|error| format!("open bundled Codex ACP zip: {error}"))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|error| format!("read bundled Codex ACP zip: {error}"))?;
+        validate_managed_node_zip_entries(&archive)?;
+        extract_managed_node_zip(&mut archive, &staging)?;
+
+        let staged_node = staging.join("node");
+        let staged_tools = staging.join("node-tools");
+        verify_node_tree(&staged_node)?;
+        if !staged_tools
+            .join("node_modules")
+            .join("@agentclientprotocol")
+            .join("codex-acp")
+            .join("dist")
+            .join("index.js")
+            .is_file()
+        {
+            return Err("bundled Codex ACP package is incomplete".to_string());
+        }
+
+        if !managed_node_runtime_ready() {
+            copy_tree(&staged_node, &node_destination)?;
+        }
+        copy_tree(&staged_tools, &npm_prefix)?;
+
+        if !managed_node_runtime_ready() {
+            return Err("bundled Node.js runtime failed its version probe".to_string());
+        }
+        let adapter = npm_prefix.join("codex-acp.cmd");
+        let node_dir = node_destination.to_string_lossy();
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        let probe_path = format!("{node_dir};{inherited}");
+        let version =
+            crate::managed_agents::probe_codex_acp_version_with_path(&adapter, Some(&probe_path))
+                .ok_or_else(|| "bundled Codex ACP failed its version probe".to_string())?;
+        if version < crate::managed_agents::MIN_CODEX_ACP_VERSION {
+            return Err(format!(
+                "bundled Codex ACP {}.{}.{} is below the supported version",
+                version.0, version.1, version.2
+            ));
+        }
+        Ok(manifest.adapter_version.clone())
+    })();
+
+    let _ = std::fs::remove_dir_all(&staging);
+    install_result.map(Some)
+}
+
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+pub(super) fn install_bundled_codex_acp(_app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 pub(super) fn ensure_managed_node_runtime_blocking() -> Result<(), Box<InstallStepResult>> {

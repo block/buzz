@@ -23,6 +23,15 @@ export function runtimeIsReadyForOnboarding(runtime: AcpRuntimeCatalogEntry) {
   );
 }
 
+export function shouldAutoInstallCodexAdapter(runtime: AcpRuntimeCatalogEntry) {
+  return (
+    runtime.id === "codex" &&
+    runtime.canAutoInstall &&
+    (runtime.availability === "adapter_missing" ||
+      runtime.availability === "adapter_outdated")
+  );
+}
+
 export function getVisibleOnboardingRuntimes(
   runtimes: readonly AcpRuntimeCatalogEntry[],
 ) {

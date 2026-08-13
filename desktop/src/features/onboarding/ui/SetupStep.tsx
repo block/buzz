@@ -22,6 +22,7 @@ import {
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
   runtimeIsReadyForOnboarding,
+  shouldAutoInstallCodexAdapter,
 } from "./onboardingRuntimeSelection";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { RuntimeErrorTooltip } from "./RuntimeErrorTooltip";
@@ -487,8 +488,9 @@ function RuntimeCard({
   const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
   const isAvailable = runtime.availability === "available";
   const isReady = runtimeIsReadyForOnboarding(runtime);
+  const autoInstallStartedRef = React.useRef(false);
 
-  function handleInstall() {
+  const handleInstall = React.useCallback(() => {
     onInstallResultsChange((current) => ({
       ...current,
       [runtime.id]: { error: null, success: false },
@@ -516,7 +518,18 @@ function RuntimeCard({
         }));
       },
     });
-  }
+  }, [installMutation, onInstallResultsChange, runtime.id]);
+
+  React.useEffect(() => {
+    if (
+      autoInstallStartedRef.current ||
+      !shouldAutoInstallCodexAdapter(runtime)
+    ) {
+      return;
+    }
+    autoInstallStartedRef.current = true;
+    handleInstall();
+  }, [handleInstall, runtime]);
 
   return (
     <Card

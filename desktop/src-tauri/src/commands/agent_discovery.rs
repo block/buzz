@@ -333,35 +333,63 @@ fn install_acp_runtime_blocking(
     ) {
         let use_managed_npm =
             cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
-        if use_managed_npm {
+        let bundled_adapter_version = if use_managed_npm && runtime_id == "codex" {
+            match install_bundled_codex_acp(app) {
+                Ok(version) => version,
+                Err(error) => {
+                    eprintln!(
+                        "buzz-desktop: bundled Codex ACP install failed; falling back to npm: {error}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(version) = bundled_adapter_version.as_deref() {
+            reporter.record_step(
+                &mut steps,
+                crate::managed_agents::InstallStepResult {
+                    step: "adapter".to_string(),
+                    command: format!("bundled @agentclientprotocol/codex-acp@{version}"),
+                    success: true,
+                    stdout: "Installed from the Buzz Codex Lab offline bundle.".to_string(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    hint: None,
+                },
+            );
+        } else if use_managed_npm {
             if let Err(step) = ensure_managed_node_runtime_blocking() {
                 reporter.record_step(&mut steps, *step);
                 return Ok(reporter.failed(steps));
             }
         }
 
-        for cmd in cmds {
-            let planned = match if use_managed_npm {
-                managed_npm_command(cmd)
-            } else {
-                Ok(None)
-            } {
-                Ok(Some(command)) => command,
-                Ok(None) => cmd.to_string(),
-                Err(step) => {
-                    reporter.record_step(&mut steps, *step);
+        if bundled_adapter_version.is_none() {
+            for cmd in cmds {
+                let planned = match if use_managed_npm {
+                    managed_npm_command(cmd)
+                } else {
+                    Ok(None)
+                } {
+                    Ok(Some(command)) => command,
+                    Ok(None) => cmd.to_string(),
+                    Err(step) => {
+                        reporter.record_step(&mut steps, *step);
+                        return Ok(reporter.failed(steps));
+                    }
+                };
+
+                let mut result = run_install_command_with_retry("adapter", &planned, &reporter);
+                if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
+                    result.hint = npm_eacces_hint(&result.stderr, cmd);
+                }
+                let success = result.success;
+                steps.push(result);
+                if !success {
                     return Ok(reporter.failed(steps));
                 }
-            };
-
-            let mut result = run_install_command_with_retry("adapter", &planned, &reporter);
-            if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
-                result.hint = npm_eacces_hint(&result.stderr, cmd);
-            }
-            let success = result.success;
-            steps.push(result);
-            if !success {
-                return Ok(reporter.failed(steps));
             }
         }
     }
@@ -1006,8 +1034,8 @@ use install_report::InstallReporter;
 // ── managed Node/npm runtime ──────────────────────────────────────────────────
 mod managed_node;
 use managed_node::{
-    ensure_managed_node_runtime_blocking, managed_node_runtime_supported, managed_npm_command,
-    npm_eacces_hint, resolve_adapter_path,
+    ensure_managed_node_runtime_blocking, install_bundled_codex_acp,
+    managed_node_runtime_supported, managed_npm_command, npm_eacces_hint, resolve_adapter_path,
 };
 
 #[tauri::command]

@@ -7,11 +7,16 @@ Codex Desktop on Windows. It is not a production Scientist Room deployment.
 
 - Buzz Desktop with Codex task binding and shared-runtime controls.
 - The Buzz ACP harness, developer MCP, agent, CLI, and Nostr credential helper.
+- A pinned, checksum-verified Windows x64 bundle of Node.js and
+  `@agentclientprotocol/codex-acp`. Buzz deploys it into its private app-data
+  directory; npm is used only as a repair fallback.
 - No Buzz identity private key, API token, community URL, relay address, Codex
   credentials, or machine-specific path.
 - No automatic updater. Test builds stay on the version that was installed.
-- No Codex binary, Codex credentials, local task history, or workspace files.
-  The shared runtime connects to the tester's existing Codex Desktop install.
+- The ACP package contains its compatible Codex CLI dependency, but shared-task
+  mode connects to the tester's existing Codex Desktop app-server. The
+  installer contains no Codex credentials, local task history, or workspace
+  files.
 
 The app uses the product name `Buzz Codex Lab`, the identifier
 `xyz.chemyibinjiang.buzz.codexlab`, and the deep-link scheme
@@ -38,7 +43,9 @@ verify the exact file before continuing.
    **Sign in to an existing account** and use that file and password.
 3. Join the evaluation community using the URL or invite supplied privately.
 4. Fully quit Codex Desktop.
-5. In Buzz, open Agents or Settings and select **Enable shared runtime**.
+5. In Buzz, open Agents, select **Add Codex task**, and choose **Set up Codex**
+   if setup is not already complete. This installs/verifies the bundled ACP
+   adapter before starting the shared runtime.
 6. When the status is ready, select **Open Codex Desktop**. This launches Codex
    Desktop against the same loopback app-server used by Buzz.
 7. Select **Add Codex task**, choose an existing local task, name its Buzz
@@ -107,7 +114,8 @@ Artifacts are written to `dist/codex-lab-windows/`:
 
 The build script clears relay, identity-injection, reconnect-hook, updater, and
 signing environment variables before compiling. It rebuilds and verifies every
-bundled Windows sidecar before creating the NSIS installer.
+bundled Windows sidecar, creates the pinned offline Codex ACP archive in the
+external build cache, and embeds that archive in the NSIS installer.
 
 Rust and native source paths are remapped or trimmed during release builds. A
 stable incremental Cargo cache is kept under

@@ -6,6 +6,7 @@ import {
   getVisibleOnboardingRuntimes,
   runtimeIsReadyForOnboarding,
   runtimeIsVisibleInOnboarding,
+  shouldAutoInstallCodexAdapter,
 } from "./onboardingRuntimeSelection.ts";
 
 function runtime(id, availability, status) {
@@ -67,5 +68,36 @@ test("ready onboarding runtimes exclude unknown and non-ready harnesses", () => 
   assert.deepEqual(
     getReadyOnboardingRuntimes(runtimes).map(({ id }) => id),
     ["claude", "goose", "buzz-agent"],
+  );
+});
+
+test("Codex adapter repair starts automatically only when the CLI is present", () => {
+  assert.equal(
+    shouldAutoInstallCodexAdapter({
+      ...runtime("codex", "adapter_missing", "unknown"),
+      canAutoInstall: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAutoInstallCodexAdapter({
+      ...runtime("codex", "adapter_outdated", "unknown"),
+      canAutoInstall: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAutoInstallCodexAdapter({
+      ...runtime("codex", "not_installed", "unknown"),
+      canAutoInstall: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAutoInstallCodexAdapter({
+      ...runtime("claude", "adapter_missing", "unknown"),
+      canAutoInstall: true,
+    }),
+    false,
   );
 });
