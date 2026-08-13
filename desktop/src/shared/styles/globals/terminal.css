@@ -248,7 +248,6 @@
   }
 
   .buzz-terminal-substrate[data-terminal-visible="false"] {
-    height: 0 !important;
     min-height: 0;
     pointer-events: none;
     transform: translateY(16px);

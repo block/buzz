@@ -477,7 +477,11 @@ export function TerminalSubstrate({
       data-terminal-visible={visible ? "true" : "false"}
       style={{
         ...terminalStyle,
-        ...(mode === "docked" ? { height: dockHeight } : undefined),
+        ...(!visible
+          ? { height: 0 }
+          : mode === "docked"
+            ? { height: dockHeight }
+            : undefined),
       }}
       onWheel={(event) => {
         event.preventDefault();

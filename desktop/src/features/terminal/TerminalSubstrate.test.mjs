@@ -400,6 +400,11 @@ test("later reveals do not replay a consumed splash", async () => {
 
   subject.rerender({ frame: EMPTY_FRAME, showSplash: false, visible: false });
   await expectWelcome(subject.view, false);
+  assert.equal(
+    subject.view.container.querySelector(".buzz-terminal-substrate").style
+      .height,
+    "0px",
+  );
   subject.rerender({ frame: EMPTY_FRAME, showSplash: false, visible: true });
   await expectWelcome(subject.view, false);
 });
