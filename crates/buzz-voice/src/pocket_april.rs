@@ -1370,28 +1370,25 @@ mod tests {
             .split_once("\n#[cfg(test)]")
             .map_or(source, |(production, _)| production);
 
-        let (_, model) = production
-            .split_once("fn split_prompt")
-            .expect("model splitter exists");
-        let (model, _) = model
-            .split_once("fn split_playback_prompt")
-            .expect("model splitter precedes the playback splitter");
-        let (_, playback) = production
-            .split_once("fn split_playback_prompt")
-            .expect("playback splitter exists");
-        // End at this method's own closing brace, not at the next `fn`: the
-        // gap between them holds the NEXT method's doc comment, and prose
-        // there would otherwise be scanned as this method's control flow.
-        let (playback, _) = playback
-            .split_once("\n    }\n")
-            .expect("playback splitter has a closing brace");
-        // Scan code only. A comment cannot branch, and rejecting one reports
-        // drift in a method that has not changed.
-        let playback: String = playback
-            .lines()
-            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // A method's own code, and nothing else. Ending at the method's own
+        // closing brace keeps the NEXT method's doc comment out, and stripping
+        // `//` to end of line keeps prose out: neither can call a splitter, so
+        // scanning either reports drift in a method that has not changed.
+        let method_code = |name: &str| -> String {
+            let (_, body) = production
+                .split_once(name)
+                .unwrap_or_else(|| panic!("{name} exists"));
+            let (body, _) = body
+                .split_once("\n    }\n")
+                .unwrap_or_else(|| panic!("{name} has a closing brace"));
+            body.lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let model = method_code("fn split_prompt");
+        let model = model.as_str();
+        let playback = method_code("fn split_playback_prompt");
         let playback = playback.as_str();
 
         assert_eq!(
