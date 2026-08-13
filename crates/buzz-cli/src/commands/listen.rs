@@ -22,6 +22,30 @@ const DEFAULT_KINDS: &[u32] = &[9, 40002, 40008, 45001, 45003];
 const MAX_LISTEN_CHANNELS: usize = 1024;
 const LISTEN_REPLAY_LIMIT: u64 = 1_000;
 
+/// How often `--dms` re-checks for newly opened DM conversations. DM-created
+/// discovery events do not reach live global subscriptions (channel-scoped
+/// fan-out), so the listener periodically polls for them.
+const DM_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Filter that finds the caller's DM conversations: relay-emitted
+/// `KIND_DM_CREATED` metadata p-tags every participant and carries the stable
+/// DM channel UUID as its `d` tag. Same query `buzz dms list` uses.
+pub(crate) fn dm_discovery_filter(my_pubkey_hex: &str) -> serde_json::Value {
+    json!({
+        "kinds": [buzz_core::kind::KIND_DM_CREATED],
+        "#p": [my_pubkey_hex],
+        "limit": 200,
+    })
+}
+
+async fn resolve_dm_channels(
+    client: &BuzzClient,
+    my_pubkey_hex: &str,
+) -> Result<Vec<String>, CliError> {
+    let events = client.query_all(dm_discovery_filter(my_pubkey_hex)).await?;
+    Ok(channel_ids_from_metadata(&events))
+}
+
 pub(crate) fn parse_kinds(raw: Option<&str>) -> Result<Vec<u32>, CliError> {
     match raw {
         None => Ok(DEFAULT_KINDS.to_vec()),
@@ -150,7 +174,7 @@ async fn resolve_listen_channels(
     }
     if !mentions_of_me {
         return Err(CliError::Usage(
-            "buzz listen requires --channel <UUID> and/or --mentions-of-me".into(),
+            "buzz listen requires --channel <UUID>, --mentions-of-me, and/or --dms".into(),
         ));
     }
 
@@ -379,11 +403,63 @@ async fn sleep_with_shutdown(duration: Duration, running: &AtomicBool) {
     }
 }
 
+/// Per-session context for `--dms`: which DM conversations are already
+/// subscribed, and everything needed to subscribe a newly discovered one.
+struct DmWatch {
+    my_pubkey: String,
+    kinds: Vec<u32>,
+    mentions_of_me: bool,
+    since: Option<u64>,
+    known: HashSet<String>,
+}
+
+/// Resolve DM channels for this session and build the final filter set.
+///
+/// Runs per session (not once at startup) so a reconnect keeps DM
+/// conversations that were discovered mid-session.
+async fn build_session_filters(
+    client: &BuzzClient,
+    channels: &[String],
+    dms: bool,
+    mentions_of_me: bool,
+    my_pubkey: &str,
+    kinds: &[u32],
+    since: Option<u64>,
+) -> Result<(Vec<serde_json::Value>, Option<DmWatch>), CliError> {
+    let mut session_channels = channels.to_vec();
+    let mut dm_watch = None;
+    if dms {
+        let dm_channels = resolve_dm_channels(client, my_pubkey).await?;
+        session_channels.extend(dm_channels);
+        dm_watch = Some(DmWatch {
+            my_pubkey: my_pubkey.to_string(),
+            kinds: kinds.to_vec(),
+            mentions_of_me,
+            since,
+            known: session_channels
+                .iter()
+                .filter_map(|c| parse_uuid(c).ok())
+                .map(|c| c.to_string())
+                .collect(),
+        });
+    }
+    // With --dms an empty start is valid: the identity may simply have no DM
+    // conversations yet; the poll subscribes them as they are opened.
+    let filters = if session_channels.is_empty() && dms {
+        Vec::new()
+    } else {
+        build_listen_filters(&session_channels, mentions_of_me, my_pubkey, kinds, since)?
+    };
+    Ok((filters, dm_watch))
+}
+
 /// Run the listen loop until shutdown or fatal error.
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_listen(
     client: &BuzzClient,
     channels: Vec<String>,
     mentions_of_me: bool,
+    dms: bool,
     kinds_raw: Option<String>,
     since: Option<u64>,
     envelope: crate::ListenEnvelope,
@@ -391,9 +467,12 @@ pub async fn cmd_listen(
 ) -> Result<(), CliError> {
     let kinds = parse_kinds(kinds_raw.as_deref())?;
     let my_pubkey = client.keys().public_key().to_hex();
-    let channels = resolve_listen_channels(client, channels, mentions_of_me).await?;
-    let filters = build_listen_filters(&channels, mentions_of_me, &my_pubkey, &kinds, since)?;
-    guard_bounded_catchup(client, &filters, since).await?;
+    let channels = if channels.is_empty() && dms && !mentions_of_me {
+        // --dms alone is a complete subscription request.
+        Vec::new()
+    } else {
+        resolve_listen_channels(client, channels, mentions_of_me).await?
+    };
     let ws_url = http_to_ws(client.relay_url());
     let running = Arc::new(AtomicBool::new(true));
     spawn_shutdown_watcher(running.clone());
@@ -402,7 +481,29 @@ pub async fn cmd_listen(
     const MAX_BACKOFF_MS: u64 = 30_000;
 
     while running.load(Ordering::SeqCst) {
-        match listen_session(client, &ws_url, &filters, envelope, running.clone()).await {
+        let session = async {
+            let (filters, dm_watch) = build_session_filters(
+                client,
+                &channels,
+                dms,
+                mentions_of_me,
+                &my_pubkey,
+                &kinds,
+                since,
+            )
+            .await?;
+            guard_bounded_catchup(client, &filters, since).await?;
+            listen_session(
+                client,
+                &ws_url,
+                &filters,
+                envelope,
+                running.clone(),
+                dm_watch,
+            )
+            .await
+        };
+        match session.await {
             Ok(()) => {
                 if !running.load(Ordering::SeqCst) || !reconnect {
                     break;
@@ -443,6 +544,7 @@ async fn listen_session(
     filters: &[serde_json::Value],
     envelope: crate::ListenEnvelope,
     running: Arc<AtomicBool>,
+    mut dm_watch: Option<DmWatch>,
 ) -> Result<(), CliError> {
     use buzz_ws_client::{NostrWsConnection, RelayMessage};
 
@@ -462,11 +564,11 @@ async fn listen_session(
             )
         })
         .collect();
-    let subscription_ids: HashSet<String> = subscriptions
+    let mut subscription_ids: HashSet<String> = subscriptions
         .iter()
         .map(|(sub_id, _)| sub_id.clone())
         .collect();
-    let subscription_filters: std::collections::HashMap<String, serde_json::Value> =
+    let mut subscription_filters: std::collections::HashMap<String, serde_json::Value> =
         subscriptions.iter().cloned().collect();
     let mut awaiting_eose = subscription_ids.clone();
     let mut eose_emitted = false;
@@ -477,7 +579,62 @@ async fn listen_session(
             .map_err(|error| map_ws_error("websocket subscribe", error))?;
     }
 
+    // A --dms-only session can legitimately start with zero subscriptions
+    // (no DM conversations yet). Nothing will send an EOSE, so declare
+    // readiness here rather than leaving an envelope consumer waiting.
+    if subscriptions.is_empty() && !eose_emitted {
+        write_lifecycle(envelope, "eose", None)?;
+        eose_emitted = true;
+    }
+
+    let mut next_dm_poll = tokio::time::Instant::now() + DM_POLL_INTERVAL;
+
     while running.load(Ordering::SeqCst) {
+        if let Some(watch) = dm_watch.as_mut() {
+            if tokio::time::Instant::now() >= next_dm_poll {
+                next_dm_poll = tokio::time::Instant::now() + DM_POLL_INTERVAL;
+                match resolve_dm_channels(client, &watch.my_pubkey).await {
+                    Ok(discovered) => {
+                        for channel in discovered {
+                            if !watch.known.insert(channel.clone()) {
+                                continue;
+                            }
+                            let filter = build_listen_filters(
+                                std::slice::from_ref(&channel),
+                                watch.mentions_of_me,
+                                &watch.my_pubkey,
+                                &watch.kinds,
+                                watch.since,
+                            )?
+                            .remove(0);
+                            guard_bounded_catchup(
+                                client,
+                                std::slice::from_ref(&filter),
+                                watch.since,
+                            )
+                            .await?;
+                            let sub_id =
+                                format!("buzz-listen-{}", &Uuid::new_v4().to_string()[..8]);
+                            conn.send_raw(&json!(["REQ", sub_id, filter]))
+                                .await
+                                .map_err(|error| map_ws_error("websocket subscribe", error))?;
+                            subscription_filters.insert(sub_id.clone(), filter);
+                            subscription_ids.insert(sub_id);
+                            write_lifecycle(envelope, "dm_channel_added", Some(&channel))?;
+                        }
+                    }
+                    Err(error) => {
+                        // The websocket is still healthy; a failed discovery
+                        // poll is diagnosable but not fatal.
+                        eprintln!(
+                            "{}",
+                            json!({"error": "dm_poll_failed", "message": error.to_string()})
+                        );
+                    }
+                }
+            }
+        }
+
         let msg = match conn.next_event(Duration::from_millis(500)).await {
             Ok(msg) => msg,
             Err(buzz_ws_client::WsClientError::Timeout) => continue,
@@ -730,6 +887,32 @@ mod tests {
             event_record(event.clone(), crate::ListenEnvelope::Flat),
             event
         );
+    }
+
+    #[test]
+    fn dm_discovery_filter_targets_dm_created_p_tagged_to_me() {
+        let me = "c".repeat(64);
+        let filter = dm_discovery_filter(&me);
+
+        assert_eq!(
+            filter["kinds"][0],
+            buzz_core::kind::KIND_DM_CREATED,
+            "must query the relay-emitted DM-created metadata kind"
+        );
+        assert_eq!(filter["#p"][0], me);
+    }
+
+    #[test]
+    fn dm_channel_ids_come_from_d_tags_and_dedupe() {
+        let dm = "22222222-2222-2222-2222-222222222222";
+        let events = vec![
+            json!({"tags": [["d", dm], ["p", "aa"]]}),
+            json!({"tags": [["d", dm]]}),
+            json!({"tags": [["p", "bb"]]}),
+            json!({"tags": [["d", "not-a-uuid"]]}),
+        ];
+
+        assert_eq!(channel_ids_from_metadata(&events), vec![dm.to_string()]);
     }
 
     #[test]

@@ -192,6 +192,11 @@ enum Cmd {
         /// Only receive events that p-tag this CLI identity
         #[arg(long, default_value_t = false)]
         mentions_of_me: bool,
+        /// Also stream your direct-message conversations, picking up newly
+        /// opened ones without a restart. Each DM event carries its stable
+        /// conversation UUID in the `h` tag.
+        #[arg(long, default_value_t = false)]
+        dms: bool,
         /// Comma-separated event kinds. Defaults to Buzz message kinds.
         #[arg(long)]
         kinds: Option<String>,
@@ -2073,6 +2078,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Listen {
             channels,
             mentions_of_me,
+            dms,
             kinds,
             since,
             envelope,
@@ -2082,6 +2088,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 &client,
                 channels,
                 mentions_of_me,
+                dms,
                 kinds,
                 since,
                 envelope,

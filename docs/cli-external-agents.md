@@ -63,6 +63,30 @@ Filter semantics are conjunctive inside one relay filter:
   authenticated query bridge, then receive events that p-tag this CLI identity;
 - both: events that match one configured channel and p-tag this CLI identity.
 
+### Direct messages (`--dms`)
+
+`--dms` additionally subscribes to every direct-message conversation this
+identity participates in. Buzz assigns each DM conversation a stable channel
+UUID, and DM events carry it in their `h` tag exactly like channel traffic, so
+consumers can use one channel-scoped event model for both surfaces.
+Conversations are discovered from the relay-emitted DM-created
+metadata (`kind:41001`, p-tagged with every participant) — the same query
+`buzz dms list` uses.
+
+Newly opened conversations are picked up without a restart: the listener
+re-checks every 30 seconds and adds a channel-scoped subscription for each new
+conversation. Under `--envelope v1` each addition emits a lifecycle record:
+
+```json
+{"schema_version":1,"type":"lifecycle","state":"dm_channel_added","message":"<dm channel uuid>"}
+```
+
+`--dms` alone is a complete subscription request: with no DM conversations yet
+the session connects, emits `eose` immediately, and subscribes conversations as
+they are opened. A failed discovery re-check is reported on stderr as
+`{"error":"dm_poll_failed"}` and retried at the next interval; the live
+subscriptions are unaffected.
+
 Each configured channel uses an independent channel-scoped relay subscription.
 This preserves live delivery across multiple channels without weakening the
 relay's channel/global fan-out boundary. Duplicate channel arguments are
@@ -95,7 +119,8 @@ Lifecycle records use the same stdout stream:
 {"schema_version":1,"type":"lifecycle","state":"eose"}
 ```
 
-Allowed v1 lifecycle states are `connected`, `eose`, `closed`, and `fatal`.
+Allowed v1 lifecycle states are `connected`, `eose`, `dm_channel_added`,
+`closed`, and `fatal`.
 For multi-channel listeners, one `eose` record is emitted after every
 channel-scoped subscription reaches EOSE. Diagnostics and reconnect notices are
 emitted on stderr as JSON.
