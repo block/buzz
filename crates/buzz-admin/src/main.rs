@@ -88,12 +88,16 @@ enum Command {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
     },
-    /// Emit kind:39000/39002 events for channels missing them.
+    /// Emit or republish kind:39000/39001/39002 channel discovery events.
     ///
-    /// Channels created via direct SQL (seed scripts, pre-migration data) won't
-    /// have Nostr discovery events. This command creates them so pure-nostr
-    /// clients can see those channels. Idempotent — safe to run multiple times.
+    /// Without `--channel`, only channels missing discovery metadata are
+    /// reconciled. With `--channel`, that channel's events are replaced even if
+    /// they already exist, which repairs stale roster snapshots after a deploy.
     ReconcileChannels {
+        /// Optional channel UUID to force-republish.
+        #[arg(long)]
+        channel: Option<String>,
+
         /// Relay private key (hex) for signing events. Falls back to
         /// BUZZ_RELAY_PRIVATE_KEY env var. If neither is set, generates
         /// an ephemeral key (events will be unverifiable after restart).
@@ -156,8 +160,8 @@ async fn run(cli: Cli) -> Result<i32> {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
         Command::Deletions { command } => deletions::run(command).await,
-        Command::ReconcileChannels { relay_key } => {
-            reconcile_channels(relay_key).await?;
+        Command::ReconcileChannels { channel, relay_key } => {
+            reconcile_channels(channel, relay_key).await?;
             Ok(0)
         }
     }
@@ -466,14 +470,26 @@ async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
     Ok(TenantContext::resolved(record.id, record.host))
 }
 
-async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
+async fn reconcile_channels(
+    channel_arg: Option<String>,
+    relay_key_arg: Option<String>,
+) -> Result<()> {
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
 
     let db = connect_db().await?;
 
-    // Resolve relay signing key: arg > env > ephemeral
-    let relay_keys = match relay_key_arg.or_else(|| std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok()) {
+    // Resolve relay signing key: arg > env > ephemeral. Force-republish must
+    // never use an ephemeral key because it replaces an existing authoritative
+    // snapshot.
+    let configured_relay_key =
+        relay_key_arg.or_else(|| std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok());
+    if channel_arg.is_some() && configured_relay_key.is_none() {
+        return Err(anyhow::anyhow!(
+            "--channel requires --relay-key or BUZZ_RELAY_PRIVATE_KEY"
+        ));
+    }
+    let relay_keys = match configured_relay_key {
         Some(key_hex) => {
             Keys::parse(&key_hex).map_err(|e| anyhow::anyhow!("invalid relay key: {e}"))?
         }
@@ -490,7 +506,21 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
     };
 
     let tenant = resolve_admin_tenant(&db).await?;
-    let channels = db.list_channels(tenant.community(), None).await?;
+    let target_channel = channel_arg
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid --channel UUID: {e}"))?;
+    let channels = if let Some(target) = target_channel {
+        vec![db
+            .get_channel(tenant.community(), target)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("channel {target} not found in community {}", tenant.host())
+            })?]
+    } else {
+        db.list_channels(tenant.community(), None).await?
+    };
     if channels.is_empty() {
         println!("No channels in database.");
         return Ok(());
@@ -513,7 +543,7 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
             .await
             .unwrap_or_default();
 
-        if !existing.is_empty() {
+        if !existing.is_empty() && target_channel.is_none() {
             skipped += 1;
             continue;
         }
