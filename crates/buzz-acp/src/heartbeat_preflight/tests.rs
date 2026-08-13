@@ -675,6 +675,7 @@ fn forwarding_denies_all_secrets_and_allows_only_gateway_ipc_metadata() {
         "NOSTR_PRIVATE_KEY",
         "BUZZ_AUTH_TAG",
         "BUZZ_RELAY_URL",
+        "BUZZ_ACP_REQUIRED_AGENT_OWNER",
         "BUZZ_RELAY_TOKEN",
         "BUZZ_AUTH_SECRET",
         "BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG",
@@ -707,7 +708,8 @@ fn model_env_scrub_removes_ambient_and_explicit_case_variants() {
     let mut command = Command::new("ignored");
     command
         .env("buzz_heartbeat_gateway_socket", "agent-controlled")
-        .env("buzz_acp_heartbeat_interval", "1");
+        .env("buzz_acp_heartbeat_interval", "1")
+        .env("buzz_acp_required_agent_owner", "a".repeat(64));
     scrub_agent_subprocess_env(&mut command);
 
     let env: BTreeMap<_, _> = command
@@ -721,6 +723,10 @@ fn model_env_scrub_removes_ambient_and_explicit_case_variants() {
     );
     assert_eq!(
         env.get(std::ffi::OsStr::new("buzz_acp_heartbeat_interval")),
+        Some(&None)
+    );
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("buzz_acp_required_agent_owner")),
         Some(&None)
     );
 }

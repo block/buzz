@@ -248,6 +248,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
     pub agent_owner: Option<String>,
 
+    /// Fail-closed startup latch for a supervisor-pinned owner pubkey.
+    /// The resolved owner (verified BUZZ_AUTH_TAG first, then agent_owner)
+    /// must exactly match this lowercase 64-char hex value.
+    #[arg(long, env = "BUZZ_ACP_REQUIRED_AGENT_OWNER")]
+    pub required_agent_owner: Option<String>,
+
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
@@ -596,6 +602,9 @@ pub struct Config {
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
+    /// Supervisor-pinned owner identity that must match the resolved owner
+    /// before any relay, heartbeat preflight, or model activity starts.
+    pub required_agent_owner: Option<String>,
     /// Disable the [Base] platform-context section prepended to every prompt.
     pub no_base_prompt: bool,
     /// Resolved content from `--base-prompt-file`, read and validated in
@@ -680,6 +689,25 @@ fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError
         validated.insert(trimmed);
     }
     Ok(validated)
+}
+
+pub(crate) fn validate_required_agent_owner(
+    value: Option<&str>,
+) -> Result<Option<String>, ConfigError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ConfigError::ConfigFile(
+            "BUZZ_ACP_REQUIRED_AGENT_OWNER must be exactly 64 lowercase hexadecimal characters"
+                .into(),
+        ));
+    }
+    Ok(Some(value.to_string()))
 }
 
 /// Validate the `--multiple-event-handling` / `--dedup` combination.
@@ -881,6 +909,8 @@ impl Config {
         args.private_key
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
+        let required_agent_owner =
+            validate_required_agent_owner(args.required_agent_owner.as_deref())?;
 
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
@@ -1188,6 +1218,7 @@ impl Config {
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
+            required_agent_owner,
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
         };
@@ -1560,6 +1591,7 @@ mod tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             agent_owner: None,
+            required_agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -2891,6 +2923,53 @@ channels = "ALL"
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
         );
+    }
+
+    #[test]
+    fn required_agent_owner_full_path_accepts_exact_lowercase_pubkey() {
+        let required_owner = "ab".repeat(32);
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--required-agent-owner",
+            required_owner.as_str(),
+        ])
+        .expect("clap should parse args");
+
+        let config = Config::from_args(args).expect("exact lowercase owner must be accepted");
+        assert_eq!(
+            config.required_agent_owner.as_deref(),
+            Some(required_owner.as_str())
+        );
+    }
+
+    #[test]
+    fn required_agent_owner_full_path_rejects_noncanonical_values() {
+        for invalid in [
+            String::new(),
+            "AB".repeat(32),
+            format!("{} ", "ab".repeat(32)),
+            "a".repeat(63),
+            format!("{}g", "a".repeat(63)),
+        ] {
+            let args = CliArgs::try_parse_from([
+                "buzz-acp",
+                "--private-key",
+                TEST_PRIVATE_KEY,
+                "--required-agent-owner",
+                invalid.as_str(),
+            ])
+            .expect("clap should preserve the value for Config validation");
+
+            let error = Config::from_args(args)
+                .expect_err("noncanonical required owner must fail configuration")
+                .to_string();
+            assert!(
+                error.contains("BUZZ_ACP_REQUIRED_AGENT_OWNER must be exactly 64 lowercase"),
+                "unexpected error for {invalid:?}: {error}"
+            );
+        }
     }
 
     // --- max_turn_duration ceiling gate ---

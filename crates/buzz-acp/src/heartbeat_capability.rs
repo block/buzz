@@ -4,10 +4,9 @@
 use anyhow::{bail, Result};
 use serde::Serialize;
 
+pub(crate) use crate::heartbeat_capability_constants::{BUILD_CAPABILITY, KIND, PROTOCOL_VERSION};
+
 pub(crate) const COMMAND: &str = "heartbeat-preflight-capability";
-pub(crate) const PROTOCOL_VERSION: u32 = 1;
-pub(crate) const BUILD_CAPABILITY: &str = "buzz-acp-source-witness-gateway-v1";
-pub(crate) const KIND: &str = "buzz_acp_heartbeat_preflight_capability";
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -54,5 +53,33 @@ mod tests {
         assert_eq!(value["protocol_version"], 1);
         assert_eq!(value["build_capability"], BUILD_CAPABILITY);
         assert_eq!(value.as_object().expect("object").len(), 3);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_info_plist_scalar_is_exact_and_derived_from_runtime_constants() {
+        let attestation = format!("{KIND}/v{PROTOCOL_VERSION}/{BUILD_CAPABILITY}");
+        assert_eq!(
+            attestation,
+            "buzz_acp_heartbeat_preflight_capability/v1/\
+             buzz-acp-source-witness-gateway-v1"
+        );
+
+        let plist = include_str!(concat!(
+            env!("OUT_DIR"),
+            "/buzz-acp-heartbeat-capability-Info.plist"
+        ));
+        let expected = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \t<key>BuzzHeartbeatPreflightCapability</key>\n\
+             \t<string>{attestation}</string>\n\
+             </dict>\n\
+             </plist>\n"
+        );
+        assert_eq!(plist, expected);
     }
 }

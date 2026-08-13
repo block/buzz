@@ -30,6 +30,7 @@ pub(crate) const HEARTBEAT_PREFLIGHT_POLICY_FILE_ENV: &str =
 pub(crate) const HEARTBEAT_PREFLIGHT_POLICY_SHA256_ENV: &str =
     "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_SHA256";
 pub(crate) const HEARTBEAT_INTERVAL_ENV: &str = "BUZZ_ACP_HEARTBEAT_INTERVAL";
+pub(crate) const REQUIRED_AGENT_OWNER_ENV: &str = "BUZZ_ACP_REQUIRED_AGENT_OWNER";
 
 const PROTOCOL_VERSION: u32 = 1;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -464,6 +465,7 @@ fn is_hard_denied_env_key(key: &str) -> bool {
             | "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_FILE"
             | "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_SHA256"
             | "BUZZ_ACP_HEARTBEAT_INTERVAL"
+            | "BUZZ_ACP_REQUIRED_AGENT_OWNER"
     ) || [
         "API_KEY",
         "TOKEN",
@@ -1499,6 +1501,7 @@ pub(crate) fn scrub_agent_subprocess_env(command: &mut Command) {
         HEARTBEAT_PREFLIGHT_POLICY_FILE_ENV,
         HEARTBEAT_PREFLIGHT_POLICY_SHA256_ENV,
         HEARTBEAT_INTERVAL_ENV,
+        REQUIRED_AGENT_OWNER_ENV,
     ];
     let mut candidate_keys: Vec<_> = std::env::vars_os().map(|(key, _)| key).collect();
     candidate_keys.extend(

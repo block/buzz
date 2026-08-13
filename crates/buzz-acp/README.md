@@ -132,6 +132,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `--heartbeat-preflight-required` | `BUZZ_ACP_HEARTBEAT_PREFLIGHT_REQUIRED` | `false` | Durable managed-agent latch. When true, missing or invalid policy-file settings fail startup instead of falling back to an ordinary heartbeat. |
 | `--heartbeat-preflight-policy-file` | `BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_FILE` | — | Absolute owner-policy file re-opened before every heartbeat. Required with the latch. |
 | `--heartbeat-preflight-policy-sha256` | `BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_SHA256` | — | Exact lowercase SHA-256 pin for the durable policy file. Required with the latch. |
+| `--required-agent-owner` | `BUZZ_ACP_REQUIRED_AGENT_OWNER` | — | Exact lowercase 64-hex owner pin. When set, startup fails before relay, preflight, or model activity unless the owner resolved from a verified `BUZZ_AUTH_TAG` (preferred) or `BUZZ_ACP_AGENT_OWNER` matches exactly. |
 
 Heartbeat preflight currently requires Unix process-group containment. Builds
 on other operating systems reject the configuration rather than risk leaving a
@@ -172,6 +173,11 @@ versioned `heartbeat-preflight-capability` response. The
 verified digest/protocol is stamped into the in-memory process and durable
 runtime receipt. An old, substituted, or previously unstamped harness is not
 reused.
+
+On macOS, `buzz-acp` also embeds the same capability tuple as the exact
+`BuzzHeartbeatPreflightCapability` scalar in Mach-O `__TEXT,__info_plist`.
+Because the section is present before code signing, a verifier can authenticate
+the capability as signed executable content without launching the candidate.
 
 The executable boundary is intentionally narrow: Buzz verifies the pinned
 executable, policy, result shape, scope, freshness, and invocation binding, but
