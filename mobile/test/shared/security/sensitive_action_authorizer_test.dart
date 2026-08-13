@@ -44,6 +44,59 @@ void main() {
     ).called(1);
   });
 
+  test('unsupported devices fail closed before authentication', () async {
+    when(authentication.isDeviceSupported).thenAnswer((_) async => false);
+
+    final result = await LocalSensitiveActionAuthorizer(
+      authentication,
+    ).authorizeIdentityAction(biometricOnly: false);
+
+    expect(result, DeviceAuthResult.unavailable);
+    verifyNever(
+      () => authentication.authenticate(
+        localizedReason: any(named: 'localizedReason'),
+        authMessages: any(named: 'authMessages'),
+        biometricOnly: any(named: 'biometricOnly'),
+        sensitiveTransaction: any(named: 'sensitiveTransaction'),
+        persistAcrossBackgrounding: any(named: 'persistAcrossBackgrounding'),
+      ),
+    );
+  });
+
+  const mappedExceptions = <LocalAuthExceptionCode, DeviceAuthResult>{
+    LocalAuthExceptionCode.userCanceled: DeviceAuthResult.cancelled,
+    LocalAuthExceptionCode.systemCanceled: DeviceAuthResult.cancelled,
+    LocalAuthExceptionCode.timeout: DeviceAuthResult.cancelled,
+    LocalAuthExceptionCode.temporaryLockout: DeviceAuthResult.lockedOut,
+    LocalAuthExceptionCode.biometricLockout: DeviceAuthResult.lockedOut,
+    LocalAuthExceptionCode.noCredentialsSet: DeviceAuthResult.unavailable,
+    LocalAuthExceptionCode.noBiometricsEnrolled: DeviceAuthResult.unavailable,
+    LocalAuthExceptionCode.noBiometricHardware: DeviceAuthResult.unavailable,
+    LocalAuthExceptionCode.biometricHardwareTemporarilyUnavailable:
+        DeviceAuthResult.unavailable,
+    LocalAuthExceptionCode.uiUnavailable: DeviceAuthResult.unavailable,
+    LocalAuthExceptionCode.authInProgress: DeviceAuthResult.failed,
+  };
+  for (final MapEntry(key: code, value: expected) in mappedExceptions.entries) {
+    test('maps ${code.name} to ${expected.name}', () async {
+      when(
+        () => authentication.authenticate(
+          localizedReason: any(named: 'localizedReason'),
+          authMessages: any(named: 'authMessages'),
+          biometricOnly: any(named: 'biometricOnly'),
+          sensitiveTransaction: any(named: 'sensitiveTransaction'),
+          persistAcrossBackgrounding: any(named: 'persistAcrossBackgrounding'),
+        ),
+      ).thenThrow(LocalAuthException(code: code));
+
+      final result = await LocalSensitiveActionAuthorizer(
+        authentication,
+      ).authorizeIdentityAction(biometricOnly: false);
+
+      expect(result, expected);
+    });
+  }
+
   test('biometric protection requires an enrolled biometric', () async {
     when(
       authentication.getAvailableBiometrics,

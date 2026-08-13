@@ -442,6 +442,53 @@ void main() {
         expect(state.sasCode, hasLength(6));
       });
 
+      test('reset invalidates pending preflight authorization', () async {
+        final pendingAuthorization = Completer<DeviceAuthResult>();
+        authorizer.pending = pendingAuthorization;
+
+        final authorization = notifier.authorizeIdentityExport(
+          community: _exportCommunity(SensitiveActionPolicy.disabledByUser),
+        );
+        expect(container.read(pairingProvider).authorizationInProgress, isTrue);
+
+        notifier.reset();
+        pendingAuthorization.complete(DeviceAuthResult.success);
+
+        expect(await authorization, isFalse);
+        expect(container.read(pairingProvider).status, PairingStatus.idle);
+        await notifier.pair(recoveryCode);
+        notifier.confirmSas();
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          socket
+              .decryptedPublishedMessages(sourceSecret)
+              .any((message) => message['type'] == 'payload'),
+          isFalse,
+        );
+      });
+
+      test('concurrent preflight requests start one authentication', () async {
+        final pendingAuthorization = Completer<DeviceAuthResult>();
+        authorizer.pending = pendingAuthorization;
+        final community = _exportCommunity(
+          SensitiveActionPolicy.disabledByUser,
+        );
+
+        final first = notifier.authorizeIdentityExport(community: community);
+        final second = notifier.authorizeIdentityExport(community: community);
+
+        expect(await second, isFalse);
+        expect(authorizer.calls, 1);
+        pendingAuthorization.complete(DeviceAuthResult.success);
+        expect(await first, isTrue);
+      });
+
       test('unchecked protection allows device passcode fallback', () async {
         expect(
           await notifier.authorizeIdentityExport(
