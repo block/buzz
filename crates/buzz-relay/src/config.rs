@@ -6,6 +6,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::warn;
+use uuid::Uuid;
 
 /// Default maximum inbound WebSocket frame size in bytes.
 ///
@@ -282,6 +283,11 @@ pub struct Config {
     /// config rather than reconstructed from request headers (which can
     /// disagree with what Twilio actually signed behind a proxy/LB).
     pub twilio_webhook_url: Option<String>,
+    /// UUID of the channel inbound SMS messages are posted into. v1
+    /// simplification: one global inbox channel for the whole relay, not
+    /// per-community — multi-community SMS routing is a future enhancement.
+    /// Inbound SMS is rejected (rather than silently dropped) when unset.
+    pub twilio_sms_inbox_channel: Option<Uuid>,
 
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
@@ -1006,6 +1012,9 @@ impl Config {
         let twilio_webhook_url = std::env::var("TWILIO_WEBHOOK_URL")
             .ok()
             .filter(|s| !s.trim().is_empty());
+        let twilio_sms_inbox_channel = std::env::var("TWILIO_SMS_INBOX_CHANNEL")
+            .ok()
+            .and_then(|s| Uuid::parse_str(s.trim()).ok());
 
         Ok(Self {
             bind_addr,
@@ -1057,6 +1066,7 @@ impl Config {
             git_hook_hmac_secret,
             twilio_auth_token,
             twilio_webhook_url,
+            twilio_sms_inbox_channel,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
