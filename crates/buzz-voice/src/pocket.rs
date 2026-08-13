@@ -206,6 +206,20 @@ mod tests {
     }
 
     #[test]
+    fn playback_api_delegates_to_first_sentence_splitter() {
+        let source = include_str!("pocket.rs");
+        let (_, playback_api) = source
+            .split_once("pub fn split_text_for_playback")
+            .expect("playback API exists");
+        let (playback_api, _) = playback_api
+            .split_once("pub fn synth_chunk")
+            .expect("playback API ends before synthesis API");
+
+        assert_eq!(playback_api.matches(".split_playback_prompt(").count(), 1);
+        assert_eq!(playback_api.matches(".split_prompt(").count(), 0);
+    }
+
+    #[test]
     #[ignore = "requires BUZZ_POCKET_TEST_MODEL_DIR"]
     fn production_api_emits_non_silent_april_int8_pcm() {
         let dir = std::env::var("BUZZ_POCKET_TEST_MODEL_DIR")

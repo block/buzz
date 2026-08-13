@@ -818,6 +818,19 @@ fn idle_playback_gets_an_onset_cushion() {
     assert_eq!(buf[SENTENCE_LEAD_IN_SAMPLES], 0.5);
 }
 
+#[test]
+fn tts_worker_uses_distinct_playback_and_model_splitters() {
+    let source = include_str!("tts.rs");
+    let playback_calls = source.matches("engine.split_text_for_playback(").count();
+    let model_calls = source.matches("engine.split_text_into_chunks(").count();
+
+    assert_eq!(
+        (playback_calls, model_calls),
+        (1, 1),
+        "the worker must isolate sentence one only in the outer playback split"
+    );
+}
+
 // ── clamp_to_full_scale tests ─────────────────────────────────────────────
 
 /// In-range speech audio passes through bit-exact — no gain is applied.
