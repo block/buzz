@@ -53,7 +53,7 @@ test("persists and applies the selected font size across the app", () => {
   assert.equal(preference.getFontSize(), "smaller");
   assert.equal(values.get(preference.FONT_SIZE_STORAGE_KEY), "smaller");
   assert.equal(attributes.get("data-font-size"), "smaller");
-  assert.equal(styleValues.get("--buzz-type-rem"), "16px");
+  assert.equal(styleValues.get("--buzz-type-rem"), "14.857143px");
 });
 
 test("previews a font size without changing the saved preference", () => {
@@ -63,11 +63,11 @@ test("previews a font size without changing the saved preference", () => {
   assert.equal(preference.getFontSize(), "smaller");
   assert.equal(values.get(preference.FONT_SIZE_STORAGE_KEY), "smaller");
   assert.equal(attributes.get("data-font-size"), "larger");
-  assert.equal(styleValues.get("--buzz-type-rem"), "20.114286px");
+  assert.equal(styleValues.get("--buzz-type-rem"), "18.857143px");
 
   preference.previewFontSize(null);
   assert.equal(attributes.get("data-font-size"), "smaller");
-  assert.equal(styleValues.get("--buzz-type-rem"), "17.6px");
+  assert.equal(styleValues.get("--buzz-type-rem"), "16.342857px");
 });
 
 test("initializes from the stored font size", () => {
@@ -76,7 +76,7 @@ test("initializes from the stored font size", () => {
   preference.initializeFontSizePreference();
   assert.equal(preference.getFontSize(), "larger");
   assert.equal(attributes.get("data-font-size"), "larger");
-  assert.equal(styleValues.get("--buzz-type-rem"), "18.285714px");
+  assert.equal(styleValues.get("--buzz-type-rem"), "17.142857px");
 });
 
 test("applies font size changes from another window", () => {
@@ -84,5 +84,5 @@ test("applies font size changes from another window", () => {
   windowListeners.get("storage")({ key: preference.FONT_SIZE_STORAGE_KEY });
   assert.equal(preference.getFontSize(), "smaller");
   assert.equal(attributes.get("data-font-size"), "smaller");
-  assert.equal(styleValues.get("--buzz-type-rem"), "16px");
+  assert.equal(styleValues.get("--buzz-type-rem"), "14.857143px");
 });
