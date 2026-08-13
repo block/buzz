@@ -768,10 +768,12 @@ to:
 - Shell history if the variable was set inline (e.g., `NOSTR_PRIVATE_KEY=... git commit`).
 - CI/CD logs if the variable is echoed or logged.
 
-This exposure model is acceptable for agent processes running in a controlled
-environment (e.g., spawned by a desktop app with process-scoped env vars). For
-human users with higher security requirements, implementations MAY support
-NIP-46 (Nostr Remote Signing) in a future version.
+This exposure model is acceptable only for a trusted signer or harness process.
+Implementations MUST NOT forward these variables to a model-controlled agent,
+MCP server, arbitrary shell, or shell child. Managed agents SHOULD receive
+typed, least-authority operations backed by a harness-owned signer instead of a
+generic signing interface. Implementations MAY additionally support NIP-46
+(Nostr Remote Signing) in a future version.
 
 Implementations MUST NOT log, print, or include the secret key in error messages.
 

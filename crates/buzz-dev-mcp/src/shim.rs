@@ -11,9 +11,9 @@ use zeroize::Zeroize;
 ///    builds ephemeral `GIT_CONFIG_*` env vars, then removes the env var
 /// 3. Prepends the shim dir to PATH
 ///
-/// Shell children receive `path_env`, `git_env`, and `BUZZ_PRIVATE_KEY` (for
-/// the buzz CLI). `NOSTR_PRIVATE_KEY` is removed from the process env after
-/// the keyfile is written — git helpers read from the keyfile only.
+/// Shell children receive `path_env` and non-secret `git_env` only. Signing
+/// keys, owner auth tags, and the typed-publisher capability are removed by the
+/// shell launcher before any model-controlled command starts.
 /// Cleaned up on drop (TempDir).
 pub struct Shim {
     _dir: TempDir,

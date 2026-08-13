@@ -74,12 +74,13 @@ impl SharedState {
 
 fn build_bootstrap(cwd: &Path, shell_hint: &str) -> String {
     let stack = detect_stack(cwd);
-    let buzz_hint =
-        if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
-            "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
-        } else {
-            ""
-        };
+    let buzz_hint = if std::env::var("BUZZ_PUBLISHER_ENDPOINT").is_ok()
+        && std::env::var("BUZZ_PUBLISHER_CAPABILITY").is_ok()
+    {
+        "\nBuzz typed publisher configured. Use `buzz_send_message` for channel messages and replies; authenticated shell sends are unavailable.\n"
+    } else {
+        ""
+    };
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
@@ -167,8 +168,18 @@ pub async fn run(
     cmd.arg(shell_arg).arg(&p.command);
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
-    // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
-    // BUZZ_PRIVATE_KEY is intentionally inherited — the buzz CLI needs it.
+    // The shell is model-controlled. Signing material and the publisher
+    // capability belong to the harness/tool boundary and must never cross into
+    // this child or its descendants.
+    for name in [
+        "BUZZ_PRIVATE_KEY",
+        "NOSTR_PRIVATE_KEY",
+        "BUZZ_AUTH_TAG",
+        "BUZZ_PUBLISHER_ENDPOINT",
+        "BUZZ_PUBLISHER_CAPABILITY",
+    ] {
+        cmd.env_remove(name);
+    }
     for (k, v) in &state.shim.git_env {
         cmd.env(k, v);
     }
@@ -988,6 +999,8 @@ mod tests {
     use serde_json::Value;
     use tempfile::tempdir;
 
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn make_state(cwd: &std::path::Path) -> SharedState {
         let shim = Shim::install().expect("shim install");
         SharedState::new(cwd.to_path_buf(), shim).expect("state new")
@@ -1021,6 +1034,42 @@ mod tests {
         assert_eq!(v["exit_code"], 0);
         assert_eq!(v["stdout"], "hello\n");
         assert_eq!(v["timed_out"], false);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_child_cannot_read_signing_key_or_publisher_capability() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("BUZZ_PRIVATE_KEY", "test-raw-signing-key");
+        std::env::set_var("BUZZ_PUBLISHER_ENDPOINT", "127.0.0.1:1");
+        std::env::set_var("BUZZ_PUBLISHER_CAPABILITY", "test-capability");
+
+        let dir = tempdir().expect("tempdir");
+        let state = make_state(dir.path());
+        let result = run(
+            &state,
+            ShellParams {
+                command: concat!(
+                    "printf '%s|%s|%s' ",
+                    "\"${BUZZ_PRIVATE_KEY-unset}\" ",
+                    "\"${BUZZ_PUBLISHER_ENDPOINT-unset}\" ",
+                    "\"${BUZZ_PUBLISHER_CAPABILITY-unset}\""
+                )
+                .into(),
+                workdir: None,
+                timeout_ms: Some(5_000),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("shell result");
+
+        std::env::remove_var("BUZZ_PRIVATE_KEY");
+        std::env::remove_var("BUZZ_PUBLISHER_ENDPOINT");
+        std::env::remove_var("BUZZ_PUBLISHER_CAPABILITY");
+
+        let body = body(result);
+        assert_eq!(body["exit_code"], 0);
+        assert_eq!(body["stdout"], "unset|unset|unset");
     }
 
     #[tokio::test(flavor = "current_thread")]

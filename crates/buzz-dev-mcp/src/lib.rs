@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod buzz_message;
 mod paths;
 mod read_file;
 mod rg;
@@ -23,15 +24,20 @@ mod view_image;
 #[derive(Clone)]
 struct DevMcp {
     state: Arc<shell::SharedState>,
+    publisher: Option<Arc<buzz_message::PublisherClient>>,
     todos: Arc<todo::TodoState>,
     tool_router: ToolRouter<DevMcp>,
 }
 
 #[tool_router]
 impl DevMcp {
-    fn new(state: Arc<shell::SharedState>) -> Self {
+    fn new(
+        state: Arc<shell::SharedState>,
+        publisher: Option<Arc<buzz_message::PublisherClient>>,
+    ) -> Self {
         Self {
             state,
+            publisher,
             todos: Arc::new(todo::TodoState::new()),
             tool_router: Self::tool_router(),
         }
@@ -47,6 +53,17 @@ impl DevMcp {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         shell::run(&self.state, p, context.ct).await
+    }
+
+    #[tool(
+        name = "buzz_send_message",
+        description = "Publish a Buzz channel message or threaded reply through the harness-owned signer. Use the channel UUID and optional reply event id from the prompt Context. Supply a stable idempotency_key unique to this logical send and reuse it only to retry the exact same fields after a timeout. This tool accepts typed fields only and never exposes raw signing keys or signatures."
+    )]
+    async fn buzz_send_message(
+        &self,
+        Parameters(p): Parameters<buzz_message::SendMessageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        buzz_message::run(self.publisher.as_deref(), p).await
     }
 
     #[tool(
@@ -180,7 +197,8 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
     let shim = shim::Shim::install()?;
     let state = Arc::new(shell::SharedState::new(cwd, shim)?);
 
-    let service = DevMcp::new(state).serve(stdio()).await?;
+    let publisher = buzz_message::PublisherClient::from_env().map(Arc::new);
+    let service = DevMcp::new(state, publisher).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

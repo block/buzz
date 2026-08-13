@@ -9,6 +9,7 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
+use std::collections::HashSet;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
@@ -32,6 +33,18 @@ pub struct McpServer {
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<EnvVar>,
+}
+
+impl McpServer {
+    /// Publisher authority is reserved for the explicitly configured Buzz
+    /// companion executable. Every other MCP server is untrusted by default.
+    pub fn is_trusted_buzz_companion(&self) -> bool {
+        self.name == "buzz-dev-mcp"
+            && std::path::Path::new(&self.command)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                == Some("buzz-dev-mcp")
+    }
 }
 
 /// A single environment variable for an MCP server.
@@ -160,6 +173,12 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    /// MCP tool-call ids that are safe to approve without an interactive prompt.
+    ///
+    /// The only admitted operation is the harness-configured Buzz publisher
+    /// tool. Its opaque capability is scoped to this ACP session and channel;
+    /// every other permission request remains fail-closed.
+    trusted_publisher_tool_calls: HashSet<String>,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -516,6 +535,22 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // The third-party agent runtime is model-controlled. The ACP harness
+        // retains signing authority and passes only a typed publisher
+        // capability inside the MCP server configuration during session/new.
+        // Apply these removals after every inherited/default/persona layer so
+        // no user-supplied extra_env entry can restore a signing credential.
+        for name in [
+            "BUZZ_PRIVATE_KEY",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_PUBLISHER_ENDPOINT",
+            "BUZZ_PUBLISHER_CAPABILITY",
+        ] {
+            cmd.env_remove(name);
+        }
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -552,6 +587,7 @@ impl AcpClient {
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            trusted_publisher_tool_calls: HashSet::new(),
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -1768,6 +1804,12 @@ impl AcpClient {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
+                if is_trusted_publisher_tool_call(update) {
+                    if let Some(tool_id) = update.get("toolCallId").and_then(|v| v.as_str()) {
+                        self.trusted_publisher_tool_calls
+                            .insert(tool_id.to_string());
+                    }
+                }
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
                 true
             }
@@ -1777,6 +1819,9 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                if matches!(status, "completed" | "failed") {
+                    self.trusted_publisher_tool_calls.remove(tool_id);
+                }
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
                 false
             }
@@ -1922,10 +1967,11 @@ impl AcpClient {
         }
     }
 
-    /// Auto-approve a `session/request_permission` request from the agent.
+    /// Resolve a `session/request_permission` request from the agent.
     ///
-    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
-    /// If no `allow_once` option exists, falls back to `reject_once`.
+    /// A correlated, already-observed typed Buzz publisher call may receive
+    /// `allow_once`. Every other request is denied with `reject_once` when the
+    /// adapter offers it, or cancelled otherwise.
     ///
     /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
     ///
@@ -1953,39 +1999,16 @@ impl AcpClient {
             options.len()
         );
 
-        // Find allow_once by kind — NEVER hardcode optionId.
-        let allow_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
-
-        let response = if let Some(opt) = allow_once {
-            let option_id = opt["optionId"]
+        let trusted_publisher_call = msg["params"]["_meta"]["is_mcp_tool_approval"].as_bool()
+            == Some(true)
+            && msg["params"]["toolCall"]["toolCallId"]
                 .as_str()
-                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
-            tracing::info!(
-                target: "acp::permission",
-                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
-            );
-            permission_response_selected(&id, option_id)
-        } else {
-            // No allow_once — fall back to reject_once.
-            tracing::warn!(
-                target: "acp::permission",
-                "no allow_once option found in permission request id={id}, falling back to reject_once"
-            );
-            let reject = options
-                .iter()
-                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
+                .is_some_and(|tool_id| self.trusted_publisher_tool_calls.remove(tool_id));
 
-            if let Some(opt) = reject {
-                let option_id = opt["optionId"].as_str().unwrap_or("reject");
-                permission_response_selected(&id, option_id)
-            } else {
-                return Err(AcpError::Protocol(
-                    "no suitable permission option found (neither allow_once nor reject_once)"
-                        .into(),
-                ));
-            }
+        let response = if trusted_publisher_call {
+            permission_allow_once_response(&id, options)?
+        } else {
+            permission_denial_response(&id, options)?
         };
 
         // Write the response first, then mark as responded.
@@ -2118,6 +2141,71 @@ fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
         "id": id,
         "result": { "outcome": { "outcome": "cancelled" } }
     })
+}
+
+/// Return true only for the harness-configured, typed Buzz publisher tool.
+///
+/// Matching the ACP MCP marker plus exact server and tool names prevents an
+/// arbitrary execute tool from borrowing the publisher's unattended approval.
+fn is_trusted_publisher_tool_call(update: &serde_json::Value) -> bool {
+    update["_meta"]["is_mcp_tool_call"].as_bool() == Some(true)
+        && update["rawInput"]["server"].as_str() == Some("buzz-dev-mcp")
+        && update["rawInput"]["tool"].as_str() == Some("buzz_send_message")
+}
+
+/// Approve one already-observed typed publisher call. If the adapter does not
+/// offer `allow_once`, cancel rather than widening the grant.
+fn permission_allow_once_response(
+    id: &serde_json::Value,
+    options: &[serde_json::Value],
+) -> Result<serde_json::Value, AcpError> {
+    let Some(option) = options
+        .iter()
+        .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"))
+    else {
+        return Ok(permission_response_cancelled(id));
+    };
+    let option_id = option
+        .get("optionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
+    Ok(permission_response_selected(id, option_id))
+}
+
+/// Choose the fail-closed response to a `session/request_permission` request.
+///
+/// Buzz has no human permission prompt in this harness, so selecting
+/// `allow_once` would turn any admitted prompt into an implicit approval.
+/// Prefer the adapter's `reject_once` option — matched by `kind`, never by a
+/// hardcoded `optionId` — and fall back to the protocol's cancelled outcome for
+/// adapters that do not offer one. Both answers deny.
+///
+/// Kept free of the client so the decision is testable without an agent
+/// subprocess: `AcpClient` owns a real `Child` and its stdio pipes.
+fn permission_denial_response(
+    id: &serde_json::Value,
+    options: &[serde_json::Value],
+) -> Result<serde_json::Value, AcpError> {
+    let reject_once = options
+        .iter()
+        .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
+
+    let Some(opt) = reject_once else {
+        tracing::warn!(
+            target: "acp::permission",
+            "no reject_once option found in permission request id={id}, cancelling"
+        );
+        return Ok(permission_response_cancelled(id));
+    };
+
+    let option_id = opt["optionId"]
+        .as_str()
+        .ok_or_else(|| AcpError::Protocol("reject_once option missing optionId".into()))?;
+    tracing::info!(
+        target: "acp::permission",
+        "rejecting permission id={id} with reject_once optionId={option_id:?}"
+    );
+    Ok(permission_response_selected(id, option_id))
 }
 
 /// Full `session/new` response — session ID plus the raw JSON result.
@@ -2374,63 +2462,157 @@ mod tests {
         assert_eq!(StopReason::from_str("Refusal"), Some(StopReason::Refusal));
     }
 
+    fn options(json: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str(json).expect("option list")
+    }
+
+    fn outcome(response: &serde_json::Value) -> Option<&str> {
+        response["result"]["outcome"]["outcome"].as_str()
+    }
+
+    /// The offered `allow_once` and `allow_always` options must be ignored:
+    /// there is no human to click them, so choosing either would make every
+    /// admitted prompt an implicit approval. `optionId`s are deliberately
+    /// non-obvious to prove they are matched by `kind`, never hardcoded.
     #[test]
-    fn find_allow_once_by_kind_not_by_option_id() {
-        // optionId values are intentionally non-obvious to prove we don't hardcode them.
-        let options: Vec<serde_json::Value> = serde_json::from_str(
+    fn permission_requests_select_reject_once_not_allow_once() {
+        let options = options(
             r#"[
             {"optionId": "opt-reject-42",  "name": "Reject",       "kind": "reject_once"},
             {"optionId": "opt-allow-99",   "name": "Allow once",   "kind": "allow_once"},
             {"optionId": "opt-always-7",   "name": "Always allow", "kind": "allow_always"}
         ]"#,
-        )
-        .unwrap();
+        );
 
-        let allow_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+        let response =
+            permission_denial_response(&serde_json::json!(7), &options).expect("denial response");
 
-        assert!(allow_once.is_some(), "should find allow_once option");
-        let opt = allow_once.unwrap();
-        // Found by kind, not by hardcoded optionId
-        assert_eq!(opt["kind"].as_str(), Some("allow_once"));
-        assert_eq!(opt["optionId"].as_str(), Some("opt-allow-99"));
+        assert_eq!(outcome(&response), Some("selected"));
+        assert_eq!(
+            response["result"]["outcome"]["optionId"].as_str(),
+            Some("opt-reject-42"),
+            "must select reject_once even when allow options are offered"
+        );
     }
 
+    /// Fail-closed backstop: an adapter that offers no `reject_once` must still
+    /// be denied, via the protocol's cancelled outcome rather than an error or
+    /// an approval.
     #[test]
-    fn find_allow_once_returns_none_when_absent() {
-        let options: Vec<serde_json::Value> = serde_json::from_str(
+    fn permission_request_without_reject_once_is_cancelled() {
+        let options = options(
             r#"[
-            {"optionId": "reject-1",      "name": "Reject",        "kind": "reject_once"},
-            {"optionId": "reject-always", "name": "Always reject", "kind": "reject_always"}
+            {"optionId": "opt-allow-99", "name": "Allow once",   "kind": "allow_once"},
+            {"optionId": "opt-always-7", "name": "Always allow", "kind": "allow_always"}
         ]"#,
-        )
-        .unwrap();
+        );
 
-        let allow_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+        let response = permission_denial_response(&serde_json::json!("req-1"), &options)
+            .expect("cancelled response");
 
-        assert!(allow_once.is_none());
+        assert_eq!(outcome(&response), Some("cancelled"));
+        assert_eq!(
+            response["id"].as_str(),
+            Some("req-1"),
+            "string ids must round-trip per JSON-RPC 2.0"
+        );
+    }
+
+    /// An empty option list is the degenerate form of the same backstop.
+    #[test]
+    fn permission_request_with_no_options_is_cancelled() {
+        let response =
+            permission_denial_response(&serde_json::json!(1), &[]).expect("cancelled response");
+
+        assert_eq!(outcome(&response), Some("cancelled"));
     }
 
     #[test]
-    fn find_reject_once_fallback_when_no_allow_once() {
-        let options: Vec<serde_json::Value> = serde_json::from_str(
-            r#"[{"optionId": "rej-x", "name": "Reject", "kind": "reject_once"}]"#,
-        )
-        .unwrap();
+    fn typed_publisher_permission_selects_allow_once_only() {
+        let options = options(
+            r#"[
+            {"optionId": "allow-session", "name": "Allow session", "kind": "allow_always"},
+            {"optionId": "allow-this-call", "name": "Allow once", "kind": "allow_once"},
+            {"optionId": "reject", "name": "Reject", "kind": "reject_once"}
+        ]"#,
+        );
 
-        let allow_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
-        assert!(allow_once.is_none());
+        let response = permission_allow_once_response(&serde_json::json!(8), &options)
+            .expect("publisher approval response");
 
-        let reject_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-        assert!(reject_once.is_some());
-        assert_eq!(reject_once.unwrap()["optionId"].as_str(), Some("rej-x"));
+        assert_eq!(outcome(&response), Some("selected"));
+        assert_eq!(
+            response["result"]["outcome"]["optionId"].as_str(),
+            Some("allow-this-call"),
+            "publisher authority must never persist beyond this call"
+        );
+    }
+
+    #[test]
+    fn typed_publisher_permission_without_allow_once_is_cancelled() {
+        let options = options(
+            r#"[
+            {"optionId": "allow-session", "name": "Allow session", "kind": "allow_always"},
+            {"optionId": "reject", "name": "Reject", "kind": "reject_once"}
+        ]"#,
+        );
+
+        let response = permission_allow_once_response(&serde_json::json!(9), &options)
+            .expect("publisher cancellation response");
+
+        assert_eq!(outcome(&response), Some("cancelled"));
+    }
+
+    #[test]
+    fn trusted_publisher_tool_call_requires_exact_mcp_identity() {
+        let valid = serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-1",
+            "_meta": {"is_mcp_tool_call": true},
+            "rawInput": {
+                "server": "buzz-dev-mcp",
+                "tool": "buzz_send_message",
+                "arguments": {"channel": "channel-id", "content": "hello"}
+            }
+        });
+        assert!(is_trusted_publisher_tool_call(&valid));
+
+        for mutation in [("server", "untrusted-server"), ("tool", "shell")] {
+            let mut invalid = valid.clone();
+            invalid["rawInput"][mutation.0] = serde_json::json!(mutation.1);
+            assert!(!is_trusted_publisher_tool_call(&invalid));
+        }
+
+        let mut missing_marker = valid;
+        missing_marker["_meta"]["is_mcp_tool_call"] = serde_json::json!(false);
+        assert!(!is_trusted_publisher_tool_call(&missing_marker));
+    }
+
+    /// A `reject_once` option missing its `optionId` is a protocol violation.
+    /// Erroring propagates to the caller, which tears the turn down — still no
+    /// approval is ever sent.
+    #[test]
+    fn reject_once_without_option_id_is_a_protocol_error() {
+        let options = options(r#"[{"name": "Reject", "kind": "reject_once"}]"#);
+
+        let err = permission_denial_response(&serde_json::json!(1), &options)
+            .expect_err("missing optionId must error");
+
+        assert!(matches!(err, AcpError::Protocol(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn find_reject_once_by_kind() {
+        let options =
+            options(r#"[{"optionId": "rej-x", "name": "Reject", "kind": "reject_once"}]"#);
+
+        let response =
+            permission_denial_response(&serde_json::json!(1), &options).expect("denial response");
+
+        assert_eq!(
+            response["result"]["outcome"]["optionId"].as_str(),
+            Some("rej-x")
+        );
     }
 
     #[test]
@@ -2512,8 +2694,8 @@ mod tests {
                     value: "ws://localhost:3000".into(),
                 },
                 EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    value: "nsec1abc".into(),
+                    name: "BUZZ_PUBLISHER_CAPABILITY".into(),
+                    value: "opaque-session-capability".into(),
                 },
             ],
         };
@@ -3053,6 +3235,30 @@ mod tests {
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_strips_signing_credentials_from_model_controlled_agent_runtime() {
+        for variable in [
+            "BUZZ_PRIVATE_KEY",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_PUBLISHER_ENDPOINT",
+            "BUZZ_PUBLISHER_CAPABILITY",
+        ] {
+            assert_eq!(
+                spawn_named_and_read_child_env(
+                    "credential-probe-agent",
+                    variable,
+                    &[(variable.to_string(), "must-not-cross-boundary".to_string())],
+                )
+                .await,
+                "<unset>",
+                "{variable} reached the model-controlled agent runtime"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3650,6 +3856,65 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn tracked_typed_publisher_call_is_approved_once_end_to_end() {
+        let mut client = spawn_inert_client().await;
+        let tool_call_id = "publisher-call-1";
+        let tool_update = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": tool_call_id,
+                    "kind": "execute",
+                    "status": "pending",
+                    "_meta": {"is_mcp_tool_call": true},
+                    "rawInput": {
+                        "server": "buzz-dev-mcp",
+                        "tool": "buzz_send_message",
+                        "arguments": {"channel": "channel-id", "content": "hello"}
+                    }
+                }
+            }
+        });
+        let _ = client.handle_session_update(&tool_update);
+        assert!(client.trusted_publisher_tool_calls.contains(tool_call_id));
+
+        let permission = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 77,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "test-session",
+                "toolCall": {"toolCallId": tool_call_id, "kind": "execute", "status": "pending"},
+                "_meta": {"is_mcp_tool_approval": true},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow", "kind": "allow_once"},
+                    {"optionId": "decline", "name": "Decline", "kind": "reject_once"}
+                ]
+            }
+        });
+        client
+            .handle_permission_request(&permission)
+            .await
+            .expect("permission response");
+
+        let echoed = client
+            .reader
+            .next()
+            .await
+            .expect("cat echoed response")
+            .expect("valid response line");
+        let response: serde_json::Value = serde_json::from_str(&echoed).expect("response json");
+        assert_eq!(
+            response["result"]["outcome"]["optionId"].as_str(),
+            Some("allow-once")
+        );
+        assert!(!client.trusted_publisher_tool_calls.contains(tool_call_id));
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
