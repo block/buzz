@@ -44,6 +44,16 @@ export function WorkflowDetailPanel({
     ? getWorkflowTriggerSummary(workflow.definition)
     : null;
   const workflowStatus = workflow ? getWorkflowDisplayStatus(workflow) : null;
+  const triggerError = errorMessage(
+    triggerMutation.error,
+    "The relay did not create a workflow run.",
+  );
+  const runsError = errorMessage(
+    runsQuery.error,
+    "Run history could not be loaded.",
+  );
+  const selectedRunIsPendingHistory =
+    selectedRunId !== null && !runs.some((run) => run.id === selectedRunId);
 
   async function handleTrigger() {
     try {
@@ -118,8 +128,14 @@ export function WorkflowDetailPanel({
       </div>
 
       {triggerMutation.isError ? (
-        <div className="border-b px-4 py-2 text-xs text-red-400">
-          Failed to trigger workflow
+        <div
+          className="border-b px-4 py-2 text-xs text-destructive"
+          role="alert"
+        >
+          <p className="font-medium">Failed to trigger workflow</p>
+          <p className="mt-1 break-words text-muted-foreground">
+            {triggerError}
+          </p>
         </div>
       ) : null}
 
@@ -142,7 +158,37 @@ export function WorkflowDetailPanel({
               <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Run History
               </h4>
-              {runs.length === 0 ? (
+              {runsQuery.isError ? (
+                <div
+                  className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                  role="alert"
+                >
+                  <p className="font-medium">Failed to load run history</p>
+                  <p className="mt-1 break-words">{runsError}</p>
+                </div>
+              ) : runsQuery.isLoading ? (
+                <div
+                  className="space-y-2"
+                  aria-label="Loading run history"
+                  role="status"
+                >
+                  <Skeleton className="h-16 w-full rounded-xl" />
+                </div>
+              ) : selectedRunIsPendingHistory ? (
+                <div
+                  className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs"
+                  data-testid="workflow-run-created"
+                  role="status"
+                >
+                  <p className="font-medium">Run created</p>
+                  <p className="mt-1 break-all font-mono text-muted-foreground">
+                    {selectedRunId}
+                  </p>
+                  <p className="mt-1 text-muted-foreground">
+                    Waiting for its persisted trace…
+                  </p>
+                </div>
+              ) : runs.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No runs yet.</p>
               ) : (
                 <div className="space-y-2">
@@ -151,6 +197,10 @@ export function WorkflowDetailPanel({
                     const duration = formatRunDuration(
                       run.startedAt,
                       run.completedAt,
+                    );
+                    const failureReason = workflowRunFailureReason(
+                      run.errorCode,
+                      run.errorMessage,
                     );
 
                     return (
@@ -205,9 +255,9 @@ export function WorkflowDetailPanel({
                                   </span>
                                 ) : null}
                               </div>
-                              {run.errorMessage ? (
+                              {failureReason ? (
                                 <p className="mt-2 break-words pl-6 text-xs text-destructive">
-                                  {run.errorMessage}
+                                  {failureReason}
                                 </p>
                               ) : null}
                             </div>
@@ -264,6 +314,30 @@ export function WorkflowDetailPanel({
       </div>
     </div>
   );
+}
+
+function workflowRunFailureReason(
+  errorCode: string | null,
+  diagnostic: string | null,
+) {
+  if (diagnostic?.trim()) return diagnostic;
+  if (!errorCode) return null;
+  const knownReasons: Record<string, string> = {
+    approval_denied: "Approval was denied.",
+    approval_expired: "Approval expired before the workflow could continue.",
+    external_outcome_unknown:
+      "The external action may have completed, but its outcome could not be confirmed.",
+    run_interrupted: "The run was interrupted before it could finish.",
+  };
+  return (
+    knownReasons[errorCode] ?? `Run failed (${errorCode.replace(/_/g, " ")}).`
+  );
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.trim().length > 0
+    ? error.message
+    : fallback;
 }
 
 function formatRunDuration(
