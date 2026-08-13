@@ -9,10 +9,15 @@ import { useCommunities } from "@/features/communities/useCommunities";
 import { AvatarFramingSlider } from "@/features/profile/ui/AnimatedAvatarControls";
 import { contrastColorForBackground } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 import {
+  setHideDockIconOnClose,
+  useHideDockIconOnClose,
+} from "@/shared/lib/dockIconPreference";
+import {
   setLinkPreviewStyle,
   useLinkPreviewStyle,
   type LinkPreviewStyle,
 } from "@/shared/lib/linkPreviewStylePreference";
+import { isMacPlatform } from "@/shared/lib/platform";
 import {
   ACCENT_COLORS,
   DEFAULT_GLASS_OPACITY,
@@ -137,6 +142,42 @@ export function LinkPreviewStyleSetting() {
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>
+    </SettingsOptionRow>
+  );
+}
+
+/**
+ * macOS keeps a Dock icon for every regular app, so closing Buzz to the menu
+ * bar still leaves it in the Dock and in the ⌘-Tab switcher. This row lets a
+ * user opt into a true menu-bar-only app while Buzz is closed.
+ */
+export function HideDockIconSetting() {
+  const hideDockIcon = useHideDockIconOnClose();
+
+  if (!isMacPlatform()) {
+    return null;
+  }
+
+  return (
+    <SettingsOptionRow data-testid="hide-dock-icon-row">
+      <div className="min-w-0">
+        <label className="text-sm font-medium" htmlFor="hide-dock-icon-switch">
+          Hide from the Dock when closed
+        </label>
+        <p
+          className="text-sm font-normal text-muted-foreground/70"
+          data-settings-subcopy
+        >
+          Closing the window leaves Buzz in the menu bar only. Reopen it from
+          the menu bar item to bring the Dock icon back.
+        </p>
+      </div>
+      <Switch
+        checked={hideDockIcon}
+        data-testid="hide-dock-icon-toggle"
+        id="hide-dock-icon-switch"
+        onCheckedChange={setHideDockIconOnClose}
+      />
     </SettingsOptionRow>
   );
 }

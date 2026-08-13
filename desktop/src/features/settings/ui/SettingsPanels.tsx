@@ -56,6 +56,7 @@ import { appearanceCommunityLabel } from "../lib/appearanceScopeCopy";
 import {
   AccentPickerContent,
   GlassBackgroundSetting,
+  HideDockIconSetting,
   LinkPreviewStyleSetting,
   ProminentActiveTabSetting,
   ThreadLayoutSetting,
@@ -806,6 +807,7 @@ function ThemeSettingsCard() {
         >
           <LinkPreviewStyleSetting />
           <ThreadLayoutSetting />
+          <HideDockIconSetting />
         </SettingsOptionGroup>
       </div>
     </section>

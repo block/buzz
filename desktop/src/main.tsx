@@ -17,6 +17,7 @@ import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
+import { syncHideDockIconOnClose } from "@/shared/lib/dockIconPreference";
 import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
 
@@ -125,6 +126,7 @@ async function bootstrap() {
   recoverLocalStorageQuotaOnStartup();
   startLocalStorageSweep();
   await installE2eBridgeIfConfigured();
+  syncHideDockIconOnClose();
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();
 }

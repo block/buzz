@@ -9,7 +9,10 @@
 pub(crate) mod mouse_nav;
 
 use std::{
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -220,7 +223,65 @@ pub enum TrayAction {
     },
 }
 
+/// Whether closing the main window should also drop Buzz out of the Dock.
+///
+/// The webview owns this preference and republishes it on every launch, so the
+/// backend only needs the current value rather than its own persistence.
+#[cfg(target_os = "macos")]
+static HIDE_DOCK_ICON_ON_CLOSE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn set_hide_dock_icon_on_close(enabled: bool) {
+    HIDE_DOCK_ICON_ON_CLOSE.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn hides_dock_icon_on_close() -> bool {
+    HIDE_DOCK_ICON_ON_CLOSE.load(Ordering::Relaxed)
+}
+
+/// Drops Buzz out of the Dock and the app switcher once its window is closed.
+///
+/// Opt-in through the Appearance setting. It is skipped while any other window
+/// is still on screen: an app with no Dock icon and a visible window cannot be
+/// brought back to the front by clicking it.
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_dock_icon_after_close<R: Runtime>(app: &AppHandle<R>) {
+    if !hides_dock_icon_on_close() {
+        return;
+    }
+
+    let another_window_is_visible = app
+        .webview_windows()
+        .iter()
+        .any(|(label, window)| label != "main" && window.is_visible().unwrap_or(false));
+    if another_window_is_visible {
+        return;
+    }
+
+    if let Err(error) = app.set_dock_visibility(false) {
+        eprintln!("buzz-desktop: failed to hide the Dock icon: {error}");
+    }
+}
+
+/// Puts Buzz back in the Dock and the app switcher.
+///
+/// Restoring runs unconditionally: a user who turns the preference off while
+/// Buzz is hidden still expects the next open to behave like a regular app.
+#[cfg(target_os = "macos")]
+pub(crate) fn restore_dock_icon<R: Runtime>(app: &AppHandle<R>) {
+    if let Err(error) = app.set_dock_visibility(true) {
+        eprintln!("buzz-desktop: failed to restore the Dock icon: {error}");
+    }
+}
+
 pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    // The Dock icon has to come back before the window is focused, otherwise
+    // macOS refuses to bring an accessory app to the front.
+    #[cfg(target_os = "macos")]
+    restore_dock_icon(app);
+
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
