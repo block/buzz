@@ -216,13 +216,37 @@ mod tests {
         let production = source
             .split_once("\n#[cfg(test)]")
             .map_or(source, |(production, _)| production);
+        // Scan code only. Prose cannot call a splitter, but it can contain
+        // ` fn `, which would end a body early and hide a call after it, and it
+        // can name a splitter, which would report a call the code never makes.
+        let production: String = production
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut out = Vec::new();
-        let mut rest = production;
+        let mut rest = production.as_str();
         while let Some((_, after)) = rest.split_once(" fn ") {
             let (name, body) = after
                 .split_once('(')
                 .expect("a function signature has an argument list");
-            let body = body.split(" fn ").next().expect("split yields one part");
+            // End at this function's own closing brace, not at the next ` fn `:
+            // a body provably stops where its braces balance, so no later
+            // function's calls are attributed here and none of this one's are
+            // dropped.
+            let inner = body.split_once('{').map_or("", |(_, inner)| inner);
+            let mut depth = 1usize;
+            let body = inner
+                .char_indices()
+                .find(|&(_, ch)| {
+                    depth = match ch {
+                        '{' => depth + 1,
+                        '}' => depth - 1,
+                        _ => depth,
+                    };
+                    depth == 0
+                })
+                .map_or(inner, |(end, _)| &inner[..end]);
             let mut calls = Vec::new();
             // Check the isolating spelling first: ".split_prompt(" is a
             // substring of neither, but a naive contains() on the shorter name
