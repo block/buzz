@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 
 use crate::app_state::AppState;
 
+mod http_client;
+use http_client::{intercepted_response_message, send_relay_request};
+
 const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
 
 // A reached-but-malformed 2xx body is NOT a connectivity failure, so this
@@ -206,15 +209,7 @@ fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option
 pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     response: reqwest::Response,
 ) -> Result<T, String> {
-    let final_host = response.url().host_str().unwrap_or("").to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+    if let Some(msg) = intercepted_response_message(&response) {
         return Err(msg);
     }
 
@@ -245,15 +240,7 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     let status = response.status();
 
     // Check for intercepted/proxy responses before reading the body.
-    let final_host = response.url().host_str().unwrap_or("").to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+    if let Some(msg) = intercepted_response_message(&response) {
         return msg;
     }
 
@@ -323,15 +310,13 @@ pub async fn query_relay_at(
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
 
-    let response = state
+    let request = state
         .http_client
         .post(&url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+        .body(body_bytes);
+    let response = send_relay_request(&state.http_client, request).await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
@@ -360,11 +345,7 @@ pub async fn query_relay_at_with_keys(
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response = send_relay_request(&state.http_client, request.body(body_bytes)).await?;
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
@@ -463,11 +444,7 @@ pub async fn sync_managed_agent_profile(
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response = send_relay_request(&state.http_client, request.body(body_bytes)).await?;
 
     if !response.status().is_success() {
         let msg = relay_error_message(response).await;
@@ -579,11 +556,7 @@ pub async fn submit_signed_event_with_keys(
         request = request.header("x-auth-tag", tag);
     }
 
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response = send_relay_request(&state.http_client, request.body(body_bytes)).await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
