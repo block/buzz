@@ -958,14 +958,19 @@ async fn resolve_new_session_channel_context(
 /// On error from `session_new_full()`, returns the `AcpError` — caller handles
 /// error reporting. Model-switch failures are logged and gracefully ignored
 /// (the agent proceeds with its default model).
+struct NewSessionChannelContext<'a> {
+    huddle_instructions: Option<&'a str>,
+    canvas: Option<&'a str>,
+    name: Option<&'a str>,
+    id: Option<Uuid>,
+    channel_type: Option<&'a str>,
+}
+
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     agent_core: Option<&str>,
-    agent_canvas: Option<&str>,
-    channel_name: Option<&str>,
-    channel_id: Option<Uuid>,
-    channel_type: Option<&str>,
+    channel: NewSessionChannelContext<'_>,
 ) -> Result<String, AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
@@ -975,24 +980,27 @@ async fn create_session_and_apply_model(
     // `[Channel Canvas]` header; both are appended with a blank-line separator.
     let is_goose = agent.agent_name == "goose";
     let combined_system_prompt = with_canvas(
-        with_core(
-            with_team(
-                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
-                ctx.team_instructions.as_deref(),
+        with_huddle_instructions(
+            with_core(
+                with_team(
+                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                    ctx.team_instructions.as_deref(),
+                ),
+                agent_core,
             ),
-            agent_core,
+            channel.huddle_instructions,
         ),
-        agent_canvas,
+        channel.canvas,
     );
 
     let session_title = ctx
         .session_title
         .as_deref()
-        .map(|agent_name| compose_session_title(agent_name, channel_name));
+        .map(|agent_name| compose_session_title(agent_name, channel.name));
     let mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
-        channel_id,
-        channel_type,
+        channel.id,
+        channel.channel_type,
         ctx.session_title.as_deref(),
     );
 
@@ -1394,6 +1402,21 @@ fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
     }
 }
 
+/// Append owner-signed huddle instructions to this channel session's system prompt.
+fn with_huddle_instructions(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (prompt, instructions) {
+        (Some(prompt), Some(instructions)) => {
+            Some(format!("{prompt}\n\n[Huddle Instructions]\n{instructions}"))
+        }
+        (None, Some(instructions)) => Some(format!("[Huddle Instructions]\n{instructions}")),
+        (Some(prompt), None) => Some(prompt),
+        (None, None) => None,
+    }
+}
+
 /// Append the `[Channel Canvas]` metadata section onto the accumulated system prompt.
 ///
 /// The canvas section already carries its `[Channel Canvas]` header (from
@@ -1616,6 +1639,7 @@ pub async fn run_prompt_task(
     // prevents a stale revision A surviving a failed create and being re-used by
     // the next attempt after the canvas was cleared.
     let mut pending_canvas: Option<(Uuid, String)> = None;
+    let mut huddle_instructions: Option<String> = None;
     // Channel name for the session title, from the same single resolve the
     // canvas DM check uses — see `resolve_new_session_channel_context`.
     let mut title_channel: Option<String> = None;
@@ -1628,6 +1652,10 @@ pub async fn run_prompt_task(
                 resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
             title_channel = resolved_channel;
             origin_channel_type = resolved_channel_type;
+            if let Some(owner) = ctx.agent_owner_pubkey.as_ref() {
+                huddle_instructions =
+                    fetch_huddle_instructions(*cid, owner, &ctx.rest_client).await;
+            }
             // A confirmed DM never receives a canvas section; an undeterminable
             // channel type fails closed as a DM for the same reason.
             if needs_canvas && !is_dm {
@@ -1670,10 +1698,13 @@ pub async fn run_prompt_task(
                     &mut agent,
                     &ctx,
                     agent_core.as_deref(),
-                    agent_canvas.as_deref(),
-                    title_channel.as_deref(),
-                    Some(*cid),
-                    origin_channel_type.as_deref(),
+                    NewSessionChannelContext {
+                        huddle_instructions: huddle_instructions.as_deref(),
+                        canvas: agent_canvas.as_deref(),
+                        name: title_channel.as_deref(),
+                        id: Some(*cid),
+                        channel_type: origin_channel_type.as_deref(),
+                    },
                 )
                 .await
                 {
@@ -1728,8 +1759,19 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
-                    .await
+                match create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    None,
+                    NewSessionChannelContext {
+                        huddle_instructions: None,
+                        canvas: None,
+                        name: None,
+                        id: None,
+                        channel_type: None,
+                    },
+                )
+                .await
                 {
                     Ok(sid) => {
                         tracing::info!(
@@ -1798,6 +1840,7 @@ pub async fn run_prompt_task(
         system_prompt: ctx.system_prompt.as_deref(),
         team_instructions: ctx.team_instructions.as_deref(),
         agent_core: agent_core.as_deref(),
+        huddle_instructions: huddle_instructions.as_deref(),
         agent_canvas: agent_canvas.as_deref(),
     };
     // Delivery state is committed only after ACP confirms success. Existing
@@ -2056,6 +2099,7 @@ pub async fn run_prompt_task(
             b,
             &crate::queue::FormatPromptArgs {
                 agent_core: standing.agent_core,
+                huddle_instructions: standing.huddle_instructions,
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 conversation_context_had_delivered_events,
@@ -2636,6 +2680,67 @@ pub(crate) async fn fetch_channel_info(
         }
     })
     .await
+}
+
+/// Fetch owner-signed huddle instructions for a new channel session.
+///
+/// The event is promoted into the system role, so accepting any channel member's
+/// event would be a privilege escalation. Only the configured agent owner's
+/// valid signature is accepted; absence or failure simply yields no section.
+async fn fetch_huddle_instructions(
+    channel_id: Uuid,
+    owner: &nostr::PublicKey,
+    rest: &RestClient,
+) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_HUDDLE_GUIDELINES as u16,
+        ))
+        .author(*owner)
+        .custom_tags(h_tag, [channel_id.to_string()])
+        .limit(1);
+    let json = match timeout(
+        CONTEXT_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(json)) => json,
+        Ok(Err(error)) => {
+            tracing::warn!(channel = %channel_id, "huddle instructions query failed: {error}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(channel = %channel_id, "huddle instructions query timed out");
+            return None;
+        }
+    };
+    huddle_instructions_from_query_response(json.as_array()?, channel_id, owner)
+}
+
+fn huddle_instructions_from_query_response(
+    events: &[serde_json::Value],
+    channel_id: Uuid,
+    owner: &nostr::PublicKey,
+) -> Option<String> {
+    let raw = events.first()?;
+    let event = serde_json::from_value::<nostr::Event>(raw.clone()).ok()?;
+    event.verify().ok()?;
+    let channel_id = channel_id.to_string();
+    if event.pubkey != *owner
+        || event.kind.as_u16() as u32 != buzz_core::kind::KIND_HUDDLE_GUIDELINES
+        || !event
+            .tags
+            .iter()
+            .any(|tag| tag.kind().to_string() == "h" && tag.content() == Some(channel_id.as_str()))
+    {
+        return None;
+    }
+    let content = event.content.trim();
+    (!content.is_empty()).then(|| content.to_owned())
 }
 
 /// Fetch the latest canvas event for `channel_id` and return a rendered
@@ -4451,6 +4556,7 @@ mod tests {
             system_prompt: Some("you are Eva"),
             team_instructions: Some("ship small"),
             agent_core: Some("[Agent Memory — core]\nremember this"),
+            huddle_instructions: Some("reply immediately"),
             agent_canvas: Some("[Channel Canvas]\ncanvas content"),
         }
     }
@@ -4466,6 +4572,7 @@ mod tests {
             "[System]",
             "[Team Instructions]",
             "[Agent Memory — core]",
+            "[Huddle Instructions]",
             "[Channel Canvas]",
             "do the thing",
         ]
@@ -7494,6 +7601,59 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
+    }
+
+    // ── huddle instructions ─────────────────────────────────────────────────
+
+    #[test]
+    fn huddle_instructions_append_as_system_section() {
+        assert_eq!(
+            with_huddle_instructions(Some("base".into()), Some("  reply now  ")).as_deref(),
+            Some("base\n\n[Huddle Instructions]\nreply now")
+        );
+    }
+
+    #[test]
+    fn huddle_instructions_require_owner_signature_and_channel() {
+        let owner = Keys::generate();
+        let stranger = Keys::generate();
+        let channel = Uuid::parse_str("00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae").unwrap();
+        let event = |keys: &Keys, channel_id: Uuid| {
+            let channel_id = channel_id.to_string();
+            let h_tag = Tag::parse(["h", channel_id.as_str()]).unwrap();
+            serde_json::to_value(
+                EventBuilder::new(
+                    Kind::Custom(buzz_core::kind::KIND_HUDDLE_GUIDELINES as u16),
+                    "reply immediately",
+                )
+                .tags([h_tag])
+                .sign_with_keys(keys)
+                .unwrap(),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            huddle_instructions_from_query_response(
+                &[event(&owner, channel)],
+                channel,
+                &owner.public_key(),
+            )
+            .as_deref(),
+            Some("reply immediately")
+        );
+        assert!(huddle_instructions_from_query_response(
+            &[event(&stranger, channel)],
+            channel,
+            &owner.public_key(),
+        )
+        .is_none());
+        assert!(huddle_instructions_from_query_response(
+            &[event(&owner, Uuid::new_v4())],
+            channel,
+            &owner.public_key(),
+        )
+        .is_none());
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────
