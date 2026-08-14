@@ -113,6 +113,10 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
               : "offline",
           respondTo: agent.respondTo,
           respondToAllowlist: agent.respondToAllowlist,
+          // Locally managed agents are owned by this user, but the directory
+          // field carries the relay-resolved NIP-OA owner; leave it unresolved
+          // rather than asserting ownership from a local record.
+          ownerPubkey: null,
         });
       }
     }

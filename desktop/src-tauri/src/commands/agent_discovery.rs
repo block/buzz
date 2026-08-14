@@ -7,7 +7,6 @@ use crate::{
         DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
         RelayAgentInfo, DEFAULT_ACP_COMMAND,
     },
-    nostr_convert,
     relay::query_relay,
 };
 
@@ -1000,6 +999,7 @@ fn build_install_command(command: &str) -> Result<std::process::Command, String>
 mod install_capture;
 mod install_exec;
 mod install_report;
+mod relay_enrich;
 use install_exec::run_install_command_with_retry;
 use install_report::InstallReporter;
 
@@ -1048,14 +1048,7 @@ pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAg
     )
     .await?;
 
-    // The convert helper returns `{"agents": [...]}`. Extract and re-deserialize
-    // into the strongly-typed `Vec<RelayAgentInfo>` the frontend expects.
-    let value = nostr_convert::agents_from_events(&events);
-    let agents = value
-        .get("agents")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
+    relay_enrich::list_relay_agents_enriched(state.inner(), events).await
 }
 
 #[cfg(test)]

@@ -207,6 +207,12 @@ pub struct RelayAgentInfo {
     pub respond_to: Option<RespondTo>,
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// NIP-OA owner resolved from the agent's own `kind:0`, when it published
+    /// a valid attestation. `None` means unresolved, not unowned — on a closed
+    /// relay the owner frequently never materializes (#4223), so a consumer
+    /// must treat absence as "unknown" rather than as a negative answer.
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {

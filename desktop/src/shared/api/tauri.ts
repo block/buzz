@@ -108,6 +108,7 @@ type RawRelayAgent = {
   status: RelayAgent["status"];
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
+  owner_pubkey?: string | null;
 };
 
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
@@ -664,6 +665,7 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
     status: agent.status,
     respondTo: agent.respond_to ?? null,
     respondToAllowlist: agent.respond_to_allowlist ?? [],
+    ownerPubkey: agent.owner_pubkey ?? null,
   };
 }
 

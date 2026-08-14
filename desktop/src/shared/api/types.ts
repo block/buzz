@@ -277,6 +277,13 @@ export type RelayAgent = {
   status: "online" | "away" | "offline";
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
+  /**
+   * NIP-OA owner resolved from the agent's own kind:0, when it published a
+   * valid attestation. `null` means unresolved, not unowned — on a closed relay
+   * the owner frequently never materializes, so treat absence as "unknown"
+   * rather than as a negative answer.
+   */
+  ownerPubkey: string | null;
 };
 
 export type ManagedAgentRuntimeLifecycle =
