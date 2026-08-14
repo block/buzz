@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -43,6 +45,11 @@ part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
+
+const _landingHighlightDuration = Duration(seconds: 3);
+const _landingHighlightDelay = Duration(milliseconds: 50);
+const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
+const _landingHighlightOpacity = 0.12 * 0.4;
 
 /// Full-screen thread detail page.
 ///
@@ -119,6 +126,68 @@ class ThreadDetailPage extends HookConsumerWidget {
               threadHead,
             ...fetchedReplies,
           ];
+    final initialMessageIsPresent =
+        initialMessageId != null &&
+        allMsgs.any((message) => message.id == initialMessageId);
+    final routeAnimation = ModalRoute.of(context)?.animation;
+    final reducedLandingHighlightMotion = MediaQuery.disableAnimationsOf(
+      context,
+    );
+    final highlightedMessageId = useState<String?>(null);
+    useEffect(
+      () {
+        final messageId = initialMessageId;
+        if (messageId == null || !initialMessageIsPresent) return null;
+        var disposed = false;
+        Timer? revealTimer;
+        Timer? dismissTimer;
+
+        void revealHighlight() {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (disposed) return;
+            revealTimer = Timer(_landingHighlightDelay, () {
+              if (disposed) return;
+              highlightedMessageId.value = messageId;
+              dismissTimer = Timer(
+                _landingHighlightDuration +
+                    (reducedLandingHighlightMotion
+                        ? Duration.zero
+                        : _landingHighlightTransitionDuration),
+                () {
+                  if (!disposed) highlightedMessageId.value = null;
+                },
+              );
+            });
+          });
+        }
+
+        void handleRouteStatus(AnimationStatus status) {
+          if (status != AnimationStatus.completed) return;
+          routeAnimation?.removeStatusListener(handleRouteStatus);
+          revealHighlight();
+        }
+
+        if (routeAnimation == null ||
+            routeAnimation.status == AnimationStatus.completed) {
+          revealHighlight();
+        } else {
+          routeAnimation.addStatusListener(handleRouteStatus);
+        }
+
+        return () {
+          disposed = true;
+          routeAnimation?.removeStatusListener(handleRouteStatus);
+          revealTimer?.cancel();
+          dismissTimer?.cancel();
+        };
+      },
+      [
+        initialMessageId,
+        initialMessageIsPresent,
+        reducedLandingHighlightMotion,
+        routeAnimation,
+      ],
+    );
 
     // Index all messages by parentId so we can find direct children of any
     // message and compute thread summaries for nested threads.
@@ -630,7 +699,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                                   currentPubkey: currentPubkey,
                                   showAuthor: true,
                                   isHighlighted:
-                                      liveHead.id == initialMessageId,
+                                      liveHead.id == highlightedMessageId.value,
                                   allMessages: allMsgs,
                                   isMember: isMember,
                                   isArchived: isArchived,
@@ -710,7 +779,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                                 channelId: channelId,
                                 currentPubkey: currentPubkey,
                                 showAuthor: showAuthor,
-                                isHighlighted: reply.id == initialMessageId,
+                                isHighlighted:
+                                    reply.id == highlightedMessageId.value,
                                 allMessages: allMsgs,
                                 isMember: isMember,
                                 isArchived: isArchived,
