@@ -1063,9 +1063,11 @@ test("nudgeGuard_noSentinel_proseRenderedCardAbsent", () => {
 test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
   const channelId = "580ca78b-9dae-46f3-8854-bd671853ba32";
   const messageLink = `buzz://message?channel=${channelId}&id=${EVENT_HEX}`;
+  const compatibilityMessageLink = `buzz://channel/${channelId}/${EVENT_HEX}`;
   const channelLink = `buzz://channel/${channelId}`;
   const links = [
     messageLink,
+    compatibilityMessageLink,
     channelLink,
     `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`,
     `buzz://issue?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`,
@@ -1092,9 +1094,11 @@ test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
     ),
   );
 
-  assert.equal((html.match(/data-buzz-link=""/g) ?? []).length, 5);
-  assert.match(html, /inline-chip-icon-message/);
-  assert.match(html, />engineering · c3b589fa</);
+  assert.equal((html.match(/data-buzz-link=""/g) ?? []).length, 6);
+  assert.equal((html.match(/inline-chip-icon-message/g) ?? []).length, 2);
+  assert.equal((html.match(/>engineering · c3b589fa</g) ?? []).length, 2);
+  assert.equal((html.match(/data-message-link=""/g) ?? []).length, 2);
+  assert.equal((html.match(/data-channel-deep-link=""/g) ?? []).length, 1);
   assert.match(html, /inline-chip-icon-channel/);
   assert.match(html, />engineering</);
   assert.match(html, /inline-chip-icon-pr/);
@@ -1108,6 +1112,7 @@ test("authored Buzz permalink labels remain ordinary links", () => {
   const channelId = "580ca78b-9dae-46f3-8854-bd671853ba32";
   const links = [
     `[the message](buzz://message?channel=${channelId}&id=${EVENT_HEX})`,
+    `[the compatibility message](buzz://channel/${channelId}/${EVENT_HEX})`,
     `[**design discussion**](buzz://channel/${channelId})`,
     `[the issue](buzz://issue?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world)`,
   ];
@@ -1134,11 +1139,13 @@ test("authored Buzz permalink labels remain ordinary links", () => {
 
   assert.equal((html.match(/data-buzz-link=""/g) ?? []).length, 0);
   assert.match(html, />the message</);
+  assert.match(html, />the compatibility message</);
+  assert.match(html, /aria-label="Open message: the compatibility message"/);
   assert.match(html, />design discussion</);
   assert.match(html, /aria-label="Open channel: design discussion"/);
   assert.doesNotMatch(html, /\[object Object\]/);
   assert.match(html, />the issue</);
-  assert.equal((html.match(/underline-offset-4/g) ?? []).length, 3);
+  assert.equal((html.match(/underline-offset-4/g) ?? []).length, 4);
 });
 
 test("bare Buzz permalinks shorten unavailable channel identifiers", () => {

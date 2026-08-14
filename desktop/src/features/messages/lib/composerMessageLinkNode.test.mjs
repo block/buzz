@@ -15,6 +15,8 @@ const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const MESSAGE_ID = "root-event";
 const HREF = `buzz://message?channel=${CHANNEL_ID}&id=${MESSAGE_ID}`;
 const CHANNEL_HREF = `buzz://channel/${CHANNEL_ID}`;
+const CHANNEL_MESSAGE_ID = "a".repeat(64);
+const CHANNEL_MESSAGE_HREF = `buzz://channel/${CHANNEL_ID}/${CHANNEL_MESSAGE_ID}`;
 const OWNER = "a".repeat(64);
 const REPO_HREF = `buzz://repo?owner=${OWNER}&d=buzz-world`;
 const ISSUE_ID = "b".repeat(64);
@@ -46,6 +48,15 @@ test("resolves channel and entity links as composer chips", () => {
       channelId === CHANNEL_ID ? "general" : undefined,
     ),
     { channelName: "general", href: CHANNEL_HREF },
+  );
+  assert.deepEqual(
+    resolveComposerMessageLinkAttributes(CHANNEL_MESSAGE_HREF, (channelId) =>
+      channelId === CHANNEL_ID ? "general" : undefined,
+    ),
+    {
+      channelName: "general",
+      href: `buzz://message?channel=${CHANNEL_ID}&id=${CHANNEL_MESSAGE_ID}`,
+    },
   );
   assert.deepEqual(
     resolveComposerMessageLinkAttributes(REPO_HREF, () => undefined),
