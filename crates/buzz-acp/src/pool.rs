@@ -1006,6 +1006,64 @@ fn resolve_effective_cwd(ctx: &PromptContext, channel_id: Option<Uuid>) -> &str 
         .unwrap_or(&ctx.cwd)
 }
 
+/// Fetches `cwd`'s upstream and returns how many commits its checked-out
+/// branch is behind it, or `None` when the comparison can't be made at all
+/// (no `.git`, no remote, offline, no upstream branch configured, detached
+/// HEAD, `git` not on `PATH`, etc). `Some(0)` means "fetched fine, fully
+/// up to date" — distinct from `None`, "couldn't tell either way".
+///
+/// Only ever runs `git fetch` (updates remote-tracking refs) — never touches
+/// the working tree or the checked-out branch, since the checkout may have
+/// uncommitted work or be in use by another agent concurrently.
+async fn commits_behind_upstream(cwd: &str) -> Option<u64> {
+    if !std::path::Path::new(cwd).join(".git").exists() {
+        return None;
+    }
+
+    let fetch = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["fetch", "--quiet"])
+        .output()
+        .await;
+    if !matches!(&fetch, Ok(output) if output.status.success()) {
+        return None;
+    }
+
+    let behind = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-list", "--count", "HEAD..@{u}"])
+        .output()
+        .await
+        .ok()?;
+    if !behind.status.success() {
+        // Most commonly: no upstream configured for the current branch.
+        return None;
+    }
+
+    String::from_utf8_lossy(&behind.stdout).trim().parse().ok()
+}
+
+/// Fail-open staleness check for an external project checkout, run once when
+/// a new session is about to be created there — not on every turn, since a
+/// network fetch per message would be far too slow. Never blocks or fails
+/// dispatch: logs a WARN if the checkout is behind, silent otherwise (see
+/// [`commits_behind_upstream`] for exactly which cases count as "can't tell").
+async fn warn_if_checkout_behind_upstream(cwd: &str) {
+    if let Some(commits_behind) = commits_behind_upstream(cwd).await {
+        if commits_behind > 0 {
+            tracing::warn!(
+                target: "pool::session",
+                cwd = %cwd,
+                commits_behind,
+                "dispatching into a project checkout that is behind its upstream — \
+                 the agent will work off stale code until someone fetches/pulls it manually"
+            );
+        }
+    }
+}
+
 /// The project id carried by the newest `["project", <id>]` tag in a batch's
 /// **live** events, if any.
 ///
@@ -1909,6 +1967,12 @@ pub async fn run_prompt_task(
                 let effective_cwd = turn_cwd
                     .clone()
                     .unwrap_or_else(|| resolve_effective_cwd(&ctx, Some(*cid)).to_string());
+                // Only external project checkouts are worth a network fetch —
+                // the harness's own default cwd isn't a project the operator
+                // pulled in from elsewhere.
+                if effective_cwd != ctx.cwd {
+                    warn_if_checkout_behind_upstream(&effective_cwd).await;
+                }
                 match create_session_and_apply_model(
                     &mut agent,
                     &ctx,
@@ -7915,6 +7979,146 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         );
         // A different, unbound channel is unaffected.
         assert_eq!(resolve_effective_cwd(&ctx, Some(Uuid::new_v4())), ctx.cwd);
+    }
+
+    // ── commits_behind_upstream ──────────────────────────────────────────────
+
+    /// Runs `git` synchronously in `dir` for test setup, panicking with full
+    /// context on failure so a broken fixture never masquerades as a real
+    /// assertion result.
+    fn git_setup(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run git {args:?} in {dir:?}: {e}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} in {dir:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_commit(dir: &std::path::Path, file_name: &str, message: &str) {
+        std::fs::write(dir.join(file_name), message).expect("write test file");
+        git_setup(dir, &["add", file_name]);
+        git_setup(
+            dir,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    struct TestDir(std::path::PathBuf);
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "buzz-acp-freshness-test-{label}-{}",
+                Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&path).expect("create test dir");
+            Self(path)
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn commits_behind_upstream_is_none_when_not_a_git_repo() {
+        let dir = TestDir::new("not-a-repo");
+        assert_eq!(commits_behind_upstream(dir.0.to_str().unwrap()).await, None);
+    }
+
+    #[tokio::test]
+    async fn commits_behind_upstream_is_none_when_no_remote_configured() {
+        let dir = TestDir::new("no-remote");
+        git_setup(&dir.0, &["init", "-q", "-b", "main"]);
+        git_commit(&dir.0, "a.txt", "first");
+        assert_eq!(commits_behind_upstream(dir.0.to_str().unwrap()).await, None);
+    }
+
+    #[tokio::test]
+    async fn commits_behind_upstream_is_zero_when_fully_up_to_date() {
+        let origin = TestDir::new("origin-uptodate");
+        git_setup(&origin.0, &["init", "-q", "--bare", "-b", "main"]);
+
+        let seed = TestDir::new("seed-uptodate");
+        git_setup(&seed.0, &["init", "-q", "-b", "main"]);
+        git_commit(&seed.0, "a.txt", "first");
+        git_setup(
+            &seed.0,
+            &["remote", "add", "origin", origin.0.to_str().unwrap()],
+        );
+        git_setup(&seed.0, &["push", "-q", "origin", "main"]);
+
+        let clone = TestDir::new("clone-uptodate");
+        git_setup(
+            std::path::Path::new("."),
+            &[
+                "clone",
+                "-q",
+                origin.0.to_str().unwrap(),
+                clone.0.to_str().unwrap(),
+            ],
+        );
+        git_setup(&clone.0, &["checkout", "-q", "main"]);
+        git_setup(&clone.0, &["branch", "-q", "--set-upstream-to=origin/main"]);
+
+        assert_eq!(
+            commits_behind_upstream(clone.0.to_str().unwrap()).await,
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn commits_behind_upstream_counts_commits_pushed_after_the_clone() {
+        let origin = TestDir::new("origin-behind");
+        git_setup(&origin.0, &["init", "-q", "--bare", "-b", "main"]);
+
+        let seed = TestDir::new("seed-behind");
+        git_setup(&seed.0, &["init", "-q", "-b", "main"]);
+        git_commit(&seed.0, "a.txt", "first");
+        git_setup(
+            &seed.0,
+            &["remote", "add", "origin", origin.0.to_str().unwrap()],
+        );
+        git_setup(&seed.0, &["push", "-q", "origin", "main"]);
+
+        let clone = TestDir::new("clone-behind");
+        git_setup(
+            std::path::Path::new("."),
+            &[
+                "clone",
+                "-q",
+                origin.0.to_str().unwrap(),
+                clone.0.to_str().unwrap(),
+            ],
+        );
+        git_setup(&clone.0, &["checkout", "-q", "main"]);
+        git_setup(&clone.0, &["branch", "-q", "--set-upstream-to=origin/main"]);
+
+        // Two more commits land on origin after the clone was made — the
+        // clone's checked-out branch is now stale relative to its upstream.
+        git_commit(&seed.0, "b.txt", "second");
+        git_commit(&seed.0, "c.txt", "third");
+        git_setup(&seed.0, &["push", "-q", "origin", "main"]);
+
+        assert_eq!(
+            commits_behind_upstream(clone.0.to_str().unwrap()).await,
+            Some(2)
+        );
     }
 
     // ── batch_project_tag ────────────────────────────────────────────────────
