@@ -73,6 +73,7 @@ import {
   deriveProfileChannels,
   type ProfilePanelTab,
   type ProfilePanelView,
+  profilePanelTargetKey,
   resolveAgentInstruction,
   resolvePanelProfile,
   resolveProfileDisplayName,
@@ -363,8 +364,7 @@ export function UserProfilePanel({
     return map;
   }, [channelsQuery.data]);
 
-  const targetKey =
-    effectivePubkey ?? `persona:${resolvedPersona?.id ?? "unknown"}`;
+  const targetKey = profilePanelTargetKey(pubkey, persona?.id);
   const prevTargetKeyRef = React.useRef(targetKey);
   React.useEffect(() => {
     if (prevTargetKeyRef.current === targetKey) return;

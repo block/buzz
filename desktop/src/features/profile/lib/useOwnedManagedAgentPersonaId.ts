@@ -56,6 +56,11 @@ export function personaIdFromOwnedManagedAgentEvent(
   }
 }
 
+type PersonaLookupResult = {
+  key: string;
+  personaId: string | null;
+};
+
 /**
  * Resolve an owned historical agent key back to its persona. Managed-agent
  * events are signed by the owner and keyed by the agent pubkey, so this works
@@ -67,20 +72,23 @@ export function useOwnedManagedAgentPersonaId(input: {
   ownerPubkey: string | undefined;
 }): string | null {
   const { agentPubkey, enabled, ownerPubkey } = input;
-  const [personaId, setPersonaId] = React.useState<string | null>(null);
+  const [result, setResult] = React.useState<PersonaLookupResult | null>(null);
+  const normalizedOwner = normalizePubkey(ownerPubkey ?? "");
+  const normalizedAgent = normalizePubkey(agentPubkey ?? "");
+  const lookupKey =
+    enabled && normalizedOwner && normalizedAgent
+      ? `${normalizedOwner}:${normalizedAgent}`
+      : null;
 
   React.useEffect(() => {
     let cancelled = false;
-    setPersonaId(null);
 
-    if (!enabled || !ownerPubkey || !agentPubkey) {
+    if (!lookupKey) {
       return () => {
         cancelled = true;
       };
     }
 
-    const normalizedOwner = normalizePubkey(ownerPubkey);
-    const normalizedAgent = normalizePubkey(agentPubkey);
     void relayClient
       .fetchFirstEvent({
         kinds: [KIND_MANAGED_AGENT],
@@ -90,22 +98,23 @@ export function useOwnedManagedAgentPersonaId(input: {
       })
       .then((event) => {
         if (cancelled) return;
-        setPersonaId(
-          personaIdFromOwnedManagedAgentEvent(
+        setResult({
+          key: lookupKey,
+          personaId: personaIdFromOwnedManagedAgentEvent(
             event,
             normalizedOwner,
             normalizedAgent,
           ),
-        );
+        });
       })
       .catch(() => {
-        if (!cancelled) setPersonaId(null);
+        if (!cancelled) setResult({ key: lookupKey, personaId: null });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [agentPubkey, enabled, ownerPubkey]);
+  }, [lookupKey, normalizedAgent, normalizedOwner]);
 
-  return personaId;
+  return result?.key === lookupKey ? result.personaId : null;
 }
