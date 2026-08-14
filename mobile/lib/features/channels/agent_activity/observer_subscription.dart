@@ -193,19 +193,27 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
     final frames = _decryptFrames(event, normalizedAgent, privHex);
     if (frames == null) return;
 
+    var storageChanged = false;
     for (final frame in frames) {
-      _storeFrame(normalizedAgent, frame);
+      if (_storeFrame(normalizedAgent, frame)) {
+        storageChanged = true;
+      }
+    }
+
+    if (storageChanged) {
+      _errorMessage = null;
+      _emit(connection: ObserverConnectionState.open);
     }
   }
 
-  void _storeFrame(String normalizedAgent, ObserverFrame frame) {
+  bool _storeFrame(String normalizedAgent, ObserverFrame frame) {
     final dedupeKey = '${frame.seq}:${frame.timestamp}';
     final dedupeKeys = _dedupeKeysByAgent.putIfAbsent(
       normalizedAgent,
       () => <String>{},
     );
     if (!dedupeKeys.add(dedupeKey)) {
-      return;
+      return false;
     }
 
     final frames = _framesByAgent.putIfAbsent(
@@ -223,8 +231,7 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
       frames.removeRange(0, removeCount);
     }
 
-    _errorMessage = null;
-    _emit(connection: ObserverConnectionState.open);
+    return true;
   }
 
   List<ObserverFrame>? _decryptFrames(

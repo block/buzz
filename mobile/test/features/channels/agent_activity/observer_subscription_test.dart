@@ -357,6 +357,69 @@ void main() {
     expect(otherChannelState.transcript, isEmpty);
   });
 
+  test('publishes one open-state update for a changed batch', () async {
+    final ownerKeychain = nostr.Keys.generate();
+    final agentKeychain = nostr.Keys.generate();
+    final relaySession = _RecordingRelaySession();
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relaySession),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(nsec: ownerKeychain.nsec),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(
+      observerSubscriptionProvider((
+        channelId: 'test-channel',
+        agentPubkey: agentKeychain.public,
+      )),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    var openStateUpdates = 0;
+    final listener = container.listen(observerRelayProvider, (_, next) {
+      if (next.connection == ObserverConnectionState.open) {
+        openStateUpdates += 1;
+      }
+    });
+    addTearDown(listener.close);
+
+    final event = _observerEvent(
+      ownerKeychain: ownerKeychain,
+      agentKeychain: agentKeychain,
+      payload: {
+        'seq': 2,
+        'timestamp': '2026-04-30T12:00:02.000Z',
+        'kind': 'batch',
+        'channelId': 'test-channel',
+        'turnId': 'turn-2',
+        'payload': {
+          'events': [
+            _observerFrameJson(
+              seq: 1,
+              channelId: 'test-channel',
+              turnId: 'turn-1',
+            ),
+            _observerFrameJson(
+              seq: 2,
+              channelId: 'test-channel',
+              turnId: 'turn-2',
+            ),
+          ],
+        },
+      },
+    );
+
+    relaySession.emit(event);
+    expect(openStateUpdates, 1);
+
+    relaySession.emit(event);
+    expect(openStateUpdates, 1);
+  });
+
   test('keeps malformed batch envelopes as singleton frames', () async {
     final ownerKeychain = nostr.Keys.generate();
     final agentKeychain = nostr.Keys.generate();
