@@ -213,6 +213,11 @@ class ThreadDetailPage extends HookConsumerWidget {
             userOptedOutOfTailFollow.value = false;
             followsThreadTail.value = true;
           }
+          // Rapid agent replies can arrive while the newly laid-out tail is
+          // already visible. There is nothing to navigate to in that case;
+          // restarting a bottom-edge animation for every reply produces iOS
+          // rubber-banding.
+          if (threadTailIsVisible()) return;
           if (animate) {
             itemScrollController.scrollTo(
               index: lastIndex,

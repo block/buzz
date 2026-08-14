@@ -2491,6 +2491,62 @@ void main() {
       );
     });
 
+    testWidgets('does not animate an already pinned tail for rapid live updates', (
+      tester,
+    ) async {
+      final initialMessages = [
+        for (var i = 0; i < 20; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
+      for (var i = 0; i < 5; i++) {
+        final latestId = 'agent-update-$i';
+        messagesNotifier.setMessages([
+          ...initialMessages,
+          for (var previous = 0; previous <= i; previous++)
+            _textMsg(
+              id: 'agent-update-$previous',
+              pubkey: 'agent',
+              content: 'Agent update $previous',
+              createdAt: 2000 + previous,
+            ),
+        ]);
+        await tester.pump();
+        await tester.pump();
+
+        final latestMessage = find.byKey(
+          ValueKey('channel-message-group-$latestId'),
+        );
+        expect(
+          tester.getBottomLeft(latestMessage).dy,
+          closeTo(tester.getTopLeft(composerDock).dy, 1),
+        );
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+        );
+      }
+      await tester.pumpAndSettle();
+    });
+
     testWidgets(
       'keeps follow mode off while a tall newest message stays visible',
       (tester) async {
