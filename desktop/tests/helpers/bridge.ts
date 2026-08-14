@@ -38,6 +38,114 @@ export const TEST_IDENTITIES = {
 
 type BridgeMode = "mock" | "relay";
 
+export type ProjectRepoDiffOverride = {
+  additions: number;
+  deletions: number;
+  commit_body: string | null;
+  files: Array<{
+    path: string;
+    additions: number;
+    deletions: number;
+    patch: string;
+    truncated: boolean;
+  }>;
+};
+
+export function createProjectRepoDiffOverride(
+  fileCount = 24,
+): ProjectRepoDiffOverride {
+  const patch = [
+    "@@ -1,2 +1,72 @@",
+    " export function example() {",
+    ...Array.from(
+      { length: 70 },
+      (_, index) => `+  const line${index + 1} = ${index + 1};`,
+    ),
+    " }",
+  ].join("\n");
+  const targetPatch = [
+    "@@ -1,6 +1,72 @@",
+    ' import { Tabs } from "@/shared/ui/tabs";',
+    "",
+    "-function CommunityTabs() {",
+    "+function CommunityTabs({ selectedCommitHash }) {",
+    '+  const typedProjectMarker = "TSX_UNIQUE_MARKER";',
+    '+  const [selectedTab, setSelectedTab] = useState("overview");',
+    "+",
+    "   return (",
+    '     <Tabs value="overview">',
+    "       <ProjectTabsList />",
+    ...Array.from(
+      { length: 59 },
+      (_, index) => `+  const detailLine${index + 1} = ${index + 1};`,
+    ),
+    " ",
+  ].join("\n");
+  const yamlPatch = [
+    "@@ -1,2 +1,5 @@",
+    " project: buzz",
+    "+fixture_marker: YAML_UNIQUE_MARKER",
+    "+renderer: config",
+    "+theme_probe: stable",
+    " ",
+  ].join("\n");
+  const mysteryPatch = [
+    "@@ -1,2 +1,5 @@",
+    " readable mystery document",
+    "+MYSTERY_PLAIN_TEXT_UNIQUE_MARKER",
+    "+This extension intentionally has no registered language.",
+    "+plain text remains readable",
+    " ",
+  ].join("\n");
+  const files = [
+    "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+    ...(fileCount === 2
+      ? ["desktop/src/features/projects/hooks.ts"]
+      : ["config/project-settings.yaml", "docs/notes.mystery"]),
+    ...Array.from(
+      { length: Math.max(0, fileCount - 3) },
+      (_, index) =>
+        `src/generated/file-${String(index + 1).padStart(2, "0")}.tsx`,
+    ),
+  ]
+    .map((path) => ({
+      path,
+      additions: 70,
+      deletions: 0,
+      patch,
+      truncated: false,
+    }))
+    .map((file) => {
+      if (
+        file.path === "desktop/src/features/projects/ui/ProjectDetailScreen.tsx"
+      ) {
+        return { ...file, patch: targetPatch };
+      }
+      if (file.path === "config/project-settings.yaml") {
+        return { ...file, patch: yamlPatch };
+      }
+      if (file.path === "docs/notes.mystery") {
+        return { ...file, patch: mysteryPatch };
+      }
+      return file;
+    });
+  return {
+    additions: files.length * 70,
+    deletions: 0,
+    commit_body:
+      fileCount === 2
+        ? [
+            "See the [project guide](https://example.com/project-guide).",
+            "",
+            "![Architecture](/buzz.svg)",
+            "",
+            "![Demo](https://example.com/project-demo.mp4)",
+          ].join("\n")
+        : null,
+    files,
+  };
+}
+
 type MockCommandAvailability = {
   available?: boolean;
   command?: string;
@@ -156,6 +264,19 @@ type MockBridgeOptions = {
   pocketVoiceImportResult?: "success" | "cancel" | "invalid";
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
+  /** Optional deterministic repository diff override for Projects geometry fixtures. */
+  projectRepoDiffOverride?: {
+    additions: number;
+    deletions: number;
+    commit_body: string | null;
+    files: Array<{
+      path: string;
+      additions: number;
+      deletions: number;
+      patch: string;
+      truncated: boolean;
+    }>;
+  };
   /** Relay NIP-11 identity used to sign authoritative repository state. */
   relaySelf?: string | null;
   /** Native-like huddle state seeded from authoritative role-bearing membership. */
@@ -893,6 +1014,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         identity: bridgeIdentity ?? currentConfig.identity,
         mock,
         mode,
+        projectRepoDiffOverride: mock?.projectRepoDiffOverride,
         relayHttpUrl: relayHttpUrl ?? currentConfig.relayHttpUrl,
         relayWsUrl: relayWsUrl ?? currentConfig.relayWsUrl,
         autoConnectDefaultRelay:

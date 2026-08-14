@@ -188,6 +188,19 @@ type E2eConfig = {
     pocketVoiceImportResult?: "success" | "cancel" | "invalid";
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
+    /** Optional deterministic repository diff override for Projects geometry fixtures. */
+    projectRepoDiffOverride?: {
+      additions: number;
+      deletions: number;
+      commit_body: string | null;
+      files: Array<{
+        path: string;
+        additions: number;
+        deletions: number;
+        patch: string;
+        truncated: boolean;
+      }>;
+    };
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -1237,6 +1250,18 @@ declare global {
     __BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__?: number[];
     /** Captured aggregate project-history filters for request-count assertions. */
     __BUZZ_E2E_PROJECT_QUERY_FILTERS__?: MockFilter[];
+    __BUZZ_E2E_PROJECT_REPO_DIFF_OVERRIDE__?: {
+      additions: number;
+      deletions: number;
+      commit_body: string | null;
+      files: Array<{
+        path: string;
+        additions: number;
+        deletions: number;
+        patch: string;
+        truncated: boolean;
+      }>;
+    };
     __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
       local_path: string | null;
       local_branch: string | null;
@@ -11540,7 +11565,15 @@ export function maybeInstallE2eTauriMocks() {
         };
       case "get_project_local_repo_snapshot":
         return null;
-      case "get_project_repo_diff":
+      case "get_project_repo_diff": {
+        const projectRepoDiffOverride =
+          getConfig()?.mock?.projectRepoDiffOverride;
+        if (projectRepoDiffOverride) {
+          return projectRepoDiffOverride;
+        }
+        if (window.__BUZZ_E2E_PROJECT_REPO_DIFF_OVERRIDE__) {
+          return window.__BUZZ_E2E_PROJECT_REPO_DIFF_OVERRIDE__;
+        }
         return {
           additions: 27,
           deletions: 4,
@@ -11588,6 +11621,7 @@ export function maybeInstallE2eTauriMocks() {
             },
           ],
         };
+      }
       case "get_project_local_repo_diff":
         return null;
       case "get_project_repo_sync_status":

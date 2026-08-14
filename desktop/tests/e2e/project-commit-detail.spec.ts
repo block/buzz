@@ -1,7 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  createProjectRepoDiffOverride,
+  installMockBridge,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 
 const SHOTS = "test-results/project-commit-detail";
 const ALIGNMENT_TOLERANCE_PX = 2;
@@ -479,7 +483,9 @@ test("commit detail opens from the commits feed with a diff", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    projectRepoDiffOverride: createProjectRepoDiffOverride(2),
+  });
   // The preview server is a static file server without SPA fallback, so
   // enter at "/" and navigate via the sidebar.
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -541,6 +547,49 @@ test("commit detail opens from the commits feed with a diff", async ({
   await expect(page.getByText("2 changed files")).toBeVisible({
     timeout: 10_000,
   });
+  await expect(page.getByTestId("project-diff-renderer")).toBeVisible();
+  const commitPanel = page.getByTestId("project-diff-scroll");
+  const commitDetailPanel = page.getByTestId("project-commit-detail-panel");
+  const detailScroll = page.getByTestId("project-detail-scroll");
+  const detailStack = page.getByTestId("project-detail-stack");
+  await expect(commitDetailPanel).toBeVisible();
+  const commitDetailBox = await commitDetailPanel.boundingBox();
+  const detailScrollBox = await detailScroll.boundingBox();
+  const detailStackBox = await detailStack.boundingBox();
+  expect(commitDetailBox).not.toBeNull();
+  expect(detailScrollBox).not.toBeNull();
+  expect(detailStackBox).not.toBeNull();
+  const commitBottom =
+    (commitDetailBox?.y ?? 0) + (commitDetailBox?.height ?? 0);
+  const detailBottom =
+    (detailScrollBox?.y ?? 0) + (detailScrollBox?.height ?? 0);
+  const stackBottom = (detailStackBox?.y ?? 0) + (detailStackBox?.height ?? 0);
+  expect(commitDetailBox?.y).toBeGreaterThanOrEqual(detailScrollBox?.y ?? 0);
+  expect(commitBottom).toBeLessThanOrEqual(detailBottom + 2);
+  expect(stackBottom).toBeGreaterThanOrEqual(detailBottom - 32);
+  expect(detailBottom - commitBottom).toBeGreaterThanOrEqual(12);
+  expect(detailBottom - commitBottom).toBeLessThanOrEqual(32);
+  const commitPanelBox = await commitPanel.boundingBox();
+  expect(commitPanelBox).not.toBeNull();
+  expect(commitPanelBox?.height).toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      commitPanel.evaluate((node) => ({
+        clientHeight: node.clientHeight,
+        scrollHeight: node.scrollHeight,
+      })),
+    )
+    .toEqual(
+      expect.objectContaining({
+        clientHeight: expect.any(Number),
+        scrollHeight: expect.any(Number),
+      }),
+    );
+  await expect
+    .poll(() =>
+      commitPanel.evaluate((node) => node.scrollHeight > node.clientHeight),
+    )
+    .toBe(true);
   await expect(
     page.getByText("CommunityTabs({ selectedCommitHash })"),
   ).toBeVisible();

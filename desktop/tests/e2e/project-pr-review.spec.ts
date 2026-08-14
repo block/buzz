@@ -1,12 +1,19 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  createProjectRepoDiffOverride,
+  installMockBridge,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 
 const SHOTS = "test-results/project-pr-review";
 const RECOVERY_SHOTS = "test-results/project-pr-conflict-recovery";
 const REVIEWER_AGENT_PUBKEY = "a".repeat(64);
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
+const WIDE_VIEWPORT = { width: 1440, height: 900 };
+const SHORT_STACKED_VIEWPORT = { width: 900, height: 620 };
+const NARROW_VIEWPORT = { width: 720, height: 720 };
 
 // The projects surface is a preview feature — opt in before the app mounts.
 // Must run before installMockBridge so React reads the override on mount.
@@ -530,7 +537,9 @@ test("reviewer can leave a commit-scoped inline diff comment", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    projectRepoDiffOverride: createProjectRepoDiffOverride(),
+  });
   await openBuzzProject(page);
 
   await page.getByRole("tab", { name: "Pull Request" }).click();
@@ -541,12 +550,77 @@ test("reviewer can leave a commit-scoped inline diff comment", async ({
   await aliceRow.getByRole("button", { name: /^#/ }).click();
   await page.getByRole("tab", { name: /Files changed/ }).click();
 
-  const diffLine = page
-    .getByTestId("project-diff-line")
-    .filter({ hasText: "function CommunityTabs({ selectedCommitHash })" });
-  await expect(diffLine).toBeVisible({ timeout: 10_000 });
-  await diffLine.hover();
-  await diffLine.getByTestId("project-diff-add-comment").click();
+  const detailScroll = page.getByTestId("project-detail-scroll");
+  const detailStack = page.getByTestId("project-detail-stack");
+  const diffPanel = page.getByTestId("project-pr-detail-panel");
+  const diffTree = page.getByTestId("project-diff-file-tree");
+  const diffScroll = page.getByTestId("project-diff-scroll");
+  await expect(detailScroll).toBeVisible();
+  await expect(detailStack).toBeVisible();
+  await expect(diffPanel).toBeVisible();
+  const detailScrollBox = await detailScroll.boundingBox();
+  const detailStackBox = await detailStack.boundingBox();
+  const diffPanelBox = await diffPanel.boundingBox();
+  expect(detailScrollBox).not.toBeNull();
+  expect(detailStackBox).not.toBeNull();
+  expect(diffPanelBox).not.toBeNull();
+  expect(detailScrollBox?.height).toBeGreaterThan(0);
+  expect(detailStackBox?.height).toBeGreaterThan(0);
+  expect(detailScrollBox?.height).toBeGreaterThanOrEqual(
+    (diffPanelBox?.height ?? 0) - 2,
+  );
+  await expect(diffTree).toBeVisible();
+  await expect(diffScroll).toBeVisible();
+  await expect
+    .poll(() =>
+      diffTree.evaluate((node) => node.scrollHeight > node.clientHeight),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      diffScroll.evaluate((node) => node.scrollHeight > node.clientHeight),
+    )
+    .toBe(true);
+  const treeBox = await diffTree.boundingBox();
+  const diffBox = await diffScroll.boundingBox();
+  const panelBox = await diffPanel.boundingBox();
+  expect(treeBox).not.toBeNull();
+  expect(diffBox).not.toBeNull();
+  expect(panelBox).not.toBeNull();
+  expect(treeBox?.height).toBeGreaterThan(0);
+  expect(diffBox?.height).toBeGreaterThan(0);
+  expect(panelBox?.height).toBeGreaterThanOrEqual((treeBox?.height ?? 0) - 2);
+  await diffTree.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect
+    .poll(() => diffTree.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0);
+  const finalTreeRow = diffTree
+    .getByRole("button")
+    .filter({ hasText: "file-21.tsx" });
+  await expect(finalTreeRow).toBeVisible();
+  const finalTreeRowBox = await finalTreeRow.boundingBox();
+  const scrolledTreeBox = await diffTree.boundingBox();
+  expect(finalTreeRowBox).not.toBeNull();
+  expect(scrolledTreeBox).not.toBeNull();
+  expect(finalTreeRowBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (scrolledTreeBox?.y ?? 0) - 2,
+  );
+  expect(
+    (finalTreeRowBox?.y ?? 0) + (finalTreeRowBox?.height ?? 0),
+  ).toBeLessThanOrEqual(
+    (scrolledTreeBox?.y ?? 0) + (scrolledTreeBox?.height ?? 0) + 2,
+  );
+
+  const diffRenderer = page.getByTestId("project-diff-renderer");
+  await expect(diffRenderer).toBeVisible({ timeout: 10_000 });
+  const diffLineText = page.getByText(
+    "function CommunityTabs({ selectedCommitHash })",
+  );
+  await expect(diffLineText).toBeVisible();
+  await diffLineText.hover();
+  await diffRenderer.getByTestId("project-diff-add-comment").click();
 
   const composer = page.getByTestId("project-inline-comment-thread");
   await composer
@@ -608,7 +682,7 @@ test("reviewer can leave a commit-scoped inline diff comment", async ({
   await expect(
     page.getByRole("tab", { name: /Files changed/ }),
   ).toHaveAttribute("data-state", "active");
-  const focusedLine = page.getByTestId("project-diff-focused-line");
+  const focusedLine = page.getByTestId("project-diff-renderer");
   await expect(focusedLine).toBeVisible();
   await expect(focusedLine).toHaveAttribute(
     "data-path",
@@ -617,8 +691,211 @@ test("reviewer can leave a commit-scoped inline diff comment", async ({
   await expect(focusedLine).toHaveAttribute("data-side", "new");
   await expect(focusedLine).toHaveAttribute("data-line", "3");
   await focusedLine.click();
-  await expect(page.getByTestId("project-diff-focused-line")).toHaveCount(0);
+  await expect(focusedLine).toBeVisible();
+  await expect
+    .poll(async () => ({
+      path: await focusedLine.getAttribute("data-path"),
+      side: await focusedLine.getAttribute("data-side"),
+      line: await focusedLine.getAttribute("data-line"),
+    }))
+    .toEqual({ path: null, side: null, line: null });
 });
+
+test("wide PR files fill the detail scroll area and expose independent scroll endpoints", async ({
+  page,
+}) => {
+  await page.setViewportSize(WIDE_VIEWPORT);
+  await enableProjectsFeature(page);
+  await installMockBridge(page, {
+    projectRepoDiffOverride: createProjectRepoDiffOverride(),
+  });
+  await openBuzzProject(page);
+  await page.getByRole("tab", { name: "Pull Request" }).click();
+  await page
+    .getByTestId("project-pull-request-row")
+    .filter({ hasText: "alice" })
+    .first()
+    .getByRole("button", { name: /^#/ })
+    .click();
+  await page.getByRole("tab", { name: /Files changed/ }).click();
+
+  const detailScroll = page.getByTestId("project-detail-scroll");
+  const detailStack = page.getByTestId("project-detail-stack");
+  const detailPanel = page.getByTestId("project-pr-detail-panel");
+  const tree = page.getByTestId("project-diff-file-tree");
+  const diff = page.getByTestId("project-diff-scroll");
+  await expect(detailScroll).toBeVisible();
+  await expect(detailStack).toBeVisible();
+  await expect(detailPanel).toBeVisible();
+  await expect
+    .poll(() =>
+      Promise.all([
+        detailScroll.evaluate((node) => node.scrollHeight > node.clientHeight),
+        tree.evaluate((node) => node.scrollHeight > node.clientHeight),
+        diff.evaluate((node) => node.scrollHeight > node.clientHeight),
+      ]),
+    )
+    .toEqual([false, true, true]);
+  const scrollBox = await detailScroll.boundingBox();
+  const stackBox = await detailStack.boundingBox();
+  const panelBox = await detailPanel.boundingBox();
+  const mainColumnBox = await page
+    .getByTestId("project-pr-main-column")
+    .boundingBox();
+  const metaRailBox = await detailPanel
+    .locator(":scope > div > aside")
+    .boundingBox();
+  expect(scrollBox).not.toBeNull();
+  expect(stackBox).not.toBeNull();
+  expect(panelBox).not.toBeNull();
+  expect(mainColumnBox).not.toBeNull();
+  expect(metaRailBox).not.toBeNull();
+  const scrollBottom = (scrollBox?.y ?? 0) + (scrollBox?.height ?? 0);
+  const stackBottom = (stackBox?.y ?? 0) + (stackBox?.height ?? 0);
+  const panelBottom = (panelBox?.y ?? 0) + (panelBox?.height ?? 0);
+  const mainColumnBottom =
+    (mainColumnBox?.y ?? 0) + (mainColumnBox?.height ?? 0);
+  const metaRailBottom = (metaRailBox?.y ?? 0) + (metaRailBox?.height ?? 0);
+  expect(stackBottom).toBeGreaterThanOrEqual(scrollBottom - 32);
+  expect(panelBox?.y).toBeGreaterThanOrEqual(scrollBox?.y ?? 0);
+  expect(panelBottom).toBeLessThanOrEqual(scrollBottom + 2);
+  expect(Math.abs(mainColumnBottom - panelBottom)).toBeLessThanOrEqual(2);
+  expect(Math.abs(metaRailBottom - panelBottom)).toBeLessThanOrEqual(2);
+  expect(scrollBottom - panelBottom).toBeGreaterThanOrEqual(12);
+  expect(scrollBottom - panelBottom).toBeLessThanOrEqual(32);
+});
+
+for (const viewport of [SHORT_STACKED_VIEWPORT, NARROW_VIEWPORT]) {
+  test(`PR files remain content-driven at ${viewport.width}x${viewport.height}`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("buzz-theme", "buzz");
+    });
+    await enableProjectsFeature(page);
+    await installMockBridge(page, {
+      projectRepoDiffOverride: createProjectRepoDiffOverride(),
+    });
+    await openBuzzProject(page);
+    await page.setViewportSize(viewport);
+    await page.getByRole("tab", { name: "Pull Request" }).click();
+    await page
+      .getByTestId("project-pull-request-row")
+      .filter({ hasText: "alice" })
+      .first()
+      .getByRole("button", { name: /^#/ })
+      .click();
+    await page.getByRole("tab", { name: /Files changed/ }).click();
+
+    const detailScroll = page.getByTestId("project-detail-scroll");
+    const detailPanel = page.getByTestId("project-pr-detail-panel");
+    await expect(detailPanel).toBeVisible();
+    const dimensions = await detailScroll.evaluate((node) => ({
+      clientHeight: node.clientHeight,
+      scrollHeight: node.scrollHeight,
+      scrollWidth: node.scrollWidth,
+      clientWidth: node.clientWidth,
+    }));
+    expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+    if (viewport === SHORT_STACKED_VIEWPORT) {
+      expect(dimensions.scrollWidth).toBeLessThanOrEqual(
+        dimensions.clientWidth + 80,
+      );
+    }
+
+    const panelBox = await detailPanel.boundingBox();
+    expect(panelBox).not.toBeNull();
+    expect(panelBox?.height).toBeGreaterThan(0);
+    if (viewport === SHORT_STACKED_VIEWPORT) {
+      const status = page.getByRole("heading", { name: "Status" });
+      const mainColumn = page.getByTestId("project-pr-main-column");
+      const metaRail = detailPanel.locator(":scope > div > aside");
+      const statusBox = await status.boundingBox();
+      const mainBox = await mainColumn.boundingBox();
+      const railBox = await metaRail.boundingBox();
+      expect(statusBox).not.toBeNull();
+      expect(mainBox).not.toBeNull();
+      expect(railBox).not.toBeNull();
+      expect(statusBox?.y).toBeGreaterThanOrEqual(
+        (mainBox?.y ?? 0) + (mainBox?.height ?? 0) - 2,
+      );
+      expect(railBox?.y).toBeGreaterThanOrEqual(
+        (mainBox?.y ?? 0) + (mainBox?.height ?? 0) - 2,
+      );
+      expect(railBox?.x).toBeGreaterThanOrEqual(mainBox?.x ?? 0);
+      expect((railBox?.x ?? 0) + (railBox?.width ?? 0)).toBeLessThanOrEqual(
+        (mainBox?.x ?? 0) + (mainBox?.width ?? 0) + 2,
+      );
+    }
+  });
+}
+
+for (const theme of ["buzz", "buzz-dark"] as const) {
+  test(`changed-file names and fallback render in ${theme}`, async ({
+    page,
+  }) => {
+    await page.addInitScript((selectedTheme) => {
+      window.localStorage.setItem("buzz-theme", selectedTheme);
+    }, theme);
+    await enableProjectsFeature(page);
+    await installMockBridge(page, {
+      projectRepoDiffOverride: createProjectRepoDiffOverride(),
+    });
+    await openBuzzProject(page);
+    await page.getByRole("tab", { name: "Pull Request" }).click();
+    await page
+      .getByTestId("project-pull-request-row")
+      .filter({ hasText: "alice" })
+      .first()
+      .getByRole("button", { name: /^#/ })
+      .click();
+    await page.getByRole("tab", { name: /Files changed/ }).click();
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-buzz-theme",
+      theme,
+    );
+    const tree = page.getByTestId("project-diff-file-tree");
+    for (const fileName of [
+      "ProjectDetailScreen.tsx",
+      "project-settings.yaml",
+      "notes.mystery",
+    ]) {
+      await expect(
+        tree.getByRole("button", { name: new RegExp(fileName) }),
+      ).toBeVisible();
+    }
+    const diffBody = page.getByTestId("project-diff-body");
+    const renderer = page.getByTestId("project-diff-renderer");
+    const selectFile = async (
+      name: RegExp,
+      path: string,
+      uniqueText: string,
+    ) => {
+      await tree.getByRole("button", { name }).click();
+      await expect(diffBody).toBeVisible();
+      await expect(renderer).toHaveAttribute("data-selected-path", path);
+      await expect(diffBody).toContainText(uniqueText);
+    };
+    await selectFile(
+      /ProjectDetailScreen\.tsx/,
+      "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+      "TSX_UNIQUE_MARKER",
+    );
+    await selectFile(
+      /project-settings\.yaml/,
+      "config/project-settings.yaml",
+      "YAML_UNIQUE_MARKER",
+    );
+    await selectFile(
+      /notes\.mystery/,
+      "docs/notes.mystery",
+      "MYSTERY_PLAIN_TEXT_UNIQUE_MARKER",
+    );
+    await expect(
+      page.getByText("No textual diff is available for this file."),
+    ).toHaveCount(0);
+  });
+}
 
 test("managed agent repository owner can merge", async ({ page }) => {
   await enableProjectsFeature(page);

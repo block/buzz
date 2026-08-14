@@ -61,7 +61,10 @@ export function ProjectCommitDetailPanel({
   const shortHash = commit?.shortHash ?? commitHash.slice(0, 7);
 
   return (
-    <div className="space-y-3">
+    <div
+      className="flex min-w-0 flex-col space-y-3 overflow-hidden xl:min-h-0 xl:flex-1"
+      data-testid="project-commit-detail-panel"
+    >
       <header
         className={`space-y-2 p-4 ${PROJECT_DETAIL_PANEL_CLASS}`}
         data-project-detail-panel

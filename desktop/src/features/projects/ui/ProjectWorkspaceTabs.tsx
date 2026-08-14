@@ -29,6 +29,7 @@ import {
 } from "@/features/projects/lib/projectRepoAvailability";
 import { useMemberChannelIds } from "@/features/projects/useRepositoryAccess";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Tabs, TabsContent } from "@/shared/ui/tabs";
 import { findReadmeFile } from "./ProjectReadmePanel";
@@ -326,7 +327,7 @@ export function WorkspaceTabs({
 
   return (
     <Tabs
-      className="space-y-3"
+      className="flex min-w-0 flex-col space-y-3 xl:min-h-0 xl:flex-1"
       onValueChange={handleTabChange}
       value={selectedTab}
     >
@@ -361,11 +362,21 @@ export function WorkspaceTabs({
         </div>
       ) : null}
       {selectedPullRequest ? (
-        <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
+        <div
+          className={cn(
+            "flex min-w-0 flex-col xl:min-h-0 xl:flex-1",
+            PROJECT_DETAIL_PANEL_CLASS,
+          )}
+          data-project-detail-panel
+          data-testid="project-pr-detail-panel"
+        >
           {/* Two full-height columns: the meta rail runs all the way to the
               top of the card, alongside the header and tabs. */}
-          <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
-            <div className="min-w-0">
+          <div className="grid min-w-0 overflow-hidden xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1fr)_18rem]">
+            <div
+              className="flex min-w-0 flex-col overflow-hidden xl:min-h-0"
+              data-testid="project-pr-main-column"
+            >
               <PullRequestDetailHeader
                 profiles={profiles}
                 pullRequest={selectedPullRequest}
@@ -395,7 +406,10 @@ export function WorkspaceTabs({
                   />
                 </TabsContent>
               ))}
-              <TabsContent className="m-0" value="pr-files">
+              <TabsContent
+                className="m-0 flex min-w-0 flex-col xl:min-h-0 xl:flex-1"
+                value="pr-files"
+              >
                 <ProjectPullRequestFilesChangedPanel
                   diff={repoDiff}
                   error={repoDiffError}
@@ -440,7 +454,10 @@ export function WorkspaceTabs({
         />
       </TabsContent>
 
-      <TabsContent className="m-0" value="activity">
+      <TabsContent
+        className="m-0 flex min-w-0 flex-col xl:min-h-0 xl:flex-1"
+        value="activity"
+      >
         {selectedCommitHash ? (
           <ProjectCommitDetailPanel
             commit={

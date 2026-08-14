@@ -856,8 +856,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
             project={project}
           />
 
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
-            <div className="w-full space-y-3 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
+          <div
+            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4"
+            data-testid="project-detail-scroll"
+          >
+            <div
+              className="flex w-full flex-col space-y-3 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)] xl:min-h-full"
+              data-testid="project-detail-stack"
+            >
               <section className="space-y-3">
                 <div className="flex min-w-0 items-start justify-between gap-3">
                   <div className="min-w-0 flex-1 space-y-0.5">
