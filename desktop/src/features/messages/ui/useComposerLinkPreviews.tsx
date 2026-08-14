@@ -186,7 +186,73 @@ function ComposerLinkPreviewCard({
   );
 }
 
-export function useComposerLinkPreviews(content: string, enabled = true) {
+export interface ComposerLinkPreviewInput {
+  content: string;
+  hrefs: Set<string>;
+  hrefVersions: Map<string, number>;
+  nextHrefVersion: number;
+}
+
+export function updateComposerLinkPreviewInput(
+  current: ComposerLinkPreviewInput,
+  content: string,
+): ComposerLinkPreviewInput {
+  const nextHrefs = new Set(
+    extractSupportedLinkPreviews(content)
+      .filter((preview) =>
+        preview.href.startsWith("buzz://")
+          ? true
+          : isValidLinkPreviewSnapshotCanonicalUrl(preview.href),
+      )
+      .map((preview) => preview.href),
+  );
+  const nextVersions = new Map<string, number>();
+  let nextHrefVersion = current.nextHrefVersion;
+  for (const href of nextHrefs) {
+    if (current.hrefs.has(href)) {
+      const version = current.hrefVersions.get(href);
+      if (version !== undefined) nextVersions.set(href, version);
+      continue;
+    }
+    nextHrefVersion += 1;
+    nextVersions.set(href, nextHrefVersion);
+  }
+  return {
+    content,
+    hrefs: nextHrefs,
+    hrefVersions: nextVersions,
+    nextHrefVersion,
+  };
+}
+
+export function useComposerLinkPreviewInput() {
+  const [input, setInput] = React.useState<ComposerLinkPreviewInput>(() => ({
+    content: "",
+    hrefs: new Set(),
+    hrefVersions: new Map(),
+    nextHrefVersion: 0,
+  }));
+  const update = React.useCallback(
+    (content: string) =>
+      setInput((current) => updateComposerLinkPreviewInput(current, content)),
+    [],
+  );
+  return [input, update] as const;
+}
+
+export function useManagedComposerLinkPreviews(enabled = true) {
+  const [input, updateContent] = useComposerLinkPreviewInput();
+  return {
+    ...useComposerLinkPreviews(input.content, enabled, input.hrefVersions),
+    updateContent,
+  };
+}
+
+export function useComposerLinkPreviews(
+  content: string,
+  enabled = true,
+  liveHrefVersions?: ReadonlyMap<string, number>,
+) {
   const [suppressed, setSuppressed] = React.useState(false);
   // Debounce the content that drives resolution so typing a URL character by
   // character does not churn a new candidate href (and a flickering card) per
@@ -225,8 +291,16 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   liveCandidatesRef.current = extractCandidates(content).map(
     (preview) => preview.href,
   );
+  const liveCandidates = extractCandidates(content).map(
+    (preview) => preview.href,
+  );
   const resolvedPreviews = useResolvedLinkPreviews(
     suppressed ? [] : candidates,
+    {
+      refetchNewNegatives: true,
+      liveHrefs: liveCandidates,
+      liveHrefVersions,
+    },
   );
   // Entity links resolve to null metadata when the relay lookup has nothing
   // for them; keep their safe fallback cards rather than dropping them.
