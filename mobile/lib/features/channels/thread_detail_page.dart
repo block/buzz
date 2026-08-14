@@ -126,18 +126,18 @@ class ThreadDetailPage extends HookConsumerWidget {
               threadHead,
             ...fetchedReplies,
           ];
-    final initialMessageIsPresent =
-        initialMessageId != null &&
-        allMsgs.any((message) => message.id == initialMessageId);
     final routeAnimation = ModalRoute.of(context)?.animation;
     final reducedLandingHighlightMotion = MediaQuery.disableAnimationsOf(
       context,
     );
     final highlightedMessageId = useState<String?>(null);
+    final initialTargetReadyForHighlight = useState(false);
     useEffect(
       () {
         final messageId = initialMessageId;
-        if (messageId == null || !initialMessageIsPresent) return null;
+        if (messageId == null || !initialTargetReadyForHighlight.value) {
+          return null;
+        }
         var disposed = false;
         Timer? revealTimer;
         Timer? dismissTimer;
@@ -183,7 +183,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       },
       [
         initialMessageId,
-        initialMessageIsPresent,
+        initialTargetReadyForHighlight.value,
         reducedLandingHighlightMotion,
         routeAnimation,
       ],
@@ -204,6 +204,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final listViewport = useMemoized(LaidOutViewport.new);
     useEffect(() => listViewport.dispose, [listViewport]);
     final didJumpToInitialMessage = useRef(false);
+    final initialHighlightTargetIndex = useState<int?>(null);
     final followsThreadTail = useRef(false);
     final userOptedOutOfTailFollow = useRef(false);
     final userDragDetachedTailFollow = useRef(false);
@@ -369,10 +370,42 @@ class ThreadDetailPage extends HookConsumerWidget {
           followsThreadTail.value = false;
           isAtThreadTail.value = false;
           itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
+          initialHighlightTargetIndex.value = targetIndex;
         },
       );
       return null;
     }, [initialMessageId, fetchedReplies, replies.length]);
+
+    useEffect(
+      () {
+        final targetIndex = initialHighlightTargetIndex.value;
+        if (targetIndex == null || initialTargetReadyForHighlight.value) {
+          return null;
+        }
+        var completionScheduled = false;
+        void markReadyAfterTargetLayout() {
+          if (completionScheduled ||
+              !itemPositionsListener.itemPositions.value.any(
+                (position) => position.index == targetIndex,
+              )) {
+            return;
+          }
+          completionScheduled = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (context.mounted) initialTargetReadyForHighlight.value = true;
+          });
+        }
+
+        itemPositionsListener.itemPositions.addListener(
+          markReadyAfterTargetLayout,
+        );
+        markReadyAfterTargetLayout();
+        return () => itemPositionsListener.itemPositions.removeListener(
+          markReadyAfterTargetLayout,
+        );
+      },
+      [initialHighlightTargetIndex.value, initialTargetReadyForHighlight.value],
+    );
 
     // A top-anchored list doesn't stick to the newest item the way the old
     // reversed one did, so follow the tail explicitly: when a reply arrives

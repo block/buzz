@@ -4350,6 +4350,8 @@ void main() {
 
       await tester.pump(threadRoute.transitionDuration);
       expect(threadRoute.animation!.status, AnimationStatus.completed);
+      await tester.pump();
+      await tester.pump();
       final landedDecoration =
           tester
                   .widget<DecoratedBox>(
@@ -4380,6 +4382,91 @@ void main() {
                   .decoration
               as BoxDecoration;
       expect(visibleDecoration.color!.a, closeTo(0.12 * 0.4, 0.001));
+    });
+
+    testWidgets('waits for a delayed target jump before highlighting', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+      ];
+      final timelineMessages = formatTimeline([root, ...replies]);
+      final threadHead = timelineMessages.first;
+      final replyCompleter = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          pendingThreadReplies: {'root': replyCompleter.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ThreadDetailPage(
+                        threadHead: threadHead,
+                        allMessages: timelineMessages,
+                        channelId: _testChannel.id,
+                        currentPubkey: null,
+                        isMember: true,
+                        isArchived: false,
+                        initialMessageId: 'reply-30',
+                      ),
+                    ),
+                  ),
+                  child: const Text('Open delayed thread'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open delayed thread'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 4));
+
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-30')),
+        findsNothing,
+      );
+
+      replyCompleter.complete(replies);
+      await tester.pumpAndSettle();
+
+      final target = find.byKey(const ValueKey('thread-message-reply-30'));
+      expect(target, findsOneWidget);
+      final landedDecoration =
+          tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
+      expect(landedDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+      final enteringDecoration =
+          tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
+      expect(enteringDecoration.color!.a, greaterThan(0));
+      expect(enteringDecoration.color!.a, lessThan(0.12 * 0.4));
     });
 
     testWidgets('opens a nested reply in its direct-parent thread', (
