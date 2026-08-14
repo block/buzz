@@ -2305,6 +2305,61 @@ void main() {
       },
     );
 
+    testWidgets(
+      'seeds an already-visible Android keyboard into the channel tail layout',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          addTearDown(tester.view.reset);
+
+          final messages = [
+            for (var i = 0; i < 20; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: i == 19
+                    ? List.filled(8, 'Tall latest message').join('\n')
+                    : 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: messages,
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final latestMessage = find.byKey(
+            const ValueKey('channel-message-group-msg19'),
+          );
+          final composerDock = find.byKey(
+            const ValueKey('channel-composer-dock'),
+          );
+          expect(latestMessage, findsOneWidget);
+          expect(
+            tester.getBottomLeft(latestMessage).dy,
+            closeTo(tester.getTopLeft(composerDock).dy, 1),
+          );
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+          );
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
     testWidgets('keeps a short followed tail flush through composer resize', (
       tester,
     ) async {
@@ -2510,6 +2565,101 @@ void main() {
         findsNothing,
       );
     });
+
+    testWidgets(
+      'Latest reveals the channel tail while the Android keyboard stays open',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+          addTearDown(tester.view.reset);
+
+          final messages = [
+            for (var i = 0; i < 40; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: messages,
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(find.text('Message #general'));
+          await tester.pump();
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          await tester.pump();
+          await tester.pump(androidImeMetricsSettleDelay);
+          await tester.pumpAndSettle();
+
+          final textField = tester.widget<TextField>(find.byType(TextField));
+          expect(textField.focusNode?.hasFocus, isTrue);
+
+          final messageList = find.byKey(
+            const ValueKey('channel-message-list'),
+          );
+          final messageListElement = tester.element(messageList);
+          UserScrollNotification(
+            metrics: FixedScrollMetrics(
+              minScrollExtent: 0,
+              maxScrollExtent: 100,
+              pixels: 0,
+              viewportDimension: 100,
+              axisDirection: AxisDirection.down,
+              devicePixelRatio: 1,
+            ),
+            context: messageListElement,
+            direction: ScrollDirection.reverse,
+          ).dispatch(messageListElement);
+          tester
+              .widget<ScrollablePositionedList>(messageList)
+              .itemScrollController!
+              .jumpTo(index: 39);
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsOneWidget,
+          );
+
+          await tester.tap(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+          );
+          await tester.pumpAndSettle();
+
+          final latestMessage = find.byKey(
+            const ValueKey('channel-message-group-msg39'),
+          );
+          final composerDock = find.byKey(
+            const ValueKey('channel-composer-dock'),
+          );
+          expect(latestMessage, findsOneWidget);
+          expect(textField.focusNode?.hasFocus, isTrue);
+          expect(
+            tester.getBottomLeft(latestMessage).dy,
+            closeTo(tester.getTopLeft(composerDock).dy, 1),
+          );
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+          );
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
 
     testWidgets(
       'keeps the Latest gap stable above the Android composer and keyboard',

@@ -35,17 +35,23 @@ class _MessageList extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final appView = View.of(context);
     final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final isLoadingOlder = useState(false);
     final isAtLatest = useState(true);
-    final settledImeBottomInset = useState(0.0);
+    final settledImeBottomInset = useState(
+      usesFixedAndroidImeViewport
+          ? appView.viewInsets.bottom / appView.devicePixelRatio
+          : 0.0,
+    );
     final hasUserScrolled = useState(false);
-    final followsLatest = useRef(
+    final followsLatest = useState(
       initialMessageId == null && initialThreadRootId == null,
     );
     final isAutoScrolling = useRef(false);
+    final latestNavigationRequest = useState(0);
     final latestRealignmentQueued = useRef(false);
     final latestEntryId = entries.isEmpty ? null : entries.last.message.id;
     final previousLatestEntryId = useRef<String?>(null);
@@ -59,7 +65,6 @@ class _MessageList extends HookConsumerWidget {
     final hasUnreadDeepLink =
         initialMessageId != null || initialThreadRootId != null;
     final notifier = ref.read(channelMessagesProvider(channelId).notifier);
-    final appView = View.of(context);
     final settledImeLift = usesFixedAndroidImeViewport
         ? (settledImeBottomInset.value -
                   MediaQuery.viewPaddingOf(context).bottom)
@@ -173,11 +178,11 @@ class _MessageList extends HookConsumerWidget {
           : 0.0;
     }
 
-    Future<void> scrollToLatest() async {
-      if (!itemScrollController.isAttached || isAutoScrolling.value) return;
-      followsLatest.value = true;
-      hasUserScrolled.value = false;
-      isAutoScrolling.value = true;
+    Future<void> performLatestNavigation() async {
+      if (!context.mounted || !itemScrollController.isAttached) {
+        isAutoScrolling.value = false;
+        return;
+      }
       try {
         await itemScrollController.scrollTo(
           index: 0,
@@ -192,6 +197,24 @@ class _MessageList extends HookConsumerWidget {
         isAutoScrolling.value = false;
       }
     }
+
+    void scrollToLatest() {
+      if (!itemScrollController.isAttached || isAutoScrolling.value) return;
+      isAutoScrolling.value = true;
+      followsLatest.value = true;
+      hasUserScrolled.value = false;
+      latestNavigationRequest.value += 1;
+    }
+
+    useEffect(() {
+      if (latestNavigationRequest.value == 0) return null;
+      var cancelled = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (cancelled) return;
+        unawaited(performLatestNavigation());
+      });
+      return () => cancelled = true;
+    }, [latestNavigationRequest.value]);
 
     Future<void> scrollToOldestUnread() async {
       final targetIndex = reversedIndexOf(oldestUnreadMessageId.value);
@@ -232,6 +255,7 @@ class _MessageList extends HookConsumerWidget {
 
     void realignLatestAfterLayoutChange() {
       if (latestRealignmentQueued.value ||
+          isAutoScrolling.value ||
           !followsLatest.value ||
           hasUserScrolled.value) {
         return;
@@ -241,6 +265,7 @@ class _MessageList extends HookConsumerWidget {
         latestRealignmentQueued.value = false;
         if (!context.mounted ||
             !itemScrollController.isAttached ||
+            isAutoScrolling.value ||
             !followsLatest.value ||
             hasUserScrolled.value ||
             latestIsAtBoundary()) {
@@ -248,7 +273,9 @@ class _MessageList extends HookConsumerWidget {
         }
         // A dock or keyboard resize is a layout correction, not a navigation
         // action. Keeping it instant avoids restarting a smooth scroll for
-        // every position report while the viewport settles.
+        // every position report while the viewport settles. The rebuilt list
+        // padding already owns the composer/IME offset; the default alignment
+        // also keeps short timelines flush with that padding.
         itemScrollController.jumpTo(index: 0);
       });
     }
