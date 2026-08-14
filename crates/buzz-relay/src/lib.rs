@@ -35,6 +35,9 @@ pub mod protocol;
 pub mod push_runtime;
 /// Axum router construction.
 pub mod router;
+/// Twilio outbound SMS sink — sends replies in the SMS-inbox channel back
+/// to the originating phone number.
+pub(crate) mod sms_sink;
 /// Shared application state.
 pub mod state;
 pub mod storage_sweep;

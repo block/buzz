@@ -288,6 +288,18 @@ pub struct Config {
     /// per-community — multi-community SMS routing is a future enhancement.
     /// Inbound SMS is rejected (rather than silently dropped) when unset.
     pub twilio_sms_inbox_channel: Option<Uuid>,
+    /// Twilio Account SID, used as the outbound Messages API's URL path
+    /// component and Basic Auth username (`twilio_auth_token` is the
+    /// password — the same secret already used to validate inbound
+    /// signatures). Outbound sending is skipped when unset.
+    pub twilio_account_sid: Option<String>,
+    /// The Twilio phone number (E.164) outbound SMS replies are sent from.
+    /// Outbound sending is skipped when unset.
+    pub twilio_from_number: Option<String>,
+    /// Base URL for the Twilio REST API. Defaults to `https://api.twilio.com`
+    /// when unset; overridable so tests can point outbound sends at a local
+    /// mock server instead of the real API.
+    pub twilio_api_base_url: Option<String>,
 
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
@@ -1015,6 +1027,15 @@ impl Config {
         let twilio_sms_inbox_channel = std::env::var("TWILIO_SMS_INBOX_CHANNEL")
             .ok()
             .and_then(|s| Uuid::parse_str(s.trim()).ok());
+        let twilio_account_sid = std::env::var("TWILIO_ACCOUNT_SID")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let twilio_from_number = std::env::var("TWILIO_FROM_NUMBER")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let twilio_api_base_url = std::env::var("TWILIO_API_BASE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
 
         Ok(Self {
             bind_addr,
@@ -1067,6 +1088,9 @@ impl Config {
             twilio_auth_token,
             twilio_webhook_url,
             twilio_sms_inbox_channel,
+            twilio_account_sid,
+            twilio_from_number,
+            twilio_api_base_url,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
