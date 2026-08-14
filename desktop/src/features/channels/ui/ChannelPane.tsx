@@ -622,6 +622,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               !useFocusThreadDrawer &&
               Boolean(openThreadHeadId)
             }
+            openThreadHeadId={openThreadHeadId}
             threadUnreadCounts={threadUnreadCounts}
           />
           {isNonMemberView ? (

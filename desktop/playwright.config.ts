@@ -20,6 +20,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/smoke.spec.ts",
+        "**/open-thread-highlight.spec.ts",
         "**/search-scope-screenshots.spec.ts",
         "**/onboarding-docked-cta-screenshots.spec.ts",
         "**/identity-key-help.spec.ts",

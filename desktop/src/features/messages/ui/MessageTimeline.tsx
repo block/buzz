@@ -117,6 +117,10 @@ type MessageTimelineProps = {
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
   splitThreadPanelOpen?: boolean;
+  /** Root id of the thread currently open in the thread panel, or null. The
+   *  matching main-timeline row is marked so the open thread stays
+   *  identifiable while the channel scrolls beside the panel. */
+  openThreadHeadId?: string | null;
   /** Event id of the oldest unread top-level message at channel open, or null. */
   firstUnreadMessageId?: string | null;
   /** Count of unread top-level messages at channel open. */
@@ -206,6 +210,7 @@ const MessageTimelineBase = React.forwardRef<
     targetMessageId = null,
     onTargetReached,
     splitThreadPanelOpen = false,
+    openThreadHeadId = null,
     firstUnreadMessageId = null,
     unreadCount = 0,
     threadUnreadCounts,
@@ -650,6 +655,7 @@ const MessageTimelineBase = React.forwardRef<
       firstUnreadMessageId={firstUnreadMessageId}
       followThreadById={followThreadById}
       highlightedMessageId={highlightedMessageId}
+      openThreadHeadId={openThreadHeadId}
       huddleMemberPubkeys={huddleMemberPubkeys}
       huddleMemberPubkeysPending={huddleMemberPubkeysPending}
       isFollowingThreadById={isFollowingThreadById}

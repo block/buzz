@@ -17,6 +17,15 @@ type ToggleReaction = (
   remove: boolean,
 ) => Promise<void>;
 
+/** Persistent marker for the main-timeline row whose thread is open in the
+ *  thread panel: a left accent rail plus a faint tint. Unlike the
+ *  search/route highlight it does not fade — it lasts as long as the panel
+ *  is open, which is the whole point of it. The rail is a pseudo-element so
+ *  the row keeps its exact layout (the timeline is virtualized and measures
+ *  row heights). */
+const OPEN_THREAD_HEAD_CLASSNAME =
+  "rounded-2xl bg-primary/10 after:pointer-events-none after:absolute after:inset-y-1 after:left-0 after:w-0.5 after:rounded-full after:bg-primary after:content-['']";
+
 type SystemRowProps = {
   currentPubkey?: string;
   entries?: MainTimelineEntry[];
@@ -73,6 +82,10 @@ type MessageRowItemProps = {
   isFollowedByContinuation?: boolean;
   isFollowingThreadById?: (rootId: string) => boolean;
   isUnread?: boolean;
+  /** Root id of the thread currently open in the thread panel, or null. Marks
+   *  its row in the main timeline so the open thread stays identifiable while
+   *  the channel keeps scrolling beside the panel. */
+  openThreadHeadId?: string | null;
   playEntrance?: boolean;
   onEntranceComplete?: (messageId: string) => void;
   onDelete?: (message: TimelineMessage) => void;
@@ -105,6 +118,7 @@ export function MessageRowItem({
   isFollowedByContinuation = false,
   isFollowingThreadById,
   isUnread,
+  openThreadHeadId,
   playEntrance = false,
   onEntranceComplete,
   onDelete,
@@ -130,6 +144,8 @@ export function MessageRowItem({
   );
   const canDelete = canManage && onDelete ? onDelete : undefined;
   const canEdit = canManage && onEdit ? onEdit : undefined;
+  const isOpenThreadHead =
+    Boolean(openThreadHeadId) && message.id === openThreadHeadId;
 
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;
@@ -139,7 +155,9 @@ export function MessageRowItem({
           "group/message relative mx-1 mb-1 flex flex-col gap-0 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
           isHighlighted &&
             "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
+          isOpenThreadHead && OPEN_THREAD_HEAD_CLASSNAME,
         )}
+        data-open-thread-head={isOpenThreadHead ? "true" : undefined}
       >
         <MessageRow
           channelId={channelId}
@@ -196,9 +214,11 @@ export function MessageRowItem({
   return (
     <div
       className={cn(
-        "flex flex-col gap-1",
+        "relative flex flex-col gap-1",
         isFollowedByContinuation ? "pb-0" : "pb-2.5",
+        isOpenThreadHead && OPEN_THREAD_HEAD_CLASSNAME,
       )}
+      data-open-thread-head={isOpenThreadHead ? "true" : undefined}
     >
       <MessageRow
         channelId={channelId}

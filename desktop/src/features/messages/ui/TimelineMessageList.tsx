@@ -55,6 +55,8 @@ type TimelineMessageListProps = {
   firstUnreadMessageId?: string | null;
   followThreadById?: (rootId: string) => void;
   highlightedMessageId?: string | null;
+  /** Root id of the thread open in the thread panel; marks its timeline row. */
+  openThreadHeadId?: string | null;
   isFollowingThreadById?: (rootId: string) => boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   entranceMessageId?: string | null;
@@ -130,6 +132,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   firstUnreadMessageId = null,
   followThreadById,
   highlightedMessageId = null,
+  openThreadHeadId = null,
   huddleMemberPubkeys,
   huddleMemberPubkeysPending = false,
   isFollowingThreadById,
@@ -249,6 +252,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               followThreadById={followThreadById}
               footer={messageFooters?.[item.entry.message.id] ?? null}
               highlightedMessageId={highlightedMessageId}
+              openThreadHeadId={openThreadHeadId}
               huddleMemberPubkeys={huddleMemberPubkeys}
               huddleMemberPubkeysPending={huddleMemberPubkeysPending}
               hideAgentAccessBadges={hideAgentAccessBadges}
@@ -290,6 +294,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       currentPubkey,
       followThreadById,
       highlightedMessageId,
+      openThreadHeadId,
       huddleMemberPubkeys,
       huddleMemberPubkeysPending,
       hideAgentAccessBadges,
