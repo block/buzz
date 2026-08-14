@@ -12,6 +12,7 @@ enum SystemEventType {
   memberRemoved,
   topicChanged,
   purposeChanged,
+  nameChanged,
   channelCreated,
   channelArchived,
   channelUnarchived,
@@ -27,6 +28,8 @@ class SystemEvent {
   final String? topic;
   final String? purpose;
   final String? ephemeralChannelId;
+  final String? previousName;
+  final String? name;
 
   const SystemEvent({
     required this.type,
@@ -35,6 +38,8 @@ class SystemEvent {
     this.topic,
     this.purpose,
     this.ephemeralChannelId,
+    this.previousName,
+    this.name,
   });
 
   /// Parse a system event from the JSON content of a kind-40099 event.
@@ -57,6 +62,7 @@ class SystemEvent {
       'member_removed' => SystemEventType.memberRemoved,
       'topic_changed' => SystemEventType.topicChanged,
       'purpose_changed' => SystemEventType.purposeChanged,
+      'name_changed' => SystemEventType.nameChanged,
       'channel_created' => SystemEventType.channelCreated,
       'channel_archived' => SystemEventType.channelArchived,
       'channel_unarchived' => SystemEventType.channelUnarchived,
@@ -65,12 +71,22 @@ class SystemEvent {
 
     if (type == null) return null;
 
+    final previousName = _readString(json, 'previous_name');
+    final name = _readString(json, 'name');
+    if (type == SystemEventType.nameChanged &&
+        (name == null ||
+            (json.containsKey('previous_name') && previousName == null))) {
+      return null;
+    }
+
     return SystemEvent(
       type: type,
       actorPubkey: _readString(json, 'actor'),
       targetPubkey: _readString(json, 'target'),
       topic: _readString(json, 'topic'),
       purpose: _readString(json, 'purpose'),
+      previousName: previousName,
+      name: name,
     );
   }
 
@@ -121,6 +137,10 @@ class SystemEvent {
         '$actor ${_describeTextFieldChange('topic', topic)}',
       SystemEventType.purposeChanged =>
         '$actor ${_describeTextFieldChange('purpose', purpose)}',
+      SystemEventType.nameChanged =>
+        previousName == null
+            ? '$actor renamed the channel to "$name"'
+            : '$actor renamed the channel from "$previousName" to "$name"',
       SystemEventType.channelCreated => '$actor created this channel',
       SystemEventType.channelArchived => '$actor archived this channel',
       SystemEventType.channelUnarchived => '$actor unarchived this channel',

@@ -185,6 +185,57 @@ void main() {
       }
     });
 
+    test('parses channel name changes', () {
+      final event = SystemEvent.fromContent(
+        jsonEncode({
+          'type': 'name_changed',
+          'actor': 'pk1',
+          'previous_name': 'old-name',
+          'name': 'new-name',
+        }),
+      );
+
+      expect(event, isNotNull);
+      expect(event!.type, SystemEventType.nameChanged);
+      expect(event.actorPubkey, 'pk1');
+      expect(event.previousName, 'old-name');
+      expect(event.name, 'new-name');
+    });
+
+    test('parses a channel name change without a previous name', () {
+      final event = SystemEvent.fromContent(
+        jsonEncode({
+          'type': 'name_changed',
+          'actor': 'pk1',
+          'name': 'new-name',
+        }),
+      );
+
+      expect(event, isNotNull);
+      expect(event!.previousName, isNull);
+      expect(event.name, 'new-name');
+    });
+
+    test('rejects malformed channel name changes', () {
+      expect(
+        SystemEvent.fromContent(
+          jsonEncode({'type': 'name_changed', 'actor': 'pk1'}),
+        ),
+        isNull,
+      );
+      expect(
+        SystemEvent.fromContent(
+          jsonEncode({
+            'type': 'name_changed',
+            'actor': 'pk1',
+            'previous_name': 123,
+            'name': 'new-name',
+          }),
+        ),
+        isNull,
+      );
+    });
+
     test('returns null for unknown type', () {
       final event = SystemEvent.fromContent(
         jsonEncode({'type': 'unknown_type'}),
@@ -332,6 +383,31 @@ void main() {
           topic: '  Release v2  ',
         ).describe(resolve),
         'Alice changed the topic to "Release v2"',
+      );
+    });
+
+    test('name_changed', () {
+      final event = SystemEvent(
+        type: SystemEventType.nameChanged,
+        actorPubkey: 'pk1',
+        previousName: 'old-name',
+        name: 'new-name',
+      );
+      expect(
+        event.describe(resolve),
+        'Alice renamed the channel from "old-name" to "new-name"',
+      );
+    });
+
+    test('name_changed without previous name', () {
+      final event = SystemEvent(
+        type: SystemEventType.nameChanged,
+        actorPubkey: 'pk1',
+        name: 'new-name',
+      );
+      expect(
+        event.describe(resolve),
+        'Alice renamed the channel to "new-name"',
       );
     });
 
