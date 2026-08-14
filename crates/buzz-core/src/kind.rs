@@ -83,8 +83,18 @@ pub const KIND_NOSTR_IDENTITY_BINDING: u32 = 24243;
 pub const KIND_HTTP_AUTH: u32 = 27235;
 
 // NEW: Buzz command kinds (Pure Nostr plan)
-/// Agent metadata + owner reference (replaceable, agent-authored).
+/// Public runtime routing advertisement (replaceable, agent-authored).
+///
+/// This event intentionally contains only information that is safe to expose
+/// community-wide: the agent's name, response mode, and subscribed channels.
+/// Private response allowlists belong in the shared-gated persona definition,
+/// never in this event.
 pub const KIND_AGENT_PROFILE: u32 = 10100;
+/// Channel-add policy command (replaceable, agent-authored).
+///
+/// Kept separate from [`KIND_AGENT_PROFILE`] so a policy change cannot replace
+/// an agent's public runtime routing advertisement.
+pub const KIND_AGENT_CHANNEL_ADD_POLICY: u32 = 10101;
 
 /// NIP-AE: Agent Engram (parameterized replaceable, agent-authored).
 ///
@@ -650,6 +660,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIFT_WRAP,
     KIND_FILE_METADATA,
     KIND_AGENT_PROFILE,
+    KIND_AGENT_CHANNEL_ADD_POLICY,
     KIND_AGENT_ENGRAM,
     KIND_EVENT_REMINDER,
     KIND_PERSONA,
@@ -853,6 +864,7 @@ pub fn event_kind_i32(event: &nostr::Event) -> i32 {
 
 // Compile-time: new kinds are in the expected ranges.
 const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–19999
+const _: () = assert!(is_replaceable(KIND_AGENT_CHANNEL_ADD_POLICY)); // 10101 ∈ 10000–19999
 const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999

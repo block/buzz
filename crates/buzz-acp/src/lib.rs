@@ -94,73 +94,80 @@ fn build_agent_profile_event(
     keys: &nostr::Keys,
     name: &str,
     respond_to: &RespondTo,
-    respond_to_allowlist: &HashSet<String>,
     channel_ids: &HashSet<Uuid>,
+    created_at: nostr::Timestamp,
 ) -> Result<nostr::Event, relay::RelayError> {
     let mut channel_ids: Vec<String> = channel_ids.iter().map(Uuid::to_string).collect();
     channel_ids.sort();
-    let mut respond_to_allowlist: Vec<&str> =
-        respond_to_allowlist.iter().map(String::as_str).collect();
-    respond_to_allowlist.sort_unstable();
     let content = serde_json::json!({
         "name": name,
         "agent_type": "agent",
         "channel_ids": channel_ids,
         "respond_to": respond_to.to_string(),
-        "respond_to_allowlist": respond_to_allowlist,
         "status": "online",
     })
     .to_string();
 
     nostr::EventBuilder::new(nostr::Kind::Custom(KIND_AGENT_PROFILE as u16), content)
         .tags([])
+        .custom_created_at(created_at)
         .sign_with_keys(keys)
         .map_err(|error| relay::RelayError::Http(format!("agent profile sign error: {error}")))
 }
 
-async fn publish_agent_profile(
-    rest_client: &relay::RestClient,
-    keys: &nostr::Keys,
-    respond_to: &RespondTo,
-    respond_to_allowlist: &HashSet<String>,
-    channel_ids: &HashSet<Uuid>,
-) -> Result<(), relay::RelayError> {
-    let name = std::env::var("BUZZ_ACP_AGENT_NAME")
-        .or_else(|_| std::env::var("AGENT_NAME"))
-        .unwrap_or_else(|_| keys.public_key().to_hex());
-    let event =
-        build_agent_profile_event(keys, &name, respond_to, respond_to_allowlist, channel_ids)?;
-
-    // Agent profiles are durable replaceable events. The HTTP bridge retries
-    // their submission, unlike the socket publisher which is tuned for
-    // disposable presence and typing updates.
-    rest_client.submit_event(&event).await?;
-    Ok(())
-}
-
-fn spawn_agent_profile_refresh(
+/// Serializes durable agent-profile writes from the harness event loop.
+///
+/// Membership notifications are processed in order by that loop. Keeping the
+/// publisher there (rather than spawning snapshots) means a later remove cannot
+/// be overtaken by a delayed earlier add. The clock also makes same-second
+/// replaceable events deterministic at the relay.
+struct AgentProfilePublisher {
     rest_client: relay::RestClient,
     keys: nostr::Keys,
+    name: String,
     respond_to: RespondTo,
-    respond_to_allowlist: HashSet<String>,
-    channel_ids: HashSet<Uuid>,
-) {
-    tokio::spawn(async move {
-        if let Err(error) = publish_agent_profile(
-            &rest_client,
-            &keys,
-            &respond_to,
-            &respond_to_allowlist,
-            &channel_ids,
-        )
-        .await
-        {
-            tracing::warn!(
-                channel_count = channel_ids.len(),
-                "failed to refresh agent profile after membership change: {error}"
-            );
+    last_created_at: u64,
+}
+
+fn next_profile_created_at(now: u64, prior_created_at: u64) -> u64 {
+    now.max(prior_created_at.saturating_add(1))
+}
+
+impl AgentProfilePublisher {
+    fn new(rest_client: relay::RestClient, keys: nostr::Keys, respond_to: RespondTo) -> Self {
+        let name = std::env::var("BUZZ_ACP_AGENT_NAME")
+            .or_else(|_| std::env::var("AGENT_NAME"))
+            .unwrap_or_else(|_| keys.public_key().to_hex());
+        Self {
+            rest_client,
+            keys,
+            name,
+            respond_to,
+            last_created_at: 0,
         }
-    });
+    }
+
+    fn next_created_at(&mut self, now: u64) -> nostr::Timestamp {
+        let created_at = next_profile_created_at(now, self.last_created_at);
+        self.last_created_at = created_at;
+        nostr::Timestamp::from(created_at)
+    }
+
+    async fn publish(&mut self, channel_ids: &HashSet<Uuid>) -> Result<(), relay::RelayError> {
+        let created_at = self.next_created_at(nostr::Timestamp::now().as_secs());
+        let event = build_agent_profile_event(
+            &self.keys,
+            &self.name,
+            &self.respond_to,
+            channel_ids,
+            created_at,
+        )?;
+
+        // Agent profiles are durable replaceable events. The HTTP bridge retries
+        // their submission, unlike the socket publisher which is tuned for
+        // disposable presence and typing updates.
+        self.rest_client.submit_event(&event).await.map(|_| ())
+    }
 }
 
 fn emit_runtime_lifecycle(
@@ -2042,14 +2049,14 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    match publish_agent_profile(
-        &relay.rest_client(),
-        &config.keys,
-        &config.respond_to,
-        &config.respond_to_allowlist,
-        &subscribed_channel_ids,
-    )
-    .await
+    let mut agent_profile_publisher = AgentProfilePublisher::new(
+        relay.rest_client(),
+        config.keys.clone(),
+        config.respond_to.clone(),
+    );
+    match agent_profile_publisher
+        .publish(&subscribed_channel_ids)
+        .await
     {
         Ok(()) => tracing::info!(
             channel_count = subscribed_channel_ids.len(),
@@ -2599,13 +2606,15 @@ async fn tokio_main() -> Result<()> {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
                                             subscribed_channel_ids.insert(ch);
-                                            spawn_agent_profile_refresh(
-                                                relay.rest_client(),
-                                                config.keys.clone(),
-                                                config.respond_to.clone(),
-                                                config.respond_to_allowlist.clone(),
-                                                subscribed_channel_ids.clone(),
-                                            );
+                                            if let Err(error) = agent_profile_publisher
+                                                .publish(&subscribed_channel_ids)
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    channel_count = subscribed_channel_ids.len(),
+                                                    "failed to refresh agent profile after membership change: {error}"
+                                                );
+                                            }
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
@@ -2616,13 +2625,15 @@ async fn tokio_main() -> Result<()> {
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
                                     }
-                                    spawn_agent_profile_refresh(
-                                        relay.rest_client(),
-                                        config.keys.clone(),
-                                        config.respond_to.clone(),
-                                        config.respond_to_allowlist.clone(),
-                                        subscribed_channel_ids.clone(),
-                                    );
+                                    if let Err(error) = agent_profile_publisher
+                                        .publish(&subscribed_channel_ids)
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            channel_count = subscribed_channel_ids.len(),
+                                            "failed to refresh agent profile after membership change: {error}"
+                                        );
+                                    }
                                     // Drain queued events and invalidate sessions for the
                                     // removed channel. Events already in-flight will
                                     // complete normally (the relay may reject actions if
@@ -5167,8 +5178,8 @@ mod agent_profile_tests {
             &keys,
             "Monty",
             &RespondTo::Allowlist,
-            &HashSet::from(["b".repeat(64), "a".repeat(64)]),
             &HashSet::from([channel_b, channel_a]),
+            nostr::Timestamp::from(1_000),
         )
         .expect("profile should sign");
         let content: serde_json::Value =
@@ -5177,9 +5188,9 @@ mod agent_profile_tests {
         assert_eq!(event.kind.as_u16(), KIND_AGENT_PROFILE as u16);
         assert_eq!(content["name"], "Monty");
         assert_eq!(content["respond_to"], "allowlist");
-        assert_eq!(
-            content["respond_to_allowlist"],
-            serde_json::json!(["a".repeat(64), "b".repeat(64)])
+        assert!(
+            content.get("respond_to_allowlist").is_none(),
+            "the public runtime profile must not disclose private allowlist pubkeys"
         );
         let mut expected_channel_ids = vec![channel_a.to_string(), channel_b.to_string()];
         expected_channel_ids.sort();
@@ -5187,6 +5198,43 @@ mod agent_profile_tests {
             content["channel_ids"],
             serde_json::json!(expected_channel_ids)
         );
+    }
+
+    #[test]
+    fn newest_membership_profile_wins_even_if_the_older_publish_arrives_last() {
+        let keys = nostr::Keys::generate();
+        let channel = Uuid::new_v4();
+        let add_created_at = next_profile_created_at(1_000, 0);
+        let remove_created_at = next_profile_created_at(1_000, add_created_at);
+        let add = build_agent_profile_event(
+            &keys,
+            "Monty",
+            &RespondTo::Anyone,
+            &HashSet::from([channel]),
+            nostr::Timestamp::from(add_created_at),
+        )
+        .expect("add profile should sign");
+        let remove = build_agent_profile_event(
+            &keys,
+            "Monty",
+            &RespondTo::Anyone,
+            &HashSet::new(),
+            nostr::Timestamp::from(remove_created_at),
+        )
+        .expect("remove profile should sign");
+
+        // Deliver the remove before the delayed add. NIP replaceable-event
+        // selection retains the higher timestamp, so the retained head still
+        // reflects the final membership state.
+        assert!(remove.created_at > add.created_at);
+        let retained = if remove.created_at > add.created_at {
+            &remove
+        } else {
+            &add
+        };
+        let content: serde_json::Value =
+            serde_json::from_str(&retained.content).expect("profile content should be JSON");
+        assert_eq!(content["channel_ids"], serde_json::json!([]));
     }
 }
 
