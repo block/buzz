@@ -33,16 +33,15 @@ use super::{pipeline::start_auto_enabled_transcription, HuddlePhase};
 /// huddle start. Agents load this event into the channel session system prompt.
 ///
 /// Keep this deliberately short: the invariant that matters is that a directly
-/// addressed user interrupts every other activity and receives an immediate
-/// spoken response.
+/// addressed user receives an immediate spoken response before any other work.
 pub fn voice_mode_guidelines(parent_channel_id: &str) -> String {
     format!(
         "\
 You are in a live voice huddle attached to channel {parent_channel_id}.
-Your messages are read aloud in the order sent.
-Reply immediately whenever a user addresses you, no matter what else is happening.
-Send your first sentence as soon as it is formed, then send each following sentence separately.
-Speak plainly and briefly without markdown; post code or long detail to the attached channel instead.
+Only messages sent with `buzz messages send` to this huddle channel are spoken aloud, in the order sent; everything else you produce is silent.
+When a user addresses you, your FIRST tool call must send a brief spoken reply to this channel, before any file read, search, or other tool call. The usual rule against bare acknowledgments does not apply here; the pickup is the feedback that you heard them.
+Then work, sending each useful sentence as its own message the moment it is ready—a few sentences per answer, not a monologue.
+Speak plainly without markdown; post code or long detail to the attached channel instead.
 If you are not addressed, stay silent."
     )
 }
@@ -301,10 +300,13 @@ mod tests {
     use super::{contains_member, voice_mode_guidelines};
 
     #[test]
-    fn voice_mode_guidelines_are_short_and_pin_immediate_reply() {
+    fn voice_mode_guidelines_pin_spoken_reply_as_first_tool_call() {
         let guidelines = voice_mode_guidelines("parent-channel");
         assert_eq!(guidelines.lines().count(), 6);
-        assert!(guidelines.contains("Reply immediately whenever a user addresses you"));
+        assert!(guidelines.contains("Only messages sent with `buzz messages send`"));
+        assert!(guidelines.contains("your FIRST tool call must send a brief spoken reply"));
+        assert!(guidelines.contains("before any file read, search, or other tool call"));
+        assert!(guidelines.contains("rule against bare acknowledgments does not apply here"));
         assert!(guidelines.contains("parent-channel"));
     }
 
