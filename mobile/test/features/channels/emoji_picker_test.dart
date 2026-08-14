@@ -503,6 +503,45 @@ void main() {
       expect(selected, ['\u{261D}\u{1F3FD}']);
     });
 
+    testWidgets('skin tone choices paint their colors on a solid layer', (
+      tester,
+    ) async {
+      await _pumpPicker(tester, prefs: await _prefs());
+
+      await tester.tap(find.byTooltip('Skin tone'));
+      await tester.pumpAndSettle();
+
+      const expectedColors = [
+        Color(0xFFFFC93A),
+        Color(0xFFFFDAB7),
+        Color(0xFFE7B98F),
+        Color(0xFFC88C61),
+        Color(0xFFA46134),
+        Color(0xFF5D4437),
+      ];
+      for (final (index, expectedColor) in expectedColors.indexed) {
+        final decorations = tester
+            .widgetList<DecoratedBox>(
+              find.descendant(
+                of: find.byKey(ValueKey('emoji-skin-tone-dot-$index')),
+                matching: find.byType(DecoratedBox),
+              ),
+            )
+            .map((widget) => widget.decoration)
+            .whereType<BoxDecoration>();
+
+        expect(
+          decorations.any(
+            (decoration) =>
+                decoration.color == expectedColor &&
+                decoration.gradient == null &&
+                decoration.backgroundBlendMode == null,
+          ),
+          isTrue,
+        );
+      }
+    });
+
     testWidgets('a custom emoji emits :shortcode:', (tester) async {
       final selected = await _pumpPicker(tester, prefs: await _prefs());
 

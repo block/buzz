@@ -105,7 +105,10 @@ class _SkinToneSelector extends StatelessWidget {
             value: index,
             child: Row(
               children: [
-                _SkinToneDot(color: tone.color),
+                _SkinToneDot(
+                  key: ValueKey('emoji-skin-tone-dot-$index'),
+                  color: tone.color,
+                ),
                 const SizedBox(width: Grid.xs),
                 Expanded(child: Text(tone.label)),
                 if (index == value)
@@ -139,19 +142,36 @@ class _SkinToneDot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: color,
-        gradient: LinearGradient(
-          colors: [Colors.white.withValues(alpha: 0.2), Colors.transparent],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-        ),
-        backgroundBlendMode: BlendMode.overlay,
-        shape: BoxShape.circle,
-        border: Border.all(color: Colors.black.withValues(alpha: 0.8)),
+    return SizedBox.square(
+      dimension: 16,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          ClipOval(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Colors.white.withValues(alpha: 0.2),
+                    Colors.transparent,
+                  ],
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                ),
+              ),
+            ),
+          ),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.black.withValues(alpha: 0.8)),
+            ),
+          ),
+        ],
       ),
-      child: const SizedBox.square(dimension: 16),
     );
   }
 }
