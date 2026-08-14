@@ -708,6 +708,17 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+const GROK_DEFAULT_MODEL: &str = "grok-4.6";
+
+fn grok_agent_args(model: &str) -> Vec<String> {
+    vec![
+        "agent".to_string(),
+        "--model".to_string(),
+        model.to_string(),
+        "stdio".to_string(),
+    ]
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
@@ -716,12 +727,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
         // subscription-backed grok-4.6 release; an explicit model (from the
         // managed-agent config) is substituted as a discrete argument by
         // `effective_agent_args` below — never shell-interpolated.
-        "grok" => Some(vec![
-            "agent".to_string(),
-            "--model".to_string(),
-            "grok-4.6".to_string(),
-            "stdio".to_string(),
-        ]),
+        "grok" => Some(grok_agent_args(GROK_DEFAULT_MODEL)),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -823,19 +829,18 @@ pub fn effective_agent_args(
         .map(|arg| arg.trim().to_string())
         .filter(|arg| !arg.is_empty())
         .collect::<Vec<_>>();
-    if !normalized.is_empty() {
+    // Clap's historical cross-runtime default is a single `acp` argument.
+    // That is not a valid Grok launch override and must not shadow the managed
+    // model. Real operator overrides provide Grok's full argv and still win.
+    let is_legacy_acp_default = normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp");
+    if !normalized.is_empty() && !is_legacy_acp_default {
         return Ok(normalized);
     }
-    let resolved_model = model.unwrap_or("grok-4.6");
+    let resolved_model = model.unwrap_or(GROK_DEFAULT_MODEL);
     if resolved_model.trim().is_empty() {
         return Err("grok agent model must be a non-empty string".to_string());
     }
-    Ok(vec![
-        "agent".to_string(),
-        "--model".to_string(),
-        resolved_model.trim().to_string(),
-        "stdio".to_string(),
-    ])
+    Ok(grok_agent_args(resolved_model.trim()))
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -1673,6 +1678,16 @@ mod tests {
                 "agent".to_string(),
                 "--model".to_string(),
                 "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+        // Clap's legacy cross-runtime default must not shadow the Grok model.
+        assert_eq!(
+            effective_agent_args("grok", vec!["acp".into()], Some("grok-5")).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-5".to_string(),
                 "stdio".to_string()
             ]
         );

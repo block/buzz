@@ -134,6 +134,7 @@ mod tests {
         assert_eq!(grok.model_env_var, None);
         assert_eq!(grok.provider_env_var, None);
         assert_eq!(grok.required_normalized_fields, &["model"]);
+        assert_eq!(grok.auth_probe_args, Some(&["grok", "models"][..]));
     }
 
     #[test]
