@@ -558,6 +558,7 @@ function frameWith(text, generation = 1) {
     rows: [
       {
         line: 0,
+        wrapped: false,
         spans: [
           {
             style: { fg: 0, bg: 0, flags: 0 },
@@ -857,3 +858,180 @@ test("the handoff chord still toggles with the tab layer installed", async () =>
 // Splash animation lifecycle.
 //
 // This substrate is mounted unconditionally on every route and merely
+
+test("mirrors the active canvas grid into a selectable plain-text layer", async () => {
+  const subject = fixture({
+    sessionFrames: [
+      { frame: frameWith("one"), sessionId: "one" },
+      { frame: frameWith("two"), sessionId: "two" },
+    ],
+    sessions: TWO_SESSIONS,
+  });
+  await ready(subject.view);
+  const selectionLayer = subject.view.container.querySelector(
+    ".buzz-terminal-selection-layer",
+  );
+  await waitFor(() =>
+    assert.equal(
+      selectionLayer.querySelector("[data-terminal-selection-row='0']")
+        .textContent,
+      "one",
+    ),
+  );
+
+  subject.rerender({ sessions: SWAPPED_SESSIONS });
+  await waitFor(() =>
+    assert.equal(
+      selectionLayer.querySelector("[data-terminal-selection-row='0']")
+        .textContent,
+      "two",
+    ),
+  );
+});
+
+test("lays out screen rows separately but copies soft wraps as one logical line", async () => {
+  const frame = {
+    cursor: { column: 0, line: 0, visible: false },
+    full: true,
+    rows: [
+      {
+        line: 0,
+        wrapped: true,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "a", width: 1 },
+              { column: 1, text: "b", width: 1 },
+              { column: 2, text: "c", width: 1 },
+              { column: 3, text: "d", width: 1 },
+              { column: 4, text: " ", width: 1 },
+            ],
+          },
+        ],
+      },
+      {
+        line: 1,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "é", width: 1 },
+              { column: 1, text: "f", width: 1 },
+            ],
+          },
+        ],
+      },
+    ],
+    viewport: { columns: 5, generation: 1, screenLines: 2 },
+  };
+  const subject = fixture({
+    sessionFrames: [{ frame, sessionId: "one" }],
+  });
+  await ready(subject.view);
+  const selectionLayer = subject.view.container.querySelector(
+    ".buzz-terminal-selection-layer",
+  );
+  await waitFor(() =>
+    assert.equal(
+      selectionLayer.querySelectorAll("[data-terminal-selection-row]").length,
+      2,
+    ),
+  );
+  const rows = selectionLayer.querySelectorAll("[data-terminal-selection-row]");
+  assert.equal(rows[0].textContent, "abcd ");
+  assert.equal(rows[1].textContent, "éf");
+
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  const range = document.createRange();
+  range.setStart(rows[0].firstChild, 1);
+  range.setEnd(rows[1].firstChild, rows[1].textContent.length);
+  selection.addRange(range);
+  const copied = new Map();
+  fireEvent.copy(rows[0].parentElement, {
+    clipboardData: { setData: (type, value) => copied.set(type, value) },
+  });
+  assert.equal(copied.get("text/plain"), "bcd éf");
+});
+
+test("copy normalizes grapheme and empty-row DOM endpoints", async () => {
+  const frame = {
+    cursor: { column: 0, line: 0, visible: false },
+    full: true,
+    rows: [
+      {
+        line: 0,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "😀", width: 2 },
+              { column: 2, text: "é", width: 1 },
+            ],
+          },
+        ],
+      },
+      { line: 1, wrapped: false, spans: [] },
+      {
+        line: 2,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [{ column: 0, text: "界", width: 2 }],
+          },
+        ],
+      },
+    ],
+    viewport: { columns: 5, generation: 1, screenLines: 3 },
+  };
+  const subject = fixture({ sessionFrames: [{ frame, sessionId: "one" }] });
+  await ready(subject.view);
+  const layer = subject.view.container.querySelector(
+    ".buzz-terminal-selection-layer",
+  );
+  await waitFor(() =>
+    assert.equal(
+      layer.querySelectorAll("[data-terminal-selection-row]").length,
+      3,
+    ),
+  );
+  const rows = layer.querySelectorAll("[data-terminal-selection-row]");
+  const copyRange = (range) => {
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const copied = new Map();
+    fireEvent.copy(layer, {
+      clipboardData: { setData: (type, value) => copied.set(type, value) },
+    });
+    return copied.get("text/plain");
+  };
+
+  const splitEmoji = document.createRange();
+  splitEmoji.setStart(rows[0].firstChild, 1);
+  splitEmoji.setEnd(rows[0].firstChild, 1);
+  // A collapsed native selection does not dispatch custom clipboard content;
+  // span from the middle of the emoji into the combining cluster instead.
+  splitEmoji.setEnd(rows[0].firstChild, 3);
+  assert.equal(copyRange(splitEmoji), "😀é");
+
+  const throughBlank = document.createRange();
+  throughBlank.setStart(rows[0], 1);
+  throughBlank.setEnd(rows[2], 0);
+  assert.equal(copyRange(throughBlank), "\n\n");
+
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.setBaseAndExtent(rows[2].firstChild, 1, rows[0].firstChild, 0);
+  const reverseCopied = new Map();
+  fireEvent.copy(layer, {
+    clipboardData: {
+      setData: (type, value) => reverseCopied.set(type, value),
+    },
+  });
+  assert.equal(reverseCopied.get("text/plain"), "😀é\n\n界");
+});

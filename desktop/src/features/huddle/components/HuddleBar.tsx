@@ -22,11 +22,12 @@ import type { RelayEvent } from "@/shared/api/types";
 import { KIND_HUDDLE_REACTION } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { useHuddle } from "../HuddleContext";
+import { useHuddle, useHuddleLevels } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
@@ -150,17 +151,14 @@ export function HuddleBar({
   onOpenHuddleWindow,
   onVisibilityChange,
 }: HuddleBarProps) {
+  const documentVisible = useDocumentVisible();
   const {
     leaveHuddle,
     micConnected,
     isMuted,
     toggleMute,
-    micLevel,
-    pttActive,
     voiceInputMode,
     setVoiceInputMode,
-    activeSpeakers,
-    speakerLevels,
     huddleError,
     clearHuddleError,
     audioDevices,
@@ -172,6 +170,7 @@ export function HuddleBar({
     selectedOutputDevice,
     setSelectedOutputDevice,
   } = useHuddle();
+  const { activeSpeakers, micLevel, speakerLevels } = useHuddleLevels();
   const customEmoji = useCustomEmoji();
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
@@ -239,7 +238,7 @@ export function HuddleBar({
       }
     }
 
-    void fetchState();
+    if (documentVisible) void fetchState();
 
     // Primary: listen for Rust-emitted state change events
     listen<HuddleState>("huddle-state-changed", (event) => {
@@ -254,21 +253,27 @@ export function HuddleBar({
 
     // Fallback in case events are missed; keep it slow so normal huddle use is
     // event-driven and does not keep a sync IPC command warm on the main thread.
-    const id = window.setInterval(
-      () => void fetchState(),
-      HUDDLE_STATE_FALLBACK_INTERVAL_MS,
-    );
+    const id = documentVisible
+      ? window.setInterval(
+          () => void fetchState(),
+          HUDDLE_STATE_FALLBACK_INTERVAL_MS,
+        )
+      : null;
 
     return () => {
       cancelled = true;
       unlisten?.();
-      window.clearInterval(id);
+      if (id !== null) window.clearInterval(id);
     };
-  }, [applyIncomingState]);
+  }, [applyIncomingState, documentVisible]);
 
   const huddlePhase = state?.phase;
   React.useEffect(() => {
-    if (huddlePhase !== "active" && huddlePhase !== "connected") return;
+    if (
+      !documentVisible ||
+      (huddlePhase !== "active" && huddlePhase !== "connected")
+    )
+      return;
 
     let cancelled = false;
 
@@ -311,8 +316,12 @@ export function HuddleBar({
     return () => {
       cancelled = true;
       window.clearInterval(id);
-      setModelStatus(null); // Clear stale status on huddle end/phase change.
     };
+  }, [documentVisible, huddlePhase]);
+
+  React.useEffect(() => {
+    if (huddlePhase === "active" || huddlePhase === "connected") return;
+    setModelStatus(null);
   }, [huddlePhase]);
 
   const isHuddleVisible = isVisibleHuddleState(state);
@@ -485,7 +494,6 @@ export function HuddleBar({
   const hasAvailableMic = micConnected;
   const ttsEnabled = barState.tts_enabled;
   const transcriptionEnabled = barState.transcription_enabled;
-
   // Self-removing detection: remote-peer audio plays through native rodio
   // today (outside the WebView render graph), so the browser's AEC has no
   // far-end reference. The AEC follow-up PR flips this constant in the
@@ -619,36 +627,34 @@ export function HuddleBar({
           </span>
         )}
 
-        {showAddAgent && (
-          <AddAgentDialog
-            currentAgentPubkeys={barState.agent_pubkeys}
-            onClose={() => setShowAddAgent(false)}
-            onAdd={async (pubkey: string): Promise<AgentAddResult> => {
-              setAgentAddError(null);
-              try {
-                const result = await invoke<AgentAddResult>(
-                  "add_agent_to_huddle",
-                  { agentPubkey: pubkey },
-                );
-                // Refresh huddle state so the participant list updates immediately.
-                const s = await invoke<HuddleState>("get_huddle_state");
-                setState(s);
-                return result;
-              } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : String(e);
-                setAgentAddError(`Failed to add agent: ${msg}`);
-                throw e; // Re-throw so AddAgentDialog shows its inline error.
-              }
-            }}
-          />
-        )}
+        <AddAgentDialog
+          currentAgentPubkeys={barState.agent_pubkeys}
+          onClose={() => setShowAddAgent(false)}
+          onAdd={async (pubkey: string): Promise<AgentAddResult> => {
+            setAgentAddError(null);
+            try {
+              const result = await invoke<AgentAddResult>(
+                "add_agent_to_huddle",
+                { agentPubkey: pubkey },
+              );
+              // Refresh huddle state so the participant list updates immediately.
+              const s = await invoke<HuddleState>("get_huddle_state");
+              setState(s);
+              return result;
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e);
+              setAgentAddError(`Failed to add agent: ${msg}`);
+              throw e; // Re-throw so AddAgentDialog shows its inline error.
+            }
+          }}
+          open={showAddAgent}
+        />
 
         <div className="flex shrink-0 items-center gap-2">
           <MicControls
             isMuted={isMuted}
             onToggleMute={toggleMute}
             isPttMode={isPttMode}
-            pttActive={pttActive}
             micConnected={hasAvailableMic}
             micLevel={micLevel}
             onSelectVoiceInputMode={setVoiceInputMode}
@@ -701,15 +707,13 @@ export function HuddleBar({
                 pubkey: currentPubkey,
               }}
               onRemoveAgent={async (pubkey) => {
-                if (!barState.ephemeral_channel_id) return;
                 const confirmed = window.confirm(
                   "Remove this agent from the huddle?",
                 );
                 if (!confirmed) return;
                 try {
-                  await invoke("remove_channel_member", {
-                    channelId: barState.ephemeral_channel_id,
-                    pubkey,
+                  await invoke("remove_agent_from_huddle", {
+                    agentPubkey: pubkey,
                   });
                   setState((prev) => {
                     if (!prev) return prev;

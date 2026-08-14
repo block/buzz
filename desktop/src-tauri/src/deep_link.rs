@@ -20,6 +20,79 @@ pub(crate) struct PendingCommunityDeepLink {
 #[derive(Default)]
 pub(crate) struct PendingCommunityDeepLinks(Mutex<VecDeque<PendingCommunityDeepLink>>);
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingNavigationDeepLink {
+    id: String,
+    kind: String,
+    channel_id: String,
+    message_id: Option<String>,
+    thread_root_id: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingNavigationDeepLinks(Mutex<VecDeque<PendingNavigationDeepLink>>);
+
+impl PendingNavigationDeepLinks {
+    fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<PendingNavigationDeepLink>> {
+        self.0.lock().unwrap_or_else(|poisoned| {
+            eprintln!("buzz-desktop: recovering poisoned pending navigation deep-link queue");
+            poisoned.into_inner()
+        })
+    }
+
+    fn enqueue(&self, pending: PendingNavigationDeepLink) {
+        let mut queue = self.lock();
+        if queue.iter().any(|item| {
+            item.kind == pending.kind
+                && item.channel_id == pending.channel_id
+                && item.message_id == pending.message_id
+                && item.thread_root_id == pending.thread_root_id
+        }) {
+            return;
+        }
+        queue.push_back(pending);
+    }
+
+    fn clear(&self) {
+        self.lock().clear();
+    }
+
+    fn first(&self) -> Option<PendingNavigationDeepLink> {
+        self.lock().front().cloned()
+    }
+
+    fn acknowledge(&self, id: &str) -> bool {
+        let mut queue = self.lock();
+        if queue.front().is_some_and(|item| item.id == id) {
+            queue.pop_front();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn clear_pending_navigation_deep_links(pending: State<'_, PendingNavigationDeepLinks>) {
+    pending.clear();
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_navigation_deep_link(
+    pending: State<'_, PendingNavigationDeepLinks>,
+) -> Option<PendingNavigationDeepLink> {
+    pending.first()
+}
+
+#[tauri::command]
+pub(crate) fn acknowledge_pending_navigation_deep_link(
+    id: String,
+    pending: State<'_, PendingNavigationDeepLinks>,
+) -> bool {
+    pending.acknowledge(&id)
+}
+
 impl PendingCommunityDeepLinks {
     fn enqueue(&self, pending: PendingCommunityDeepLink) {
         let mut queue = self.0.lock().expect("pending deep-link queue poisoned");
@@ -88,6 +161,20 @@ fn queue_community_deep_link(
         });
 }
 
+fn queue_navigation_deep_link(app: &tauri::AppHandle, kind: &str, payload: &serde_json::Value) {
+    let Some(channel_id) = payload["channelId"].as_str() else {
+        return;
+    };
+    app.state::<PendingNavigationDeepLinks>()
+        .enqueue(PendingNavigationDeepLink {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: kind.to_owned(),
+            channel_id: channel_id.to_owned(),
+            message_id: payload["messageId"].as_str().map(str::to_owned),
+            thread_root_id: payload["threadRootId"].as_str().map(str::to_owned),
+        });
+}
+
 fn activate_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -102,6 +189,35 @@ fn activate_main_window(app: &tauri::AppHandle) {
     if let Err(error) = window.set_focus() {
         eprintln!("buzz-desktop: failed to focus main window for deep link: {error}");
     }
+}
+
+fn parse_channel_deep_link(url: &Url) -> Option<serde_json::Value> {
+    if url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    let mut segments = url.path_segments()?;
+    let channel_id = segments.next()?;
+    let message_id = segments.next();
+    if segments.next().is_some() {
+        return None;
+    }
+    let channel_id = uuid::Uuid::parse_str(channel_id).ok()?.to_string();
+    if message_id.is_some_and(|value| {
+        value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return None;
+    }
+    Some(match message_id {
+        Some(message_id) => serde_json::json!({
+            "channelId": channel_id,
+            "messageId": message_id.to_ascii_lowercase(),
+        }),
+        None => serde_json::json!({ "channelId": channel_id }),
+    })
 }
 
 /// Parse the query string of a `buzz://message?…` URL into the JSON
@@ -350,6 +466,20 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             );
             let _ = app.emit("deep-link-add-community", payload);
         }
+        Some("channel") => {
+            let Some(payload) = parse_channel_deep_link(&url) else {
+                eprintln!("buzz-desktop: channel deep link missing/invalid channel: {url_str}");
+                return;
+            };
+            activate_main_window(app);
+            if payload["messageId"].is_string() {
+                queue_navigation_deep_link(app, "message", &payload);
+                let _ = app.emit("deep-link-message", payload);
+            } else {
+                queue_navigation_deep_link(app, "channel", &payload);
+                let _ = app.emit("deep-link-channel", payload);
+            }
+        }
         Some("message") => {
             // `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
             //
@@ -364,6 +494,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 return;
             };
             activate_main_window(app);
+            queue_navigation_deep_link(app, "message", &payload);
             let _ = app.emit("deep-link-message", payload);
         }
         Some("nostr-bind") => match parse_nostr_bind_deep_link(&url) {
@@ -389,8 +520,9 @@ mod tests {
     use url::Url;
 
     use super::{
-        parse_add_community_deep_link, parse_join_deep_link, parse_message_deep_link,
-        parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+        parse_add_community_deep_link, parse_channel_deep_link, parse_join_deep_link,
+        parse_message_deep_link, parse_nostr_bind_deep_link, PendingCommunityDeepLink,
+        PendingCommunityDeepLinks, PendingNavigationDeepLink, PendingNavigationDeepLinks,
     };
 
     fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
@@ -402,6 +534,100 @@ mod tests {
             policy_receipt: None,
             name: None,
         }
+    }
+
+    fn pending_navigation(
+        id: &str,
+        kind: &str,
+        channel_id: &str,
+        message_id: Option<&str>,
+        thread_root_id: Option<&str>,
+    ) -> PendingNavigationDeepLink {
+        PendingNavigationDeepLink {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            channel_id: channel_id.to_owned(),
+            message_id: message_id.map(str::to_owned),
+            thread_root_id: thread_root_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn pending_navigation_links_are_fifo_acknowledged_and_deduplicated() {
+        let queue = PendingNavigationDeepLinks::default();
+        queue.enqueue(pending_navigation(
+            "first",
+            "channel",
+            "channel-1",
+            None,
+            None,
+        ));
+        queue.enqueue(pending_navigation(
+            "duplicate",
+            "channel",
+            "channel-1",
+            None,
+            None,
+        ));
+        queue.enqueue(pending_navigation(
+            "second",
+            "message",
+            "channel-1",
+            Some("message-1"),
+            Some("root-1"),
+        ));
+
+        assert_eq!(queue.first().unwrap().id, "first");
+        assert!(!queue.acknowledge("second"));
+        assert!(queue.acknowledge("first"));
+        assert_eq!(queue.first().unwrap().id, "second");
+        assert!(queue.acknowledge("second"));
+        assert!(queue.first().is_none());
+    }
+
+    #[test]
+    fn pending_navigation_links_can_be_cleared() {
+        let queue = PendingNavigationDeepLinks::default();
+        queue.enqueue(pending_navigation(
+            "first",
+            "channel",
+            "channel-1",
+            None,
+            None,
+        ));
+        queue.enqueue(pending_navigation(
+            "second",
+            "message",
+            "channel-1",
+            Some("message-1"),
+            None,
+        ));
+
+        queue.clear();
+        assert!(queue.first().is_none());
+    }
+
+    #[test]
+    fn pending_navigation_queue_recovers_after_mutex_poisoning() {
+        let queue = std::sync::Arc::new(PendingNavigationDeepLinks::default());
+        let poisoner = std::sync::Arc::clone(&queue);
+        assert!(std::thread::spawn(move || {
+            let _guard = poisoner.0.lock().unwrap();
+            panic!("poison queue for recovery regression");
+        })
+        .join()
+        .is_err());
+
+        queue.enqueue(pending_navigation(
+            "after-poison",
+            "channel",
+            "channel-1",
+            None,
+            None,
+        ));
+        assert_eq!(queue.first().unwrap().id, "after-poison");
+        assert!(queue.acknowledge("after-poison"));
+        assert!(queue.first().is_none());
     }
 
     #[test]
@@ -474,6 +700,63 @@ mod tests {
             "buzz://add-community?relay=wss%3A%2F%2F",
         ] {
             assert!(parse_add_community_deep_link(&Url::parse(raw).unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn parse_channel_deep_link_accepts_one_path_segment() {
+        let url = Url::parse("buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32").unwrap();
+        let payload = parse_channel_deep_link(&url).unwrap();
+        assert_eq!(payload["channelId"], "580ca78b-9dae-46f3-8854-bd671853ba32");
+    }
+
+    #[test]
+    fn parse_channel_deep_link_accepts_message_path() {
+        let message_id = "8455293f0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+        let url = Url::parse(&format!(
+            "buzz://channel/a372f080-5961-4535-b1a3-edffface377d/{message_id}"
+        ))
+        .unwrap();
+        let payload = parse_channel_deep_link(&url).unwrap();
+        assert_eq!(payload["channelId"], "a372f080-5961-4535-b1a3-edffface377d");
+        assert_eq!(payload["messageId"], message_id);
+    }
+
+    #[test]
+    fn parse_channel_deep_link_accepts_v7_and_normalizes_uppercase() {
+        for (raw, expected) in [
+            (
+                "buzz://channel/018fdb5d-3a64-7c35-b5f9-4a23e1f9d2d9",
+                "018fdb5d-3a64-7c35-b5f9-4a23e1f9d2d9",
+            ),
+            (
+                "buzz://channel/580CA78B-9DAE-46F3-8854-BD671853BA32",
+                "580ca78b-9dae-46f3-8854-bd671853ba32",
+            ),
+        ] {
+            let payload = parse_channel_deep_link(&Url::parse(raw).unwrap()).unwrap();
+            assert_eq!(payload["channelId"], expected);
+        }
+    }
+
+    #[test]
+    fn parse_channel_deep_link_rejects_malformed_forms() {
+        for raw in [
+            "buzz://channel",
+            "buzz://channel/",
+            "buzz://channel/one/two",
+            "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/not-hex",
+            "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/extra",
+            "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/",
+            "buzz://channel/one?extra=true",
+            "buzz://channel/one#fragment",
+            "buzz://:pass@channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "buzz://channel/not-a-uuid",
+            "buzz://channel/%2F",
+            "buzz://channel/%00",
+        ] {
+            assert!(parse_channel_deep_link(&Url::parse(raw).unwrap()).is_none());
         }
     }
 

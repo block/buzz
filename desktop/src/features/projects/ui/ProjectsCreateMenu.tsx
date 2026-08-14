@@ -12,12 +12,12 @@ const MENU_ITEM_CLASS =
 
 export function ProjectsCreateMenu({
   onCreateIssue,
+  onCreateProject,
   onCreatePullRequest,
-  onCreateRepository,
 }: {
   onCreateIssue: () => void;
+  onCreateProject: () => void;
   onCreatePullRequest: () => void;
-  onCreateRepository: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
   const containerRef = React.useRef<HTMLElement>(null);
@@ -50,7 +50,7 @@ export function ProjectsCreateMenu({
   return (
     <nav
       aria-label="Create project item"
-      className="relative shrink-0 pl-4"
+      className="relative shrink-0"
       onBlurCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setOpen(false);
@@ -88,12 +88,12 @@ export function ProjectsCreateMenu({
           >
             <button
               className={MENU_ITEM_CLASS}
-              onClick={() => select(onCreateRepository)}
+              onClick={() => select(onCreateProject)}
               role="menuitem"
               type="button"
             >
               <FolderGit2 />
-              Repository
+              Project
             </button>
             <button
               className={MENU_ITEM_CLASS}

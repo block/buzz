@@ -120,6 +120,11 @@ fn check_repo_id(repo_id: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// Maximum length of a custom emoji shortcode.
+pub const MAX_CUSTOM_EMOJI_SHORTCODE_LEN: usize = 64;
+/// Maximum reaction payload length for a colon-wrapped custom emoji shortcode.
+pub const MAX_CUSTOM_EMOJI_REACTION_LEN: usize = MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 2;
+
 /// Validate and normalize a NIP-30 custom emoji shortcode.
 ///
 /// Shortcodes are case-insensitive in Buzz's relay-global set; lowercase
@@ -131,9 +136,9 @@ pub fn normalize_custom_emoji_shortcode(shortcode: &str) -> Result<String, SdkEr
             "emoji shortcode must not be empty".into(),
         ));
     }
-    if trimmed.len() > 64 {
+    if trimmed.len() > MAX_CUSTOM_EMOJI_SHORTCODE_LEN {
         return Err(SdkError::InvalidInput(format!(
-            "emoji shortcode exceeds 64 bytes (got {})",
+            "emoji shortcode exceeds {MAX_CUSTOM_EMOJI_SHORTCODE_LEN} bytes (got {})",
             trimmed.len()
         )));
     }
@@ -234,7 +239,9 @@ pub fn build_message(
         tags.push(tag(&["broadcast", "1"])?);
     }
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
@@ -285,7 +292,9 @@ pub fn build_forum_post(
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(45001), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(45001), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a forum comment reply (kind 45003).
@@ -301,7 +310,9 @@ pub fn build_forum_comment(
     thread_tags(thread_ref, &mut tags)?;
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(45003), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a diff/patch message (kind 40008).
@@ -2249,6 +2260,53 @@ mod tests {
     }
 
     #[test]
+    fn message_preserves_self_mention_p_tag() {
+        // nostr 0.44 strips p tags matching the signer by default.
+        // build_message must opt in via allow_self_tagging() so that
+        // explicit self-mentions survive signing. See #4906.
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let builder = build_message(cid, "self-canary", None, &[&self_pk], false, &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn forum_post_preserves_self_mention_p_tag() {
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let builder = build_forum_post(cid, "self-canary", &[&self_pk], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn forum_comment_preserves_self_mention_p_tag() {
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let root = event_id();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let builder = build_forum_comment(cid, "self-canary", &tr, &[&self_pk], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
     fn agent_observer_frame_happy_path() {
         let sender = keys();
         let recipient = keys();
@@ -2652,6 +2710,30 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 7);
         assert_eq!(ev.content, ":party_parrot:");
         assert!(has_tag(&ev, "emoji", "party_parrot"));
+    }
+
+    #[test]
+    fn custom_emoji_reaction_accepts_max_shortcode_length() {
+        let eid = event_id();
+        let shortcode = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let ev = sign(
+            build_custom_emoji_reaction(eid, &shortcode, "https://example.com/max.png").unwrap(),
+        );
+
+        assert_eq!(ev.content, format!(":{shortcode}:"));
+        assert_eq!(ev.content.chars().count(), MAX_CUSTOM_EMOJI_REACTION_LEN);
+        assert!(has_tag(&ev, "emoji", &shortcode));
+    }
+
+    #[test]
+    fn custom_emoji_reaction_rejects_overlong_shortcode() {
+        let eid = event_id();
+        let shortcode = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+
+        assert!(matches!(
+            build_custom_emoji_reaction(eid, &shortcode, "https://example.com/too-long.png"),
+            Err(SdkError::InvalidInput(message)) if message.contains("exceeds 64 bytes")
+        ));
     }
 
     #[test]

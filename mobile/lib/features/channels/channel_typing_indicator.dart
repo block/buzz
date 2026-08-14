@@ -16,10 +16,19 @@ class ChannelTypingIndicator extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final userCache = ref.watch(userCacheProvider);
+    final normalizedPubkeys = {
+      for (final entry in entries) entry.pubkey.toLowerCase(),
+    };
+    final profiles = {
+      for (final pubkey in normalizedPubkeys)
+        pubkey: ref.watch(userCacheProvider.select((cache) => cache[pubkey])),
+    };
+    final userCache = {
+      for (final entry in profiles.entries) entry.key: ?entry.value,
+    };
     final names = entries.map((entry) {
       final profile =
-          userCache[entry.pubkey.toLowerCase()] ??
+          profiles[entry.pubkey.toLowerCase()] ??
           ref.read(userCacheProvider.notifier).get(entry.pubkey.toLowerCase());
       return profile?.label ?? shortPubkey(entry.pubkey);
     }).toList();

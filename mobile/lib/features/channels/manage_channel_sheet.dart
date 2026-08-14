@@ -109,8 +109,6 @@ class ManageChannelSheet extends HookConsumerWidget {
         child: ListView(
           shrinkWrap: true,
           children: [
-            Text('Manage channel', style: context.textTheme.titleMedium),
-            const SizedBox(height: Grid.xxs),
             Text(
               'Basic management for ${channel.name}.',
               style: context.textTheme.bodySmall?.copyWith(

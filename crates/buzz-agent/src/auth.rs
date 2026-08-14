@@ -16,7 +16,8 @@
 //! calls hit the cache and silently refresh when expired.
 
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -188,15 +189,16 @@ impl PkceOAuthTokenSource {
     }
 
     /// Persist a token to disk and the in-memory cell.
+    ///
+    /// The cache holds both the access and refresh tokens, so the on-disk
+    /// file is written owner-only (`0o600` on Unix) via an atomic
+    /// inode-swapping rename — see [`write_private_cache`].
     fn save(&self, state: &mut Option<CachedToken>, token: CachedToken) -> Result<(), AgentError> {
         let body = serde_json::to_vec_pretty(&token)
             .map_err(|e| AgentError::Llm(format!("oauth cache serialize: {e}")))?;
-        // Atomic rename so a concurrent reader never sees a partial write.
-        let tmp = self.cache_path.with_extension("json.tmp");
-        fs::write(&tmp, &body)
-            .map_err(|e| AgentError::Llm(format!("oauth cache write {tmp:?}: {e}")))?;
-        fs::rename(&tmp, &self.cache_path)
-            .map_err(|e| AgentError::Llm(format!("oauth cache rename: {e}")))?;
+        write_private_cache(&self.cache_path, &body).map_err(|e| {
+            AgentError::Llm(format!("oauth cache write {:?}: {e}", self.cache_path))
+        })?;
         *state = Some(token);
         Ok(())
     }
@@ -453,22 +455,170 @@ fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
 
     let dir = match &cfg.cache_dir_override {
         Some(p) => p.join(&cfg.cache_namespace),
-        None => {
-            let home = std::env::var("HOME")
-                .map_err(|_| AgentError::Llm("oauth cache: $HOME not set".into()))?;
-            PathBuf::from(home)
-                .join(".config")
-                .join("buzz-agent")
-                .join("oauth")
-                .join(&cfg.cache_namespace)
-        }
+        None => dirs::home_dir()
+            .ok_or_else(|| AgentError::Llm("oauth cache: home directory not found".into()))?
+            .join(".config")
+            .join("buzz-agent")
+            .join("oauth")
+            .join(&cfg.cache_namespace),
     };
     Ok(dir.join(format!("{hash}.json")))
 }
 
-fn read_cache(path: &PathBuf) -> Option<CachedToken> {
-    let body = fs::read(path).ok()?;
+/// Load a cached token, enforcing the owner-only invariant on load.
+///
+/// Owner-only permissions are a cache *lifecycle* invariant, not just a
+/// write-path property: a world-readable cache left by an older buzz-agent
+/// (or any tampering) must be tightened the moment we touch it, before the
+/// tokens are used — otherwise a file that never expires stays exposed until
+/// some future refresh happens to rewrite it. Every load path (initial and
+/// cross-process re-reads) funnels through here, so the repair covers them
+/// all. Returns `None` when the cache is absent, unreadable, unparseable, or
+/// cannot be secured; the caller then falls through to refresh/browser.
+fn read_cache(path: &Path) -> Option<CachedToken> {
+    let body = read_private_cache(path).ok()?;
     serde_json::from_slice(&body).ok()
+}
+
+/// Open the cache, reject symlinks, tighten loose permissions to `0o600`, and
+/// return its bytes.
+///
+/// On Unix `O_NOFOLLOW` rejects a symlinked cache path at the kernel level
+/// (no stat/open TOCTOU), and `fchmod` on the already-open handle repairs a
+/// loose mode against the pinned inode rather than re-resolving the path.
+/// A cache that exists but cannot be secured is an error, so the caller fails
+/// closed instead of using an exposed file.
+#[cfg(unix)]
+fn read_private_cache(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "oauth cache is not a regular file",
+        ));
+    }
+    // Tighten in place on the open fd if any group/other bit is set. fchmod
+    // targets the inode we already hold, so no attacker can swap the path
+    // between the check and the repair.
+    if meta.permissions().mode() & 0o077 != 0 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+
+    let mut body = Vec::new();
+    file.read_to_end(&mut body)?;
+    Ok(body)
+}
+
+/// Non-Unix fallback: read the cache as-is. Owner-only enforcement is the
+/// Windows DACL work deferred behind the [`create_private_temp_file`] seam.
+#[cfg(not(unix))]
+fn read_private_cache(path: &Path) -> io::Result<Vec<u8>> {
+    fs::read(path)
+}
+
+/// Removes a temp file on drop unless it was already renamed away. Keeps a
+/// failed/partial write from leaving a stray token file behind.
+struct TmpFileGuard<'a>(&'a Path);
+
+impl Drop for TmpFileGuard<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+    }
+}
+
+/// A per-write-unique temp suffix so concurrent savers — sibling threads or
+/// separate processes sharing `$HOME` — never collide on one temp path.
+/// Falls back to a timestamp if the RNG is unavailable rather than panicking
+/// mid-auth.
+fn unique_suffix() -> String {
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_ok() {
+        return hex::encode(bytes);
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}")
+}
+
+/// Write `body` to `path` as an owner-only file via an atomic rename.
+///
+/// The cache holds both the refresh and access tokens, so it must never be
+/// readable by other users. We create a uniquely-named temp file in the same
+/// directory with owner-only protection at creation time — mode `0o600` on
+/// Unix (see [`create_private_temp_file`]) — so it is never briefly
+/// world/other readable, write and fsync it, then rename over the
+/// destination. The rename swaps the inode/entry wholesale, so a pre-existing
+/// cache file with loose permissions is *replaced* by the new private one;
+/// its old mode never survives. `fs::rename` maps to
+/// `MOVEFILE_REPLACE_EXISTING` on Windows, so the atomic replace holds on
+/// both platforms; the Windows owner-only DACL is pending the unsafe-FFI
+/// decision noted at the seam.
+fn write_private_cache(path: &Path, body: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "oauth cache path has no parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("oauth-cache");
+    let tmp = parent.join(format!(".{file_name}.{}.tmp", unique_suffix()));
+    let guard = TmpFileGuard(&tmp);
+
+    let mut f = create_private_temp_file(&tmp)?;
+    f.write_all(body)?;
+    f.sync_all()?;
+    drop(f);
+
+    fs::rename(&tmp, path)?;
+    // The rename consumed the temp path; nothing left to clean up.
+    std::mem::forget(guard);
+    Ok(())
+}
+
+/// Create `tmp` for writing with owner-only permissions from the moment it
+/// exists. Fails if the file already exists (`create_new`), which the
+/// per-write-unique suffix makes effectively impossible.
+#[cfg(unix)]
+fn create_private_temp_file(tmp: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(tmp)
+}
+
+/// Non-Unix fallback: create the temp file if it does not already exist.
+///
+/// On Windows the owner-only equivalent is an explicit DACL set at creation
+/// (`CreateFileW` with SDDL `D:P(A;;FA;;;OW)`, matching goose's
+/// `private_file.rs`), but that FFI needs `unsafe`, which this crate forbids.
+/// Reconciling the two — an isolated helper crate, a vetted safe dependency,
+/// or descoping Windows — is an open decision escalated to the maintainer, so
+/// this interim relies on the default per-user ACLs and drops the owner-only
+/// implementation in behind this seam once the decision lands. `create_new`
+/// fails if the file already exists.
+#[cfg(not(unix))]
+fn create_private_temp_file(tmp: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
 }
 
 /// Parse a token-endpoint JSON response. Fails loudly when `access_token`
@@ -521,6 +671,47 @@ fn random_state() -> Result<String, AgentError> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Decide the OAuth callback result and the HTML page to serve.
+///
+/// Returns `(result, page)`: `result` carries the auth code (or a detail
+/// string on failure) to the waiting flow via the oneshot channel; `page` is
+/// the *static* HTML shown in the browser. The page never embeds any request
+/// parameter — the `error` query value is attacker-influenceable, so
+/// reflecting it would be an XSS sink on the localhost callback. Failure
+/// detail travels only through `result`, which surfaces in the process error
+/// and logs, never in the served markup.
+fn callback_outcome(
+    params: &std::collections::HashMap<String, String>,
+    expected_state: &str,
+) -> (Result<String, String>, String) {
+    let result = match (params.get("code"), params.get("state")) {
+        (Some(code), Some(st)) if st == expected_state => Ok(code.clone()),
+        (Some(_), Some(_)) => Err("state mismatch".to_string()),
+        _ => Err(params
+            .get("error")
+            .map(|e| sanitize_callback_detail(e))
+            .unwrap_or_else(|| "missing code".into())),
+    };
+    let page = match result {
+        Ok(_) => "<h2>Buzz: signed in</h2><p>You can close this window.</p>",
+        Err(_) => "<h2>Buzz auth failed</h2><p>You can close this window and try again.</p>",
+    }
+    .to_string();
+    (result, page)
+}
+
+/// Neutralize an attacker-controllable OAuth `error` value before it enters
+/// an error string that later reaches the logs. Control characters (CR/LF in
+/// particular) enable log-line injection, and an unbounded value could flood
+/// the logs — replace control chars with spaces and cap the length.
+fn sanitize_callback_detail(raw: &str) -> String {
+    const MAX: usize = 200;
+    raw.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX)
+        .collect()
+}
+
 /// Spin up a localhost callback server, open the authorize URL in a
 /// browser, wait up to [`BROWSER_AUTH_TIMEOUT`] for the redirect, then
 /// exchange the code for a token.
@@ -547,23 +738,11 @@ async fn browser_pkce_flow(
             let tx = Arc::clone(&tx);
             let expected = expected_state.clone();
             async move {
-                let result = match (params.get("code"), params.get("state")) {
-                    (Some(code), Some(st)) if st == &expected => Ok(code.clone()),
-                    (Some(_), Some(_)) => Err("state mismatch".to_string()),
-                    _ => Err(params
-                        .get("error")
-                        .cloned()
-                        .unwrap_or_else(|| "missing code".into())),
-                };
+                let (result, page) = callback_outcome(&params, &expected);
                 if let Some(sender) = tx.lock().await.take() {
-                    let _ = sender.send(result.clone());
+                    let _ = sender.send(result);
                 }
-                match result {
-                    Ok(_) => Html(
-                        "<h2>Buzz: signed in</h2><p>You can close this window.</p>".to_string(),
-                    ),
-                    Err(e) => Html(format!("<h2>Buzz auth failed</h2><pre>{e}</pre>")),
-                }
+                Html(page)
             }
         }),
     );
@@ -683,8 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_path_includes_namespace_and_hash() {
-        // HOME is required; cargo test runs set it.
+    fn cache_path_uses_platform_home_directory() {
         let cfg = PkceOAuthConfig {
             discovery_url: "https://example.com/.well-known".into(),
             client_id: "abc".into(),
@@ -693,8 +871,14 @@ mod tests {
             cache_dir_override: None,
         };
         let p = cache_path_for(&cfg).unwrap();
-        assert!(p.to_string_lossy().contains("/buzz-agent/oauth/demo/"));
-        assert!(p.extension().and_then(|s| s.to_str()) == Some("json"));
+        let expected_dir = dirs::home_dir()
+            .unwrap()
+            .join(".config")
+            .join("buzz-agent")
+            .join("oauth")
+            .join("demo");
+        assert_eq!(p.parent(), Some(expected_dir.as_path()));
+        assert_eq!(p.extension().and_then(|s| s.to_str()), Some("json"));
     }
 
     #[test]
@@ -841,5 +1025,321 @@ mod tests {
                  This means endpoints() was called before the refresh-token check."
             ),
         }
+    }
+
+    // ---- callback HTML must never reflect input --------------------------
+
+    #[test]
+    fn test_callback_failure_page_omits_reflected_error_param() {
+        // A hostile `error` query value carrying markup must not appear in
+        // the served HTML — otherwise the localhost callback is an XSS sink.
+        let payload = "<script>alert('xss')</script>";
+        let mut params = std::collections::HashMap::new();
+        params.insert("error".to_string(), payload.to_string());
+
+        let (result, page) = callback_outcome(&params, "expected-state");
+
+        // The failure detail still reaches the waiting flow via `result`...
+        assert_eq!(result.as_ref().err().map(String::as_str), Some(payload));
+        // ...but the browser page is static and inert.
+        assert!(
+            !page.contains(payload),
+            "callback page reflected the raw error param: {page}"
+        );
+        assert!(
+            !page.contains("<script>"),
+            "callback page contains script tag"
+        );
+        assert!(
+            page.contains("auth failed"),
+            "unexpected failure page: {page}"
+        );
+    }
+
+    #[test]
+    fn test_callback_error_detail_strips_control_chars_and_caps_length() {
+        // The `error` param feeds an error string that reaches the logs, so
+        // CR/LF (log-line injection) must be neutralized and length bounded.
+        let payload = format!("bad\r\nInjected: fake-log-line{}", "A".repeat(500));
+        let mut params = std::collections::HashMap::new();
+        params.insert("error".to_string(), payload);
+
+        let (result, _page) = callback_outcome(&params, "expected-state");
+        let detail = result.unwrap_err();
+
+        assert!(
+            !detail.contains('\r'),
+            "carriage return survived: {detail:?}"
+        );
+        assert!(!detail.contains('\n'), "newline survived: {detail:?}");
+        assert!(
+            detail.len() <= 200,
+            "detail not length-capped: {}",
+            detail.len()
+        );
+        assert!(
+            detail.starts_with("bad  Injected:"),
+            "unexpected sanitized detail: {detail:?}"
+        );
+    }
+
+    #[test]
+    fn test_callback_state_mismatch_page_omits_reflected_code() {
+        // A returned code with a mismatched state must be rejected, and the
+        // page must not echo the (attacker-chosen) state or code values.
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "code".to_string(),
+            "<img src=x onerror=alert(1)>".to_string(),
+        );
+        params.insert("state".to_string(), "attacker-state".to_string());
+
+        let (result, page) = callback_outcome(&params, "expected-state");
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("state mismatch")
+        );
+        assert!(
+            !page.contains("<img"),
+            "callback page reflected the code param: {page}"
+        );
+    }
+
+    #[test]
+    fn test_callback_success_returns_code_and_static_page() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("code".to_string(), "auth-code-123".to_string());
+        params.insert("state".to_string(), "expected-state".to_string());
+
+        let (result, page) = callback_outcome(&params, "expected-state");
+
+        assert_eq!(
+            result.as_ref().ok().map(String::as_str),
+            Some("auth-code-123")
+        );
+        assert!(
+            page.contains("signed in"),
+            "unexpected success page: {page}"
+        );
+        // The success page is a fixed literal — no request data in it.
+        assert!(!page.contains("auth-code-123"));
+    }
+
+    // ---- private atomic cache write --------------------------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_save_writes_owner_only_cache_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PkceOAuthConfig {
+            discovery_url: "https://example.com/.well-known".into(),
+            client_id: "test-client".into(),
+            scopes: vec!["offline_access".into()],
+            cache_namespace: "test".into(),
+            cache_dir_override: Some(dir.path().to_path_buf()),
+        };
+        let source = PkceOAuthTokenSource::new(cfg).unwrap();
+
+        {
+            let mut state = source.state.lock().await;
+            source
+                .save(
+                    &mut state,
+                    CachedToken {
+                        access_token: "secret-access".into(),
+                        refresh_token: Some("secret-refresh".into()),
+                        expires_at: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let mode = fs::metadata(&source.cache_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "cache file must be owner-only, got {:o}",
+            mode & 0o777
+        );
+        // No temp file left behind.
+        let leftovers: Vec<_> = fs::read_dir(dir.path().join("test"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_save_repairs_preexisting_loose_mode_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PkceOAuthConfig {
+            discovery_url: "https://example.com/.well-known".into(),
+            client_id: "test-client".into(),
+            scopes: vec!["offline_access".into()],
+            cache_namespace: "test".into(),
+            cache_dir_override: Some(dir.path().to_path_buf()),
+        };
+        let source = PkceOAuthTokenSource::new(cfg).unwrap();
+
+        // Simulate a world-readable cache written by an older buzz-agent.
+        fs::create_dir_all(source.cache_path.parent().unwrap()).unwrap();
+        fs::write(&source.cache_path, b"{\"access_token\":\"old\"}").unwrap();
+        fs::set_permissions(&source.cache_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let old_inode = fs::metadata(&source.cache_path).unwrap().ino();
+
+        {
+            let mut state = source.state.lock().await;
+            source
+                .save(
+                    &mut state,
+                    CachedToken {
+                        access_token: "new-access".into(),
+                        refresh_token: Some("new-refresh".into()),
+                        expires_at: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let meta = fs::metadata(&source.cache_path).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "loose-mode cache file was not tightened to 0600"
+        );
+        // The rename swapped the inode — the loose-mode file is gone, not
+        // chmod'd in place, so no window where the new tokens inherit 0644.
+        assert_ne!(meta.ino(), old_inode, "cache inode was not replaced");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_private_cache_concurrent_savers_all_succeed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Unique tmp suffixes must let many concurrent writers to the SAME
+        // destination each land a complete, private file — no tmp collision,
+        // no failed rename. The fixed `*.json.tmp` name this replaces would
+        // race (one writer's rename fails on the other's half-written tmp).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let path = Arc::new(path);
+
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                std::thread::spawn(move || {
+                    let body = format!("{{\"n\":{i}}}");
+                    write_private_cache(&path, body.as_bytes())
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join()
+                .unwrap()
+                .expect("concurrent write_private_cache failed");
+        }
+
+        // Destination exists, is valid (one writer's complete body), and 0600.
+        let contents = fs::read_to_string(path.as_ref()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert!(v.get("n").is_some(), "cache body was corrupted: {contents}");
+        let mode = fs::metadata(path.as_ref()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // No temp files leaked.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+    }
+
+    // ---- owner-only is a load-time invariant, not just a save-time one ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_bearer_cache_hit_tightens_preexisting_loose_mode_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // A world-readable cache left by an older buzz-agent must be tightened
+        // the moment we load it — on the plain cache-hit path, with no refresh
+        // or save. Otherwise the pre-bug population stays exposed indefinitely.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PkceOAuthConfig {
+            discovery_url: "https://example.com/.well-known".into(),
+            client_id: "test-client".into(),
+            scopes: vec!["offline_access".into()],
+            cache_namespace: "test".into(),
+            cache_dir_override: Some(dir.path().to_path_buf()),
+        };
+        let cache_path = cache_path_for(&cfg).unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+
+        // A valid, unexpired token so bearer() takes the cache hit and never
+        // touches the network or save path.
+        let future_exp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 7200;
+        let token = CachedToken {
+            access_token: "loose-but-valid".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: Some(future_exp),
+        };
+        fs::write(&cache_path, serde_json::to_vec_pretty(&token).unwrap()).unwrap();
+        fs::set_permissions(&cache_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let old_inode = fs::metadata(&cache_path).unwrap().ino();
+
+        // Constructing the source loads the cache — repair happens here.
+        let source = PkceOAuthTokenSource::new(cfg).unwrap();
+        let bearer = source.bearer().await.unwrap();
+        assert_eq!(bearer, "loose-but-valid");
+
+        let meta = fs::metadata(&cache_path).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "existing loose-mode cache was not tightened on load"
+        );
+        // Repaired in place on the open fd — same inode, no rewrite/rename.
+        assert_eq!(
+            meta.ino(),
+            old_inode,
+            "load-time repair should fchmod in place, not replace the inode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_cache_refuses_symlinked_cache_path() {
+        // A cache path that is a symlink must be rejected, not followed — a
+        // hostile symlink could redirect the read (and our chmod) at an
+        // arbitrary file. `read_cache` returns None so the caller falls
+        // through to a fresh flow instead of trusting the link target.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real-token.json");
+        fs::write(&target, b"{\"access_token\":\"via-symlink\"}").unwrap();
+
+        let link = dir.path().join("cache.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(
+            read_cache(&link).is_none(),
+            "read_cache followed a symlinked cache path"
+        );
     }
 }

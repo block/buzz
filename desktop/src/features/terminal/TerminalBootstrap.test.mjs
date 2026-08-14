@@ -234,6 +234,56 @@ test("mounted bootstrap passes GUI context and ACKs only after consuming a frame
   );
   view.unmount();
 });
+
+test("first-open splash waits for the first terminal frame", async () => {
+  const { createElement } = await import("react");
+  const { act, render, waitFor } = await import("@testing-library/react");
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  const view = render(
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, {
+        channelId: "channel-1",
+        channelName: "general",
+        npub: "npub1owner",
+        relayUrl: "wss://relay.example",
+        threadId: null,
+      }),
+    ),
+  );
+  await waitFor(() =>
+    assert.ok(calls.some(({ command }) => command === "terminal_attach")),
+  );
+  assert.equal(
+    view.container.querySelector(".buzz-terminal-welcome"),
+    null,
+    "the splash must not be consumed while the first PTY frame is pending",
+  );
+
+  await act(async () => {
+    emit({
+      type: "frame",
+      payload: {
+        bracketedPaste: false,
+        cursor: { column: 0, line: 0, visible: true },
+        focusReporting: false,
+        full: true,
+        rows: [],
+        sequence: 1,
+        subscriptionId: "subscription-1",
+        viewport: { columns: 100, generation: 0, screenLines: 24 },
+      },
+    });
+  });
+  await waitFor(() =>
+    assert.ok(view.container.querySelector(".buzz-terminal-welcome")),
+  );
+  view.unmount();
+});
+
 test("resize during in-flight catch-up keeps the newest viewport ready", async () => {
   const { createElement } = await import("react");
   const { act, render, waitFor } = await import("@testing-library/react");

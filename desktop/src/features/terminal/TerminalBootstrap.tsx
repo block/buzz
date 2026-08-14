@@ -371,7 +371,7 @@ export function TerminalBootstrap({
       focusReportingEnabled={active?.frame?.focusReporting ?? false}
       frame={active?.frame}
       viewportReportingEnabled={viewportReportingEnabled}
-      showSplash={splashPending}
+      showSplash={splashPending && Boolean(active?.frame)}
       onSplashStarted={handleSplashStarted}
       sessionFrames={channelSessions.flatMap((session) =>
         session.frame ? [{ sessionId: session.key, frame: session.frame }] : [],

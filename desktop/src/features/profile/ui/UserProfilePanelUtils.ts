@@ -31,13 +31,13 @@ export type ProfilePanelTab = "info" | "runtime" | "channels" | "memories";
 
 export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   summary: "Profile",
-  instructions: "Instructions",
+  instructions: "Agent instructions",
   info: "Agent info",
   configuration: "Runtime",
-  diagnostics: "Harness Log",
+  diagnostics: "Harness log",
   memories: "Memories",
   channels: "Channels",
-  logs: "Harness Log",
+  logs: "Harness log",
 };
 
 const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>(
@@ -88,8 +88,14 @@ export function profilePanelTabFromSearch(value: unknown): ProfilePanelTab {
   return parseProfilePanelTab(value) ?? "info";
 }
 
+export function profilePanelTargetKey(
+  pubkey: string | undefined,
+  personaId: string | undefined,
+): string {
+  return pubkey ?? `persona:${personaId ?? "unknown"}`;
+}
+
 export type UserProfilePanelProps = {
-  callerChannelId?: string | null;
   canResetWidth?: boolean;
   currentPubkey?: string;
   isSinglePanelView?: boolean;

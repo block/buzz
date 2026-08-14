@@ -167,7 +167,13 @@ impl SpawnConfigSnapshot {
             ),
             idle_timeout_seconds: record.idle_timeout_seconds,
             max_turn_duration_seconds: record.max_turn_duration_seconds,
-            parallelism: record.parallelism,
+            // Hash the effective parallelism so over-cap edits that don't change
+            // the running pool size (e.g. 10 → 8, both clamp to 5 on OpenClaw)
+            // do not raise a spurious "restart required" badge. Cap crossings
+            // (e.g. 8 → 3, where 3 is below the cap) do change the effective
+            // pool and must badge. The diff surface consequently displays the
+            // effective value — that is correct, it is what actually runs.
+            parallelism: super::effective_parallelism(&descriptor.command, record.parallelism),
         }
     }
 

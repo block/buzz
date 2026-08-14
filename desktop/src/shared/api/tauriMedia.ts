@@ -1,4 +1,4 @@
-import { invoke as invokeTauriRaw } from "@tauri-apps/api/core";
+import { invoke as invokeTauriRaw, isTauri } from "@tauri-apps/api/core";
 import { type BlobDescriptor, invokeTauri } from "./tauri";
 
 function encodeRawIpcHeader(value: string): string {
@@ -17,6 +17,7 @@ export async function uploadMediaFile(
   file: File,
   progressId?: string,
   signal?: AbortSignal,
+  onDispatch?: () => void,
 ): Promise<BlobDescriptor> {
   const headers: Record<string, string> = {
     "x-buzz-filename": encodeRawIpcHeader(file.name),
@@ -28,7 +29,7 @@ export async function uploadMediaFile(
   if (signal?.aborted) throw new Error("upload cancelled");
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (signal?.aborted) throw new Error("upload cancelled");
-
+  onDispatch?.();
   return invokeTauriRaw<BlobDescriptor>("upload_media_bytes_raw", bytes, {
     headers,
   });
@@ -37,6 +38,11 @@ export async function uploadMediaFile(
 /** Stop the native HTTP request associated with a background media upload. */
 export async function cancelMediaUpload(progressId: string): Promise<void> {
   await invokeTauri("cancel_media_upload", { progressId });
+}
+
+/** Release the renderer's cancellation ownership after an upload settles. */
+export async function releaseMediaUpload(progressId: string): Promise<void> {
+  await invokeTauri("release_media_upload", { progressId });
 }
 
 /**
@@ -64,6 +70,23 @@ export async function fetchMediaBytes(
   // arrive as a raw ArrayBuffer rather than a JSON number array.
   const bytes = await invokeTauri<ArrayBuffer>("fetch_media_bytes", { url });
   return new Uint8Array(bytes);
+}
+
+/** Read plain text without depending on embedded-webview clipboard grants. */
+export async function readTextFromSystemClipboard(): Promise<string> {
+  // E2E installs Tauri's mocked IPC surface in a browser page, where the SDK's
+  // `isTauri()` marker remains false. Exercise the packaged-app command path in
+  // that build so tests detect accidental regressions to permission-gated DOM
+  // clipboard reads.
+  if (isTauri() || import.meta.env.MODE === "e2e") {
+    return invokeTauri<string>("read_clipboard_text");
+  }
+
+  const clipboard = navigator.clipboard;
+  if (!clipboard?.readText) {
+    throw new Error("Clipboard text reading is unavailable");
+  }
+  return clipboard.readText();
 }
 
 /** Write text through the native clipboard after an asynchronous workflow. */

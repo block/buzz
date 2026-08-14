@@ -1,4 +1,3 @@
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 
 type PersonaGroup = { persona: AgentPersona; agents: ManagedAgent[] };
@@ -32,13 +31,4 @@ export function buildUnifiedGroups(
   }
 
   return { groups, ungrouped, unknown };
-}
-
-export function pickProfileAgent(agents: ManagedAgent[]) {
-  return [...agents].sort((left, right) => {
-    const activeDiff =
-      Number(isManagedAgentActive(right)) - Number(isManagedAgentActive(left));
-    if (activeDiff !== 0) return activeDiff;
-    return left.name.localeCompare(right.name);
-  })[0];
 }

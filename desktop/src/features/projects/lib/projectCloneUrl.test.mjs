@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { deriveRelayCloneUrl, effectiveCloneUrls } from "./projectCloneUrl.ts";
+import {
+  projectRepoHost,
+  projectRepoHostForProject,
+  repositoryDisplayPath,
+} from "./projectRepoHost.ts";
 
 const OWNER = "a".repeat(64);
 const ORIGIN = "https://relay.example";
@@ -59,4 +64,93 @@ test("effectiveCloneUrls derives a default when none is advertised", () => {
 
 test("effectiveCloneUrls returns empty when no default can be derived", () => {
   assert.deepEqual(effectiveCloneUrls([], null, OWNER, "repo"), []);
+});
+
+test("projectRepoHost recognizes a canonical repository on the relay", () => {
+  assert.deepEqual(projectRepoHost(`${ORIGIN}/git/${OWNER}/buzz`, ORIGIN), {
+    kind: "buzz",
+  });
+});
+
+test("projectRepoHost identifies an external repository by host", () => {
+  assert.deepEqual(
+    projectRepoHost("https://github.com/block/buzz.git", ORIGIN),
+    { kind: "external", host: "github.com" },
+  );
+});
+
+test("projectRepoHost treats a non-repository relay path as external", () => {
+  assert.deepEqual(projectRepoHost(`${ORIGIN}/other/path`, ORIGIN), {
+    kind: "external",
+    host: "relay.example",
+  });
+});
+
+test("projectRepoHost fails closed while either URL is unresolved", () => {
+  assert.deepEqual(projectRepoHost(null, ORIGIN), { kind: "unresolved" });
+  assert.deepEqual(projectRepoHost(`${ORIGIN}/git/${OWNER}/buzz`, null), {
+    kind: "unresolved",
+  });
+  assert.deepEqual(projectRepoHost("not a URL", ORIGIN), {
+    kind: "unresolved",
+  });
+});
+
+test("projectRepoHostForProject recognizes an implicit relay repository", () => {
+  assert.deepEqual(
+    projectRepoHostForProject(
+      { cloneUrls: [], dtag: "buzz", owner: OWNER },
+      ORIGIN,
+    ),
+    { kind: "buzz" },
+  );
+});
+
+test("repositoryDisplayPath renders an external repo as host/path without .git", () => {
+  assert.equal(
+    repositoryDisplayPath(
+      {
+        cloneUrls: ["https://github.com/block/buzz.git"],
+        dtag: "buzz",
+        owner: OWNER,
+      },
+      ORIGIN,
+    ),
+    "github.com/block/buzz",
+  );
+});
+
+test("repositoryDisplayPath renders a relay-hosted repo as owner/repo", () => {
+  assert.equal(
+    repositoryDisplayPath(
+      { cloneUrls: [], dtag: "buzz", owner: OWNER },
+      ORIGIN,
+      "thomas",
+    ),
+    "thomas/buzz",
+  );
+});
+
+test("repositoryDisplayPath falls back to a shortened pubkey owner", () => {
+  assert.equal(
+    repositoryDisplayPath(
+      { cloneUrls: [], dtag: "buzz", owner: OWNER },
+      ORIGIN,
+    ),
+    `${"a".repeat(8)}…/buzz`,
+  );
+});
+
+test("repositoryDisplayPath fails closed without a resolvable clone URL", () => {
+  assert.equal(
+    repositoryDisplayPath({ cloneUrls: [], dtag: "buzz", owner: OWNER }, null),
+    null,
+  );
+  assert.equal(
+    repositoryDisplayPath(
+      { cloneUrls: ["not a URL"], dtag: "buzz", owner: OWNER },
+      ORIGIN,
+    ),
+    null,
+  );
 });
