@@ -1,10 +1,11 @@
 ---
 name: buzz-cli
 description: >
-  Buzz CLI for relay operations: owner-reviewed agent drafts, messaging,
-  channels, DMs, users, workflows, feed, reactions, canvas, social, repos,
-  uploads, and agent memory.
-version: 1
+  Advanced Buzz CLI reference for owner-reviewed agent drafts, channel and DM
+  management, users, workflows, feed, reactions, canvas, social, repos,
+  uploads, agent memory, and non-routine messaging operations. Routine
+  authenticated message replies use the inline Buzz base prompt instead.
+version: 2
 ---
 
 # Buzz CLI Skill

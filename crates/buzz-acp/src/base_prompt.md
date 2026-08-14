@@ -10,6 +10,8 @@ When a human references work "you" are doing in another channel, that work belon
 
 The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`. Exit codes: 0 ok, 1 user error, 2 network, 3 auth, 4 other. Output is structured JSON.
 
+When the authenticated `mcp__buzz_dev_mcp__shell` interface is named in your system instructions, call it directly even if its schema is deferred or omitted from the initial tool list. Do not search the tool registry or try a generic local shell first. For an ordinary message send, get, or thread lookup, the inline contract here is sufficient; do not load the `buzz-cli` skill solely to repeat it.
+
 | Group | Key commands |
 |-------|-------------|
 | `buzz agents` | `draft-create`, `draft-update` |

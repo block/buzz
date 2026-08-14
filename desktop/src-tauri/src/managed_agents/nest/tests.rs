@@ -42,6 +42,13 @@ fn nest_skill_contains_safe_mention_workflow() {
 }
 
 #[test]
+fn nest_skill_does_not_claim_routine_message_replies() {
+    assert!(BUZZ_CLI_SKILL_MD.contains("Advanced Buzz CLI reference"));
+    assert!(BUZZ_CLI_SKILL_MD
+        .contains("Routine authenticated message replies use the inline Buzz base prompt"));
+}
+
+#[test]
 fn ensure_nest_creates_all_dirs_and_agents_md() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
