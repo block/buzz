@@ -1,10 +1,18 @@
 import * as React from "react";
-import { AlertCircle, Lock, Upload } from "lucide-react";
+import { AlertCircle, Upload } from "lucide-react";
 
 import type {
   AgentSnapshotImportPreview,
   AgentSnapshotImportResult,
 } from "@/features/agents/hooks";
+import type {
+  AcpRuntimeCatalogEntry,
+  CreatePersonaInput,
+} from "@/shared/api/types";
+import type {
+  SnapshotFormat,
+  SnapshotMemoryLevel,
+} from "@/shared/api/tauriPersonas";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -13,9 +21,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-import { Separator } from "@/shared/ui/separator";
-
-import { AgentDefinitionMetadata } from "./AgentDefinitionMetadata";
+import { AgentTradingCardPreview } from "./AgentTradingCardPreview";
+import { AgentDialog } from "./AgentDialog";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -23,6 +30,10 @@ type ImportPhase = "preview" | "confirming" | "result";
 
 type AgentSnapshotImportDialogProps = {
   open: boolean;
+  /** Original snapshot bytes. PNG imports use these as the exact card art
+   * shown during review instead of reconstructing a second card. */
+  fileBytes: number[];
+  fileName: string;
   /** Preview data loaded by the caller before opening. */
   preview: AgentSnapshotImportPreview;
   /** True while the confirm mutation is in-flight. */
@@ -31,8 +42,11 @@ type AgentSnapshotImportDialogProps = {
   result: AgentSnapshotImportResult | null;
   /** Error from the confirm mutation, if any. */
   confirmError: string | null;
-  /** Called with keepAllowlist when user clicks Import. */
-  onConfirm: (keepAllowlist: boolean) => void;
+  runtimes: AcpRuntimeCatalogEntry[];
+  runtimeCatalogStatus: "loading" | "ready" | "error";
+  onBeginSetup: () => void;
+  /** Creates the imported agent after the reviewed setup form is submitted. */
+  onConfirm: (input: CreatePersonaInput) => Promise<boolean>;
   onOpenChange: (open: boolean) => void;
 };
 
@@ -40,266 +54,202 @@ type AgentSnapshotImportDialogProps = {
 
 export function AgentSnapshotImportDialog({
   open,
+  fileBytes,
+  fileName,
   preview,
   isConfirming,
   result,
   confirmError,
+  runtimes,
+  runtimeCatalogStatus,
+  onBeginSetup,
   onConfirm,
   onOpenChange,
 }: AgentSnapshotImportDialogProps) {
-  // Default: clear the source allowlist (safe default per spec).
-  const [keepAllowlist, setKeepAllowlist] = React.useState(false);
-
-  // Reset choice whenever the dialog opens with new data.
-  React.useEffect(() => {
-    if (open) {
-      setKeepAllowlist(false);
-    }
-  }, [open]);
-
+  const [showSetup, setShowSetup] = React.useState(false);
+  const setupValues = React.useMemo(
+    () => importSetupValues(preview),
+    [preview],
+  );
   const phase: ImportPhase =
     result !== null ? "result" : isConfirming ? "confirming" : "preview";
+  const format = importSnapshotFormat(fileName);
+  const memoryLevel = importSnapshotMemoryLevel(preview.memoryLevel);
+  const cardImageUrl = useImportedCardImageUrl(fileBytes, format);
+  const agentId =
+    preview.avatarUrl ??
+    `${preview.displayName}:${preview.model ?? ""}:${preview.runtime ?? ""}`;
 
-  const hasMemory = preview.memoryEntryCount > 0;
-  const memoryLevelLabel =
-    preview.memoryLevel === "core"
-      ? "core"
-      : preview.memoryLevel === "everything"
-        ? "all"
-        : "none";
+  if (showSetup) {
+    return (
+      <AgentDialog
+        description=""
+        error={confirmError ? new Error(confirmError) : null}
+        initialValues={setupValues}
+        isPending={isConfirming}
+        mode="definition-edit"
+        onOpenChange={onOpenChange}
+        onSubmit={async (input) => {
+          if ("id" in input) return;
+          const imported = await onConfirm(input);
+          if (imported) onOpenChange(false);
+        }}
+        open={open}
+        runtimes={runtimes}
+        runtimeCatalogStatus={runtimeCatalogStatus}
+        submitLabel="Add agent"
+        title="Set up your imported agent"
+      />
+    );
+  }
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
         aria-describedby={undefined}
-        className="max-h-[85vh] max-w-2xl overflow-y-auto"
+        className="max-w-lg"
         data-testid="agent-snapshot-import-dialog"
         showCloseButton={false}
       >
         <DialogHeader className="space-y-0">
-          <div className="flex items-center justify-between gap-4">
-            <DialogTitle>
-              {phase === "result" ? "Agent imported" : "Import agent snapshot"}
-            </DialogTitle>
-            <div className="flex items-center gap-2">
-              {phase === "preview" ? (
-                <>
-                  <Button
-                    data-testid="agent-snapshot-import-confirm"
-                    disabled={isConfirming}
-                    onClick={() => onConfirm(keepAllowlist)}
-                    size="sm"
-                    type="button"
-                    variant="default"
-                  >
-                    <Upload className="h-4 w-4" />
-                    Import
-                  </Button>
-                  <DialogClose asChild>
-                    <Button
-                      disabled={isConfirming}
-                      size="sm"
-                      type="button"
-                      variant="ghost"
-                    >
-                      Cancel
-                    </Button>
-                  </DialogClose>
-                </>
-              ) : (
-                <DialogClose asChild>
-                  <Button size="sm" type="button" variant="ghost">
-                    Close
-                  </Button>
-                </DialogClose>
-              )}
-            </div>
-          </div>
+          <DialogTitle className="truncate">
+            {phase === "result"
+              ? "Agent imported"
+              : `Import ${preview.displayName}`}
+          </DialogTitle>
         </DialogHeader>
 
-        <Separator />
-
-        {phase === "preview" ? (
-          <PreviewBody
-            preview={preview}
-            hasMemory={hasMemory}
-            memoryLevelLabel={memoryLevelLabel}
-            keepAllowlist={keepAllowlist}
-            onKeepAllowlistChange={setKeepAllowlist}
-          />
-        ) : phase === "confirming" ? (
-          <div className="py-4 text-center text-sm text-muted-foreground">
-            Creating agent…
+        {phase === "result" && result !== null ? (
+          <div className="flex flex-col gap-6 pt-2">
+            <ResultBody result={result} confirmError={confirmError} />
+            <div className="flex items-center justify-end pt-2">
+              <DialogClose asChild>
+                <Button size="sm" type="button" variant="ghost">
+                  Close
+                </Button>
+              </DialogClose>
+            </div>
           </div>
-        ) : result !== null ? (
-          <ResultBody result={result} confirmError={confirmError} />
-        ) : null}
+        ) : (
+          <div className="flex flex-col gap-6 pt-2">
+            <div className="py-4" data-testid="agent-snapshot-import-card-area">
+              <AgentTradingCardPreview
+                agentAvatarUrl={preview.avatarUrl}
+                agentId={agentId}
+                agentName={preview.displayName}
+                cardImageUrl={cardImageUrl}
+                format={format}
+                memoryLevel={memoryLevel}
+              />
+            </div>
+
+            {confirmError ? (
+              <p
+                aria-live="polite"
+                className="text-sm text-destructive"
+                data-testid="agent-snapshot-import-error"
+              >
+                {confirmError}
+              </p>
+            ) : null}
+
+            <div
+              className="flex items-center justify-end gap-2 pt-2"
+              data-testid="agent-snapshot-import-footer"
+            >
+              <DialogClose asChild>
+                <Button
+                  disabled={isConfirming}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+              </DialogClose>
+              <Button
+                data-testid="agent-snapshot-import-confirm"
+                disabled={isConfirming}
+                onClick={() => {
+                  onBeginSetup();
+                  setShowSetup(true);
+                }}
+                size="sm"
+                type="button"
+              >
+                <Upload className="h-4 w-4" />
+                {isConfirming ? "Importing…" : "Import"}
+              </Button>
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
 }
 
-// ── Preview body ──────────────────────────────────────────────────────────────
+function useImportedCardImageUrl(
+  fileBytes: number[],
+  format: SnapshotFormat,
+): string | undefined {
+  return React.useMemo(() => {
+    if (format !== "png" || !hasPngSignature(fileBytes)) return undefined;
+    const bytes = Uint8Array.from(fileBytes);
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(
+        ...bytes.subarray(offset, offset + chunkSize),
+      );
+    }
+    return `data:image/png;base64,${btoa(binary)}`;
+  }, [fileBytes, format]);
+}
 
-export function PreviewBody({
-  preview,
-  hasMemory,
-  memoryLevelLabel,
-  keepAllowlist,
-  onKeepAllowlistChange,
-}: {
-  preview: AgentSnapshotImportPreview;
-  hasMemory: boolean;
-  memoryLevelLabel: string;
-  keepAllowlist: boolean;
-  onKeepAllowlistChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="space-y-4 py-1">
-      {/* Agent identity */}
-      <div className="space-y-1">
-        <p className="text-sm font-medium">{preview.displayName}</p>
-      </div>
+function hasPngSignature(fileBytes: readonly number[]): boolean {
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  return signature.every((byte, index) => fileBytes[index] === byte);
+}
 
-      {/* Locked-card provenance: this file was encrypted to this machine's
-          keys and has been unlocked for review. */}
-      {preview.locked ? (
-        <div
-          className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm"
-          data-testid="agent-snapshot-import-locked-notice"
-        >
-          <Lock className="mt-0.5 h-4 w-4 shrink-0" />
-          <p>
-            This card is <strong>locked</strong> — its agent is encrypted to the
-            original owner and agent keys. Your keys unlocked it; the full
-            decrypted payload is shown below.
-          </p>
-        </div>
-      ) : null}
+function importSnapshotFormat(fileName: string): SnapshotFormat {
+  return fileName.toLocaleLowerCase().endsWith(".png") ? "png" : "json";
+}
 
-      <AgentDefinitionMetadata
-        isBuiltIn={preview.isBuiltIn}
-        model={preview.model}
-        runtime={preview.runtime}
-      />
+function importSnapshotMemoryLevel(memoryLevel: string): SnapshotMemoryLevel {
+  return memoryLevel === "core" || memoryLevel === "everything"
+    ? memoryLevel
+    : "none";
+}
 
-      {/* Portable behavior — never hide executable configuration behind a summary. */}
-      <section
-        className="space-y-2 rounded-md border border-border p-3"
-        data-testid="agent-snapshot-import-behavior"
-      >
-        <div>
-          <p className="text-sm font-medium">Agent instructions</p>
-          <p className="text-xs text-muted-foreground">
-            Review the instructions this agent will follow after import.
-          </p>
-        </div>
-        <pre
-          className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-3 text-xs"
-          data-testid="agent-snapshot-import-system-prompt"
-        >
-          {preview.systemPrompt || "No system prompt included."}
-        </pre>
-      </section>
+function importSetupValues(
+  preview: AgentSnapshotImportPreview,
+): CreatePersonaInput {
+  const respondTo = safeImportedRespondTo(preview.respondTo);
+  const behavior =
+    respondTo !== undefined || preview.parallelism !== null
+      ? {
+          respondTo,
+          parallelism: preview.parallelism ?? undefined,
+        }
+      : undefined;
+  return {
+    displayName: preview.displayName,
+    avatarUrl: preview.avatarUrl ?? undefined,
+    systemPrompt: preview.systemPrompt ?? "",
+    runtime: preview.runtime ?? undefined,
+    model: preview.model ?? undefined,
+    provider: preview.provider ?? undefined,
+    namePool: preview.namePool,
+    behavior,
+  };
+}
 
-      <p className="text-sm text-muted-foreground">
-        A new agent will be created with a fresh keypair. The imported agent is
-        independent of the source — identity never travels.
-      </p>
-
-      {/* Memory section */}
-      {hasMemory ? (
-        <div
-          className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
-          data-testid="agent-snapshot-import-memory-warning"
-        >
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <p>
-            This snapshot includes{" "}
-            <strong>
-              {preview.memoryEntryCount} {memoryLevelLabel} memory entr
-              {preview.memoryEntryCount === 1 ? "y" : "ies"}
-            </strong>
-            . Memory is stored as plaintext in the file and will be restored
-            under the new agent's identity.
-          </p>
-        </div>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          No memory included — config only.
-        </p>
-      )}
-
-      {/* Allowlist section */}
-      {preview.hasSourceAllowlist ? (
-        <div
-          className="space-y-2 rounded-md border border-border p-3"
-          data-testid="agent-snapshot-import-allowlist-section"
-        >
-          <p className="text-sm font-medium">
-            Respond-to allowlist ({preview.sourceAllowlistCount} entr
-            {preview.sourceAllowlistCount === 1 ? "y" : "ies"})
-          </p>
-          <p className="text-xs text-muted-foreground">
-            This snapshot includes source-environment pubkeys. Review every key
-            before choosing Keep; Clear is safer when you do not recognize them.
-          </p>
-          <ul
-            className="max-h-28 space-y-1 overflow-y-auto rounded bg-muted/60 p-2 font-mono text-xs"
-            data-testid="agent-snapshot-import-allowlist-values"
-          >
-            {preview.sourceAllowlist.map((pubkey) => (
-              <li className="break-all" key={pubkey}>
-                {pubkey}
-              </li>
-            ))}
-          </ul>
-          <div className="flex flex-col gap-1.5">
-            <label className="flex cursor-pointer items-center gap-2">
-              <input
-                checked={!keepAllowlist}
-                data-testid="agent-snapshot-import-allowlist-clear"
-                name="allowlist-choice"
-                onChange={() => onKeepAllowlistChange(false)}
-                type="radio"
-              />
-              <span className="text-sm">
-                <strong>Clear</strong> — start with an empty allowlist (safer)
-              </span>
-            </label>
-            <label className="flex cursor-pointer items-center gap-2">
-              <input
-                checked={keepAllowlist}
-                data-testid="agent-snapshot-import-allowlist-keep"
-                name="allowlist-choice"
-                onChange={() => onKeepAllowlistChange(true)}
-                type="radio"
-              />
-              <span className="text-sm">
-                <strong>Keep</strong> — copy source allowlist to the new agent
-              </span>
-            </label>
-          </div>
-        </div>
-      ) : null}
-
-      <details
-        className="rounded-md border border-border p-3"
-        data-testid="agent-snapshot-import-manifest"
-      >
-        <summary className="cursor-pointer text-sm font-medium">
-          Full embedded manifest
-        </summary>
-        <p className="mt-2 text-xs text-muted-foreground">
-          This is the complete portable payload decoded from the file. Secrets,
-          credentials, and source identity are not part of the snapshot format.
-        </p>
-        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-3 text-xs">
-          {preview.manifestJson}
-        </pre>
-      </details>
-    </div>
-  );
+function safeImportedRespondTo(
+  respondTo: string | null,
+): "owner-only" | "anyone" | undefined {
+  if (respondTo === "anyone") return "anyone";
+  if (respondTo === "allowlist") return "owner-only";
+  return respondTo === "owner-only" ? "owner-only" : undefined;
 }
 
 // ── Result body ───────────────────────────────────────────────────────────────

@@ -1,0 +1,439 @@
+@property --agent-card-pointer-x {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 50%;
+}
+
+@property --agent-card-pointer-y {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 50%;
+}
+
+.agent-card-mode-perspective {
+  perspective: 56rem;
+  pointer-events: none;
+}
+
+:where(.agent-card-mode-perspective) .agent-trading-card-preview__stage {
+  max-width: clamp(13rem, calc((100vh - 25rem) * 0.667), 16.5rem);
+}
+
+.agent-card-mode-flip {
+  display: grid;
+  transform-origin: 50% 50%;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+
+.agent-card-mode-face {
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  grid-column: 1;
+  grid-row: 1;
+  opacity: 0;
+  transform-style: flat;
+  visibility: hidden;
+}
+
+.agent-card-mode-face--back {
+  transform: rotateY(180deg);
+}
+
+.agent-card-mode-face[data-active="false"] {
+  pointer-events: none;
+}
+
+.agent-card-mode-face[data-active="true"] {
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
+}
+
+.agent-trading-card-preview__stage {
+  /* The white frame is inset 30px horizontally and 31px vertically in the
+     1227 x 1839 template, with a 50px inner radius. Keep the outer curve
+     concentric: (50 + 30) / 1227 and (50 + 31) / 1839. */
+  --agent-card-outer-radius-x: 6.51997%;
+  --agent-card-outer-radius-y: 4.40457%;
+  --agent-card-outer-radius:
+    var(--agent-card-outer-radius-x) / var(--agent-card-outer-radius-y);
+  --agent-card-outer-clip: inset(
+    0 round var(--agent-card-outer-radius-x) /
+    var(--agent-card-outer-radius-y)
+  );
+  --agent-card-accent: hsl(220deg 68% 56%);
+
+  isolation: isolate;
+  perspective: 56rem;
+  position: relative;
+  transform-style: preserve-3d;
+  will-change: opacity, transform;
+  z-index: 0;
+}
+
+.agent-trading-card-preview__burst {
+  border-radius: var(--agent-card-outer-radius);
+  inset: -24% -36%;
+  pointer-events: none;
+  position: absolute;
+  z-index: -1;
+}
+
+.agent-trading-card-preview__burst-lobe {
+  --agent-card-burst-color: color-mix(
+    in srgb,
+    var(--agent-card-accent) 62%,
+    transparent
+  );
+
+  animation: none;
+  background: radial-gradient(
+    ellipse,
+    var(--agent-card-burst-color) 0%,
+    var(--agent-card-burst-color) 24%,
+    transparent 72%
+  );
+  border-radius: 44%;
+  box-shadow: 0 0 9.375rem 5.3125rem var(--agent-card-burst-color);
+  filter: blur(1.25rem);
+  inset: 4%;
+  opacity: 0;
+  position: absolute;
+  transform: var(--agent-card-burst-start);
+  will-change: opacity, transform;
+}
+
+.agent-trading-card-preview__stage[data-reveal-ready="true"]
+  .agent-trading-card-preview__burst-lobe {
+  animation: agent-card-color-burst 1.4s cubic-bezier(0.65, 0, 0.35, 1) 240ms
+    both;
+}
+
+.agent-trading-card-preview__burst-lobe--one {
+  --agent-card-burst-color: color-mix(
+    in srgb,
+    var(--agent-card-accent) 68%,
+    white
+  );
+  --agent-card-burst-start: translate3d(-6%, -3%, 0) rotate(-17deg) scaleX(0.9)
+    scaleY(0.56);
+  --agent-card-burst-end: translate3d(-18%, -10%, 0) rotate(-8deg) scaleX(1.15)
+    scaleY(0.72);
+}
+
+.agent-trading-card-preview__burst-lobe--two {
+  --agent-card-burst-start: translate3d(6%, 1%, 0) rotate(19deg) scaleX(0.64)
+    scaleY(0.84);
+  --agent-card-burst-end: translate3d(20%, 4%, 0) rotate(28deg) scaleX(0.82)
+    scaleY(1.08);
+}
+
+.agent-trading-card-preview__burst-lobe--three {
+  --agent-card-burst-color: color-mix(
+    in srgb,
+    var(--agent-card-accent) 52%,
+    white
+  );
+  --agent-card-burst-start: translate3d(-1%, 5%, 0) rotate(3deg) scaleX(0.8)
+    scaleY(0.59);
+  --agent-card-burst-end: translate3d(-2%, 18%, 0) rotate(12deg) scaleX(1.02)
+    scaleY(0.76);
+}
+
+.agent-trading-card-preview__tilt-plane {
+  aspect-ratio: 1227 / 1839;
+  border-radius: var(--agent-card-outer-radius);
+  box-shadow:
+    0 1.875rem 3.75rem rgb(46 32 18 / 22%),
+    0 0.5rem 1.125rem rgb(46 32 18 / 16%);
+  cursor: default;
+  isolation: isolate;
+  position: relative;
+  transform: none;
+  transform-origin: 50% 50%;
+  transform-style: preserve-3d;
+  transition: transform 560ms cubic-bezier(0.22, 0.8, 0.3, 1);
+  width: 100%;
+  -webkit-user-select: none;
+  user-select: none;
+  will-change: transform;
+}
+
+.agent-trading-card-preview__tilt-plane * {
+  cursor: inherit;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.agent-trading-card-preview {
+  background: #7a643f;
+  border-radius: var(--agent-card-outer-radius);
+  clip-path: var(--agent-card-outer-clip);
+  contain: layout paint;
+  height: 100%;
+  inset: 0;
+  isolation: isolate;
+  overflow: hidden;
+  position: absolute;
+  width: 100%;
+}
+
+.agent-trading-card-preview__template,
+.agent-trading-card-preview__generated,
+.agent-trading-card-preview__content,
+.agent-trading-card-preview__palette,
+.agent-trading-card-preview__shimmer {
+  inset: 0;
+  border-radius: inherit;
+  clip-path: var(--agent-card-outer-clip);
+  position: absolute;
+}
+
+.agent-trading-card-preview__template,
+.agent-trading-card-preview__generated,
+.agent-trading-card-preview__content {
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+
+.agent-trading-card-preview__template {
+  z-index: 0;
+}
+
+.agent-trading-card-preview__generated {
+  object-fit: cover;
+  z-index: 0;
+}
+
+.agent-trading-card-preview__content {
+  z-index: 2;
+}
+
+.agent-trading-card-preview__palette,
+.agent-trading-card-preview__shimmer {
+  padding: 2.45%;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.agent-trading-card-preview__palette {
+  background: var(--agent-card-accent);
+  mix-blend-mode: color;
+  opacity: 0.62;
+  transition: background-color 220ms cubic-bezier(0.23, 1, 0.32, 1);
+  z-index: 1;
+}
+
+.agent-trading-card-preview__shimmer {
+  --agent-card-pointer-x: 50%;
+  --agent-card-pointer-y: 50%;
+
+  overflow: hidden;
+  transition:
+    --agent-card-pointer-x 560ms cubic-bezier(0.22, 0.8, 0.3, 1),
+    --agent-card-pointer-y 560ms cubic-bezier(0.22, 0.8, 0.3, 1);
+  z-index: 3;
+}
+
+.agent-trading-card-preview__shimmer::after {
+  background: conic-gradient(
+    from 218deg at var(--agent-card-pointer-x) var(--agent-card-pointer-y),
+    transparent 0deg,
+    color-mix(in srgb, var(--agent-card-accent) 44%, white) 42deg,
+    rgb(255 255 255 / 84%) 72deg,
+    color-mix(in srgb, var(--agent-card-accent) 54%, white) 104deg,
+    transparent 148deg
+  );
+  content: "";
+  inset: -1px;
+  opacity: 0;
+  position: absolute;
+  transition: opacity 560ms cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+
+.agent-trading-card-preview__shimmer::before {
+  background: radial-gradient(
+    circle at var(--agent-card-pointer-x) var(--agent-card-pointer-y),
+    rgb(255 255 255 / 88%) 0,
+    color-mix(in srgb, var(--agent-card-accent) 32%, white) 13%,
+    transparent 34%
+  );
+  content: "";
+  inset: -1px;
+  opacity: 0;
+  position: absolute;
+  transition: opacity 560ms cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .agent-trading-card-preview__stage[data-entrance-complete="true"]
+    .agent-trading-card-preview__tilt-plane:hover {
+    transition-duration: 70ms;
+    transition-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  .agent-trading-card-preview__stage[data-entrance-complete="true"]
+    .agent-trading-card-preview__tilt-plane:hover
+    .agent-trading-card-preview__shimmer {
+    transition-duration: 70ms;
+    transition-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  .agent-trading-card-preview__stage[data-entrance-complete="true"]
+    .agent-trading-card-preview__tilt-plane:hover
+    .agent-trading-card-preview__shimmer::before {
+    opacity: 0.76;
+    transition-duration: 90ms;
+  }
+
+  .agent-trading-card-preview__stage[data-entrance-complete="true"]
+    .agent-trading-card-preview__tilt-plane:hover
+    .agent-trading-card-preview__shimmer::after {
+    opacity: 0.58;
+    transition-duration: 90ms;
+  }
+}
+
+@keyframes agent-card-color-burst {
+  0% {
+    opacity: 0;
+    transform: var(--agent-card-burst-start);
+  }
+
+  16% {
+    opacity: 0.58;
+  }
+
+  48% {
+    opacity: 0.34;
+  }
+
+  100% {
+    opacity: 0;
+    transform: var(--agent-card-burst-end);
+  }
+}
+
+.agent-custom-card-waiting {
+  background: hsl(var(--background));
+}
+
+.agent-custom-card-waiting__particle-grid {
+  border-radius: inherit;
+  clip-path: var(--agent-card-outer-clip);
+  cursor: default;
+  display: block;
+  height: 100%;
+  inset: 0;
+  position: absolute;
+  touch-action: none;
+  width: 100%;
+  z-index: 0;
+}
+
+.agent-custom-card-progress__track {
+  background: hsl(var(--muted));
+  border-radius: 9999px;
+  height: 0.375rem;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.agent-custom-card-progress__indicator {
+  animation: agent-custom-card-progress 1.6s cubic-bezier(0.65, 0, 0.35, 1)
+    infinite;
+  background: hsl(var(--foreground));
+  border-radius: inherit;
+  height: 100%;
+  left: 0;
+  opacity: 0.72;
+  position: absolute;
+  top: 0;
+  transform: translateX(-125%);
+  width: 42%;
+  will-change: transform;
+}
+
+@keyframes agent-custom-card-progress {
+  0% {
+    transform: translateX(-125%);
+  }
+
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-card-mode-flip {
+    transform-style: flat;
+    will-change: auto;
+  }
+
+  .agent-card-mode-face {
+    -webkit-backface-visibility: visible;
+    backface-visibility: visible;
+    visibility: hidden;
+  }
+
+  .agent-card-mode-face[data-active="true"] {
+    visibility: visible;
+  }
+
+  .agent-card-mode-face--back {
+    transform: none;
+  }
+
+  .agent-trading-card-preview__stage {
+    transform: none;
+    transition: none;
+    will-change: auto;
+  }
+
+  .agent-trading-card-preview__burst {
+    display: none;
+  }
+
+  .agent-trading-card-preview__burst-lobe {
+    animation: none;
+    display: none;
+  }
+
+  .agent-trading-card-preview__tilt-plane {
+    transform: none;
+    transition: none;
+    will-change: auto;
+  }
+
+  .agent-trading-card-preview__palette {
+    transition: none;
+  }
+
+  .agent-trading-card-preview__shimmer {
+    transition: none;
+  }
+
+  .agent-trading-card-preview__shimmer::after {
+    display: none;
+  }
+
+  .agent-trading-card-preview__shimmer::before {
+    display: none;
+  }
+
+  .agent-custom-card-progress__indicator {
+    animation: none;
+    opacity: 0.5;
+    transform: none;
+  }
+}

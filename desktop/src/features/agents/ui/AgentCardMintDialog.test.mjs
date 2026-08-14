@@ -26,16 +26,20 @@ describe("cardMintKeyUtils — key panel derivations", () => {
     assert.equal(isWritableLayer("global"), true);
   });
 
-  it("isWritableLayer_agent_false", () => {
-    assert.equal(isWritableLayer("agent"), false);
+  it("isWritableLayer_agent_true", () => {
+    assert.equal(isWritableLayer("agent"), true);
   });
 
-  it("isWritableLayer_persona_false", () => {
-    assert.equal(isWritableLayer("persona"), false);
+  it("isWritableLayer_persona_true", () => {
+    assert.equal(isWritableLayer("persona"), true);
   });
 
-  it("isWritableLayer_process_false", () => {
-    assert.equal(isWritableLayer("process"), false);
+  it("isWritableLayer_process_true", () => {
+    assert.equal(isWritableLayer("process"), true);
+  });
+
+  it("isWritableLayer_card_true", () => {
+    assert.equal(isWritableLayer("card"), true);
   });
 
   it("isWritableLayer_undefined_false", () => {
@@ -45,16 +49,16 @@ describe("cardMintKeyUtils — key panel derivations", () => {
 
   // ── isReadOnlyLayer ────────────────────────────────────────────────────────
 
-  it("isReadOnlyLayer_agent_true", () => {
-    assert.equal(isReadOnlyLayer("agent"), true);
+  it("isReadOnlyLayer_agent_false", () => {
+    assert.equal(isReadOnlyLayer("agent"), false);
   });
 
-  it("isReadOnlyLayer_persona_true", () => {
-    assert.equal(isReadOnlyLayer("persona"), true);
+  it("isReadOnlyLayer_persona_false", () => {
+    assert.equal(isReadOnlyLayer("persona"), false);
   });
 
-  it("isReadOnlyLayer_process_true", () => {
-    assert.equal(isReadOnlyLayer("process"), true);
+  it("isReadOnlyLayer_process_false", () => {
+    assert.equal(isReadOnlyLayer("process"), false);
   });
 
   it("isReadOnlyLayer_global_false", () => {
@@ -166,9 +170,12 @@ describe("cardMintKeyUtils — key panel derivations", () => {
     assert.equal(showKeyStatusRow("none", false), false);
   });
 
-  it("showKeyStatusRow_agent_notEditing_hides", () => {
-    // Read-only layer: use showReadOnlyRow instead
-    assert.equal(showKeyStatusRow("agent", false), false);
+  it("showKeyStatusRow_agent_notEditing_shows", () => {
+    assert.equal(showKeyStatusRow("agent", false), true);
+  });
+
+  it("showKeyStatusRow_card_notEditing_shows", () => {
+    assert.equal(showKeyStatusRow("card", false), true);
   });
 
   it("showKeyStatusRow_undefined_notEditing_hides", () => {
@@ -179,16 +186,16 @@ describe("cardMintKeyUtils — key panel derivations", () => {
   // ── showReadOnlyRow ────────────────────────────────────────────────────────
   // Inline provenance row on the mint form for keys the dialog cannot update.
 
-  it("showReadOnlyRow_agent_notEditing_shows", () => {
-    assert.equal(showReadOnlyRow("agent", false), true);
+  it("showReadOnlyRow_agent_notEditing_hides", () => {
+    assert.equal(showReadOnlyRow("agent", false), false);
   });
 
-  it("showReadOnlyRow_persona_notEditing_shows", () => {
-    assert.equal(showReadOnlyRow("persona", false), true);
+  it("showReadOnlyRow_persona_notEditing_hides", () => {
+    assert.equal(showReadOnlyRow("persona", false), false);
   });
 
-  it("showReadOnlyRow_process_notEditing_shows", () => {
-    assert.equal(showReadOnlyRow("process", false), true);
+  it("showReadOnlyRow_process_notEditing_hides", () => {
+    assert.equal(showReadOnlyRow("process", false), false);
   });
 
   it("showReadOnlyRow_agent_editing_hides", () => {
@@ -247,11 +254,11 @@ describe("cardMintKeyUtils — key panel derivations", () => {
     assert.equal(keyPanelTitle("global", true), "Update OpenAI API key");
   });
 
-  it("keyPanelTitle_agent_readOnly", () => {
-    assert.equal(keyPanelTitle("agent", false), "OpenAI API key");
+  it("keyPanelTitle_agent_override", () => {
+    assert.equal(keyPanelTitle("agent", false), "Update OpenAI API key");
   });
 
-  it("keyPanelTitle_persona_readOnly", () => {
-    assert.equal(keyPanelTitle("persona", true), "OpenAI API key");
+  it("keyPanelTitle_persona_override", () => {
+    assert.equal(keyPanelTitle("persona", true), "Update OpenAI API key");
   });
 });

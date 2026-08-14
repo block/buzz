@@ -82,12 +82,15 @@ fn key_status_layer_matches_mint_resolution_priority() {
     let mut record = BTreeMap::new();
 
     // No key anywhere → "none"
-    assert_eq!(resolve_key_layer(&global, &persona, &record, None), "none");
+    assert_eq!(
+        resolve_key_layer(None, &global, &persona, &record, None),
+        "none"
+    );
 
     // Only global → "global" (the only writable layer)
     global.insert(key.to_string(), "sk-global".to_string());
     assert_eq!(
-        resolve_key_layer(&global, &persona, &record, None),
+        resolve_key_layer(None, &global, &persona, &record, None),
         "global"
     );
     // mint resolution also picks global when record and persona are empty
@@ -99,7 +102,7 @@ fn key_status_layer_matches_mint_resolution_priority() {
     // Persona overrides global → status must report "persona", NOT "global"
     persona.insert(key.to_string(), "sk-persona".to_string());
     assert_eq!(
-        resolve_key_layer(&global, &persona, &record, None),
+        resolve_key_layer(None, &global, &persona, &record, None),
         "persona"
     );
     // mint would use the persona key
@@ -119,7 +122,10 @@ fn key_status_layer_matches_mint_resolution_priority() {
 
     // Agent record overrides both → status must report "agent"
     record.insert(key.to_string(), "sk-agent".to_string());
-    assert_eq!(resolve_key_layer(&global, &persona, &record, None), "agent");
+    assert_eq!(
+        resolve_key_layer(None, &global, &persona, &record, None),
+        "agent"
+    );
     assert_eq!(
         resolve_env_from_layers(key, &global, &persona, &record, None).as_deref(),
         Some("sk-agent")
@@ -128,7 +134,7 @@ fn key_status_layer_matches_mint_resolution_priority() {
     // Process env is last resort (only when all map layers are empty)
     let empty = BTreeMap::new();
     assert_eq!(
-        resolve_key_layer(&empty, &empty, &empty, Some("sk-process".to_string())),
+        resolve_key_layer(None, &empty, &empty, &empty, Some("sk-process".to_string())),
         "process"
     );
 
@@ -137,12 +143,26 @@ fn key_status_layer_matches_mint_resolution_priority() {
     blank_global.insert(key.to_string(), "   ".to_string());
     assert_eq!(
         resolve_key_layer(
+            None,
             &blank_global,
             &empty,
             &empty,
             Some("sk-process".to_string())
         ),
         "process"
+    );
+
+    // A dedicated custom-card key wins over every agent environment layer so
+    // adding it never needs to rewrite those layers.
+    assert_eq!(
+        resolve_key_layer(
+            Some("sk-card-only"),
+            &global,
+            &persona,
+            &record,
+            Some("sk-process".to_string())
+        ),
+        "card"
     );
 }
 
@@ -157,6 +177,31 @@ fn key_resolution_skips_blank_values() {
             .as_deref(),
         Some("persona")
     );
+}
+
+#[test]
+fn dedicated_card_key_wins_without_mutating_agent_layers() {
+    let mut global = BTreeMap::new();
+    global.insert("OPENAI_API_KEY".to_string(), "sk-global".to_string());
+    let mut persona = BTreeMap::new();
+    persona.insert("OPENAI_API_KEY".to_string(), "sk-persona".to_string());
+    let mut record = BTreeMap::new();
+    record.insert("OPENAI_API_KEY".to_string(), "sk-agent".to_string());
+
+    assert_eq!(
+        resolve_card_api_key(
+            Some("sk-card-only".to_string()),
+            &global,
+            &persona,
+            &record,
+            Some("sk-process".to_string())
+        )
+        .as_deref(),
+        Some("sk-card-only")
+    );
+    assert_eq!(global["OPENAI_API_KEY"], "sk-global");
+    assert_eq!(persona["OPENAI_API_KEY"], "sk-persona");
+    assert_eq!(record["OPENAI_API_KEY"], "sk-agent");
 }
 
 #[test]
@@ -177,6 +222,10 @@ fn responses_url_default_and_override() {
 fn instructions_pin_style_match_default_and_owner_primacy() {
     let base = build_card_instructions("Eva", "leads the team", "");
     assert!(base.contains("match input image 2's art style EXACTLY"));
+    assert!(base.contains("iridescent foil perimeter"));
+    assert!(base.contains("same circular art mask"));
+    assert!(base.contains("two-column metadata row"));
+    assert!(base.contains("\"Good for\" and \"Vibes\""));
     assert!(base.contains("\"Eva\""));
     assert!(!base.contains("OWNER'S DIRECTIONS"));
 
@@ -198,6 +247,24 @@ fn instructions_pin_style_match_default_and_owner_primacy() {
 }
 
 #[test]
+fn followup_instructions_preserve_unrequested_card_details() {
+    let followup =
+        build_card_followup_instructions("Eva", "leads the team", "make only the sky warmer");
+    assert!(followup.contains("Input image 3 is the current finished card"));
+    assert!(followup.contains("Preserve every visual and textual detail"));
+    assert!(followup.contains("make only the sky warmer"));
+}
+
+#[test]
+fn followup_reference_must_be_a_bounded_image() {
+    let png = test_png_data_url();
+    let encoded = png.split_once(',').unwrap().1;
+    assert!(decode_reference_card(Some(encoded)).unwrap().is_some());
+    assert!(decode_reference_card(Some("not-base64")).is_err());
+    assert!(decode_reference_card(None).unwrap().is_none());
+}
+
+#[test]
 fn extract_card_output_happy_path_and_missing_image() {
     let ok = serde_json::json!({
         "output": [
@@ -214,10 +281,47 @@ fn extract_card_output_happy_path_and_missing_image() {
 
     let missing = serde_json::json!({"output": [{"type": "message", "content": []}]});
     let err = extract_card_output(&missing).unwrap_err();
-    assert!(err.contains("No image"), "{err}");
+    assert!(err.contains("did not return a card image"), "{err}");
 
     let no_output = serde_json::json!({});
     assert!(extract_card_output(&no_output).is_err());
+}
+
+#[test]
+fn extract_card_output_surfaces_failed_tool_message() {
+    let failed = serde_json::json!({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning"},
+            {"type": "image_generation_call", "status": "failed", "result": null},
+            {"type": "reasoning"},
+            {"type": "image_generation_call", "status": "failed"},
+            {"type": "message", "content": [{
+                "type": "output_text",
+                "text": "The supplied description could not be used to create an image."
+            }]}
+        ]
+    });
+
+    let err = extract_card_output(&failed).unwrap_err();
+    assert!(
+        err.contains("The supplied description could not be used"),
+        "{err}"
+    );
+    assert!(!err.contains("item types"), "{err}");
+}
+
+#[test]
+fn extract_card_output_reports_status_when_provider_omits_detail() {
+    let failed = serde_json::json!({
+        "output": [
+            {"type": "image_generation_call", "status": "failed"},
+            {"type": "image_generation_call", "status": "incomplete"}
+        ]
+    });
+
+    let err = extract_card_output(&failed).unwrap_err();
+    assert!(err.contains("statuses: failed, incomplete"), "{err}");
 }
 
 #[test]
@@ -244,6 +348,34 @@ fn kind0_picture_wins_over_record_avatar_unless_blank() {
     );
     // Nothing anywhere: None (caller surfaces the "no avatar" error).
     assert_eq!(preferred_avatar_url(None, None), None);
+}
+
+#[test]
+fn inline_svg_avatar_uses_its_rasterized_png_fallback() {
+    let svg =
+        "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%2F%3E";
+    let png = test_png_data_url();
+
+    let bytes = resolve_inline_avatar_bytes(svg, Some(&png)).unwrap();
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((image.width(), image.height()), (1, 1));
+}
+
+#[test]
+fn raster_avatar_cannot_be_overridden_when_the_source_is_not_svg() {
+    let malformed_png = "data:image/png;base64,bm90LWEtcG5n";
+    let valid_png = test_png_data_url();
+
+    assert!(resolve_inline_avatar_bytes(malformed_png, Some(&valid_png)).is_err());
+}
+
+fn test_png_data_url() -> String {
+    let image = image::DynamicImage::new_rgba8(1, 1);
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    format!("data:image/png;base64,{}", STANDARD.encode(png))
 }
 
 #[test]

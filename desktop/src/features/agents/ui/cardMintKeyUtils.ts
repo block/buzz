@@ -17,25 +17,24 @@ export function showKeyPanel(
 }
 
 /**
- * Whether the resolved layer is writable from the dialog.
- * Only `"global"` (and unset/`"none"`) can be updated via the dialog seam.
+ * Whether the dialog can save a dedicated custom-card key. Any resolved
+ * fallback can be safely overridden because the save never mutates that
+ * source layer.
  */
 export function isWritableLayer(
   keyLayer: CardMintKeyLayer | undefined,
 ): boolean {
-  return keyLayer === "global" || keyLayer === "none";
+  return keyLayer !== undefined;
 }
 
 /**
- * Whether the resolved layer cannot be updated from the dialog (key would be
- * shadowed by the higher-priority layer even if global were updated).
+ * No existing fallback is read-only: a dedicated card key takes precedence
+ * without changing the fallback source.
  */
 export function isReadOnlyLayer(
-  keyLayer: CardMintKeyLayer | undefined,
+  _keyLayer: CardMintKeyLayer | undefined,
 ): boolean {
-  return (
-    keyLayer === "agent" || keyLayer === "persona" || keyLayer === "process"
-  );
+  return false;
 }
 
 /** Whether the "Cancel" button should be shown (update mode only, with a mint form to return to). */
@@ -51,25 +50,22 @@ export function showKeyStatusRow(
   keyLayer: CardMintKeyLayer | undefined,
   editingKey: boolean,
 ): boolean {
-  return keyLayer === "global" && !editingKey;
+  return keyLayer !== undefined && keyLayer !== "none" && !editingKey;
 }
 
 /** Whether the read-only provenance row should be shown on the mint form. */
 export function showReadOnlyRow(
-  keyLayer: CardMintKeyLayer | undefined,
-  editingKey: boolean,
+  _keyLayer: CardMintKeyLayer | undefined,
+  _editingKey: boolean,
 ): boolean {
-  return isReadOnlyLayer(keyLayer) && !editingKey;
+  return false;
 }
 
 /** The header title for the key-setup panel. */
 export function keyPanelTitle(
   keyLayer: CardMintKeyLayer | undefined,
-  editingKey: boolean,
+  _editingKey: boolean,
 ): string {
-  if (isReadOnlyLayer(keyLayer)) return "OpenAI API key";
   if (keyLayer === "none") return "One-time setup: OpenAI API key";
-  return editingKey
-    ? "Update OpenAI API key"
-    : "One-time setup: OpenAI API key";
+  return "Update OpenAI API key";
 }

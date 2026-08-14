@@ -10,10 +10,13 @@ use nostr::ToBech32;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
+pub(crate) use super::import_preview::build_agent_snapshot_import_preview;
+use super::import_preview::AgentSnapshotImportPreview;
+use super::import_setup::{apply_import_setup, AgentSnapshotImportSetup};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_snapshot::{extract_chunk_payload_png, AgentSnapshot, MemoryLevel},
+        agent_snapshot::{extract_chunk_payload_png, MemoryLevel},
         agent_snapshot_envelope::{
             decrypt_envelope, parse_chunk_payload, resolve_unlock_secret, ChunkPayload,
             LOCKED_CARD_REFUSAL,
@@ -46,48 +49,6 @@ pub(super) fn reject_legacy_persona_filename(file_name: &str) -> Result<(), Stri
     Ok(())
 }
 
-// ── Import preview types ──────────────────────────────────────────────────────
-
-/// Materialized preview returned to the UI before any write is committed.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSnapshotImportPreview {
-    /// Agent display name from the snapshot.
-    pub display_name: String,
-    /// Whether the exported source definition was built in. This is display
-    /// metadata only; confirmed imports are always independent custom agents.
-    pub is_builtin: bool,
-    /// Preferred model from the exported definition.
-    pub model: Option<String>,
-    /// Preferred runtime from the exported definition.
-    pub runtime: Option<String>,
-    /// System prompt, if any.
-    pub system_prompt: Option<String>,
-    /// Effective avatar: data URL if present, otherwise the source URL fallback.
-    /// The UI renders this as a single avatar source.
-    pub avatar_url: Option<String>,
-    /// Memory level declared in the snapshot.
-    pub memory_level: String,
-    /// Number of memory entries bundled in the snapshot.
-    pub memory_entry_count: usize,
-    /// True when the snapshot's `respond_to_allowlist` is non-empty. These
-    /// pubkeys come from the source environment and are meaningless on the
-    /// importer's relay — the UI must offer Keep / Clear.
-    pub has_source_allowlist: bool,
-    /// Number of source allowlist entries.
-    pub source_allowlist_count: usize,
-    /// Full source allowlist entries, surfaced before import so hidden access
-    /// configuration is never reduced to a count.
-    pub source_allowlist: Vec<String>,
-    /// Pretty-printed, validated manifest exactly as decoded from the file.
-    /// The UI makes this available before confirmation for full payload review.
-    pub manifest_json: String,
-    /// True when the snapshot came from a locked (encrypted) card that this
-    /// machine successfully unlocked. Cards that cannot be unlocked never
-    /// reach a preview — they fail closed with the locked-card refusal.
-    pub locked: bool,
-}
-
 /// The confirmation request sent from the UI after the user reviews the preview.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +58,9 @@ pub struct AgentSnapshotImportConfirm {
     /// When true, copy source `respond_to_allowlist` to the new agent.
     /// When false (the safe default), the allowlist is cleared.
     pub keep_allowlist: bool,
+    /// Optional user-reviewed values from the setup dialog. Older callers may
+    /// omit this and retain the original direct-import behavior.
+    pub setup: Option<AgentSnapshotImportSetup>,
 }
 
 /// Structured result returned after a confirmed import.
@@ -129,11 +93,9 @@ pub struct AgentSnapshotImportResult {
 /// function so that unit tests exercise the exact production logic rather
 /// than a reconstruction of it.
 ///
-/// # UI contract
-///
-/// The Keep/Clear toggle is shown whenever `has_source_allowlist` is true
-/// (i.e. the raw allowlist is non-empty), regardless of the source mode.
-/// The mode (`respond_to` wire string) and the list are independent axes.
+/// The reviewed setup flow supplies explicit behavioral values. This resolver
+/// remains the compatibility path for callers that omit setup values and for
+/// normalizing the final values before the imported agent is persisted.
 ///
 /// # Decision table
 ///
@@ -182,8 +144,8 @@ pub(crate) fn resolve_snapshot_import_behavior(
         );
     }
 
-    // Step 4: apply Keep/Clear when the toggle was visible (list non-empty),
-    // or preserve the source mode when it was not.
+    // Step 4: apply the caller's Keep/Clear choice when a list is present, or
+    // preserve the source mode when there is no list to resolve.
     let (resolved_mode, resolved_allowlist) = if has_source_allowlist {
         if keep_allowlist {
             // Keep: preserve source mode and validated list.
@@ -198,7 +160,7 @@ pub(crate) fn resolve_snapshot_import_behavior(
             (source_mode, Vec::new())
         }
     } else {
-        // No list present → toggle was never shown; preserve source mode as-is.
+        // No list present: preserve source mode as-is.
         (source_mode, normalized_allowlist)
     };
 
@@ -396,43 +358,6 @@ pub async fn preview_agent_snapshot_import(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-pub(crate) fn build_agent_snapshot_import_preview(
-    snapshot: &AgentSnapshot,
-    locked: bool,
-) -> Result<AgentSnapshotImportPreview, String> {
-    let memory_level = match snapshot.memory.level {
-        MemoryLevel::None => "none",
-        MemoryLevel::Core => "core",
-        MemoryLevel::Everything => "everything",
-    }
-    .to_string();
-
-    let manifest_json = serde_json::to_string_pretty(snapshot)
-        .map_err(|e| format!("failed to render snapshot manifest: {e}"))?;
-    let source_allowlist = snapshot.definition.respond_to_allowlist.clone();
-
-    Ok(AgentSnapshotImportPreview {
-        display_name: snapshot.profile.display_name.clone(),
-        is_builtin: snapshot.definition.source_is_builtin,
-        model: snapshot.definition.model.clone(),
-        runtime: snapshot.definition.runtime.clone(),
-        system_prompt: snapshot.definition.system_prompt.clone(),
-        // Effective avatar: data URL wins; URL fallback if no data URL.
-        avatar_url: snapshot
-            .profile
-            .avatar_data_url
-            .clone()
-            .or_else(|| snapshot.profile.avatar_url.clone()),
-        memory_level,
-        memory_entry_count: snapshot.memory.entries.len(),
-        source_allowlist_count: source_allowlist.len(),
-        has_source_allowlist: !source_allowlist.is_empty(),
-        source_allowlist,
-        manifest_json,
-        locked,
-    })
-}
-
 // ── `confirm_agent_snapshot_import` ──────────────────────────────────────────
 
 /// Import a `buzz-agent-snapshot v1` file as a brand-new agent.
@@ -461,7 +386,7 @@ pub async fn confirm_agent_snapshot_import(
     // ── Phase 1: validate (no writes) ────────────────────────────────────────
     // Locked cards unlock only via this machine's exact key endpoints;
     // anything else fails closed here, before key generation.
-    let snapshot = {
+    let mut snapshot = {
         let owner_keys = state.signing_keys().ok();
         let records = {
             let _store_guard = state
@@ -473,6 +398,12 @@ pub async fn confirm_agent_snapshot_import(
         decode_snapshot_for_import(&input.file_bytes, owner_keys.as_ref(), &records)?.0
     };
 
+    let reviewed_env_vars = input
+        .setup
+        .as_ref()
+        .map(|setup| apply_import_setup(&mut snapshot, setup))
+        .unwrap_or_default();
+
     let display_name = snapshot.profile.display_name.trim().to_string();
     if display_name.is_empty() {
         return Err("Snapshot display name is empty.".to_string());
@@ -483,7 +414,7 @@ pub async fn confirm_agent_snapshot_import(
         snapshot.definition.respond_to.as_deref(),
         &snapshot.definition.respond_to_allowlist,
         snapshot.definition.parallelism,
-        input.keep_allowlist,
+        input.setup.is_some() || input.keep_allowlist,
     )?;
     let minted_parallelism = minted.parallelism;
 
@@ -578,7 +509,7 @@ pub async fn confirm_agent_snapshot_import(
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
-            env_vars: std::collections::BTreeMap::new(),
+            env_vars: reviewed_env_vars.clone(),
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             parallelism: minted_parallelism,
@@ -620,7 +551,7 @@ pub async fn confirm_agent_snapshot_import(
             model: snapshot.definition.model.clone(),
             provider: snapshot.definition.provider.clone(),
             persona_source_version: None,
-            env_vars: std::collections::BTreeMap::new(),
+            env_vars: reviewed_env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,

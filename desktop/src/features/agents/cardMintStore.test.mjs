@@ -41,20 +41,43 @@ describe("cardMintStore", () => {
   it("forwards the mint input — including memoryLevel — to mintFn", async () => {
     const seen = [];
     await runCardMintJob(
-      { ...INPUT, styleNotes: "stormy", lock: true, memoryLevel: "core" },
+      {
+        ...INPUT,
+        styleNotes: "stormy",
+        lock: true,
+        memoryLevel: "core",
+        avatarDataUrl: "data:image/png;base64,YXZhdGFy",
+        referenceCardPngBase64: "cHJldmlvdXMtY2FyZA==",
+      },
       (...args) => {
         seen.push(args);
         return Promise.resolve({ ...CARD, memoryLevel: "core" });
       },
     );
-    assert.deepEqual(seen, [["agent-1", "stormy", true, "core"]]);
+    assert.deepEqual(seen, [
+      [
+        "agent-1",
+        "stormy",
+        true,
+        "core",
+        "data:image/png;base64,YXZhdGFy",
+        "cHJldmlvdXMtY2FyZA==",
+      ],
+    ]);
 
     // Omitted memoryLevel stays undefined so Rust applies its "none" default.
     await runCardMintJob(INPUT, (...args) => {
       seen.push(args);
       return Promise.resolve(CARD);
     });
-    assert.deepEqual(seen[1], ["agent-1", undefined, undefined, undefined]);
+    assert.deepEqual(seen[1], [
+      "agent-1",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
   });
 
   it("tracks a successful mint through minting → done", async () => {
@@ -110,8 +133,8 @@ describe("cardMintStore", () => {
       `expected 'invalid or expired' in: ${error}`,
     );
     assert.ok(
-      error?.includes("Update API key"),
-      `expected 'Update API key' in: ${error}`,
+      error?.includes("custom-card API key"),
+      `expected 'custom-card API key' in: ${error}`,
     );
   });
 

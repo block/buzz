@@ -429,6 +429,21 @@ type E2eConfig = {
     /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
      *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
     encodeDelayMs?: number;
+    /** Delay (ms) applied to `mint_agent_card` so custom-card waiting motion
+     *  can be observed before the generated preview is returned. */
+    cardMintDelayMs?: number;
+    /** Reject `mint_agent_card` with this message when set. */
+    cardMintError?: string;
+    /** Whether the card-only OpenAI credential is configured. */
+    cardMintDedicatedKeyConfigured?: boolean;
+    /** Fallback layer reported when no dedicated card key is configured. */
+    cardMintKeyLayer?:
+      | "none"
+      | "card"
+      | "global"
+      | "persona"
+      | "agent"
+      | "process";
     /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
      *  fail-closed race: DMs are withheld while classification is unresolved. */
     relaySelfDelayMs?: number;
@@ -451,6 +466,11 @@ type E2eConfig = {
      * message — lets specs prove malformed/hash/size-mismatch error paths.
      */
     snapshotFetchError?: string;
+    /** Exact bytes returned by `fetch_snapshot_bytes` for attachment preview
+     * tests. Defaults to the legacy JSON fixture when omitted. */
+    snapshotFetchBytes?: number[];
+    agentSnapshotPreviewAvatarUrl?: string | null;
+    agentSnapshotPreviewSourceAvatarUrl?: string | null;
     uploadDescriptors?: RawBlobDescriptor[];
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
@@ -12238,8 +12258,14 @@ export function maybeInstallE2eTauriMocks() {
           isBuiltIn: true,
           model: "claude-opus-4-5",
           runtime: "goose",
+          provider: "anthropic",
           systemPrompt: null,
-          avatarUrl: null,
+          avatarUrl: activeConfig?.mock?.agentSnapshotPreviewAvatarUrl ?? null,
+          sourceAvatarUrl:
+            activeConfig?.mock?.agentSnapshotPreviewSourceAvatarUrl ?? null,
+          namePool: [],
+          respondTo: null,
+          parallelism: null,
           memoryLevel: "none",
           memoryEntryCount: 0,
           hasSourceAllowlist: false,
@@ -12250,9 +12276,14 @@ export function maybeInstallE2eTauriMocks() {
         };
       }
       case "confirm_agent_snapshot_import": {
+        const setup = (
+          payload as {
+            input?: { setup?: { displayName?: string } };
+          }
+        ).input?.setup;
         // Return a successful import result with fresh synthetic keys.
         const importResult = {
-          displayName: "Imported Agent",
+          displayName: setup?.displayName ?? "Imported Agent",
           newPubkey:
             "e2e000000000000000000000000000000000000000000000000000000000000ff",
           personaId: `e2e-persona-${Date.now()}`,
@@ -12790,6 +12821,12 @@ export function maybeInstallE2eTauriMocks() {
         // real relay. A non-null snapshotFetchError config forces a rejection.
         const err = activeConfig?.mock?.snapshotFetchError;
         if (err) throw new Error(err);
+        const configuredBytes = activeConfig?.mock?.snapshotFetchBytes;
+        if (configuredBytes) {
+          const configuredBuffer = new ArrayBuffer(configuredBytes.length);
+          new Uint8Array(configuredBuffer).set(configuredBytes);
+          return configuredBuffer;
+        }
         const jsonBytes = Array.from(
           new TextEncoder().encode(
             JSON.stringify({
@@ -12815,9 +12852,39 @@ export function maybeInstallE2eTauriMocks() {
         // command was invoked via `__BUZZ_E2E_COMMANDS__`, not the dialog.
         return true;
       case "card_mint_key_status":
-        // Cards: pretend a key is configured in global defaults so the mint
-        // form renders and the key-status row is shown.
-        return "global";
+        if (activeConfig?.mock?.cardMintDedicatedKeyConfigured) return "card";
+        return activeConfig?.mock?.cardMintKeyLayer ?? "global";
+      case "card_mint_dedicated_key_status":
+        return activeConfig?.mock?.cardMintDedicatedKeyConfigured ?? false;
+      case "card_mint_save_openai_key":
+        if (activeConfig?.mock) {
+          activeConfig.mock.cardMintDedicatedKeyConfigured = true;
+        }
+        return undefined;
+      case "card_mint_delete_openai_key":
+        if (activeConfig?.mock) {
+          activeConfig.mock.cardMintDedicatedKeyConfigured = false;
+        }
+        return undefined;
+      case "mint_agent_card": {
+        const delayMs = activeConfig?.mock?.cardMintDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        const error = activeConfig?.mock?.cardMintError;
+        if (error) throw new Error(error);
+        // A small valid PNG is sufficient for the browser to exercise the
+        // generated-card reveal without invoking an image-generation service.
+        return {
+          cardPngBase64:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n3cAAAAASUVORK5CYII=",
+          fileName: "e2e-custom-card.agent.png",
+          designerNotes: "E2E generated card",
+          locked: false,
+          memoryLevel:
+            (payload as { memoryLevel?: string }).memoryLevel ?? "none",
+        };
+      }
       case "list_agent_cards":
         // Cards archive starts empty in E2E; specs exercising the gallery
         // can extend this with a seeded config knob when needed.

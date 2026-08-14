@@ -8,6 +8,9 @@ const MAX_AGENT_SNAPSHOT_BYTES = 10 * 1024 * 1024;
 const MAX_TEAM_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const MAX_DISPLAY_NAME_LENGTH = 200;
 const MAX_FILENAME_LENGTH = 255;
+const MAX_INLINE_AVATAR_BYTES = 2 * 1024 * 1024;
+const MAX_INLINE_AVATAR_URL_LENGTH =
+  "data:image/webp;base64,".length + 4 * Math.ceil(MAX_INLINE_AVATAR_BYTES / 3);
 
 type SnapshotClipboardPayload = {
   version: 1;
@@ -17,6 +20,10 @@ type SnapshotClipboardPayload = {
   size: number;
   type: string;
   url: string;
+  /** Optional agent avatar used only by the compact composer preview. */
+  avatarUrl?: string;
+  /** Legacy field emitted by the first composer-avatar implementation. */
+  thumb?: string;
 };
 
 function escapeHtml(value: string): string {
@@ -40,6 +47,14 @@ function isSafeSnapshotUrl(value: string): boolean {
   }
 }
 
+function isSafeSnapshotAvatarUrl(value: string): boolean {
+  if (isSafeSnapshotUrl(value)) return value.length <= 2_048;
+  if (value.length > MAX_INLINE_AVATAR_URL_LENGTH) return false;
+  return /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z\d+/]+={0,2}$/iu.test(
+    value,
+  );
+}
+
 /** Build Buzz-specific clipboard HTML with the raw URL as its visible link. */
 export function buildSnapshotClipboardHtml({
   attachment,
@@ -58,6 +73,9 @@ export function buildSnapshotClipboardHtml({
     size: attachment.size,
     type: attachment.type,
     url: attachment.url,
+    ...(attachment.snapshotAvatarUrl
+      ? { avatarUrl: attachment.snapshotAvatarUrl }
+      : {}),
   };
   const encodedPayload = encodeURIComponent(JSON.stringify(payload));
 
@@ -114,6 +132,7 @@ export function parseSnapshotClipboardHtml(html: string): ImetaMedia | null {
   const maxSnapshotBytes = filename?.toLowerCase().endsWith(".team.png")
     ? MAX_TEAM_SNAPSHOT_BYTES
     : MAX_AGENT_SNAPSHOT_BYTES;
+  const avatarUrl = candidate.avatarUrl ?? candidate.thumb;
 
   if (
     candidate.version !== 1 ||
@@ -132,7 +151,9 @@ export function parseSnapshotClipboardHtml(html: string): ImetaMedia | null {
     candidate.size > maxSnapshotBytes ||
     candidate.type !== "image/png" ||
     typeof candidate.url !== "string" ||
-    !isSafeSnapshotUrl(candidate.url)
+    !isSafeSnapshotUrl(candidate.url) ||
+    (avatarUrl !== undefined &&
+      (typeof avatarUrl !== "string" || !isSafeSnapshotAvatarUrl(avatarUrl)))
   ) {
     return null;
   }
@@ -145,6 +166,7 @@ export function parseSnapshotClipboardHtml(html: string): ImetaMedia | null {
     type: "image/png",
     uploaded: 0,
     url: candidate.url,
+    ...(avatarUrl ? { snapshotAvatarUrl: avatarUrl } : {}),
   };
 }
 

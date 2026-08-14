@@ -78,6 +78,7 @@ async function addGenericAgent(
   channelName: string,
   agentName: string,
   systemPrompt = "Watch the channel and help when asked.",
+  avatarUrl: string | null = null,
 ): Promise<string> {
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
@@ -98,7 +99,7 @@ async function addGenericAgent(
     );
   });
   return page.evaluate(
-    async ({ agentName, channelId, systemPrompt }) => {
+    async ({ agentName, avatarUrl, channelId, systemPrompt }) => {
       const invoke = (
         window as Window & {
           __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
@@ -113,6 +114,7 @@ async function addGenericAgent(
 
       const persona = await invoke("create_persona", {
         input: {
+          avatarUrl,
           displayName: agentName,
           systemPrompt,
         },
@@ -150,7 +152,7 @@ async function addGenericAgent(
 
       return pubkey;
     },
-    { agentName, channelId, systemPrompt },
+    { agentName, avatarUrl, channelId, systemPrompt },
   );
 }
 
@@ -956,6 +958,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     "general",
     "Memory Bot",
     longAgentInstruction,
+    "/onboarding/starter-team/honey.png",
   );
 
   await page.getByTestId("channel-general").click();
@@ -1299,7 +1302,37 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await page.getByTestId("user-profile-export-agent-row").click();
   const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
   await expect(exportDialog).toBeVisible();
+  await expect(exportDialog.getByLabel("Export type")).toHaveCount(0);
+  const liveCardPreview = exportDialog.getByTestId("agent-card-live-preview");
+  await expect(liveCardPreview).toBeVisible();
+  await expect(
+    liveCardPreview.getByTestId("agent-card-preview-avatar"),
+  ).toBeVisible();
+  await expect(liveCardPreview).toHaveAttribute("data-accent-color", /^rgb\(/);
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-memory-trigger"),
+  ).toBeVisible();
+  await expect(exportDialog.getByTestId("agent-card-mint-panel")).toHaveCount(
+    0,
+  );
+  await expect(
+    exportDialog.getByText("Mint card", { exact: true }),
+  ).toHaveCount(0);
+  await expect(exportDialog.getByText(/OpenAI/i)).toHaveCount(0);
+  await expect(exportDialog.getByRole("textbox")).toHaveCount(0);
+  const memoryTrigger = exportDialog.getByTestId(
+    "agent-snapshot-memory-trigger",
+  );
+  await memoryTrigger.click();
+  await page
+    .getByRole("menuitemradio", { name: "Agent + core memory" })
+    .click();
+  await expect(memoryTrigger).toHaveText("Agent + core memory");
+  await expect(
+    liveCardPreview.getByTestId("agent-card-preview-memory"),
+  ).toContainText("Core memory");
   await exportDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(exportDialog).toHaveCount(0);
   const archiveAgentRow = page.getByTestId("user-profile-archive-agent-row");
   await expect(archiveAgentRow).toHaveText(/Archive agent/);
   await archiveAgentRow.click();
@@ -2220,6 +2253,7 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
   for (const testId of [
     "agents-preferences-card",
     "settings-harnesses",
+    "settings-custom-cards",
     "settings-global-agent-config",
   ]) {
     const section = agentsPage.getByTestId(testId);
@@ -2231,6 +2265,12 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
   await expect(
     agentsPage.getByRole("heading", {
       name: "Agent runtimes",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    agentsPage.getByRole("heading", {
+      name: "Custom cards",
       exact: true,
     }),
   ).toBeVisible();
@@ -2258,6 +2298,40 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
     .nth(1)
     .evaluate((element) => getComputedStyle(element).color);
   expect(agentsSecondaryColor).toBe(appearanceSecondaryColor);
+});
+
+test("custom-card key settings stay separate from agent defaults", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, "agents");
+
+  const card = page.getByTestId("settings-custom-cards");
+  await expect(card).toContainText("No dedicated custom-card key is saved.");
+  await card.getByTestId("custom-card-key-edit").click();
+  await card.getByTestId("custom-card-key-input").fill("sk-card-only-test");
+  await card.getByTestId("custom-card-key-save").click();
+
+  await expect(card).toContainText(
+    "Stored securely and used only for custom cards.",
+  );
+  await expect(card.getByTestId("custom-card-key-edit")).toHaveText("Update");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const commands =
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [];
+        return {
+          saved: commands.includes("card_mint_save_openai_key"),
+          changedDefaults: commands.includes("set_global_agent_config"),
+        };
+      }),
+    )
+    .toEqual({ saved: true, changedDefaults: false });
+
+  await card.getByTestId("custom-card-key-remove").click();
+  await expect(card).toContainText("No dedicated custom-card key is saved.");
 });
 
 test("settings subtitles share the Appearance secondary color", async ({

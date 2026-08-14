@@ -388,6 +388,20 @@ type MockBridgeOptions = {
   /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
    *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
   encodeDelayMs?: number;
+  /** Delay (ms) applied to custom-card generation so the waiting state is observable. */
+  cardMintDelayMs?: number;
+  /** Reject custom-card generation with this message when set. */
+  cardMintError?: string;
+  /** Whether the card-only OpenAI credential is configured. */
+  cardMintDedicatedKeyConfigured?: boolean;
+  /** Fallback layer reported when no dedicated card key is configured. */
+  cardMintKeyLayer?:
+    | "none"
+    | "card"
+    | "global"
+    | "persona"
+    | "agent"
+    | "process";
   /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
    *  fail-closed race: DMs are withheld while classification is unresolved. */
   relaySelfDelayMs?: number;
@@ -410,6 +424,11 @@ type MockBridgeOptions = {
    * message — lets specs prove malformed/hash/size-mismatch error paths.
    */
   snapshotFetchError?: string;
+  /** Exact bytes returned for a successfully fetched snapshot attachment. */
+  snapshotFetchBytes?: number[];
+  /** Avatar URLs returned by the mocked agent-snapshot preview. */
+  agentSnapshotPreviewAvatarUrl?: string | null;
+  agentSnapshotPreviewSourceAvatarUrl?: string | null;
   uploadDescriptors?: {
     url: string;
     sha256: string;

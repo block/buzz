@@ -16,7 +16,6 @@ import {
   setCardGalleryOpen,
   startCardMint,
 } from "@/features/agents/cardMintStore";
-import { globalAgentConfigQueryKey } from "@/features/agents/useGlobalAgentConfig";
 import {
   cardMintKeyStatus,
   cardMintSaveOpenaiKey,
@@ -151,29 +150,21 @@ export function AgentCardMintDialog({
   // True when the key resolves from a layer this dialog cannot update.
   const keyIsReadOnly = isReadOnlyLayer(keyLayer);
 
-  // Save the pasted key into the global Agent Defaults env — the same single
-  // source of truth every agent inherits. Narrow Rust seam: validated
-  // single-key merge, never restarts running agents (the mint re-reads
-  // config per call, so no restart is needed for minting).
+  // Save a card-only credential. Existing agent configuration remains a
+  // fallback, but this key takes precedence without changing it.
   const saveKeyMutation = useMutation({
     mutationFn: (key: string) => cardMintSaveOpenaiKey(key),
     onSuccess: () => {
-      // The key now lives in global defaults — update the cached layer so the
-      // status row shows correctly without waiting for a refetch.
       queryClient.setQueryData<CardMintKeyLayer>(
         ["cardMintKeyStatus", agentId],
-        "global",
+        "card",
       );
-      // The Agent Defaults editor caches the whole config — refetch it so a
-      // later-opened settings view shows the key we just wrote.
       void queryClient.invalidateQueries({
-        queryKey: globalAgentConfigQueryKey,
+        queryKey: ["cardMintDedicatedKeyStatus"],
       });
       setKeyDraft("");
       setEditingKey(false);
-      toast.success(
-        "API key saved to your agent defaults. Running agents pick it up on their next restart.",
-      );
+      toast.success("OpenAI key saved for custom cards only.");
     },
     onError: (error) =>
       toast.error(typeof error === "string" ? error : "Couldn't save the key."),
@@ -235,10 +226,9 @@ export function AgentCardMintDialog({
                   <p className="text-xs text-muted-foreground">
                     Minting a card costs money — it generates the art and card
                     text through the OpenAI API with your key (typically well
-                    under a dollar per mint, billed by OpenAI). The key is saved
-                    as <code className="font-mono">OPENAI_API_KEY</code> in your
-                    agent defaults env — that's the row to update in Settings if
-                    you ever need to change it there.
+                    under a dollar per mint, billed by OpenAI). This key is
+                    stored securely for custom cards only and does not change
+                    Agent Defaults.
                   </p>
                   <Button
                     className="w-fit px-0 text-xs"

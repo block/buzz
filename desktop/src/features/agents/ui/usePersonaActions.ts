@@ -38,6 +38,7 @@ import { useCreatedAgentChannelAttachment } from "@/features/agents/useCreatedAg
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type {
+  AgentSnapshotImportSetup,
   SnapshotFormat,
   SnapshotMemoryLevel,
 } from "@/shared/api/tauriPersonas";
@@ -386,15 +387,36 @@ export function usePersonaActions() {
     }
   }
 
-  async function handleConfirmSnapshotImport(keepAllowlist: boolean) {
+  function beginSnapshotImportSetup() {
+    setShouldLoadAcpRuntimes(true);
+    setSnapshotImportConfirmError(null);
+  }
+
+  async function handleConfirmSnapshotImport(
+    input: CreatePersonaInput,
+  ): Promise<boolean> {
     if (!snapshotImportState) {
-      return;
+      return false;
     }
     setSnapshotImportConfirmError(null);
     try {
+      const setup: AgentSnapshotImportSetup = {
+        displayName: input.displayName,
+        avatarUrl: input.avatarUrl,
+        systemPrompt: input.systemPrompt,
+        runtime: input.runtime,
+        model: input.model,
+        provider: input.provider,
+        namePool: input.namePool,
+        envVars: input.envVars,
+        respondTo: input.behavior?.respondTo,
+        respondToAllowlist: input.behavior?.respondToAllowlist,
+        parallelism: input.behavior?.parallelism,
+      };
       const result = await confirmSnapshotImportMutation.mutateAsync({
         fileBytes: snapshotImportState.fileBytes,
-        keepAllowlist,
+        keepAllowlist: false,
+        setup,
       });
       setSnapshotImportResult(result);
       void queryClient.invalidateQueries({ queryKey: personasQueryKey });
@@ -409,10 +431,12 @@ export function usePersonaActions() {
       } else {
         setPersonaNoticeMessage(`Imported ${result.displayName}.`);
       }
+      return true;
     } catch (err) {
       setSnapshotImportConfirmError(
         err instanceof Error ? err.message : "Failed to import agent snapshot.",
       );
+      return false;
     }
   }
 
@@ -469,6 +493,7 @@ export function usePersonaActions() {
     effectiveAvatarUrl: string | null,
     memoryLevel: SnapshotMemoryLevel,
     format: SnapshotFormat,
+    cardPngDataUrl?: string,
   ) {
     clearFeedback("library");
     setPersonaToExportSnapshot(null);
@@ -479,6 +504,7 @@ export function usePersonaActions() {
         format,
         memorySourcePubkey: linkedAgentPubkey,
         avatarUrl: effectiveAvatarUrl,
+        cardPngDataUrl,
       },
       {
         onSuccess: (saved) => {
@@ -612,6 +638,7 @@ export function usePersonaActions() {
     snapshotImportConfirmError,
     isSnapshotImportConfirming: confirmSnapshotImportMutation.isPending,
     handleImportSnapshotFile,
+    beginSnapshotImportSetup,
     handleConfirmSnapshotImport,
     closeSnapshotImportDialog,
   };

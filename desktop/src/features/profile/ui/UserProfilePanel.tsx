@@ -64,16 +64,14 @@ import { UserProfileAgentSettingsMenuSlot } from "@/features/profile/ui/UserProf
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
 import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
-import {
-  type CardMintTarget,
-  UserProfilePersonaDialogs,
-} from "@/features/profile/ui/UserProfilePersonaDialogs";
+import { UserProfilePersonaDialogs } from "@/features/profile/ui/UserProfilePersonaDialogs";
 import {
   deriveProfileChannels,
   type ProfilePanelTab,
   type ProfilePanelView,
   resolveAgentInstruction,
   resolvePanelProfile,
+  resolveProfileAvatarUrl,
   resolveProfileDisplayName,
   truncatePubkey,
   type UserProfilePanelProps,
@@ -177,8 +175,6 @@ export function UserProfilePanel({
     React.useState<AgentPersona | null>(null);
   const [personaToExportSnapshot, setPersonaToExportSnapshot] =
     React.useState<AgentPersona | null>(null);
-  const [cardMintTarget, setCardMintTarget] =
-    React.useState<CardMintTarget | null>(null);
 
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
@@ -931,7 +927,11 @@ export function UserProfilePanel({
   const personaDialogs = (
     <>
       <UserProfilePersonaDialogs
-        cardMintTarget={cardMintTarget}
+        agentAvatarUrl={resolveProfileAvatarUrl(
+          profileQuery.data?.avatarUrl,
+          managedAgent?.avatarUrl,
+          resolvedPersona?.avatarUrl,
+        )}
         createError={
           createPersonaMutation.error instanceof Error
             ? createPersonaMutation.error
@@ -948,7 +948,6 @@ export function UserProfilePanel({
         personaDialogState={personaDialogState}
         personaToDelete={personaToDelete}
         personaToExportSnapshot={personaToExportSnapshot}
-        resolvedPersona={resolvedPersona}
         runtimes={acpRuntimesQuery.data ?? []}
         runtimesError={acpRuntimesQuery.isError}
         runtimesLoading={acpRuntimesQuery.isLoading}
@@ -957,14 +956,12 @@ export function UserProfilePanel({
             ? updatePersonaMutation.error
             : null
         }
-        onCloseCardMint={() => setCardMintTarget(null)}
         onCloseDelete={() => setPersonaToDelete(null)}
         onCloseDialog={() => setPersonaDialogState(null)}
         onCloseExportSnapshot={() => setPersonaToExportSnapshot(null)}
         onConfirmDelete={(selectedPersona) => {
           void handleConfirmDeletePersona(selectedPersona);
         }}
-        onExportSnapshot={setPersonaToExportSnapshot}
         onSubmit={handleSubmitPersona}
       />
     </>

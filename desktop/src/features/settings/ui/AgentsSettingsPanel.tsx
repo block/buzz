@@ -1,4 +1,5 @@
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
+import { CustomCardsSettingsCard } from "./CustomCardsSettingsCard";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -14,6 +15,7 @@ export function AgentsSettingsPanel() {
       <div className="flex flex-col gap-4">
         <PreventSleepSettingsCard />
         <HarnessesSettingsPanel />
+        <CustomCardsSettingsCard />
         <AgentDefaultsSettingsCard />
       </div>
     </section>

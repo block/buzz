@@ -8,6 +8,7 @@ import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 type AttachmentProps = React.ComponentProps<"div"> & {
   orientation?: "horizontal" | "vertical";
   size?: "default" | "sm" | "xs";
+  smoothCorners?: boolean;
   state?: "idle" | "uploading" | "processing" | "error" | "done";
 };
 
@@ -15,11 +16,12 @@ function Attachment({
   className,
   orientation = "horizontal",
   size = "default",
+  smoothCorners = true,
   state = "done",
   ...props
 }: AttachmentProps) {
   const attachmentRef = React.useRef<HTMLDivElement | null>(null);
-  useSmoothCorners(attachmentRef);
+  useSmoothCorners(attachmentRef, { enabled: smoothCorners });
 
   return (
     <div

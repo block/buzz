@@ -27,6 +27,10 @@ export type CardMintInput = {
   lock?: boolean;
   /** Memory to embed in the card's snapshot. Omitted = "none". */
   memoryLevel?: SnapshotMemoryLevel;
+  /** Raster fallback for Buzz's inline SVG avatar format. */
+  avatarDataUrl?: string;
+  /** Previous finished card used as image context for an iterative revision. */
+  referenceCardPngBase64?: string;
 };
 
 export type CardMintJob = {
@@ -39,6 +43,9 @@ export type CardMintJob = {
   error: string | null;
   startedAt: number;
 };
+
+export const INVALID_OPENAI_KEY_MESSAGE =
+  "The OpenAI API key is invalid or expired. Update the custom-card API key and try again.";
 
 /** Card content shown by the global viewer dialog. */
 export type CardViewerState = {
@@ -74,19 +81,7 @@ function updateJob(jobId: string, patch: Partial<CardMintJob>): void {
   emitChange();
 }
 
-/**
- * Run one mint as a background job. `mintFn` is injectable for tests; the
- * public `startCardMint` binds the real Tauri command.
- */
-export async function runCardMintJob(
-  input: CardMintInput,
-  mintFn: (
-    id: string,
-    styleNotes?: string,
-    lock?: boolean,
-    memoryLevel?: SnapshotMemoryLevel,
-  ) => Promise<MintedAgentCard>,
-): Promise<void> {
+function addCardMintJob(input: CardMintInput): string {
   const jobId = `card-mint-${nextJobId++}`;
   jobs = [
     ...jobs,
@@ -100,13 +95,29 @@ export async function runCardMintJob(
     },
   ];
   emitChange();
+  return jobId;
+}
 
+async function completeCardMintJob(
+  jobId: string,
+  input: CardMintInput,
+  mintFn: (
+    id: string,
+    styleNotes?: string,
+    lock?: boolean,
+    memoryLevel?: SnapshotMemoryLevel,
+    avatarDataUrl?: string,
+    referenceCardPngBase64?: string,
+  ) => Promise<MintedAgentCard>,
+): Promise<void> {
   try {
     const card = await mintFn(
       input.agentId,
       input.styleNotes,
       input.lock,
       input.memoryLevel,
+      input.avatarDataUrl,
+      input.referenceCardPngBase64,
     );
     updateJob(jobId, { phase: "done", card });
     toast.success(`${input.agentName}'s card is ready`, {
@@ -119,9 +130,8 @@ export async function runCardMintJob(
   } catch (error) {
     let message = error instanceof Error ? error.message : "Card mint failed.";
     if (message.startsWith(NO_OPENAI_KEY_PREFIX)) {
-      // The dialog pre-checks the key, so this only happens when the key was
-      // removed between dialog-open and mint. The dialog's key-setup panel is
-      // long gone — surface a plain instruction instead of the wire prefix.
+      // The wire prefix only routes the old setup UI. Inline custom-card
+      // creation needs the actionable message without its transport marker.
       message = message.slice(NO_OPENAI_KEY_PREFIX.length).trim();
     } else if (
       message.startsWith("Card mint failed (HTTP 401 ") ||
@@ -130,8 +140,7 @@ export async function runCardMintJob(
       // The saved OpenAI key is invalid or expired. Only match the OpenAI-call
       // envelope prefix and the specific Incorrect-API-key message to avoid
       // rewriting unrelated 401s (e.g. "Avatar fetch failed: HTTP 401 …").
-      message =
-        'The OpenAI API key is invalid or expired. Open the mint dialog and use "Update API key" to replace it.';
+      message = INVALID_OPENAI_KEY_MESSAGE;
     }
     updateJob(jobId, { phase: "error", error: message });
     toast.error(`Minting ${input.agentName}'s card failed`, {
@@ -140,9 +149,34 @@ export async function runCardMintJob(
   }
 }
 
-/** Start a mint in the background. Fire-and-forget; state flows via the store. */
-export function startCardMint(input: CardMintInput): void {
-  void runCardMintJob(input, mintAgentCard);
+/**
+ * Run one mint as a background job. `mintFn` is injectable for tests; the
+ * public `startCardMint` binds the real Tauri command.
+ */
+export async function runCardMintJob(
+  input: CardMintInput,
+  mintFn: (
+    id: string,
+    styleNotes?: string,
+    lock?: boolean,
+    memoryLevel?: SnapshotMemoryLevel,
+    avatarDataUrl?: string,
+    referenceCardPngBase64?: string,
+  ) => Promise<MintedAgentCard>,
+): Promise<void> {
+  const jobId = addCardMintJob(input);
+  await completeCardMintJob(jobId, input, mintFn);
+}
+
+/**
+ * Start a mint in the background and return its stable job id immediately.
+ * Callers that stay open can use the id to reveal the result inline; callers
+ * that close keep the existing composer-chip and completion-toast behavior.
+ */
+export function startCardMint(input: CardMintInput): string {
+  const jobId = addCardMintJob(input);
+  void completeCardMintJob(jobId, input, mintAgentCard);
+  return jobId;
 }
 
 /** Open the finished card of a job in the viewer and clear its rail chip. */

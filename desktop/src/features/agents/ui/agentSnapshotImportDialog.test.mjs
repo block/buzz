@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// Source-path tests for AgentSnapshotImportDialog ResultBody rendering.
+// Source-path tests for AgentSnapshotImportDialog result rendering.
 //
 // ResultBody is a hook-free component: it accepts a result object and renders
 // the summary, partial-memory alert, and per-entry error list. These tests
@@ -9,7 +9,7 @@ import test from "node:test";
 // memoryErrors strings are carried through to a bounded list element with the
 // correct data-testid. No DOM or test renderer is needed.
 
-import { PreviewBody, ResultBody } from "./AgentSnapshotImportDialog.tsx";
+import { ResultBody } from "./AgentSnapshotImportDialog.tsx";
 
 /**
  * Walk a React element tree (breadth-first) and collect all elements that
@@ -70,68 +70,6 @@ function makeResult(overrides = {}) {
     ...overrides,
   };
 }
-
-function makePreview(overrides = {}) {
-  return {
-    displayName: "TestBot",
-    systemPrompt: "Inspect every boundary before changing code.",
-    avatarUrl: null,
-    memoryLevel: "none",
-    memoryEntryCount: 0,
-    hasSourceAllowlist: true,
-    sourceAllowlistCount: 2,
-    sourceAllowlist: ["a".repeat(64), "b".repeat(64)],
-    manifestJson: '{\n  "format": "buzz-agent-snapshot"\n}',
-    locked: false,
-    ...overrides,
-  };
-}
-
-// ── preview transparency ──────────────────────────────────────────────────────
-
-test("preview_body_discloses_prompt_allowlist_and_full_manifest", () => {
-  const preview = makePreview();
-  const element = PreviewBody({
-    preview,
-    hasMemory: false,
-    memoryLevelLabel: "none",
-    keepAllowlist: false,
-    onKeepAllowlistChange: () => {},
-  });
-  const allText = collectText(element).join(" ");
-
-  assert.ok(allText.includes(preview.systemPrompt));
-  for (const pubkey of preview.sourceAllowlist) {
-    assert.ok(allText.includes(pubkey), `missing allowlist pubkey ${pubkey}`);
-  }
-  assert.ok(allText.includes(preview.manifestJson));
-  assert.equal(
-    findAll(
-      element,
-      (n) => n.props?.["data-testid"] === "agent-snapshot-import-manifest",
-    ).length,
-    1,
-  );
-});
-
-// ── locked-card provenance notice ─────────────────────────────────────────────
-
-test("preview_body_shows_locked_notice_only_for_locked_cards", () => {
-  const lockedNotice = (locked) =>
-    findAll(
-      PreviewBody({
-        preview: makePreview({ locked }),
-        hasMemory: false,
-        memoryLevelLabel: "none",
-        keepAllowlist: false,
-        onKeepAllowlistChange: () => {},
-      }),
-      (n) => n.props?.["data-testid"] === "agent-snapshot-import-locked-notice",
-    );
-
-  assert.equal(lockedNotice(true).length, 1);
-  assert.equal(lockedNotice(false).length, 0);
-});
 
 // ── memory errors detail list ─────────────────────────────────────────────────
 

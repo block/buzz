@@ -561,6 +561,7 @@ fn import_preview_includes_exported_definition_metadata() {
     snapshot.definition.source_is_builtin = true;
     snapshot.definition.model = Some("claude-opus-4-5".to_string());
     snapshot.definition.runtime = Some("goose".to_string());
+    snapshot.profile.avatar_url = Some("https://example.com/avatar.png".to_string());
     let bytes = crate::managed_agents::agent_snapshot::encode_snapshot_json(&snapshot).unwrap();
     let decoded = decode_snapshot_from_bytes(&bytes).unwrap();
 
@@ -569,6 +570,10 @@ fn import_preview_includes_exported_definition_metadata() {
     assert!(preview.is_builtin);
     assert_eq!(preview.model.as_deref(), Some("claude-opus-4-5"));
     assert_eq!(preview.runtime.as_deref(), Some("goose"));
+    assert_eq!(
+        preview.source_avatar_url.as_deref(),
+        Some("https://example.com/avatar.png")
+    );
 }
 
 // ── Import: resolve_snapshot_import_behavior — the production selection path

@@ -6,6 +6,11 @@ import {
   uploadMediaBytes,
 } from "@/shared/api/tauri";
 import { uploadMediaFile } from "@/shared/api/tauriMedia";
+import {
+  isAgentSnapshotPngFilename,
+  withAgentSnapshotAvatarPreview,
+} from "./agentSnapshotAttachmentPreview";
+import { useAgentSnapshotAvatarRecovery } from "./useAgentSnapshotAvatarRecovery";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
 import { useFilePicker } from "./useFilePicker";
@@ -254,6 +259,7 @@ export function useMediaUpload({
 
   const pendingImetaRef = React.useRef(pendingImeta);
   pendingImetaRef.current = pendingImeta;
+  useAgentSnapshotAvatarRecovery(pendingImeta, setImetaSlots);
 
   /**
    * Pre-edit originals of annotated attachments, keyed by the annotated
@@ -604,9 +610,16 @@ export function useMediaUpload({
         // Fire-and-forget each upload concurrently — slot preserves order.
         void (async () => {
           try {
-            const descriptor = await uploadMediaFile(
+            const localSnapshotBytes = isAgentSnapshotPngFilename(file.name)
+              ? new Uint8Array(await file.arrayBuffer())
+              : undefined;
+            const uploaded = await uploadMediaFile(
               file,
               uploadProgressId(previewId),
+            );
+            const descriptor = await withAgentSnapshotAvatarPreview(
+              uploaded,
+              localSnapshotBytes,
             );
             fillSlot(slotIndex, descriptor, previewId, epoch);
           } catch (err) {
@@ -637,7 +650,14 @@ export function useMediaUpload({
     setUploadingCount((c) => c + 1);
     const epoch = uploadEpochRef.current;
     try {
-      const descriptors = await pickAndUploadMedia(uploadProgressId(previewId));
+      const uploadedDescriptors = await pickAndUploadMedia(
+        uploadProgressId(previewId),
+      );
+      const descriptors = await Promise.all(
+        uploadedDescriptors.map((descriptor) =>
+          withAgentSnapshotAvatarPreview(descriptor),
+        ),
+      );
       if (isUploadCanceled(previewId)) return;
       finishUpload(previewId);
       if (isUploadStale(epoch)) return;
@@ -762,9 +782,16 @@ export function useMediaUpload({
       setUploadingCount((c) => c + 1);
       const epoch = uploadEpochRef.current;
       try {
-        const descriptor = await uploadMediaFile(
+        const localSnapshotBytes = isAgentSnapshotPngFilename(file.name)
+          ? new Uint8Array(await file.arrayBuffer())
+          : undefined;
+        const uploaded = await uploadMediaFile(
           file,
           uploadProgressId(previewId),
+        );
+        const descriptor = await withAgentSnapshotAvatarPreview(
+          uploaded,
+          localSnapshotBytes,
         );
         onUploaded(descriptor, previewId, epoch);
       } catch (err) {

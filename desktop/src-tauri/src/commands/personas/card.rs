@@ -19,9 +19,10 @@
 //!   resize + chunk injection) via `validate_snapshot_encode_size`.
 //! - Round-trip verification decodes the final bytes and compares the logical
 //!   manifest before anything is returned to the frontend.
-//! - The API key is resolved through the same env layering the agent runtime
-//!   uses (global config < persona < agent record) and never leaves Rust.
-//!   It is never logged.
+//! - A card-only API key is stored in the OS credential store and takes
+//!   precedence. Existing agent/persona/global/process keys remain a backwards-
+//!   compatible fallback, but card setup never mutates agent configuration.
+//!   The resolved key never leaves Rust and is never logged.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -44,14 +45,23 @@ use crate::{
             decrypt_envelope, encode_locked_snapshot_png, parse_chunk_payload, ChunkPayload,
         },
         load_agent_definitions, load_global_agent_config, load_managed_agents, load_personas,
-        save_global_agent_config, validate_global_config,
     },
+    secret_store::SecretStore,
 };
 
-/// The Buzz card frame template — Tyler's gold-honeycomb base. Generation
-/// input only: it never participates in the snapshot manifest, PNG chunk,
-/// import decoder, or attachment validation. Embedded at compile time for
-/// deterministic packaging (see `card_template_decodes` test).
+mod avatar;
+use avatar::{preferred_avatar_url, resolve_inline_avatar_bytes};
+mod generation_input;
+use generation_input::{
+    build_card_followup_instructions, build_card_instructions, decode_reference_card,
+};
+mod response;
+use response::extract_card_output;
+
+/// The Buzz card frame template — a raster of the SVG used by Export. It never
+/// participates in the snapshot manifest, PNG chunk, import decoder, or
+/// attachment validation. Embedded at compile time for deterministic
+/// packaging (see `card_template_decodes` test).
 const CARD_TEMPLATE_PNG: &[u8] = include_bytes!("../../../assets/card_template.png");
 
 /// Designer model driving copy + art direction.
@@ -66,8 +76,15 @@ const CARD_WIDTH: u32 = 1500;
 const MANIFEST_AVATAR_MAX_DIM: u32 = 512;
 /// Upper bound for a fetched avatar (pre-resize input to the model).
 const MAX_AVATAR_FETCH_BYTES: usize = 10 * 1024 * 1024;
+/// A previous verified card may be supplied as image context for a revision.
+const MAX_REFERENCE_CARD_BYTES: usize = 10 * 1024 * 1024;
 /// One mint is a single long API call (~2–3 minutes observed).
 const MINT_TIMEOUT_SECS: u64 = 600;
+
+/// Dedicated OS-credential-store slot for custom-card generation. Keeping it
+/// outside `GlobalAgentConfig.env_vars` prevents card setup from changing the
+/// environment inherited by local agents.
+const CARD_OPENAI_KEY_NAME: &str = "custom-card-openai-api-key";
 
 /// Error prefix the frontend matches to route the user to provider settings
 /// instead of showing a raw failure.
@@ -287,11 +304,15 @@ pub(crate) fn resolve_env_from_layers(
 /// returns which layer supplies `OPENAI_API_KEY` (agent > persona > global >
 /// process > none).
 pub(crate) fn resolve_key_layer(
+    dedicated_key: Option<&str>,
     global_env: &std::collections::BTreeMap<String, String>,
     persona_env: &std::collections::BTreeMap<String, String>,
     record_env: &std::collections::BTreeMap<String, String>,
     process_value: Option<String>,
 ) -> &'static str {
+    if dedicated_key.is_some_and(|key| !key.trim().is_empty()) {
+        return "card";
+    }
     let key = "OPENAI_API_KEY";
     let nonempty = |m: &std::collections::BTreeMap<String, String>| {
         m.get(key).is_some_and(|v| !v.trim().is_empty())
@@ -312,6 +333,39 @@ pub(crate) fn resolve_key_layer(
     "none"
 }
 
+/// Resolve the key used by custom-card generation. A dedicated credential is
+/// intentionally first so legacy agent configuration can remain untouched.
+pub(crate) fn resolve_card_api_key(
+    dedicated_key: Option<String>,
+    global_env: &std::collections::BTreeMap<String, String>,
+    persona_env: &std::collections::BTreeMap<String, String>,
+    record_env: &std::collections::BTreeMap<String, String>,
+    process_value: Option<String>,
+) -> Option<String> {
+    dedicated_key
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| {
+            resolve_env_from_layers(
+                "OPENAI_API_KEY",
+                global_env,
+                persona_env,
+                record_env,
+                process_value,
+            )
+        })
+}
+
+fn card_key_store() -> &'static SecretStore {
+    SecretStore::shared(crate::app_state::keyring_service())
+}
+
+fn load_dedicated_card_key() -> Result<Option<String>, String> {
+    card_key_store()
+        .load(CARD_OPENAI_KEY_NAME)
+        .map(|key| key.filter(|value| !value.trim().is_empty()))
+        .map_err(|error| format!("Could not access the custom-card API key: {error}"))
+}
+
 /// The Responses endpoint to post mints to. `OPENAI_BASE_URL` (same env
 /// layering as the key) overrides the default host, supporting endpoints and
 /// proxies that speak the OpenAI Responses shape with Bearer auth. Azure
@@ -320,52 +374,6 @@ pub(crate) fn resolve_key_layer(
 pub(crate) fn responses_url(base_url: Option<String>) -> String {
     let base = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
     format!("{}/responses", base.trim_end_matches('/'))
-}
-
-// ── Prompt construction ───────────────────────────────────────────────────────
-
-/// Build the designer instructions. Pure so tests can pin the contract:
-/// style-match-the-avatar is DEFAULT behavior; owner directions (art AND
-/// card text) take primacy over those style defaults, but never over the
-/// fixed contract (frame identity, geometry, text fidelity).
-pub(crate) fn build_card_instructions(
-    agent_name: &str,
-    persona_notes: &str,
-    style_notes: &str,
-) -> String {
-    let owner_directions = if style_notes.trim().is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\nOWNER'S DIRECTIONS — these override the default art-style and copy guidance \
-             below wherever they conflict (they cannot change the frame, layout, or \
-             text-fidelity requirements). The owner may direct the art, the card text \
-             (type line, ability, flavor), or both:\n{style_notes}\n"
-        )
-    };
-    format!(
-        r#"You are designing one premium collectible trading card for the Buzz agent "{agent_name}".
-
-Input image 1 is the official Buzz card frame template (gold honeycomb border, dark interior, name banner top, hex badge top-right, text box lower third). Input image 2 is the agent's avatar — study its exact art style: medium, pixel grid if any, palette, shading, background motifs.
-
-Persona notes for the card copy:
-{persona_notes}
-{owner_directions}
-First, write professional trading-card copy at Magic: The Gathering editorial quality:
-- a type line (e.g. "Legendary Agent — Team Lead"),
-- ONE keyworded ability: short bolded ability name + one sentence of crisp rules text written like real MTG rules (present tense, precise, no fluff),
-- ONE italic flavor-text line, evocative and short, the kind that gets quoted.
-Where the owner's directions specify card text, use their wording within the 220-character text-box limit below (edited only for spelling; if their text exceeds the limit, condense it minimally while keeping their words and intent); invent copy only for the parts they left open.
-Keep total text-box copy under 220 characters so it renders cleanly.
-
-Then generate the finished card with the image tool, exactly 1024x1536 portrait:
-- The frame must follow input image 1 faithfully: same gold honeycomb border, same layout, honey drip detail.
-- Default art style: match input image 2's art style EXACTLY — same medium, same pixel density if pixel art, same palette, same background honeycomb-lattice sky. It must look like the same artist drew a larger scene: the character in a confident pose, conjuring glowing golden hexagons. The owner's directions above override any of this default styling where they conflict.
-- Name banner: "{agent_name}" plus the type line beneath it in smaller type.
-- Text box: the ability name in bold, rules text in regular, then the flavor line in italics, cleanly typeset like a real MTG card — professional kerning, no misspellings, hyphenate nothing.
-- Top-right hex badge: one small emblem of your choice, no text.
-Render all text with perfect fidelity."#
-    )
 }
 
 /// Encode raw image bytes as a `data:image/png;base64,` URL, downscaling to
@@ -391,92 +399,39 @@ fn png_bytes_resized(bytes: &[u8], max_dim: u32) -> Result<Vec<u8>, String> {
     Ok(png)
 }
 
-// ── Response parsing ──────────────────────────────────────────────────────────
-
-/// Extract the generated image (base64) and any designer text from a
-/// Responses API payload. Pure for testability.
-pub(crate) fn extract_card_output(resp: &serde_json::Value) -> Result<(String, String), String> {
-    let output = resp
-        .get("output")
-        .and_then(|o| o.as_array())
-        .ok_or_else(|| "Responses payload has no output array".to_string())?;
-
-    let mut image_b64 = None;
-    let mut notes = Vec::new();
-    for item in output {
-        match item.get("type").and_then(|t| t.as_str()) {
-            Some("image_generation_call") => {
-                if let Some(result) = item.get("result").and_then(|r| r.as_str()) {
-                    image_b64 = Some(result.to_string());
-                }
-            }
-            Some("message") => {
-                if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-                    for c in content {
-                        if c.get("type").and_then(|t| t.as_str()) == Some("output_text") {
-                            if let Some(text) = c.get("text").and_then(|t| t.as_str()) {
-                                notes.push(text.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let image_b64 = image_b64.ok_or_else(|| {
-        let types: Vec<&str> = output
-            .iter()
-            .filter_map(|i| i.get("type").and_then(|t| t.as_str()))
-            .collect();
-        format!("No image in Responses output (item types: {types:?})")
-    })?;
-    Ok((image_b64, notes.join("\n")))
-}
-
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-/// Save an `OPENAI_API_KEY` into the global Agent Defaults env for card
-/// minting — a narrow seam with deliberately different semantics from the
-/// general `set_global_agent_config`:
-///
-/// - **No agent restarts.** The general command stops/restarts every running
-///   local agent whose effective env changes, because agent env is baked at
-///   spawn time. The mint command re-reads the config from disk on every
-///   mint, so minting needs no restart — and a card setup must never disrupt
-///   running agents as a side effect. Agents pick the key up naturally on
-///   their next (re)start.
-/// - **Read-modify-write of the latest on-disk config.** The config is
-///   re-read immediately before the single-key insert + write (under the
-///   managed-agents store lock, which serializes it against the other card
-///   and agent-store commands), so a settings save that landed after this
-///   dialog opened is not clobbered with a stale dialog-open snapshot.
-///   (The general settings editor performs its own whole-config write; as
-///   today, the last writer wins between the two surfaces.)
-///
-/// Standard global-config validation still applies (POSIX key shape,
-/// reserved-key reject, size caps) — this is not a validation bypass.
+/// Save a dedicated OpenAI key for custom-card generation in the OS credential
+/// store. This never reads or writes Agent Defaults and therefore cannot alter
+/// an agent's inherited environment or restart a running agent.
 #[tauri::command]
-pub fn card_mint_save_openai_key(
-    key: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub fn card_mint_save_openai_key(key: String) -> Result<(), String> {
     let key = key.trim().to_string();
     if key.is_empty() {
         return Err("API key cannot be empty.".to_string());
     }
+    if key.len() > 4096 {
+        return Err("API key is too long.".to_string());
+    }
+    card_key_store()
+        .store(CARD_OPENAI_KEY_NAME, &key)
+        .map_err(|error| format!("Could not save the custom-card API key: {error}"))
+}
 
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
+/// Whether a dedicated custom-card key is present. The key value never crosses
+/// the IPC boundary.
+#[tauri::command]
+pub fn card_mint_dedicated_key_status() -> Result<bool, String> {
+    Ok(load_dedicated_card_key()?.is_some())
+}
 
-    let mut config = load_global_agent_config(&app)?;
-    config.env_vars.insert("OPENAI_API_KEY".to_string(), key);
-    validate_global_config(&config)?;
-    save_global_agent_config(&app, &config)
+/// Remove only the dedicated custom-card key. Agent Defaults and every agent-
+/// specific environment remain untouched.
+#[tauri::command]
+pub fn card_mint_delete_openai_key() -> Result<(), String> {
+    card_key_store()
+        .delete(CARD_OPENAI_KEY_NAME)
+        .map_err(|error| format!("Could not remove the custom-card API key: {error}"))
 }
 
 /// Report which env layer resolves the OpenAI key for a card mint of agent
@@ -488,6 +443,7 @@ pub fn card_mint_key_status(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let dedicated_key = load_dedicated_card_key()?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -507,6 +463,7 @@ pub fn card_mint_key_status(
         .unwrap_or_default();
 
     Ok(resolve_key_layer(
+        dedicated_key.as_deref(),
         &global.env_vars,
         &persona_env,
         &record.env_vars,
@@ -532,11 +489,14 @@ pub fn card_mint_key_status(
 /// Returns the final, chunk-injected, round-trip-verified `.agent.png` bytes.
 /// Reroll = call again; the command holds no session state.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named IPC fields.
 pub async fn mint_agent_card(
     id: String,
     style_notes: Option<String>,
     lock: Option<bool>,
     memory_level: Option<String>,
+    avatar_data_url: Option<String>,
+    reference_card_png_base64: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<MintedCard, String> {
@@ -563,18 +523,15 @@ pub async fn mint_agent_card(
             .map(|p| p.env_vars.clone())
             .unwrap_or_default();
 
-        let api_key = resolve_env_from_layers(
-            "OPENAI_API_KEY",
+        let api_key = resolve_card_api_key(
+            load_dedicated_card_key()?,
             &global.env_vars,
             &persona_env,
             &record.env_vars,
             std::env::var("OPENAI_API_KEY").ok(),
         )
         .ok_or_else(|| {
-            format!(
-                "{NO_KEY_ERROR_PREFIX} No OPENAI_API_KEY found. Add one in the agent's \
-                 environment variables or global agent settings to mint cards."
-            )
+            format!("{NO_KEY_ERROR_PREFIX} No OpenAI API key found for custom-card creation.")
         })?;
         let base_url = resolve_env_from_layers(
             "OPENAI_BASE_URL",
@@ -633,6 +590,7 @@ pub async fn mint_agent_card(
         let listing = get_agent_memory(record.pubkey.clone(), app.clone(), state.clone()).await?;
         memory_entries_from_listing(listing, memory_level)
     };
+    let reference_card_bytes = decode_reference_card(reference_card_png_base64.as_deref())?;
 
     let display_name = record
         .display_name
@@ -664,8 +622,9 @@ pub async fn mint_agent_card(
 
     // ── Resolve avatar bytes (data URL, else fetch) ──────────────────────────
     let avatar_bytes = match record.avatar_url.as_deref() {
-        Some(url) if url.starts_with("data:") => decode_avatar_data_url(url)
-            .ok_or_else(|| "Agent avatar data URL could not be decoded.".to_string())?,
+        Some(url) if url.starts_with("data:") => {
+            resolve_inline_avatar_bytes(url, avatar_data_url.as_deref())?
+        }
         Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
             // Relay-hosted avatars (kind:0 pictures under the relay's /media/)
             // require Blossom get-auth. Mint the header ONLY for same-origin URLs
@@ -718,26 +677,36 @@ pub async fn mint_agent_card(
             ));
         }
     }
-    let instructions = build_card_instructions(
-        &display_name,
-        snapshot.definition.system_prompt.as_deref().unwrap_or(""),
-        style_notes.as_deref().unwrap_or(""),
-    );
+    let persona_notes = snapshot.definition.system_prompt.as_deref().unwrap_or("");
+    let style_notes = style_notes.as_deref().unwrap_or("");
+    let instructions = if reference_card_bytes.is_some() {
+        build_card_followup_instructions(&display_name, persona_notes, style_notes)
+    } else {
+        build_card_instructions(&display_name, persona_notes, style_notes)
+    };
+    let mut input_content = vec![
+        serde_json::json!({"type": "input_text", "text": instructions}),
+        serde_json::json!({"type": "input_image", "image_url": image_data_url(CARD_TEMPLATE_PNG, 1024)?}),
+        serde_json::json!({"type": "input_image", "image_url": image_data_url(&avatar_bytes, 1024)?}),
+    ];
+    if let Some(reference_card_bytes) = reference_card_bytes.as_deref() {
+        input_content.push(serde_json::json!({
+            "type": "input_image",
+            "image_url": image_data_url(reference_card_bytes, 1024)?,
+        }));
+    }
     let body = serde_json::json!({
         "model": DESIGNER_MODEL,
         "reasoning": {"effort": "high"},
         "instructions": "You are a senior TCG card designer and MTG rules editor.",
         "input": [{
             "role": "user",
-            "content": [
-                {"type": "input_text", "text": instructions},
-                {"type": "input_image", "image_url": image_data_url(CARD_TEMPLATE_PNG, 1024)?},
-                {"type": "input_image", "image_url": image_data_url(&avatar_bytes, 1024)?},
-            ],
+            "content": input_content,
         }],
         "tools": [{
             "type": "image_generation",
             "model": IMAGE_MODEL,
+            "action": if reference_card_bytes.is_some() { "edit" } else { "generate" },
             "quality": "high",
             "size": "1024x1536",
             "output_format": "png",
@@ -758,6 +727,11 @@ pub async fn mint_agent_card(
         .map_err(|e| format!("Card mint request failed: {e}"))?;
 
     let status = resp.status();
+    let request_id = resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let payload: serde_json::Value = resp
         .json()
         .await
@@ -773,7 +747,12 @@ pub async fn mint_agent_card(
         return Err(format!("Card mint failed (HTTP {status}): {detail}"));
     }
 
-    let (image_b64, designer_notes) = extract_card_output(&payload)?;
+    let (image_b64, designer_notes) = extract_card_output(&payload).map_err(|error| {
+        if let Some(request_id) = request_id {
+            eprintln!("buzz-desktop: custom-card request {request_id} returned no image: {error}");
+        }
+        error
+    })?;
     let raw_card = STANDARD
         .decode(image_b64.as_bytes())
         .map_err(|e| format!("Generated image was not valid base64: {e}"))?;
@@ -851,20 +830,6 @@ pub async fn mint_agent_card(
     }
 
     Ok(minted)
-}
-
-/// The avatar the mint should use: the agent's kind:0 `picture` when one is
-/// published and non-blank, else the local record's `avatar_url`.
-///
-/// Pure so the precedence is unit-testable without a relay: a blank or
-/// whitespace-only `picture` must NOT shadow a real record avatar.
-fn preferred_avatar_url(
-    kind0_picture: Option<String>,
-    record_avatar_url: Option<String>,
-) -> Option<String> {
-    kind0_picture
-        .filter(|p| !p.trim().is_empty())
-        .or(record_avatar_url)
 }
 
 /// The avatar bytes the card manifest should inline.

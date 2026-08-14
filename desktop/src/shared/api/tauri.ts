@@ -580,10 +580,10 @@ export type BlobDescriptor = {
   thumb?: string;
   duration?: number;
   image?: string;
-  /** Original filename captured client-side. */
   filename?: string;
+  /** Client-only `.agent.png` avatar; never serialized as NIP-92 metadata. */
+  snapshotAvatarUrl?: string;
 };
-
 export async function uploadMedia(
   filePath: string,
   isTemp: boolean,

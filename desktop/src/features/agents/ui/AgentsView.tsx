@@ -413,11 +413,16 @@ export function AgentsView() {
       ) : null}
       {personas.personaToExportSnapshot ? (
         <AgentSnapshotExportDialog
+          agentId={
+            personas.personaToExportSnapshot.linkedAgentPubkey ??
+            personas.personaToExportSnapshot.persona.id
+          }
+          agentAvatarUrl={personas.personaToExportSnapshot.effectiveAvatarUrl}
           agentName={personas.personaToExportSnapshot.persona.displayName}
           isSavePending={personas.isPending}
           open={personas.personaToExportSnapshot !== null}
           linkedAgentPubkey={personas.personaToExportSnapshot.linkedAgentPubkey}
-          onSaveFile={(memoryLevel, format) => {
+          onSaveFile={(memoryLevel, format, cardPngDataUrl) => {
             if (personas.personaToExportSnapshot) {
               personas.handleExportSnapshot(
                 personas.personaToExportSnapshot.persona,
@@ -425,6 +430,7 @@ export function AgentsView() {
                 personas.personaToExportSnapshot.effectiveAvatarUrl,
                 memoryLevel,
                 format,
+                cardPngDataUrl,
               );
             }
           }}
@@ -437,14 +443,24 @@ export function AgentsView() {
       ) : null}
       {personas.snapshotImportState ? (
         <AgentSnapshotImportDialog
+          fileBytes={personas.snapshotImportState.fileBytes}
+          fileName={personas.snapshotImportState.fileName}
+          key={personas.snapshotImportState.fileName}
           open={personas.snapshotImportState !== null}
           preview={personas.snapshotImportState.preview}
           isConfirming={personas.isSnapshotImportConfirming}
           result={personas.snapshotImportResult}
           confirmError={personas.snapshotImportConfirmError}
-          onConfirm={(keepAllowlist) => {
-            void personas.handleConfirmSnapshotImport(keepAllowlist);
-          }}
+          runtimes={personas.acpRuntimesQuery.data ?? []}
+          runtimeCatalogStatus={
+            personas.acpRuntimesQuery.isLoading
+              ? "loading"
+              : personas.acpRuntimesQuery.isError
+                ? "error"
+                : "ready"
+          }
+          onBeginSetup={personas.beginSnapshotImportSetup}
+          onConfirm={personas.handleConfirmSnapshotImport}
           onOpenChange={(open) => {
             if (!open) {
               personas.closeSnapshotImportDialog();

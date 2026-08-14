@@ -20,6 +20,7 @@ function buildHtml(overrides = {}) {
       type: "image/png",
       uploaded: 1,
       url: URL,
+      snapshotAvatarUrl: "https://relay.example/media/avatar.png",
       ...overrides,
     },
     displayName: "Animation Auditor",
@@ -35,6 +36,7 @@ test("copied agent HTML restores a labeled snapshot attachment", () => {
     type: "image/png",
     uploaded: 0,
     url: URL,
+    snapshotAvatarUrl: "https://relay.example/media/avatar.png",
   });
 });
 
@@ -118,11 +120,46 @@ test("invalid copied snapshot metadata falls through to normal paste", () => {
     buildHtml({ url: `${URL})[hidden](https://attacker.example` }),
     buildHtml({ url: `${URL}\n[hidden](https://attacker.example)` }),
     buildHtml({ url: `${URL} trailing` }),
+    buildHtml({ snapshotAvatarUrl: "javascript:alert(1)" }),
+    buildHtml({ snapshotAvatarUrl: "data:image/svg+xml;base64,PHN2Zy8+" }),
+    buildHtml({ snapshotAvatarUrl: "data:image/png;base64,not-base64!" }),
   ];
 
   for (const html of invalid) {
     assert.equal(parseAgentSnapshotClipboardHtml(html), null);
   }
+});
+
+test("legacy copied avatar metadata stays composer-only", () => {
+  const payload = {
+    version: 1,
+    displayName: "Animation Auditor",
+    filename: "animation-auditor.agent.png",
+    sha256: SHA256,
+    size: 1234,
+    type: "image/png",
+    url: URL,
+    thumb: "https://relay.example/media/legacy-avatar.png",
+  };
+  const html = `<a data-buzz-agent-snapshot="${encodeURIComponent(JSON.stringify(payload))}">Snapshot</a>`;
+
+  const parsed = parseAgentSnapshotClipboardHtml(html);
+  assert.equal(
+    parsed?.snapshotAvatarUrl,
+    "https://relay.example/media/legacy-avatar.png",
+  );
+  assert.equal(parsed?.thumb, undefined);
+});
+
+test("portable inline avatars stay available to the composer", () => {
+  const snapshotAvatarUrl =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+
+  assert.equal(
+    parseAgentSnapshotClipboardHtml(buildHtml({ snapshotAvatarUrl }))
+      ?.snapshotAvatarUrl,
+    snapshotAvatarUrl,
+  );
 });
 
 test("malformed copied snapshot field types fall through to normal paste", () => {

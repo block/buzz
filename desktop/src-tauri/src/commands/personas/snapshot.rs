@@ -23,6 +23,8 @@ use crate::{
 };
 
 pub(crate) mod import;
+mod import_preview;
+mod import_setup;
 
 // Re-export import-side commands so callers see a flat `snapshot::` namespace.
 pub use import::{confirm_agent_snapshot_import, preview_agent_snapshot_import};
@@ -229,12 +231,14 @@ fn materialize_portable_runtime_defaults(
 /// - Memory-source pubkey validation
 /// - Secret exclusion (env_vars never enter the manifest via `build_snapshot`)
 /// - Output filename derived from the agent display name
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn materialize_snapshot_bytes(
     id: String,
     memory_source_pubkey: Option<String>,
     memory_level: MemoryLevel,
     is_png: bool,
     avatar_png_data_url: Option<String>,
+    source_avatar_png_data_url: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SnapshotPayload, String> {
@@ -285,7 +289,7 @@ pub(crate) async fn materialize_snapshot_bytes(
     // ── Resolve avatar bytes ─────────────────────────────────────────────────
     // If the avatar_url is a data URL we decode it inline; otherwise we keep
     // it as an external reference in the manifest (the importer will use it).
-    let avatar_bytes: Option<Vec<u8>> = record
+    let stored_avatar_bytes: Option<Vec<u8>> = record
         .avatar_url
         .as_deref()
         .and_then(crate::managed_agents::agent_snapshot::decode_avatar_data_url);
@@ -299,11 +303,15 @@ pub(crate) async fn materialize_snapshot_bytes(
     };
 
     // ── Build manifest ───────────────────────────────────────────────────────
+    let manifest_avatar_bytes = resolve_manifest_avatar_bytes(
+        source_avatar_png_data_url.as_deref(),
+        stored_avatar_bytes.clone(),
+    );
     let snapshot = build_snapshot(
         &record,
         memory_level,
         memory_entries,
-        avatar_bytes.as_deref(),
+        manifest_avatar_bytes.as_deref(),
     );
 
     // ── Encode ───────────────────────────────────────────────────────────────
@@ -311,7 +319,7 @@ pub(crate) async fn materialize_snapshot_bytes(
 
     if is_png {
         let png_body_avatar_bytes =
-            resolve_png_body_avatar_bytes(avatar_png_data_url.as_deref(), avatar_bytes);
+            resolve_png_body_avatar_bytes(avatar_png_data_url.as_deref(), manifest_avatar_bytes);
         let png_bytes = encode_snapshot_png(&snapshot, png_body_avatar_bytes.as_deref())
             .map_err(|e| format!("Failed to encode .agent.png: {e}"))?;
         validate_snapshot_encode_size(png_bytes.len(), true)?;
@@ -331,12 +339,24 @@ pub(crate) async fn materialize_snapshot_bytes(
 }
 
 /// Choose bytes for the PNG image body without changing the source avatar the
-/// manifest preserves for import.
+/// manifest preserves for import. The export UI normally supplies the fully
+/// flattened trading card here; older callers may still supply just an avatar.
 fn resolve_png_body_avatar_bytes(
     avatar_png_data_url: Option<&str>,
     store_avatar_bytes: Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
     avatar_png_data_url
+        .and_then(crate::managed_agents::agent_snapshot::decode_avatar_data_url)
+        .or(store_avatar_bytes)
+}
+
+/// Prefer the source avatar separately from the flattened card image so the
+/// manifest remains capable of restoring the real agent face on import.
+fn resolve_manifest_avatar_bytes(
+    source_avatar_png_data_url: Option<&str>,
+    store_avatar_bytes: Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    source_avatar_png_data_url
         .and_then(crate::managed_agents::agent_snapshot::decode_avatar_data_url)
         .or(store_avatar_bytes)
 }
@@ -353,12 +373,14 @@ fn resolve_png_body_avatar_bytes(
 /// The user picks the save path via the OS dialog. Returns `true` when the
 /// file was written, `false` when the dialog was cancelled.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named IPC fields.
 pub async fn export_agent_snapshot(
     id: String,
     memory_source_pubkey: Option<String>,
     memory_level: String,
     format: String,
     avatar_png_data_url: Option<String>,
+    source_avatar_png_data_url: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
@@ -371,6 +393,7 @@ pub async fn export_agent_snapshot(
         memory_level,
         is_png,
         avatar_png_data_url,
+        source_avatar_png_data_url,
         app.clone(),
         state,
     )
@@ -416,12 +439,14 @@ pub struct EncodedSnapshotPayload {
 /// but **never opens a file dialog**. The frontend passes the returned bytes
 /// through `uploadMediaBytes` → message construction → channel/DM send.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named IPC fields.
 pub async fn encode_agent_snapshot_for_send(
     id: String,
     memory_source_pubkey: Option<String>,
     memory_level: String,
     format: String,
     avatar_png_data_url: Option<String>,
+    source_avatar_png_data_url: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<EncodedSnapshotPayload, String> {
@@ -434,6 +459,7 @@ pub async fn encode_agent_snapshot_for_send(
         memory_level,
         is_png,
         avatar_png_data_url,
+        source_avatar_png_data_url,
         app,
         state,
     )
@@ -511,5 +537,24 @@ mod png_body_tests {
 
         assert_eq!((reader.info().width, reader.info().height), (3, 2));
         assert_eq!(decoded.profile.avatar_url, snapshot.profile.avatar_url);
+    }
+
+    #[test]
+    fn source_avatar_stays_distinct_from_flattened_card_body() {
+        let source_avatar = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+        let flattened_card = vec![0x89, b'P', b'N', b'G', 4, 5, 6];
+        let source_data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&source_avatar)
+        );
+
+        assert_eq!(
+            resolve_manifest_avatar_bytes(Some(&source_data_url), Some(flattened_card.clone())),
+            Some(source_avatar)
+        );
+        assert_eq!(
+            resolve_manifest_avatar_bytes(None, Some(flattened_card.clone())),
+            Some(flattened_card)
+        );
     }
 }

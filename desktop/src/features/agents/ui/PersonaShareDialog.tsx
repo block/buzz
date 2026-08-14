@@ -12,11 +12,13 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
+import tradingCardTemplateUrl from "@/features/agents/assets/buzz-trading-card-template.svg";
 import type { CatalogPersonaShareLevel } from "@/features/agents/lib/personaCatalogRelay";
 import {
   useOpenDmMutation,
   useUpsertCachedChannel,
 } from "@/features/channels/hooks";
+import { withAgentSnapshotAvatarPreview } from "@/features/messages/lib/agentSnapshotAttachmentPreview";
 import { buildSnapshotClipboardHtml } from "@/features/messages/lib/agentSnapshotClipboard";
 import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
 import { copyTextToSystemClipboard } from "@/shared/api/tauriMedia";
@@ -50,6 +52,7 @@ import {
   PersonaShareRecipients,
 } from "./PersonaShareRecipients";
 import { SnapshotOptionMenu } from "./SnapshotOptionMenu";
+import { renderAgentTradingCardPng } from "./agentTradingCardExport";
 import { resolveSnapshotAvatarPng } from "./snapshotAvatarPng";
 import { useSnapshotSendController } from "./useSnapshotSendController";
 
@@ -345,10 +348,13 @@ export function SnapshotShareDialog({
     );
     const { thumb: _thumb, ...uploadedWithoutThumb } = uploaded;
 
-    return {
+    const descriptor = {
       ...uploadedWithoutThumb,
       filename: encoded.fileName,
     };
+    return snapshotKind === "agent"
+      ? withAgentSnapshotAvatarPreview(descriptor, encoded.fileBytes)
+      : descriptor;
   }
 
   async function copyLink(memoryLevel: SnapshotMemoryLevel) {
@@ -686,18 +692,32 @@ export function PersonaShareDialog({
 }: PersonaShareDialogProps) {
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
   const encodeSnapshot = React.useCallback(
-    async (memoryLevel: SnapshotMemoryLevel) =>
-      encodeSnapshotMutation.mutateAsync({
+    async (memoryLevel: SnapshotMemoryLevel) => {
+      const avatarPngDataUrl =
+        await resolveSnapshotAvatarPng(effectiveAvatarUrl);
+      const cardPngDataUrl = await renderAgentTradingCardPng({
+        agentAvatarUrl: effectiveAvatarUrl,
+        avatarPngDataUrl,
+        agentId: linkedAgentPubkey ?? persona.id,
+        agentName: persona.displayName,
+        format: "png",
+        memoryLevel: linkedAgentPubkey ? memoryLevel : "none",
+        templateUrl: tradingCardTemplateUrl,
+      });
+      return encodeSnapshotMutation.mutateAsync({
         id: persona.id,
         memoryLevel: linkedAgentPubkey ? memoryLevel : "none",
         format: "png",
         memorySourcePubkey: linkedAgentPubkey,
-        avatarPngDataUrl: await resolveSnapshotAvatarPng(effectiveAvatarUrl),
-      }),
+        avatarPngDataUrl: cardPngDataUrl,
+        sourceAvatarPngDataUrl: avatarPngDataUrl,
+      });
+    },
     [
       encodeSnapshotMutation.mutateAsync,
       effectiveAvatarUrl,
       linkedAgentPubkey,
+      persona.displayName,
       persona.id,
     ],
   );

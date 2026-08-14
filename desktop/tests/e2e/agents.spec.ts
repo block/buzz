@@ -857,6 +857,9 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
 
 type AgentShareCommand = { command: string; payload: unknown };
 
+const INLINE_SAFETY_AVATAR =
+  "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22512%22%20height%3D%22512%22%3E%3Crect%20width%3D%22512%22%20height%3D%22512%22%20rx%3D%22256%22%20fill%3D%22%231b9a59%22%2F%3E%3Ccircle%20cx%3D%22256%22%20cy%3D%22256%22%20r%3D%22128%22%20fill%3D%22%23f5d44a%22%2F%3E%3C%2Fsvg%3E";
+
 async function openSafetyShareDialog(
   page: import("@playwright/test").Page,
   options: Parameters<typeof installMockBridge>[1] = {},
@@ -866,6 +869,7 @@ async function openSafetyShareDialog(
       {
         id: "custom:safety-auditor",
         displayName: "Safety Auditor",
+        avatarUrl: INLINE_SAFETY_AVATAR,
         systemPrompt: "You audit safety boundaries.",
       },
     ],
@@ -918,15 +922,673 @@ async function readAgentShareCommands(
   );
 }
 
+test("PNG export flattens the visible trading card into the saved image body", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openSafetyShareDialog(page);
+  await page.getByTestId("persona-share-export").click();
+
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  await expect(exportDialog).toBeVisible();
+  await expect(
+    exportDialog.getByTestId("agent-card-preview-avatar"),
+  ).toBeVisible();
+  const previewAccent = await exportDialog
+    .getByTestId("agent-card-live-preview")
+    .getAttribute("data-accent-color");
+  await exportDialog.getByTestId("agent-snapshot-export-confirm").click();
+  await expect(exportDialog).toHaveCount(0);
+
+  const payload = (await readAgentShareCommands(page))
+    .filter((entry) => entry.command === "export_agent_snapshot")
+    .at(-1)?.payload as
+    | {
+        avatarPngDataUrl?: string;
+        format?: string;
+        memoryLevel?: string;
+      }
+    | undefined;
+  expect(payload).toMatchObject({ format: "png", memoryLevel: "none" });
+  expect(payload?.avatarPngDataUrl).toMatch(/^data:image\/png;base64,/u);
+
+  const rendered = await page.evaluate(async (source) => {
+    if (!source) return null;
+    const image = new Image();
+    image.src = source;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(image, 0, 0);
+    const colors = new Set<string>();
+    for (let y = 100; y < canvas.height; y += 180) {
+      for (let x = 100; x < canvas.width; x += 140) {
+        colors.add(Array.from(context.getImageData(x, y, 1, 1).data).join(","));
+      }
+    }
+    const sample = (x: number, y: number) =>
+      Array.from(context.getImageData(x, y, 1, 1).data);
+    let accentDominantFoilPixels = 0;
+    for (let y = 40; y < canvas.height - 40; y += 20) {
+      for (const x of [20, 40, canvas.width - 40, canvas.width - 20]) {
+        const [red = 0, green = 0, blue = 0] = sample(x, y);
+        if (green > red && green > blue) accentDominantFoilPixels += 1;
+      }
+    }
+    return {
+      accentDominantFoilPixels,
+      avatarCenter: sample(607, 740),
+      avatarOuter: sample(300, 740),
+      colors: colors.size,
+      height: image.naturalHeight,
+      width: image.naturalWidth,
+    };
+  }, payload?.avatarPngDataUrl);
+  expect(rendered).toEqual({
+    accentDominantFoilPixels: expect.any(Number),
+    avatarCenter: [245, 212, 74, 255],
+    avatarOuter: [27, 154, 89, 255],
+    colors: expect.any(Number),
+    height: 1839,
+    width: 1227,
+  });
+  expect(rendered?.colors ?? 0).toBeGreaterThan(8);
+  expect(rendered?.accentDominantFoilPixels ?? 0).toBeGreaterThan(20);
+  expect(previewAccent).toBe("rgb(29 155 89)");
+});
+
+test("PNG import reviews the exact attached card image", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await installMockBridge(page);
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByTestId("agent-catalog-import").click();
+
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.getByTestId("agent-catalog-import-dropzone").click();
+  const fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles({
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
+    mimeType: "image/png",
+    name: "imported.agent.png",
+  });
+
+  const dialog = page.getByTestId("agent-snapshot-import-dialog");
+  await expect(dialog).toBeVisible();
+  const attachedCard = dialog.getByTestId("agent-custom-card-generated-image");
+  await expect(attachedCard).toBeVisible();
+  await expect(attachedCard).toHaveAttribute(
+    "src",
+    /^data:image\/png;base64,/u,
+  );
+  await expect(dialog.getByTestId("agent-card-template")).toHaveCount(0);
+  await expect(dialog.getByTestId("agent-card-preview-avatar")).toHaveCount(0);
+});
+
+test("export can create and reveal a custom generated card", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openSafetyShareDialog(page, { cardMintDelayMs: 500 });
+  await page.getByTestId("persona-share-export").click();
+
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  await expect(exportDialog).toBeVisible();
+  const defaultCard = exportDialog.getByTestId("agent-card-live-preview");
+  await expect(
+    exportDialog
+      .getByTestId("agent-card-default-face")
+      .getByTestId("agent-card-stage"),
+  ).toHaveAttribute("data-entrance-complete", "true", { timeout: 4_000 });
+  const initialDialogHeight = (await exportDialog.boundingBox())?.height ?? 0;
+  expect(initialDialogHeight).toBeLessThanOrEqual(
+    (page.viewportSize()?.height ?? 720) - 16,
+  );
+  const defaultCardBox = await defaultCard.boundingBox();
+  expect(defaultCardBox).not.toBeNull();
+
+  await exportDialog.getByTestId("agent-custom-card-open").click();
+  await expect(
+    exportDialog.getByRole("heading", {
+      name: "Create custom card",
+    }),
+  ).toBeVisible();
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-export-settings"),
+  ).toHaveCount(0);
+
+  const waitingCard = exportDialog.getByTestId(
+    "agent-custom-card-waiting-preview",
+  );
+  const description = exportDialog.getByTestId("agent-custom-card-description");
+  await expect(waitingCard).toBeVisible();
+  await expect(description).toBeVisible();
+  await expect(description).toBeFocused();
+  await expect(description).toHaveCSS("border-top-width", "0px");
+  await expect(description).toHaveCSS("resize", "none");
+  expect(
+    await description.evaluate((element) => {
+      const shadowLengths =
+        getComputedStyle(element).boxShadow.match(/-?\d*\.?\d+px/g) ?? [];
+      return shadowLengths.every((length) => Number.parseFloat(length) === 0);
+    }),
+  ).toBe(true);
+  const customCreateButton = exportDialog.getByTestId(
+    "agent-custom-card-create",
+  );
+  await expect(customCreateButton).toBeVisible();
+  const descriptionBox = await description.boundingBox();
+  const waitingCardBox = await waitingCard.boundingBox();
+  const customCreateButtonBox = await customCreateButton.boundingBox();
+  expect(
+    (descriptionBox?.y ?? 0) -
+      ((waitingCardBox?.y ?? 0) + (waitingCardBox?.height ?? 0)),
+  ).toBeGreaterThanOrEqual(48);
+  expect(descriptionBox?.width).toBeCloseTo(
+    customCreateButtonBox?.width ?? 0,
+    0,
+  );
+  const particleGrid = waitingCard.getByTestId(
+    "agent-custom-card-particle-grid",
+  );
+  await expect(particleGrid).toBeVisible();
+  await expect(particleGrid).toHaveAttribute("data-ready", "true");
+  await expect(particleGrid).toHaveAttribute("data-grid-size", "15");
+  await expect(particleGrid).toHaveAttribute("data-char-set", "H");
+  await expect(particleGrid).toHaveAttribute("data-mode", "2");
+  const particlePalette = await particleGrid.evaluate((canvas) => ({
+    background: canvas.dataset.backgroundColor,
+    dots: canvas.dataset.dotColor,
+    surface: getComputedStyle(
+      canvas.closest(".agent-custom-card-waiting") as HTMLElement,
+    ).backgroundColor,
+  }));
+  const surfaceChannels = particlePalette.surface
+    .match(/-?\d*\.?\d+/g)
+    ?.slice(0, 3)
+    .map((channel) => Number(channel) / 255);
+  expect(particlePalette.background).toBe(surfaceChannels?.join(","));
+  expect(particlePalette.dots).toBe(
+    surfaceChannels?.map((channel) => 1 - channel).join(","),
+  );
+  await expect(particleGrid).toHaveAttribute("data-animated", "true");
+  const particleGridRange = await particleGrid.evaluate((canvas) => {
+    const element = canvas as HTMLCanvasElement;
+    const context = element.getContext("2d");
+    if (!context || element.width === 0 || element.height === 0) {
+      return { darkest: 255, lightest: 0 };
+    }
+    const pixels = context.getImageData(
+      0,
+      0,
+      element.width,
+      element.height,
+    ).data;
+    let darkest = 255;
+    let lightest = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      darkest = Math.min(darkest, pixels[index] ?? 255);
+      lightest = Math.max(lightest, pixels[index] ?? 0);
+    }
+    return { darkest, lightest };
+  });
+  expect(particleGridRange.darkest).toBeLessThan(particleGridRange.lightest);
+  await expect(
+    waitingCard.locator(
+      ".agent-custom-card-waiting__shimmer, .agent-custom-card-waiting__creation-beam, .agent-custom-card-waiting__dot-fill",
+    ),
+  ).toHaveCount(0);
+  await expect
+    .poll(async () => (await waitingCard.boundingBox())?.width ?? 0)
+    .toBeLessThan((defaultCardBox?.width ?? 0) * 0.85);
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(particleGrid).toHaveAttribute("data-animated", "false");
+  await expect
+    .poll(() =>
+      exportDialog.getByTestId("agent-card-mode-flip").evaluate((element) => {
+        const matrix = new DOMMatrix(getComputedStyle(element).transform);
+        return Math.abs(Math.hypot(matrix.m11, matrix.m13) - 0.8);
+      }),
+    )
+    .toBeLessThan(0.01);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+
+  await description.fill(
+    "A midnight garden with emerald circuitry and a quiet gold horizon",
+  );
+  await exportDialog.getByTestId("agent-custom-card-create").click();
+  await expect(waitingCard).toHaveAttribute("data-creating", "true");
+  await expect(particleGrid).toHaveAttribute("data-animated", "true");
+  const progress = exportDialog.getByTestId("agent-custom-card-progress");
+  await expect(progress).toBeVisible();
+  await expect(
+    progress.getByRole("progressbar", { name: "Creating custom card" }),
+  ).toHaveAttribute("aria-valuetext", "Working");
+  await expect(
+    progress.getByRole("progressbar", { name: "Creating custom card" }),
+  ).not.toHaveAttribute("aria-valuenow");
+  await expect(progress).toContainText("This can take a few minutes");
+  await expect(
+    exportDialog.getByTestId("agent-custom-card-description"),
+  ).toHaveCount(0);
+  await expect(
+    exportDialog.getByTestId("agent-custom-card-create"),
+  ).toHaveCount(0);
+  await expect(exportDialog.getByTestId("agent-custom-card-back")).toHaveCount(
+    0,
+  );
+
+  const generatedImage = exportDialog.getByTestId(
+    "agent-custom-card-generated-image",
+  );
+  await expect(generatedImage).toBeVisible({ timeout: 5_000 });
+  expect((await exportDialog.boundingBox())?.height).toBeCloseTo(
+    initialDialogHeight,
+    0,
+  );
+  expect(
+    await exportDialog.evaluate(
+      (element) => element.scrollHeight - element.clientHeight,
+    ),
+  ).toBeLessThanOrEqual(1);
+  const generatedStage = exportDialog
+    .getByTestId("agent-card-custom-face")
+    .getByTestId("agent-card-stage");
+  await expect(generatedStage).toHaveAttribute("data-reveal-ready", "true");
+  await expect(
+    generatedStage.locator(".agent-trading-card-preview__burst-lobe").first(),
+  ).toHaveCSS("animation-name", "agent-card-color-burst");
+  await expect(generatedStage).toHaveAttribute(
+    "data-entrance-complete",
+    "true",
+    { timeout: 4_000 },
+  );
+  await expect(progress).toHaveCount(0);
+  await expect(
+    exportDialog.getByRole("heading", {
+      name: "Export Safety Auditor",
+    }),
+  ).toBeVisible();
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-export-settings"),
+  ).toBeVisible();
+  await expect(
+    exportDialog.getByTestId("agent-custom-card-settings"),
+  ).toHaveCount(0);
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-format-trigger"),
+  ).toContainText("PNG");
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-format-trigger"),
+  ).toBeDisabled();
+  await expect
+    .poll(() =>
+      exportDialog.getByTestId("agent-card-mode-flip").evaluate((element) => {
+        const matrix = new DOMMatrix(getComputedStyle(element).transform);
+        return Math.abs(Math.hypot(matrix.m11, matrix.m13) - 1);
+      }),
+    )
+    .toBeLessThan(0.01);
+
+  const mintCommand = (await readAgentShareCommands(page)).findLast(
+    (entry) => entry.command === "mint_agent_card",
+  );
+  expect(mintCommand?.payload).toMatchObject({
+    avatarDataUrl: expect.stringMatching(/^data:image\/png;base64,/),
+    id: "custom:safety-auditor",
+    memoryLevel: "none",
+    referenceCardPngBase64: null,
+    styleNotes:
+      "A midnight garden with emerald circuitry and a quiet gold horizon",
+  });
+
+  await exportDialog.getByTestId("agent-custom-card-open").click();
+  const followupDescription = exportDialog.getByTestId(
+    "agent-custom-card-description",
+  );
+  await expect(followupDescription).toHaveAttribute(
+    "placeholder",
+    "Describe a follow-up",
+  );
+  await followupDescription.fill("Make only the horizon warmer");
+  await exportDialog.getByTestId("agent-custom-card-create").click();
+  await expect(
+    exportDialog.getByTestId("agent-custom-card-progress"),
+  ).toBeVisible();
+  await expect(
+    exportDialog.getByTestId("agent-custom-card-progress"),
+  ).toHaveCount(0, { timeout: 5_000 });
+  await expect(generatedImage).toBeVisible({ timeout: 5_000 });
+  await expect(
+    exportDialog.getByTestId("agent-snapshot-export-settings"),
+  ).toBeVisible();
+  const mintCommands = (await readAgentShareCommands(page)).filter(
+    (entry) => entry.command === "mint_agent_card",
+  );
+  expect(mintCommands).toHaveLength(2);
+  expect(mintCommands.at(-1)?.payload).toMatchObject({
+    referenceCardPngBase64:
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n3cAAAAASUVORK5CYII=",
+    styleNotes: "Make only the horizon warmer",
+  });
+
+  await exportDialog.getByTestId("agent-snapshot-export-confirm").click();
+  await expect(exportDialog).toHaveCount(0);
+  expect(
+    (await readAgentShareCommands(page)).filter(
+      (entry) => entry.command === "save_agent_card",
+    ),
+  ).toHaveLength(1);
+});
+
+test("custom card flips to its reverse, keeps the modal stable, and Back restores the standard card", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openSafetyShareDialog(page);
+  await page.getByTestId("persona-share-export").click();
+
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  const formatTrigger = exportDialog.getByTestId(
+    "agent-snapshot-format-trigger",
+  );
+  await formatTrigger.click();
+  await page.getByRole("menuitemradio", { name: "JSON" }).click();
+  await expect(formatTrigger).toContainText("JSON");
+  await expect(exportDialog.getByTestId("agent-card-stage")).toHaveAttribute(
+    "data-entrance-complete",
+    "true",
+    { timeout: 4_000 },
+  );
+
+  const initialDialogBox = await exportDialog.boundingBox();
+  const defaultExportButtonBox = await exportDialog
+    .getByTestId("agent-snapshot-export-confirm")
+    .boundingBox();
+  const defaultCustomButtonBox = await exportDialog
+    .getByTestId("agent-custom-card-open")
+    .boundingBox();
+  const defaultFormatRowBox = await exportDialog
+    .getByTestId("agent-snapshot-format-row")
+    .boundingBox();
+  const flip = exportDialog.getByTestId("agent-card-mode-flip");
+  const defaultFace = exportDialog.getByTestId("agent-card-default-face");
+  const customFace = exportDialog.getByTestId("agent-card-custom-face");
+  await expect(exportDialog).toHaveAttribute("data-resize-motion", "enabled");
+  await expect(exportDialog).toHaveAttribute("data-mode-size", "stable");
+  await expect(defaultFace).toHaveAttribute("aria-hidden", "false");
+  await expect(defaultFace).toHaveCSS("visibility", "visible");
+  await expect(customFace).toHaveAttribute("aria-hidden", "true");
+  await expect(customFace).toHaveCSS("visibility", "hidden");
+  await exportDialog.evaluate((element) => {
+    const recorder = {
+      frameId: 0,
+      heights: [] as number[],
+    };
+    const sample = () => {
+      recorder.heights.push(element.getBoundingClientRect().height);
+      recorder.frameId = requestAnimationFrame(sample);
+    };
+    recorder.frameId = requestAnimationFrame(sample);
+    (
+      window as typeof window & {
+        __agentModalHeightRecorder?: typeof recorder;
+      }
+    ).__agentModalHeightRecorder = recorder;
+  });
+  await exportDialog.getByTestId("agent-custom-card-open").click();
+
+  // The front remains the only painted face during the start of one
+  // uninterrupted 180-degree turn.
+  await page.waitForTimeout(100);
+  await expect(defaultFace).toHaveAttribute("aria-hidden", "false");
+  await expect(defaultFace).toHaveCSS("visibility", "visible");
+  await expect(customFace).toHaveCSS("visibility", "hidden");
+
+  await expect(defaultFace).toHaveAttribute("aria-hidden", "true");
+  await expect(customFace).toHaveAttribute("aria-hidden", "false");
+  await expect(defaultFace).toHaveCSS("visibility", "hidden");
+  await expect(customFace).toHaveCSS("visibility", "visible");
+  await page.waitForTimeout(800);
+  const observedModalHeights = await page.evaluate(() => {
+    const recorder = (
+      window as typeof window & {
+        __agentModalHeightRecorder?: {
+          frameId: number;
+          heights: number[];
+        };
+      }
+    ).__agentModalHeightRecorder;
+    if (!recorder) return [];
+    cancelAnimationFrame(recorder.frameId);
+    return recorder.heights;
+  });
+  const uniqueModalHeights = [
+    ...new Set(observedModalHeights.map((height) => Math.round(height))),
+  ];
+  expect(uniqueModalHeights.length).toBeLessThanOrEqual(2);
+  expect(
+    Math.max(...uniqueModalHeights) - Math.min(...uniqueModalHeights),
+  ).toBeLessThanOrEqual(1);
+  const createButton = exportDialog.getByTestId("agent-custom-card-create");
+  const backButton = exportDialog.getByTestId("agent-custom-card-back");
+  await expect(createButton).toBeVisible();
+  await expect(backButton).toBeVisible();
+  const createButtonBox = await createButton.boundingBox();
+  const backButtonBox = await backButton.boundingBox();
+  const customDescriptionBox = await exportDialog
+    .getByTestId("agent-custom-card-description")
+    .boundingBox();
+  const defaultContentToActionsGap =
+    (defaultExportButtonBox?.y ?? 0) -
+    ((defaultFormatRowBox?.y ?? 0) + (defaultFormatRowBox?.height ?? 0));
+  const customContentToActionsGap =
+    (createButtonBox?.y ?? 0) -
+    ((customDescriptionBox?.y ?? 0) + (customDescriptionBox?.height ?? 0));
+  expect(customContentToActionsGap).toBeCloseTo(defaultContentToActionsGap, 0);
+  expect(createButtonBox?.y).toBeCloseTo(defaultExportButtonBox?.y ?? 0, 0);
+  expect(backButtonBox?.y).toBeCloseTo(defaultCustomButtonBox?.y ?? 0, 0);
+  expect(backButtonBox?.width).toBeCloseTo(createButtonBox?.width ?? 0, 0);
+  expect(backButtonBox?.y ?? 0).toBeGreaterThan(
+    (createButtonBox?.y ?? 0) + (createButtonBox?.height ?? 0),
+  );
+  await expect
+    .poll(() =>
+      flip.evaluate((element) => {
+        const matrix = new DOMMatrix(getComputedStyle(element).transform);
+        return matrix.m11;
+      }),
+    )
+    .toBeLessThan(-0.79);
+  const customDialogBox = await exportDialog.boundingBox();
+  expect(customDialogBox?.width).toBeCloseTo(initialDialogBox?.width ?? 0, 0);
+  expect(customDialogBox?.height).toBeCloseTo(initialDialogBox?.height ?? 0, 0);
+
+  await backButton.click();
+  await page.waitForTimeout(100);
+  await expect(customFace).toHaveAttribute("aria-hidden", "false");
+  await expect(customFace).toHaveCSS("visibility", "visible");
+  await expect(defaultFace).toHaveCSS("visibility", "hidden");
+  await expect(
+    exportDialog.getByRole("heading", { name: "Export Safety Auditor" }),
+  ).toBeVisible();
+  await expect(defaultFace).toHaveAttribute("aria-hidden", "false");
+  await expect(customFace).toHaveAttribute("aria-hidden", "true");
+  await expect(defaultFace).toHaveCSS("visibility", "visible");
+  await expect(customFace).toHaveCSS("visibility", "hidden");
+  await expect
+    .poll(() =>
+      flip.evaluate(
+        (element) => new DOMMatrix(getComputedStyle(element).transform).m11,
+      ),
+    )
+    .toBeGreaterThan(0.99);
+  await expect(formatTrigger).toContainText("JSON");
+  const restoredDialogBox = await exportDialog.boundingBox();
+  expect(restoredDialogBox?.width).toBeCloseTo(initialDialogBox?.width ?? 0, 0);
+  expect(restoredDialogBox?.height).toBeCloseTo(
+    initialDialogBox?.height ?? 0,
+    0,
+  );
+});
+
+test("custom card can add a missing OpenAI key inline", async ({ page }) => {
+  await openSafetyShareDialog(page, { cardMintKeyLayer: "none" });
+  await page.getByTestId("persona-share-export").click();
+
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  await expect(
+    exportDialog
+      .getByTestId("agent-card-default-face")
+      .getByTestId("agent-card-stage"),
+  ).toHaveAttribute("data-entrance-complete", "true", { timeout: 4_000 });
+  const initialDialogHeight = (await exportDialog.boundingBox())?.height ?? 0;
+  await exportDialog.getByTestId("agent-custom-card-open").click();
+
+  const description = exportDialog.getByTestId("agent-custom-card-description");
+  const create = exportDialog.getByTestId("agent-custom-card-create");
+  const descriptionAppearance = await description.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return {
+      backgroundColor: styles.backgroundColor,
+      borderTopWidth: styles.borderTopWidth,
+    };
+  });
+  expect(descriptionAppearance.borderTopWidth).toBe("0px");
+  expect(descriptionAppearance.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  await description.fill("A green glass garden with quiet geometric light");
+  await expect(create).toBeDisabled();
+  await expect(
+    exportDialog.getByTestId("agent-custom-card-key-required"),
+  ).toContainText("OpenAI key required");
+
+  await exportDialog.getByTestId("agent-custom-card-key-add").click();
+  const keySetup = exportDialog.getByTestId("agent-custom-card-key-setup");
+  await expect(keySetup).toBeVisible();
+  expect((await exportDialog.boundingBox())?.height).toBeCloseTo(
+    initialDialogHeight,
+    0,
+  );
+  expect(
+    await exportDialog.evaluate(
+      (element) => element.scrollHeight - element.clientHeight,
+    ),
+  ).toBeLessThanOrEqual(1);
+  const keyInput = keySetup.getByTestId("agent-custom-card-key-input");
+  await expect(keyInput).toHaveAttribute("type", "password");
+  await keyInput.fill("sk-e2e-custom-card");
+  await keySetup.getByTestId("agent-custom-card-key-save").click();
+
+  await expect(keySetup).toHaveCount(0);
+  await expect(
+    exportDialog.getByTestId("agent-custom-card-key-status"),
+  ).toHaveCount(0);
+  await expect(create).toBeEnabled();
+  await expect(description).toHaveValue(
+    "A green glass garden with quiet geometric light",
+  );
+  expect((await exportDialog.boundingBox())?.height).toBeCloseTo(
+    initialDialogHeight,
+    0,
+  );
+
+  const saveKeyCommand = (await readAgentShareCommands(page)).findLast(
+    (entry) => entry.command === "card_mint_save_openai_key",
+  );
+  expect(saveKeyCommand?.payload).toEqual({ key: "sk-e2e-custom-card" });
+  expect(
+    (await readAgentShareCommands(page)).some(
+      (entry) => entry.command === "set_global_agent_config",
+    ),
+  ).toBe(false);
+});
+
+test("invalid custom-card key transforms into inline replacement setup", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openSafetyShareDialog(page, {
+    cardMintError:
+      "Card mint failed (HTTP 401 Unauthorized): Incorrect API key provided: sk-proj-***",
+    cardMintKeyLayer: "global",
+  });
+  await page.getByTestId("persona-share-export").click();
+
+  const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
+  await expect(
+    exportDialog
+      .getByTestId("agent-card-default-face")
+      .getByTestId("agent-card-stage"),
+  ).toHaveAttribute("data-entrance-complete", "true", { timeout: 4_000 });
+  const initialDialogHeight = (await exportDialog.boundingBox())?.height ?? 0;
+  await exportDialog.getByTestId("agent-custom-card-open").click();
+  const description = exportDialog.getByTestId("agent-custom-card-description");
+  await description.fill("A jade observatory under a quiet aurora");
+  const create = exportDialog.getByTestId("agent-custom-card-create");
+  await expect(create).toBeEnabled();
+  await create.click();
+
+  await expect(
+    exportDialog.getByRole("heading", { name: "Update OpenAI key" }),
+  ).toBeVisible();
+  const keySetup = exportDialog.getByTestId("agent-custom-card-key-setup");
+  const keyInput = keySetup.getByTestId("agent-custom-card-key-input");
+  await expect(keySetup).toBeVisible();
+  await expect(keyInput).toBeFocused();
+  await expect(
+    keySetup.getByTestId("agent-custom-card-invalid-key"),
+  ).toContainText("invalid or expired");
+  await expect(description).toHaveCount(0);
+  expect((await exportDialog.boundingBox())?.height).toBeCloseTo(
+    initialDialogHeight,
+    0,
+  );
+  expect(
+    await exportDialog.evaluate(
+      (element) => element.scrollHeight - element.clientHeight,
+    ),
+  ).toBeLessThanOrEqual(1);
+
+  await keyInput.fill("sk-e2e-replacement-key");
+  await keySetup.getByTestId("agent-custom-card-key-save").click();
+
+  await expect(
+    exportDialog.getByRole("heading", { name: "Create custom card" }),
+  ).toBeVisible();
+  await expect(keySetup).toHaveCount(0);
+  await expect(description).toHaveValue(
+    "A jade observatory under a quiet aurora",
+  );
+  await expect(exportDialog.getByTestId("agent-custom-card-error")).toHaveCount(
+    0,
+  );
+  await expect(create).toBeEnabled();
+
+  const saveKeyCommand = (await readAgentShareCommands(page)).findLast(
+    (entry) => entry.command === "card_mint_save_openai_key",
+  );
+  expect(saveKeyCommand?.payload).toEqual({ key: "sk-e2e-replacement-key" });
+});
+
 test("custom personas share with people and keep export separate", async ({
   page,
 }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   const sharedAgentUrl = `https://mock.relay/media/${"b".repeat(64)}.png`;
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await installMockBridge(page, {
     personas: [
       {
         id: "custom:analyst",
+        avatarUrl: "/onboarding/starter-team/fizz.png",
         displayName: "Animation Auditor",
         systemPrompt: "You audit animations.",
       },
@@ -1156,8 +1818,49 @@ test("custom personas share with people and keep export separate", async ({
   await expect(shareDialog).toHaveCount(0);
   const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
   await expect(exportDialog).toBeVisible();
+  const cardStage = exportDialog.getByTestId("agent-card-stage");
+  const colorBurst = exportDialog.getByTestId("agent-card-color-burst");
+  const colorBurstLobes = colorBurst.locator(
+    ".agent-trading-card-preview__burst-lobe",
+  );
+  await expect(cardStage).toHaveAttribute("data-entrance-complete", "false");
+  await expect(colorBurstLobes).toHaveCount(3);
+  await expect(cardStage).toHaveAttribute("data-palette-ready", "true");
+  const entranceAccent = await exportDialog
+    .getByTestId("agent-card-live-preview")
+    .getAttribute("data-accent-color");
+  expect(entranceAccent).toMatch(/^rgb\(/);
+  await expect(colorBurstLobes.first()).toHaveCSS(
+    "animation-name",
+    "agent-card-color-burst",
+  );
+  await expect(colorBurstLobes.first()).toHaveCSS("animation-delay", "0.24s");
+  await expect(colorBurstLobes.first()).toHaveCSS("animation-duration", "1.4s");
+  await expect
+    .poll(() =>
+      cardStage.evaluate((element) =>
+        element
+          .getAnimations()
+          .map((animation) => animation.effect?.getTiming().duration)
+          .find((duration) => duration === 1_000),
+      ),
+    )
+    .toBe(1_000);
+  await expect
+    .poll(() =>
+      colorBurstLobes
+        .first()
+        .evaluate((element) => Number(getComputedStyle(element).opacity)),
+    )
+    .toBeGreaterThan(0);
+  await waitForAnimations(page);
+  await expect(cardStage).toHaveAttribute("data-entrance-complete", "true");
+  await expect(
+    exportDialog.getByTestId("agent-card-live-preview"),
+  ).toHaveAttribute("data-accent-color", entranceAccent ?? "");
   const exportDialogBox = await exportDialog.boundingBox();
-  expect(exportDialogBox?.width).toBeLessThanOrEqual(448);
+  expect(exportDialogBox?.width ?? 0).toBeGreaterThan(450);
+  expect(exportDialogBox?.width).toBeLessThanOrEqual(512);
   await expect(
     exportDialog.getByRole("heading", {
       name: "Export Animation Auditor",
@@ -1168,11 +1871,265 @@ test("custom personas share with people and keep export separate", async ({
   await expect(
     exportDialog.getByRole("button", { name: "Send in Buzz" }),
   ).toHaveCount(0);
+  await expect(exportDialog.getByLabel("Export type")).toHaveCount(0);
+  await expect(exportDialog.getByText("Live card preview")).toHaveCount(0);
+  const liveCardPreview = exportDialog.getByTestId("agent-card-live-preview");
+  const exportSettings = exportDialog.getByTestId(
+    "agent-snapshot-export-settings",
+  );
+  await expect(liveCardPreview).toBeVisible();
+  await expect(liveCardPreview).toHaveCSS("cursor", "default");
+  await expect(liveCardPreview).toHaveCSS("user-select", "none");
+  await expect(liveCardPreview).not.toHaveAttribute("title", /.+/);
+  await expect(liveCardPreview.locator("title")).toHaveCount(0);
+  await expect(
+    liveCardPreview.getByTestId("agent-card-template"),
+  ).toBeVisible();
+  await expect(
+    liveCardPreview.getByTestId("agent-card-preview-name"),
+  ).toContainText("ANIMATION AUDITOR");
+  await expect(
+    liveCardPreview.getByTestId("agent-card-preview-name"),
+  ).toHaveCSS("cursor", "default");
+  await expect(
+    liveCardPreview.getByTestId("agent-card-preview-name"),
+  ).toHaveCSS("user-select", "none");
+  await expect(
+    liveCardPreview.getByTestId("agent-card-preview-avatar"),
+  ).toBeVisible();
+  await expect(liveCardPreview).toHaveAttribute("data-accent-color", /^rgb\(/);
+  const cardDisplayArea = exportDialog.getByTestId("agent-card-display-area");
+  const [liveCardBox, cardDisplayAreaBox, exportSettingsBox] =
+    await Promise.all([
+      liveCardPreview.boundingBox(),
+      cardDisplayArea.boundingBox(),
+      exportSettings.boundingBox(),
+    ]);
+  if (!liveCardBox) throw new Error("Live card preview has no layout box.");
+  if (!exportDialogBox) throw new Error("Export dialog has no layout box.");
+  if (!cardDisplayAreaBox)
+    throw new Error("Card display area has no layout box.");
+  if (!exportSettingsBox)
+    throw new Error("Export settings have no layout box.");
+  expect(liveCardBox.width).toBeGreaterThanOrEqual(208);
+  expect(liveCardBox.width).toBeLessThanOrEqual(264);
+  expect(liveCardBox.width / liveCardBox.height).toBeCloseTo(1227 / 1839, 2);
+  expect(liveCardBox.x + liveCardBox.width / 2).toBeCloseTo(
+    exportDialogBox.x + exportDialogBox.width / 2,
+    0,
+  );
+  expect(liveCardBox.y - cardDisplayAreaBox.y).toBeCloseTo(16, 0);
+  expect(
+    cardDisplayAreaBox.y +
+      cardDisplayAreaBox.height -
+      (liveCardBox.y + liveCardBox.height),
+  ).toBeCloseTo(16, 0);
+  expect(exportSettingsBox.y).toBeGreaterThanOrEqual(
+    liveCardBox.y + liveCardBox.height + 36,
+  );
+  const restingEffect = await liveCardPreview.evaluate((element) => {
+    const paintedRoot = element.querySelector(".agent-trading-card-preview");
+    const shimmer = element.querySelector(
+      ".agent-trading-card-preview__shimmer",
+    );
+    const stage = element.parentElement;
+    const burst = stage?.querySelector(".agent-trading-card-preview__burst");
+    const layers = [
+      paintedRoot,
+      element.querySelector(".agent-trading-card-preview__template"),
+      element.querySelector(".agent-trading-card-preview__content"),
+      element.querySelector(".agent-trading-card-preview__palette"),
+      shimmer,
+    ];
+    if (
+      !paintedRoot ||
+      !shimmer ||
+      !stage ||
+      !burst ||
+      layers.some((layer) => !layer)
+    ) {
+      throw new Error("Card effect layers are missing.");
+    }
+    const presentLayers = layers.filter(
+      (layer): layer is Element => layer !== null,
+    );
+    const planeStyles = getComputedStyle(element);
+    const rootStyles = getComputedStyle(paintedRoot);
+    const stageStyles = getComputedStyle(stage);
+    return {
+      burstAccent: getComputedStyle(burst)
+        .getPropertyValue("--agent-card-accent")
+        .trim(),
+      burstRadius: getComputedStyle(burst).borderRadius,
+      foilAnimation: getComputedStyle(shimmer, "::after").animationName,
+      foilOpacity: getComputedStyle(shimmer, "::after").opacity,
+      foilTransitionDuration: getComputedStyle(shimmer, "::after")
+        .transitionDuration,
+      layerClips: presentLayers.map(
+        (layer) => getComputedStyle(layer).clipPath,
+      ),
+      layerRadii: presentLayers.map(
+        (layer) => getComputedStyle(layer).borderRadius,
+      ),
+      outerRadiusX: stageStyles
+        .getPropertyValue("--agent-card-outer-radius-x")
+        .trim(),
+      outerRadiusY: stageStyles
+        .getPropertyValue("--agent-card-outer-radius-y")
+        .trim(),
+      rootAccent: rootStyles.getPropertyValue("--agent-card-accent").trim(),
+      rootClip: rootStyles.clipPath,
+      rootRadius: rootStyles.borderRadius,
+      planeRadius: planeStyles.borderRadius,
+      planeShadow: planeStyles.boxShadow,
+      planeTransform: planeStyles.transform,
+      planeTransitionDuration: planeStyles.transitionDuration,
+      shimmerTransitionDuration: getComputedStyle(shimmer).transitionDuration,
+      shadowPseudo: getComputedStyle(element, "::after").boxShadow,
+    };
+  });
+  expect(restingEffect.outerRadiusX).toBe("6.51997%");
+  expect(restingEffect.outerRadiusY).toBe("4.40457%");
+  expect(restingEffect.burstAccent).toBe(restingEffect.rootAccent);
+  expect(restingEffect.burstRadius).toBe(restingEffect.rootRadius);
+  expect(restingEffect.planeRadius).toBe(restingEffect.rootRadius);
+  expect(restingEffect.planeShadow).not.toBe("none");
+  expect(restingEffect.shadowPseudo).toBe("none");
+  expect(restingEffect.layerRadii).toEqual(
+    Array(5).fill(restingEffect.rootRadius),
+  );
+  expect(restingEffect.layerClips).toEqual(
+    Array(5).fill(restingEffect.rootClip),
+  );
+  expect(restingEffect.foilAnimation).toBe("none");
+  expect(restingEffect.foilOpacity).toBe("0");
+  expect(restingEffect.foilTransitionDuration).toBe("0.56s");
+  expect(restingEffect.planeTransitionDuration).toBe("0.56s");
+  expect(restingEffect.shimmerTransitionDuration).toBe("0.56s, 0.56s");
+  await page.mouse.move(
+    liveCardBox.x + liveCardBox.width * 0.9,
+    liveCardBox.y + liveCardBox.height * 0.1,
+  );
+  await waitForAnimations(page);
+  const pointerFinish = await liveCardPreview.evaluate((element) => {
+    const paintedRoot = element.querySelector(".agent-trading-card-preview");
+    const shimmer = element.querySelector(
+      ".agent-trading-card-preview__shimmer",
+    );
+    if (!paintedRoot || !shimmer) {
+      throw new Error("Painted card effect layers are missing.");
+    }
+    const transform = element.style.transform;
+    const tiltX = /rotateX\(([-\d.]+)deg\)/.exec(transform)?.[1];
+    const tiltY = /rotateY\(([-\d.]+)deg\)/.exec(transform)?.[1];
+    return {
+      clipPath: getComputedStyle(paintedRoot).clipPath,
+      pointerX: Number.parseFloat(
+        (shimmer as HTMLElement).style.getPropertyValue(
+          "--agent-card-pointer-x",
+        ),
+      ),
+      pointerY: Number.parseFloat(
+        (shimmer as HTMLElement).style.getPropertyValue(
+          "--agent-card-pointer-y",
+        ),
+      ),
+      tiltX: Number.parseFloat(tiltX ?? "NaN"),
+      tiltY: Number.parseFloat(tiltY ?? "NaN"),
+    };
+  });
+  expect(pointerFinish.clipPath).not.toBe("none");
+  expect(pointerFinish.pointerX).toBeGreaterThan(89);
+  expect(pointerFinish.pointerX).toBeLessThan(91);
+  expect(pointerFinish.pointerY).toBeGreaterThan(9);
+  expect(pointerFinish.pointerY).toBeLessThan(11);
+  expect(pointerFinish.tiltX).toBeGreaterThan(0);
+  expect(pointerFinish.tiltX).toBeLessThanOrEqual(4);
+  expect(pointerFinish.tiltY).toBeGreaterThan(0);
+  expect(pointerFinish.tiltY).toBeLessThanOrEqual(4);
+  await expect
+    .poll(() =>
+      liveCardPreview
+        .locator(".agent-trading-card-preview__shimmer")
+        .evaluate((element) => getComputedStyle(element, "::after").opacity),
+    )
+    .toBe("0.58");
+  await expect(liveCardPreview).toHaveCSS("transition-duration", "0.07s");
+  await expect(
+    liveCardPreview.locator(".agent-trading-card-preview__shimmer"),
+  ).toHaveCSS("transition-duration", "0.07s");
+  await expect(liveCardPreview).toHaveCSS(
+    "box-shadow",
+    restingEffect.planeShadow,
+  );
+  await page.mouse.move(
+    (exportSettingsBox?.x ?? liveCardBox.x + liveCardBox.width) + 8,
+    exportSettingsBox?.y ?? liveCardBox.y,
+  );
+  const settlingEffect = await liveCardPreview.evaluate((element) => {
+    const shimmer = element.querySelector(
+      ".agent-trading-card-preview__shimmer",
+    );
+    if (!shimmer) throw new Error("Card shimmer layer is missing.");
+    return {
+      foilOpacity: getComputedStyle(shimmer, "::after").opacity,
+      pointerX: getComputedStyle(shimmer)
+        .getPropertyValue("--agent-card-pointer-x")
+        .trim(),
+      transform: getComputedStyle(element).transform,
+    };
+  });
+  expect(settlingEffect.transform).not.toBe("none");
+  expect(Number.parseFloat(settlingEffect.pointerX)).toBeGreaterThan(50);
+  expect(Number.parseFloat(settlingEffect.foilOpacity)).toBeGreaterThan(0);
+  await waitForAnimations(page);
+  const settledEffect = await liveCardPreview.evaluate((element) => {
+    const shimmer = element.querySelector(
+      ".agent-trading-card-preview__shimmer",
+    );
+    if (!shimmer) throw new Error("Card shimmer layer is missing.");
+    return {
+      foilOpacity: getComputedStyle(shimmer, "::after").opacity,
+      pointerX: getComputedStyle(shimmer)
+        .getPropertyValue("--agent-card-pointer-x")
+        .trim(),
+      pointerY: getComputedStyle(shimmer)
+        .getPropertyValue("--agent-card-pointer-y")
+        .trim(),
+      transform: getComputedStyle(element).transform,
+    };
+  });
+  expect(settledEffect.transform).toBe(restingEffect.planeTransform);
+  expect(settledEffect.pointerX).toBe("50%");
+  expect(settledEffect.pointerY).toBe("50%");
+  expect(settledEffect.foilOpacity).toBe("0");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(colorBurst).toHaveCSS("display", "none");
+  await expect(liveCardPreview).toHaveCSS("transform", "none");
+  await expect
+    .poll(() =>
+      liveCardPreview
+        .locator(".agent-trading-card-preview__shimmer")
+        .evaluate((element) => getComputedStyle(element, "::before").display),
+    )
+    .toBe("none");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  expect(exportSettingsBox.x).toBeLessThan(liveCardBox.x);
+  expect(exportSettingsBox.x + exportSettingsBox.width).toBeGreaterThan(
+    liveCardBox.x + liveCardBox.width,
+  );
+  await expect(exportDialog.getByTestId("agent-card-mint-panel")).toHaveCount(
+    0,
+  );
+  await expect(exportDialog.getByRole("textbox")).toHaveCount(0);
+  await expect(
+    exportDialog.getByText("Mint card", { exact: true }),
+  ).toHaveCount(0);
+  await expect(exportDialog.getByText(/OpenAI/i)).toHaveCount(0);
   await expect(exportDialog.getByLabel("Memories")).toHaveCount(0);
   await expect(
     exportDialog.getByTestId("agent-snapshot-memory-value"),
   ).toHaveText("Agent only");
-  await expect(exportDialog.getByText("Start this agent")).toHaveCount(0);
   await expect(
     exportDialog.getByTestId("agent-snapshot-memory-value").locator("svg"),
   ).toHaveCount(0);
@@ -1184,20 +2141,82 @@ test("custom personas share with people and keep export separate", async ({
   );
   await formatTrigger.click();
   await expect(page.getByRole("menuitemradio", { name: "JSON" })).toBeVisible();
-  await page.getByRole("menuitemradio", { name: "PNG" }).click();
+  await page.getByRole("menuitemradio", { name: "JSON" }).click();
+  await expect(formatTrigger).toHaveText("JSON");
+  await expect(
+    liveCardPreview.getByTestId("agent-card-preview-format"),
+  ).toContainText("JSON");
+  await expect(cardStage).toHaveAttribute("data-entrance-complete", "true");
   const exportFooter = exportDialog.getByTestId("agent-snapshot-export-footer");
-  const cancelButtonBox = await exportFooter
-    .getByRole("button", { name: "Cancel" })
+  const memoryRowBox = await exportDialog
+    .getByTestId("agent-snapshot-memory-row")
+    .boundingBox();
+  const formatRowBox = await exportDialog
+    .getByTestId("agent-snapshot-format-row")
     .boundingBox();
   const exportButtonBox = await exportFooter
     .getByRole("button", { name: "Export" })
     .boundingBox();
-  expect(cancelButtonBox?.x).toBeLessThan(exportButtonBox?.x ?? 0);
+  const customButtonBox = await exportFooter
+    .getByRole("button", { name: "Create custom card" })
+    .boundingBox();
+  await expect(
+    exportFooter.getByRole("button", { name: "Export" }),
+  ).toBeInViewport();
+  await expect(
+    exportFooter.getByRole("button", { name: "Create custom card" }),
+  ).toBeInViewport();
+  await expect(
+    exportDialog.getByRole("button", { name: "Cancel" }),
+  ).toHaveCount(0);
+  const closeButton = exportDialog.getByRole("button", { name: "Close" });
+  const exportHeading = exportDialog.getByRole("heading", {
+    name: "Export Animation Auditor",
+  });
+  await expect(closeButton).toBeVisible();
+  await expect(exportHeading).toHaveCSS("text-align", "left");
+  const [closeButtonBox, exportHeadingBox] = await Promise.all([
+    closeButton.boundingBox(),
+    exportHeading.boundingBox(),
+  ]);
+  expect(closeButtonBox?.x).toBeGreaterThan(exportHeadingBox?.x ?? 0);
+  expect(memoryRowBox?.width).toBeCloseTo(formatRowBox?.width ?? 0, 0);
   expect(
-    (exportButtonBox?.x ?? 0) -
-      ((cancelButtonBox?.x ?? 0) + (cancelButtonBox?.width ?? 0)),
-  ).toBeLessThanOrEqual(12);
-  await exportDialog.getByRole("button", { name: "Cancel" }).click();
+    (memoryRowBox?.width ?? 0) / (exportDialogBox?.width ?? 1),
+  ).toBeCloseTo(0.75, 2);
+  await expect(exportDialog.getByTestId("agent-snapshot-memory-row")).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(exportDialog.getByTestId("agent-snapshot-format-row")).toHaveCSS(
+    "border-top-width",
+    "0px",
+  );
+  expect(exportButtonBox?.width).toBeCloseTo(memoryRowBox?.width ?? 0, 0);
+  expect(customButtonBox?.width).toBeCloseTo(exportButtonBox?.width ?? 0, 0);
+  expect(customButtonBox?.y).toBeGreaterThan(
+    (exportButtonBox?.y ?? 0) + (exportButtonBox?.height ?? 0),
+  );
+  await exportDialog.getByTestId("agent-snapshot-export-confirm").click();
+  await expect(exportDialog).toHaveCount(0);
+  const exportedAgentPayload = await page.evaluate(() => {
+    const commands =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: { format?: string; memoryLevel?: string };
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+    return commands.findLast(
+      (entry) => entry.command === "export_agent_snapshot",
+    )?.payload;
+  });
+  expect(exportedAgentPayload).toMatchObject({
+    format: "json",
+    memoryLevel: "none",
+  });
 
   await actionsButton.click();
   await page.getByRole("menuitem", { name: "Share" }).click();
@@ -1266,6 +2285,52 @@ test("custom personas share with people and keep export separate", async ({
   const pastedAgentCard = page.getByTestId("agent-snapshot-card").last();
   await expect(pastedAgentCard).toBeVisible();
   await expect(pastedAgentCard).toContainText("Animation Auditor");
+
+  // A copied share link must enter the same review flow as a picked file:
+  // trading card first, editable setup second, and no import write until the
+  // recipient explicitly submits Add agent.
+  await pastedAgentCard.getByTestId("agent-snapshot-card-import").click();
+  const sharedLinkImportDialog = page.getByTestId(
+    "agent-snapshot-import-dialog",
+  );
+  await expect(sharedLinkImportDialog).toBeVisible();
+  await expect(
+    sharedLinkImportDialog.getByRole("heading", {
+      name: "Import Imported Agent",
+    }),
+  ).toBeVisible();
+  await expect(
+    sharedLinkImportDialog.getByTestId("agent-card-live-preview"),
+  ).toBeVisible();
+  await expect(
+    sharedLinkImportDialog.getByTestId("agent-card-preview-format"),
+  ).toContainText("PNG");
+  await sharedLinkImportDialog
+    .getByTestId("agent-snapshot-import-confirm")
+    .click();
+
+  const sharedLinkSetupDialog = page.getByTestId("persona-dialog");
+  await expect(sharedLinkSetupDialog).toBeVisible();
+  await expect(
+    sharedLinkSetupDialog.getByRole("heading", {
+      name: "Set up your imported agent",
+    }),
+  ).toBeVisible();
+  await expect(
+    sharedLinkSetupDialog.getByRole("button", { name: "Add agent" }),
+  ).toBeVisible();
+  expect(
+    (await readAgentShareCommands(page)).filter(
+      (entry) => entry.command === "confirm_agent_snapshot_import",
+    ),
+  ).toHaveLength(0);
+  await sharedLinkSetupDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(sharedLinkSetupDialog).toHaveCount(0);
+  expect(
+    (await readAgentShareCommands(page)).filter(
+      (entry) => entry.command === "confirm_agent_snapshot_import",
+    ),
+  ).toHaveLength(0);
 
   await page.getByTestId("open-agents-view").click();
   await actionsButton.click();
@@ -1460,6 +2525,164 @@ test("custom personas share with people and keep export separate", async ({
     `\n[Animation Auditor](${sharedAgentUrl})`,
   );
   await expect(shareDialog).toHaveCount(0);
+});
+
+test("agent snapshot composer prefers the avatar while the message keeps the card", async ({
+  page,
+}) => {
+  const cardUrl = `https://example.com/media/${"9".repeat(64)}.png`;
+  const avatarUrl = "http://127.0.0.1:4173/onboarding/starter-team/fizz.png";
+  const cardBytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  await page.route(cardUrl, (route) =>
+    route.fulfill({ body: cardBytes, contentType: "image/png", status: 200 }),
+  );
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:composer-avatar",
+        avatarUrl,
+        displayName: "Composer Avatar",
+        systemPrompt: "You verify attachment previews.",
+      },
+    ],
+    uploadDescriptors: [
+      {
+        url: cardUrl,
+        sha256: "9".repeat(64),
+        size: cardBytes.length,
+        type: "image/png",
+        uploaded: Math.floor(Date.now() / 1000),
+        filename: "composer-avatar.agent.png",
+      },
+    ],
+    agentSnapshotPreviewSourceAvatarUrl: avatarUrl,
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByLabel("Open actions for Composer Avatar").click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  const shareDialog = page.getByTestId("persona-share-dialog");
+  await expect(shareDialog).toBeVisible();
+  await page.getByTestId("persona-share-copy-link").click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(cardUrl);
+
+  const copied = await page.evaluate(() => {
+    const commands =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: { html?: string; text?: string };
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+    return commands.findLast(
+      (entry) => entry.command === "copy_text_to_clipboard",
+    )?.payload;
+  });
+  expect(copied?.html).toContain("data-buzz-agent-snapshot");
+
+  await page.keyboard.press("Escape");
+  await expect(shareDialog).toHaveCount(0);
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(async ({ html, text }) => {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        "text/html": new Blob([html ?? ""], { type: "text/html" }),
+        "text/plain": new Blob([text ?? ""], { type: "text/plain" }),
+      }),
+    ]);
+  }, copied ?? {});
+  await page
+    .getByTestId("message-composer")
+    .locator("[contenteditable='true']")
+    .click();
+  await page.keyboard.press("ControlOrMeta+V");
+
+  const composerCard = page.getByTestId("composer-agent-snapshot-card");
+  await expect(composerCard).toBeVisible();
+  await expect(
+    composerCard.getByTestId("composer-agent-snapshot-thumb"),
+  ).toHaveAttribute("src", avatarUrl);
+  await expect(composerCard.locator("img")).toHaveCount(1);
+
+  await page.getByTestId("send-message").click();
+  const messageCard = page.getByTestId("agent-snapshot-card").last();
+  await expect(messageCard).toBeVisible();
+  await expect(messageCard).toHaveCSS("border-radius", "24px");
+  await expect(messageCard).toHaveCSS("overflow", "visible");
+  await expect(messageCard).toHaveCSS("clip-path", "none");
+  await expect(
+    messageCard.getByTestId("agent-snapshot-card-thumb"),
+  ).toHaveAttribute("src", cardUrl);
+  await expect(messageCard.getByTestId("agent-snapshot-card-thumb")).toHaveCSS(
+    "object-fit",
+    "contain",
+  );
+
+  const sentContent = await page.evaluate(
+    () =>
+      (
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{
+              command: string;
+              payload: { content?: string };
+            }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+      ).findLast((entry) => entry.command === "send_channel_message")?.payload
+        .content,
+  );
+  expect(sentContent).not.toContain("thumb ");
+
+  // Older clipboard payloads and restored drafts do not carry the new
+  // composer-only avatar field. The composer should recover it from the
+  // snapshot manifest instead of showing the full trading-card image.
+  const legacyClipboardHtml = copied?.html?.replace(
+    /data-buzz-agent-snapshot="([^"]+)"/u,
+    (_attribute, encodedPayload: string) => {
+      const payload = JSON.parse(decodeURIComponent(encodedPayload));
+      delete payload.avatarUrl;
+      return `data-buzz-agent-snapshot="${encodeURIComponent(JSON.stringify(payload))}"`;
+    },
+  );
+  expect(legacyClipboardHtml).toBeTruthy();
+  await page.evaluate(
+    async ({ html, text }) => {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html ?? ""], { type: "text/html" }),
+          "text/plain": new Blob([text ?? ""], { type: "text/plain" }),
+        }),
+      ]);
+    },
+    { html: legacyClipboardHtml, text: copied?.text },
+  );
+  await page
+    .getByTestId("message-composer")
+    .locator("[contenteditable='true']")
+    .click();
+  await page.keyboard.press("ControlOrMeta+V");
+  const restoredComposerCard = page.getByTestId("composer-agent-snapshot-card");
+  await expect(
+    restoredComposerCard.getByTestId("composer-agent-snapshot-thumb"),
+  ).toHaveAttribute("src", avatarUrl);
+  await page.getByTestId("send-message").click();
+
+  await page.getByRole("button", { name: "Attach file" }).click();
+  const importedComposerCard = page.getByTestId("composer-agent-snapshot-card");
+  await expect(importedComposerCard).toBeVisible();
+  await expect(importedComposerCard.locator("img")).toHaveCount(1);
+  await expect(
+    importedComposerCard.getByTestId("composer-agent-snapshot-thumb"),
+  ).toHaveAttribute("src", avatarUrl);
 });
 
 test("custom personas can be shared to the relay catalog", async ({ page }) => {
@@ -2232,9 +3455,6 @@ test("one share level selector drives both the link and send paths", async ({
       expect.objectContaining({
         memoryLevel: "core",
         memorySourcePubkey: linkedAgentPubkey,
-        avatarPngDataUrl: `data:image/png;base64,${Buffer.from(
-          profileAvatarBytes,
-        ).toString("base64")}`,
       }),
       expect.objectContaining({
         memoryLevel: "everything",
@@ -2242,6 +3462,26 @@ test("one share level selector drives both the link and send paths", async ({
       }),
     ]),
   );
+  const sharedCardPng = (
+    encodePayloads.find(
+      (payload) => (payload as { memoryLevel?: string }).memoryLevel === "core",
+    ) as { avatarPngDataUrl?: string } | undefined
+  )?.avatarPngDataUrl;
+  expect(sharedCardPng).toMatch(/^data:image\/png;base64,/u);
+  expect(sharedCardPng).not.toBe(
+    `data:image/png;base64,${Buffer.from(profileAvatarBytes).toString("base64")}`,
+  );
+  await expect
+    .poll(async () =>
+      page.evaluate(async (source) => {
+        if (!source) return null;
+        const image = new Image();
+        image.src = source;
+        await image.decode();
+        return { height: image.naturalHeight, width: image.naturalWidth };
+      }, sharedCardPng),
+    )
+    .toEqual({ height: 1839, width: 1227 });
 });
 
 test("people sharing excludes the moderation recipient", async ({ page }) => {
@@ -2393,7 +3633,7 @@ test("people sharing stays mounted while a send is pending", async ({
   });
 });
 
-test("export from share aligns selections and animates memory details", async ({
+test("export from share aligns selections without resizing for memory details", async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
@@ -2427,6 +3667,11 @@ test("export from share aligns selections and animates memory details", async ({
   expect((await memoryTrigger.boundingBox())?.width).toBeLessThan(112);
   await expect(memoryTrigger).toHaveCSS("text-align", "right");
   await expect(memoryTrigger.locator("svg.lucide-chevron-down")).toBeVisible();
+  await expect(
+    exportDialog
+      .getByTestId("agent-card-default-face")
+      .getByTestId("agent-card-stage"),
+  ).toHaveAttribute("data-entrance-complete", "true", { timeout: 4_000 });
 
   const initialHeight = await exportDialog.evaluate(
     (element) => element.getBoundingClientRect().height,
@@ -2457,10 +3702,14 @@ test("export from share aligns selections and animates memory details", async ({
   await expect(
     exportDialog.getByTestId("agent-snapshot-memory-warning"),
   ).toBeVisible();
-  expect(heightSamples.at(-1)).toBeGreaterThan(initialHeight);
+  expect(heightSamples.at(-1)).toBeCloseTo(initialHeight, 0);
   expect(
     new Set(heightSamples.map((height) => Math.round(height))).size,
-  ).toBeGreaterThan(2);
+  ).toBeLessThanOrEqual(1);
+  const contentOverflow = await exportDialog.evaluate(
+    (element) => element.scrollHeight - element.clientHeight,
+  );
+  expect(contentOverflow).toBeLessThanOrEqual(1);
 });
 
 test("team-managed personas do not expose editable actions", async ({

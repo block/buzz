@@ -36,7 +36,7 @@ export type ResolvedSnapshotCard = {
   snapshotKind: "agent" | "team";
   /**
    * Optional thumbnail URL for the card icon. PNG snapshots use the
-   * attachment URL because the PNG body is the avatar card image. JSON
+   * attachment URL because the PNG body is the complete trading card. JSON
    * snapshots have no thumbnail and use the generic icon.
    */
   thumb?: string;
@@ -111,8 +111,8 @@ export function resolveSnapshotCard(
     size: entry.size,
     sha256,
     snapshotKind,
-    // Agent PNG snapshots carry the avatar card image. Team PNG snapshots use
-    // a transport placeholder, so render the team icon instead of that image.
+    // Agent PNG snapshots carry the complete trading-card image. Team PNG
+    // snapshots use a transport placeholder, so render the team icon instead.
     thumb: isPng ? rewriteRelayUrl(href) : undefined,
   };
 }

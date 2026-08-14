@@ -22,23 +22,27 @@ export function useExportAgentSnapshotMutation() {
       format,
       memorySourcePubkey,
       avatarUrl,
+      cardPngDataUrl,
     }: {
       id: string;
       memoryLevel: SnapshotMemoryLevel;
       format: SnapshotFormat;
       memorySourcePubkey?: string | null;
       avatarUrl?: string | null;
+      cardPngDataUrl?: string;
     }) => {
-      const avatarPngDataUrl =
+      const sourceAvatarPngDataUrl =
         format === "png"
           ? await resolveSnapshotAvatarPng(avatarUrl)
           : undefined;
+      const avatarPngDataUrl = cardPngDataUrl ?? sourceAvatarPngDataUrl;
       return exportAgentSnapshot(
         id,
         memoryLevel,
         format,
         memorySourcePubkey,
         avatarPngDataUrl,
+        sourceAvatarPngDataUrl,
       );
     },
   });
@@ -52,12 +56,14 @@ export function useEncodeAgentSnapshotForSendMutation() {
       format,
       memorySourcePubkey,
       avatarPngDataUrl,
+      sourceAvatarPngDataUrl,
     }: {
       id: string;
       memoryLevel: SnapshotMemoryLevel;
       format: SnapshotFormat;
       memorySourcePubkey?: string | null;
       avatarPngDataUrl?: string;
+      sourceAvatarPngDataUrl?: string;
     }) =>
       encodeAgentSnapshotForSend(
         id,
@@ -65,6 +71,7 @@ export function useEncodeAgentSnapshotForSendMutation() {
         format,
         memorySourcePubkey,
         avatarPngDataUrl,
+        sourceAvatarPngDataUrl,
       ),
   });
 }

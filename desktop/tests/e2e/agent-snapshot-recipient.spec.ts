@@ -70,6 +70,13 @@ const ANALYST_PERSONA_ID = "test-analyst";
 const ANALYST_PUBKEY =
   "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
 const SHA256 = "a".repeat(64);
+const CARD_SHA256 = "b".repeat(64);
+const CARD_PNG_BYTES = Array.from(
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  ),
+);
 
 /** Full imeta descriptor for a .agent.json attachment. */
 const SNAPSHOT_UPLOAD_DESCRIPTOR = {
@@ -221,6 +228,57 @@ test("recipient_timeline_renders_agent_snapshot_card_not_file_card", async ({
   await expect(page.getByTestId("file-card")).toHaveCount(0);
 });
 
+test("recipient PNG share shows a portrait trading card and imports that image", async ({
+  page,
+}) => {
+  const cardUrl = `https://mock.relay/media/${CARD_SHA256}.png`;
+  await page.route(`**/media/${CARD_SHA256}.png`, (route) =>
+    route.fulfill({
+      body: Buffer.from(CARD_PNG_BYTES),
+      contentType: "image/png",
+      status: 200,
+    }),
+  );
+  await installMockBridge(page, { snapshotFetchBytes: CARD_PNG_BYTES });
+  await page.goto("/");
+  await invokeMockCommand(page, "send_channel_message", {
+    channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+    content: `[Portrait Agent](${cardUrl})`,
+    mediaTags: [
+      [
+        "imeta",
+        `url ${cardUrl}`,
+        "m image/png",
+        `x ${CARD_SHA256}`,
+        `size ${CARD_PNG_BYTES.length}`,
+        "filename portrait-agent.agent.png",
+      ],
+    ],
+  });
+  await page.getByTestId("channel-general").click();
+
+  const card = page.getByTestId("agent-snapshot-card").last();
+  const thumb = card.getByTestId("agent-snapshot-card-thumb");
+  await expect(thumb).toBeVisible({ timeout: 5000 });
+  const mediaBox = await card
+    .locator('[data-slot="attachment-media"]')
+    .boundingBox();
+  expect(mediaBox).not.toBeNull();
+  expect(mediaBox?.height ?? 0).toBeGreaterThan(mediaBox?.width ?? 0);
+  expect((mediaBox?.width ?? 0) / (mediaBox?.height ?? 1)).toBeCloseTo(
+    1227 / 1839,
+    2,
+  );
+
+  await card.getByTestId("agent-snapshot-card-import").click();
+  const importDialog = page.getByTestId("agent-snapshot-import-dialog");
+  await expect(importDialog).toBeVisible({ timeout: 8000 });
+  await expect(
+    importDialog.getByTestId("agent-custom-card-generated-image"),
+  ).toHaveAttribute("src", /^data:image\/png;base64,/u);
+  await expect(importDialog.getByTestId("agent-card-template")).toHaveCount(0);
+});
+
 // ── Download still invokes download_file, not fetch_snapshot_bytes ───────────
 
 test("recipient_download_invokes_download_file_only", async ({ page }) => {
@@ -269,15 +327,30 @@ test("recipient_import_navigates_to_agents_and_opens_preview", async ({
   const dialog = page.getByTestId("agent-snapshot-import-dialog");
   await expect(dialog).toBeVisible({ timeout: 8000 });
 
-  // Decoded display name must appear.
-  await expect(dialog).toContainText("Imported Agent");
-  const metadata = dialog.getByTestId("agent-definition-metadata");
-  await expect(metadata).toContainText("Type");
-  await expect(metadata).toContainText("Built-in agent");
-  await expect(metadata).toContainText("Preferred model");
-  await expect(metadata).toContainText("claude-opus-4-5");
-  await expect(metadata).toContainText("Preferred runtime");
-  await expect(metadata).toContainText("goose");
+  await expect(
+    dialog.getByRole("heading", { name: "Import Imported Agent" }),
+  ).toBeVisible();
+  await expect(dialog.getByTestId("agent-card-live-preview")).toBeVisible();
+  await expect(dialog.getByTestId("agent-card-preview-name")).toContainText(
+    "IMPORTED AGENT",
+  );
+  await expect(dialog.getByTestId("agent-card-preview-format")).toContainText(
+    "JSON",
+  );
+  await expect(dialog.getByTestId("agent-definition-metadata")).toHaveCount(0);
+  await expect(dialog.getByText("Agent instructions")).toHaveCount(0);
+  await expect(dialog.getByText("No memory included")).toHaveCount(0);
+  await expect(dialog.getByText("Full embedded manifest")).toHaveCount(0);
+  const footer = dialog.getByTestId("agent-snapshot-import-footer");
+  const cancelBox = await footer
+    .getByRole("button", { name: "Cancel" })
+    .boundingBox();
+  const importBox = await footer
+    .getByRole("button", { name: "Import" })
+    .boundingBox();
+  expect(cancelBox).not.toBeNull();
+  expect(importBox).not.toBeNull();
+  expect(cancelBox?.x ?? 0).toBeLessThan(importBox?.x ?? 0);
 });
 
 // ── Confirm imports the agent ─────────────────────────────────────────────────
@@ -294,8 +367,29 @@ test("recipient_import_confirm_calls_confirm_once_and_shows_result", async ({
   const dialog = page.getByTestId("agent-snapshot-import-dialog");
   await expect(dialog).toBeVisible({ timeout: 8000 });
 
-  // Confirm the import.
+  // Move from the card confirmation into the existing configuration panel.
   await dialog.getByTestId("agent-snapshot-import-confirm").click();
+  await expect(dialog).toHaveCount(0);
+  const setupDialog = page.getByTestId("persona-dialog");
+  await expect(setupDialog).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Set up your imported agent" }),
+  ).toBeVisible();
+  await expect(setupDialog.locator("#persona-display-name")).toHaveValue(
+    "Imported Agent",
+  );
+  await expect(setupDialog.locator("#persona-system-prompt")).toHaveValue("");
+  expect(
+    (await readCommandLog(page)).filter(
+      (entry) => entry.command === "confirm_agent_snapshot_import",
+    ),
+  ).toHaveLength(0);
+  await setupDialog.locator("#persona-display-name").fill("Imported Agent 2");
+  await expect(setupDialog.locator("#persona-llm-provider")).toContainText(
+    "Anthropic",
+  );
+  await setupDialog.getByTestId("persona-provider-api-key").fill("sk-test-key");
+  await setupDialog.getByRole("button", { name: "Add agent" }).click();
 
   // confirm_agent_snapshot_import must have been called exactly once.
   await expect(async () => {
@@ -304,6 +398,18 @@ test("recipient_import_confirm_calls_confirm_once_and_shows_result", async ({
       (e) => e.command === "confirm_agent_snapshot_import",
     );
     expect(confirmCmds.length).toBe(1);
+    expect(confirmCmds[0]?.payload).toMatchObject({
+      input: {
+        keepAllowlist: false,
+        setup: {
+          displayName: "Imported Agent 2",
+          runtime: "goose",
+          model: "claude-opus-4-5",
+          provider: "anthropic",
+          envVars: { ANTHROPIC_API_KEY: "sk-test-key" },
+        },
+      },
+    });
   }).toPass({ timeout: 5000 });
 });
 

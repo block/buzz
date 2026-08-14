@@ -198,6 +198,7 @@ export async function exportAgentSnapshot(
   format: SnapshotFormat,
   memorySourcePubkey?: string | null,
   avatarPngDataUrl?: string,
+  sourceAvatarPngDataUrl?: string,
 ): Promise<boolean> {
   return invokeTauri<boolean>("export_agent_snapshot", {
     id,
@@ -205,6 +206,7 @@ export async function exportAgentSnapshot(
     memoryLevel,
     format,
     avatarPngDataUrl: avatarPngDataUrl ?? null,
+    sourceAvatarPngDataUrl: sourceAvatarPngDataUrl ?? null,
   });
 }
 
@@ -230,6 +232,7 @@ export async function encodeAgentSnapshotForSend(
   format: SnapshotFormat,
   memorySourcePubkey?: string | null,
   avatarPngDataUrl?: string,
+  sourceAvatarPngDataUrl?: string,
 ): Promise<EncodedSnapshotPayload> {
   return invokeTauri<EncodedSnapshotPayload>("encode_agent_snapshot_for_send", {
     id,
@@ -237,6 +240,7 @@ export async function encodeAgentSnapshotForSend(
     memoryLevel,
     format,
     avatarPngDataUrl: avatarPngDataUrl ?? null,
+    sourceAvatarPngDataUrl: sourceAvatarPngDataUrl ?? null,
   });
 }
 
@@ -263,8 +267,9 @@ export const NO_OPENAI_KEY_PREFIX = "NO_OPENAI_KEY:";
  * Which env layer resolves the OpenAI key for a card mint of this agent.
  *
  * - `"none"` — no key configured anywhere; show the first-time setup panel.
- * - `"global"` — key comes from global Agent Defaults env; writable from the
- *   dialog via `cardMintSaveOpenaiKey`.
+ * - `"card"` — dedicated custom-card key stored by Buzz; writable from the
+ *   dialog and Settings without changing Agent Defaults.
+ * - `"global"` — compatibility fallback from global Agent Defaults env.
  * - `"persona"` — key is set on the linked persona; cannot be updated from
  *   the mint dialog (would be shadowed by the higher-priority layer).
  * - `"agent"` — key is set directly on the agent record; same restriction.
@@ -273,6 +278,7 @@ export const NO_OPENAI_KEY_PREFIX = "NO_OPENAI_KEY:";
  */
 export type CardMintKeyLayer =
   | "none"
+  | "card"
   | "global"
   | "persona"
   | "agent"
@@ -280,24 +286,30 @@ export type CardMintKeyLayer =
 
 /**
  * Report which env layer resolves the OpenAI key for a card mint of this agent
- * (same layering as the mint itself). Returns a layer discriminant — never the
- * key value itself. Use to decide whether to show a writable key input (none /
- * global) or a read-only redirect (persona / agent / process).
+ * (same resolution as the mint itself). Returns a layer discriminant — never
+ * the key value itself.
  */
 export async function cardMintKeyStatus(id: string): Promise<CardMintKeyLayer> {
   return invokeTauri<CardMintKeyLayer>("card_mint_key_status", { id });
 }
 
 /**
- * Save an OPENAI_API_KEY into the global Agent Defaults env for card minting.
- *
- * Narrow seam: validated read-modify-write of the single key against the
- * latest on-disk config. Unlike the general set_global_agent_config, this
- * NEVER restarts running agents — the mint re-reads config per call, and a
- * card setup must not disrupt unrelated agents.
+ * Save a dedicated OpenAI API key for custom-card generation. The native
+ * command stores it in the OS credential store and never changes Agent
+ * Defaults or restarts agents.
  */
 export async function cardMintSaveOpenaiKey(key: string): Promise<void> {
   return invokeTauri<void>("card_mint_save_openai_key", { key });
+}
+
+/** Whether a dedicated custom-card key is configured. The key never crosses IPC. */
+export async function cardMintDedicatedKeyStatus(): Promise<boolean> {
+  return invokeTauri<boolean>("card_mint_dedicated_key_status");
+}
+
+/** Remove only the dedicated custom-card key. */
+export async function cardMintDeleteOpenaiKey(): Promise<void> {
+  return invokeTauri<void>("card_mint_delete_openai_key");
 }
 
 /**
@@ -318,12 +330,16 @@ export async function mintAgentCard(
   styleNotes?: string,
   lock?: boolean,
   memoryLevel?: SnapshotMemoryLevel,
+  avatarDataUrl?: string,
+  referenceCardPngBase64?: string,
 ): Promise<MintedAgentCard> {
   return invokeTauri<MintedAgentCard>("mint_agent_card", {
     id,
     styleNotes: styleNotes || null,
     lock: lock ?? null,
     memoryLevel: memoryLevel ?? null,
+    avatarDataUrl: avatarDataUrl ?? null,
+    referenceCardPngBase64: referenceCardPngBase64 || null,
   });
 }
 
@@ -372,9 +388,15 @@ export type AgentSnapshotImportPreview = {
   isBuiltIn: boolean;
   model: string | null;
   runtime: string | null;
+  provider: string | null;
   systemPrompt: string | null;
   /** Effective avatar: data URL if present, source URL fallback otherwise. */
   avatarUrl: string | null;
+  /** Original manifest URL before a PNG body supplies a portable fallback. */
+  sourceAvatarUrl: string | null;
+  namePool: string[];
+  respondTo: string | null;
+  parallelism: number | null;
   /** "none" | "core" | "everything" */
   memoryLevel: string;
   memoryEntryCount: number;
@@ -398,6 +420,22 @@ export type AgentSnapshotImportConfirm = {
   fileBytes: number[];
   /** When true, copy source allowlist to the new agent. Default: false (Clear). */
   keepAllowlist: boolean;
+  /** User-reviewed values from the setup dialog. */
+  setup?: AgentSnapshotImportSetup;
+};
+
+export type AgentSnapshotImportSetup = {
+  displayName: string;
+  avatarUrl?: string;
+  systemPrompt: string;
+  runtime?: string;
+  model?: string;
+  provider?: string;
+  namePool?: string[];
+  envVars?: Record<string, string>;
+  respondTo?: string;
+  respondToAllowlist?: string[];
+  parallelism?: number;
 };
 
 /** Structured result from a confirmed import. */

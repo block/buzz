@@ -4,10 +4,12 @@ import type { AgentPersona } from "@/shared/api/types";
 import { toast } from "sonner";
 
 export function UserProfileSnapshotExportDialog({
+  agentAvatarUrl,
   persona,
   linkedAgentPubkey,
   onOpenChange,
 }: {
+  agentAvatarUrl: string | null;
   persona: AgentPersona;
   linkedAgentPubkey: string | null;
   onOpenChange: (open: boolean) => void;
@@ -16,19 +18,22 @@ export function UserProfileSnapshotExportDialog({
 
   return (
     <AgentSnapshotExportDialog
+      agentId={linkedAgentPubkey ?? persona.id}
+      agentAvatarUrl={agentAvatarUrl}
       agentName={persona.displayName}
       isSavePending={exportSnapshotMutation.isPending}
       linkedAgentPubkey={linkedAgentPubkey}
       open
       onOpenChange={onOpenChange}
-      onSaveFile={(memoryLevel, format) => {
+      onSaveFile={(memoryLevel, format, cardPngDataUrl) => {
         exportSnapshotMutation.mutate(
           {
             id: persona.id,
             memoryLevel,
             format,
             memorySourcePubkey: linkedAgentPubkey,
-            avatarUrl: persona.avatarUrl,
+            avatarUrl: agentAvatarUrl,
+            cardPngDataUrl,
           },
           {
             onSuccess: (saved) => {
