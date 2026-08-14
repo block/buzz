@@ -1466,6 +1466,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   expect(managementRowOrder).toEqual([
     "user-profile-duplicate-agent-row",
     "user-profile-export-agent-row",
+    "user-profile-create-card-row",
     "user-profile-archive-agent-row",
     "user-profile-delete-agent-row",
   ]);
@@ -1486,6 +1487,11 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
   await expect(exportDialog).toBeVisible();
   await exportDialog.getByRole("button", { name: "Cancel" }).click();
+  await page.getByTestId("user-profile-create-card-row").click();
+  const cardMintDialog = page.getByTestId("agent-card-mint-dialog");
+  await expect(cardMintDialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(cardMintDialog).toHaveCount(0);
   const archiveAgentRow = page.getByTestId("user-profile-archive-agent-row");
   await expect(archiveAgentRow).toHaveText(/Archive agent/);
   await archiveAgentRow.click();
