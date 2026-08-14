@@ -4,7 +4,7 @@ use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::commands::GIT_ORIGIN_CHANNEL_ENV;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
+use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 use nostr::Timestamp;
 use serde::Deserialize;
@@ -228,7 +228,6 @@ impl IssueAssignmentOperation {
         }
     }
 }
-
 pub async fn cmd_create_issue(
     client: &BuzzClient,
     repo_owner: &str,
@@ -488,6 +487,67 @@ pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliEr
     Ok(())
 }
 
+/// Publish a channel-scoped Project issue comment with monotonic ordering.
+pub async fn cmd_comment_issue(
+    client: &BuzzClient,
+    channel: &str,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    content: &str,
+    recipients: &[String],
+) -> Result<(), CliError> {
+    validate_hex64(issue)?;
+    validate_hex64(repo_owner)?;
+    validate_repo_id(repo_id)?;
+    let channel = parse_uuid(channel)?;
+    let content = read_or_stdin(content)?;
+    let recipient_refs = recipients
+        .iter()
+        .map(|recipient| {
+            validate_hex64(recipient)?;
+            Ok(recipient.as_str())
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    let repo = GitRepoCoord {
+        owner: repo_owner.to_string(),
+        id: repo_id.to_string(),
+    };
+    let repo_address = format!("30617:{repo_owner}:{repo_id}");
+    let prior_comments_raw = client
+        .query(&serde_json::json!({
+            "kinds": [1, 9],
+            "#e": [issue],
+            "#a": [repo_address],
+            "limit": 500
+        }))
+        .await?;
+    let prior_comments: serde_json::Value = serde_json::from_str(&prior_comments_raw)
+        .map_err(|error| CliError::Other(format!("failed to parse issue comments: {error}")))?;
+    let newest_comment = prior_comments
+        .as_array()
+        .ok_or_else(|| CliError::Other("relay returned an invalid issue comment list".into()))?
+        .iter()
+        .filter_map(|event| event.get("created_at")?.as_u64())
+        .max();
+    let now = Timestamp::now().as_secs();
+    let created_at = match newest_comment {
+        Some(timestamp) => Timestamp::from(now.max(timestamp.checked_add(1).ok_or_else(|| {
+            CliError::Other("issue comment timestamp cannot be advanced".into())
+        })?)),
+        None => Timestamp::from(now),
+    };
+    let builder = with_git_provenance(
+        buzz_sdk::build_git_issue_comment(channel, issue, &repo, &content, &recipient_refs)
+            .map_err(sdk_err)?
+            .custom_created_at(created_at),
+    )?;
+    let event = client.sign_event(builder)?;
+    let response = client.submit_event(event).await?;
+    println!("{response}");
+    Ok(())
+}
+
 pub async fn cmd_list_issues(
     client: &BuzzClient,
     repo_owner: &str,
@@ -611,6 +671,25 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             cmd_create_issue(client, &repo_owner, &repo_id, &title, &content, &label, &to).await
         }
         IssuesCmd::Get { event } => cmd_get_issue(client, &event).await,
+        IssuesCmd::Comment {
+            channel,
+            issue,
+            repo_owner,
+            repo_id,
+            content,
+            to,
+        } => {
+            cmd_comment_issue(
+                client,
+                &channel,
+                &issue,
+                &repo_owner,
+                &repo_id,
+                &content,
+                &to,
+            )
+            .await
+        }
         IssuesCmd::List {
             repo_owner,
             repo_id,

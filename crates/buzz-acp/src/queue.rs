@@ -875,6 +875,46 @@ pub struct ThreadTags {
     pub mentioned_pubkeys: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoThreadRef {
+    root_event_id: String,
+    repo_owner: String,
+    repo_id: String,
+}
+
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_repo_thread_ref(event: &Event) -> Option<RepoThreadRef> {
+    if event.kind.as_u16() != 9 {
+        return None;
+    }
+    let root_event_id = event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.len() >= 4 && parts[0] == "e" && parts[3] == "root" && is_hex64(&parts[1]))
+            .then(|| parts[1].clone())
+    })?;
+    let (repo_owner, repo_id) = event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        if parts.len() < 2 || parts[0] != "a" {
+            return None;
+        }
+        let mut coordinate = parts[1].splitn(3, ':');
+        let kind = coordinate.next()?;
+        let owner = coordinate.next()?;
+        let id = coordinate.next()?;
+        (kind == "30617" && is_hex64(owner) && !id.is_empty())
+            .then(|| (owner.to_string(), id.to_string()))
+    })?;
+
+    Some(RepoThreadRef {
+        root_event_id,
+        repo_owner,
+        repo_id,
+    })
+}
+
 /// Parse NIP-10 thread tags from a Nostr event.
 ///
 /// Marker parsing and the (root, reply) → (root, parent) collapse are delegated
@@ -1196,6 +1236,16 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+fn append_repo_comment_instruction(s: &mut String, channel_id: Uuid, repo: &RepoThreadRef) {
+    s.push_str(&format!(
+        "\nIMPORTANT: This is a Project issue comment. For an ordinary reply, \
+         run `buzz issues comment --channel {channel_id} --issue {} --repo-owner {} \
+         --repo-id {} --content \"...\"`. Do NOT use `buzz messages send --reply-to` \
+         for this turn because it would omit the repository attachment.",
+        repo.root_event_id, repo.repo_owner, repo.repo_id
+    ));
+}
+
 /// Append a new-thread reply instruction for a human-facing top-level mention.
 ///
 /// The triggering mention has no thread tags, so the agent's reply becomes the
@@ -1354,14 +1404,26 @@ fn append_project_home(s: &mut String, channel_info: Option<&PromptChannelInfo>,
 /// replies; in the channel branch a `Some` anchor means a human-facing
 /// top-level mention whose reply should open a new thread rooted at the
 /// triggering event.
-fn format_context_hints(
+struct ContextHintArgs<'a> {
     channel_id: Uuid,
-    channel_info: Option<&PromptChannelInfo>,
-    thread_tags: &ThreadTags,
+    channel_info: Option<&'a PromptChannelInfo>,
+    thread_tags: &'a ThreadTags,
+    repo_thread: Option<&'a RepoThreadRef>,
     is_dm: bool,
     conversation_context_status: ConversationContextStatus,
-    reply_anchor: Option<&str>,
-) -> String {
+    reply_anchor: Option<&'a str>,
+}
+
+fn format_context_hints(args: ContextHintArgs<'_>) -> String {
+    let ContextHintArgs {
+        channel_id,
+        channel_info,
+        thread_tags,
+        repo_thread,
+        is_dm,
+        conversation_context_status,
+        reply_anchor,
+    } = args;
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
         None => channel_id.to_string(),
@@ -1415,6 +1477,16 @@ fn format_context_hints(
                 append_reply_instruction(&mut s, event_id);
             }
         }
+        crate::prompt_framing::semantic_section("context", &s)
+    } else if let Some(repo) = repo_thread {
+        let mut s = format!(
+            "Scope: project-comment\n\
+             Channel: {channel_display}\n\
+             Project root: {}\n\
+             Repository: 30617:{}:{}",
+            repo.root_event_id, repo.repo_owner, repo.repo_id
+        );
+        append_repo_comment_instruction(&mut s, channel_id, repo);
         crate::prompt_framing::semantic_section("context", &s)
     } else if let Some(ref root) = thread_tags.root_event_id {
         let ctx_hint = if complete_conversation_context {
@@ -1734,6 +1806,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         }
     };
     let thread_tags = parse_thread_tags(&last_event.event);
+    let repo_thread = parse_repo_thread_ref(&last_event.event);
     let is_dm = args
         .channel_info
         .map(|ci| ci.channel_type == "dm")
@@ -1781,18 +1854,19 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             args.profile_lookup,
         )
     };
-    sections.push(format_context_hints(
-        batch.channel_id,
-        args.channel_info,
-        &thread_tags,
+    sections.push(format_context_hints(ContextHintArgs {
+        channel_id: batch.channel_id,
+        channel_info: args.channel_info,
+        thread_tags: &thread_tags,
+        repo_thread: repo_thread.as_ref(),
         is_dm,
-        conversation_context_status(
+        conversation_context_status: conversation_context_status(
             batch,
             args.conversation_context,
             args.conversation_context_had_delivered_events,
         ),
-        reply_anchor.as_deref(),
-    ));
+        reply_anchor: reply_anchor.as_deref(),
+    }));
 
     // 3. Conversation context (thread or DM).
     if let Some(ctx) = args.conversation_context {
@@ -1946,8 +2020,35 @@ pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+    use crate::acp::AcpClient;
+    use crate::config::PermissionMode;
+    use crate::pool::{
+        ChannelDeliveryState, ChannelInfoResolver, OwnedAgent, PromptContext, PromptOutcome,
+        SessionState,
+    };
+    use crate::relay::{ChannelInfo, RestClient};
+    use buzz_sdk::{build_git_issue, build_git_issue_comment, GitIssueMeta, GitRepoCoord};
+    use buzz_test_client::BuzzTestClient;
+    use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    fn relay_url() -> String {
+        std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
+    }
+
+    async fn query_relay(client: &mut BuzzTestClient, filter: Filter) -> Vec<Event> {
+        let subscription_id = format!("project-agent-{}", Uuid::new_v4());
+        client
+            .subscribe(&subscription_id, vec![filter])
+            .await
+            .expect("subscribe");
+        client
+            .collect_until_eose(&subscription_id, Duration::from_secs(5))
+            .await
+            .expect("collect events")
+    }
 
     /// Build a test event with the given content and kind.
     fn make_event(content: &str) -> Event {
@@ -5878,5 +5979,316 @@ mod tests {
             !prompt.contains("Description:"),
             "unresolved metadata must not render a Description field; got: {prompt}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn authorized_project_issue_mention_round_trips_through_acp_contract() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let repo_id = format!("agent-delivery-{}", &Uuid::new_v4().to_string()[..8]);
+        let repo = GitRepoCoord {
+            owner: owner.public_key().to_hex(),
+            id: repo_id.clone(),
+        };
+        let repo_address = format!("30617:{}:{repo_id}", repo.owner);
+
+        let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner)
+            .await
+            .expect("connect owner");
+        let create_channel = EventBuilder::new(Kind::Custom(9007), "")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["name", "Project agent delivery"]).unwrap(),
+                Tag::parse(["channel_type", "forum"]).unwrap(),
+                Tag::parse(["visibility", "private"]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        assert!(
+            owner_client
+                .send_event(create_channel)
+                .await
+                .expect("create channel")
+                .accepted
+        );
+
+        let add_agent = EventBuilder::new(Kind::Custom(9000), "")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["p", &agent.public_key().to_hex()]).unwrap(),
+                Tag::parse(["role", "bot"]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        assert!(
+            owner_client
+                .send_event(add_agent)
+                .await
+                .expect("add agent")
+                .accepted
+        );
+
+        let announcement = EventBuilder::new(Kind::Custom(30617), "")
+            .tags([
+                Tag::parse(["d", &repo_id]).unwrap(),
+                Tag::parse(["name", &repo_id]).unwrap(),
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        assert!(
+            owner_client
+                .send_event(announcement)
+                .await
+                .expect("announce repository")
+                .accepted
+        );
+
+        let issue = build_git_issue(
+            &repo,
+            "Agent delivery regression",
+            "Investigate the failing Project workflow.",
+            &GitIssueMeta::default(),
+        )
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+        assert!(
+            owner_client
+                .send_event(issue.clone())
+                .await
+                .expect("publish issue")
+                .accepted
+        );
+
+        let trigger = build_git_issue_comment(
+            channel_id,
+            &issue.id.to_hex(),
+            &repo,
+            "@agent please investigate",
+            &[&agent.public_key().to_hex()],
+        )
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap();
+        assert!(
+            owner_client
+                .send_event(trigger.clone())
+                .await
+                .expect("publish agent mention")
+                .accepted
+        );
+
+        let mut agent_client = BuzzTestClient::connect(&relay_url(), &agent)
+            .await
+            .expect("connect agent");
+        let delivered = query_relay(
+            &mut agent_client,
+            Filter::new()
+                .kind(Kind::Custom(9))
+                .custom_tags(
+                    SingleLetterTag::lowercase(Alphabet::H),
+                    [channel_id.to_string()],
+                )
+                .custom_tags(
+                    SingleLetterTag::lowercase(Alphabet::P),
+                    [agent.public_key().to_hex()],
+                ),
+        )
+        .await;
+        assert_eq!(delivered.len(), 1, "ACP must receive exactly one trigger");
+
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-project-delivery-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$count,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+  count=$((count + 1))
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn deterministic ACP agent");
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "project-session".into());
+        state
+            .deliveries
+            .insert(channel_id, ChannelDeliveryState::default());
+        let owned_agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "project-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        let relay_http_url = relay_url()
+            .replacen("ws://", "http://", 1)
+            .replacen("wss://", "https://", 1);
+        let rest_client = RestClient {
+            http: reqwest::Client::new(),
+            base_url: relay_http_url.clone(),
+            keys: agent.clone(),
+            auth_tag_json: None,
+        };
+        let context = Arc::new(PromptContext {
+            mcp_servers: vec![],
+            initial_message: None,
+            idle_timeout: Duration::from_secs(10),
+            max_turn_duration: Duration::from_secs(30),
+            turn_liveness_interval: Duration::ZERO,
+            dedup_mode: DedupMode::Queue,
+            system_prompt: None,
+            session_title: None,
+            team_instructions: None,
+            heartbeat_prompt: None,
+            base_prompt: None,
+            cwd: ".".into(),
+            rest_client: rest_client.clone(),
+            channel_info: ChannelInfoResolver::new(
+                HashMap::from([(
+                    channel_id,
+                    ChannelInfo {
+                        name: "Project agent delivery".into(),
+                        channel_type: "forum".into(),
+                        description: None,
+                    },
+                )]),
+                rest_client,
+            ),
+            context_message_limit: 12,
+            max_turns_per_session: 0,
+            permission_mode: PermissionMode::Default,
+            agent_keys: agent.clone(),
+            agent_owner_pubkey: Some(owner.public_key()),
+            memory_enabled: false,
+            harness_name: "test-agent".into(),
+            relay_url: relay_url(),
+        });
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event: delivered[0].clone(),
+            received_at: Instant::now(),
+            prompt_tag: "@mention".into(),
+        }));
+        let batch = queue.flush_next().expect("flush one ACP turn");
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        crate::pool::run_prompt_task(
+            owned_agent,
+            Some(batch),
+            None,
+            context,
+            result_tx,
+            None,
+            Uuid::new_v4().to_string(),
+        )
+        .await;
+        let mut result = result_rx.recv().await.expect("ACP prompt result");
+        assert!(matches!(result.outcome, PromptOutcome::Ok(_)));
+        result.agent.acp.shutdown().await;
+
+        let captured = std::fs::read_to_string(&capture).expect("read ACP capture");
+        let prompt_requests = captured
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|request| request["method"] == "session/prompt")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prompt_requests.len(),
+            1,
+            "mention must produce exactly one ACP turn"
+        );
+        let prompt = prompt_requests[0]["params"]["prompt"]
+            .as_array()
+            .expect("ACP prompt blocks")
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(prompt.contains("Investigate the failing Project workflow."));
+        assert!(prompt.contains(&format!("Repository: {repo_address}")));
+        assert!(prompt.contains(&format!(
+            "buzz issues comment --channel {channel_id} --issue {}",
+            issue.id.to_hex()
+        )));
+
+        let ordinary_comment =
+            EventBuilder::new(Kind::TextNote, "Human follow-up before the agent reply.")
+                .tags([
+                    Tag::parse(["e", &issue.id.to_hex(), "", "root"]).unwrap(),
+                    Tag::parse(["a", &repo_address]).unwrap(),
+                ])
+                .custom_created_at(Timestamp::from(trigger.created_at.as_secs() + 1))
+                .sign_with_keys(&owner)
+                .unwrap();
+        assert!(
+            owner_client
+                .send_event(ordinary_comment.clone())
+                .await
+                .expect("publish ordinary Project comment")
+                .accepted
+        );
+
+        let exit_code = buzz_cli::run_from_args([
+            "buzz".to_string(),
+            "--relay".into(),
+            relay_http_url,
+            "--private-key".into(),
+            agent.secret_key().to_bech32().unwrap(),
+            "issues".into(),
+            "comment".into(),
+            "--channel".into(),
+            channel_id.to_string(),
+            "--issue".into(),
+            issue.id.to_hex(),
+            "--repo-owner".into(),
+            repo.owner.clone(),
+            "--repo-id".into(),
+            repo.id.clone(),
+            "--content".into(),
+            "Agent reply attached to the issue.".into(),
+            "--to".into(),
+            owner.public_key().to_hex(),
+        ])
+        .await;
+        assert_eq!(exit_code, 0, "agent-facing CLI publication must succeed");
+
+        let replies = query_relay(
+            &mut owner_client,
+            Filter::new()
+                .kind(Kind::Custom(9))
+                .author(agent.public_key())
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::E), [issue.id.to_hex()])
+                .custom_tags(SingleLetterTag::lowercase(Alphabet::A), [repo_address]),
+        )
+        .await;
+        assert_eq!(
+            replies.len(),
+            1,
+            "issue must contain exactly one agent reply"
+        );
+        assert_eq!(replies[0].content, "Agent reply attached to the issue.");
+        assert!(
+            replies[0].created_at > ordinary_comment.created_at,
+            "agent reply must sort after both ordinary and agent Project comments"
+        );
+
+        let _ = std::fs::remove_file(capture);
+        agent_client.disconnect().await.expect("disconnect agent");
+        owner_client.disconnect().await.expect("disconnect owner");
     }
 }

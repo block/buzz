@@ -1246,6 +1246,29 @@ fn build_git_issue_assignee_operation(
     Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
 }
 
+/// Build a channel-scoped comment attached to a git issue.
+pub fn build_git_issue_comment(
+    channel_id: Uuid,
+    issue_id: &str,
+    repo: &GitRepoCoord,
+    content: &str,
+    recipients: &[&str],
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let issue_id = check_hex_exact(issue_id, 64, "issue_id")?;
+    let a_value = repo.to_a_tag_value()?;
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["e", &issue_id, "", "root"])?,
+        tag(&["a", &a_value])?,
+    ];
+    mention_tags(recipients, &mut tags)?;
+
+    Ok(EventBuilder::new(Kind::Custom(9), content)
+        .tags(tags)
+        .allow_self_tagging())
+}
+
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitStatus {

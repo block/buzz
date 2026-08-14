@@ -23,6 +23,7 @@ import {
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_OPEN,
   KIND_REPO_STATE,
+  KIND_STREAM_MESSAGE,
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
 import type {
@@ -42,10 +43,7 @@ import {
   mergeEventsById,
 } from "./assignmentOperationFetch";
 import type { ProjectIssue } from "./projectIssues.mjs";
-import {
-  nextProjectIssueCommentCreatedAt,
-  projectIssueEventsToIssues,
-} from "./projectIssues.mjs";
+import { projectIssueEventsToIssues } from "./projectIssues.mjs";
 import type {
   ProjectPullRequest,
   ProjectPullRequestCommentAnchor,
@@ -73,6 +71,7 @@ import {
   fetchProjectEventsExhaustively,
 } from "./projectEnumeration";
 import { projectMatchesRouteId } from "./projectRoutes";
+import { createProjectIssueComment } from "./projectIssueCommentPublish";
 
 export { projectsQueryKey };
 
@@ -260,7 +259,7 @@ async function fetchProjectIssues(
         limit: 500,
       }),
       relayClient.fetchEvents({
-        kinds: [KIND_TEXT_NOTE],
+        kinds: [KIND_TEXT_NOTE, KIND_STREAM_MESSAGE],
         "#a": [project.repoAddress],
         limit: 500,
       }),
@@ -402,56 +401,6 @@ async function createProjectPullRequestComment({
     event,
     "Timed out posting review comment.",
     "Failed to post review comment.",
-  );
-}
-
-async function createProjectIssueComment({
-  content,
-  mediaTags,
-  mentionPubkeys = [],
-  issue,
-  project,
-}: {
-  content: string;
-  mediaTags?: string[][];
-  mentionPubkeys?: string[];
-  issue: ProjectIssue;
-  project: Repository;
-}): Promise<void> {
-  const body = content.trim();
-  if (!body) {
-    throw new Error("Comment cannot be empty.");
-  }
-
-  const recipients = new Set([
-    project.owner.toLowerCase(),
-    issue.author.toLowerCase(),
-    ...issue.recipients.map((recipient) => recipient.toLowerCase()),
-    ...mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
-  ]);
-  const tags = [
-    ["e", issue.id, "", "root"],
-    ["a", project.repoAddress],
-    ...[...recipients].map((recipient) => ["p", recipient]),
-    ...(mediaTags ?? []),
-  ];
-  const identity = await getIdentity();
-
-  const event = await signRelayEvent({
-    kind: KIND_TEXT_NOTE,
-    content: body,
-    createdAt: nextProjectIssueCommentCreatedAt(
-      issue,
-      Math.floor(Date.now() / 1_000),
-      identity.pubkey,
-    ),
-    tags,
-  });
-
-  await relayClient.publishEvent(
-    event,
-    "Timed out posting task comment.",
-    "Failed to post task comment.",
   );
 }
 
@@ -870,11 +819,13 @@ export function useCreateProjectIssueCommentMutation(
 
   return useMutation({
     mutationFn: ({
+      agentMentionPubkeys,
       content,
       mediaTags,
       mentionPubkeys,
       issue,
     }: {
+      agentMentionPubkeys?: string[];
       content: string;
       mediaTags?: string[][];
       mentionPubkeys?: string[];
@@ -882,6 +833,7 @@ export function useCreateProjectIssueCommentMutation(
     }) => {
       if (!project) throw new Error("No project selected.");
       return createProjectIssueComment({
+        agentMentionPubkeys,
         content,
         mediaTags,
         mentionPubkeys,
