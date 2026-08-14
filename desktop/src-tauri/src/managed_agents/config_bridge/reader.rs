@@ -199,7 +199,8 @@ fn mcp_config_file_path_for_runtime(runtime: &KnownAcpRuntime) -> Option<String>
         }
         "claude" => Some(resolve_tilde("~/.claude.json")),
         "codex" => {
-            super::codex::codex_config_path().map(|path| path.to_string_lossy().into_owned())
+            super::codex::codex_config_path(&Default::default())
+                .map(|path| path.to_string_lossy().into_owned())
         }
         _ => None,
     }

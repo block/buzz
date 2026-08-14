@@ -1,3 +1,11 @@
+/// Authentication evidence that can settle a runtime before its CLI probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthEvidenceStrategy {
+    None,
+    StaticEnvKeys(&'static [&'static str]),
+    CodexProviderEnvKey,
+}
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -64,6 +72,9 @@ pub(crate) struct KnownAcpRuntime {
     /// CLI args for probing authentication status. `args[0]` is the binary name;
     /// the remainder are the subcommand. `None` for runtimes with no login step.
     pub auth_probe_args: Option<&'static [&'static str]>,
+    /// Evidence read from the environment of the process Buzz will spawn.
+    /// When satisfied, it takes precedence over the sibling CLI probe.
+    pub auth_evidence: AuthEvidenceStrategy,
 }
 
 impl KnownAcpRuntime {

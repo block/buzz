@@ -10,7 +10,7 @@ use crate::managed_agents::{
     HarnessSource,
 };
 mod presets;
-mod runtime_auth;
+pub(crate) mod runtime_auth;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
@@ -19,7 +19,7 @@ pub(crate) use presets::{
     preset_harness_ids,
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
-pub(crate) use runtime_metadata::KnownAcpRuntime;
+pub(crate) use runtime_metadata::{AuthEvidenceStrategy, KnownAcpRuntime};
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
@@ -110,6 +110,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_evidence: AuthEvidenceStrategy::None,
     },
     KnownAcpRuntime {
         id: "claude",
@@ -143,6 +144,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
         auth_probe_args: Some(&["claude", "auth", "status"]),
+        auth_evidence: AuthEvidenceStrategy::StaticEnvKeys(&["CLAUDE_CODE_OAUTH_TOKEN"]),
     },
     KnownAcpRuntime {
         id: "codex",
@@ -175,8 +177,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_rounds_env_var: None,
         required_normalized_fields: &[],
         login_hint: Some("Run `codex login` to authenticate."),
-        // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+        auth_evidence: AuthEvidenceStrategy::CodexProviderEnvKey,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -210,6 +212,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_evidence: AuthEvidenceStrategy::None,
     },
 ];
 
@@ -1295,7 +1298,10 @@ struct PartialEntry {
     entry: AcpRuntimeCatalogEntry,
 }
 
-fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntry {
+fn discover_acp_runtime_phase1(
+    runtime: &'static KnownAcpRuntime,
+    auth_envs: &[std::collections::BTreeMap<String, String>],
+) -> PartialEntry {
     let adapter_result = runtime
         .commands
         .iter()
@@ -1399,8 +1405,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             requires_external_cli: runtime.underlying_cli.is_some(),
             underlying_cli_path,
             node_required,
-            // Filled in here for env auth, or by the auth-probe phase below.
-            auth_status: runtime_auth::initial_status(runtime.id, &availability),
+            auth_status: runtime_auth::initial_status(runtime, &availability, auth_envs),
             login_hint: None,
             source: HarnessSource::Builtin,
             definition_env: Default::default(),
@@ -1415,34 +1420,29 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
 /// resolves, so it should not pay the cost of authenticating every catalog entry.
 pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpAvailabilityStatus> {
     known_acp_runtime_exact(runtime_id)
-        .map(discover_acp_runtime_phase1)
+        .map(|runtime| discover_acp_runtime_phase1(runtime, &[]))
         .map(|partial| partial.entry.availability)
 }
 
-/// Discover all ACP runtimes, optionally merging user-defined custom harnesses
-/// from `custom_harnesses_dir`.
-///
-/// This is the primary entry point used by the Tauri command layer. It:
-/// 1. Builds entries for all compiled-in (`Builtin`) runtimes.
-/// 2. Runs auth probes in parallel.
-/// 3. Inserts static `Preset` entries (PATH-probed, `source: Preset`).
-/// 4. If `custom_harnesses_dir` is `Some`, loads `*.json` files from that
-///    directory and appends `Custom` entries — no auth probe, command resolved
-///    via PATH, availability is `Available` or `NotInstalled`.
+/// Discover all ACP runtimes, optionally merging custom harnesses from disk.
+/// This is the primary entry point used by the Tauri command layer. It builds
+/// builtin entries, settles auth evidence/probes, inserts static presets, then
+/// loads `*.json` files when `custom_harnesses_dir` is `Some` and
+/// appends `Custom` entries without auth probes.
 ///
 /// The custom dir is re-scanned on every call (goose `refresh_custom_providers`
 /// pattern) — no caching, no restart needed to pick up new files.
-///
 /// After building the catalog, updates the loaded-harness registry so spawn
 /// and readiness paths can resolve preset/custom harness commands without
 /// re-running discovery.
 pub fn discover_acp_runtimes_from(
     custom_harnesses_dir: Option<&Path>,
+    auth_envs: &[std::collections::BTreeMap<String, String>],
 ) -> Vec<AcpRuntimeCatalogEntry> {
     // Phase 1: build all builtin entries (fast — no probes yet).
     let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
         .iter()
-        .map(discover_acp_runtime_phase1)
+        .map(|runtime| discover_acp_runtime_phase1(runtime, auth_envs))
         .collect();
 
     // Phase 2: run auth probes in parallel for entries that need them.

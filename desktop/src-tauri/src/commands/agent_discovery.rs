@@ -11,8 +11,8 @@ use crate::{
     relay::query_relay,
 };
 
+mod auth_env;
 mod post_install_verification;
-
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -22,7 +22,6 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 
 /// Returns the adapter install commands that `install_acp_runtime_blocking` would
 /// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or `None` if not found).
-/// Returns `None` when no install is needed; `Some(cmds)` when adapter is missing or outdated.
 ///
 /// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
 /// then install `@agentclientprotocol/codex-acp` (npm ≥7 refuses to overwrite a bin from another pkg).
@@ -69,7 +68,8 @@ pub async fn discover_acp_providers(
             .app_data_dir()
             .ok()
             .map(|d| d.join("custom_harnesses"));
-        crate::managed_agents::discover_acp_runtimes_from(custom_dir.as_deref())
+        let auth_envs = auth_env::load(&app);
+        crate::managed_agents::discover_acp_runtimes_from(custom_dir.as_deref(), &auth_envs)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))

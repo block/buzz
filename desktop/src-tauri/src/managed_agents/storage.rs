@@ -260,9 +260,17 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 /// folded into the same store) are filtered out so every pre-fold call site
 /// keeps seeing exactly the records it always did.
 pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+    let mut records = load_managed_agent_configs(app)?;
+    hydrate_keys(&mut records);
+    Ok(records)
+}
+
+/// Load agent instance configuration without accessing private keys.
+pub(crate) fn load_managed_agent_configs(
+    app: &AppHandle,
+) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
-    hydrate_keys(&mut records);
     Ok(records)
 }
 

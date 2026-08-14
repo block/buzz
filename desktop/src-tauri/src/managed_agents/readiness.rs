@@ -435,12 +435,7 @@ fn collect_missing_requirements(
             let file_cfg = read_goose_file_config();
             goose_requirements(effective, file_cfg.as_ref())
         }
-        "claude" => cli_login::requirements(
-            &["claude", "auth", "status"],
-            "complete Claude Code authentication by running the Claude CLI",
-            rt,
-        ),
-        "codex" => cli_login::codex_requirements(rt, &effective.env),
+        "claude" | "codex" => cli_login::requirements_for_runtime(rt, &effective.env),
         _ => vec![],
     }
 }
@@ -1055,11 +1050,11 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            auth_evidence: crate::managed_agents::AuthEvidenceStrategy::None,
         }
     }
 
-    /// Returns the absolute path of the currently-running test binary as a `&'static str`.
-    /// Host-portable stand-in for a "present" binary: absolute path so `find_command` resolves
+    /// Host-portable absolute path that `find_command` resolves as present.
     /// it via `path.exists()`. Leaked allocation is intentional — process exits after tests.
     fn present_binary_str() -> &'static str {
         let path = std::env::current_exe().expect("current_exe must be available in tests");
@@ -1247,6 +1242,7 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            auth_evidence: crate::managed_agents::AuthEvidenceStrategy::None,
         }
     }
 

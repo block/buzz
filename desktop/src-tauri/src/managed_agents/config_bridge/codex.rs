@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 /// Read Codex config from `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
-    let path = codex_config_path()?;
+    let path = codex_config_path(&BTreeMap::new())?;
     let raw = std::fs::read_to_string(path).ok()?;
     parse_codex_config(&raw)
 }
@@ -14,7 +14,7 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
 /// persisted credential store. Buzz must account for both authentication
 /// paths before deciding that the runtime is logged out.
 pub(crate) fn env_key_auth_satisfied(effective_env: &BTreeMap<String, String>) -> bool {
-    let Some(env_key) = read_active_provider_env_key() else {
+    let Some(env_key) = read_active_provider_env_key(effective_env) else {
         return false;
     };
 
@@ -22,14 +22,22 @@ pub(crate) fn env_key_auth_satisfied(effective_env: &BTreeMap<String, String>) -
 }
 
 fn env_key_value_is_set(effective_env: &BTreeMap<String, String>, env_key: &str) -> bool {
-    effective_env
-        .get(env_key)
-        .is_some_and(|value| !value.is_empty())
-        || std::env::var_os(env_key).is_some_and(|value| !value.is_empty())
+    env_key_value_is_set_from(effective_env, env_key, std::env::var_os(env_key))
 }
 
-fn read_active_provider_env_key() -> Option<String> {
-    let path = codex_config_path()?;
+fn env_key_value_is_set_from(
+    effective_env: &BTreeMap<String, String>,
+    env_key: &str,
+    process_value: Option<std::ffi::OsString>,
+) -> bool {
+    match effective_env.get(env_key) {
+        Some(value) => !value.is_empty(),
+        None => process_value.is_some_and(|value| !value.is_empty()),
+    }
+}
+
+fn read_active_provider_env_key(effective_env: &BTreeMap<String, String>) -> Option<String> {
+    let path = codex_config_path(effective_env)?;
     let raw = std::fs::read_to_string(path).ok()?;
     parse_active_provider_env_key(&raw)
 }
@@ -168,12 +176,28 @@ fn toml_string(table: &toml::Table, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn codex_config_path() -> Option<std::path::PathBuf> {
-    if let Ok(home) = std::env::var("CODEX_HOME") {
-        return Some(std::path::PathBuf::from(home).join("config.toml"));
-    }
-    let home = dirs::home_dir()?;
-    Some(home.join(".codex").join("config.toml"))
+pub(crate) fn codex_config_path(
+    effective_env: &BTreeMap<String, String>,
+) -> Option<std::path::PathBuf> {
+    codex_config_path_from(
+        effective_env,
+        std::env::var_os("CODEX_HOME"),
+        dirs::home_dir(),
+    )
+}
+
+fn codex_config_path_from(
+    effective_env: &BTreeMap<String, String>,
+    process_codex_home: Option<std::ffi::OsString>,
+    default_home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let root = match effective_env.get("CODEX_HOME") {
+        Some(home) => std::path::PathBuf::from(home),
+        None => process_codex_home
+            .map(std::path::PathBuf::from)
+            .or_else(|| default_home.map(|home| home.join(".codex")))?,
+    };
+    Some(root.join("config.toml"))
 }
 
 #[cfg(test)]
@@ -276,7 +300,60 @@ env_key = "CUSTOM_API_KEY=secret"
     fn rejects_empty_effective_env_credential() {
         let env = BTreeMap::from([("BUZZ_TEST_CODEX_API_KEY".to_string(), String::new())]);
 
-        assert!(!env_key_value_is_set(&env, "BUZZ_TEST_CODEX_API_KEY"));
+        assert!(!env_key_value_is_set_from(
+            &env,
+            "BUZZ_TEST_CODEX_API_KEY",
+            Some("parent-secret".into())
+        ));
+    }
+
+    #[test]
+    fn effective_codex_home_wins_over_process_home() {
+        let env = BTreeMap::from([("CODEX_HOME".to_string(), "/child/codex".to_string())]);
+
+        assert_eq!(
+            codex_config_path_from(
+                &env,
+                Some("/desktop/codex".into()),
+                Some("/user".into())
+            ),
+            Some(std::path::PathBuf::from("/child/codex/config.toml"))
+        );
+    }
+
+    #[test]
+    fn process_codex_home_is_used_when_effective_env_omits_it() {
+        assert_eq!(
+            codex_config_path_from(
+                &BTreeMap::new(),
+                Some("/desktop/codex".into()),
+                Some("/user".into())
+            ),
+            Some(std::path::PathBuf::from("/desktop/codex/config.toml"))
+        );
+    }
+
+    #[test]
+    fn env_auth_reads_config_and_credential_from_effective_env() {
+        let codex_home = tempfile::tempdir().expect("temp CODEX_HOME");
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+env_key = "CUSTOM_API_KEY"
+"#,
+        )
+        .expect("write config");
+        let env = BTreeMap::from([
+            (
+                "CODEX_HOME".to_string(),
+                codex_home.path().to_string_lossy().into_owned(),
+            ),
+            ("CUSTOM_API_KEY".to_string(), "secret".to_string()),
+        ]);
+
+        assert!(env_key_auth_satisfied(&env));
     }
 
     #[test]

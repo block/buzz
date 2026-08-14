@@ -11,25 +11,49 @@ use crate::managed_agents::{
 
 use super::{cli_probe, Requirement};
 
-pub(super) fn codex_requirements(
-    runtime: &KnownAcpRuntime,
-    effective_env: &BTreeMap<String, String>,
-) -> Vec<Requirement> {
-    requirements_with_env_auth(
-        &["codex", "login", "status"],
-        "run `codex login`",
-        runtime,
-        crate::managed_agents::config_bridge::codex_env_key_auth_satisfied(effective_env),
-    )
-}
-
 /// Requirements for CLI-login runtimes (claude, codex).
+#[cfg(test)]
 pub(super) fn requirements(
     probe_args: &[&str],
     setup_copy: &str,
     runtime: &KnownAcpRuntime,
 ) -> Vec<Requirement> {
     requirements_with_env_auth(probe_args, setup_copy, runtime, false)
+}
+
+pub(super) fn requirements_with_effective_env(
+    probe_args: &[&str],
+    setup_copy: &str,
+    runtime: &KnownAcpRuntime,
+    effective_env: &BTreeMap<String, String>,
+) -> Vec<Requirement> {
+    let env_auth_satisfied =
+        crate::managed_agents::discovery::runtime_auth::auth_evidence_satisfied(
+            runtime.auth_evidence,
+            std::slice::from_ref(effective_env),
+        );
+    requirements_with_env_auth(probe_args, setup_copy, runtime, env_auth_satisfied)
+}
+
+pub(super) fn requirements_for_runtime(
+    runtime: &KnownAcpRuntime,
+    effective_env: &BTreeMap<String, String>,
+) -> Vec<Requirement> {
+    match runtime.id {
+        "claude" => requirements_with_effective_env(
+            &["claude", "auth", "status"],
+            "complete Claude Code authentication by running the Claude CLI",
+            runtime,
+            effective_env,
+        ),
+        "codex" => requirements_with_effective_env(
+            &["codex", "login", "status"],
+            "run `codex login`",
+            runtime,
+            effective_env,
+        ),
+        _ => vec![],
+    }
 }
 
 /// Requirements for a CLI-login runtime that may also be authenticated by an
@@ -160,6 +184,7 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            auth_evidence: crate::managed_agents::AuthEvidenceStrategy::None,
         }
     }
 
@@ -172,6 +197,23 @@ mod tests {
             "this should not show",
             &runtime,
             true,
+        );
+
+        assert!(requirements.is_empty());
+    }
+
+    #[test]
+    fn static_runtime_env_auth_bypasses_login_probe() {
+        let exe = present_binary_str();
+        let mut runtime = make_runtime(static_commands(vec![exe]), Some(exe));
+        runtime.auth_evidence = crate::managed_agents::AuthEvidenceStrategy::StaticEnvKeys(&["TOKEN"]);
+        let env = BTreeMap::from([("TOKEN".to_string(), "secret".to_string())]);
+
+        let requirements = requirements_with_effective_env(
+            &[exe, "--buzz-probe-must-not-run"],
+            "this should not show",
+            &runtime,
+            &env,
         );
 
         assert!(requirements.is_empty());
