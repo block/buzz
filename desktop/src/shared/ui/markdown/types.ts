@@ -22,6 +22,8 @@ export type ImetaLookup = Map<string, ImetaEntry>;
 
 export type MessageLinkPillProps = {
   channels: Channel[];
+  /** Original permalink text, preserved for the context menu's Copy action. */
+  href?: string;
   interactive: boolean;
   link: ParsedMessageLink;
   onOpenMessageLink: (link: ParsedMessageLink) => void;

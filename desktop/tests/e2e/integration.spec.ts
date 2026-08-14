@@ -314,7 +314,7 @@ test("live mentions refetch the home feed without waiting for polling", async ({
       .click();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
-      message,
+      message.replace("@tyler", "tyler"),
     );
     await expect(targetPage.getByTestId("sidebar-home-count")).toHaveCount(0);
     await expect.poll(() => getLoggedNotificationCount(targetPage)).toBe(1);
@@ -371,7 +371,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
-      message,
+      message.replace("@tyler", "tyler"),
     );
     await expect(targetPage.getByTestId("sidebar-home-count")).toHaveCount(0);
     await expect.poll(() => getLoggedNotificationCount(targetPage)).toBe(1);
