@@ -1,0 +1,11 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  plugins:
+    - custom_lint
+  errors:
+    invalid_use_of_visible_for_overriding_member: ignore
+
+linter:
+  rules:
+    prefer_single_quotes: true

@@ -1,0 +1,31 @@
+{{- /*
+Prometheus Operator ServiceMonitor for the relay's /metrics endpoint.
+Opt-in (serviceMonitor.enabled). Selects the relay Service by the chart's
+selector labels (which the Service carries in its own metadata.labels) and
+scrapes the named `metrics` port.
+*/ -}}
+{{- if .Values.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "buzz.fullname" . }}
+  {{- with .Values.serviceMonitor.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "buzz.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | quote }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+{{- end -}}

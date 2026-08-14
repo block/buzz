@@ -1,0 +1,22 @@
+{{- include "buzz.validate" . -}}
+{{- if and .Values.persistence.git.enabled (not .Values.persistence.git.existingClaim) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "buzz.fullname" . }}-git
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+  {{- with .Values.persistence.git.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.git.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.git.size }}
+  {{- if .Values.persistence.git.storageClass }}
+  storageClassName: {{ .Values.persistence.git.storageClass | quote }}
+  {{- end }}
+{{- end -}}

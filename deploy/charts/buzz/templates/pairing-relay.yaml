@@ -1,0 +1,72 @@
+{{- include "buzz.validate" . -}}
+{{- if .Values.pairingRelay.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "buzz.fullname" . }}-pairing
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pairing-relay
+spec:
+  replicas: {{ .Values.pairingRelay.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "buzz.pairingRelaySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "buzz.pairingRelaySelectorLabels" . | nindent 8 }}
+        {{- with .Values.pairingRelay.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.pairingRelay.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.relay.securityContext | nindent 8 }}
+      containers:
+        - name: pairing-relay
+          image: {{ include "buzz.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/buzz-pair-relay"]
+          securityContext:
+            {{- toYaml .Values.relay.containerSecurityContext | nindent 12 }}
+          env:
+            - name: BUZZ_PAIR_RELAY_BIND_ADDR
+              value: "0.0.0.0:{{ .Values.pairingRelay.service.port }}"
+          ports:
+            - name: websocket
+              containerPort: {{ .Values.pairingRelay.service.port }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: websocket
+          livenessProbe:
+            tcpSocket:
+              port: websocket
+          resources:
+            {{- toYaml .Values.pairingRelay.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "buzz.fullname" . }}-pairing
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pairing-relay
+  {{- with .Values.pairingRelay.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.pairingRelay.service.type }}
+  selector:
+    {{- include "buzz.pairingRelaySelectorLabels" . | nindent 4 }}
+  ports:
+    - name: websocket
+      port: {{ .Values.pairingRelay.service.port }}
+      targetPort: websocket
+      protocol: TCP
+{{- end }}

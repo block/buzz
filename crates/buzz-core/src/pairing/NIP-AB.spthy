@@ -1,0 +1,455 @@
+theory NIP_AB
+begin
+
+builtins: diffie-hellman, hashing, symmetric-encryption
+
+rule Source_Start:
+  [ Fr(~qr), Fr(~xs) ]
+  --[
+      SourceStarted(h(< 'session-id', ~qr >), 'g'^~xs)
+    ]->
+  [
+      SrcWaiting(~qr, ~xs),
+      !QrVisible(~qr, 'g'^~xs),
+      !SourceSecrets(~qr, ~xs)
+  ]
+
+rule Leak_QR:
+  [ !QrVisible(qr, pkS) ]
+  --[
+      QrLeaked(h(< 'session-id', qr >), pkS)
+    ]->
+  [ Out(< qr, pkS >) ]
+
+rule Compromise_Source_Session:
+  [ !SourceSecrets(qr, xs) ]
+  --[
+      SourceCompromised(h(< 'session-id', qr >), 'g'^xs)
+    ]->
+  [ Out(< qr, xs >) ]
+
+rule Target_Scan_QR_And_Send_Offer:
+  [ !QrVisible(qr, pkS), Fr(~xt) ]
+  --[
+      TargetStarted(h(< 'session-id', qr >), pkS, 'g'^~xt)
+    ]->
+  [
+      TgtOfferSent(qr, pkS, ~xt, 'g'^~xt),
+      !TargetSecrets(qr, pkS, ~xt),
+      Out(
+        <
+          'offer_evt',
+          'g'^~xt,
+          senc(
+            < 'offer', h(< 'session-id', qr >) >,
+            h(< 'pair-key', pkS^~xt >)
+          )
+        >
+      )
+  ]
+
+rule Compromise_Target_Session:
+  [ !TargetSecrets(qr, pkS, xt) ]
+  --[
+      TargetCompromised(h(< 'session-id', qr >), pkS, 'g'^xt)
+    ]->
+  [ Out(< qr, xt >) ]
+
+rule Source_Accepts_Offer:
+  [ SrcWaiting(qr, xs),
+    In(
+      <
+        'offer_evt',
+        pkT,
+        senc(
+          < 'offer', h(< 'session-id', qr >) >,
+          h(< 'pair-key', pkT^xs >)
+        )
+      >
+    )
+  ]
+  --[
+      SourceAcceptedOffer(h(< 'session-id', qr >), 'g'^xs, pkT)
+    ]->
+  [
+      SrcSasReady(qr, xs, pkT)
+  ]
+
+// SAS comparison is modeled as perfect: the rule requires both devices'
+// state facts with matching cryptographic material, so it only fires when
+// the ECDH shared secret (and therefore the SAS code) genuinely agrees.
+// In reality SAS provides ~20 bits of entropy (1/10^6 collision); that
+// computational bound is argued separately in §Design Rationale.
+rule User_Compares_Matching_SAS:
+  [ SrcSasReady(qr, xs, pkT),
+    TgtOfferSent(qr, 'g'^xs, xt, pkT)
+  ]
+  --[
+      SasMatched(
+        h(< 'session-id', qr >),
+        'g'^xs,
+        pkT,
+        h(< 'sas', pkT^xs, qr >)
+      )
+    ]->
+  [
+      SrcUserConfirmed(qr, xs, pkT),
+      TgtAwaitingSasConfirm(qr, 'g'^xs, xt)
+  ]
+
+// Transcript hash matches spec §Step 3 (see also PR #346 clarifications):
+//   transcript_hash = HKDF(IKM = session_id || pkS || pkT || sas_input,
+//                          salt = session_secret, info = "nostr-pair-transcript-v1")
+// Symbolically we collapse HKDF to h(.) and rely on collision resistance;
+// qr (session_secret) is already committed via session_id and sas_input, so
+// we do not include it again here.
+//
+// Per §Step 3, the transcript hash is a detection mechanism for session
+// inconsistency, not the MITM prevention gate (that role belongs to the
+// user's SAS comparison, modeled by User_Compares_Matching_SAS above).
+rule Source_Sends_SAS_Confirm:
+  [ SrcUserConfirmed(qr, xs, pkT) ]
+  --[
+      SourceSentSasConfirm(h(< 'session-id', qr >), 'g'^xs, pkT)
+    ]->
+  [
+      SrcReadyPayload(qr, xs, pkT),
+      Out(
+        <
+          'sas_confirm_evt',
+          senc(
+            <
+              'sas-confirm',
+              h(
+                <
+                  'transcript',
+                  h(< 'session-id', qr >),
+                  'g'^xs,
+                  pkT,
+                  h(< 'sas', pkT^xs, qr >)
+                >
+              )
+            >,
+            h(< 'pair-key', pkT^xs >)
+          )
+        >
+      )
+  ]
+
+rule Target_Receives_SAS_Confirm:
+  [ TgtAwaitingSasConfirm(qr, pkS, xt),
+    In(
+      <
+        'sas_confirm_evt',
+        senc(
+          <
+            'sas-confirm',
+            h(
+              <
+                'transcript',
+                h(< 'session-id', qr >),
+                pkS,
+                'g'^xt,
+                h(< 'sas', pkS^xt, qr >)
+              >
+            )
+          >,
+          h(< 'pair-key', pkS^xt >)
+        )
+      >
+    )
+  ]
+  --[
+      TargetVerifiedTranscript(h(< 'session-id', qr >), pkS, 'g'^xt)
+    ]->
+  [
+      TgtAwaitingUserApproval(qr, pkS, xt),
+      TgtCanBuffer(qr, pkS, xt)
+  ]
+
+// Target user approval: AwaitingConfirmation -> Transferring (spec §Step 3).
+// This fires only after transcript verification (Target_Receives_SAS_Confirm).
+rule Target_User_Approves_After_Transcript:
+  [ TgtAwaitingUserApproval(qr, pkS, xt) ]
+  --[
+      TargetUserApproved(h(< 'session-id', qr >), pkS, 'g'^xt)
+    ]->
+  [
+      TgtTransferring(qr, pkS, xt)
+  ]
+
+rule Source_Sends_Payload:
+  [ SrcReadyPayload(qr, xs, pkT), Fr(~payload) ]
+  --[
+      SourceSentPayload(h(< 'session-id', qr >), 'g'^xs, pkT, ~payload),
+      PayloadMarkedSecret(h(< 'session-id', qr >), ~payload)
+    ]->
+  [
+      SrcAwaitingComplete(qr, xs, pkT, ~payload),
+      Out(
+        <
+          'payload_evt',
+          senc(
+            < 'payload', ~payload >,
+            h(< 'pair-key', pkT^xs >)
+          )
+        >
+      )
+  ]
+
+// --- Payload buffering (spec §Event Validation, §Step 3-4) ---
+//
+// Per #346, the source sends payload immediately after sas-confirm without
+// waiting for the target. The target may therefore receive the encrypted
+// payload while still in AwaitingConfirmation (before user approval).
+// The spec requires: buffer the ciphertext, do NOT decrypt or import until
+// both transcript_hash is verified AND the user confirms SAS on the target.
+//
+// We model this as two rules:
+//   1. Target_Buffers_Payload — receives ciphertext into a holding fact
+//      WITHOUT extracting the plaintext. The rule validates that the
+//      ciphertext is encrypted under the session's DH-derived key
+//      (h(< 'pair-key', pkS^xt >)), matching the spec's requirement that
+//      invalid events are silently discarded without advancing state.
+//      Only fires after transcript verification (linear TgtCanBuffer),
+//      matching the spec's state table where `payload` is valid only in
+//      AwaitingConfirmation or Transferring (both post-transcript-verify).
+//      The linear fact is consumed, so at most one payload can be buffered
+//      per session — matching the spec's single-payload semantics.
+//   2. Target_Decrypts_Payload — pattern-matches senc() to extract plaintext.
+//      Requires both TgtTransferring (post-approval) and the buffered
+//      ciphertext. This is the dual-consent gate: decryption only happens
+//      after transcript verification + user approval.
+
+rule Target_Buffers_Payload:
+  [ TgtCanBuffer(qr, pkS, xt),
+    In(< 'payload_evt', senc(msg, h(< 'pair-key', pkS^xt >)) >)
+  ]
+  --[
+      TargetBufferedPayload(h(< 'session-id', qr >), pkS, 'g'^xt)
+    ]->
+  [
+      TgtPayloadBuffer(qr, pkS, xt, senc(msg, h(< 'pair-key', pkS^xt >)))
+  ]
+
+// Target decrypts the payload only after entering Transferring state
+// (transcript verified + user approved). This is the dual-consent gate:
+// the senc() pattern match here is the symbolic decryption operation.
+rule Target_Decrypts_Payload:
+  [ TgtTransferring(qr, pkS, xt),
+    TgtPayloadBuffer(qr, pkS, xt,
+      senc(
+        < 'payload', payload >,
+        h(< 'pair-key', pkS^xt >)
+      )
+    )
+  ]
+  --[
+      TargetDecryptedPayload(h(< 'session-id', qr >), pkS, 'g'^xt, payload)
+    ]->
+  [
+      TgtHasPayload(qr, pkS, xt, payload)
+  ]
+
+rule Target_Sends_Complete:
+  [ TgtHasPayload(qr, pkS, xt, payload) ]
+  --[
+      TargetCompleted(h(< 'session-id', qr >), pkS, 'g'^xt, payload)
+    ]->
+  [
+      TgtDone(qr, pkS, xt, payload),
+      Out(
+        <
+          'complete_evt',
+          senc('complete', h(< 'pair-key', pkS^xt >))
+        >
+      )
+  ]
+
+rule Source_Receives_Complete:
+  [ SrcAwaitingComplete(qr, xs, pkT, payload),
+    In(
+      <
+        'complete_evt',
+        senc('complete', h(< 'pair-key', pkT^xs >))
+      >
+    )
+  ]
+  --[
+      SourceCompleted(h(< 'session-id', qr >), 'g'^xs, pkT, payload)
+    ]->
+  [
+      SrcDone(qr, xs, pkT, payload)
+  ]
+
+// ============================================================================
+// Core security lemmas (invariants)
+// ============================================================================
+
+// Happy path: both sides complete with the same session and payload.
+lemma executable_core_flow:
+  exists-trace
+  "Ex sid pkS pkT payload #i #j.
+      TargetCompleted(sid, pkS, pkT, payload) @ i
+    & SourceCompleted(sid, pkS, pkT, payload) @ j"
+
+// SAS gate: source never sends the payload without a prior SAS match.
+lemma payload_requires_successful_sas_match:
+  "All sid pkS pkT payload #i.
+      SourceSentPayload(sid, pkS, pkT, payload) @ i
+    ==> (Ex sas #j.
+          SasMatched(sid, pkS, pkT, sas) @ j
+        & #j < #i)"
+
+// Payload secrecy: without endpoint compromise, the payload is secret.
+// Note: this holds even under QR-code leak. The SAS gate prevents a MITM
+// from causing the source to send the payload under the attacker's key,
+// because the SAS rule only fires when the source's accepted pkT matches
+// a genuine fresh target ephemeral (see sas_match_implies_genuine_target).
+lemma payload_secrecy_without_endpoint_compromise:
+  "All sid payload #i.
+      PayloadMarkedSecret(sid, payload) @ i
+    & not (Ex pkS #r. SourceCompromised(sid, pkS) @ r)
+    & not (Ex pkS pkT #r. TargetCompromised(sid, pkS, pkT) @ r)
+    ==> not (Ex #j. K(payload) @ j)"
+
+// Target-side agreement: if the target completes, the source genuinely
+// sent that exact payload under this session.
+lemma target_completion_agrees_on_source_payload:
+  "All sid pkS pkT payload #i.
+      TargetCompleted(sid, pkS, pkT, payload) @ i
+    & not (Ex pkS2 #r. SourceCompromised(sid, pkS2) @ r)
+    & not (Ex pkS2 pkT2 #r. TargetCompromised(sid, pkS2, pkT2) @ r)
+    ==> (Ex #j.
+          SourceSentPayload(sid, pkS, pkT, payload) @ j
+        & #j < #i)"
+
+// Source-side completion soundness: if the source sees `complete`, the
+// target really completed this session.
+lemma source_completion_implies_prior_target_completion_without_compromise:
+  "All sid pkS pkT payload #i.
+      SourceCompleted(sid, pkS, pkT, payload) @ i
+    & not (Ex pkS2 #r. SourceCompromised(sid, pkS2) @ r)
+    & not (Ex pkS2 pkT2 #r. TargetCompromised(sid, pkS2, pkT2) @ r)
+    ==> (Ex #j.
+          TargetCompleted(sid, pkS, pkT, payload) @ j
+        & #j < #i)"
+
+// Injective agreement (target → source): each target completion corresponds
+// to a unique source payload send, and that send is itself unique. This is
+// one-directional; the reverse (every send leads to a completion) is a
+// liveness property not provable under Dolev-Yao scheduling.
+lemma injective_target_source_agreement:
+  "All sid pkS pkT payload #i.
+      TargetCompleted(sid, pkS, pkT, payload) @ i
+    & not (Ex pkS2 #r. SourceCompromised(sid, pkS2) @ r)
+    & not (Ex pkS2 pkT2 #r. TargetCompromised(sid, pkS2, pkT2) @ r)
+    ==> (Ex #j.
+          SourceSentPayload(sid, pkS, pkT, payload) @ j
+        & #j < #i
+        & not (Ex #i2.
+                TargetCompleted(sid, pkS, pkT, payload) @ i2
+              & not (#i2 = #i))
+        & not (Ex #j2.
+                SourceSentPayload(sid, pkS, pkT, payload) @ j2
+              & not (#j2 = #j)))"
+
+// ============================================================================
+// MITM-resistance test cases
+// ============================================================================
+
+// "MITM does not work": any SAS match pins the source's view of pkT to an
+// actual target-generated ephemeral ('g'^~xt from Target_Scan_QR_And_Send_Offer).
+// A network adversary who substitutes the offer's pkT with an attacker-chosen
+// value can never make this lemma's conclusion hold, because the fresh ~xt
+// in TargetStarted is outside attacker knowledge.
+lemma sas_match_implies_genuine_target:
+  "All sid pkS pkT sas #i.
+      SasMatched(sid, pkS, pkT, sas) @ i
+    ==> (Ex #j.
+          TargetStarted(sid, pkS, pkT) @ j
+        & #j < #i)"
+
+// Composition: no payload is ever sent under a pkT the real target did not
+// produce. Follows from payload_requires_successful_sas_match combined with
+// sas_match_implies_genuine_target, and is the explicit no-MITM guarantee.
+lemma payload_delivery_requires_genuine_target:
+  "All sid pkS pkT payload #i.
+      SourceSentPayload(sid, pkS, pkT, payload) @ i
+    ==> (Ex #j.
+          TargetStarted(sid, pkS, pkT) @ j
+        & #j < #i)"
+
+// Dual-consent gate (spec §Step 3, PR #346): the target never processes
+// (decrypts/imports) a payload without BOTH transcript verification AND
+// an explicit user-approval step. The payload may arrive and be buffered
+// earlier (see Target_Buffers_Payload), but processing is gated.
+lemma target_decrypts_payload_only_after_dual_consent:
+  "All sid pkS pkT payload #i.
+      TargetDecryptedPayload(sid, pkS, pkT, payload) @ i
+    ==> (Ex #j #k.
+          TargetVerifiedTranscript(sid, pkS, pkT) @ j
+        & TargetUserApproved(sid, pkS, pkT) @ k
+        & #j < #i
+        & #k < #i)"
+
+// ============================================================================
+// Reachability / sanity test cases
+// ============================================================================
+//
+// These exists-trace lemmas prove that the compromise model is meaningful
+// (each compromise rule is actually reachable within a valid protocol run)
+// and that compromise genuinely breaks payload confidentiality. Without
+// these, a trivially unreachable compromise rule would make the no-compromise
+// secrecy claims vacuous.
+
+lemma executable_with_qr_leak:
+  exists-trace
+  "Ex sid pkS #r. QrLeaked(sid, pkS) @ r"
+
+lemma executable_with_source_compromise:
+  exists-trace
+  "Ex sid pkS #r. SourceCompromised(sid, pkS) @ r"
+
+lemma executable_with_target_compromise:
+  exists-trace
+  "Ex sid pkS pkT #r. TargetCompromised(sid, pkS, pkT) @ r"
+
+// Buffer-then-decrypt sequencing: every decryption is preceded by buffering.
+// Makes the intended two-phase flow explicit in the proof surface.
+lemma decryption_requires_prior_buffering:
+  "All sid pkS pkT payload #i.
+      TargetDecryptedPayload(sid, pkS, pkT, payload) @ i
+    ==> (Ex #j.
+          TargetBufferedPayload(sid, pkS, pkT) @ j
+        & #j < #i)"
+
+// Sanity: the payload CAN arrive (be buffered) before the target user
+// approves. This proves the buffering path is reachable and the dual-consent
+// gate is not vacuously enforced by message ordering alone.
+lemma executable_payload_buffered_before_approval:
+  exists-trace
+  "Ex sid pkS pkT #i #j.
+      TargetBufferedPayload(sid, pkS, pkT) @ i
+    & TargetUserApproved(sid, pkS, pkT) @ j
+    & #i < #j"
+
+// Source-side compromise: an attacker who learns xs can decrypt the payload.
+// Counter-example to a naive "secrecy always holds" claim; justifies the
+// `not SourceCompromised` guard in payload_secrecy_without_endpoint_compromise.
+lemma source_compromise_can_leak_payload:
+  exists-trace
+  "Ex sid pkS payload #i #j #k.
+      PayloadMarkedSecret(sid, payload) @ i
+    & SourceCompromised(sid, pkS) @ j
+    & K(payload) @ k"
+
+// Target-side compromise: same story, from the target side.
+lemma target_compromise_can_leak_payload:
+  exists-trace
+  "Ex sid pkS pkT payload #i #j #k.
+      PayloadMarkedSecret(sid, payload) @ i
+    & TargetCompromised(sid, pkS, pkT) @ j
+    & K(payload) @ k"
+
+end
