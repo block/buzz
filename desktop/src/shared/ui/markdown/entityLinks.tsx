@@ -34,6 +34,12 @@ function entityLinkPresentation(link: ParsedEntityLink) {
         icon: "issue" as const,
         label: `${link.dtag} · ${link.id.slice(0, 8)}`,
       };
+    case "project":
+      return {
+        ariaLabel: `Open project ${link.dtag}`,
+        icon: "project" as const,
+        label: link.dtag,
+      };
   }
 }
 
@@ -46,7 +52,17 @@ export function useOpenEntityLink(): (link: ParsedEntityLink) => void {
   const { goProject } = useAppNavigation();
   return React.useCallback(
     (link: ParsedEntityLink) => {
+      const tab =
+        (link.type === "repo" || link.type === "project") && link.tab
+          ? link.tab
+          : undefined;
       void goProject(entityLinkProjectRouteId(link), {
+        entityNavigationId: crypto.randomUUID(),
+        ...(tab
+          ? {
+              tab,
+            }
+          : {}),
         ...(link.type === "pr" ? { pullRequestId: link.id } : {}),
         ...(link.type === "issue" ? { issueId: link.id } : {}),
       });

@@ -5,6 +5,7 @@ import type { EditorView } from "@tiptap/pm/view";
 
 import {
   buildIssueLink,
+  buildProjectLink,
   buildPullRequestLink,
   buildRepoLink,
   parseEntityLink,
@@ -30,9 +31,9 @@ export type ComposerMessageLinkAttributes = {
 };
 
 const BARE_BUZZ_LINK_AT_START =
-  /^buzz:\/\/(?:message\?|channel\/|(?:pr|issue|repo)\?)[^\s<>"')\]}*]+/i;
+  /^buzz:\/\/(?:message\?|channel\/|(?:pr|issue|repo|project)\?)[^\s<>"')\]}*]+/i;
 const BUZZ_LINK_SUFFIX_AT_START =
-  /^:\/\/(?:message\?|channel\/|(?:pr|issue|repo)\?)[^\s<>"')\]}*]+/i;
+  /^:\/\/(?:message\?|channel\/|(?:pr|issue|repo|project)\?)[^\s<>"')\]}*]+/i;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
 
 function trimBareBuzzLink(value: string): string {
@@ -82,6 +83,11 @@ export function resolveComposerMessageLinkAttributes(
       return {
         channelName: "",
         href: buildRepoLink(entity.value),
+      };
+    case "project":
+      return {
+        channelName: "",
+        href: buildProjectLink(entity.value),
       };
     case "pr":
       return {
@@ -257,17 +263,21 @@ function composerLinkPresentation(
   }
 
   const shortId =
-    entity.value.type === "repo" ? "" : entity.value.id.slice(0, 8);
+    entity.value.type === "repo" || entity.value.type === "project"
+      ? ""
+      : entity.value.id.slice(0, 8);
   return {
     ariaLabel:
       entity.value.type === "repo"
         ? `Open repository ${entity.value.dtag}`
-        : `Open ${entity.value.type === "pr" ? "pull request" : "issue"} ${shortId} in repository ${entity.value.dtag}`,
+        : entity.value.type === "project"
+          ? `Open project ${entity.value.dtag}`
+          : `Open ${entity.value.type === "pr" ? "pull request" : "issue"} ${shortId} in repository ${entity.value.dtag}`,
     channelName: "",
     dataAttributes: { "data-buzz-link-kind": entity.value.type },
     icon: entity.value.type,
     label:
-      entity.value.type === "repo"
+      entity.value.type === "repo" || entity.value.type === "project"
         ? entity.value.dtag
         : `${entity.value.dtag} · ${shortId}`,
   };

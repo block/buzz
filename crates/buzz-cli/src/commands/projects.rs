@@ -108,13 +108,29 @@ fn make_tag(parts: &[&str]) -> Result<Tag, CliError> {
 
 // ── Submit helper ─────────────────────────────────────────────────────────────
 
-async fn submit_project(client: &BuzzClient, builder: EventBuilder) -> Result<(), CliError> {
+/// Submit a project event and print the relay's write response.
+///
+/// `link_slug` carries the project's d-tag on creates whose slug fits the
+/// `buzz://` link charset; the response then also carries a `link` field,
+/// which renders as a rich preview card in Buzz Desktop when included in a
+/// chat message — agents announce projects with it (see base_prompt.md).
+async fn submit_project(
+    client: &BuzzClient,
+    builder: EventBuilder,
+    link_slug: Option<&str>,
+) -> Result<(), CliError> {
     let event = client.sign_event(builder)?;
+    let owner = event.pubkey.to_hex();
     let raw = client.submit_event(event).await?;
-    println!(
-        "{}",
-        parse_write_response(&raw, "project changed concurrently; retry")?
-    );
+    let response = parse_write_response(&raw, "project changed concurrently; retry")?;
+    match link_slug {
+        Some(slug) => crate::client::print_create_response(
+            &response,
+            "link",
+            &crate::links::project_link(&owner, slug),
+        ),
+        None => println!("{response}"),
+    }
     Ok(())
 }
 
@@ -207,7 +223,15 @@ pub async fn cmd_create(
     // ── Build via Layer B (enforces all writer policy) ────────────────────
     let builder = build_project(slug, name, description, &members, channel, visibility)
         .map_err(|e| CliError::Usage(e.to_string()))?;
-    submit_project(client, builder).await
+
+    // Slugs wider than the link charset stay linkless rather than emitting a
+    // `link` no client can parse.
+    submit_project(
+        client,
+        builder,
+        crate::links::is_linkable_dtag(slug).then_some(slug),
+    )
+    .await
 }
 
 /// `buzz projects get`
@@ -320,7 +344,7 @@ pub async fn cmd_add_repo(
     }
 
     let builder = rebuild_project(&head.content, tags, next_ts)?;
-    submit_project(client, builder).await
+    submit_project(client, builder, None).await
 }
 
 /// `buzz projects remove-repo`
@@ -383,7 +407,7 @@ pub async fn cmd_remove_repo(
 
     // Single rebuild validates the full envelope and strips any remaining auth.
     let builder = rebuild_project(&head.content, tags, next_ts)?;
-    submit_project(client, builder).await
+    submit_project(client, builder, None).await
 }
 
 /// `buzz projects update`
@@ -484,7 +508,7 @@ pub async fn cmd_update(
     let builder = build_project_with_tags(&head.content, tags)
         .map_err(|e| CliError::Other(format!("envelope validation failed: {e}")))?
         .custom_created_at(next_ts);
-    submit_project(client, builder).await
+    submit_project(client, builder, None).await
 }
 
 /// `buzz projects delete`
