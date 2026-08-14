@@ -30,6 +30,7 @@ function seed(
   resolvedTag = null,
 ) {
   __linkPreviewPreparationTest.jobs.set(candidate.href, {
+    controller: new AbortController(),
     promise,
     fallbackTag,
     resolvedTag,
@@ -56,6 +57,7 @@ test("expires settled jobs while retaining in-flight and recent work", () => {
   assert.equal(
     __linkPreviewPreparationTest.isReusableJob(
       {
+        controller: new AbortController(),
         promise: Promise.resolve(firstTag),
         fallbackTag: null,
         resolvedTag: null,
@@ -69,6 +71,7 @@ test("expires settled jobs while retaining in-flight and recent work", () => {
   assert.equal(
     __linkPreviewPreparationTest.isReusableJob(
       {
+        controller: new AbortController(),
         promise: Promise.resolve(firstTag),
         fallbackTag: null,
         resolvedTag: null,
@@ -82,6 +85,7 @@ test("expires settled jobs while retaining in-flight and recent work", () => {
   assert.equal(
     __linkPreviewPreparationTest.isReusableJob(
       {
+        controller: new AbortController(),
         promise: Promise.resolve(firstTag),
         fallbackTag: null,
         resolvedTag: null,

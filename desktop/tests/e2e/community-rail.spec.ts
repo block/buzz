@@ -446,6 +446,65 @@ test.describe("community rail", () => {
     await expect(page.getByTestId("message-input")).toHaveText("");
   });
 
+  test("community switch stops preview media before it reaches the new community", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        deferLinkPreviewMetadata: true,
+        linkPreviewMetadata: {
+          title: "Old community preview",
+          siteName: "GitHub",
+          description: "Must not upload after reset.",
+          imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          imageDomain: "github.com",
+          faviconDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("https://github.com/block/buzz/pull/5697?media=reset");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "fetch_link_preview_metadata",
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__?.() ?? 0,
+      ),
+    ).toBeGreaterThan(0);
+    await page.waitForTimeout(250);
+
+    const uploadCalls = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "upload_media_bytes",
+      ),
+    );
+    expect(uploadCalls).toHaveLength(0);
+  });
+
   test("restores the last Home or channel destination per community", async ({
     page,
   }) => {

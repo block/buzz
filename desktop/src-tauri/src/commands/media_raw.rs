@@ -27,7 +27,18 @@ pub async fn upload_media_bytes(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BlobDescriptor, String> {
-    upload_media_bytes_inner(data, filename, progress_id, app, state, None).await
+    let cancellation = begin_media_upload(progress_id.as_deref());
+    let result = upload_media_bytes_inner(
+        data,
+        filename,
+        progress_id.clone(),
+        app,
+        state,
+        cancellation.as_ref(),
+    )
+    .await;
+    finish_media_upload(progress_id.as_deref());
+    result
 }
 
 fn decode_raw_upload_header(value: &str) -> Result<String, String> {

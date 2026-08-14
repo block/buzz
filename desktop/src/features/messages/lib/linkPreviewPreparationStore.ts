@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { uploadMediaBytes } from "@/shared/api/tauri";
+import { cancelMediaUpload } from "@/shared/api/tauriMedia";
 import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
 import {
   buildLinkPreviewSnapshotTag,
@@ -15,6 +16,7 @@ const POST_SUBMIT_PREVIEW_BUDGET_MS = 10_000;
 const SETTLED_PREVIEW_JOB_TTL_MS = 5 * 60_000;
 
 type PreviewJob = {
+  controller: AbortController;
   promise: Promise<string[] | null>;
   fallbackTag: string[] | null;
   resolvedTag: string[] | null;
@@ -51,6 +53,7 @@ const promotedSends = new Map<number, AbortController>();
 const listeners = new Set<() => void>();
 let nextTaskId = 0;
 let nextPromotedSendId = 0;
+let nextUploadId = 0;
 let snapshot: BackgroundPreviewSnapshot = {
   canSkip: false,
   isPreparing: false,
@@ -79,23 +82,35 @@ function dataUrlBytes(dataUrl: string | null | undefined): Uint8Array | null {
 async function uploadDataUrl(
   dataUrl: string | null | undefined,
   filename: string,
+  signal: AbortSignal,
 ): Promise<{ failed: boolean; sha256: string; url: string }> {
   const bytes = dataUrlBytes(dataUrl);
   if (!bytes) return { failed: false, sha256: "", url: "" };
+  if (signal.aborted) return { failed: true, sha256: "", url: "" };
+
+  const progressId = `link-preview-${nextUploadId++}`;
+  const cancel = () => {
+    void cancelMediaUpload(progressId).catch(() => undefined);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
-    const uploaded = await uploadMediaBytes([...bytes], filename);
+    const uploaded = await uploadMediaBytes([...bytes], filename, progressId);
+    if (signal.aborted) return { failed: true, sha256: "", url: "" };
     return { failed: false, sha256: uploaded.sha256, url: uploaded.url };
   } catch {
     return { failed: true, sha256: "", url: "" };
+  } finally {
+    signal.removeEventListener("abort", cancel);
   }
 }
 
 async function buildSnapshot(
   candidate: SupportedLinkPreview,
+  signal: AbortSignal,
   onMetadataReady: (tag: string[]) => void,
 ): Promise<string[] | null> {
   const metadata = await loadLinkPreviewMetadata(candidate.href);
-  if (!metadata) return null;
+  if (signal.aborted || !metadata) return null;
   const preview = resolveLinkPreview(candidate, metadata);
   if (!preview.snapshotReady) return null;
   const fallbackTag = buildLinkPreviewSnapshotTag({
@@ -108,12 +123,13 @@ async function buildSnapshot(
     faviconUrl: "",
     faviconSha256: "",
   });
-  if (!fallbackTag) return null;
+  if (!fallbackTag || signal.aborted) return null;
   onMetadataReady(fallbackTag);
   const [image, favicon] = await Promise.all([
-    uploadDataUrl(preview.imageDataUrl, "link-preview-image.png"),
-    uploadDataUrl(preview.faviconDataUrl, "link-preview-favicon.png"),
+    uploadDataUrl(preview.imageDataUrl, "link-preview-image.png", signal),
+    uploadDataUrl(preview.faviconDataUrl, "link-preview-favicon.png", signal),
   ]);
+  if (signal.aborted) return null;
   if (image.failed || favicon.failed) return fallbackTag;
   return (
     buildLinkPreviewSnapshotTag({
@@ -152,14 +168,16 @@ export function prepareLinkPreview(
   }
   if (existing) jobs.delete(candidate.href);
 
+  const controller = new AbortController();
   const job: PreviewJob = {
+    controller,
     promise: Promise.resolve(null),
     fallbackTag: null,
     resolvedTag: null,
     settled: false,
     settledAt: null,
   };
-  job.promise = buildSnapshot(candidate, (fallbackTag) => {
+  job.promise = buildSnapshot(candidate, controller.signal, (fallbackTag) => {
     job.fallbackTag = fallbackTag;
   })
     .catch(() => null)
@@ -280,6 +298,7 @@ export function resetLinkPreviewPreparations(): void {
   for (const controller of promotedSends.values()) controller.abort();
   promotedSends.clear();
   for (const task of [...tasks.values()]) task.cancel();
+  for (const job of jobs.values()) job.controller.abort();
   jobs.clear();
 }
 

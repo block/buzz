@@ -375,6 +375,8 @@ type E2eConfig = {
       } | null
     >;
     linkPreviewMetadataDelayMs?: number;
+    /** Hold metadata until the E2E release seam is invoked. */
+    deferLinkPreviewMetadata?: boolean;
     /** Simulates native cold-cache startup work before the async response. */
     linkPreviewMetadataStartBlockMs?: number;
     /** Delays link-preview snapshot media uploads so specs can exercise the
@@ -1379,6 +1381,8 @@ declare global {
     __BUZZ_E2E_RELEASE_CHANNELS_READ__?: () => number;
     /** Number of channel reads currently held by the seam. */
     __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+    /** Release all link-preview metadata commands held by the mock bridge. */
+    __BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__?: () => number;
   }
 }
 
@@ -1483,6 +1487,7 @@ type DeferredGetEvent = {
   run: () => Promise<string>;
 };
 let deferredGetEventQueue: DeferredGetEvent[] = [];
+let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
 let deferNextChannelsRead = false;
 let deferredChannelsReadResolve: (() => void) | null = null;
 
@@ -10161,6 +10166,12 @@ export function maybeInstallE2eTauriMocks() {
   mockChannelHistoryCloses.length = 0;
   relayWebsocketConnectAttemptStarts.length = 0;
   deferredSendMessageLiveEchoes.length = 0;
+  deferredLinkPreviewMetadataQueue = [];
+  window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__ = () => {
+    const queued = deferredLinkPreviewMetadataQueue.splice(0);
+    for (const release of queued) release();
+    return queued.length;
+  };
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -11345,6 +11356,11 @@ export function maybeInstallE2eTauriMocks() {
       case "fetch_join_policy":
         return activeConfig?.mock?.joinPolicy ?? null;
       case "fetch_link_preview_metadata": {
+        if (activeConfig?.mock?.deferLinkPreviewMetadata) {
+          await new Promise<void>((resolve) => {
+            deferredLinkPreviewMetadataQueue.push(resolve);
+          });
+        }
         const startBlockMs =
           activeConfig?.mock?.linkPreviewMetadataStartBlockMs ?? 0;
         if (startBlockMs > 0) {
@@ -12768,6 +12784,8 @@ export function maybeInstallE2eTauriMocks() {
           payload as { data: number[]; filename?: string | null },
           activeConfig,
         );
+      case "cancel_media_upload":
+        return null;
       case "upload_media_bytes_raw":
         return resolveMockUploadDescriptorForBytes(
           {
