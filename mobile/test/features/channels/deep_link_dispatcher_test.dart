@@ -228,7 +228,7 @@ void main() {
     expect(find.text('Join this Buzz community?'), findsOneWidget);
   });
 
-  testWidgets('drains consecutive queued invites after preparation completes', (
+  testWidgets('waits for an invite modal before preparing the next invite', (
     tester,
   ) async {
     const first = InviteDeepLink(
@@ -240,15 +240,19 @@ void main() {
       code: 'invite-two',
     );
     final pending = _QueuedPendingDeepLinkNotifier([first, second]);
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(
+          CommunityStorage(secure: FakeSecureStorage()),
+        ),
+        pendingDeepLinkProvider.overrideWith(() => pending),
+      ],
+    );
+    addTearDown(container.dispose);
 
     await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          communityStorageProvider.overrideWithValue(
-            CommunityStorage(secure: FakeSecureStorage()),
-          ),
-          pendingDeepLinkProvider.overrideWith(() => pending),
-        ],
+      UncontrolledProviderScope(
+        container: container,
         child: const MaterialApp(
           home: DeepLinkDispatcher(child: Scaffold(body: SizedBox())),
         ),
@@ -256,8 +260,18 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(pending.consumeCalls, 1);
+    expect(pending.current, same(second));
+    expect(container.read(inviteJoinProvider).invite, same(first));
+    expect(find.text('Join this Buzz community?'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
     expect(pending.consumeCalls, 2);
     expect(pending.current, isNull);
+    expect(container.read(inviteJoinProvider).invite, same(second));
+    expect(find.text('Join this Buzz community?'), findsOneWidget);
   });
 
   testWidgets('dispatches a queued channel after preparing an invite', (
@@ -292,7 +306,16 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(pending.consumeCalls, 1);
+    expect(pending.current, same(channelLink));
+    expect(find.text('Join this Buzz community?'), findsOneWidget);
+    expect(find.byType(_CapturedDestination), findsNothing);
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
     expect(pending.consumeCalls, 2);
+    expect(pending.current, isNull);
     final destination = tester.widget<_CapturedDestination>(
       find.byType(_CapturedDestination),
     );

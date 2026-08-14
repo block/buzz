@@ -129,7 +129,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         if (!navigatorContext.mounted) return;
         final status = ref.read(inviteJoinProvider).status;
         if (status == InviteJoinStatus.confirming) {
-          showInviteJoinSheet(navigatorContext, ref);
+          await showInviteJoinSheet(navigatorContext, ref);
         } else if (status == InviteJoinStatus.switchedExisting) {
           messenger?.showSnackBar(
             const SnackBar(content: Text('Switched to this community')),
