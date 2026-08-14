@@ -32,6 +32,7 @@ import { buildPlainTextProjection } from "./plainTextProjection";
 import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
 import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
+import { handleMentionBoundaryBeforeInput } from "./mentionBoundaryBeforeInput";
 import {
   CodeBlockAfterHardBreak,
   handleCodeFenceEnter,
@@ -506,6 +507,8 @@ export function useRichTextEditor({
               : createComposerLinkPasteHandler(
                   messageLinkWiring.resolveChannelName,
                 )(view, event as ClipboardEvent),
+          beforeinput: (view, event) =>
+            handleMentionBoundaryBeforeInput(view, event as InputEvent),
         },
         attributes: {
           autocapitalize: "none",

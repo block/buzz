@@ -1,8 +1,58 @@
 import { Extension } from "@tiptap/core";
-import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
+import {
+  Plugin,
+  PluginKey,
+  type EditorState,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
+
+type AgentMentionDecorationSpec = {
+  mentionKind: "agent";
+  segment: "prefix" | "label";
+};
+
+/**
+ * Return the authoritative decorated agent-mention range whose final
+ * character is immediately before `to`, or null when no exact range exists.
+ *
+ * Agent mention rendering uses two adjacent decorations so WebKit can hide
+ * the `@` prefix independently from the visible label. Both segments must be
+ * present at their exact mapped positions; plain matching text is never
+ * sufficient.
+ */
+export function findAgentMentionDecorationEndingAt(
+  state: EditorState,
+  to: number,
+): { from: number; to: number } | null {
+  const decorations = mentionHighlightKey.getState(state);
+  if (!decorations || to <= 1) return null;
+
+  const agentSegments = decorations.find(
+    0,
+    state.doc.content.size,
+    (spec: AgentMentionDecorationSpec) => spec.mentionKind === "agent",
+  );
+  const label = agentSegments.find(
+    (decoration: Decoration) =>
+      decoration.to === to && decoration.spec.segment === "label",
+  );
+  if (!label || label.from <= 1) return null;
+
+  const prefixFrom = label.from - 1;
+  const hasExactPrefix = agentSegments.some(
+    (decoration: Decoration) =>
+      decoration.from === prefixFrom &&
+      decoration.to === label.from &&
+      decoration.spec.segment === "prefix",
+  );
+  if (!hasExactPrefix) return null;
+
+  if (state.doc.textBetween(prefixFrom, label.from) !== "@") return null;
+  return { from: prefixFrom, to };
+}
 
 /**
  * TipTap extension that applies inline `mention-chip` decorations
@@ -305,16 +355,32 @@ function addMatchesForPatterns(
       const to = from + match[0].length;
       if (options?.hideMentionPrefix && match[0].startsWith("@")) {
         decorations.push(
-          Decoration.inline(from, from + 1, {
-            class: "agent-mention-at-hidden",
-            spellcheck: "false",
-          }),
+          Decoration.inline(
+            from,
+            from + 1,
+            {
+              class: "agent-mention-at-hidden",
+              spellcheck: "false",
+            },
+            {
+              mentionKind: "agent",
+              segment: "prefix",
+            } satisfies AgentMentionDecorationSpec,
+          ),
         );
         decorations.push(
-          Decoration.inline(from + 1, to, {
-            class: className,
-            spellcheck: "false",
-          }),
+          Decoration.inline(
+            from + 1,
+            to,
+            {
+              class: className,
+              spellcheck: "false",
+            },
+            {
+              mentionKind: "agent",
+              segment: "label",
+            } satisfies AgentMentionDecorationSpec,
+          ),
         );
       } else {
         decorations.push(
