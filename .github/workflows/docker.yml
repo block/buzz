@@ -137,8 +137,11 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           # Tag matrix — every build gets a full commit-SHA tag, while relay
-          # releases also get the semver family. The semver entries carry
-          # match=^relay-v(.*)$
+          # releases also get the semver family. The sha tag carries no
+          # enable= gate, deliberately: a workflow_dispatch rescue still needs
+          # a commit-pinned tag for launchpad/deploy/run.sh's guard to accept,
+          # so it publishes on every event including a rescue dispatch. The
+          # semver entries carry match=^relay-v(.*)$
           # because metadata-action does NOT strip a `relay-v` prefix on its
           # own — it only strips refs/tags/, then runs the raw ref through
           # semver.valid(), which rejects "relay-v0.3.0". The match capture

@@ -99,9 +99,15 @@ case "${lower_image}" in
   *) fail "BUZZ_IMAGE must select ghcr.io/launchpad-26/buzz; found '${image}'." ;;
 esac
 
+case "${image}" in
+  *CHANGE_ME*)
+    fail "BUZZ_IMAGE still contains the .env.example placeholder. Replace it with a digest or a full 40-character sha- tag."
+    ;;
+esac
+
 immutable=false
 if [[ "${lower_image}" =~ ^ghcr\.io/launchpad-26/buzz@sha256:[0-9a-f]{64}$ ]] ||
-  [[ "${lower_image}" =~ ^ghcr\.io/launchpad-26/buzz:sha-[0-9a-f]{40}$ ]]; then
+  [[ "${lower_image}" =~ ^ghcr\.io/launchpad-26/buzz:(debug-)?sha-[0-9a-f]{40}$ ]]; then
   immutable=true
 fi
 
