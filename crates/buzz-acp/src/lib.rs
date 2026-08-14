@@ -4275,6 +4275,19 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_teaches_repo_context_and_learning_loop() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("read its root `AGENTS.md`"));
+        assert!(prompt.contains("path-local `AGENTS.md`"));
+        assert!(
+            prompt.contains("product, architecture, and vision documents as design constraints")
+        );
+        assert!(prompt.contains("CI and live workflow evidence answer different questions"));
+        assert!(prompt.contains("record the invariant in the same session"));
+        assert!(prompt.contains("update the team's shared guidance"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("--mention <hex-or-npub>"));
