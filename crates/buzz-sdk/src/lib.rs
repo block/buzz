@@ -25,11 +25,19 @@ pub use buzz_core::kind;
 ///
 /// - Direct reply (root == parent): emits `["e", root, "", "reply"]`
 /// - Nested reply (root ≠ parent): emits `["e", root, "", "root"]` + `["e", parent, "", "reply"]`
+///
+/// `parent_author` is the signer of the parent event. When set, the reply also
+/// carries a `["p", <parent_author>]` tag — NIP-10 says a reply SHOULD name the
+/// pubkeys being replied to, and it is what makes the reply reach the parent
+/// author's `{"kinds":[9],"#p":[self]}` notification filter. `None` preserves
+/// the prior (no parent `p` tag) behavior for callers that do not resolve it.
 pub struct ThreadRef {
     /// The root event of the thread.
     pub root_event_id: nostr::EventId,
     /// The immediate parent being replied to.
     pub parent_event_id: nostr::EventId,
+    /// Signer of the parent event, p-tagged when present.
+    pub parent_author: Option<nostr::PublicKey>,
 }
 
 /// Metadata for diff/patch messages (kind 40008).

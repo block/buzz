@@ -611,12 +611,16 @@ async fn publish_setup_nudge(
         Some(ThreadRef {
             root_event_id: root_id,
             parent_event_id: root_id,
+            // Already p-tagged as the asker via the explicit mention below.
+            parent_author: None,
         })
     } else {
         // Top-level event: reply to the triggering event.
         Some(ThreadRef {
             root_event_id: triggering_event.id,
             parent_event_id: triggering_event.id,
+            // Already p-tagged as the asker via the explicit mention below.
+            parent_author: None,
         })
     };
 

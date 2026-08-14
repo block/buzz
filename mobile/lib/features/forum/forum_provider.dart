@@ -118,6 +118,7 @@ class ForumEventDelivery {
     required String channelId,
     required String parentEventId,
     required String content,
+    String? parentAuthorPubkey,
     List<String> mentionPubkeys = const [],
     List<List<String>> mediaTags = const [],
   }) async {
@@ -125,6 +126,7 @@ class ForumEventDelivery {
       kind: EventKind.forumComment,
       channelId: channelId,
       parentEventId: parentEventId,
+      parentAuthorPubkey: parentAuthorPubkey,
       content: content,
       mentionPubkeys: mentionPubkeys,
       mediaTags: mediaTags,
@@ -140,6 +142,7 @@ class ForumEventDelivery {
     required String channelId,
     required String content,
     String? parentEventId,
+    String? parentAuthorPubkey,
     required List<String> mentionPubkeys,
     required List<List<String>> mediaTags,
   }) async {
@@ -150,10 +153,17 @@ class ForumEventDelivery {
       );
     }
 
+    // NIP-10 reply `p` tag: notify the parent author. Prepended so the
+    // normalization dedupes it against an explicit @mention and drops it on a
+    // self-reply (no self-notification).
+    final mentionsWithParent = <String>[
+      if (parentAuthorPubkey != null) parentAuthorPubkey,
+      ...mentionPubkeys,
+    ];
     final selfPubkey = _relay.pubkey?.toLowerCase();
     final seen = <String>{?selfPubkey};
     final normalizedMentions = [
-      for (final pk in mentionPubkeys)
+      for (final pk in mentionsWithParent)
         if (seen.add(pk.toLowerCase())) pk,
     ];
 

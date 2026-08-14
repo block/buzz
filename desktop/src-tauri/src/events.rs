@@ -46,9 +46,14 @@ fn check_content(content: &str) -> Result<(), String> {
 }
 
 /// NIP-10 thread reference.
+///
+/// `parent_author` is the signer of the parent event. When set, a reply built
+/// from this ref also carries the parent author's `p` tag so it reaches their
+/// `{"kinds":[9],"#p":[self]}` notification filter (NIP-10 reply SHOULD).
 pub struct ThreadRef {
     pub root_event_id: EventId,
     pub parent_event_id: EventId,
+    pub parent_author: Option<nostr::PublicKey>,
 }
 
 fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
@@ -303,7 +308,19 @@ pub fn build_message_with_client_tags(
     if let Some(tr) = thread_ref {
         tags.extend(thread_tags(tr)?);
     }
-    tags.extend(mention_tags(mentions)?);
+    // Merge the reply's parent author into the mention set (NIP-10 reply `p`
+    // tag). `mention_tags` dedupes, so an explicit @mention of the same pubkey
+    // stays a single tag; a self-reply's `p` tag is scrubbed by nostr (build
+    // path does not opt into self-tagging), so it never self-notifies.
+    let parent_author_hex = thread_ref
+        .and_then(|tr| tr.parent_author)
+        .map(|pk| pk.to_hex());
+    let merged_mentions: Vec<&str> = parent_author_hex
+        .iter()
+        .map(String::as_str)
+        .chain(mentions.iter().copied())
+        .collect();
+    tags.extend(mention_tags(&merged_mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
@@ -341,7 +358,14 @@ pub fn build_forum_comment(
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     tags.extend(thread_tags(thread_ref)?);
-    tags.extend(mention_tags(mentions)?);
+    // NIP-10 reply `p` tag for the parent author, deduped against mentions.
+    let parent_author_hex = thread_ref.parent_author.map(|pk| pk.to_hex());
+    let merged_mentions: Vec<&str> = parent_author_hex
+        .iter()
+        .map(String::as_str)
+        .chain(mentions.iter().copied())
+        .collect();
+    tags.extend(mention_tags(&merged_mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))

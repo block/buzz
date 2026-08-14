@@ -186,15 +186,37 @@ fn thread_tags(thread_ref: &ThreadRef, tags: &mut Vec<Tag>) -> Result<(), SdkErr
         tags.push(tag(&["e", &root, "", "root"])?);
         tags.push(tag(&["e", &parent, "", "reply"])?);
     }
+    // NIP-10: a reply SHOULD `p`-tag the author it replies to, so the parent
+    // author's `{"kinds":[9],"#p":[self]}` notification filter matches. Deduped
+    // against explicit mentions by `mention_tags`. A self-reply's `p` tag is
+    // scrubbed by nostr's default self-tag handling, which is what we want (no
+    // self-notification).
+    if let Some(author) = thread_ref.parent_author {
+        tags.push(tag(&["p", &author.to_hex()])?);
+    }
     Ok(())
 }
 
 /// Deduplicate and cap mentions, emitting p-tags.
+///
+/// Seeds its dedup set from `p` tags already on `tags` (e.g. a reply's parent
+/// author emitted by [`thread_tags`]) so an explicit mention of that same
+/// pubkey does not produce a duplicate `p` tag.
 fn mention_tags(mentions: &[&str], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
     if mentions.len() > crate::mentions::MENTION_CAP {
         return Err(SdkError::TooManyMentions);
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<String> = tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            if s.first().map(String::as_str) == Some("p") {
+                s.get(1).map(|v| v.to_ascii_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect();
     for &hex in mentions {
         let lower = hex.to_ascii_lowercase();
         if seen.insert(lower.clone()) {
@@ -2357,6 +2379,7 @@ mod tests {
         let tr = ThreadRef {
             root_event_id: eid,
             parent_event_id: eid,
+            parent_author: None,
         };
         let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[]).unwrap());
         // Direct reply: only one e-tag with "reply" marker
@@ -2380,6 +2403,7 @@ mod tests {
         let tr = ThreadRef {
             root_event_id: root,
             parent_event_id: parent,
+            parent_author: None,
         };
         let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[]).unwrap());
         let e_tags: Vec<_> = ev
@@ -2394,6 +2418,69 @@ mod tests {
             .collect();
         assert!(markers.contains(&"root"));
         assert!(markers.contains(&"reply"));
+    }
+
+    #[test]
+    fn reply_p_tags_the_parent_author() {
+        let cid = uuid();
+        let eid = event_id();
+        let author = Keys::generate().public_key();
+        let tr = ThreadRef {
+            root_event_id: eid,
+            parent_event_id: eid,
+            parent_author: Some(author),
+        };
+        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[]).unwrap());
+        // NIP-10: the reply carries the parent author's `p` tag.
+        assert!(has_tag(&ev, "p", &author.to_hex()));
+    }
+
+    #[test]
+    fn reply_parent_author_not_duplicated_by_mention() {
+        let cid = uuid();
+        let eid = event_id();
+        let author = Keys::generate().public_key();
+        let author_hex = author.to_hex();
+        let tr = ThreadRef {
+            root_event_id: eid,
+            parent_event_id: eid,
+            parent_author: Some(author),
+        };
+        // The parent author is also typed as an explicit @mention.
+        let ev = sign(build_message(cid, "reply", Some(&tr), &[&author_hex], false, &[]).unwrap());
+        let p_for_author = ev
+            .tags
+            .iter()
+            .filter(|t| {
+                let s = t.as_slice();
+                s.first().map(|v| v.as_str()) == Some("p")
+                    && s.get(1).map(|v| v.as_str()) == Some(author_hex.as_str())
+            })
+            .count();
+        assert_eq!(
+            p_for_author, 1,
+            "parent author must appear as a single p tag"
+        );
+    }
+
+    #[test]
+    fn self_reply_drops_the_parent_p_tag() {
+        // Replying to your own message: the parent-author `p` tag equals the
+        // signer, which nostr scrubs by default — so no self-notification, and
+        // `build_message` deliberately does not opt into self-tagging here.
+        let cid = uuid();
+        let me = keys();
+        let eid = event_id();
+        let tr = ThreadRef {
+            root_event_id: eid,
+            parent_event_id: eid,
+            parent_author: Some(me.public_key()),
+        };
+        let ev = build_message(cid, "reply", Some(&tr), &[], false, &[])
+            .unwrap()
+            .sign_with_keys(&me)
+            .expect("sign");
+        assert!(!has_tag(&ev, "p", &me.public_key().to_hex()));
     }
 
     #[test]
@@ -2472,6 +2559,7 @@ mod tests {
         let tr = ThreadRef {
             root_event_id: eid,
             parent_event_id: eid,
+            parent_author: None,
         };
         let ev = sign(build_forum_comment(cid, "comment", &tr, &[], &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 45003);

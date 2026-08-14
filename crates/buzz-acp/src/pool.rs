@@ -4257,6 +4257,8 @@ pub(crate) async fn post_failure_notice(
         Some(buzz_sdk::ThreadRef {
             root_event_id: root_id,
             parent_event_id: parent_id,
+            // System dead-letter notice, not a reply to a person.
+            parent_author: None,
         })
     });
     let builder =

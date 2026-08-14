@@ -42,13 +42,16 @@ class SendMessage {
   /// For thread replies, pass [parentEventId] and optionally [rootEventId].
   /// If [rootEventId] is null it defaults to [parentEventId] (direct reply to
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
-  /// convention with `root` / `reply` markers. Pass [mediaTags] to append
-  /// relay-validated `imeta` tags and NIP-30 `emoji` tags.
+  /// convention with `root` / `reply` markers. Pass [parentAuthorPubkey] so the
+  /// reply carries the NIP-10 `p` tag that notifies the author being replied
+  /// to. Pass [mediaTags] to append relay-validated `imeta` tags and NIP-30
+  /// `emoji` tags.
   Future<void> call({
     required String channelId,
     required String content,
     String? parentEventId,
     String? rootEventId,
+    String? parentAuthorPubkey,
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
@@ -71,12 +74,21 @@ class SendMessage {
           )
         : explicitMentions;
 
+    // NIP-10 reply `p` tag: the author being replied to is notified. Prepended
+    // to the mention set so the normalization below dedupes it against an
+    // explicit @mention and drops it when it is the sender (self-reply → no
+    // self-notification).
+    final mentionsWithParent = <String>[
+      if (parentAuthorPubkey != null) parentAuthorPubkey,
+      ...resolvedMentions,
+    ];
+
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
     // the desktop's normalizeMentionPubkeys).
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
+      for (final pk in mentionsWithParent)
         if (seenMentions.add(pk.toLowerCase())) pk,
     ];
 
