@@ -2222,7 +2222,9 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
     "settings-harnesses",
     "settings-global-agent-config",
   ]) {
-    const section = agentsPage.getByTestId(testId);
+    const section = agentsPage
+      .getByTestId(testId)
+      .locator('[data-slot="settings-section-card"]');
     await expect(section).toBeVisible();
     await expect(section).toHaveCSS("border-radius", "12px");
     await expect(section).toHaveCSS("border-top-width", "1px");

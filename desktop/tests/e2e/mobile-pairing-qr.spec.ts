@@ -46,7 +46,9 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
   const section = page.getByTestId("settings-mobile");
-  const card = page.getByTestId("mobile-pairing-card");
+  const card = page
+    .getByTestId("mobile-pairing-card")
+    .locator('[data-slot="settings-section-card"]');
   const layout = card.getByTestId("mobile-pairing-layout");
   const qrContainer = page.getByTestId("mobile-pairing-qr-container");
   const steps = card.getByTestId("mobile-pairing-steps");
