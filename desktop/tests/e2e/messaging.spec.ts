@@ -531,6 +531,18 @@ test("sent link preview media uses the authenticated proxy in compact and rich c
     .poll(() => compactThumbnail.evaluate((image) => image.naturalWidth))
     .toBe(40);
 
+  // The compact thumbnail sits flush against the card shell's left edge, so the
+  // shell's smooth-corner clip carves those corners. It must therefore carry
+  // the same treatment itself, or its right corners render as a plain arc
+  // against the shell's smoothed left corners. See the invariant in
+  // `shared/ui/smoothCorners.ts`.
+  const compactThumbnailFrame = compactPreview
+    .locator("[data-link-preview-thumbnail]")
+    .first();
+  await expectCornerRadiusPx(compactPreview, 16);
+  await expectCornerRadiusPx(compactThumbnailFrame, 16);
+  await expectSmoothCorners(compactThumbnailFrame);
+
   await openSettings(page, "appearance");
   await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-rich").click();
