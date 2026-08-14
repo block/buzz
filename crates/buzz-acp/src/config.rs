@@ -409,6 +409,20 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
+    /// Publish the completed ACP assistant message as a signed Buzz DM.
+    ///
+    /// This compatibility bridge is for a tool-free Hermes chat adapter whose
+    /// ACP text would otherwise remain activity-only. It is deliberately
+    /// DM-only and requires `--no-base-prompt` so the agent is not
+    /// simultaneously told to publish with `buzz messages send`.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_PUBLISH_FINAL_RESPONSE_TO_DM",
+        default_value_t = false,
+        requires = "no_base_prompt"
+    )]
+    pub publish_final_response_to_dm: bool,
+
     /// Path to a custom base prompt file. Overrides the compiled-in default.
     /// Mutually exclusive with --no-base-prompt.
     #[arg(
@@ -564,6 +578,9 @@ pub struct Config {
     pub agent_owner: Option<String>,
     /// Disable the [Base] platform-context section prepended to every prompt.
     pub no_base_prompt: bool,
+    /// Publish a captured final ACP assistant message for successful DM turns.
+    /// Default-off; intended only for tool-free compatibility harnesses.
+    pub publish_final_response_to_dm: bool,
     /// Resolved content from `--base-prompt-file`, read and validated in
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
@@ -716,12 +733,15 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 /// `session/new`, but Hermes otherwise starts every profile-configured MCP
 /// server before it responds to `initialize` — which can exhaust the host's
 /// startup budget (see block/buzz#3355). Skip that unrelated global startup
-/// by default; an operator or persona can still opt back in by setting the
-/// variable explicitly.
+/// by default; an operator or persona can still opt back in for ordinary
+/// Hermes launches. The isolated final-response bridge forcibly retains this
+/// setting because configured MCP is outside its content-only trust boundary.
 pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
-    match normalize_agent_command_identity(command).as_str() {
-        "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
-        _ => &[],
+    let identity = normalize_agent_command_identity(command);
+    if identity.split('-').any(|segment| segment == "hermes") {
+        &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")]
+    } else {
+        &[]
     }
 }
 
@@ -891,6 +911,55 @@ impl Config {
         } else {
             None
         };
+
+        if args.publish_final_response_to_dm && !args.no_base_prompt {
+            return Err(ConfigError::ConfigFile(
+                "publish_final_response_to_dm requires no_base_prompt to prevent duplicate sends"
+                    .into(),
+            ));
+        }
+        if args.publish_final_response_to_dm && !args.mcp_command.trim().is_empty() {
+            return Err(ConfigError::ConfigFile(
+                "publish_final_response_to_dm requires an empty mcp_command so no host-injected MCP tools can duplicate or redirect the reply"
+                    .into(),
+            ));
+        }
+        if args.publish_final_response_to_dm
+            && !default_agent_env(&args.agent_command)
+                .iter()
+                .any(|(key, value)| *key == "HERMES_ACP_SKIP_CONFIGURED_MCP" && *value == "1")
+        {
+            return Err(ConfigError::ConfigFile(
+                "publish_final_response_to_dm currently requires a Hermes adapter command so configured MCP startup can be forcibly disabled"
+                    .into(),
+            ));
+        }
+        if args.publish_final_response_to_dm && args.no_ignore_self {
+            return Err(ConfigError::ConfigFile(
+                "publish_final_response_to_dm requires ignore_self so published replies cannot recursively trigger the agent"
+                    .into(),
+            ));
+        }
+        if args.publish_final_response_to_dm && args.agents != 1 {
+            return Err(ConfigError::ConfigFile(
+                "publish_final_response_to_dm currently requires agents=1 so an unconfirmed signed reply remains bound to its transport outbox"
+                    .into(),
+            ));
+        }
+        if args.publish_final_response_to_dm && !matches!(args.dedup, DedupMode::Queue) {
+            return Err(ConfigError::ConfigFile(
+                "publish_final_response_to_dm requires dedup=queue so unconfirmed signed replies remain retryable"
+                    .into(),
+            ));
+        }
+        if args.publish_final_response_to_dm
+            && !matches!(args.multiple_event_handling, MultipleEventHandling::Queue)
+        {
+            return Err(ConfigError::ConfigFile(
+                "publish_final_response_to_dm requires multiple_event_handling=queue so trusted DM routing cannot change through native steering"
+                    .into(),
+            ));
+        }
 
         if matches!(args.subscribe, SubscribeMode::Config) {
             if args.kinds.is_some() {
@@ -1109,6 +1178,7 @@ impl Config {
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
+            publish_final_response_to_dm: args.publish_final_response_to_dm,
             base_prompt_content,
         };
 
@@ -1131,7 +1201,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} publish_final_response_to_dm={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1150,6 +1220,7 @@ impl Config {
             self.presence_enabled,
             self.typing_enabled,
             self.memory_enabled,
+            self.publish_final_response_to_dm,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
             respond_to_detail,
@@ -1480,6 +1551,7 @@ mod tests {
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
+            publish_final_response_to_dm: false,
             base_prompt_content: None,
         }
     }
@@ -1649,6 +1721,7 @@ mod tests {
             "/opt/hermes/bin/hermes-acp",
             r"C:\Users\test\bin\HERMES_ACP.EXE",
             r"C:\Users\test\AppData\Roaming\npm\hermes-acp.cmd",
+            "/Users/test/.local/bin/run-buzz-hermes-venice.sh",
         ] {
             assert_eq!(
                 default_agent_env(command),
@@ -2741,6 +2814,101 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn final_response_dm_bridge_defaults_off() {
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("default args should parse");
+        assert!(!args.publish_final_response_to_dm);
+    }
+
+    #[test]
+    fn final_response_dm_bridge_requires_explicit_safe_profile() {
+        let missing_no_base = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--publish-final-response-to-dm",
+        ]);
+        assert!(
+            missing_no_base.is_err(),
+            "clap must require --no-base-prompt"
+        );
+
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "hermes",
+            "--publish-final-response-to-dm",
+            "--no-base-prompt",
+            "--multiple-event-handling",
+            "queue",
+        ])
+        .expect("safe bridge profile should parse");
+        let config = Config::from_args(args).expect("safe bridge profile should validate");
+        assert!(config.publish_final_response_to_dm);
+        assert!(config.ignore_self);
+        assert!(config.mcp_command.is_empty());
+        assert!(matches!(config.dedup_mode, DedupMode::Queue));
+        assert!(matches!(
+            config.multiple_event_handling,
+            MultipleEventHandling::Queue
+        ));
+    }
+
+    #[test]
+    fn final_response_dm_bridge_rejects_unsafe_delivery_modes() {
+        let unsafe_cases = [
+            vec!["--mcp-command", "buzz-dev-mcp"],
+            vec!["--no-ignore-self"],
+            vec!["--agents", "2"],
+            vec!["--dedup", "drop"],
+            vec!["--multiple-event-handling", "steer"],
+        ];
+        for unsafe_case in unsafe_cases {
+            let mut argv = vec![
+                "buzz-acp",
+                "--private-key",
+                TEST_PRIVATE_KEY,
+                "--agent-command",
+                "hermes",
+                "--publish-final-response-to-dm",
+                "--no-base-prompt",
+                "--multiple-event-handling",
+                "queue",
+            ];
+            argv.extend(unsafe_case.iter().copied());
+            let parsed = CliArgs::try_parse_from(argv);
+            let rejected = parsed.is_err()
+                || parsed
+                    .ok()
+                    .is_some_and(|args| Config::from_args(args).is_err());
+            assert!(
+                rejected,
+                "unsafe bridge args were accepted: {unsafe_case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn final_response_dm_bridge_rejects_non_hermes_adapter() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "goose",
+            "--publish-final-response-to-dm",
+            "--no-base-prompt",
+            "--multiple-event-handling",
+            "queue",
+        ])
+        .expect("CLI shape parses before runtime safety validation");
+        let error = Config::from_args(args).expect_err("Goose bridge must be rejected");
+        assert!(error.to_string().contains("requires a Hermes adapter"));
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {

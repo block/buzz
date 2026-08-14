@@ -19,6 +19,25 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+/// Maximum assistant text retained for an opt-in host-published chat response.
+/// Matches the Buzz kind-9 message content limit.
+const MAX_TURN_AGENT_MESSAGE_SIZE: usize = 64 * 1024;
+
+/// Append a UTF-8-safe prefix of `chunk` without exceeding `limit` bytes.
+/// Returns true only when the complete chunk fit.
+fn append_up_to_byte_limit(output: &mut String, chunk: &str, limit: usize) -> bool {
+    let remaining = limit.saturating_sub(output.len());
+    if remaining == 0 {
+        return chunk.is_empty();
+    }
+
+    let mut end = chunk.len().min(remaining);
+    while end > 0 && !chunk.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&chunk[..end]);
+    end == chunk.len()
+}
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -103,6 +122,11 @@ pub enum AcpError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
+
+    /// The ACP turn completed, but its host-owned Buzz message has not yet
+    /// been confirmed by the relay. The agent stdio pipe remains healthy.
+    #[error("Final response publication error: {0}")]
+    Publication(String),
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
@@ -211,6 +235,21 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Assistant message chunks observed during the current prompt. ACP text is
+    /// normally activity-only; the opt-in DM bridge consumes this after a clean
+    /// `end_turn` and publishes it with the harness-owned relay identity.
+    turn_agent_message: String,
+    /// Session whose in-flight prompt owns `turn_agent_message`. Updates for
+    /// any other session are ignored so a late notification cannot be routed
+    /// into the current DM response.
+    turn_agent_message_session_id: Option<String>,
+    /// True when assistant text exceeded the kind-9 content limit. A partial
+    /// answer must never be published as though the turn completed cleanly.
+    turn_agent_message_truncated: bool,
+    /// Actual stop reason parsed for the most recently completed prompt. The
+    /// control-signal completion race consumes this instead of synthesizing an
+    /// `end_turn` that could accidentally publish a refusal or partial answer.
+    completed_prompt_stop_reason: Option<StopReason>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -454,6 +493,27 @@ impl AcpClient {
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
+        Self::spawn_with_relay_credential_isolation(
+            command,
+            args,
+            extra_env,
+            has_generated_codex_config,
+            false,
+        )
+        .await
+    }
+
+    /// Spawn an ACP adapter, optionally removing every Buzz relay credential
+    /// from its inherited environment. The isolated mode is used by the
+    /// host-published DM bridge: the parent retains signing authority while the
+    /// adapter receives only ACP prompt/result traffic and provider settings.
+    pub async fn spawn_with_relay_credential_isolation(
+        command: &str,
+        args: &[String],
+        extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
+        isolate_relay_credentials: bool,
+    ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
         let mut cmd = tokio::process::Command::new(command);
@@ -465,6 +525,38 @@ impl AcpClient {
             // Ensure the child is killed when the AcpClient is dropped (best-effort).
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
+
+        const RELAY_CREDENTIAL_ENV: [&str; 7] = [
+            "BUZZ_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_RELAY_URL",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_ACP_API_TOKEN",
+        ];
+        if isolate_relay_credentials {
+            if let Some((key, _)) = extra_env
+                .iter()
+                .find(|(key, _)| RELAY_CREDENTIAL_ENV.contains(&key.as_str()))
+            {
+                return Err(AcpError::Protocol(format!(
+                    "isolated ACP adapter extra_env must not contain {key}"
+                )));
+            }
+            for key in RELAY_CREDENTIAL_ENV {
+                cmd.env_remove(key);
+            }
+
+            if let Some((_, value)) = extra_env
+                .iter()
+                .find(|(key, value)| key == "HERMES_ACP_SKIP_CONFIGURED_MCP" && *value != "1")
+            {
+                return Err(AcpError::Protocol(format!(
+                    "isolated Hermes ACP adapter requires HERMES_ACP_SKIP_CONFIGURED_MCP=1, got {value:?}"
+                )));
+            }
+        }
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
@@ -513,6 +605,17 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // The publication bridge keeps relay signing in this trusted parent.
+        // For Hermes, also force profile-configured MCP servers off even when
+        // the parent environment attempted to override the normal default.
+        if isolate_relay_credentials
+            && crate::config::default_agent_env(command)
+                .iter()
+                .any(|(key, _)| *key == "HERMES_ACP_SKIP_CONFIGURED_MCP")
+        {
+            cmd.env("HERMES_ACP_SKIP_CONFIGURED_MCP", "1");
+        }
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -550,6 +653,10 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_agent_message: String::new(),
+            turn_agent_message_session_id: None,
+            turn_agent_message_truncated: false,
+            completed_prompt_stop_reason: None,
         })
     }
 
@@ -768,6 +875,12 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        // A client may reuse one ACP session across many turns. Never let text
+        // from a cancelled, failed, or prior prompt leak into the next turn.
+        self.turn_agent_message.clear();
+        self.turn_agent_message_session_id = Some(session_id.to_owned());
+        self.turn_agent_message_truncated = false;
+        self.completed_prompt_stop_reason = None;
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -792,6 +905,7 @@ impl AcpClient {
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
             self.current_hard_deadline = None;
+            self.turn_agent_message_session_id = None;
             return Err(e);
         }
 
@@ -811,6 +925,7 @@ impl AcpClient {
             Ok(_) => {
                 self.last_prompt_id = None;
                 self.current_hard_deadline = None;
+                self.turn_agent_message_session_id = None;
             }
             Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout { .. }) => {
                 // Leave last_prompt_id and current_hard_deadline set —
@@ -819,9 +934,12 @@ impl AcpClient {
             Err(_) => {
                 self.last_prompt_id = None;
                 self.current_hard_deadline = None;
+                self.turn_agent_message_session_id = None;
             }
         }
-        self.parse_stop_reason(&result?)
+        let stop_reason = self.parse_stop_reason(&result?)?;
+        self.completed_prompt_stop_reason = Some(stop_reason.clone());
+        Ok(stop_reason)
     }
 
     /// Send a `session/cancel` **notification** (no `id` field, no response expected).
@@ -879,6 +997,24 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Consume assistant text captured during the most recent prompt.
+    ///
+    /// The default Buzz behavior remains unchanged: ACP text is activity, not
+    /// a channel message. The private DM bridge is the sole production caller.
+    pub fn take_turn_agent_message(&mut self) -> Result<Option<String>, &'static str> {
+        let captured = std::mem::take(&mut self.turn_agent_message);
+        if std::mem::take(&mut self.turn_agent_message_truncated) {
+            return Err("ACP final assistant message exceeded the 64 KiB Buzz limit");
+        }
+        Ok((!captured.trim().is_empty()).then_some(captured))
+    }
+
+    /// Consume the exact stop reason recorded by the most recently completed
+    /// `session/prompt`, if any.
+    pub fn take_completed_prompt_stop_reason(&mut self) -> Option<StopReason> {
+        self.completed_prompt_stop_reason.take()
     }
 
     /// Notify the usage tracker that buzz-acp just spawned a new session.
@@ -1746,10 +1882,34 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    let session_id = msg["params"]["sessionId"].as_str();
+                    if self
+                        .turn_agent_message_session_id
+                        .as_deref()
+                        .is_some_and(|expected| session_id == Some(expected))
+                        && !append_up_to_byte_limit(
+                            &mut self.turn_agent_message,
+                            text,
+                            MAX_TURN_AGENT_MESSAGE_SIZE,
+                        )
+                    {
+                        self.turn_agent_message_truncated = true;
+                    }
                 }
                 false
             }
             "tool_call" => {
+                if self
+                    .turn_agent_message_session_id
+                    .as_deref()
+                    .is_some_and(|expected| msg["params"]["sessionId"].as_str() == Some(expected))
+                {
+                    // ACP adapters may stream a pre-tool status sentence as an
+                    // agent message. A visible reply must contain only the
+                    // terminal answer produced after the last tool call.
+                    self.turn_agent_message.clear();
+                    self.turn_agent_message_truncated = false;
+                }
                 let title = update
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -2907,6 +3067,7 @@ mod tests {
         file_name: &str,
         var: &str,
         extra_env: &[(String, String)],
+        isolate_relay_credentials: bool,
     ) -> String {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2922,11 +3083,12 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).expect("chmod probe");
 
-        let mut client = AcpClient::spawn(
+        let mut client = AcpClient::spawn_with_relay_credential_isolation(
             path.to_str().expect("probe path is UTF-8"),
             &[],
             extra_env,
             false,
+            isolate_relay_credentials,
         )
         .await
         .expect("spawn env probe script");
@@ -2955,19 +3117,51 @@ mod tests {
         }
 
         assert_eq!(
-            spawn_named_and_read_child_env("hermes-acp", VAR, &[]).await,
+            spawn_named_and_read_child_env("hermes-acp", VAR, &[], false).await,
             "1",
             "Hermes spawns must default {VAR}=1"
         );
         assert_eq!(
-            spawn_named_and_read_child_env("hermes-acp", VAR, &[(VAR.into(), "0".into())]).await,
+            spawn_named_and_read_child_env("hermes-acp", VAR, &[(VAR.into(), "0".into())], false,)
+                .await,
             "0",
             "an explicit extra_env entry must override the runtime default"
         );
         assert_eq!(
-            spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
+            spawn_named_and_read_child_env("other-agent", VAR, &[], false).await,
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn isolated_hermes_spawn_forces_configured_mcp_off() {
+        const VAR: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
+        const INNER_MARKER: &str = "BUZZ_ACP_HERMES_ISOLATION_INNER_TEST";
+        if std::env::var_os(INNER_MARKER).is_none() {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("resolve current test executable"),
+            )
+            .arg("isolated_hermes_spawn_forces_configured_mcp_off")
+            .arg("--nocapture")
+            .env(INNER_MARKER, "1")
+            .env(VAR, "0")
+            .output()
+            .expect("run nested Hermes isolation test");
+            assert!(
+                output.status.success(),
+                "nested Hermes isolation test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        assert_eq!(
+            spawn_named_and_read_child_env("run-buzz-hermes-venice.sh", VAR, &[], true,).await,
+            "1",
+            "isolated Hermes mode must override an inherited opt-out"
         );
     }
 
@@ -3566,6 +3760,307 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    fn agent_message_chunk_update(session_id: Option<&str>, text: &str) -> serde_json::Value {
+        let mut params = serde_json::json!({
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "text": text },
+            },
+        });
+        if let Some(session_id) = session_id {
+            params["sessionId"] = serde_json::json!(session_id);
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": params,
+        })
+    }
+
+    #[tokio::test]
+    async fn matching_hermes_and_goose_message_chunks_are_captured_with_whitespace() {
+        let mut client = spawn_inert_client().await;
+        client.turn_agent_message_session_id = Some("session-match".into());
+
+        // Hermes emits the minimal ACP shape: no messageId, content type, or
+        // adapter metadata is required for a text chunk.
+        let hermes = agent_message_chunk_update(Some("session-match"), "  Hermes\n");
+        assert!(!client.handle_session_update(&hermes));
+
+        // Goose adds message identity, a typed content block, and extension
+        // metadata. Those fields must not change capture semantics.
+        let goose = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-match",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "messageId": "message-goose-1",
+                    "content": { "type": "text", "text": "Goose  " },
+                    "_meta": { "goose": { "role": "assistant" } },
+                },
+            },
+        });
+        assert!(!client.handle_session_update(&goose));
+
+        assert_eq!(
+            client.take_turn_agent_message(),
+            Ok(Some("  Hermes\nGoose  ".into())),
+            "leading, embedded, and trailing whitespace must be preserved"
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn message_chunks_for_wrong_or_missing_sessions_are_ignored() {
+        let mut client = spawn_inert_client().await;
+        client.turn_agent_message_session_id = Some("session-match".into());
+
+        let wrong = agent_message_chunk_update(Some("session-other"), "wrong");
+        let missing = agent_message_chunk_update(None, "missing");
+        client.handle_session_update(&wrong);
+        client.handle_session_update(&missing);
+
+        client.turn_agent_message_session_id = None;
+        let no_active_turn = agent_message_chunk_update(Some("session-match"), "inactive");
+        client.handle_session_update(&no_active_turn);
+
+        assert_eq!(client.take_turn_agent_message(), Ok(None));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn matching_tool_call_clears_pre_tool_text_and_truncation_state() {
+        let mut client = spawn_inert_client().await;
+        client.turn_agent_message_session_id = Some("session-match".into());
+
+        let oversized = "x".repeat(MAX_TURN_AGENT_MESSAGE_SIZE + 1);
+        client.handle_session_update(&agent_message_chunk_update(
+            Some("session-match"),
+            &oversized,
+        ));
+        assert!(!client.turn_agent_message.is_empty());
+        assert!(client.turn_agent_message_truncated);
+
+        let tool_call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-match",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "title": "read file",
+                    "kind": "read",
+                },
+            },
+        });
+        assert!(client.handle_session_update(&tool_call));
+        assert!(client.turn_agent_message.is_empty());
+        assert!(!client.turn_agent_message_truncated);
+
+        client.handle_session_update(&agent_message_chunk_update(
+            Some("session-match"),
+            "terminal answer",
+        ));
+        assert_eq!(
+            client.take_turn_agent_message(),
+            Ok(Some("terminal answer".into()))
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn utf8_overflow_at_64_kib_returns_explicit_capture_error() {
+        let mut client = spawn_inert_client().await;
+        client.turn_agent_message_session_id = Some("session-match".into());
+
+        // The byte limit lands between the two bytes of `é`. Capture must
+        // retain a valid UTF-8 prefix, mark truncation, and refuse publication.
+        let chunk = format!("{}é", "a".repeat(MAX_TURN_AGENT_MESSAGE_SIZE - 1));
+        client.handle_session_update(&agent_message_chunk_update(Some("session-match"), &chunk));
+        assert_eq!(
+            client.turn_agent_message.len(),
+            MAX_TURN_AGENT_MESSAGE_SIZE - 1
+        );
+        assert!(client
+            .turn_agent_message
+            .is_char_boundary(client.turn_agent_message.len()));
+        assert_eq!(
+            client.take_turn_agent_message(),
+            Err("ACP final assistant message exceeded the 64 KiB Buzz limit")
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn consecutive_prompt_turns_do_not_leak_captured_text() {
+        let script = r#"
+            read -r _first_prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-reused","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"first answer"}}}}'
+            echo '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+            read -r _second_prompt
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-reused","update":{"sessionUpdate":"agent_message_chunk","messageId":"m2","content":{"type":"text","text":"second answer"}}}}'
+            echo '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+            sleep 10
+        "#;
+        let mut client = spawn_script(script).await;
+        let idle = std::time::Duration::from_secs(2);
+        let max = std::time::Duration::from_secs(5);
+
+        assert_eq!(
+            client
+                .session_prompt_with_idle_timeout("session-reused", "first", idle, max)
+                .await
+                .expect("first prompt completes"),
+            StopReason::EndTurn
+        );
+        assert_eq!(client.turn_agent_message, "first answer");
+
+        // Deliberately do not consume the first answer. Starting the second
+        // prompt must clear it before any second-turn chunk arrives.
+        assert_eq!(
+            client
+                .session_prompt_with_idle_timeout("session-reused", "second", idle, max)
+                .await
+                .expect("second prompt completes"),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            client.take_turn_agent_message(),
+            Ok(Some("second answer".into()))
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn completed_stop_reason_is_retained_exactly_once_for_end_turn_and_refusal() {
+        let script = r#"
+            read -r _first_prompt
+            echo '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+            read -r _second_prompt
+            echo '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"refusal"}}'
+            sleep 10
+        "#;
+        let mut client = spawn_script(script).await;
+        let idle = std::time::Duration::from_secs(2);
+        let max = std::time::Duration::from_secs(5);
+
+        assert_eq!(
+            client
+                .session_prompt_with_idle_timeout("session", "first", idle, max)
+                .await
+                .expect("end-turn prompt completes"),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            client.take_completed_prompt_stop_reason(),
+            Some(StopReason::EndTurn)
+        );
+        assert_eq!(client.take_completed_prompt_stop_reason(), None);
+
+        assert_eq!(
+            client
+                .session_prompt_with_idle_timeout("session", "second", idle, max)
+                .await
+                .expect("refused prompt completes"),
+            StopReason::Refusal
+        );
+        assert_eq!(
+            client.take_completed_prompt_stop_reason(),
+            Some(StopReason::Refusal)
+        );
+        assert_eq!(client.take_completed_prompt_stop_reason(), None);
+        client.shutdown().await;
+    }
+
+    /// Run the isolation assertion in a nested copy of this test process. That
+    /// gives the spawned adapter real inherited credentials without racing the
+    /// primary test binary by mutating its process-global environment.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn isolated_child_omits_relay_credentials_but_keeps_provider_env() {
+        const INNER_MARKER: &str = "BUZZ_ACP_CREDENTIAL_ISOLATION_INNER_TEST";
+        if std::env::var_os(INNER_MARKER).is_none() {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("resolve current test executable"),
+            )
+            .arg("isolated_child_omits_relay_credentials_but_keeps_provider_env")
+            .arg("--nocapture")
+            .env(INNER_MARKER, "1")
+            .env("BUZZ_PRIVATE_KEY", "inherited-private-key")
+            .env("NOSTR_PRIVATE_KEY", "inherited-nostr-private-key")
+            .env("BUZZ_AUTH_TAG", "inherited-auth-tag")
+            .env("BUZZ_RELAY_URL", "wss://inherited.invalid")
+            .env_remove("GOOSE_PROVIDER")
+            .output()
+            .expect("run nested credential-isolation test");
+            assert!(
+                output.status.success(),
+                "nested credential-isolation test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // `${VAR+x}` reveals presence only, so a regression never prints an
+        // inherited credential value into test output.
+        let script = r#"printf '%s|%s|%s|%s|%s\n' "${BUZZ_PRIVATE_KEY+x}" "${NOSTR_PRIVATE_KEY+x}" "${BUZZ_AUTH_TAG+x}" "${BUZZ_RELAY_URL+x}" "${GOOSE_PROVIDER-unset}"; sleep 10"#;
+        let extra_env = [("GOOSE_PROVIDER".into(), "anthropic".into())];
+        let mut client = AcpClient::spawn_with_relay_credential_isolation(
+            "bash",
+            &["-c".into(), script.into()],
+            &extra_env,
+            false,
+            true,
+        )
+        .await
+        .expect("spawn isolated environment probe");
+        let observed = client
+            .reader
+            .next()
+            .await
+            .expect("environment probe writes one line")
+            .expect("environment probe line is readable");
+        assert_eq!(observed, "||||anthropic");
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn isolated_spawn_rejects_sensitive_extra_env() {
+        for key in [
+            "BUZZ_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_RELAY_URL",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_ACP_API_TOKEN",
+        ] {
+            let extra_env = [(key.to_string(), "must-not-reach-child".into())];
+            match AcpClient::spawn_with_relay_credential_isolation(
+                "cat",
+                &[],
+                &extra_env,
+                false,
+                true,
+            )
+            .await
+            {
+                Err(AcpError::Protocol(message)) => assert!(
+                    message.contains(key),
+                    "rejection should identify forbidden key {key}: {message}"
+                ),
+                Err(other) => panic!("expected protocol rejection for {key}, got {other}"),
+                Ok(mut client) => {
+                    client.shutdown().await;
+                    panic!("isolated spawn accepted forbidden key {key}");
+                }
+            }
+        }
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

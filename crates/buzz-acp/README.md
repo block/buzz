@@ -1,6 +1,6 @@
 # buzz-acp
 
-ACP harness that connects AI agents to Buzz. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Buzz CLI.
+ACP harness that connects AI agents to Buzz. The harness listens for @mentions on the relay, prompts your agent, and normally lets the agent reply using the Buzz CLI. A narrow opt-in bridge is also available for tool-free ACP chat agents whose final text would otherwise remain activity-only.
 
 ```
 Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
@@ -111,6 +111,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
+| `BUZZ_ACP_PUBLISH_FINAL_RESPONSE_TO_DM` | no | `false` | Publish the final ACP assistant text as one signed DM after a successful `end_turn`. See **Tool-free DM response bridge** below. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
@@ -118,6 +119,37 @@ All configuration is via environment variables (or CLI flags — every env var h
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
+
+### Tool-free DM response bridge
+
+ACP `agent_message_chunk` notifications are activity/transcript output; by default they are not Buzz chat events. Agents with the normal base prompt publish deliberately through `buzz messages send`. For a chat-only Hermes adapter that intentionally has no Buzz tool, enable the trusted parent-side bridge:
+
+```bash
+export BUZZ_ACP_PUBLISH_FINAL_RESPONSE_TO_DM=true
+export BUZZ_ACP_NO_BASE_PROMPT=true
+export BUZZ_ACP_MCP_COMMAND=""
+export BUZZ_ACP_AGENTS=1
+export BUZZ_ACP_DEDUP=queue
+export BUZZ_ACP_MULTIPLE_EVENT_HANDLING=queue
+```
+
+The bridge is default-off and deliberately restricted:
+
+- the configured agent command must identify a Hermes adapter so configured MCP startup can be forcibly disabled;
+- only a relay-verified DM is eligible; unresolved routes fail closed;
+- only text captured from the matching ACP session and an actual `end_turn` is published;
+- the channel, thread ancestry, author key, and signature come from trusted harness state, never model output;
+- the exact signed event is retained across an ambiguous relay response and retried before another model prompt;
+- Buzz relay credentials are removed from the ACP child environment; Hermes also has configured MCP startup forced off;
+- `--no-base-prompt`, an empty MCP command, one agent, self-event filtering, `dedup=queue`, and `multiple-event-handling=queue` are required to prevent duplicate, recursive, or redirected sends.
+
+This mode is for one-answer DM adapters. It does not auto-publish heartbeats, channel/stream turns, partial output, refusals, cancellations, or token-limit stops.
+
+Operational limits:
+
+- Run only one `buzz-acp` publisher for a given agent key. Relay reconciliation is idempotent for one process, but two concurrent processes can race before either response exists.
+- Successfully published replies carry relay-backed correlation markers, preventing a replayed trigger from invoking Hermes again. The pending signed-event outbox itself is process-local; a crash after inference but before any event reaches the relay is recoverable only while the inbound trigger remains in the relay subscription replay window.
+- A Buzz DM can contain multiple members. Kind-9 message content is protected by channel access control but is not NIP-44 end-to-end encrypted from the relay/database.
 
 ### Parallel Agents & Heartbeat
 
@@ -254,7 +286,7 @@ Forum event kinds:
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
 3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
-5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
+5. **Agent response** — Normally the agent uses the Buzz CLI (`messages send`, `messages get`, etc.) to interact with Buzz. In the opt-in tool-free DM mode, the harness publishes the completed ACP assistant text itself.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
@@ -328,6 +360,8 @@ The harness works with any agent that implements the [ACP spec](https://agentcli
 - Accept `session/new` with `mcpServers` and return a `sessionId`
 - Accept `session/prompt` with a text message and stream `session/update` notifications
 - Return a `stopReason` (`end_turn`, `cancelled`, `max_tokens`, etc.)
+
+ACP assistant chunks alone appear in agent activity, not the Buzz chat timeline. An adapter must either use the normal Buzz send workflow or be launched with the restricted tool-free DM bridge described above.
 
 Set `BUZZ_ACP_AGENT_COMMAND` and `BUZZ_ACP_AGENT_ARGS` to point at your agent binary.
 

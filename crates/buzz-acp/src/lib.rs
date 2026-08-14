@@ -1843,6 +1843,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        publish_final_response_to_dm: config.publish_final_response_to_dm,
     });
 
     if !config.memory_enabled {
@@ -2059,10 +2060,20 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let isolate_relay_credentials = config.publish_final_response_to_dm;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        isolate_relay_credentials,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -2291,7 +2302,7 @@ async fn tokio_main() -> Result<()> {
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
                                     let invalidated = if pool_ready {
-                                        pool.invalidate_channel_sessions(ch)
+                                        pool.forget_channel_on_removal(ch)
                                     } else {
                                         0
                                     };
@@ -3256,7 +3267,10 @@ fn dispatch_pending(
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
-        let batch = match queue.flush_next() {
+        let reserved_channel = pool.reserved_final_response_channel();
+        let preferred_batch =
+            reserved_channel.and_then(|channel_id| queue.flush_channel(channel_id));
+        let batch = match preferred_batch.or_else(|| queue.flush_next()) {
             Some(b) => b,
             None => break,
         };
@@ -3513,6 +3527,22 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(acp::AcpError::Publication(_))
+            ) {
+                // Publication diagnostics may include relay response bodies or
+                // event IDs. Keep those in local logs/observer telemetry; never
+                // interpolate them into a group-DM-visible failure notice.
+                if let Some(dead) = queue.requeue_publication(batch) {
+                    result
+                        .agent
+                        .state
+                        .drop_pending_final_response(&dead.channel_id);
+                    let content = "⚠️ I generated a reply but couldn't deliver it to this chat after repeated attempts. Please re-send if it's still needed."
+                        .to_string();
+                    spawn_failure_notice(rest_client, &dead, content);
+                }
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -3562,7 +3592,7 @@ fn handle_prompt_result(
     // agent was checked out. This covers the gap where invalidate_channel_sessions
     // only touches idle agents.
     for ch in removed_channels {
-        result.agent.state.invalidate_channel(ch);
+        result.agent.state.forget_channel(ch);
     }
 
     let outcome_label = match &result.outcome {
@@ -3873,12 +3903,22 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let isolate_relay_credentials = config.publish_final_response_to_dm;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            isolate_relay_credentials,
+            i,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -4068,6 +4108,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let isolate_relay_credentials = config.publish_final_response_to_dm;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -4079,7 +4120,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            isolate_relay_credentials,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -4123,6 +4173,7 @@ struct PoolStartup {
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
+    isolate_relay_credentials: bool,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
 }
@@ -4135,6 +4186,7 @@ impl PoolStartup {
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
+            isolate_relay_credentials: config.publish_final_response_to_dm,
             model: config.model.clone(),
             observer,
         }
@@ -4149,11 +4201,12 @@ async fn initialize_agent_pool(
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
-        let spawn_result = AcpClient::spawn(
+        let spawn_result = AcpClient::spawn_with_relay_credential_isolation(
             &startup.command,
             &startup.args,
             &startup.extra_env,
             startup.has_generated_codex_config,
+            startup.isolate_relay_credentials,
         )
         .await;
         match spawn_result {
@@ -4254,12 +4307,19 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    isolate_relay_credentials: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    let mut acp = AcpClient::spawn_with_relay_credential_isolation(
+        command,
+        args,
+        extra_env,
+        has_generated_codex_config,
+        isolate_relay_credentials,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
@@ -6251,6 +6311,7 @@ mod build_mcp_servers_tests {
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
+            publish_final_response_to_dm: false,
             base_prompt_content: None,
         }
     }
@@ -6473,6 +6534,7 @@ mod error_outcome_emission_tests {
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
+            publish_final_response_to_dm: false,
             base_prompt_content: None,
         }
     }

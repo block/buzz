@@ -100,6 +100,18 @@ pub struct ChannelDeliveryState {
     pub delivered_event_ids: HashSet<String>,
 }
 
+/// Signed DM response waiting for relay confirmation. Keeping the exact event
+/// in agent state lets queue retries resubmit the same event ID without
+/// invoking the model or re-signing a potentially different answer.
+#[derive(Clone)]
+struct PendingFinalResponse {
+    trigger_event_id: nostr::EventId,
+    event: nostr::Event,
+    standing_context_sent: bool,
+    batch_event_ids: HashSet<String>,
+    delivered_event_ids: HashSet<String>,
+}
+
 /// Per-channel session IDs, turn counters, and delivery state.
 ///
 /// Separated from `OwnedAgent` so the state machine is testable without
@@ -129,6 +141,10 @@ pub struct SessionState {
     /// Per-channel successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
     pub deliveries: HashMap<Uuid, ChannelDeliveryState>,
+    /// Channel-scoped final responses whose signed relay event is not yet
+    /// confirmed. This is transport state, not ACP session state, so ordinary
+    /// session invalidation deliberately leaves it intact.
+    pending_final_responses: HashMap<Uuid, PendingFinalResponse>,
 }
 
 impl SessionState {
@@ -166,6 +182,22 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.deliveries.clear();
+    }
+
+    /// Forget all state that may cause work to resume for a channel after a
+    /// membership removal. Ordinary session rotation intentionally preserves
+    /// the transport outbox; membership removal must drop it.
+    pub(crate) fn forget_channel(&mut self, channel_id: &Uuid) -> bool {
+        let invalidated = self.invalidate_channel(channel_id);
+        self.drop_pending_final_response(channel_id);
+        invalidated
+    }
+
+    /// Discard an unconfirmed signed response when its retry budget or channel
+    /// membership is gone. This prevents later unrelated traffic from
+    /// publishing a stale reply after the original batch was dead-lettered.
+    pub(crate) fn drop_pending_final_response(&mut self, channel_id: &Uuid) -> bool {
+        self.pending_final_responses.remove(channel_id).is_some()
     }
 
     pub(crate) fn mark_channel_delivery_success(
@@ -605,6 +637,9 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Opt-in transport bridge for tool-free ACP chat agents. Successful DM
+    /// turns publish the captured final assistant text with trusted routing.
+    pub publish_final_response_to_dm: bool,
 }
 
 impl AgentPool {
@@ -627,16 +662,32 @@ impl AgentPool {
 
     /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
     ///
-    /// Pass 1: prefer an agent that already has a session for `channel_id`.
-    /// Pass 2: any idle agent.
+    /// Pass 1: prefer the agent retaining an unconfirmed signed response for
+    /// `channel_id` so a queue retry cannot invoke a second model.
+    /// Pass 2: prefer an agent that already has a session for `channel_id`.
+    /// Pass 3: any idle agent that is not reserving an unconfirmed signed
+    /// response. A reserved agent may only be claimed by that response's
+    /// channel, so unrelated work cannot destroy or strand the outbox.
     ///
     /// Returns `None` if all agents are checked out.
     pub fn try_claim(&mut self, channel_id: Option<Uuid>) -> Option<OwnedAgent> {
-        // Pass 1: prefer agent with existing session for this channel.
+        // Pass 1: transport outbox affinity is stronger than session affinity.
         if let Some(cid) = channel_id {
+            let pending_idx = self.agents.iter().position(|slot| {
+                slot.as_ref()
+                    .is_some_and(|agent| agent.state.pending_final_responses.contains_key(&cid))
+            });
+            if let Some(i) = pending_idx {
+                return self.agents[i].take();
+            }
+
+            // Pass 2: prefer agent with existing session for this channel.
             let idx = self.agents.iter().position(|slot| {
                 slot.as_ref()
-                    .map(|a| a.state.sessions.contains_key(&cid))
+                    .map(|a| {
+                        a.state.pending_final_responses.is_empty()
+                            && a.state.sessions.contains_key(&cid)
+                    })
                     .unwrap_or(false)
             });
             if let Some(i) = idx {
@@ -644,8 +695,11 @@ impl AgentPool {
             }
         }
 
-        // Pass 2: first idle agent.
-        let idx = self.agents.iter().position(|slot| slot.is_some());
+        // Pass 3: first idle agent.
+        let idx = self.agents.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|agent| agent.state.pending_final_responses.is_empty())
+        });
         idx.map(|i| self.agents[i].take().unwrap())
     }
 
@@ -677,6 +731,16 @@ impl AgentPool {
             slot.as_ref()
                 .map(|a| a.state.sessions.contains_key(&channel_id))
                 .unwrap_or(false)
+        })
+    }
+
+    /// Channel whose idle agent is reserved by an unconfirmed signed reply.
+    /// The dispatcher prioritizes this channel over global FIFO so older
+    /// unrelated work cannot starve transport confirmation.
+    pub fn reserved_final_response_channel(&self) -> Option<Uuid> {
+        self.agents.iter().find_map(|slot| {
+            slot.as_ref()
+                .and_then(|agent| agent.state.pending_final_responses.keys().next().copied())
         })
     }
 
@@ -806,12 +870,12 @@ impl AgentPool {
         &mut self.agents
     }
 
-    /// Remove the session for `channel_id` from all idle agents.
+    /// Remove the ACP session for `channel_id` from all idle agents while
+    /// preserving any signed response awaiting relay confirmation.
     ///
-    /// Called when the agent is removed from a channel — stale sessions
-    /// should not be reused. Checked-out agents (in-flight) are not
-    /// modified; their sessions will fail naturally on the next prompt
-    /// if the relay rejects the request.
+    /// This is the ordinary rotation path. Membership removal must instead
+    /// call [`Self::forget_channel_on_removal`] so transport outbox state is
+    /// discarded as well.
     ///
     /// Returns the number of sessions invalidated.
     pub fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
@@ -819,6 +883,21 @@ impl AgentPool {
         for slot in &mut self.agents {
             if let Some(agent) = slot.as_mut() {
                 if agent.state.invalidate_channel(&channel_id) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Forget both ACP session state and an unpublished signed response after
+    /// the agent loses channel membership. Checked-out agents are handled when
+    /// they return to the pool through the removed-channel set.
+    pub fn forget_channel_on_removal(&mut self, channel_id: Uuid) -> usize {
+        let mut count = 0;
+        for slot in &mut self.agents {
+            if let Some(agent) = slot.as_mut() {
+                if agent.state.forget_channel(&channel_id) {
                     count += 1;
                 }
             }
@@ -1438,6 +1517,443 @@ fn send_prompt_result(
     });
 }
 
+const FINAL_RESPONSE_RELAY_TIMEOUT: Duration = Duration::from_secs(15);
+const FINAL_RESPONSE_RECONCILE_DELAY: Duration = Duration::from_millis(250);
+
+/// Trusted destination for the opt-in ACP final-response bridge.
+///
+/// Every field comes from the accepted relay event and resolved channel
+/// metadata. Model output can supply only the message content.
+struct FinalResponseTarget {
+    channel_id: Uuid,
+    trigger_event_id: nostr::EventId,
+    root_event_id: Option<nostr::EventId>,
+}
+
+const FINAL_RESPONSE_MARKER_DOMAIN: &[u8] = b"buzz-acp-final/v1\0";
+const FINAL_RESPONSE_MARKER_LABEL: &str = "acp-trigger";
+
+/// Relay-queryable correlation for one inbound event covered by an automatic
+/// final response. The model cannot influence any input to this hash.
+fn final_response_marker(
+    author: nostr::PublicKey,
+    channel_id: Uuid,
+    inbound_event_id: nostr::EventId,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(FINAL_RESPONSE_MARKER_DOMAIN);
+    digest.update(author.as_bytes());
+    digest.update(channel_id.as_bytes());
+    digest.update(inbound_event_id.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn final_response_marker_tag(marker: &str) -> Result<nostr::Tag, AcpError> {
+    nostr::Tag::parse(["e", marker, "", FINAL_RESPONSE_MARKER_LABEL]).map_err(|error| {
+        AcpError::Publication(format!("response correlation tag build failed: {error}"))
+    })
+}
+
+fn final_response_target_for_dm(
+    batch: &FlushBatch,
+    channel_info: Option<&PromptChannelInfo>,
+) -> Result<Option<FinalResponseTarget>, AcpError> {
+    let channel_info = channel_info.ok_or_else(|| {
+        AcpError::Publication(format!(
+            "cannot verify channel {} is a DM",
+            batch.channel_id
+        ))
+    })?;
+    if channel_info.channel_type == "unknown" || channel_info.channel_type.trim().is_empty() {
+        return Err(AcpError::Publication(format!(
+            "channel {} has unresolved type metadata",
+            batch.channel_id
+        )));
+    }
+    if channel_info.channel_type != "dm" {
+        return Ok(None);
+    }
+
+    let trigger = batch
+        .events
+        .last()
+        .or_else(|| batch.cancelled_events.last())
+        .ok_or_else(|| AcpError::Publication("DM batch has no trusted triggering event".into()))?;
+    let thread_tags = crate::queue::parse_thread_tags(&trigger.event);
+    let root_event_id = match thread_tags.root_event_id {
+        Some(root) => match nostr::EventId::from_hex(&root) {
+            Ok(id) => Some(id),
+            Err(error) => {
+                tracing::warn!(
+                    channel = %batch.channel_id,
+                    trigger_event = %trigger.event.id,
+                    "final-response DM bridge rejected malformed thread root: {error}"
+                );
+                return Err(AcpError::Publication(format!(
+                    "DM trigger {} has malformed thread ancestry",
+                    trigger.event.id
+                )));
+            }
+        },
+        None => None,
+    };
+
+    Ok(Some(FinalResponseTarget {
+        channel_id: batch.channel_id,
+        trigger_event_id: trigger.event.id,
+        root_event_id,
+    }))
+}
+
+fn build_final_response_event(
+    rest: &RestClient,
+    target: &FinalResponseTarget,
+    covered_event_ids: &HashSet<String>,
+    content: &str,
+) -> Result<nostr::Event, AcpError> {
+    let thread_ref = target
+        .root_event_id
+        .map(|root_event_id| buzz_sdk::ThreadRef {
+            root_event_id,
+            parent_event_id: target.trigger_event_id,
+        });
+    let mut markers = covered_event_ids
+        .iter()
+        .map(|event_id| {
+            let event_id = nostr::EventId::from_hex(event_id).map_err(|error| {
+                AcpError::Publication(format!(
+                    "covered inbound event ID is invalid ({event_id:?}): {error}"
+                ))
+            })?;
+            Ok(final_response_marker(
+                rest.keys.public_key(),
+                target.channel_id,
+                event_id,
+            ))
+        })
+        .collect::<Result<Vec<_>, AcpError>>()?;
+    markers.sort_unstable();
+    markers.dedup();
+    let marker_tags = markers
+        .iter()
+        .map(|marker| final_response_marker_tag(marker))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let builder = buzz_sdk::build_message(
+        target.channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+    )
+    .map_err(|error| AcpError::Publication(format!("message build failed: {error}")))?
+    .tags(marker_tags);
+    builder
+        .sign_with_keys(&rest.keys)
+        .map_err(|error| AcpError::Publication(format!("message signing failed: {error}")))
+}
+
+fn confirmed_final_response_event_ids(
+    response: &serde_json::Value,
+    author: nostr::PublicKey,
+    channel_id: Uuid,
+    marker_to_event_id: &HashMap<String, String>,
+) -> Result<HashSet<String>, AcpError> {
+    let values = response.as_array().ok_or_else(|| {
+        AcpError::Publication("relay correlation query returned a non-array response".into())
+    })?;
+    let channel = channel_id.to_string();
+    let mut confirmed = HashSet::new();
+
+    for value in values {
+        let Ok(event) = serde_json::from_value::<nostr::Event>(value.clone()) else {
+            tracing::warn!("ignoring malformed final-response correlation event");
+            continue;
+        };
+        if event.verify().is_err()
+            || event.pubkey != author
+            || event.kind != nostr::Kind::Custom(9)
+            || !event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().map(String::as_str) == Some("h")
+                    && values.get(1).map(String::as_str) == Some(channel.as_str())
+            })
+        {
+            continue;
+        }
+        for tag in event.tags.iter() {
+            let values = tag.as_slice();
+            if values.first().map(String::as_str) != Some("e")
+                || values.get(3).map(String::as_str) != Some(FINAL_RESPONSE_MARKER_LABEL)
+            {
+                continue;
+            }
+            if let Some(event_id) = values
+                .get(1)
+                .and_then(|marker| marker_to_event_id.get(marker))
+            {
+                confirmed.insert(event_id.clone());
+            }
+        }
+    }
+    Ok(confirmed)
+}
+
+/// Reconcile relay-backed response markers before any ACP session work. This
+/// covers the harness restart replay window: already-answered inbound events
+/// are removed from the batch instead of invoking the model again.
+async fn remove_already_published_final_response_events(
+    rest: &RestClient,
+    batch: &mut FlushBatch,
+) -> Result<HashSet<String>, AcpError> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let author = rest.keys.public_key();
+    let channel = batch.channel_id.to_string();
+    let mut marker_to_event_id = HashMap::new();
+    for event in batch.events.iter().chain(batch.cancelled_events.iter()) {
+        let event_id = event.event.id.to_hex();
+        marker_to_event_id.insert(
+            final_response_marker(author, batch.channel_id, event.event.id),
+            event_id,
+        );
+    }
+    if marker_to_event_id.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let e_tag = SingleLetterTag::lowercase(Alphabet::E);
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let filters = marker_to_event_id
+        .keys()
+        .map(|marker| {
+            nostr::Filter::new()
+                .kind(nostr::Kind::Custom(9))
+                .author(author)
+                .custom_tags(h_tag, [channel.as_str()])
+                .custom_tags(e_tag, [marker.as_str()])
+                .limit(1)
+        })
+        .collect::<Vec<_>>();
+    let response = timeout(FINAL_RESPONSE_RELAY_TIMEOUT, rest.query(filters.as_slice()))
+        .await
+        .map_err(|_| AcpError::Publication("response correlation query timed out".into()))?
+        .map_err(|error| {
+            AcpError::Publication(format!("response correlation query failed: {error}"))
+        })?;
+    let confirmed = confirmed_final_response_event_ids(
+        &response,
+        author,
+        batch.channel_id,
+        &marker_to_event_id,
+    )?;
+    if confirmed.is_empty() {
+        return Ok(confirmed);
+    }
+
+    batch
+        .events
+        .retain(|event| !confirmed.contains(&event.event.id.to_hex()));
+    batch
+        .cancelled_events
+        .retain(|event| !confirmed.contains(&event.event.id.to_hex()));
+    if batch.cancelled_events.is_empty() {
+        batch.cancel_reason = None;
+    }
+    Ok(confirmed)
+}
+
+async fn preflight_final_response_replay(
+    ctx: &PromptContext,
+    batch: &mut FlushBatch,
+) -> Result<(Option<PromptChannelInfo>, HashSet<String>), AcpError> {
+    let channel_info = ctx.channel_info.resolve(batch.channel_id).await;
+    if final_response_target_for_dm(batch, channel_info.as_ref())?.is_none() {
+        return Ok((channel_info, HashSet::new()));
+    }
+    let confirmed = remove_already_published_final_response_events(&ctx.rest_client, batch).await?;
+    Ok((channel_info, confirmed))
+}
+
+fn relay_response_contains_event(response: &serde_json::Value, event_id: nostr::EventId) -> bool {
+    let expected = event_id.to_hex();
+    response.as_array().is_some_and(|events| {
+        events
+            .iter()
+            .any(|event| event["id"].as_str() == Some(expected.as_str()))
+    })
+}
+
+fn relay_accepted_event(response: &serde_json::Value, event_id: nostr::EventId) -> bool {
+    let expected = event_id.to_hex();
+    response["accepted"].as_bool() == Some(true)
+        && response["event_id"].as_str() == Some(expected.as_str())
+}
+
+async fn final_response_event_exists(
+    rest: &RestClient,
+    event_id: nostr::EventId,
+) -> Result<bool, AcpError> {
+    let filter = nostr::Filter::new().id(event_id);
+    let response = timeout(
+        FINAL_RESPONSE_RELAY_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    .map_err(|_| AcpError::Publication("relay reconciliation query timed out".into()))?
+    .map_err(|error| {
+        AcpError::Publication(format!("relay reconciliation query failed: {error}"))
+    })?;
+    Ok(relay_response_contains_event(&response, event_id))
+}
+
+/// Submit one already-signed event. A failed/ambiguous request is reconciled by
+/// exact event ID, then the same event bytes are retried once. The model is not
+/// called again and the answer is never re-signed inside this function.
+async fn submit_final_response_event(
+    rest: &RestClient,
+    event: &nostr::Event,
+) -> Result<(), AcpError> {
+    let first_error = match timeout(FINAL_RESPONSE_RELAY_TIMEOUT, rest.submit_event(event)).await {
+        Ok(Ok(response)) if relay_accepted_event(&response, event.id) => return Ok(()),
+        Ok(Ok(response)) => format!("relay returned an unconfirmed response: {response}"),
+        Ok(Err(error)) => format!("{error}"),
+        Err(_) => "publish timed out".to_string(),
+    };
+
+    tokio::time::sleep(FINAL_RESPONSE_RECONCILE_DELAY).await;
+    match final_response_event_exists(rest, event.id).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            response_event = %event.id,
+            "final-response reconciliation after first failure was inconclusive: {error}"
+        ),
+    }
+
+    let second_error = match timeout(FINAL_RESPONSE_RELAY_TIMEOUT, rest.submit_event(event)).await {
+        Ok(Ok(response)) if relay_accepted_event(&response, event.id) => return Ok(()),
+        Ok(Ok(response)) => format!("relay returned an unconfirmed response: {response}"),
+        Ok(Err(error)) => format!("{error}"),
+        Err(_) => "retry timed out".to_string(),
+    };
+
+    tokio::time::sleep(FINAL_RESPONSE_RECONCILE_DELAY).await;
+    if final_response_event_exists(rest, event.id).await? {
+        return Ok(());
+    }
+
+    Err(AcpError::Publication(format!(
+        "relay did not confirm event {} (first: {first_error}; retry: {second_error})",
+        event.id
+    )))
+}
+
+async fn publish_captured_final_response(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    target: Option<&FinalResponseTarget>,
+    standing_context_sent: bool,
+    batch_event_ids: &HashSet<String>,
+    delivered_event_ids: &HashSet<String>,
+) -> Result<(), AcpError> {
+    if !ctx.publish_final_response_to_dm {
+        return Ok(());
+    }
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let content = agent
+        .acp
+        .take_turn_agent_message()
+        .map_err(|error| AcpError::Publication(error.into()))?
+        .ok_or_else(|| {
+            AcpError::Publication("ACP ended the DM turn without a final assistant message".into())
+        })?;
+    let event = build_final_response_event(&ctx.rest_client, target, batch_event_ids, &content)?;
+    let response_event_id = event.id;
+
+    agent.state.pending_final_responses.insert(
+        target.channel_id,
+        PendingFinalResponse {
+            trigger_event_id: target.trigger_event_id,
+            event: event.clone(),
+            standing_context_sent,
+            batch_event_ids: batch_event_ids.clone(),
+            delivered_event_ids: delivered_event_ids.clone(),
+        },
+    );
+
+    submit_final_response_event(&ctx.rest_client, &event).await?;
+    agent
+        .state
+        .pending_final_responses
+        .remove(&target.channel_id);
+
+    tracing::info!(
+        channel = %target.channel_id,
+        trigger_event = %target.trigger_event_id,
+        response_event = %response_event_id,
+        "published ACP final response to DM"
+    );
+    Ok(())
+}
+
+/// Retry a previously signed response before invoking ACP again. Returns true
+/// when the pending event belongs to the current batch, which means successful
+/// relay confirmation fully completes this dispatch without another model
+/// call. A pending response from an older drop-mode batch is published first,
+/// then the current batch may continue normally.
+async fn retry_pending_final_response(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    batch: &mut FlushBatch,
+) -> Result<bool, AcpError> {
+    if !ctx.publish_final_response_to_dm {
+        return Ok(false);
+    }
+    let Some(pending) = agent
+        .state
+        .pending_final_responses
+        .get(&batch.channel_id)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+
+    submit_final_response_event(&ctx.rest_client, &pending.event).await?;
+    agent
+        .state
+        .pending_final_responses
+        .remove(&batch.channel_id);
+    agent.state.mark_channel_delivery_success(
+        batch.channel_id,
+        pending.standing_context_sent,
+        pending.delivered_event_ids,
+    );
+    batch
+        .events
+        .retain(|event| !pending.batch_event_ids.contains(&event.event.id.to_hex()));
+    batch
+        .cancelled_events
+        .retain(|event| !pending.batch_event_ids.contains(&event.event.id.to_hex()));
+    if batch.cancelled_events.is_empty() {
+        batch.cancel_reason = None;
+    }
+    let completes_current_batch = batch.events.is_empty() && batch.cancelled_events.is_empty();
+    tracing::info!(
+        channel = %batch.channel_id,
+        trigger_event = %pending.trigger_event_id,
+        response_event = %pending.event.id,
+        completes_current_batch,
+        "confirmed pending ACP final response without invoking the model"
+    );
+    Ok(completes_current_batch)
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -1452,7 +1968,7 @@ fn send_prompt_result(
 /// abort and the caller uses `task_map` to recover the agent index.
 pub async fn run_prompt_task(
     mut agent: OwnedAgent,
-    batch: Option<FlushBatch>,
+    mut batch: Option<FlushBatch>,
     prompt_text: Option<String>,
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
@@ -1537,6 +2053,90 @@ pub async fn run_prompt_task(
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+
+    // Publication retries are transport-only. If the preceding attempt
+    // completed ACP but could not confirm its signed DM event, retry that exact
+    // event before any session work so Venice is not billed for a second answer.
+    if let Some(queued_batch) = batch.as_mut() {
+        match retry_pending_final_response(&mut agent, &ctx, queued_batch).await {
+            Ok(true) => {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Ok(StopReason::EndTurn),
+                    None,
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "pool::prompt",
+                    "pending final-response DM remains unconfirmed: {error}"
+                );
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(error),
+                    requeue_batch_if_queue(&ctx, batch),
+                );
+                return;
+            }
+        }
+    }
+
+    // Relay-backed replay reconciliation closes the normal restart overlap:
+    // each auto-published DM carries a deterministic marker for every inbound
+    // event it answered. Resolve the trusted DM route and remove confirmed
+    // events before session creation or any model-visible initial prompt.
+    let mut pre_resolved_channel_info: Option<PromptChannelInfo> = None;
+    let mut marker_confirmed_event_ids = HashSet::new();
+    if ctx.publish_final_response_to_dm {
+        if let Some(queued_batch) = batch.as_mut() {
+            match preflight_final_response_replay(&ctx, queued_batch).await {
+                Ok((channel_info, confirmed)) => {
+                    pre_resolved_channel_info = channel_info;
+                    marker_confirmed_event_ids = confirmed;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "pool::prompt",
+                        "final-response replay preflight failed closed: {error}"
+                    );
+                    send_prompt_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        PromptOutcome::Error(error),
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
+                    return;
+                }
+            }
+
+            if queued_batch.events.is_empty() && queued_batch.cancelled_events.is_empty() {
+                tracing::info!(
+                    channel = %queued_batch.channel_id,
+                    confirmed_events = marker_confirmed_event_ids.len(),
+                    "skipping ACP because every replayed event already has a signed DM response"
+                );
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Ok(StopReason::EndTurn),
+                    None,
+                );
+                return;
+            }
+        }
+    }
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -1768,6 +2368,16 @@ pub async fn run_prompt_task(
             }
         }
     };
+
+    if let PromptSource::Channel(channel_id) = &source {
+        if !marker_confirmed_event_ids.is_empty() {
+            agent.state.mark_channel_delivery_success(
+                *channel_id,
+                false,
+                marker_confirmed_event_ids.iter().cloned(),
+            );
+        }
+    }
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         Some(session_id.clone()),
@@ -1950,9 +2560,16 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    // Trusted route for the opt-in final-response bridge. It is populated only
+    // after the relay confirms this batch belongs to a DM.
+    let mut final_response_target: Result<Option<FinalResponseTarget>, AcpError> = Ok(None);
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
+    // Trigger/cancelled event IDs only (conversation context excluded). Stored
+    // with a pending signed response so a merged queue retry can subtract the
+    // already-answered request before invoking ACP for newer events.
+    let mut prompt_batch_event_ids = HashSet::new();
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -1979,7 +2596,13 @@ pub async fn run_prompt_task(
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = ctx.channel_info.resolve(b.channel_id).await;
+        let channel_info = match pre_resolved_channel_info.as_ref() {
+            Some(info) => Some(info.clone()),
+            None => ctx.channel_info.resolve(b.channel_id).await,
+        };
+        if ctx.publish_final_response_to_dm {
+            final_response_target = final_response_target_for_dm(b, channel_info.as_ref());
+        }
 
         let conversation_context = if ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
@@ -1992,6 +2615,7 @@ pub async fn run_prompt_task(
             .chain(b.cancelled_events.iter())
             .map(|event| event.event.id.to_hex())
             .collect();
+        prompt_batch_event_ids.extend(rendered_batch_ids.iter().cloned());
         let delivered_ids = agent
             .state
             .deliveries
@@ -2060,6 +2684,25 @@ pub async fn run_prompt_task(
             None,
         );
         return;
+    };
+
+    let final_response_target = match final_response_target {
+        Ok(target) => target,
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::prompt",
+                "final-response DM routing could not be verified: {error}"
+            );
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(error),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        }
     };
 
     // 💬 — fire-and-forget so the prompt fires immediately.
@@ -2256,6 +2899,83 @@ pub async fn run_prompt_task(
                                 "control signal arrived but turn already completed — treating as success"
                             );
                         }
+                        let completed_stop_reason =
+                            agent.acp.take_completed_prompt_stop_reason();
+                        if completed_stop_reason.is_none()
+                            && ctx.publish_final_response_to_dm
+                            && final_response_target.is_some()
+                        {
+                            let error = AcpError::Publication(
+                                "ACP completion raced without a recorded terminal stop reason"
+                                    .into(),
+                            );
+                            tracing::warn!(
+                                target: "pool::prompt",
+                                "DM completion could not be proven as end_turn; requeueing"
+                            );
+                            let usage = agent.acp.take_turn_usage();
+                            publish_agent_turn_metric(
+                                &ctx,
+                                usage,
+                                observer_channel_id,
+                                &session_id,
+                                &turn_id,
+                                Some(buzz_core::agent_turn_metric::StopReason::Error),
+                            )
+                            .await;
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(error),
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
+                        let is_confirmed_end_turn = matches!(
+                            completed_stop_reason.as_ref(),
+                            Some(StopReason::EndTurn)
+                        );
+                        let completed_stop_reason =
+                            completed_stop_reason.unwrap_or(StopReason::EndTurn);
+                        if is_confirmed_end_turn {
+                            let bridge_standing_sent = !agent.has_system_prompt_support();
+                            if let Err(error) = publish_captured_final_response(
+                                &mut agent,
+                                &ctx,
+                                final_response_target.as_ref(),
+                                bridge_standing_sent,
+                                &prompt_batch_event_ids,
+                                &pending_delivered_event_ids,
+                            )
+                            .await
+                            {
+                                tracing::error!(
+                                    target: "pool::prompt",
+                                    "completed DM turn could not publish its final response: {error}"
+                                );
+                                let usage = agent.acp.take_turn_usage();
+                                publish_agent_turn_metric(
+                                    &ctx,
+                                    usage,
+                                    observer_channel_id,
+                                    &session_id,
+                                    &turn_id,
+                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                )
+                                .await;
+                                send_prompt_result(
+                                    &result_tx,
+                                    &turn_id,
+                                    agent,
+                                    source,
+                                    PromptOutcome::Error(error),
+                                    requeue_batch_if_queue(&ctx, batch),
+                                );
+                                return;
+                            }
+                        }
                         if let PromptSource::Channel(cid) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
                             agent.state.mark_channel_delivery_success(
@@ -2276,7 +2996,7 @@ pub async fn run_prompt_task(
                             observer_channel_id,
                             &session_id,
                             &turn_id,
-                            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                            Some(acp_stop_to_core(&completed_stop_reason)),
                         )
                         .await;
                         send_prompt_result(
@@ -2284,7 +3004,7 @@ pub async fn run_prompt_task(
                             &turn_id,
                             agent,
                             source,
-                            PromptOutcome::Ok(StopReason::EndTurn),
+                            PromptOutcome::Ok(completed_stop_reason),
                             None, // turn succeeded — batch was processed, no requeue
                         );
                         return;
@@ -2297,6 +3017,45 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+            let _ = agent.acp.take_completed_prompt_stop_reason();
+
+            if matches!(stop_reason, StopReason::EndTurn) {
+                let bridge_standing_sent = !agent.has_system_prompt_support();
+                if let Err(error) = publish_captured_final_response(
+                    &mut agent,
+                    &ctx,
+                    final_response_target.as_ref(),
+                    bridge_standing_sent,
+                    &prompt_batch_event_ids,
+                    &pending_delivered_event_ids,
+                )
+                .await
+                {
+                    tracing::error!(
+                        target: "pool::prompt",
+                        "completed DM turn could not publish its final response: {error}"
+                    );
+                    let usage = agent.acp.take_turn_usage();
+                    publish_agent_turn_metric(
+                        &ctx,
+                        usage,
+                        observer_channel_id,
+                        &session_id,
+                        &turn_id,
+                        Some(buzz_core::agent_turn_metric::StopReason::Error),
+                    )
+                    .await;
+                    send_prompt_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        PromptOutcome::Error(error),
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
+                    return;
+                }
+            }
 
             if let PromptSource::Channel(cid) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
@@ -7409,6 +8168,497 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         );
     }
 
+    #[test]
+    fn final_response_bridge_routes_only_verified_dms() {
+        let channel_id = Uuid::new_v4();
+        let batch = one_event_batch(channel_id);
+
+        let dm = PromptChannelInfo {
+            name: "private".into(),
+            channel_type: "dm".into(),
+        };
+        let target = final_response_target_for_dm(&batch, Some(&dm))
+            .expect("verified DM route")
+            .expect("DM target");
+        assert_eq!(target.channel_id, channel_id);
+        assert_eq!(target.trigger_event_id, batch.events[0].event.id);
+        assert!(target.root_event_id.is_none());
+
+        let stream = PromptChannelInfo {
+            name: "general".into(),
+            channel_type: "stream".into(),
+        };
+        assert!(final_response_target_for_dm(&batch, Some(&stream))
+            .expect("known non-DM")
+            .is_none());
+        assert!(final_response_target_for_dm(&batch, None).is_err());
+
+        let unknown = PromptChannelInfo {
+            name: "unresolved".into(),
+            channel_type: "unknown".into(),
+        };
+        assert!(final_response_target_for_dm(&batch, Some(&unknown)).is_err());
+    }
+
+    #[test]
+    fn final_response_bridge_rejects_malformed_thread_ancestry() {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "reply")
+            .tags([Tag::parse(["e", "not-an-event-id", "", "root"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let dm = PromptChannelInfo {
+            name: "private".into(),
+            channel_type: "dm".into(),
+        };
+        assert!(final_response_target_for_dm(&batch, Some(&dm)).is_err());
+    }
+
+    #[test]
+    fn final_response_event_is_signed_and_bound_to_trusted_thread() {
+        let channel_id = Uuid::new_v4();
+        let agent_keys = Keys::generate();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let trigger = EventBuilder::new(Kind::Custom(9), "trigger")
+            .tags([Tag::parse(["e", &root.id.to_hex(), "", "root"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let target = FinalResponseTarget {
+            channel_id,
+            trigger_event_id: trigger.id,
+            root_event_id: Some(root.id),
+        };
+        let rest = RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:0".into(),
+            keys: agent_keys.clone(),
+            auth_tag_json: None,
+        };
+
+        let covered = HashSet::from([trigger.id.to_hex(), root.id.to_hex()]);
+        let event = build_final_response_event(&rest, &target, &covered, "  exact markdown\n")
+            .expect("build signed response");
+        event.verify().expect("valid signature");
+        assert_eq!(event.pubkey, agent_keys.public_key());
+        assert_eq!(event.kind, Kind::Custom(9));
+        assert_eq!(event.content, "  exact markdown\n");
+        assert!(event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("h")
+                && values.get(1).map(String::as_str) == Some(channel_id.to_string().as_str())
+        }));
+        let thread = crate::queue::parse_thread_tags(&event);
+        assert_eq!(
+            thread.root_event_id.as_deref(),
+            Some(root.id.to_hex().as_str())
+        );
+        assert_eq!(
+            thread.parent_event_id.as_deref(),
+            Some(trigger.id.to_hex().as_str())
+        );
+        let correlation_markers = event
+            .tags
+            .iter()
+            .filter(|tag| {
+                let values = tag.as_slice();
+                values.first().map(String::as_str) == Some("e")
+                    && values.get(3).map(String::as_str) == Some(FINAL_RESPONSE_MARKER_LABEL)
+            })
+            .count();
+        assert_eq!(correlation_markers, covered.len());
+
+        let marker_to_event_id = covered
+            .iter()
+            .map(|event_id| {
+                let parsed = nostr::EventId::from_hex(event_id).unwrap();
+                (
+                    final_response_marker(agent_keys.public_key(), channel_id, parsed),
+                    event_id.clone(),
+                )
+            })
+            .collect();
+        let confirmed = confirmed_final_response_event_ids(
+            &json!([event]),
+            agent_keys.public_key(),
+            channel_id,
+            &marker_to_event_id,
+        )
+        .expect("validate relay marker response");
+        assert_eq!(confirmed, covered);
+    }
+
+    #[test]
+    fn final_response_relay_ack_requires_matching_accepted_event() {
+        let event_id = EventBuilder::new(Kind::Custom(9), "answer")
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+            .id;
+        let other_id = EventBuilder::new(Kind::Custom(9), "other")
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+            .id;
+        assert!(relay_accepted_event(
+            &json!({"accepted": true, "event_id": event_id.to_hex()}),
+            event_id
+        ));
+        assert!(!relay_accepted_event(
+            &json!({"accepted": false, "event_id": event_id.to_hex()}),
+            event_id
+        ));
+        assert!(!relay_accepted_event(
+            &json!({"accepted": true, "event_id": other_id.to_hex()}),
+            event_id
+        ));
+        assert!(!relay_accepted_event(&serde_json::Value::Null, event_id));
+    }
+
+    #[test]
+    fn session_rotation_preserves_pending_response_but_membership_removal_drops_it() {
+        let channel_id = Uuid::new_v4();
+        let trigger = EventBuilder::new(Kind::Custom(9), "trigger")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let response = EventBuilder::new(Kind::Custom(9), "response")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "session".into());
+        state.pending_final_responses.insert(
+            channel_id,
+            PendingFinalResponse {
+                trigger_event_id: trigger.id,
+                event: response,
+                standing_context_sent: false,
+                batch_event_ids: HashSet::from([trigger.id.to_hex()]),
+                delivered_event_ids: HashSet::from([trigger.id.to_hex()]),
+            },
+        );
+
+        assert!(state.invalidate_channel(&channel_id));
+        assert!(state.pending_final_responses.contains_key(&channel_id));
+        state.forget_channel(&channel_id);
+        assert!(!state.pending_final_responses.contains_key(&channel_id));
+    }
+
+    #[tokio::test]
+    async fn pending_response_reserves_its_agent_from_unrelated_work() {
+        let pending_channel = Uuid::new_v4();
+        let unrelated_channel = Uuid::new_v4();
+        let trigger = EventBuilder::new(Kind::Custom(9), "trigger")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let response = EventBuilder::new(Kind::Custom(9), "response")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let reserved_acp = AcpClient::spawn("cat", &[], &[], false)
+            .await
+            .expect("spawn reserved test agent");
+        let free_acp = AcpClient::spawn("cat", &[], &[], false)
+            .await
+            .expect("spawn free test agent");
+        let mut reserved = OwnedAgent {
+            index: 0,
+            acp: reserved_acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "hermes".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        reserved.state.pending_final_responses.insert(
+            pending_channel,
+            PendingFinalResponse {
+                trigger_event_id: trigger.id,
+                event: response,
+                standing_context_sent: false,
+                batch_event_ids: HashSet::from([trigger.id.to_hex()]),
+                delivered_event_ids: HashSet::from([trigger.id.to_hex()]),
+            },
+        );
+        let free = OwnedAgent {
+            index: 1,
+            acp: free_acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "hermes".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        let mut pool = AgentPool::from_slots(vec![Some(reserved), Some(free)]);
+        assert_eq!(
+            pool.reserved_final_response_channel(),
+            Some(pending_channel)
+        );
+
+        let unrelated = pool
+            .try_claim(Some(unrelated_channel))
+            .expect("free agent handles unrelated channel");
+        assert_eq!(unrelated.index, 1);
+        assert!(
+            pool.try_claim(None).is_none(),
+            "heartbeat must not consume the reserved outbox carrier"
+        );
+        pool.return_agent(unrelated);
+
+        let mut reserved = pool
+            .try_claim(Some(pending_channel))
+            .expect("pending channel reclaims its outbox carrier");
+        assert_eq!(reserved.index, 0);
+        let mut free = pool
+            .try_claim(Some(unrelated_channel))
+            .expect("free agent remains available");
+        assert_eq!(free.index, 1);
+        reserved.acp.shutdown().await;
+        free.acp.shutdown().await;
+    }
+
+    async fn read_test_http_request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+        use tokio::io::AsyncReadExt;
+
+        let mut request = Vec::new();
+        let mut scratch = [0_u8; 8192];
+        let mut expected_len = None;
+        loop {
+            let read = socket.read(&mut scratch).await.expect("read test request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&scratch[..read]);
+            if expected_len.is_none() {
+                if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_len = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    expected_len = Some(header_end + 4 + content_len);
+                }
+            }
+            if expected_len.is_some_and(|len| request.len() >= len) {
+                break;
+            }
+        }
+
+        let header_end = request
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("HTTP header terminator");
+        let request_line = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .next()
+            .expect("request line")
+            .to_string();
+        (request_line, request[(header_end + 4)..].to_vec())
+    }
+
+    #[tokio::test]
+    async fn hermes_minimal_acp_end_turn_publishes_one_visible_dm() {
+        use tokio::io::AsyncWriteExt;
+
+        let channel_id = Uuid::new_v4();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind relay bridge");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (message_tx, mut message_rx) = tokio::sync::mpsc::unbounded_channel();
+        let stored_messages = Arc::new(Mutex::new(Vec::<nostr::Event>::new()));
+        let server_messages = Arc::clone(&stored_messages);
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let (request_line, body) = read_test_http_request(&mut socket).await;
+                let response_body = if request_line.contains(" /query ") {
+                    serde_json::to_string(&*server_messages.lock().unwrap())
+                        .expect("serialize stored messages")
+                } else if request_line.contains(" /events ") {
+                    let event: nostr::Event =
+                        serde_json::from_slice(&body).expect("submitted event JSON");
+                    if event.kind == Kind::Custom(9) {
+                        server_messages.lock().unwrap().push(event.clone());
+                        message_tx.send(event.clone()).expect("capture DM");
+                    }
+                    json!({"accepted": true, "event_id": event.id.to_hex()}).to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write relay response");
+            }
+        });
+
+        let script = r#"IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"live-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello "}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"live-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"from Hermes"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'"#;
+        let acp = AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+            .await
+            .expect("spawn minimal Hermes ACP");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "hermes".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, ChannelDeliveryState::default());
+
+        let trigger = EventBuilder::new(Kind::Custom(9), "say hello")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let trigger_id = trigger.id.to_hex();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: trigger,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let replay_batch = batch.clone();
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.publish_final_response_to_dm = true;
+        ctx.dedup_mode = DedupMode::Queue;
+        ctx.rest_client.base_url = base_url.clone();
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "private".into(),
+                    channel_type: "dm".into(),
+                },
+            )]),
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: ctx.agent_keys.clone(),
+                auth_tag_json: None,
+            },
+        );
+        let expected_pubkey = ctx.agent_keys.public_key();
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(batch),
+            None,
+            Arc::clone(&ctx),
+            result_tx,
+            None,
+            "hermes-visible-dm".into(),
+        )
+        .await;
+
+        let mut result = result_rx.recv().await.expect("prompt result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        let message = tokio::time::timeout(Duration::from_secs(2), message_rx.recv())
+            .await
+            .expect("visible DM timeout")
+            .expect("visible DM event");
+        assert_eq!(message.content, "Hello from Hermes");
+        assert_eq!(message.pubkey, expected_pubkey);
+        message.verify().expect("signed visible DM");
+        assert!(message.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("h")
+                && values.get(1).map(String::as_str) == Some(channel_id.to_string().as_str())
+        }));
+        assert!(result.agent.state.pending_final_responses.is_empty());
+        assert!(result.agent.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .contains(&trigger_id));
+
+        result.agent.acp.shutdown().await;
+
+        // Simulate a full harness restart: no session or in-memory outbox is
+        // retained. The relay marker must complete the replay without touching
+        // the ACP child and without producing another chat event.
+        let replay_acp = AcpClient::spawn(
+            "bash",
+            &["-c".into(), "IFS= read -r line; exit 99".into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn replay sentinel ACP");
+        let replay_agent = OwnedAgent {
+            index: 0,
+            acp: replay_acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "hermes".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        let (replay_tx, mut replay_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            replay_agent,
+            Some(replay_batch),
+            None,
+            ctx,
+            replay_tx,
+            None,
+            "hermes-restart-replay".into(),
+        )
+        .await;
+        let mut replay_result = replay_rx.recv().await.expect("replay result");
+        assert!(matches!(
+            replay_result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        assert!(
+            message_rx.try_recv().is_err(),
+            "restart replay duplicated DM"
+        );
+        replay_result.agent.acp.shutdown().await;
+        server.abort();
+    }
+
     fn make_prompt_context_no_owner() -> PromptContext {
         let agent_keys = nostr::Keys::generate();
         make_prompt_context_impl(&agent_keys, None)
@@ -7462,6 +8712,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            publish_final_response_to_dm: false,
         }
     }
 

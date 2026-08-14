@@ -258,6 +258,16 @@ impl EventQueue {
     /// across channels), drains ALL events for that channel into a single batch,
     /// inserts into `in_flight_channels`, and returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
+        self.flush_next_for_channel(None)
+    }
+
+    /// Flush only `channel_id` when it is eligible. Used for an unconfirmed
+    /// signed response whose reserved agent must not be starved by global FIFO.
+    pub fn flush_channel(&mut self, channel_id: Uuid) -> Option<FlushBatch> {
+        self.flush_next_for_channel(Some(channel_id))
+    }
+
+    fn flush_next_for_channel(&mut self, only_channel: Option<Uuid>) -> Option<FlushBatch> {
         let now = Instant::now();
 
         // Auto-expire any stuck in-flight entries that missed mark_complete.
@@ -288,16 +298,24 @@ impl EventQueue {
 
         // Find the channel whose head event has the oldest received_at,
         // excluding in-flight channels and throttled channels.
-        let channel_id = self
-            .queues
-            .iter()
-            .filter(|(id, q)| {
-                !q.is_empty()
-                    && !self.in_flight_channels.contains(id)
-                    && self.retry_after.get(id).is_none_or(|&t| t <= now)
-            })
-            .min_by_key(|(_, q)| q.front().unwrap().received_at)
-            .map(|(id, _)| *id);
+        let is_ready = |id: &Uuid, q: &VecDeque<QueuedEvent>| {
+            !q.is_empty()
+                && !self.in_flight_channels.contains(id)
+                && self.retry_after.get(id).is_none_or(|&t| t <= now)
+        };
+        let channel_id = match only_channel {
+            Some(id) => self
+                .queues
+                .get(&id)
+                .filter(|queue| is_ready(&id, queue))
+                .map(|_| id),
+            None => self
+                .queues
+                .iter()
+                .filter(|(id, queue)| is_ready(id, queue))
+                .min_by_key(|(_, queue)| queue.front().unwrap().received_at)
+                .map(|(id, _)| *id),
+        };
 
         // Fallback: if no queued events are ready but a channel has cancelled
         // events waiting (e.g., explicit !cancel with no new @mention), flush
@@ -305,11 +323,21 @@ impl EventQueue {
         let channel_id = match channel_id {
             Some(id) => id,
             None => {
-                let cancelled_id = self
-                    .cancelled_batches
-                    .keys()
-                    .find(|id| !self.in_flight_channels.contains(id))
-                    .copied();
+                let cancelled_id = match only_channel {
+                    Some(id)
+                        if self.cancelled_batches.contains_key(&id)
+                            && !self.in_flight_channels.contains(&id)
+                            && self.retry_after.get(&id).is_none_or(|&t| t <= now) =>
+                    {
+                        Some(id)
+                    }
+                    Some(_) => None,
+                    None => self
+                        .cancelled_batches
+                        .keys()
+                        .find(|id| !self.in_flight_channels.contains(id))
+                        .copied(),
+                };
                 match cancelled_id {
                     Some(id) => {
                         // Move cancelled events into the regular events slot.
@@ -495,6 +523,20 @@ impl EventQueue {
         }
         self.retry_after.insert(channel_id, Instant::now() + delay);
         None
+    }
+
+    /// Requeue a batch whose model turn already completed and whose signed
+    /// response only needs transport confirmation. Cancelled events are moved
+    /// into the ordinary queue as scheduling tokens: the outbox retry removes
+    /// every covered ID before any subsequent model prompt.
+    pub fn requeue_publication(&mut self, mut batch: FlushBatch) -> Option<FlushBatch> {
+        if !batch.cancelled_events.is_empty() {
+            let mut covered = std::mem::take(&mut batch.cancelled_events);
+            covered.extend(batch.events);
+            batch.events = covered;
+            batch.cancel_reason = None;
+        }
+        self.requeue(batch)
     }
 
     /// Re-queue a batch preserving original `received_at` timestamps.
@@ -4960,5 +5002,62 @@ mod tests {
             after_second >= after_first,
             "second extend must not move deadline backward (monotonic)"
         );
+    }
+
+    #[test]
+    fn publication_requeue_preserves_cancelled_events_as_retry_tokens() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let cancelled = BatchEvent {
+            event: make_event("cancelled"),
+            prompt_tag: "cancelled".into(),
+            received_at: Instant::now(),
+        };
+        let regular = BatchEvent {
+            event: make_event("regular"),
+            prompt_tag: "regular".into(),
+            received_at: Instant::now(),
+        };
+
+        assert!(q
+            .requeue_publication(FlushBatch {
+                channel_id,
+                events: vec![regular],
+                cancelled_events: vec![cancelled],
+                cancel_reason: Some(CancelReason::Steer),
+            })
+            .is_none());
+
+        let queued = q.queues.get(&channel_id).expect("publication retry queue");
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].event.content, "cancelled");
+        assert_eq!(queued[1].event.content, "regular");
+        assert!(!q.cancelled_batches.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn flush_channel_prioritizes_reserved_retry_over_older_fifo_work() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let older_channel = Uuid::new_v4();
+        let reserved_channel = Uuid::new_v4();
+        q.push(make_queued_at(
+            older_channel,
+            "older unrelated work",
+            Duration::from_secs(60),
+        ));
+        q.push(make_queued_at(
+            reserved_channel,
+            "signed-response retry token",
+            Duration::from_secs(1),
+        ));
+
+        let reserved = q
+            .flush_channel(reserved_channel)
+            .expect("reserved channel is eligible");
+        assert_eq!(reserved.channel_id, reserved_channel);
+        q.mark_complete(reserved_channel);
+
+        let older = q.flush_next().expect("older work remains queued");
+        assert_eq!(older.channel_id, older_channel);
     }
 }
