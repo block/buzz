@@ -197,6 +197,32 @@ class CodeStripping(unittest.TestCase):
     def test_blockquoted_fence_is_stripped(self):
         self.assertNotIn("Closes", m.strip_code("Refs #1\n\n> ```\n> Closes #999\n> ```\n"))
 
+    def test_blockquoted_unterminated_fence_does_not_consume_prose_after_the_quote_ends(self):
+        # #145: a fence opened with `> ` and never explicitly closed used to stay
+        # open past the blockquote's own end, since the fence carried no memory of
+        # having opened inside a quote. CommonMark ends the fence when the quote
+        # does — a line with no `>` marker closes the quote, and the fence closes
+        # with it.
+        body = "### Issue type\nTask\n\n> ```\n> some quoted output\n\nRefs #116 covers the rest.\n"
+        stripped = m.strip_code(body)
+        self.assertIn("Refs #116", stripped, f"prose after the quote ends must survive: {stripped!r}")
+        errors, _ = m.check(body, [], [])
+        self.assertEqual(errors, [], f"a compliant Refs after a quoted fence must not be rejected: {errors}")
+
+    def test_blockquoted_unterminated_fence_closes_on_a_bare_top_level_blank_line_too(self):
+        # Same defect, blank line spelled with no `>` at all rather than omitted.
+        body = "> ```\n> quoted\n\n\nRefs #1\n"
+        self.assertIn("Refs #1", m.strip_code(body))
+
+    def test_a_properly_closed_blockquoted_fence_still_closes_at_its_own_closer(self):
+        # Regression guard: the fix must not make every quoted fence run to the
+        # quote's end — one that closes explicitly, still inside the quote, must
+        # close there and nowhere later.
+        body = "> ```\n> Closes #999\n> ```\n\nRefs #1\n"
+        stripped = m.strip_code(body)
+        self.assertNotIn("Closes", stripped)
+        self.assertIn("Refs #1", stripped)
+
     def test_fence_with_an_info_string_is_stripped(self):
         self.assertNotIn("Closes", m.strip_code("Refs #1\n\n```python\nCloses #9\n```\n"))
 
