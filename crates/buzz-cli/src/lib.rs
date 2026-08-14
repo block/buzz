@@ -412,6 +412,13 @@ buzz agents set-directory --name \"QC Lead\" --respond-to allowlist \
         /// Derive channel ids from this identity's current channel memberships
         #[arg(long, default_value_t = false, conflicts_with = "channel_ids")]
         channels_from_membership: bool,
+        /// Publish with an empty channel list (DM-only agents)
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["channel_ids", "channels_from_membership"]
+        )]
+        no_channels: bool,
         /// Who may see and mention this agent
         #[arg(long, value_enum)]
         respond_to: DirectoryRespondToArg,

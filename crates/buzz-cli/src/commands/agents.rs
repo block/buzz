@@ -169,18 +169,22 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             name,
             channel_ids,
             channels_from_membership,
+            no_channels,
             respond_to,
             respond_to_allowlist,
             status,
         } => {
             cmd_set_directory(
                 client,
-                name,
-                channel_ids,
-                channels_from_membership,
-                respond_to,
-                respond_to_allowlist,
-                status,
+                SetDirectoryArgs {
+                    name,
+                    channel_ids,
+                    channels_from_membership,
+                    no_channels,
+                    respond_to,
+                    respond_to_allowlist,
+                    status,
+                },
             )
             .await
         }
@@ -219,17 +223,29 @@ fn content_object(event: &serde_json::Value) -> serde_json::Map<String, serde_js
         .unwrap_or_default()
 }
 
-async fn cmd_set_directory(
-    client: &BuzzClient,
+struct SetDirectoryArgs {
     name: Option<String>,
     channel_ids: Vec<String>,
     channels_from_membership: bool,
+    no_channels: bool,
     respond_to: crate::DirectoryRespondToArg,
     respond_to_allowlist: Vec<String>,
     status: String,
-) -> Result<(), CliError> {
+}
+
+async fn cmd_set_directory(client: &BuzzClient, args: SetDirectoryArgs) -> Result<(), CliError> {
     use crate::client::extract_d_tag;
     use crate::validate::parse_uuid;
+
+    let SetDirectoryArgs {
+        name,
+        channel_ids,
+        channels_from_membership,
+        no_channels,
+        respond_to,
+        respond_to_allowlist,
+        status,
+    } = args;
 
     let respond_to = respond_to.to_wire();
     match respond_to {
@@ -265,7 +281,9 @@ async fn cmd_set_directory(
     let base = existing.first().map(content_object).unwrap_or_default();
 
     // Resolve channel ids: explicit flags, or this identity's memberships.
-    let channel_ids: Vec<String> = if channels_from_membership {
+    let channel_ids: Vec<String> = if no_channels {
+        Vec::new()
+    } else if channels_from_membership {
         let member_filter = json!({"kinds": [39002], "#p": [my_pk]});
         let member_events = client.query_paginated(member_filter, 500).await?;
         let mut ids: Vec<String> = member_events
@@ -284,7 +302,8 @@ async fn cmd_set_directory(
         ids
     } else if channel_ids.is_empty() {
         return Err(CliError::Usage(
-            "pass --channel-id <UUID> (repeatable) or --channels-from-membership".into(),
+            "pass --channel-id <UUID> (repeatable), --channels-from-membership, or --no-channels"
+                .into(),
         ));
     } else {
         for id in &channel_ids {
@@ -294,8 +313,12 @@ async fn cmd_set_directory(
     };
 
     // Channel display names for the record's legacy `channels` field.
-    let meta_filter = json!({"kinds": [39000], "#d": channel_ids});
-    let meta_events = client.query_paginated(meta_filter, 500).await?;
+    let meta_events = if channel_ids.is_empty() {
+        Vec::new()
+    } else {
+        let meta_filter = json!({"kinds": [39000], "#d": channel_ids});
+        client.query_paginated(meta_filter, 500).await?
+    };
     let channel_names: Vec<String> = meta_events
         .iter()
         .filter_map(|e| {
