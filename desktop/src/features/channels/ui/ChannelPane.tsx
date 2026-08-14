@@ -913,7 +913,6 @@ export const ChannelPane = React.memo(function ChannelPane({
             const panel = (
               <UserProfilePanel
                 currentPubkey={currentPubkey}
-                callerChannelId={activeChannelId}
                 isSinglePanelView={
                   useSplitAuxiliaryPane ? false : isSinglePanelView
                 }
