@@ -231,9 +231,19 @@ class ThreadDetailPage extends HookConsumerWidget {
             currentPubkey: currentPubkey,
           )
         : null;
-    final firstUnreadReplyIndex = firstUnreadReplyId == null
-        ? -1
-        : replies.indexWhere((reply) => reply.id == firstUnreadReplyId);
+    // Resuming is for *returning* to a thread. A reader with no marker over
+    // any reply — never opened this thread, never read the channel — has no
+    // place to return to, so an ordinary open still settles on the tail the
+    // way it always has. The divider still marks the replies as new; it just
+    // does not drag the reader to the top of a thread they have never seen.
+    // Once the channel marker alone covers the replies this turns back on,
+    // which is the case the resume exists for.
+    final hasThreadReadHistory = openReadSnapshot.value.values.any(
+      (readAt) => readAt != null,
+    );
+    final resumeReplyIndex = hasThreadReadHistory && firstUnreadReplyId != null
+        ? replies.indexWhere((reply) => reply.id == firstUnreadReplyId)
+        : -1;
 
     final hasFetchedReplies = fetchedReplies != null;
     final initialTailSettle = useMemoized(InitialThreadTailSettle.new);
@@ -338,13 +348,6 @@ class ThreadDetailPage extends HookConsumerWidget {
         return null;
       }
       if (!initialTailSettle.isComplete) {
-        // Read markers decide where an ordinary open lands, so hold the settle
-        // until they load rather than committing to the tail and jumping
-        // again a moment later. A deep link names its own target, so it must
-        // not wait — otherwise a marker fetch that never resolves would leave
-        // the settle incomplete and keep tail realignment disabled for good.
-        // The first user scroll abandons the settle either way.
-        if (initialMessageId == null && !readState.isReady) return null;
         previousReplyCount.value = replies.length;
         previousViewportHeight.value = viewportHeight;
         initialTailSettle.schedule(
@@ -352,13 +355,13 @@ class ThreadDetailPage extends HookConsumerWidget {
           controller: itemScrollController,
           positionsListener: itemPositionsListener,
           // Resume at the oldest unread reply, falling back to the tail once
-          // the thread is fully read. A deep link names its own target and
-          // always wins.
+          // the thread is fully read (or was never read at all). Markers can
+          // land after this first schedule; readState.isReady is a dependency
+          // below, so a later run replaces the target while the settle is
+          // still pending. A deep link names its own target and always wins.
           targetIndex: initialMessageId == null && replies.isNotEmpty
               ? indexForReply(
-                  firstUnreadReplyIndex >= 0
-                      ? firstUnreadReplyIndex
-                      : replies.length - 1,
+                  resumeReplyIndex >= 0 ? resumeReplyIndex : replies.length - 1,
                 )
               : null,
           hiddenTopFraction: topOverlayFraction,
@@ -402,13 +405,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         restoreFollow: hasNewLocalReply,
       );
       return null;
-    }, [
-      hasFetchedReplies,
-      readState.isReady,
-      replies.length,
-      firstUnreadReplyId,
-      settleGeometry,
-    ]);
+    }, [hasFetchedReplies, readState.isReady, replies.length, settleGeometry]);
     final visibleReplyReadKey = replies
         .map((reply) => '${reply.id}:${reply.createdAt}')
         .join(',');
