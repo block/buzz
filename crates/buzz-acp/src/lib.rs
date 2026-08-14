@@ -3956,6 +3956,40 @@ fn spawn_failure_notice(
     }
 }
 
+/// Emit a user-visible alert when an agent slot's circuit breaker opens.
+///
+/// Previously this state transition (3 crashes/60s, or a failed half-open
+/// probe re-opening the circuit) only produced a `tracing::error!` log —
+/// invisible unless someone is watching server logs, so a permanently dark
+/// slot could go unnoticed indefinitely. This routes through the same
+/// owner-encrypted observer-frame pipeline already used for `agent_panic`
+/// and `turn_error`, which the desktop app already renders via
+/// `friendlyAgentLastError` — no new transport, no new client-side wiring.
+fn emit_circuit_open_alert(
+    observer: Option<&observer::ObserverHandle>,
+    agent_index: usize,
+    channel_id: Option<Uuid>,
+    trigger: &str,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    let cooldown_secs = CIRCUIT_BREAKER_COOLDOWN.as_secs();
+    observer.emit(
+        "circuit_open",
+        Some(agent_index),
+        &observer::context_for(channel_id, None, None),
+        serde_json::json!({
+            "trigger": trigger,
+            "cooldown_secs": cooldown_secs,
+            "error": format!(
+                "Agent slot {agent_index} {trigger} repeatedly and its circuit breaker is now open \
+                 — it will not respond until the {cooldown_secs}s cooldown elapses and a health probe succeeds."
+            ),
+        }),
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -4412,6 +4446,7 @@ fn recover_panicked_agent(
     let delay = match slot.record_crash() {
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = i, "circuit open after panic — not respawning");
+            emit_circuit_open_alert(observer.as_ref(), i, meta.channel_id, "panicked");
             return;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -4626,6 +4661,7 @@ fn spawn_respawn_task(
     let delay = match slot.record_crash() {
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = index, "circuit open — not respawning");
+            emit_circuit_open_alert(observer.as_ref(), index, None, "crashed");
             return false;
         }
         CrashVerdict::HalfOpenProbe => {
