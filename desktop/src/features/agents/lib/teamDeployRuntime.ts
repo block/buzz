@@ -4,6 +4,7 @@ import type {
   CreateManagedAgentInput,
   ManagedAgent,
 } from "@/shared/api/types";
+import { commandsMatch } from "../agentReuse";
 import {
   getDefaultPersonaRuntime,
   resolvePersonaRuntime,
@@ -85,7 +86,10 @@ export function runtimeForTeamPersonaDeploy(input: {
   const override = source?.agentCommandOverride?.trim();
   if (override) {
     const matching = input.runtimes.find(
-      (runtime) => runtime.command === override || runtime.id === override,
+      (runtime) =>
+        (runtime.command != null &&
+          commandsMatch(runtime.command, override)) ||
+        runtime.id === override,
     );
     if (!matching) {
       return {

@@ -112,6 +112,53 @@ test("team deploy copies a local pin onto create command, args, and harnessOverr
   );
 });
 
+test("pinned Homebrew path matches the catalog command via commandsMatch", () => {
+  const plan = runtimeForTeamPersonaDeploy({
+    persona: persona(),
+    runtimes: [gooseRuntime, buzzAgentRuntime],
+    defaultProvider: buzzAgentRuntime,
+    managedAgents: [
+      managedAgent({
+        agentCommandOverride: "/opt/homebrew/bin/goose-cmd",
+        agentArgs: ["--acp"],
+      }),
+    ],
+  });
+  assert.equal(plan.status, "ready");
+  if (plan.status !== "ready") {
+    return;
+  }
+  assert.equal(plan.runtime.id, "goose");
+  assert.equal(plan.harnessOverride, true);
+  assert.deepEqual(plan.agentArgs, ["--acp"]);
+});
+
+test("claude-code-acp pin matches the claude-acp catalog command", () => {
+  const claudeRuntime = {
+    ...gooseRuntime,
+    id: "claude-acp",
+    label: "Claude",
+    command: "claude-acp",
+    mcpCommand: null,
+  };
+  const plan = runtimeForTeamPersonaDeploy({
+    persona: persona({ runtime: "claude-acp" }),
+    runtimes: [claudeRuntime, buzzAgentRuntime],
+    defaultProvider: buzzAgentRuntime,
+    managedAgents: [
+      managedAgent({
+        agentCommandOverride: "/opt/bin/claude-code-acp",
+        agentArgs: [],
+      }),
+    ],
+  });
+  assert.equal(plan.status, "ready");
+  if (plan.status !== "ready") {
+    return;
+  }
+  assert.equal(plan.runtime.id, "claude-acp");
+});
+
 test("unresolved local pin is Setup required, not a silent default fallback", () => {
   const plan = runtimeForTeamPersonaDeploy({
     persona: persona(),
