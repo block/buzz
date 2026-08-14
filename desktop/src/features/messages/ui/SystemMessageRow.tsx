@@ -34,7 +34,11 @@ import {
   toInlineName,
 } from "../lib/systemEventCopy";
 import { MessageAgentOwner } from "./MessageAgentOwner";
-import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
+import {
+  MessageAuthorText,
+  MessageHeaderRow,
+  MessageMetaSeparator,
+} from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import {
   MembershipAvatarStack,
@@ -895,15 +899,20 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
                 {description.title}
               </MessageAuthorText>
               {displayedIdentityIsAgent ? (
-                <MessageAgentOwner
-                  ownerLabel={displayedOwnerLabel}
-                  ownerPubkey={displayedOwnerPubkey}
-                />
-              ) : null}
-              <MessageTimestamp
-                createdAt={message.createdAt}
-                time={message.time}
-              />
+                <>
+                  <MessageAgentOwner
+                    ownerLabel={displayedOwnerLabel}
+                    ownerPubkey={displayedOwnerPubkey}
+                  />
+                  {/* Grouped with the timestamp so the two wrap together. */}
+                  <span className="inline-flex min-w-0 items-baseline gap-x-1.5">
+                    <MessageMetaSeparator />
+                    <MessageTimestamp createdAt={message.createdAt} />
+                  </span>
+                </>
+              ) : (
+                <MessageTimestamp createdAt={message.createdAt} />
+              )}
             </MessageHeaderRow>
             <p className="-mt-0.5 text-sm leading-snug text-foreground">
               {description.action}

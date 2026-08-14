@@ -27,6 +27,15 @@ import {
 } from "./ui/agentSessionTranscript";
 
 const MAX_OBSERVER_EVENTS = 3000;
+// Length the per-agent journal is evicted down to when it overflows
+// MAX_OBSERVER_EVENTS. Eviction rebuilds the transcript from the retained
+// window (see appendAgentEvents), so trimming back to exactly the cap re-arms
+// eviction on the very next append — every steady-state append then replays the
+// whole history. Leaving 10% headroom amortizes one rebuild across the ~300
+// appends that refill it, while keeping the window within the cap. Expressed as
+// a fraction (not a fixed count) so the same math stays correct if the cap is
+// ever made per-agent, where a fixed headroom could exceed a smaller cap.
+const OBSERVER_EVENTS_LOW_WATER = Math.floor(MAX_OBSERVER_EVENTS * 0.9);
 const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
 
 export type ObserverSnapshot = {
@@ -48,6 +57,20 @@ const listeners = new Set<() => void>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
+
+// Per-agent eviction floor: the ordering key of the newest event that eviction
+// has ever discarded for this agent. Once the journal is trimmed to the
+// low-water mark, the dedup set (built only from the retained array) no longer
+// remembers the discarded frames, so a delayed/replayed relay frame at or below
+// that boundary would be re-admitted into the headroom — and a later refill to
+// the cap would then trim away 300 legitimate retained events with no new
+// activity. The floor rejects any arrival at or before it (equal included: the
+// floor event itself was evicted), so already-evicted history can never
+// re-enter. Cleared with the observer store; only advances forward.
+const evictionFloorByAgent = new Map<
+  string,
+  { timestamp: string; seq: number }
+>();
 
 // Channel-scoped archive event journal — holds paged history loaded from the local
 // SQLite archive without the MAX_OBSERVER_EVENTS live-relay cap. Keyed by
@@ -201,13 +224,25 @@ function appendAgentEvents(
 
   const key = normalizePubkey(agentPubkey);
   const current = eventsByAgent.get(key) ?? [];
+
+  // Reject any arrival at or before the eviction floor: those frames were
+  // already discarded, so re-admitting them (they fit within the headroom
+  // below the cap) would let a later refill trim away legitimate retained
+  // events. Admit only frames strictly after the floor — the floor event
+  // itself was evicted, so an equal ordering key is rejected too.
+  const floor = evictionFloorByAgent.get(key);
+  const admissible = floor
+    ? events.filter((event) => isObserverEventAfter(event, floor))
+    : events;
+  if (admissible.length === 0) return false;
+
   const seen = new Set(
     current.map(
       (event) => `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
     ),
   );
   const added: ObserverEvent[] = [];
-  for (const event of events) {
+  for (const event of admissible) {
     const eventKey = `${event.timestamp.length}:${event.timestamp}:${event.seq}`;
     if (seen.has(eventKey)) continue;
     seen.add(eventKey);
@@ -219,9 +254,20 @@ function appendAgentEvents(
   const sorted = [...current, ...sortedAdded].sort(compareObserverEvents);
   const trimmed = sorted.length > MAX_OBSERVER_EVENTS;
   const final = trimmed
-    ? sorted.slice(sorted.length - MAX_OBSERVER_EVENTS)
+    ? sorted.slice(sorted.length - OBSERVER_EVENTS_LOW_WATER)
     : sorted;
   eventsByAgent.set(key, final);
+
+  // Record the newest event this trim discarded as the agent's eviction floor.
+  // It is the entry just below the retained window; the floor only advances,
+  // since the retained window is always the newest tail.
+  if (trimmed) {
+    const boundary = sorted[sorted.length - OBSERVER_EVENTS_LOW_WATER - 1];
+    evictionFloorByAgent.set(key, {
+      timestamp: boundary.timestamp,
+      seq: boundary.seq,
+    });
+  }
 
   // The common live path appends a sorted batch after the retained window. Fold
   // that batch through the transcript state once without rebuilding history.
@@ -807,6 +853,7 @@ export function resetAgentObserverStore() {
   eventProcessingQueue = Promise.resolve();
   eventsByAgent.clear();
   transcriptByAgent.clear();
+  evictionFloorByAgent.clear();
   snapshotByAgent.clear();
   archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();

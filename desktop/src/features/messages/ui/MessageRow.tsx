@@ -52,7 +52,11 @@ import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
-import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
+import {
+  MessageAuthorText,
+  MessageHeaderRow,
+  MessageMetaSegments,
+} from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
@@ -523,7 +527,6 @@ export const MessageRow = React.memo(
           className="opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100"
           createdAt={message.createdAt}
           hideDayPeriod
-          time={message.time}
         />
       </div>
     );
@@ -627,10 +630,18 @@ export const MessageRow = React.memo(
 
     const inlineMetadataNode = (
       <div className="flex shrink-0 items-baseline gap-2 text-xs">
-        <MessageTimestamp createdAt={message.createdAt} time={message.time} />
+        <MessageTimestamp createdAt={message.createdAt} />
         {statusMetadataNode}
       </div>
     );
+
+    const personaNode =
+      message.personaDisplayName &&
+      message.personaDisplayName !== message.author ? (
+        <span className="text-xs text-muted-foreground">
+          {message.personaDisplayName}
+        </span>
+      ) : null;
 
     const continuationMetadataNode =
       isDisplayedAsContinuation && statusMetadataNode ? (
@@ -657,14 +668,14 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
-        {agentOwnerNode}
-        {inlineMetadataNode}
-        {message.personaDisplayName &&
-        message.personaDisplayName !== message.author ? (
-          <span className="text-xs text-muted-foreground">
-            {message.personaDisplayName}
-          </span>
-        ) : null}
+        {/* Author is not a segment: "Alice 9:53 AM" needs no divider. */}
+        <MessageMetaSegments
+          segments={[
+            { key: "owner", node: agentOwnerNode },
+            { key: "timestamp", node: inlineMetadataNode },
+            { key: "persona", node: personaNode },
+          ]}
+        />
       </MessageHeaderRow>
     );
     const bodyContainerClass = isDisplayedAsContinuation
@@ -932,7 +943,9 @@ export const MessageRow = React.memo(
     prev.message.ownerLabel === next.message.ownerLabel &&
     prev.message.avatarUrl === next.message.avatarUrl &&
     prev.message.accent === next.message.accent &&
-    prev.message.time === next.message.time &&
+    // The header timestamp and hover gutter both derive from createdAt (the
+    // old `time` prop was the same value pre-formatted; this row reads neither).
+    prev.message.createdAt === next.message.createdAt &&
     prev.message.depth === next.message.depth &&
     prev.message.kind === next.message.kind &&
     prev.message.pending === next.message.pending &&
