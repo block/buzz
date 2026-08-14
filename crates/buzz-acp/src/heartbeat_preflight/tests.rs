@@ -553,6 +553,100 @@ fn production_macos_policy_requires_both_code_identity_pins() {
 }
 
 #[test]
+fn local_certificate_trust_is_typed_and_strict() {
+    let fingerprint = "a".repeat(40);
+    let trust_spec = format!("{LOCAL_CERTIFICATE_TRUST_PREFIX}{fingerprint}");
+    assert_eq!(
+        parse_macos_signing_trust(&trust_spec).expect("valid local certificate trust"),
+        MacosSigningTrust::LocalCertificateV1(&fingerprint)
+    );
+
+    assert!(
+        parse_macos_signing_trust(&fingerprint).is_err(),
+        "a fingerprint without the typed prefix must not activate local-certificate mode"
+    );
+
+    for fingerprint in [
+        "a".repeat(39),
+        "a".repeat(41),
+        "A".repeat(40),
+        format!("{}g", "a".repeat(39)),
+    ] {
+        let error =
+            parse_macos_signing_trust(&format!("{LOCAL_CERTIFICATE_TRUST_PREFIX}{fingerprint}"))
+                .expect_err("malformed local certificate fingerprint must fail closed");
+        assert!(matches!(error, HeartbeatPreflightError::InvalidConfig(_)));
+    }
+}
+
+#[test]
+fn local_certificate_config_requires_designated_requirement_leaf_pin() {
+    let (directory, path) = temp_script("local-certificate-config", "exit 0");
+    let fingerprint = "b".repeat(40);
+    let mut candidate = config(path.to_string_lossy().into_owned(), vec![]);
+    candidate.macos_team_identifier =
+        Some(format!("{LOCAL_CERTIFICATE_TRUST_PREFIX}{fingerprint}"));
+
+    let error = candidate
+        .validate_macos_identity_pins(false)
+        .expect_err("local certificate mode must retain a designated requirement");
+    assert!(error.to_string().contains("exact broker identifier"));
+
+    let requirement = local_certificate_requirement(&fingerprint);
+    candidate.macos_designated_requirement = Some(requirement.clone());
+    let raw = serde_json::to_string(&candidate).expect("serialize local certificate policy");
+    let parsed = HeartbeatPreflightConfig::parse(&raw).expect("parse local certificate policy");
+    assert_eq!(
+        parsed.macos_designated_requirement.as_deref(),
+        Some(requirement.as_str())
+    );
+    assert_eq!(
+        expected_macos_team_identifier(
+            parsed
+                .macos_team_identifier
+                .as_deref()
+                .expect("typed local certificate trust")
+        )
+        .expect("parse typed trust"),
+        None,
+        "local certificate identity is enforced by the exact designated requirement, not TeamIdentifier metadata"
+    );
+
+    for mismatched in [
+        format!("certificate leaf = H\"{fingerprint}\""),
+        local_certificate_requirement(&"c".repeat(40)),
+        format!("identifier \"buzz-acp\" and certificate leaf = H\"{fingerprint}\""),
+    ] {
+        candidate.macos_designated_requirement = Some(mismatched);
+        let error = candidate
+            .validate_macos_identity_pins(false)
+            .expect_err("local trust and executed requirement must be the same exact pin");
+        assert!(error.to_string().contains("exact broker identifier"));
+    }
+    std::fs::remove_dir_all(directory).expect("remove test directory");
+}
+
+#[test]
+fn developer_id_team_identifier_metadata_check_is_unchanged() {
+    assert_eq!(
+        parse_macos_signing_trust("TEAMIDENTIFIER").expect("legacy Developer ID trust"),
+        MacosSigningTrust::DeveloperId("TEAMIDENTIFIER")
+    );
+    assert_eq!(
+        expected_macos_team_identifier("TEAMIDENTIFIER").expect("Developer ID metadata pin"),
+        Some("TEAMIDENTIFIER")
+    );
+    for invalid in [
+        String::new(),
+        "lowercase".into(),
+        "TEAM-ID".into(),
+        "A".repeat(33),
+    ] {
+        assert!(parse_macos_signing_trust(&invalid).is_err());
+    }
+}
+
+#[test]
 fn codesign_test_requirement_is_passed_as_one_expression() {
     assert_eq!(
         codesign_requirement_arg("identifier \"com.example.gateway\" and anchor apple generic"),

@@ -48,6 +48,9 @@ const MAX_COMMITTED_MATERIAL_TEXT_BYTES: usize = 8 * 1024;
 const MAX_COMMITTED_MATERIAL_TOTAL_BYTES: usize = 64 * 1024;
 const MIN_REQUIRED_HEARTBEAT_INTERVAL_SECONDS: u64 = 10;
 const MAX_REQUIRED_HEARTBEAT_INTERVAL_SECONDS: u64 = 86_400;
+const LOCAL_CERTIFICATE_TRUST_PREFIX: &str = "local_certificate_v1:";
+const LOCAL_CERTIFICATE_PROGRAM_IDENTIFIER: &str =
+    "com.jungleside.accountability-gateway-preflight";
 const SAFE_FORWARDED_ENV_KEYS: &[&str] = &[
     "BUZZ_HEARTBEAT_GATEWAY_SOCKET",
     "BUZZ_HEARTBEAT_GATEWAY_PIPE",
@@ -88,7 +91,8 @@ pub(crate) struct HeartbeatPreflightConfig {
     /// macOS code-signing requirement; mandatory in production macOS builds.
     #[serde(default)]
     pub macos_designated_requirement: Option<String>,
-    /// macOS signing team identifier; mandatory in production macOS builds.
+    /// macOS Developer ID team identifier or typed local-certificate trust
+    /// spec; mandatory in production macOS builds.
     #[serde(default)]
     pub macos_team_identifier: Option<String>,
     #[serde(default)]
@@ -276,6 +280,11 @@ impl HeartbeatPreflightConfig {
     }
 
     fn validate_macos_identity_pins(&self, required: bool) -> Result<(), HeartbeatPreflightError> {
+        let signing_trust = self
+            .macos_team_identifier
+            .as_deref()
+            .map(parse_macos_signing_trust)
+            .transpose()?;
         if required
             && (self.macos_designated_requirement.is_none() || self.macos_team_identifier.is_none())
         {
@@ -283,6 +292,15 @@ impl HeartbeatPreflightConfig {
                 "macOS production preflight requires designated-requirement and team-identifier pins"
                     .into(),
             ));
+        }
+        if let Some(MacosSigningTrust::LocalCertificateV1(fingerprint)) = signing_trust {
+            let expected = local_certificate_requirement(fingerprint);
+            if self.macos_designated_requirement.as_deref() != Some(expected.as_str()) {
+                return Err(HeartbeatPreflightError::InvalidConfig(
+                    "macOS local-certificate preflight requires the exact broker identifier and certificate leaf pin"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -1187,6 +1205,51 @@ fn codesign_requirement_arg(requirement: &str) -> String {
     format!("-R={requirement}")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacosSigningTrust<'a> {
+    DeveloperId(&'a str),
+    LocalCertificateV1(&'a str),
+}
+
+fn parse_macos_signing_trust(
+    value: &str,
+) -> Result<MacosSigningTrust<'_>, HeartbeatPreflightError> {
+    if let Some(fingerprint) = value.strip_prefix(LOCAL_CERTIFICATE_TRUST_PREFIX) {
+        if !is_lower_hex(fingerprint, 40) {
+            return Err(HeartbeatPreflightError::InvalidConfig(
+                "local certificate fingerprint must be exactly 40 lowercase hex characters".into(),
+            ));
+        }
+        return Ok(MacosSigningTrust::LocalCertificateV1(fingerprint));
+    }
+    if value.is_empty()
+        || value.len() > 32
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return Err(HeartbeatPreflightError::InvalidConfig(
+            "Developer ID team identifier must be 1 to 32 uppercase ASCII letters or digits".into(),
+        ));
+    }
+    Ok(MacosSigningTrust::DeveloperId(value))
+}
+
+fn local_certificate_requirement(fingerprint: &str) -> String {
+    format!(
+        "identifier \"{LOCAL_CERTIFICATE_PROGRAM_IDENTIFIER}\" and certificate leaf = H\"{fingerprint}\""
+    )
+}
+
+fn expected_macos_team_identifier(
+    signing_trust: &str,
+) -> Result<Option<&str>, HeartbeatPreflightError> {
+    match parse_macos_signing_trust(signing_trust)? {
+        MacosSigningTrust::DeveloperId(team_identifier) => Ok(Some(team_identifier)),
+        MacosSigningTrust::LocalCertificateV1(_) => Ok(None),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn verify_macos_code_identity(
     path: &Path,
@@ -1207,7 +1270,13 @@ fn verify_macos_code_identity(
         }
     }
 
-    if let Some(expected_team) = config.macos_team_identifier.as_deref() {
+    if let Some(expected_team) = config
+        .macos_team_identifier
+        .as_deref()
+        .map(expected_macos_team_identifier)
+        .transpose()?
+        .flatten()
+    {
         let output = std::process::Command::new("/usr/bin/codesign")
             .args(["-d", "--verbose=4"])
             .arg(path)
