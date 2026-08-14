@@ -2627,6 +2627,108 @@ void main() {
       );
     });
 
+    testWidgets('renders all five permalink types as composer chips', (
+      tester,
+    ) async {
+      final owner = 'ab' * 32;
+      final id = 'cd' * 32;
+      const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+      final urls = [
+        'buzz://message?channel=$channelId&id=$id',
+        'buzz://channel/$channelId',
+        'buzz://repo?owner=$owner&d=buzz',
+        'buzz://pr?id=$id&owner=$owner&d=buzz',
+        'buzz://issue?id=$id&owner=$owner&d=buzz',
+      ];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: [
+            Channel(
+              id: channelId,
+              name: 'engineering',
+              channelType: 'stream',
+              visibility: 'open',
+              description: '',
+              createdBy: 'creator',
+              createdAt: DateTime(2026),
+              memberCount: 1,
+              isMember: true,
+            ),
+          ],
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), urls.join(' '));
+      await tester.pump();
+
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'composer-buzz-link-chip:',
+              ),
+        ),
+        findsNWidgets(5),
+      );
+      expect(
+        find.byKey(
+          const ValueKey('composer-buzz-link-chip:engineering · cdcdcdcd'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:engineering')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:buzz')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:buzz · cdcdcdcd')),
+        findsNWidgets(2),
+      );
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        urls.join(' '),
+      );
+    });
+
+    testWidgets('preserves underscore d-tags and Markdown delimiters', (
+      tester,
+    ) async {
+      final owner = 'ab' * 32;
+      final url = 'buzz://repo?owner=$owner&d=my_repo';
+      final source = '**$url**';
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), source);
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:my_repo')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:my')),
+        findsNothing,
+      );
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        source,
+      );
+    });
+
     testWidgets('uses the primary color for formatting actions', (
       tester,
     ) async {
