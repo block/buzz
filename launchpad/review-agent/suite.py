@@ -49,7 +49,7 @@ def _surfaces_for(case: Case) -> dict[str, Surface]:
 
 def run_case(case: Case, *, enabled: bool = True) -> Result:
     nonce = make_nonce(f"suite-{case.id}")
-    document, findings, _ = render(_surfaces_for(case), nonce, enabled=enabled)
+    document, findings, _, _ = render(_surfaces_for(case), nonce, enabled=enabled)
 
     contained, why = _is_contained(document, case, nonce)
 

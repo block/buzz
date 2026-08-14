@@ -35,8 +35,8 @@ def review_for(case) -> str:
         for ep in ENTRY_POINTS
     }
     nonce = make_nonce(f"step8-{case.id}")
-    _, findings, all_readable = render(surfaces, nonce)
-    return render_review(findings, {ep: s.state for ep, s in surfaces.items()})
+    _, findings, all_readable, states = render(surfaces, nonce)
+    return render_review(findings, states)
 
 
 def records_in(body: str) -> list[tuple[str, str, str]]:

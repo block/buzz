@@ -311,12 +311,27 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
 # ---------------------------------------------------------------------------
 
 
-def render(surfaces: dict, nonce: str, *, enabled: bool = True) -> tuple[str, list, bool]:
-    """Render every surface. Returns (document, findings, all_readable).
+def render(
+    surfaces: dict, nonce: str, *, enabled: bool = True
+) -> tuple[str, list, bool, dict]:
+    """Render every surface. Returns (document, findings, all_readable, states).
 
     An unreadable surface renders as an explicit SKIP carrying its reason. It must not
     render as an empty block: "nothing was read" and "there is nothing" are different
     facts, and a reviewer who cannot tell them apart will read the first as the second.
+
+    ``states`` is the aggregate-cap-applied state of every entry point, keyed exactly
+    as ``FINDINGS.md``'s ``containment.states`` requires. It did not used to be
+    returned: a comment here claimed "the refusal is applied to the SURFACES, ... so
+    the states a later stage reads carry it too", but ``surfaces = fetch.
+    apply_invocation_cap(surfaces)`` two lines below only rebinds this function's own
+    local parameter — a caller holding its own, separately-fetched ``surfaces`` never
+    saw the cap. ``main()`` below worked around this by calling
+    ``apply_invocation_cap`` a second time before building its own ``states`` dict, and
+    that duplication is exactly how a future caller with no reason to know about the
+    workaround would build ``states`` from the wrong (uncapped) surfaces and never
+    render the "Incomplete" banner over a wholly-withheld pull request. Returning it
+    here removes the duplication rather than documenting around it.
     """
     import detect
     import fetch
@@ -365,7 +380,8 @@ def render(surfaces: dict, nonce: str, *, enabled: bool = True) -> tuple[str, li
         lines.append(result.block)
         lines.append("")
 
-    return "\n".join(lines), findings, all_readable
+    states = {ep: surfaces[ep].state for ep in ENTRY_POINTS}
+    return "\n".join(lines), findings, all_readable, states
 
 
 def findings_for(surfaces: dict, nonce: str) -> list:
@@ -376,7 +392,7 @@ def findings_for(surfaces: dict, nonce: str) -> list:
     makes the prohibition followable: it returns what render() found, and nothing that
     would tempt a caller back to the surfaces.
     """
-    _, findings, _ = render(surfaces, nonce)
+    _, findings, _, _ = render(surfaces, nonce)
     return findings
 
 
@@ -416,12 +432,12 @@ def main(argv: list[str] | None = None) -> int:
     for spec in args.degrade:
         surfaces = fetch.degrade(surfaces, spec)
 
-    # Applied here as well as inside render(), so the `states` emitted below carry the
-    # refusal. It is idempotent by construction — see fetch.invocation_total.
-    surfaces = fetch.apply_invocation_cap(surfaces)
-
     nonce = make_nonce(args.seed)
-    document, findings, all_readable = render(surfaces, nonce, enabled=not args.no_contain)
+    # `states` comes back from render() itself now, post-cap — no second,
+    # easy-to-drift application of apply_invocation_cap here to keep in sync.
+    document, findings, all_readable, states = render(
+        surfaces, nonce, enabled=not args.no_contain
+    )
 
     if args.json:
         print(
@@ -430,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
                     "nonce": nonce,
                     "document": document,
                     "containment_findings": [f.as_dict() for f in findings],
-                    "states": {ep: s.state for ep, s in surfaces.items()},
+                    "states": states,
                     "all_readable": all_readable,
                 },
                 indent=2,

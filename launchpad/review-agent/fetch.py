@@ -102,6 +102,21 @@ def _joined(items: list[dict], key: str = "body") -> str:
     return "\n\n".join((item.get(key) or "").strip() for item in items if item.get(key))
 
 
+def _joined_paginated(pages: list[list[dict]], key: str = "body") -> str:
+    """Flatten ``--paginate --slurp``'s one-array-per-page shape, then join.
+
+    Without ``--paginate``, GitHub's issue-comment, review-comment and review-list
+    endpoints return only their first page — 30 items by default — so a PR with more
+    than 30 comments or reviews in any one category silently lost everything past that
+    point. Nothing detects the loss: a truncated list is a normally-shaped JSON array,
+    so it fetches, parses and joins exactly like a complete one, and an injection
+    attempt sitting in record 31 is never fetched at all, not misdetected. ``--slurp``
+    wraps the pages themselves in an outer array rather than merging them, so this
+    flattens one level before ``_joined`` sees a plain list of items.
+    """
+    return _joined([item for page in pages for item in page], key)
+
+
 def fetch_all(pr: int, repo: str = DEFAULT_REPO) -> dict[str, Surface]:
     """Fetch every surface. A failure on one surface never aborts the others."""
     base = f"repos/{repo}"
@@ -120,13 +135,19 @@ def fetch_all(pr: int, repo: str = DEFAULT_REPO) -> dict[str, Surface]:
     surfaces["pr_diff"] = _classify("pr_diff", ok, diff, reason)
 
     surfaces["pr_issue_comments"] = _json_field(
-        "pr_issue_comments", ["api", f"{base}/issues/{pr}/comments"], _joined
+        "pr_issue_comments",
+        ["api", "--paginate", "--slurp", f"{base}/issues/{pr}/comments"],
+        _joined_paginated,
     )
     surfaces["pr_review_comments"] = _json_field(
-        "pr_review_comments", ["api", f"{base}/pulls/{pr}/comments"], _joined
+        "pr_review_comments",
+        ["api", "--paginate", "--slurp", f"{base}/pulls/{pr}/comments"],
+        _joined_paginated,
     )
     surfaces["pr_review_bodies"] = _json_field(
-        "pr_review_bodies", ["api", f"{base}/pulls/{pr}/reviews"], _joined
+        "pr_review_bodies",
+        ["api", "--paginate", "--slurp", f"{base}/pulls/{pr}/reviews"],
+        _joined_paginated,
     )
 
     surfaces["linked_issue"] = _linked_issue(surfaces["pr_body"], repo)

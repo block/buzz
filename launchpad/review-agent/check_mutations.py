@@ -57,15 +57,19 @@ MUTATIONS = [
     (
         "unescaped-evidence",
         "review.py",
-        "            lines.append(escape(finding.evidence))",
-        "            lines.append(finding.evidence)",
+        "                    escape(finding.evidence),",
+        "                    finding.evidence,",
         "the published review quotes attacker text raw, becoming a fresh vector",
     ),
     (
         "fixed-fence",
         "review.py",
-        "            lines.append(fence_for(finding.evidence))",
-        '            lines.append("```")',
+        "                    fence_for(finding.evidence),\n"
+        "                    escape(finding.evidence),\n"
+        "                    fence_for(finding.evidence),",
+        '                    "```",\n'
+        "                    escape(finding.evidence),\n"
+        '                    "```",',
         "backticks in evidence break the fence and corrupt the rest of the review",
     ),
     (
@@ -142,6 +146,58 @@ MUTATIONS = [
         "stops scanning after the first winning candidate (skeleton vs "
         "skeleton_squeezed), so a decoy that lands in one hides a genuine "
         "letter-spaced forgery that only the OTHER candidate can see",
+    ),
+    (
+        "no-pagination",
+        "fetch.py",
+        '    surfaces["pr_issue_comments"] = _json_field(\n'
+        '        "pr_issue_comments",\n'
+        '        ["api", "--paginate", "--slurp", f"{base}/issues/{pr}/comments"],\n'
+        "        _joined_paginated,\n"
+        "    )\n"
+        '    surfaces["pr_review_comments"] = _json_field(\n'
+        '        "pr_review_comments",\n'
+        '        ["api", "--paginate", "--slurp", f"{base}/pulls/{pr}/comments"],\n'
+        "        _joined_paginated,\n"
+        "    )\n"
+        '    surfaces["pr_review_bodies"] = _json_field(\n'
+        '        "pr_review_bodies",\n'
+        '        ["api", "--paginate", "--slurp", f"{base}/pulls/{pr}/reviews"],\n'
+        "        _joined_paginated,\n"
+        "    )",
+        '    surfaces["pr_issue_comments"] = _json_field(\n'
+        '        "pr_issue_comments", ["api", f"{base}/issues/{pr}/comments"], _joined\n'
+        "    )\n"
+        '    surfaces["pr_review_comments"] = _json_field(\n'
+        '        "pr_review_comments", ["api", f"{base}/pulls/{pr}/comments"], _joined\n'
+        "    )\n"
+        '    surfaces["pr_review_bodies"] = _json_field(\n'
+        '        "pr_review_bodies", ["api", f"{base}/pulls/{pr}/reviews"], _joined\n'
+        "    )",
+        "comment/review list endpoints lose --paginate --slurp, so a PR with more "
+        "than 30 comments or reviews in any category silently drops everything "
+        "past the first page — an injection attempt past record 30 is never "
+        "fetched at all",
+    ),
+    (
+        "states-ignore-the-cap",
+        "contain.py",
+        "    states = {ep: surfaces[ep].state for ep in ENTRY_POINTS}\n"
+        '    return "\\n".join(lines), findings, all_readable, states',
+        '    states = {ep: "ok" for ep in ENTRY_POINTS}\n'
+        '    return "\\n".join(lines), findings, all_readable, states',
+        "render() returns states that never reflect the aggregate cap, so a "
+        "caller building the Incomplete banner from render()'s own return value "
+        "sees every surface as ok even when every surface was withheld",
+    ),
+    (
+        "unbounded-findings-render",
+        "review.py",
+        '        ordered = sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 9))\n        rendered_bytes = 0\n        omitted = 0\n        for index, finding in enumerate(ordered):\n            block = "\\n".join(\n                [\n                    f"### {finding.severity} — {finding.kind}",\n                    "",\n                    f"Entry point: `{finding.entry_point}`",\n                    "",\n                    # Post-escape, deliberately: see the module docstring. The\n                    # fence is sized longer than any backtick run in the\n                    # evidence, because attacker text containing ``` would\n                    # otherwise close the fence early and spill the rest of the\n                    # review into an unterminated code block.\n                    fence_for(finding.evidence),\n                    escape(finding.evidence),\n                    fence_for(finding.evidence),\n                    "",\n                ]\n            )\n            block_bytes = len(block.encode("utf-8"))\n            if rendered_bytes and rendered_bytes + block_bytes > MAX_FINDINGS_BYTES:\n                omitted = len(ordered) - index\n                break\n            lines.append(block)\n            rendered_bytes += block_bytes\n        if omitted:\n            lines.append(\n                f"**{omitted} further finding(s) omitted.** Rendering every finding "\n                f"would exceed a {MAX_FINDINGS_BYTES}-byte budget. Findings are "\n                "sorted by severity before this budget is applied, so what is "\n                "omitted is the lowest-severity tail, never the highest — but a "\n                "pull request producing enough findings to hit this budget is "\n                "itself worth escalating."\n            )\n            lines.append("")\n',
+        '        for finding in sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 9)):\n            lines.append(f"### {finding.severity} — {finding.kind}")\n            lines.append("")\n            lines.append(f"Entry point: `{finding.entry_point}`")\n            lines.append("")\n            lines.append(fence_for(finding.evidence))\n            lines.append(escape(finding.evidence))\n            lines.append(fence_for(finding.evidence))\n            lines.append("")\n',
+        "the rendered findings section has no size budget again, so enough "
+        "distinct low-severity findings render past GitHub's body limit and "
+        "suppress the whole review, Blockers included, through sheer volume",
     ),
     (
         "newline-split-restored",

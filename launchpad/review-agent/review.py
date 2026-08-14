@@ -41,6 +41,12 @@ COVERAGE_NOTE = (
 
 UNREADABLE_STATES = ("absent", "oversized", "unparseable")
 
+#: GitHub's PR review/comment body limit is 65536 bytes. Budgeting the findings
+#: section alone, well under that ceiling, leaves room for COVERAGE_NOTE, the
+#: incomplete banner and the empty-surfaces line that follow it, plus this section's
+#: own truncation notice.
+MAX_FINDINGS_BYTES = 48 * 1024
+
 
 def render_review(findings: list[Finding], states: dict[str, str]) -> str:
     """The review body, as markdown.
@@ -59,18 +65,50 @@ def render_review(findings: list[Finding], states: dict[str, str]) -> str:
             "act on the review itself; it was contained and is reported here."
         )
         lines.append("")
-        for finding in sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 9)):
-            lines.append(f"### {finding.severity} — {finding.kind}")
-            lines.append("")
-            lines.append(f"Entry point: `{finding.entry_point}`")
-            lines.append("")
-            # Post-escape, deliberately: see the module docstring. The fence is
-            # sized longer than any backtick run in the evidence, because attacker
-            # text containing ``` would otherwise close the fence early and spill
-            # the rest of the review into an unterminated code block.
-            lines.append(fence_for(finding.evidence))
-            lines.append(escape(finding.evidence))
-            lines.append(fence_for(finding.evidence))
+        # A PR author can pad enough distinct sentences to make EVERY finding real
+        # and still render past GitHub's own body limit -- amplification, not
+        # evasion, and the previous unbounded loop let it suppress the whole
+        # review, Blockers included. Findings are already sorted by severity, so a
+        # budget applied HERE, in rendering order, drops only the lowest-severity
+        # tail -- never the highest -- and at least one finding always renders
+        # even if it alone exceeds the budget, so a review with real findings never
+        # renders as though it had none.
+        ordered = sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 9))
+        rendered_bytes = 0
+        omitted = 0
+        for index, finding in enumerate(ordered):
+            block = "\n".join(
+                [
+                    f"### {finding.severity} — {finding.kind}",
+                    "",
+                    f"Entry point: `{finding.entry_point}`",
+                    "",
+                    # Post-escape, deliberately: see the module docstring. The
+                    # fence is sized longer than any backtick run in the
+                    # evidence, because attacker text containing ``` would
+                    # otherwise close the fence early and spill the rest of the
+                    # review into an unterminated code block.
+                    fence_for(finding.evidence),
+                    escape(finding.evidence),
+                    fence_for(finding.evidence),
+                    "",
+                ]
+            )
+            block_bytes = len(block.encode("utf-8"))
+            if rendered_bytes and rendered_bytes + block_bytes > MAX_FINDINGS_BYTES:
+                omitted = len(ordered) - index
+                break
+            lines.append(block)
+            rendered_bytes += block_bytes
+        if omitted:
+            lines.append(
+                f"**{omitted} further finding(s) omitted.** Rendering every finding "
+                f"would exceed a {MAX_FINDINGS_BYTES}-byte budget. Findings are "
+                "sorted by severity before this budget is applied, so what is "
+                "omitted is the lowest-severity tail, never the highest — but a "
+                "pull request producing enough findings to hit this budget is "
+                "itself worth escalating."
+            )
             lines.append("")
     else:
         lines.append("No containment findings.")
