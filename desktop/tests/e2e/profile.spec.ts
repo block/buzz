@@ -1871,6 +1871,18 @@ test("an older agent message opens the same persona instance as the Agents libra
   ).toHaveAttribute("aria-label", "Stop");
   const agentsLibraryContract = await readOwnedAgentProfileContract(page);
 
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${historicalPubkey}`).click();
+  await expectHashSearchParam(page, "profile", historicalPubkey);
+  await expectHashSearchParam(page, "profileTab", "runtime");
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Start agent");
+  await expect(
+    page.getByTestId(`user-profile-instance-${historicalPubkey}`),
+  ).toContainText("Current");
+
   await page.getByTestId("auxiliary-panel-close").click();
   await page.getByTestId("channel-agents").click();
   const historicalMessage = page

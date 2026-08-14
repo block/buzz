@@ -88,6 +88,7 @@ import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type {
   AgentPersona,
   Channel,
@@ -180,6 +181,14 @@ export function UserProfilePanel({
     React.useState<AgentPersona | null>(null);
   const [cardMintTarget, setCardMintTarget] =
     React.useState<CardMintTarget | null>(null);
+  const [requestedInstancePubkey, setRequestedInstancePubkey] = React.useState<
+    string | null
+  >(null);
+  const preserveRequestedInstance = Boolean(
+    pubkey &&
+      requestedInstancePubkey &&
+      normalizePubkey(pubkey) === normalizePubkey(requestedInstancePubkey),
+  );
 
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
@@ -188,6 +197,7 @@ export function UserProfilePanel({
       currentPubkey,
       managedAgents: managedAgentsQuery.data,
       personaId: persona?.id,
+      preserveRequestedInstance,
       pubkey,
     });
   const resolvedPersonaFromSource = React.useMemo(() => {
@@ -369,9 +379,10 @@ export function UserProfilePanel({
   React.useEffect(() => {
     if (prevTargetKeyRef.current === targetKey) return;
     prevTargetKeyRef.current = targetKey;
+    if (preserveRequestedInstance) return;
     setView("summary", { replace: true });
     setTab("info", { replace: true });
-  }, [setTab, setView, targetKey]);
+  }, [preserveRequestedInstance, setTab, setView, targetKey]);
   const {
     canHuddle,
     canMessage,
@@ -818,7 +829,11 @@ export function UserProfilePanel({
           onExportAgent={
             isBot && canManagePersona ? handleExportPersona : undefined
           }
-          onOpenInstance={(instancePubkey) => onOpenProfile?.(instancePubkey)}
+          onOpenInstance={(instancePubkey) => {
+            setRequestedInstancePubkey(instancePubkey);
+            onOpenProfile?.(instancePubkey);
+            setTab("runtime");
+          }}
           onOpenActivity={handleOpenActivity}
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}
