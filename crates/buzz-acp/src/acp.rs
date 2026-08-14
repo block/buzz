@@ -22,8 +22,11 @@ use crate::usage::{
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
-/// Maximum serialized JSON detail included in an agent error diagnostic.
+/// Maximum serialized, recursively redacted JSON detail included in an agent
+/// error diagnostic.
 const MAX_AGENT_ERROR_DATA_BYTES: usize = 4 * 1024;
+
+const REDACTED_AGENT_ERROR_DATA: &str = "[REDACTED]";
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -118,9 +121,9 @@ pub enum AcpError {
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
-/// preserving the numeric code and bounded provider-specific `data`. When the
-/// `message` field is missing or non-string, use a stable fallback message while
-/// retaining any `data` detail.
+/// preserving the numeric code and redacted, bounded provider-specific `data`.
+/// When the `message` field is missing or non-string, use a stable fallback
+/// message while retaining any safe `data` detail.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
     let wire_message = error.get("message").and_then(|message| message.as_str());
@@ -140,7 +143,9 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
 }
 
 fn bounded_error_data(data: &serde_json::Value) -> String {
-    let serialized = data.to_string();
+    let mut redacted = data.clone();
+    redact_error_data(&mut redacted);
+    let serialized = redacted.to_string();
     if serialized.len() <= MAX_AGENT_ERROR_DATA_BYTES {
         return serialized;
     }
@@ -152,6 +157,47 @@ fn bounded_error_data(data: &serde_json::Value) -> String {
     }
 
     format!("{}{}", &serialized[..end], TRUNCATION_MARKER)
+}
+
+fn redact_error_data(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(entries) => {
+            for (key, value) in entries {
+                if is_sensitive_error_data_key(key) {
+                    *value = serde_json::Value::String(REDACTED_AGENT_ERROR_DATA.to_string());
+                } else {
+                    redact_error_data(value);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_error_data(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_error_data_key(key: &str) -> bool {
+    let canonical: String = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
+
+    matches!(canonical.as_str(), "auth" | "bearer" | "pwd" | "token")
+        || canonical.contains("authorization")
+        || canonical.contains("apikey")
+        || canonical.contains("password")
+        || canonical.contains("passwd")
+        || canonical.contains("privatekey")
+        || canonical.contains("secret")
+        || canonical.contains("credential")
+        || canonical.contains("cookie")
+        || canonical.ends_with("token")
+        || canonical.ends_with("tokenvalue")
+        || canonical.ends_with("tokenhash")
 }
 
 fn build_initialize_params() -> serde_json::Value {
@@ -4800,6 +4846,57 @@ mod tests {
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_error_from_json_recursively_redacts_credential_data() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "details": "actionable adapter failure",
+                "Authorization": "Bearer top-level-secret",
+                "nested": [
+                    {
+                        "api_key": "api-key-secret",
+                        "accessToken": "access-token-secret",
+                        "client-secret": "client-secret-value",
+                        "password_hash": "password-secret"
+                    },
+                    {
+                        "credentials": {
+                            "username": "operator",
+                            "password": "nested-password-secret"
+                        }
+                    },
+                    { "safe": { "token_count": 42 } }
+                ]
+            }
+        });
+
+        let AcpError::AgentError {
+            data: Some(data), ..
+        } = super::agent_error_from_json(&error)
+        else {
+            panic!("expected AgentError with diagnostic data");
+        };
+        let data: serde_json::Value =
+            serde_json::from_str(&data).expect("redacted diagnostic should remain valid JSON");
+
+        assert_eq!(data["details"], "actionable adapter failure");
+        assert_eq!(data["Authorization"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(data["nested"][0]["api_key"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(data["nested"][0]["accessToken"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(
+            data["nested"][0]["client-secret"],
+            REDACTED_AGENT_ERROR_DATA
+        );
+        assert_eq!(
+            data["nested"][0]["password_hash"],
+            REDACTED_AGENT_ERROR_DATA
+        );
+        assert_eq!(data["nested"][1]["credentials"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(data["nested"][2]["safe"]["token_count"], 42);
     }
 
     #[test]
