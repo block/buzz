@@ -72,3 +72,12 @@ identity.key
 
 # Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
 deploy/charts/*/charts/*.tgz
+
+# Claude Code context
+.claude_context_tree
+
+# Stray artifacts from a Windows-path-into-POSIX-shell-script test bug
+# (fixed in pool.rs, kept as a safety net against recurrence)
+crates/buzz-acp/*Temp*
+crates/buzz-acp/*tmp-build*
+/st.txt
