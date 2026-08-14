@@ -308,80 +308,111 @@ fn windows_mesh_gpu_sdk_dll_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+const WINDOWS_MESH_NATIVE_RUNTIME_VERSION: &str = "0.75.1";
+
+#[cfg(target_os = "windows")]
+fn windows_mesh_native_runtime_lib_dirs_from(
+    native_root: &std::path::Path,
+    runtime_version: &str,
+) -> Vec<PathBuf> {
+    let mut lib_dirs = Vec::new();
+    let version_root = native_root.join(runtime_version);
+    if let Ok(runtime_dirs) = std::fs::read_dir(version_root) {
+        for runtime_dir in runtime_dirs.flatten() {
+            let lib_dir = runtime_dir.path().join("lib");
+            if lib_dir.is_dir() {
+                lib_dirs.push(lib_dir);
+            }
+        }
+    }
+    lib_dirs.sort();
+    lib_dirs
+}
+
+#[cfg(target_os = "windows")]
+fn windows_mesh_dll_registration_order(
+    runtime_lib_dirs: Vec<PathBuf>,
+    dependency_dirs: Vec<PathBuf>,
+    gpu_sdk_dirs: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut registered_dirs = runtime_lib_dirs;
+    registered_dirs.extend(dependency_dirs);
+    registered_dirs.extend(gpu_sdk_dirs);
+
+    let mut seen = HashSet::new();
+    registered_dirs
+        .into_iter()
+        .filter(|dir| {
+            dir.is_dir() && seen.insert(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone()))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
 fn prepare_windows_mesh_runtime_dependencies(app: &AppHandle) {
     let dependency_dirs = windows_mesh_runtime_dependency_dirs(app);
     if dependency_dirs.is_empty() {
         append_mesh_debug_log(app, "windows mesh runtime dependency resources not found");
-        return;
     }
 
-    let mut registered_dirs = dependency_dirs.clone();
-    let Some(local_data_dir) = dirs::data_local_dir() else {
-        return;
-    };
-    let native_root = local_data_dir.join("mesh-llm").join("native-runtimes");
-    if let Ok(version_dirs) = std::fs::read_dir(native_root) {
-        for version_dir in version_dirs.flatten() {
-            let Ok(runtime_dirs) = std::fs::read_dir(version_dir.path()) else {
-                continue;
-            };
-            for runtime_dir in runtime_dirs.flatten() {
-                let lib_dir = runtime_dir.path().join("lib");
-                if !lib_dir.is_dir() {
+    let runtime_lib_dirs = dirs::data_local_dir()
+        .map(|local_data_dir| {
+            windows_mesh_native_runtime_lib_dirs_from(
+                &local_data_dir.join("mesh-llm").join("native-runtimes"),
+                WINDOWS_MESH_NATIVE_RUNTIME_VERSION,
+            )
+        })
+        .unwrap_or_default();
+
+    for lib_dir in &runtime_lib_dirs {
+        for dependency_dir in &dependency_dirs {
+            for name in WINDOWS_MESH_RUNTIME_DEP_DLLS {
+                let src = dependency_dir.join(name);
+                let dst = lib_dir.join(name);
+                // Runtime archives are authoritative for DLLs they ship;
+                // Buzz's bundle only fills gaps (for example CUDA
+                // archives that lack MinGW support DLLs). Do not
+                // replace archive-provided DLLs with runner-local
+                // MinGW copies, whose version depends on whether the
+                // bundler bootstrapped via MSYS2 or Chocolatey.
+                if dst.is_file() {
+                    append_mesh_debug_log(
+                        app,
+                        format!(
+                            "windows mesh runtime dependency already present; not replacing file={}",
+                            dst.display()
+                        ),
+                    );
                     continue;
                 }
-                registered_dirs.push(lib_dir.clone());
-                for dependency_dir in &dependency_dirs {
-                    for name in WINDOWS_MESH_RUNTIME_DEP_DLLS {
-                        let src = dependency_dir.join(name);
-                        let dst = lib_dir.join(name);
-                        // Runtime archives are authoritative for DLLs they ship;
-                        // Buzz's bundle only fills gaps (for example CUDA
-                        // archives that lack MinGW support DLLs). Do not
-                        // replace archive-provided DLLs with runner-local
-                        // MinGW copies, whose version depends on whether the
-                        // bundler bootstrapped via MSYS2 or Chocolatey.
-                        if dst.is_file() {
-                            append_mesh_debug_log(
-                                app,
-                                format!(
-                                    "windows mesh runtime dependency already present; not replacing file={}",
-                                    dst.display()
-                                ),
-                            );
-                            continue;
-                        }
-                        match std::fs::copy(&src, &dst) {
-                            Ok(_) => append_mesh_debug_log(
-                                app,
-                                format!(
-                                    "copied windows mesh runtime dependency src={} dst={}",
-                                    src.display(),
-                                    dst.display()
-                                ),
-                            ),
-                            Err(error) => append_mesh_debug_log(
-                                app,
-                                format!(
-                                    "failed to copy windows mesh runtime dependency src={} dst={} error={}",
-                                    src.display(),
-                                    dst.display(),
-                                    error
-                                ),
-                            ),
-                        }
-                    }
+                match std::fs::copy(&src, &dst) {
+                    Ok(_) => append_mesh_debug_log(
+                        app,
+                        format!(
+                            "copied windows mesh runtime dependency src={} dst={}",
+                            src.display(),
+                            dst.display()
+                        ),
+                    ),
+                    Err(error) => append_mesh_debug_log(
+                        app,
+                        format!(
+                            "failed to copy windows mesh runtime dependency src={} dst={} error={}",
+                            src.display(),
+                            dst.display(),
+                            error
+                        ),
+                    ),
                 }
             }
         }
     }
 
-    registered_dirs.extend(windows_mesh_gpu_sdk_dll_dirs());
-
-    let mut seen = HashSet::new();
-    registered_dirs.retain(|dir| {
-        dir.is_dir() && seen.insert(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone()))
-    });
+    let registered_dirs = windows_mesh_dll_registration_order(
+        runtime_lib_dirs,
+        dependency_dirs,
+        windows_mesh_gpu_sdk_dll_dirs(),
+    );
 
     let mut path_entries: Vec<PathBuf> = registered_dirs.clone();
     if let Some(existing) = std::env::var_os("PATH") {
