@@ -20,6 +20,7 @@ import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { CommunityThemeController } from "@/shared/theme/CommunityThemeController";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
+import { IdleAutoReloadController } from "@/app/useIdleAutoReload";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
@@ -283,6 +284,7 @@ function AppReady({
       }
     >
       <KnownAgentPubkeysProvider>
+        {huddleWindowChannelId() === null ? <IdleAutoReloadController /> : null}
         <RouterProvider router={router} />
       </KnownAgentPubkeysProvider>
     </EncryptedBackupProvider>

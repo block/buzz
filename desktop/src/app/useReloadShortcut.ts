@@ -1,9 +1,7 @@
 import * as React from "react";
 
-import { closeAllWebSockets } from "@/shared/api/relayWebSocketClose";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
-
-const RELOAD_TEARDOWN_TIMEOUT_MS = 500;
+import { requestRendererReload } from "@/shared/lib/reloadRenderer";
 
 /** Reloads the webview after bounded native WebSocket teardown. */
 export function useReloadShortcut() {
@@ -19,13 +17,7 @@ export function useReloadShortcut() {
       }
 
       event.preventDefault();
-      await Promise.race([
-        closeAllWebSockets(),
-        new Promise<void>((resolve) =>
-          window.setTimeout(resolve, RELOAD_TEARDOWN_TIMEOUT_MS),
-        ),
-      ]);
-      window.location.reload();
+      await requestRendererReload();
     }
 
     window.addEventListener("keydown", handleKeyDown);

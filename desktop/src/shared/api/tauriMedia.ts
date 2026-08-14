@@ -1,5 +1,6 @@
 import { invoke as invokeTauriRaw, isTauri } from "@tauri-apps/api/core";
 import { type BlobDescriptor, invokeTauri } from "./tauri";
+import { withVolatileWork } from "@/shared/lib/volatileWorkRegistry";
 
 function encodeRawIpcHeader(value: string): string {
   const bytes = new TextEncoder().encode(value);
@@ -46,7 +47,30 @@ export async function cancelMediaUpload(progressId: string): Promise<void> {
  * reach the relay. Resolves to `null` when the user cancels the dialog.
  */
 export async function pickAndUploadImage(): Promise<BlobDescriptor | null> {
-  return invokeTauri<BlobDescriptor | null>("pick_and_upload_image", {});
+  // Same reload-destroyed window as `pickAndUploadMedia`: an open OS dialog
+  // then a Rust-side upload. Hold the volatile-work registry across it (release
+  // on resolve or cancel) so the idle backstop withholds the reload.
+  return withVolatileWork("pick-and-upload-image", () =>
+    invokeTauri<BlobDescriptor | null>("pick_and_upload_image", {}),
+  );
+}
+
+/**
+ * Open the native multi-file picker and upload the chosen files, reporting
+ * per-file progress under `progressId`. Rust performs the upload; this resolves
+ * once every selected file has landed.
+ */
+export async function pickAndUploadMedia(
+  progressId?: string,
+): Promise<BlobDescriptor[]> {
+  // The native picker returns immediately from JS but holds an open OS dialog
+  // and then a Rust-side upload — reload-destroyed work that no other signal
+  // (`uploadingCount`, mutations) covers for every caller. Hold the app-global
+  // volatile-work registry across the whole operation (release on resolve or
+  // reject) so the idle backstop withholds the reload while the picker is open.
+  return withVolatileWork("pick-and-upload-media", () =>
+    invokeTauri<BlobDescriptor[]>("pick_and_upload_media", { progressId }),
+  );
 }
 
 /**

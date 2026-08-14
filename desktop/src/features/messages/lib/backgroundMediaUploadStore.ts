@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import { cancelMediaUpload, uploadMediaFile } from "@/shared/api/tauriMedia";
+import { registerVolatileWorkPredicate } from "@/shared/lib/volatileWorkRegistry";
 import {
   type BackgroundMediaUploadPhase,
   isNativeMediaUploadPhase,
@@ -335,6 +336,39 @@ export function takeQueuedAttachmentsForDraft(
   queuedAttachmentsByDraftKey.delete(draftKey);
   return attachments;
 }
+
+/**
+ * True while any local attachment is queued for a deferred upload. These are
+ * `File` objects retained only in memory (they cannot be serialized into a
+ * persisted draft), so a renderer reload destroys them — the idle backstop
+ * withholds the reload until the queue drains via the registered predicate
+ * below.
+ */
+function hasQueuedDraftAttachments(): boolean {
+  for (const attachments of queuedAttachmentsByDraftKey.values()) {
+    if (attachments.length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * True while any background media upload is in flight, including the
+ * `isCompleting` settling window between the last byte and `onComplete`
+ * resolving. Mirrors the `isUploading` snapshot without a React subscription so
+ * the idle backstop can read it at check time.
+ */
+function isBackgroundMediaUploadInFlight(): boolean {
+  return snapshot.isUploading;
+}
+
+// Register this store's reload-destroyed state with the app-global volatile-
+// work registry: an in-flight background upload (its settling window included)
+// or a local file retained off-channel for a deferred upload (the retention
+// map, in-memory only). The idle backstop reads this at check time and
+// withholds the reload while either holds.
+registerVolatileWorkPredicate(
+  () => isBackgroundMediaUploadInFlight() || hasQueuedDraftAttachments(),
+);
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);

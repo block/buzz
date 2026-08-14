@@ -116,6 +116,46 @@ export function useDraftPersistLifecycle({
   // cleanup always reads the latest value during normal mounted operation.
   pendingImetaForPersistRef.current = livePendingImeta;
 
+  // Persist a draft's volatile composer state — live editor text, queued local
+  // files, imeta, spoilers, and mention routing. The key/channelId are passed
+  // explicitly so the draft-key-change cleanup persists the OUTGOING draft
+  // while the pagehide flush persists the CURRENT one; both read the same live
+  // editor content and imeta ref, so the write is identical either way.
+  const persistDraftSnapshot = (
+    draftKey: string,
+    draftChannelId: string | null | undefined,
+  ) => {
+    const queuedAttachments = getQueuedAttachments?.() ?? [];
+    if (queuedAttachments.length > 0) {
+      saveQueuedAttachmentsForDraft?.(draftKey, queuedAttachments);
+    }
+    const content = syncComposerContentFromEditor();
+    persistDraft(
+      draftKey,
+      content,
+      draftChannelId ?? draftKey,
+      [...pendingImetaForPersistRef.current],
+      [...spoileredAttachmentUrlsRef.current],
+      getMentionRefs(content),
+    );
+  };
+
+  // location.reload() (the idle backstop and Cmd+R) and window close do not run
+  // React effect cleanup, so the live editor text — otherwise persisted only by
+  // the draft-key-change cleanup below — would be lost. pagehide fires before
+  // all three, so flush the current draft synchronously there. A ref keeps the
+  // mount-once listener bound to the live key/channelId without re-subscribing.
+  // Mirrors the pagehide flush in useObservedUnreadPersistence.
+  const flushCurrentDraftRef = React.useRef<() => void>(() => {});
+  flushCurrentDraftRef.current = () => {
+    if (effectiveDraftKey) persistDraftSnapshot(effectiveDraftKey, channelId);
+  };
+  React.useEffect(() => {
+    const onPageHide = () => flushCurrentDraftRef.current();
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
     // The outgoing draft is persisted by the cleanup below, which runs before
@@ -156,19 +196,7 @@ export function useDraftPersistLifecycle({
 
     return () => {
       if (effectiveDraftKey) {
-        const queuedAttachments = getQueuedAttachments?.() ?? [];
-        if (queuedAttachments.length > 0) {
-          saveQueuedAttachmentsForDraft?.(effectiveDraftKey, queuedAttachments);
-        }
-        const content = syncComposerContentFromEditor();
-        persistDraft(
-          effectiveDraftKey,
-          content,
-          channelId ?? effectiveDraftKey,
-          [...pendingImetaForPersistRef.current],
-          [...spoileredAttachmentUrlsRef.current],
-          getMentionRefs(content),
-        );
+        persistDraftSnapshot(effectiveDraftKey, channelId);
       }
     };
   }, [effectiveDraftKey]);

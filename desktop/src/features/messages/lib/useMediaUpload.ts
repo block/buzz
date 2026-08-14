@@ -6,6 +6,7 @@ import {
   uploadMediaBytes,
 } from "@/shared/api/tauri";
 import { uploadMediaFile } from "@/shared/api/tauriMedia";
+import { useRegisterVolatileWork } from "@/shared/lib/volatileWorkRegistry";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
 import { useFilePicker } from "./useFilePicker";
@@ -622,6 +623,19 @@ export function useMediaUpload({
 
   const handlePaperclip = React.useCallback(async () => {
     if (queueUntilSend) {
+      // Deliberately NOT registered with the volatile-work registry. Unlike the
+      // native picker (`pickAndUploadMedia`), this path opens `useFilePicker`'s
+      // hidden `<input type="file">`: `input.click()` returns synchronously and
+      // the dialog is owned by the webview. There is no reliable dismissal
+      // signal — `useFilePicker`'s own comment notes "Cancel emits no `change`"
+      // — so acquiring on open would risk a hold that never releases when the
+      // user cancels, and a leaked key blocks the idle backstop forever (worse
+      // than the window it would protect). The window is safe to leave
+      // unregistered: no reload-destroyed state exists until `change` fires
+      // (which routes into `queueFiles`/`uploadFiles`, both already covered by
+      // the registered `queuedAttachments`/`uploadingCount` hold), and a user
+      // interacting with an open dialog is not OS-idle, so the backstop's
+      // 30-minute idle gate cannot fire mid-dialog anyway.
       openFilePicker({ multiple: true }, (files) => {
         queueFiles(files.filter(shouldQueueFile));
         uploadFiles(files.filter((file) => !shouldQueueFile(file)));
@@ -894,6 +908,12 @@ export function useMediaUpload({
    * already-cleared composer.
    */
   const isUploading = uploadingCount > 0;
+  // Foreground uploads in flight and local files queued for a deferred send
+  // both live only in this hook's state — a renderer reload discards them. Hold
+  // the app-global volatile-work registry while either is outstanding so the
+  // idle backstop withholds the reload; the hold releases when the composer
+  // drains or unmounts.
+  useRegisterVolatileWork(isUploading || queuedAttachments.length > 0);
   const queuedPreviews = React.useMemo<UploadingAttachmentPreview[]>(
     () =>
       queuedAttachments.map((attachment) => ({

@@ -417,7 +417,16 @@ test("partial list-item selections snap to whole items for block formats", async
       ],
     }[format];
     expect(structure).toEqual(expected);
-    await page.reload();
+    // Clear the composer before the next iteration navigates. The pagehide
+    // draft flush persists live editor text on navigation-away, so leaving the
+    // formatted content in place would restore it into the next iteration's
+    // composer. `fill("")` does not reliably empty the ProseMirror editor, so
+    // select-all + Backspace clears it the way a user would; the emptied editor
+    // then flushes to a cleared draft. (This replaces a bare page.reload(),
+    // which the flush now defeats — the next iteration's openGeneral already
+    // provides the fresh page.)
+    await input.press("ControlOrMeta+a");
+    await input.press("Backspace");
   }
 });
 

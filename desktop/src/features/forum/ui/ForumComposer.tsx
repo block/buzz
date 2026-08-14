@@ -21,6 +21,7 @@ import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomple
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
+import { useRegisterVolatileWork } from "@/shared/lib/volatileWorkRegistry";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -54,6 +55,13 @@ export function ForumComposer({
   const [content, setContent] = React.useState("");
   const contentRef = React.useRef(content);
   contentRef.current = content;
+
+  // The forum composer has no draft persistence, so unsent text lives only in
+  // renderer memory and a reload discards it. Register it with the app-global
+  // volatile-work registry so the idle backstop withholds the reload while a
+  // draft is unsent; the hold releases when the text clears or the forum view
+  // (and this composer) unmounts, so a closed view never leaks its key.
+  useRegisterVolatileWork(content.trim().length > 0);
 
   const [isCompactExpanded, setIsCompactExpanded] = React.useState(!compact);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);

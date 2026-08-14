@@ -179,6 +179,13 @@ function installDOMShim() {
       configurable: true,
     });
   }
+  // The draft-persist hook registers a window-level `pagehide` listener; back
+  // window.{add,remove}EventListener/dispatchEvent with an event target so the
+  // listener binds cleanly and the pagehide flush can be dispatched in tests.
+  const windowET = new MinimalEventTarget();
+  globalThis.addEventListener = windowET.addEventListener.bind(windowET);
+  globalThis.removeEventListener = windowET.removeEventListener.bind(windowET);
+  globalThis.dispatchEvent = windowET.dispatchEvent.bind(windowET);
   if (!Object.getOwnPropertyDescriptor(globalThis, "navigator")?.value) {
     Object.defineProperty(globalThis, "navigator", {
       value: { userAgent: "node" },
@@ -283,6 +290,24 @@ async function mountStrictMode(Comp) {
         );
       });
     },
+    unmount: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+    },
+  };
+}
+
+// Plain (non-StrictMode) mount: no simulate-unmount, so the draft-key-change
+// cleanup never fires while mounted. Used to isolate the pagehide flush as the
+// sole persist path.
+async function mountPlain(Comp) {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(React.createElement(Comp));
+  });
+  return {
     unmount: async () => {
       await act(async () => {
         root.unmount();
@@ -661,4 +686,80 @@ test("discarding_a_draft_drops_its_retained_local_files", () => {
   deleteDraftEntry("chan-deleted");
 
   assert.deepEqual(takeQueuedAttachmentsForDraft("chan-deleted"), []);
+});
+
+/**
+ * Regression test: typed-but-unpersisted composer text survives a
+ * pagehide-then-reload cycle (the idle auto-reload backstop and Cmd+R).
+ *
+ * ── Background ────────────────────────────────────────────────────────────────
+ * `location.reload()` navigates the webview without running React effect
+ * cleanup, and the draft-key-change cleanup is otherwise the ONLY path that
+ * persists live editor text. So text typed since the last key change — the
+ * common case: the user is mid-message when the backstop or Cmd+R fires —
+ * would be lost. `pagehide` fires before the reload, so the hook flushes the
+ * CURRENT draft there.
+ *
+ * This mounts the REAL `useDraftPersistLifecycle` on a key with NO saved draft,
+ * types content into the live editor (never triggering a key change), dispatches
+ * `pagehide`, and asserts the store now holds that text — proving the flush
+ * captures work the cleanup never saw.
+ */
+test("pagehide_flush_persists_typed_but_unsaved_composer_text_before_reload", async () => {
+  const DRAFT_KEY = "chan-pagehide-flush";
+  setupStore("pubkey-pagehide-flush");
+  // No draft seeded: the live editor text has never been persisted.
+  assert.equal(
+    loadDraftEntry(DRAFT_KEY),
+    undefined,
+    "precondition: empty store",
+  );
+
+  // Live editor content the user is typing; the cleanup has not run for it.
+  const editorContent = "half-written message";
+  const spoileredRef = { current: new Set() };
+
+  function HarnessComposer() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: () => {},
+      clearContent: () => {},
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    });
+    return null;
+  }
+
+  const handle = await mountPlain(HarnessComposer);
+
+  // Still unsaved after mount — mount does not persist an unchanged key, and a
+  // plain mount runs no cleanup, so only the pagehide flush can persist here.
+  assert.equal(
+    loadDraftEntry(DRAFT_KEY),
+    undefined,
+    "mount alone must not persist the live editor text",
+  );
+
+  // The reload path fires pagehide before location.reload().
+  await act(async () => {
+    globalThis.dispatchEvent({ type: "pagehide" });
+  });
+
+  const persisted = loadDraftEntry(DRAFT_KEY);
+  assert.ok(persisted, "pagehide flush must persist the current draft");
+  assert.equal(
+    persisted.content,
+    "half-written message",
+    "typed-but-unsaved composer text must survive the reload",
+  );
+
+  await handle.unmount();
 });
