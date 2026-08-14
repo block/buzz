@@ -157,6 +157,28 @@ above is unit-level verification (re-run directly, not taken from build-agent re
 the MSVC linker (`LNK1108: cannot write file at 0x0`). Prefix cargo with
 `TMP=E:/tmp-build TEMP=E:/tmp-build` to build at all.
 
+## 2026-08-14 correction: `cargo test -p buzz-acp` was not fully green
+
+Earlier passages above cite specific passing test counts (persona_pack_tests,
+routing_*, build_tags) — those numbers were re-verified and are accurate. But
+nothing here previously disclosed that **the full crate was not clean**: a
+branch-wide audit found `cargo test -p buzz-acp` at 810 passed / 24 failed.
+4 of those failures were a real bug in this crate's own tests (commit
+`18bd342`): four `pool.rs` lifecycle tests spawned `"bash"` for their
+fake-ACP-agent script, which resolves to WSL bash on this machine — WSL
+mounts drives at `/mnt/e/`, not `E:/`, so a Windows temp capture path was
+neither a valid WSL path nor writable as given. Fixed by switching those
+tests to `"sh"` (matching the already-correct pattern in
+`spawn_fake_session_agent`) and normalizing backslashes before shell-quoting.
+Full suite is now 823 passed / 11 failed; the remaining 11 are unrelated
+pre-existing `acp.rs` steer/timing races, not part of this feature.
+Stray on-disk artifacts this bug produced (`st.txt` + 9 malformed filenames)
+were deleted (commit `8c502c1`), with a `.gitignore` safety net added.
+
+**Lesson carried forward:** "tests pass" claims in this doc should state
+which tests, not imply the whole crate — re-verify against a fresh
+`cargo test -p buzz-acp` count before trusting prior green claims here.
+
 ## ⚠ Two blocking findings (verified 2026-08-13) — these invalidated the original slice-8 plan (NOW FIXED, see above)
 
 Both were found by an adversarial research pass and then **independently re-verified against the
