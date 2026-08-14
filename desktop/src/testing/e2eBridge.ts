@@ -322,6 +322,10 @@ type E2eConfig = {
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
     feedReadError?: string;
+    /** Long-form kind:30023 events returned by `get_long_form_note`. */
+    longFormNotes?: RawUserNote[];
+    /** Sequenced long-form read failures; null means the request succeeds. */
+    longFormReadErrors?: (string | null)[];
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
@@ -5278,6 +5282,30 @@ function handleGetNote(args: { noteId?: string }) {
       ...getMockUserNotes(DEFAULT_MOCK_IDENTITY.pubkey),
       ...getMockUserNotes(ALICE_PUBKEY),
     ].find((note) => note.id === noteId) ?? null
+  );
+}
+
+function handleGetLongFormNote(
+  args: { pubkey?: string; identifier?: string },
+  config: E2eConfig | undefined,
+) {
+  const nextError = config?.mock?.longFormReadErrors?.shift();
+  if (nextError) {
+    throw new Error(nextError);
+  }
+
+  const pubkey = args.pubkey?.toLowerCase();
+  const identifier = args.identifier;
+  if (!pubkey || !identifier) {
+    return null;
+  }
+
+  return (
+    config?.mock?.longFormNotes?.find(
+      (note) =>
+        note.pubkey.toLowerCase() === pubkey &&
+        note.tags.some((tag) => tag[0] === "d" && tag[1] === identifier),
+    ) ?? null
   );
 }
 
@@ -11419,6 +11447,11 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "get_note":
         return handleGetNote(payload as Parameters<typeof handleGetNote>[0]);
+      case "get_long_form_note":
+        return handleGetLongFormNote(
+          payload as Parameters<typeof handleGetLongFormNote>[0],
+          activeConfig,
+        );
       case "get_note_reactions":
         return handleGetNoteReactions();
       case "get_liked_notes":

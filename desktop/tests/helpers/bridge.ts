@@ -277,6 +277,16 @@ type MockBridgeOptions = {
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;
   feedReadError?: string;
+  /** Long-form kind:30023 events returned by `get_long_form_note`. */
+  longFormNotes?: Array<{
+    id: string;
+    pubkey: string;
+    created_at: number;
+    content: string;
+    tags: string[][];
+  }>;
+  /** Sequenced long-form read failures; null means the request succeeds. */
+  longFormReadErrors?: (string | null)[];
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;

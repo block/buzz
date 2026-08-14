@@ -838,6 +838,7 @@ pub fn run() {
             get_notes_timeline,
             get_global_notes,
             get_note,
+            get_long_form_note,
             get_note_reactions,
             get_liked_notes,
             start_huddle,

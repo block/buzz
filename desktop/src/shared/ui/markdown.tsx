@@ -13,6 +13,7 @@ import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { requestOpenSnapshotImport } from "@/features/agents/openSnapshotImportFromUrlEvent";
+import { renderInteractiveNaddrLink } from "@/features/long-form/ui/NaddrLinkPill";
 import {
   parseMessageLink,
   resolveMessageLinkRenderTarget,
@@ -1305,6 +1306,9 @@ function createMarkdownComponents(
 
     const label = getReactNodeText(children);
 
+    if (href?.startsWith("nostr:"))
+      return renderInteractiveNaddrLink(href, children);
+
     // Snapshot attachment (agent or team): classify before generic FileCard.
     // resolveSnapshotCard checks the filename suffix + SHA-256 field.
     const snapshotCard = resolveSnapshotCard(
@@ -1348,9 +1352,7 @@ function createMarkdownComponents(
       );
     }
 
-    // Intercept `buzz://message?channel=…&id=…` links so a click navigates
-    // in-app instead of opening the URL in the OS browser. http(s) links
-    // continue to use the existing target="_blank" behavior.
+    // Keep Buzz message links in-app; http(s) uses the external-link path.
     if (href) {
       const messageLinkTarget = resolveMessageLinkRenderTarget({
         href,
@@ -1730,9 +1732,11 @@ function createMarkdownComponents(
 /**
  * The component map only varies by the two boolean render flags, so at most
  * four instances ever exist. Module-stable maps mean cached markdown element
- * trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
+ * trees (see ./markdown/nodeCache.ts) never embed per-mount closures. Bump the
+ * version whenever the component map changes so stale cached trees are dropped
+ * (bumped to "6" when the `nostr:naddr` renderer joined the entity-link map).
  */
-const MARKDOWN_COMPONENT_SCHEMA_VERSION = "5";
+const MARKDOWN_COMPONENT_SCHEMA_VERSION = "6";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
 type MarkdownComponentSet = { components: Components; variant: string };

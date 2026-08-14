@@ -1,5 +1,6 @@
 import type {
   ContactListResponse,
+  LongFormNote,
   NoteReactionSummary,
   PublishNoteResult,
   UserNote,
@@ -69,6 +70,17 @@ export async function getNoteReactions(
 export async function getNote(noteId: string): Promise<UserNote | null> {
   const response = await invokeTauri<RawUserNote | null>("get_note", {
     noteId,
+  });
+  return response ? fromRawUserNote(response) : null;
+}
+
+export async function getLongFormNote(
+  pubkey: string,
+  identifier: string,
+): Promise<LongFormNote | null> {
+  const response = await invokeTauri<RawUserNote | null>("get_long_form_note", {
+    pubkey,
+    identifier,
   });
   return response ? fromRawUserNote(response) : null;
 }

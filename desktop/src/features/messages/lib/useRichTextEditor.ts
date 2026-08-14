@@ -15,6 +15,10 @@ import {
   isMacPlatform,
 } from "@/shared/lib/platform";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+import {
+  isAllowedComposerLink,
+  shouldAutoLinkComposerUrl,
+} from "@/features/long-form/lib/composerLinks";
 
 import { resolveLinkAt, type LinkSelectionInfo } from "./resolveLinkAt";
 
@@ -475,10 +479,15 @@ export function useRichTextEditor({
           openOnClick: false,
           autolink: true,
           linkOnPaste: true,
-          // Allow Buzz message links through TipTap's URL sanitiser.
+          // Allow Buzz message links and NIP-21 references through TipTap's URL
+          // sanitiser. Rendering still validates supported `nostr:` payloads.
           // http(s) and mailto are accepted by default; non-listed protocols are
           // stripped on paste/typed input.
-          protocols: ["buzz"],
+          protocols: ["buzz", "nostr"],
+          isAllowedUri: (url, { defaultValidate }) =>
+            isAllowedComposerLink(url, defaultValidate),
+          shouldAutoLink: (url) =>
+            shouldAutoLinkComposerUrl(url, Link.options.shouldAutoLink),
           HTMLAttributes: {
             class: "text-primary underline underline-offset-4 cursor-text",
           },

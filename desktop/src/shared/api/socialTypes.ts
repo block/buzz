@@ -6,6 +6,8 @@ export type UserNote = {
   tags: string[][];
 };
 
+export type LongFormNote = UserNote;
+
 export type NoteReactionSummary = {
   noteId: string;
   emoji: string;

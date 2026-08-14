@@ -1,6 +1,7 @@
 import * as React from "react";
 import { defaultUrlTransform } from "react-markdown";
 
+import { isLongFormNaddr } from "@/features/long-form/lib/nostrAddress";
 import { isMessageLink } from "@/features/messages/lib/messageLink";
 import { parseEntityLink } from "@/shared/lib/entityLink";
 
@@ -178,18 +179,22 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
  *   message-link pill renderer).
  * - `buzz://pr|issue|repo` hrefs — preserved only when `parseEntityLink`
  *   succeeds, keeping the sanitizer active against arbitrary `buzz://` URIs.
+ * - `nostr:naddr1…` hrefs — preserved only for valid kind:30023 long-form
+ *   addresses (`isLongFormNaddr`); other `nostr:` payloads are stripped.
  * - Everything else delegates to `defaultUrlTransform`.
  */
 export function buzzDeepLinkUrlTransform(value: string, key: string): string {
   if (key !== "href") return defaultUrlTransform(value);
   if (isMessageLink(value)) return value;
+  if (isLongFormNaddr(value)) return value;
   if (parseEntityLink(value).ok) return value;
   return defaultUrlTransform(value);
 }
 
 /**
  * @deprecated Preserved for external callers; use `buzzDeepLinkUrlTransform`
- * which also handles `buzz://pr|issue|repo` entity links.
+ * which also handles `buzz://pr|issue|repo` entity links and `nostr:naddr`
+ * long-form references.
  */
 export function messageLinkUrlTransform(value: string, key: string): string {
   return buzzDeepLinkUrlTransform(value, key);

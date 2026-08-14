@@ -96,6 +96,7 @@ export default defineConfig({
         "**/channel-window-mock-paging.spec.ts",
         "**/live-broadcast-reply-timeline.spec.ts",
         "**/markdown-parse-cache.spec.ts",
+        "**/naddr-links.spec.ts",
         "**/overscroll-boundary.spec.ts",
         "**/terminal-wheel.spec.ts",
         "**/cold-switch-longtask.perf.ts",

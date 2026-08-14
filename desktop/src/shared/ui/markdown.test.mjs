@@ -521,34 +521,27 @@ test("rehypeImageGallery: leaves a single trailing image in the text flow", () =
 
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
 // schemes (returns `""`) before our `a` component override can see them,
-// which would break copy → paste → click for `buzz://message?…` links and
-// `buzz://pr|issue|repo?…` entity links end-to-end. We pass a custom
-// `urlTransform` (`buzzDeepLinkUrlTransform`) that preserves valid Buzz
+// which would break copy → paste → click for `buzz://message?…` links,
+// `buzz://pr|issue|repo?…` entity links, and `nostr:naddr` long-form
+// references end-to-end. `buzzDeepLinkUrlTransform` preserves valid Buzz
 // deep links and delegates everything else to `defaultUrlTransform`.
 //
 // This test renders real `<ReactMarkdown>` with the production transform
-// and asserts the link href survives to the rendered DOM. Mirrors the
-// `markdown.tsx` source — keep in sync if either changes.
+// (imported straight from `./markdown/utils.ts`) so the supported custom
+// schemes cannot drift between the test and the render path.
 
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown from "react-markdown";
+import { nip19 } from "nostr-tools";
 
-import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
-import { parseEntityLink } from "../lib/entityLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
+import { buzzDeepLinkUrlTransform } from "./markdown/utils.ts";
 
 const OWNER_HEX =
   "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
 const EVENT_HEX =
   "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
-
-function buzzDeepLinkUrlTransform(value, key) {
-  if (key !== "href") return defaultUrlTransform(value);
-  if (isMessageLink(value)) return value;
-  if (parseEntityLink(value).ok) return value;
-  return defaultUrlTransform(value);
-}
 
 function renderMarkdown(content) {
   return renderToStaticMarkup(
@@ -728,6 +721,34 @@ test("renderEntityLinkAnchor_directEntityLink_returnsAnchorRegardlessOfOrigin", 
     null,
     "direct buzz://pr link must produce an entity anchor regardless of origin",
   );
+});
+
+test("messageLinkUrlTransform: preserves valid kind 30023 naddr href", () => {
+  const uri = `nostr:${nip19.naddrEncode({
+    identifier: "launch-brief",
+    kind: 30023,
+    pubkey: "1".repeat(64),
+  })}`;
+  const html = renderMarkdown(`[brief](${uri})`);
+  assert.match(html, new RegExp(`href="${uri}"`));
+});
+
+test("messageLinkUrlTransform: strips unsupported naddr kinds", () => {
+  const uri = `nostr:${nip19.naddrEncode({
+    identifier: "unsupported",
+    kind: 30024,
+    pubkey: "1".repeat(64),
+  })}`;
+  const html = renderMarkdown(`[unsupported](${uri})`);
+  assert.match(html, /href=""/);
+  assert.doesNotMatch(html, /href="nostr:naddr/);
+});
+
+test("messageLinkUrlTransform: strips secret-key nostr URIs", () => {
+  const uri = `nostr:${nip19.nsecEncode(new Uint8Array(32).fill(1))}`;
+  const html = renderMarkdown(`[secret](${uri})`);
+  assert.match(html, /href=""/);
+  assert.doesNotMatch(html, /href="nostr:nsec/);
 });
 
 test("remarkSpoilers: block delimiter spoilers expose a block prop to React", () => {

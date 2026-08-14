@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { nip19 } from "nostr-tools";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { clearMarkdownNodeCache, renderCachedMarkdown } from "./nodeCache.ts";
@@ -114,4 +115,29 @@ test("active search queries bypass the cache", () => {
   const first = renderCachedMarkdown({ ...BASE, searchQuery: "bold" });
   const second = renderCachedMarkdown({ ...BASE, searchQuery: "bold" });
   assert.notEqual(first, second);
+});
+
+test("bare valid long-form naddr renders as a preserved nostr link", () => {
+  clearMarkdownNodeCache();
+  const naddr = `nostr:${nip19.naddrEncode({
+    identifier: "hello",
+    kind: 30023,
+    pubkey: "1".repeat(64),
+  })}`;
+  const markup = renderToStaticMarkup(
+    renderCachedMarkdown({ ...BASE, content: `read ${naddr}` }),
+  );
+
+  assert.match(markup, new RegExp(`<a href="${naddr}">${naddr}</a>`));
+});
+
+test("unsupported nostr links do not get a preserved href", () => {
+  clearMarkdownNodeCache();
+  const nsec = `nostr:${nip19.nsecEncode(new Uint8Array(32).fill(1))}`;
+  const markup = renderToStaticMarkup(
+    renderCachedMarkdown({ ...BASE, content: `[secret](${nsec})` }),
+  );
+
+  assert.match(markup, /<a href="">secret<\/a>/);
+  assert.doesNotMatch(markup, /href="nostr:nsec/);
 });
