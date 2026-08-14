@@ -1,9 +1,16 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test, type Locator } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
+
+const LINK_PREVIEW_IMAGE = readFileSync(
+  new URL("../fixtures/github-pr-5629-og.png", import.meta.url),
+);
+const LINK_PREVIEW_IMAGE_DATA_URL = `data:image/png;base64,${LINK_PREVIEW_IMAGE.toString("base64")}`;
 
 async function waitForReadyComposerSnapshots(
   page: import("@playwright/test").Page,
@@ -208,8 +215,7 @@ test.beforeEach(async ({ page }, testInfo) => {
                       siteName: "GitHub",
                       description:
                         "A polished, stable preview for shared links.",
-                      imageDataUrl:
-                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                      imageDataUrl: LINK_PREVIEW_IMAGE_DATA_URL,
                       imageDomain: "opengraph.githubassets.com",
                       faviconDataUrl:
                         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -280,44 +286,63 @@ test.beforeEach(async ({ page }, testInfo) => {
                               "link-preview-image",
                             ],
                           }
-                        : testInfo.title.includes("link preview") ||
-                            testInfo.title.includes("supported Compact")
+                        : testInfo.title.includes(
+                              "sent link preview media uses",
+                            )
                           ? {
+                              mediaProxyInitiallyUnavailable: true,
                               linkPreviewMetadata: {
                                 title: "Buzz pull request",
                                 siteName: "GitHub",
                                 description:
                                   "A sender-authored preview snapshot.",
-                                imageDataUrl: null,
-                                imageDomain: null,
+                                imageDataUrl:
+                                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                                imageDomain: "opengraph.githubassets.com",
+                                faviconDataUrl:
+                                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                               },
-                              linkPreviewMetadataDelayMs:
-                                testInfo.title.includes(
-                                  "loading card before cold resolver work",
-                                )
-                                  ? 10_000
-                                  : testInfo.title.includes(
-                                        "send does not wait",
-                                      )
-                                    ? 3_000
-                                    : testInfo.title.includes("draft auto-send")
-                                      ? 500
-                                      : testInfo.title.includes(
-                                            "style defaults",
-                                          ) ||
-                                          testInfo.title.includes(
-                                            "attachment-sized",
-                                          )
-                                        ? 1_500
-                                        : undefined,
-                              linkPreviewMetadataStartBlockMs:
-                                testInfo.title.includes(
-                                  "loading card before cold resolver work",
-                                )
-                                  ? 150
-                                  : undefined,
                             }
-                          : undefined;
+                          : testInfo.title.includes("link preview") ||
+                              testInfo.title.includes("supported Compact")
+                            ? {
+                                linkPreviewMetadata: {
+                                  title: "Buzz pull request",
+                                  siteName: "GitHub",
+                                  description:
+                                    "A sender-authored preview snapshot.",
+                                  imageDataUrl: null,
+                                  imageDomain: null,
+                                },
+                                linkPreviewMetadataDelayMs:
+                                  testInfo.title.includes(
+                                    "loading card before cold resolver work",
+                                  )
+                                    ? 10_000
+                                    : testInfo.title.includes(
+                                          "send does not wait",
+                                        )
+                                      ? 3_000
+                                      : testInfo.title.includes(
+                                            "draft auto-send",
+                                          )
+                                        ? 500
+                                        : testInfo.title.includes(
+                                              "style defaults",
+                                            ) ||
+                                            testInfo.title.includes(
+                                              "attachment-sized",
+                                            )
+                                          ? 1_500
+                                          : undefined,
+                                linkPreviewMetadataStartBlockMs:
+                                  testInfo.title.includes(
+                                    "loading card before cold resolver work",
+                                  )
+                                    ? 150
+                                    : undefined,
+                              }
+                            : undefined;
   const mock = testInfo.title.includes("unresolvable preview")
     ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 800 }
     : baseMock;
@@ -460,6 +485,81 @@ test("markdown tables overflow wide content and fill the message when narrow", a
       }),
     )
     .toBeLessThanOrEqual(1);
+});
+
+test("sent link preview media uses the authenticated proxy in compact and rich cards", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?proxy=1";
+  const fallbackMediaPattern =
+    /^buzz-media:\/\/localhost\/media\/[\da-f]{64}\.png$/;
+  const proxyMediaPattern =
+    /^http:\/\/127\.0\.0\.1:54321\/media\/[\da-f]{64}\.png$/;
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#22c55e"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+  await waitForReadyComposerSnapshots(page);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const compactPreview = row.locator(
+    '[data-link-preview="github-pull-request"]',
+  );
+  const compactThumbnail = compactPreview
+    .locator("[data-link-preview-thumbnail] img")
+    .first();
+  const compactFavicon = compactPreview.locator(
+    "img[data-link-preview-hostname-favicon]",
+  );
+  await expect(compactThumbnail).toHaveAttribute("src", fallbackMediaPattern);
+  await expect(compactFavicon).toHaveAttribute("src", fallbackMediaPattern);
+
+  const releasedPort = await page.evaluate(() =>
+    window.__BUZZ_E2E_RELEASE_MEDIA_PROXY__?.(),
+  );
+  expect(releasedPort).toBe(54321);
+  await expect(compactThumbnail).toHaveAttribute("src", proxyMediaPattern);
+  await expect(compactFavicon).toHaveAttribute("src", proxyMediaPattern);
+  await expect
+    .poll(() => compactThumbnail.evaluate((image) => image.naturalWidth))
+    .toBe(40);
+
+  // The compact thumbnail sits flush against the card shell's left edge, so the
+  // shell's smooth-corner clip carves those corners. It must therefore carry
+  // the same treatment itself, or its right corners render as a plain arc
+  // against the shell's smoothed left corners. See the invariant in
+  // `shared/ui/smoothCorners.ts`.
+  const compactThumbnailFrame = compactPreview
+    .locator("[data-link-preview-thumbnail]")
+    .first();
+  await expectCornerRadiusPx(compactPreview, 16);
+  await expectCornerRadiusPx(compactThumbnailFrame, 16);
+  await expectSmoothCorners(compactThumbnailFrame);
+
+  await openSettings(page, "appearance");
+  await page.getByTestId("link-preview-style-trigger").click();
+  await page.getByTestId("link-preview-style-rich").click();
+  await page.getByTestId("settings-back-to-app").click();
+
+  const richPreview = row.locator(
+    '[data-link-preview="github-pull-request"][data-link-preview-inline]',
+  );
+  const richThumbnail = richPreview
+    .locator("[data-link-preview-thumbnail] img")
+    .first();
+  const richFavicon = richPreview.locator("img[data-link-preview-favicon]");
+  await expect(richThumbnail).toHaveAttribute("src", proxyMediaPattern);
+  await expect(richFavicon).toHaveAttribute("src", proxyMediaPattern);
+  await expect
+    .poll(() => richThumbnail.evaluate((image) => image.naturalWidth))
+    .toBe(40);
 });
 
 test("link preview style defaults to compact and Rich unfurls descriptions", async ({
@@ -1217,6 +1317,58 @@ test("composer link preview embeds stay attachment-sized while loading and ready
     expect(initial.thumbnailHeight).toBe(55);
     expect(initial.thumbnailWidth).toBe(55);
     expect(ready).toEqual(initial);
+  }
+});
+
+test("compact link preview image geometry truncates long titles to one line", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?geometry=1";
+  // Sent snapshot media is relay-hosted and rewritten through the
+  // authenticated media proxy (#5627), so serve the fixture from the mock
+  // proxy origin rather than the raw relay origin.
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: LINK_PREVIEW_IMAGE,
+      contentType: "image/png",
+    }),
+  );
+  await page.setViewportSize({ width: 800, height: 700 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+  await waitForReadyComposerSnapshots(page);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const card = row.locator('[data-link-preview="github-pull-request"]');
+  const thumbnail = card.locator("[data-link-preview-thumbnail]");
+  const title = card.locator('[data-slot="attachment-title"]');
+  const image = thumbnail.locator("img");
+  await expect(card).toHaveAttribute("data-image-state", "image");
+  await expect(image).toBeVisible();
+  await expect
+    .poll(() => image.evaluate((element) => element.naturalWidth))
+    .toBeGreaterThan(0);
+  await expect(card).toHaveCSS("height", "64px");
+  await expect(thumbnail).toHaveCSS("height", "64px");
+  await expect(thumbnail).toHaveCSS("width", "104px");
+  await expect(title).toHaveText(
+    "Ship a wider horizontal preview with a two-line title that wraps cleanly",
+  );
+  await expect(title).toHaveCSS("white-space", "nowrap");
+  await expect
+    .poll(() =>
+      title.evaluate((element) => element.scrollWidth - element.clientWidth),
+    )
+    .toBeGreaterThan(1);
+
+  if (process.env.BUZZ_LINK_PREVIEW_SCREENSHOTS_DIR) {
+    await waitForAnimations(page);
+    await row.screenshot({
+      animations: "disabled",
+      path: `${process.env.BUZZ_LINK_PREVIEW_SCREENSHOTS_DIR}/recipient-compact-long-title.png`,
+    });
   }
 });
 

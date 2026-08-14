@@ -17,6 +17,8 @@ pub mod api_token;
 pub mod archived_identities;
 /// Channel and membership persistence.
 pub mod channel;
+/// Durable whole-community deletion lifecycle and PostgreSQL adapter.
+pub mod deletion;
 /// Direct message channel persistence.
 pub mod dm;
 /// Database error types.
@@ -103,6 +105,21 @@ pub async fn insert_mentions(
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Insert mention rows on the caller's transaction. Replacement writes use
+/// this so the authoritative event and its discovery index commit or roll back
+/// as one unit.
+async fn insert_mentions_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    event: &nostr::Event,
+    channel_id: Option<Uuid>,
+) -> Result<()> {
     let p_tags: Vec<&str> = event
         .tags
         .iter()
@@ -148,24 +165,31 @@ pub async fn insert_mentions(
         return Ok(());
     }
 
-    // Single multi-row INSERT ... ON CONFLICT DO NOTHING — one round-trip regardless of mention count.
-    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "INSERT INTO event_mentions \
-         (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
-    );
+    // Multi-row INSERT ... ON CONFLICT DO NOTHING, chunked to stay under
+    // Postgres's 65,535 bind-parameter statement cap (6 binds per row caps a
+    // single statement at ~10.9k rows). Relay-signed kind 39002 rosters carry
+    // one p-tag per channel member and can exceed that. The caller owns the
+    // transaction so all chunks share its commit boundary.
+    const MENTION_INSERT_CHUNK_ROWS: usize = 5_000;
+    for chunk in valid_pubkeys.chunks(MENTION_INSERT_CHUNK_ROWS) {
+        let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "INSERT INTO event_mentions \
+             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
+        );
 
-    qb.push_values(&valid_pubkeys, |mut b, pubkey| {
-        b.push_bind(community_id.as_uuid())
-            .push_bind(pubkey.as_str())
-            .push_bind(event_id_bytes.as_slice())
-            .push_bind(created_at)
-            .push_bind(channel_id)
-            .push_bind(kind as i32);
-    });
+        qb.push_values(chunk, |mut b, pubkey| {
+            b.push_bind(community_id.as_uuid())
+                .push_bind(pubkey.as_str())
+                .push_bind(event_id_bytes.as_slice())
+                .push_bind(created_at)
+                .push_bind(channel_id)
+                .push_bind(kind as i32);
+        });
 
-    qb.push(" ON CONFLICT DO NOTHING");
+        qb.push(" ON CONFLICT DO NOTHING");
 
-    qb.build().execute(pool).await?;
+        qb.build().execute(&mut **tx).await?;
+    }
     Ok(())
 }
 
@@ -651,7 +675,7 @@ impl Db {
     /// `buzz.created_at_floor` GUC — this is what makes the replica fence
     /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
-        let pool = Self::connect_pool(config, &config.database_url, true).await?;
+        let pool = Self::connect_pool(config, &config.database_url).await?;
         let read_max_connections = config
             .read_max_connections
             .unwrap_or(config.max_connections);
@@ -671,31 +695,39 @@ impl Db {
         })
     }
 
-    /// Connect one pool with the sizing knobs from `config`.
+    /// Connect the writer pool with all session-level safety premises.
     ///
-    /// `arm_floor_guard` sets the `buzz.created_at_floor` session GUC on
-    /// every connection, arming the deferred commit-time trigger from
-    /// migration 0021. Writer pools must arm it; replica pools are read-only
-    /// so the trigger never fires there.
-    async fn connect_pool(config: &DbConfig, url: &str, arm_floor_guard: bool) -> Result<PgPool> {
-        let mut options = PgPoolOptions::new()
+    /// SQLx stores one `after_connect` hook, so the floor guard and transaction
+    /// isolation assertion must remain in this single closure. Registering a
+    /// second hook replaces the first and silently disarms the floor trigger.
+    async fn connect_pool(config: &DbConfig, url: &str) -> Result<PgPool> {
+        let options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-            .idle_timeout(Duration::from_secs(config.idle_timeout_secs));
-        if arm_floor_guard {
-            options = options.after_connect(|conn, _meta| {
+            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .after_connect(|conn, _meta| {
                 Box::pin(async move {
                     // `SET` cannot take bind parameters; `set_config` can.
                     sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
                         .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
-                        .execute(conn)
+                        .execute(&mut *conn)
                         .await?;
+                    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+                        .fetch_one(&mut *conn)
+                        .await?;
+                    if isolation != "read committed" {
+                        return Err(sqlx::Error::Configuration(
+                            format!(
+                                "writer pool requires READ COMMITTED transaction isolation, got {isolation}"
+                            )
+                            .into(),
+                        ));
+                    }
                     Ok(())
                 })
             });
-        }
         Ok(options.connect(url).await?)
     }
 
@@ -720,8 +752,9 @@ impl Db {
     /// are dialed only on first acquire; the ~10-minute reaper never tops
     /// the pool back up, which is fine — routed reads re-fill it on demand.
     ///
-    /// No floor guard: replica sessions are read-only, the trigger never
-    /// fires there (see [`Db::connect_pool`]).
+    /// No floor guard or writer-isolation assertion: replica sessions are
+    /// read-only, so the commit-time trigger from migration 0021 never fires
+    /// here and the write fence that depends on READ COMMITTED is never reached.
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
@@ -1021,6 +1054,16 @@ impl Db {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
     }
 
+    /// Validate the minimum deletion fence catalog required by serving paths.
+    pub async fn validate_deletion_serving_catalog(&self) -> Result<()> {
+        self.deletion_store().validate_serving_catalog().await
+    }
+
+    /// Validate the exact live community-deletion tenant catalog for destruction.
+    pub async fn validate_deletion_catalog(&self) -> Result<()> {
+        self.deletion_store().validate_catalog().await
+    }
+
     /// Returns pool utilisation stats for metrics emission.
     ///
     /// `size`  — total connections (idle + active)
@@ -1198,6 +1241,11 @@ impl Db {
         usage::community_hosts(&self.pool).await
     }
 
+    /// Return the shared durable whole-community deletion adapter.
+    pub fn deletion_store(&self) -> deletion::DeletionStore {
+        deletion::DeletionStore::new(self.pool.clone())
+    }
+
     /// Begin a database transaction for atomic multi-statement operations.
     ///
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
@@ -1221,6 +1269,8 @@ impl Db {
             FROM communities
             WHERE lower(host) = lower($1)
               AND archived_at IS NULL
+              AND deleted_at IS NULL
+              AND deletion_state = 'active'
             "#,
         )
         .bind(normalized_host)
@@ -1243,7 +1293,7 @@ impl Db {
     #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
         let active = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community_id.as_uuid())
         .fetch_one(&self.pool)
@@ -1331,6 +1381,8 @@ impl Db {
             FROM communities
             WHERE id = $1
               AND archived_at IS NULL
+              AND deleted_at IS NULL
+              AND deletion_state = 'active'
             "#,
         )
         .bind(community_id.as_uuid())
@@ -1404,12 +1456,19 @@ impl Db {
             INSERT INTO communities (host)
             VALUES ($1)
             ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
+            WHERE communities.deletion_state = 'active'
+              AND communities.deleted_at IS NULL
             RETURNING id, host, (xmax = 0) AS created
             "#,
         )
         .bind(normalized_host)
-        .fetch_one(&self.pool)
-        .await?;
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            DbError::AccessDenied(format!(
+                "community host {normalized_host:?} is permanently tombstoned"
+            ))
+        })?;
 
         let id: Uuid = row.try_get("id")?;
         let host: String = row.try_get("host")?;
@@ -1490,6 +1549,8 @@ impl Db {
                   AND lower(rm.pubkey) = lower($2)
                   AND rm.role = 'owner'
                   AND c.archived_at IS NULL
+                  AND c.deletion_state = 'active'
+                  AND c.deleted_at IS NULL
                 "#,
             )
             .bind(normalized_host)
@@ -1529,6 +1590,8 @@ impl Db {
                  AND lower(rm.pubkey) = lower($2)
                  AND rm.role = 'owner'
                  AND lower(c.host) <> lower($3)
+                 AND c.deletion_state = 'active'
+                 AND c.deleted_at IS NULL
                RETURNING c.id, c.host, c.archived_at"#,
         )
         .bind(normalized_host)
@@ -1561,6 +1624,8 @@ impl Db {
                  AND rm.community_id = c.id
                  AND lower(rm.pubkey) = lower($2)
                  AND rm.role = 'owner'
+                 AND c.deletion_state = 'active'
+                 AND c.deleted_at IS NULL
                RETURNING c.id, c.host"#,
         )
         .bind(normalized_host)
@@ -1657,6 +1722,49 @@ impl Db {
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
         let result = event::insert_event(&self.pool, community_id, event, channel_id).await?;
+        if result.1 {
+            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(result)
+    }
+
+    /// Insert an event while holding and validating an admitted serving-write
+    /// lease under the community ordering lock through commit.
+    ///
+    /// External side effects use a durable lease rather than one long-lived DB
+    /// transaction. Their final database mutation presents that exact lease so
+    /// it may finish during quiescing without admitting any new serving work.
+    pub async fn insert_event_with_serving_write_guard(
+        &self,
+        lease: &deletion::ServingWriteLease,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        let community_id = lease.community_id;
+        let kind_u16 = event.kind.as_u16();
+        let kind_u32 = u32::from(kind_u16);
+        if kind_u32 == buzz_core::kind::KIND_AUTH {
+            return Err(DbError::AuthEventRejected);
+        }
+        if buzz_core::kind::is_ephemeral(kind_u32) {
+            return Err(DbError::EphemeralEventRejected(kind_u16));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        self.deletion_store()
+            .guard_transaction_with_serving_lease(&mut tx, lease)
+            .await?;
+        let result = event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            community_id,
+            event,
+            channel_id,
+            None,
+        )
+        .await?;
+        tx.commit().await?;
         if result.1 {
             if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
                 tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
@@ -3965,6 +4073,27 @@ impl Db {
         workflow::list_workflow_runs(&self.pool, community_id, workflow_id, limit).await
     }
 
+    /// List one keyset-paginated page of workflow runs.
+    #[datastore_span(name = "list_workflow_runs_page", system = "postgresql")]
+    pub async fn list_workflow_runs_page(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        before_id: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<workflow::WorkflowRunRecord>> {
+        workflow::list_workflow_runs_page(
+            &self.pool,
+            community_id,
+            workflow_id,
+            before,
+            before_id,
+            limit,
+        )
+        .await
+    }
+
     /// Update a workflow run's status.
     #[datastore_span(name = "update_workflow_run", system = "postgresql")]
     pub async fn update_workflow_run(
@@ -3974,7 +4103,7 @@ impl Db {
         status: workflow::RunStatus,
         current_step: i32,
         trace: &serde_json::Value,
-        error: Option<&str>,
+        failure: Option<workflow::WorkflowRunFailure<'_>>,
     ) -> Result<()> {
         workflow::update_workflow_run(
             &self.pool,
@@ -3983,7 +4112,7 @@ impl Db {
             status,
             current_step,
             trace,
-            error,
+            failure,
         )
         .await
     }
@@ -4086,7 +4215,8 @@ impl Db {
                   WHERE elem->>0 = 'd' LIMIT 1), \
                  '' \
              ) \
-             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL",
+             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL \
+               AND community_write_allowed(community_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -4808,13 +4938,12 @@ impl Db {
             ));
         }
 
-        tx.commit().await?;
+        // The replaceable event and its denormalized mention index are one
+        // authoritative discovery write. An indexing error must roll back the
+        // new event and restore the previously-live event.
+        crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
 
-        // Mentions are a denormalized index — safe outside the transaction.
-        // insert_event() normally handles this, but we inlined the INSERT above.
-        if let Err(e) = crate::insert_mentions(&self.pool, community_id, event, channel_id).await {
-            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
-        }
+        tx.commit().await?;
 
         Ok((
             StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
@@ -5349,6 +5478,87 @@ mod tests {
             .await
             .expect("insert community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn addressable_replacement_rolls_back_when_mention_indexing_fails() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "atomic_addressable").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let keys = Keys::generate();
+        seed_community_channel(&pool, community_uuid, channel, &keys).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let member = Keys::generate().public_key().to_hex();
+        let tags = || {
+            vec![
+                Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
+                Tag::parse(["p", member.as_str(), "", "member"]).expect("p tag"),
+            ]
+        };
+        let base = Timestamp::now().as_secs();
+        let old = EventBuilder::new(Kind::Custom(39002), "old")
+            .tags(tags())
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign old");
+        db.replace_addressable_event(community, &old, Some(channel))
+            .await
+            .expect("insert old roster");
+
+        sqlx::query(
+            "CREATE FUNCTION reject_test_mention() RETURNS trigger AS $$ \
+             BEGIN RAISE EXCEPTION 'injected mention failure'; END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_test_mention BEFORE INSERT ON event_mentions \
+             FOR EACH ROW EXECUTE FUNCTION reject_test_mention()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install failure injection");
+
+        let new = EventBuilder::new(Kind::Custom(39002), "new")
+            .tags(tags())
+            .custom_created_at(Timestamp::from(base + 1))
+            .sign_with_keys(&keys)
+            .expect("sign new");
+        let error = db
+            .replace_addressable_event(community, &new, Some(channel))
+            .await
+            .expect_err("mention failure must fail replacement");
+        assert!(error.to_string().contains("injected mention failure"));
+
+        let live_id: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
+             AND kind=39002 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("query live roster");
+        assert_eq!(live_id, old.id.as_bytes(), "old roster must remain live");
+        let new_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(new.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(new_rows, 0, "new roster must roll back with its index");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]
@@ -8524,6 +8734,76 @@ mod tests {
         drop_scratch_db(&admin, pool, &name).await;
     }
 
+    #[test]
+    fn writer_pool_safety_hook_is_single_and_composed() {
+        let source = include_str!("lib.rs");
+        let connect_pool = source
+            .split("async fn connect_pool")
+            .nth(1)
+            .and_then(|tail| tail.split("const READER_ACQUIRE_TIMEOUT").next())
+            .expect("connect_pool source block");
+        assert_eq!(
+            connect_pool.matches(".after_connect(").count(),
+            1,
+            "SQLx replaces after_connect hooks; writer safety must use exactly one"
+        );
+        assert!(connect_pool.contains("buzz.created_at_floor"));
+        assert!(connect_pool.contains("SHOW transaction_isolation"));
+        assert!(!connect_pool.contains("arm_floor_guard"));
+        assert!(!connect_pool.contains("_arm_floor_guard"));
+        assert!(!connect_pool.contains("allow(unused_variables)"));
+
+        let reader_doc = source
+            .split("fn connect_read_pool")
+            .next()
+            .and_then(|prefix| prefix.rsplit("/// Connect the read-replica").next())
+            .expect("reader pool documentation");
+        assert!(reader_doc.contains("replica sessions are"));
+        assert!(reader_doc.contains("read-only"));
+        assert!(!reader_doc.contains("Db::connect_pool"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn writer_pool_rejects_non_read_committed_database_default() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed_pool, name) = create_scratch_db(&admin, "writer_isolation").await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER DATABASE {name} SET default_transaction_isolation = 'repeatable read'"
+        )))
+        .execute(&admin)
+        .await
+        .expect("set unsafe database default");
+        seed_pool.close().await;
+
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let scratch_url = format!("{}/{}", &base[..idx], name);
+        let error = Db::new(&DbConfig {
+            database_url: scratch_url,
+            max_connections: 1,
+            min_connections: 1,
+            acquire_timeout_secs: 1,
+            ..DbConfig::default()
+        })
+        .await
+        .expect_err("writer pool must reject pinned-snapshot database defaults");
+        assert!(
+            error.to_string().contains("requires READ COMMITTED")
+                || error.to_string().contains("pool timed out"),
+            "unexpected isolation rejection: {error}"
+        );
+
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop isolation test database");
+    }
+
     /// The armed writer pool (`Db::new`) must enforce the floor end-to-end
     /// through the public insert APIs, and the session GUC must be verifiably
     /// set on pooled connections.
@@ -8562,6 +8842,14 @@ mod tests {
             effective,
             crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string(),
             "writer pool must arm the floor guard on every connection"
+        );
+        let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+            .fetch_one(&db.pool)
+            .await
+            .expect("SHOW writer isolation");
+        assert_eq!(
+            isolation, "read committed",
+            "the same writer after_connect hook must enforce the isolation premise"
         );
 
         let now_secs = chrono::Utc::now().timestamp() as u64;

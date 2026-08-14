@@ -47,7 +47,7 @@ export const USER_STATUS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Focus-refetch policy for the user-status query; consumed by focusRefetchPolicy.test.mjs. */
 export const userStatusFocusRefetchPolicy = {
   staleTime: USER_STATUS_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 export function useUserStatusQuery(pubkeys: string[]) {

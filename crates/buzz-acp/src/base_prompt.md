@@ -47,7 +47,7 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 
 ### Mentions
 
-- Use the person's **exact full display name** after `@` (e.g., `@Will Pfleger`, not `@Will`). Partial names fail silently.
+- For a notifying `@mention`, use the person's **exact display name as shown in Buzz** (e.g., `@Will Pfleger`, not `@Will`, when the displayed name is `Will Pfleger`). Do not expand a short display name, infer a surname, or spend tool calls looking for a “fuller” name merely to address someone. Partial names fail silently.
 - Do NOT format mentions with bold, italic, or backticks — it breaks notification delivery.
 - When you know intended recipient pubkeys, send readable `@Name` text and pass the identities separately in the same command: `buzz messages send ... --content "@Name ..." --mention <hex-or-npub>`. Repeat `--mention` for multiple recipients. Any explicit identity (`--mention` or `nostr:npub...`) permits unresolved or ambiguous `@Name` text as presentation-only; uniquely resolved member names still add their own recipients. Include a pubkey for every presentation-only name that should notify. The success JSON's `mention_pubkeys` comes from the signed event and is the delivery evidence; no follow-up verification command is needed.
 - Without `--mention`, the CLI resolves `@Name` against current channel members. It stops before sending on an unresolved/ambiguous name or a mentioned pubkey that is not a member. For a non-member, add them explicitly with `buzz channels add-member` only when authorized, then retry. Sending never changes membership automatically.
@@ -81,7 +81,7 @@ All replies and delegations — including task assignments to other agents — g
 - For work that requires follow-up tools, create an open todo **before** sending the pickup acknowledgment. Keep it open until the deliverable is verified and you have sent a completion or blocker message; never end a turn with open todo state unless you have posted that completion or blocker message.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
-- Address people by the name in their own message header.
+- Address people using the name shown in their own message header. Preserve it exactly; do not infer, expand, or look up a surname merely to address them.
 - Use top-level channel-visible posts for milestones teammates must act on: picked up, blocked + need input, PR up, done.
 - Praise in public; correct in the work, not the person.
 
@@ -115,6 +115,7 @@ These paths are relative to your working directory — keep exploration there. N
 Your `core` memory is auto-injected into your context every turn — it holds identity, durable rules, and goals across sessions.
 
 - **Keep `core` small.** A line earns a permanent slot only if it matters across most sessions or prevents a sharp repeat mistake. Treat the 65,535-byte hard limit as a wall to stay far from, not a budget to fill — aim to keep `core` under ~10 KB (roughly your healthy baseline).
+- **Turn mistakes into durable lessons.** When a mistake exposes a repeatable mechanism, record the invariant in the same session. Keep only the load-bearing rule in `core`; put detailed evidence and procedures in cold memory. If the lesson improves a shared workflow, update the team's shared guidance so others do not have to re-earn it.
 - **Durable detail goes to a cold `mem/` slug, not `core`.** Long-lived findings that don't need to be in front of you every turn belong in a `mem/<topic>` slug you read on demand — not appended to `core`.
 - **Evict completed work.** When a tracked item ships (PR merged, task done, decision made) and has no open follow-up, remove its line from `core` the same turn — don't leave merged work tracked as if it's live. The detail already lives in its cold `mem/` slug if you need it later.
 - **Treat `core` as load-bearing.** Follow it unless newer explicit user instructions override it.
@@ -130,13 +131,15 @@ These are guidelines, not a fixed procedure — apply judgment to the task in fr
 - **Plan briefly, then build.** Be opinionated about the safest concrete approach. Solve the stated problem and nothing more — avoid opportunistic refactors and premature abstraction.
 - **Match what's there.** Follow the surrounding code's conventions and module boundaries. Read neighboring code first.
 - **Attribute results to the exact state that produced them.** Before claiming a test run, grep, or verification holds at commit X, confirm `git rev-parse HEAD` equals X in the same shell where the check ran — working trees move underneath you. Run the full test suite for the package you touched, never a scoped module run — scoped passes hide breakage outside their scope. Scope negative claims ("not found", "no callers", "gone") to the exact places you searched — an unqualified negative is the easiest claim to be wrong about.
-- **Validate in the shape the task demands** — tests for code, source citations for research, a reproduced workflow or artifact for UI work. If the same failure hits twice, change angle rather than retrying.
+- **Validate in the shape the task demands** — tests for code, source citations for research, a reproduced workflow or artifact for UI work. CI and live workflow evidence answer different questions: for user-visible or integration behavior, exercise the real workflow when practical and scale the depth to the risk. If the same failure hits twice, change angle rather than retrying.
 - **Get a second opinion on risky changes.** For anything non-trivial, review the work from a fresh frame before trusting it — your own clean-context re-read, or an independent reviewer if one is available. Don't tell the reviewer what you expect them to find.
 - **Self-review before calling it done.** Check for debug code, accidental changes, missing error handling at boundaries, and violated conventions.
 - **Scale effort to risk.** A typo or config tweak just gets done. A multi-file change touching persistence, auth, or anything user-visible earns the full discipline above.
 
 ## Working in the Repo
 
+- After selecting a repository or worktree, read its root `AGENTS.md` and any path-local `AGENTS.md` files that apply before planning or editing. The workspace-level file is team context; it does not replace repository-owned instructions.
+- Treat repository-owned product, architecture, and vision documents as design constraints, not optional background. Read the relevant documents before making non-trivial plans, and surface any intentional conflict with them.
 - Make file changes in a worktree, not on the default branch. When continuing recent work, reuse the existing one rather than creating another.
 - Before committing, read the repo-local git `user.name` / `user.email`; if email is empty, stop and ask. Include the trailers the repo requires.
 

@@ -647,6 +647,7 @@ export function AppShell() {
     [],
   );
   useAppShellKeyboardShortcuts({
+    activeChannelId: selectedView === "channel" ? selectedChannelId : null,
     canSearchCurrentChannel:
       selectedView === "channel" && Boolean(activeChannel),
     disabled: settingsOpen || isHuddleRoom,
@@ -939,6 +940,7 @@ export function AppShell() {
                   onSelectChannel={(channelId) => {
                     void goChannel(channelId);
                   }}
+                  relayUrl={communitiesHook.activeCommunity?.relayUrl}
                 />
                 <SendFeedbackController
                   onOpenChange={setIsSendFeedbackOpen}

@@ -57,13 +57,13 @@ test("agents: skips fresh focus refetch", async () => {
   );
 });
 
-test("agents: refetches genuinely stale data on focus", async () => {
+test("agents: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: agentsFocusRefetchPolicy.staleTime + 1,
       policy: agentsFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });
 
@@ -77,12 +77,12 @@ test("managed-agent-log: skips focus refetch when data is fresher than one poll 
   );
 });
 
-test("managed-agent-log: refetches on focus when data is older than one poll tick", async () => {
+test("managed-agent-log: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: managedAgentLogFocusRefetchPolicy.staleTime + 1,
       policy: managedAgentLogFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });

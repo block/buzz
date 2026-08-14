@@ -20,6 +20,7 @@ buzz-core = { workspace = true }
 buzz-conformance = { workspace = true }
 buzz-db = { workspace = true }
 buzz-datastore-tracing = { workspace = true }
+buzz-deletion = { workspace = true }
 buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }
 buzz-audit = { workspace = true }

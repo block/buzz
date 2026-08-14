@@ -123,13 +123,7 @@ class _ComposerOverlayPortal extends StatelessWidget {
                   child: ClipRect(
                     child: Padding(
                       padding: const EdgeInsets.only(bottom: Grid.xxs),
-                      child: surface == _AttachmentSurface.closed
-                          ? _SuggestionPanelMotion(
-                              duration: surfaceDuration,
-                              alignment: Alignment.bottomLeft,
-                              child: buildOverlayPanel(surface),
-                            )
-                          : buildOverlayPanel(surface),
+                      child: buildOverlayPanel(surface),
                     ),
                   ),
                 ),

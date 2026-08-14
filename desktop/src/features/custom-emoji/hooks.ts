@@ -32,7 +32,7 @@ export const CUSTOM_EMOJI_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Focus-refetch policy for the custom emoji query; consumed by focusRefetchPolicy.test.mjs. */
 export const customEmojiFocusRefetchPolicy = {
   staleTime: CUSTOM_EMOJI_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 export const customEmojiQueryKey = ["custom-emoji"] as const;

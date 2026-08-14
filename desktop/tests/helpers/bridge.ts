@@ -250,6 +250,8 @@ type MockBridgeOptions = {
   personaSharePublicationStatuses?: Array<"published" | "queued">;
   teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
+  /** Reject successive relay-agent directory reads, then resume. */
+  relayAgentListErrors?: (string | null)[];
   /** Delay both managed and relay agent directory reads. */
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
@@ -267,6 +269,11 @@ type MockBridgeOptions = {
   ensureStarterChannelsErrors?: string[];
   /** Reject successive mock `join_channel` calls, then resume. */
   joinChannelErrors?: string[];
+  channelsReadDelayMs?: number;
+  /** Return not-modified for this many reads before resuming full payloads. */
+  channelsNotModifiedResponses?: number;
+  /** When true, a matching knownHash returns a not-modified channel payload. */
+  honorChannelsKnownHash?: boolean;
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;
   feedReadError?: string;
@@ -275,6 +282,8 @@ type MockBridgeOptions = {
   applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
+  mediaProxyInitiallyUnavailable?: boolean;
   /** Hold mock send live echoes until the E2E release seam is invoked. */
   deferSendMessageLiveEcho?: boolean;
   /** Close the first channel-window live REQ; its retry is accepted. */

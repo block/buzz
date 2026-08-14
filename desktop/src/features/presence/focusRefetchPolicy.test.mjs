@@ -54,12 +54,12 @@ test("presence: skips fresh focus refetch", async () => {
   );
 });
 
-test("presence: refetches genuinely stale data on focus", async () => {
+test("presence: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: presenceFocusRefetchPolicy.staleTime + 1,
       policy: presenceFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });

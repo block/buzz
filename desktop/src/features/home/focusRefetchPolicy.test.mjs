@@ -77,13 +77,13 @@ for (const entry of [
     );
   });
 
-  test(`${entry.name} refetches genuinely stale data on focus`, async () => {
+  test(`${entry.name} does not refetch stale data on focus`, async () => {
     assert.equal(
       await focusRefetchCount({
         ageMs: entry.focusPolicy.staleTime + 1,
         policy: entry.focusPolicy,
       }),
-      1,
+      0,
     );
   });
 }
