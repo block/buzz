@@ -795,7 +795,9 @@ jobs:
         run: just desktop-install-ci
       - name: Get Playwright version
         id: pw-version
-        run: echo "version=$(cd desktop && node -e \"console.log(require('@playwright/test/package.json').version)\")" >> "$GITHUB_OUTPUT"
+        run: |
+          PLAYWRIGHT_VERSION=$(cd desktop && node -p "require('@playwright/test/package.json').version")
+          echo "version=$PLAYWRIGHT_VERSION" >> "$GITHUB_OUTPUT"
       - name: Restore Playwright browser cache
         id: playwright-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
