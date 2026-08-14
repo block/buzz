@@ -192,16 +192,32 @@ fn activate_main_window(app: &tauri::AppHandle) {
 }
 
 fn parse_channel_deep_link(url: &Url) -> Option<serde_json::Value> {
-    if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() {
+    if url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return None;
     }
     let mut segments = url.path_segments()?;
     let channel_id = segments.next()?;
+    let message_id = segments.next();
     if segments.next().is_some() {
         return None;
     }
     let channel_id = uuid::Uuid::parse_str(channel_id).ok()?.to_string();
-    Some(serde_json::json!({ "channelId": channel_id }))
+    if message_id.is_some_and(|value| {
+        value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return None;
+    }
+    Some(match message_id {
+        Some(message_id) => serde_json::json!({
+            "channelId": channel_id,
+            "messageId": message_id.to_ascii_lowercase(),
+        }),
+        None => serde_json::json!({ "channelId": channel_id }),
+    })
 }
 
 /// Parse the query string of a `buzz://message?…` URL into the JSON
@@ -456,8 +472,13 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 return;
             };
             activate_main_window(app);
-            queue_navigation_deep_link(app, "channel", &payload);
-            let _ = app.emit("deep-link-channel", payload);
+            if payload["messageId"].is_string() {
+                queue_navigation_deep_link(app, "message", &payload);
+                let _ = app.emit("deep-link-message", payload);
+            } else {
+                queue_navigation_deep_link(app, "channel", &payload);
+                let _ = app.emit("deep-link-channel", payload);
+            }
         }
         Some("message") => {
             // `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
@@ -690,6 +711,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_channel_deep_link_accepts_message_path() {
+        let message_id = "8455293f0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+        let url = Url::parse(&format!(
+            "buzz://channel/a372f080-5961-4535-b1a3-edffface377d/{message_id}"
+        ))
+        .unwrap();
+        let payload = parse_channel_deep_link(&url).unwrap();
+        assert_eq!(payload["channelId"], "a372f080-5961-4535-b1a3-edffface377d");
+        assert_eq!(payload["messageId"], message_id);
+    }
+
+    #[test]
     fn parse_channel_deep_link_accepts_v7_and_normalizes_uppercase() {
         for (raw, expected) in [
             (
@@ -712,8 +745,13 @@ mod tests {
             "buzz://channel",
             "buzz://channel/",
             "buzz://channel/one/two",
+            "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/not-hex",
+            "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/extra",
+            "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/",
             "buzz://channel/one?extra=true",
             "buzz://channel/one#fragment",
+            "buzz://:pass@channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "buzz://channel/not-a-uuid",
             "buzz://channel/%2F",
             "buzz://channel/%00",

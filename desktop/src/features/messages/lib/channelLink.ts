@@ -1,11 +1,15 @@
-/** `buzz://channel/<uuid>` link encoding and parsing. */
+/** `buzz://channel/<uuid>[/<event-id>]` link encoding and parsing. */
 
 const CHANNEL_LINK_SCHEME = "buzz:";
 const CHANNEL_LINK_HOST = "channel";
 const CHANNEL_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const EVENT_ID_PATTERN = /^[0-9a-f]{64}$/iu;
 
-export type ParsedChannelLink = { channelId: string };
+export type ParsedChannelLink = {
+  channelId: string;
+  messageId?: string;
+};
 
 export type ChannelLinkParseResult =
   | { ok: true; value: ParsedChannelLink }
@@ -34,20 +38,31 @@ export function parseChannelLink(url: string): ChannelLinkParseResult {
   if (parsed.search || parsed.hash || parsed.username || parsed.password) {
     return { ok: false, reason: "unexpected-components" };
   }
-  const segments = parsed.pathname.split("/").filter(Boolean);
-  if (segments.length !== 1) {
+  const segments = parsed.pathname.split("/").slice(1);
+  if (segments.length < 1 || segments.length > 2 || segments.includes("")) {
     return { ok: false, reason: "missing-or-extra-channel" };
   }
   let channelId: string;
+  let messageId: string | null = null;
   try {
     channelId = decodeURIComponent(segments[0]);
+    messageId = segments[1] ? decodeURIComponent(segments[1]) : null;
   } catch {
     return { ok: false, reason: "invalid-channel-encoding" };
   }
   if (!CHANNEL_UUID_PATTERN.test(channelId)) {
     return { ok: false, reason: "invalid-channel-uuid" };
   }
-  return { ok: true, value: { channelId: channelId.toLowerCase() } };
+  if (messageId !== null && !EVENT_ID_PATTERN.test(messageId)) {
+    return { ok: false, reason: "invalid-message-id" };
+  }
+  return {
+    ok: true,
+    value: {
+      channelId: channelId.toLowerCase(),
+      ...(messageId ? { messageId: messageId.toLowerCase() } : {}),
+    },
+  };
 }
 
 export function isChannelLink(href: string | undefined | null): boolean {
