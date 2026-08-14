@@ -6,7 +6,6 @@ import {
 } from "@/shared/api/tauri";
 import type { PresenceStatus, RelayEvent } from "@/shared/api/types";
 import {
-  KIND_STREAM_MESSAGE,
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
   CHANNEL_EVENT_KINDS,
@@ -36,8 +35,14 @@ import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import {
   activateRateLimit,
   parseRateLimitHint,
+  rateLimitRemainingMs,
   waitForRateLimit,
 } from "@/shared/api/relayRateLimitGate";
+import {
+  measureMessageSendStage,
+  sendTracedStreamMessage,
+  type MessageSendTrace,
+} from "@/shared/api/messageSendDiagnostics";
 import {
   fetchChunkedHistory,
   requestFirstEventGated,
@@ -254,28 +259,18 @@ export class RelayClient {
     content: string,
     mentionPubkeys: string[] = [],
     extraTags: string[][] = [],
+    trace: MessageSendTrace,
   ) {
-    await this.ensureConnected();
-
-    const tags: string[][] = [["h", channelId]];
-    for (const pubkey of mentionPubkeys) {
-      tags.push(["p", pubkey]);
-    }
-    for (const tag of extraTags) {
-      tags.push(tag);
-    }
-
-    const event = await signRelayEvent({
-      kind: KIND_STREAM_MESSAGE,
-      content: content.trim(),
-      tags,
+    return sendTracedStreamMessage({
+      trace,
+      channelId,
+      content,
+      mentionPubkeys,
+      extraTags,
+      ensureConnected: () => this.ensureConnected(),
+      connectionState: () => this.connectionStateEmitter.get(),
+      publishEvent: this.publishEvent.bind(this),
     });
-
-    return this.publishEvent(
-      event,
-      "Timed out while sending the message.",
-      "Failed to send the message.",
-    );
   }
 
   async sendPresence(status: PresenceStatus) {
@@ -709,9 +704,13 @@ export class RelayClient {
     event: RelayEvent,
     timeoutMessage: string,
     sendErrorMessage: string,
+    trace?: MessageSendTrace,
   ) {
     // Await the gate before sending EVENT; op timeout starts after the wait.
-    await waitForRateLimit();
+    await measureMessageSendStage(trace, "rate_limit_wait", waitForRateLimit, {
+      gateRemainingMs: rateLimitRemainingMs(),
+    });
+    trace?.mark("relay_ack_wait_started", { eventId: event.id });
 
     return new Promise<RelayEvent>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
@@ -735,6 +734,7 @@ export class RelayClient {
         );
 
         try {
+          trace?.mark("socket_retry_started", { eventId: event.id });
           await this.ensureConnected();
           if (!pendingEvent) {
             throw normalizedError;

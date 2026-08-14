@@ -20,6 +20,8 @@ use crate::{
     relay::{query_relay, submit_event, submit_event_with_keys},
 };
 
+use super::message_send_diagnostics::MessageSendTrace;
+
 // ── Reads (pure-nostr) ──────────────────────────────────────────────────────
 
 /// Timeline content kinds — the message/channel-event kinds that make up a
@@ -488,8 +490,12 @@ pub async fn send_channel_message(
     link_preview_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
+    diagnostic_id: Option<String>,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<SendChannelMessageResponse, String> {
+    let trace = MessageSendTrace::new(app, diagnostic_id, &channel_id);
+    trace.started();
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
     let mentions = mention_pubkeys.unwrap_or_default();
@@ -515,7 +521,9 @@ pub async fn send_channel_message(
             let parent_id = parent_event_id
                 .as_deref()
                 .ok_or("forum comment requires parent_event_id")?;
-            let thread_ref = resolve_thread_ref(parent_id, &state).await?;
+            let thread_ref = trace
+                .measure("thread_ref", None, resolve_thread_ref(parent_id, &state))
+                .await?;
             resolved_root = Some(thread_ref.root_event_id.to_hex());
             events::build_forum_comment(
                 channel_uuid,
@@ -529,7 +537,9 @@ pub async fn send_channel_message(
         _ => {
             let thread_ref = match parent_event_id.as_deref() {
                 Some(pid) => {
-                    let tr = resolve_thread_ref(pid, &state).await?;
+                    let tr = trace
+                        .measure("thread_ref", None, resolve_thread_ref(pid, &state))
+                        .await?;
                     resolved_root = Some(tr.root_event_id.to_hex());
                     Some(tr)
                 }
@@ -549,7 +559,14 @@ pub async fn send_channel_message(
         }
     };
 
-    let result = submit_event(builder, &state).await?;
+    let gate_remaining_ms = crate::relay_admission::rate_limit_remaining_ms();
+    let result = trace
+        .measure(
+            "relay_submit",
+            Some(gate_remaining_ms),
+            submit_event(builder, &state),
+        )
+        .await?;
 
     let depth = match (&parent_event_id, &resolved_root) {
         (None, _) => 0,

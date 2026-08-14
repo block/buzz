@@ -459,7 +459,6 @@ pub fn run() {
             }
 
             tauri::async_runtime::spawn(managed_agents::restore_codex_runtime(app_handle.clone()));
-
             // Resolve the REPOS symlink from the persisted repos_dir BEFORE
             // agents are restored below, and decide whether restore is safe.
             // The frontend's apply_workspace runs only after React mounts —
@@ -717,6 +716,7 @@ pub fn run() {
             set_canvas,
             get_feed,
             search_messages,
+            append_message_send_diagnostic,
             send_channel_message,
             send_managed_agent_channel_message,
             has_managed_agent_channel_message_marker,

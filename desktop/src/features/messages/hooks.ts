@@ -32,6 +32,10 @@ import {
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
 import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
+import {
+  createMessageSendTrace,
+  sendChannelMessageWithDiagnostics,
+} from "@/shared/api/messageSendDiagnostics";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
@@ -41,7 +45,6 @@ import {
   deleteMessage,
   editMessage,
   removeReaction,
-  sendChannelMessage,
 } from "@/shared/api/tauri";
 import { getChannelWindowEvents } from "@/shared/api/channelWindow";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
@@ -475,21 +478,34 @@ export function useSendMessageMutation(
         emojiTags.length > 0 ||
         linkPreviewTags.length > 0
       ) {
+        const trace = createMessageSendTrace({
+          channelId: effectiveChannel.id,
+          transport: "http",
+        });
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
           ) ?? [];
-        const result = await sendChannelMessage(
-          effectiveChannel.id,
-          content,
-          parentEventId ?? null,
-          imetaTags,
-          recipientPubkeys,
-          undefined,
-          emojiTags,
-          mentionTags,
-          linkPreviewTags,
-        );
+        let result: Awaited<
+          ReturnType<typeof sendChannelMessageWithDiagnostics>
+        >;
+        try {
+          result = await sendChannelMessageWithDiagnostics(
+            effectiveChannel.id,
+            content,
+            parentEventId ?? null,
+            imetaTags,
+            recipientPubkeys,
+            emojiTags,
+            mentionTags,
+            linkPreviewTags,
+            trace.operationId,
+          );
+          trace.finishSuccess(result.eventId);
+        } catch (error) {
+          trace.finishFailure(error);
+          throw error;
+        }
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
         // For replies, buildReplyTags already includes ["p", author] and ["h", channel].
@@ -533,11 +549,16 @@ export function useSendMessageMutation(
         };
       }
 
+      const trace = createMessageSendTrace({
+        channelId: effectiveChannel.id,
+        transport: "websocket",
+      });
       return relayClient.sendMessage(
         effectiveChannel.id,
         content,
         recipientPubkeys,
         mentionTags,
+        trace,
       );
     },
     onMutate: async ({

@@ -98,6 +98,27 @@ directory. Do not remove the upstream Buzz data directory.
 - Exact visible error text and timestamp for any failure. Do not send identity
   private keys, API tokens, or full private task transcripts.
 
+## Message Send Timing Log
+
+The Lab build records privacy-safe message-send stages in:
+
+```text
+%APPDATA%\xyz.chemyibinjiang.buzz.codexlab\diagnostics\message-send.jsonl
+```
+
+Read the latest entries after a message remains on `Sending...` longer than
+expected:
+
+```powershell
+Get-Content -LiteralPath "$env:APPDATA\xyz.chemyibinjiang.buzz.codexlab\diagnostics\message-send.jsonl" -Tail 120
+```
+
+Entries sharing an `operationId` describe one send. Their `elapsedMs` and
+`waitMs` fields separate connection, event signing, admission-rate-limit,
+thread-reference, relay submit, socket retry, and relay acknowledgement time.
+The log never contains the message body, attachment content, identity key, or
+API token. It rotates at approximately 2 MiB and keeps one `.jsonl.1` backup.
+
 ## Build The Installer
 
 From a Windows x64 PowerShell session at the repository root:

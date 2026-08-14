@@ -68,6 +68,18 @@ pub fn activate_rate_limit(retry_in_seconds: Option<u64>) {
     }
 }
 
+/// Milliseconds remaining in the active admission window, for diagnostics.
+/// Returns zero when the gate is inactive or has already expired.
+pub fn rate_limit_remaining_ms() -> u64 {
+    let guard = GATE_EXPIRY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    guard
+        .map(|expiry| expiry.saturating_duration_since(Instant::now()).as_millis())
+        .unwrap_or_default()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 /// Wait until the admission gate is clear.
 ///
 /// Returns immediately when no gate is active. Loops after sleeping because a
@@ -123,6 +135,18 @@ mod tests {
             start,
             "inactive gate must not consume any (paused) time"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remaining_millis_reports_the_active_window() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+        activate_rate_limit(Some(3));
+        assert_eq!(rate_limit_remaining_ms(), 3_000);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(rate_limit_remaining_ms(), 2_000);
+        reset_rate_limit_gate();
+        assert_eq!(rate_limit_remaining_ms(), 0);
     }
 
     #[tokio::test(start_paused = true)]
