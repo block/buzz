@@ -458,6 +458,83 @@ test("buildTimelineDayGroups: moves non-day rows under their day section", () =>
   assert.ok(groups.every((group) => group.headingTimestamp !== null));
 });
 
+test("buildTimelineItems: collapses contiguous agent progress lines", () => {
+  const start = dayAt(2026, 6, 14);
+  const agent = "agent-pubkey";
+  const entries = [
+    entry({
+      id: "ask",
+      pubkey: "human",
+      body: "@Buzz-Agent show progress",
+      createdAt: start,
+    }),
+    entry({
+      id: "p1",
+      pubkey: agent,
+      body: "▸ Working · grok",
+      createdAt: start + 10,
+    }),
+    entry({
+      id: "p2",
+      pubkey: agent,
+      body: "⚙ shell — git status",
+      createdAt: start + 20,
+    }),
+    entry({
+      id: "p3",
+      pubkey: agent,
+      body: "⏳ read router.rs",
+      createdAt: start + 30,
+    }),
+    entry({
+      id: "answer",
+      pubkey: agent,
+      body: "Here is the real answer.",
+      createdAt: start + 40,
+    }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), [
+    "day-divider",
+    "message",
+    "agent-progress-group",
+    "message",
+  ]);
+  const group = items.find((item) => item.kind === "agent-progress-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["p1", "p2", "p3"],
+  );
+  assert.equal(group?.key, "p1");
+});
+
+test("buildTimelineItems: does not group progress from different authors", () => {
+  const start = dayAt(2026, 6, 14);
+  const { items } = buildTimelineItems(
+    [
+      entry({
+        id: "a",
+        pubkey: "agent-a",
+        body: "▸ Working",
+        createdAt: start,
+      }),
+      entry({
+        id: "b",
+        pubkey: "agent-b",
+        body: "⏳ git status",
+        createdAt: start + 10,
+      }),
+    ],
+    null,
+  );
+  assert.deepEqual(kinds(items), [
+    "day-divider",
+    "agent-progress-group",
+    "agent-progress-group",
+  ]);
+});
+
 test("buildTimelineDayGroups: preserves leading rows without a day divider", () => {
   const leadingRows = [
     { kind: "unread-divider", key: "unread-a" },
