@@ -2535,6 +2535,17 @@ impl Db {
         channel::update_channel(&self.pool, community_id, channel_id, updates).await
     }
 
+    /// Atomically updates a channel name and returns the previous and new names.
+    #[datastore_span(name = "update_channel_name", system = "postgresql")]
+    pub async fn update_channel_name(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        name: &str,
+    ) -> Result<(String, String)> {
+        channel::update_channel_name(&self.pool, community_id, channel_id, name).await
+    }
+
     /// Sets the topic for a channel.
     #[datastore_span(name = "set_topic", system = "postgresql")]
     pub async fn set_topic(

@@ -1267,6 +1267,48 @@ pub async fn update_channel(
     get_channel(pool, community_id, channel_id).await
 }
 
+/// Atomically updates a channel name and returns `(previous_name, name)`.
+///
+/// The row lock makes the pair suitable for an audit/system event: concurrent
+/// renames observe each other's committed name rather than both reporting the
+/// same stale previous value.
+pub async fn update_channel_name(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    name: &str,
+) -> Result<(String, String)> {
+    let name = buzz_core::channel::canonical_channel_name(name);
+    if name.is_empty() {
+        return Err(DbError::InvalidData("channel name is required".into()));
+    }
+
+    let mut tx = pool.begin().await?;
+    let previous_name = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+         FOR UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(DbError::ChannelNotFound(channel_id))?;
+
+    sqlx::query(
+        "UPDATE channels SET name = $1, updated_at = NOW() \
+         WHERE community_id = $2 AND id = $3 AND deleted_at IS NULL",
+    )
+    .bind(name)
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok((previous_name, name.to_owned()))
+}
+
 /// Sets the topic for a channel, recording who set it and when.
 pub async fn set_topic(
     pool: &PgPool,

@@ -1433,6 +1433,19 @@ async fn handle_remove_user(
     Ok(())
 }
 
+fn should_emit_channel_name_change(previous_name: &str, name: &str) -> bool {
+    previous_name != name
+}
+
+fn channel_name_change_content(actor: &str, previous_name: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "name_changed",
+        "actor": actor,
+        "name": name,
+        "previous_name": previous_name,
+    })
+}
+
 async fn handle_edit_metadata(
     tenant: &TenantContext,
     event: &Event,
@@ -1448,17 +1461,26 @@ async fn handle_edit_metadata(
         if let Some(val) = tag.content() {
             match key.as_str() {
                 "name" => {
-                    state
+                    let (previous_channel_name, updated_channel_name) = state
                         .db
-                        .update_channel(
-                            tenant.community(),
+                        .update_channel_name(tenant.community(), channel_id, val)
+                        .await?;
+                    if should_emit_channel_name_change(
+                        &previous_channel_name,
+                        &updated_channel_name,
+                    ) {
+                        emit_system_message(
+                            tenant,
+                            state,
                             channel_id,
-                            buzz_db::channel::ChannelUpdate {
-                                name: Some(val.to_string()),
-                                ..Default::default()
-                            },
+                            channel_name_change_content(
+                                &actor_hex,
+                                &previous_channel_name,
+                                &updated_channel_name,
+                            ),
                         )
                         .await?;
+                    }
                 }
                 "about" => {
                     state
@@ -3403,6 +3425,21 @@ mod tests {
                 && fields[1] == late_pubkey
                 && fields[3] == "owner"
         }));
+    }
+
+    #[test]
+    fn channel_name_change_carries_actor_and_both_names() {
+        let content = channel_name_change_content("actor", "old-name", "new-name");
+
+        assert_eq!(content["type"], "name_changed");
+        assert_eq!(content["actor"], "actor");
+        assert_eq!(content["previous_name"], "old-name");
+        assert_eq!(content["name"], "new-name");
+    }
+
+    #[test]
+    fn channel_name_change_is_not_emitted_when_stored_names_match() {
+        assert!(!should_emit_channel_name_change("same-name", "same-name"));
     }
 
     #[test]

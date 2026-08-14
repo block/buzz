@@ -31,6 +31,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   addedByActionPrefix,
   describeChannelTextFieldChange,
+  describeChannelNameChange,
   toInlineName,
 } from "../lib/systemEventCopy";
 import { MessageAgentOwner } from "./MessageAgentOwner";
@@ -51,6 +52,8 @@ type SystemMessagePayload = {
   targets?: string[];
   topic?: string;
   purpose?: string;
+  previous_name?: string;
+  name?: string;
   // Moderation tombstone fields (kind:40099 "message_deleted"). All optional and
   // moderator-authored — present when a moderator removed the message, absent for
   // a plain member self-delete. Reporter identity/evidence never appears here.
@@ -579,6 +582,18 @@ function describeSystemEvent(
       return {
         title: actorName,
         action: describeChannelTextFieldChange("purpose", payload.purpose),
+      };
+    case "name_changed":
+      if (
+        typeof payload.name !== "string" ||
+        (payload.previous_name !== undefined &&
+          typeof payload.previous_name !== "string")
+      ) {
+        return null;
+      }
+      return {
+        title: actorName,
+        action: describeChannelNameChange(payload.previous_name, payload.name),
       };
     case "channel_created":
       return {
