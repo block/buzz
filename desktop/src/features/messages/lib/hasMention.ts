@@ -19,8 +19,11 @@ function maskRange(
 /**
  * Replace Markdown code with spaces while retaining offsets and line endings.
  * Handles fenced blocks, four-space/tab-indented lines, and backtick code spans.
+ *
+ * Exported so other mention extractors (NIP-27 `nostr:` URIs) apply the same
+ * rule: text inside code is never a mention.
  */
-function maskMarkdownCode(text: string): string {
+export function maskMarkdownCode(text: string): string {
   const chars = text.split("");
   const lines: Array<{ start: number; end: number; content: string }> = [];
 
