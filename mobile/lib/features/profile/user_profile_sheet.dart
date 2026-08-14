@@ -6,12 +6,14 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/animated_avatar.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/progressive_animated_avatar.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
@@ -372,7 +374,7 @@ class _ProfilePresenceChip extends StatelessWidget {
   }
 }
 
-class _ProfileAvatar extends StatelessWidget {
+class _ProfileAvatar extends HookWidget {
   final String? avatarUrl;
   final String initial;
 
@@ -380,12 +382,33 @@ class _ProfileAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final animatedAvatar = parseAnimatedAvatarUrl(avatarUrl);
+    final stoppedAnimationUrl = useState<String?>(null);
+    final isPlaying =
+        animatedAvatar != null &&
+        stoppedAnimationUrl.value != animatedAvatar.animationUrl;
+
     return AspectRatio(
       aspectRatio: 1,
-      child: ClipOval(
-        child: AvatarImageContent(
-          imageUrl: avatarUrl,
-          fallback: _AvatarFallback(initial: initial),
+      child: GestureDetector(
+        key: const ValueKey('selected-profile-avatar'),
+        onTap: animatedAvatar == null
+            ? null
+            : () => stoppedAnimationUrl.value =
+                  stoppedAnimationUrl.value == animatedAvatar.animationUrl
+                  ? null
+                  : animatedAvatar.animationUrl,
+        child: ClipOval(
+          child: isPlaying
+              ? ProgressiveAnimatedAvatar(
+                  key: ValueKey(animatedAvatar.animationUrl),
+                  descriptor: animatedAvatar,
+                  fallback: _AvatarFallback(initial: initial),
+                )
+              : AvatarImageContent(
+                  imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                  fallback: _AvatarFallback(initial: initial),
+                ),
         ),
       ),
     );

@@ -306,6 +306,83 @@ void main() {
     expect(channels.single.lastMessageAt?.millisecondsSinceEpoch, 20 * 1000);
   });
 
+  test(
+    'loads all channel timestamps through one batched relay query',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'direct', channelType: 'dm'),
+        ],
+        recentMessages: const [
+          NostrEvent(
+            id: 'stream-message',
+            pubkey: 'alice',
+            createdAt: 30,
+            kind: EventKind.streamMessageV2,
+            tags: [
+              ['h', _channelA],
+            ],
+            content: 'hello',
+            sig: 'sig',
+          ),
+          NostrEvent(
+            id: 'dm-message',
+            pubkey: 'alice',
+            createdAt: 40,
+            kind: 9,
+            tags: [
+              ['h', _channelB],
+            ],
+            content: 'hello privately',
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+
+      await _waitUntil(() => session.queryBatches.length == 2);
+      expect(session.queryBatches, hasLength(2));
+      expect(session.queryBatches.first, hasLength(2));
+      expect(
+        session.queryBatches.first
+            .map((filter) => filter.tags['#h']!.single)
+            .toSet(),
+        {_channelA, _channelB},
+      );
+      expect(session.queryBatches.last, hasLength(2));
+      expect(
+        session.queryBatches.last.every(
+          (filter) => filter.limit == 1000 && filter.since == 0,
+        ),
+        isTrue,
+      );
+      expect(
+        session.historyFilters.where((filter) {
+          final kinds = filter.kinds.toSet();
+          return kinds.length == EventKind.channelMessageEventKinds.length &&
+              kinds.containsAll(EventKind.channelMessageEventKinds);
+        }),
+        isEmpty,
+      );
+      expect(
+        channels.firstWhere((channel) => channel.id == _channelA).lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+      );
+      expect(
+        channels.firstWhere((channel) => channel.id == _channelB).lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(40 * 1000, isUtc: true),
+      );
+    },
+  );
+
   test('ephemeral (TTL) channels appear in the list', () async {
     // Regression: previously the provider unconditionally dropped any channel
     // with a `ttl` tag, which made TTL channels invisible on iOS even when the
@@ -668,15 +745,18 @@ class _FakeRelaySession extends RelaySessionNotifier {
     required this.memberships,
     required this.metadata,
     this.hiddenDmEvents = const [],
+    this.recentMessages = const [],
     this.membershipFailures = 0,
   });
 
   List<NostrEvent> memberships;
   List<NostrEvent> metadata;
   final List<NostrEvent> hiddenDmEvents;
+  final List<NostrEvent> recentMessages;
   int membershipFailures;
 
   final List<NostrFilter> historyFilters = [];
+  final List<List<NostrFilter>> queryBatches = [];
   final List<NostrFilter> subscribeFilters = [];
   final Map<int, (NostrFilter, void Function(NostrEvent))> _subscriptions = {};
   int _nextSubscriptionKey = 0;
@@ -745,6 +825,33 @@ class _FakeRelaySession extends RelaySessionNotifier {
       return metadata.where((e) => ids.contains(e.getTagValue('d'))).toList();
     }
     return const [];
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryBatches.add(filters);
+    return recentMessages.where((event) {
+      return filters.any((filter) {
+        if (!filter.kinds.contains(event.kind)) return false;
+        for (final entry in filter.tags.entries) {
+          final tagName = entry.key.startsWith('#')
+              ? entry.key.substring(1)
+              : entry.key;
+          if (!event.tags.any(
+            (tag) =>
+                tag.length > 1 &&
+                tag[0] == tagName &&
+                entry.value.contains(tag[1]),
+          )) {
+            return false;
+          }
+        }
+        return true;
+      });
+    }).toList();
   }
 
   @override
