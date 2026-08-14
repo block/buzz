@@ -513,6 +513,21 @@ pub enum MessagesCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Build a `buzz://message` deep link for a channel event
+    #[command(
+        after_help = "Prints JSON `{link, channel, id}` (and `thread` when given). Does not hit the relay.\n\nExamples:\n  buzz messages link --channel <UUID> --event <HEX>\n  buzz messages link --channel <UUID> --event <HEX> --thread <HEX>"
+    )]
+    Link {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Message event ID (64-char hex)
+        #[arg(long)]
+        event: String,
+        /// Optional thread root event ID (64-char hex)
+        #[arg(long)]
+        thread: Option<String>,
+    },
     /// Upvote or downvote a forum post
     Vote {
         /// Event ID of the post to vote on (64-char hex)

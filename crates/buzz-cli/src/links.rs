@@ -1,13 +1,14 @@
-//! Canonical `buzz://` deep links for Buzz-hosted git entities.
+//! Canonical `buzz://` deep links for Buzz-hosted entities.
 //!
-//! Buzz Desktop renders these links as rich preview cards in chat and
-//! navigates in-app when they are clicked. The desktop parser lives in
-//! `desktop/src/shared/lib/entityLink.ts` — the two implementations must
-//! stay format-compatible (see `golden_format_matches_desktop` below and
-//! the mirror test in `entityLink.test.mjs`).
+//! Desktop renders repo/PR/issue links as rich preview cards
+//! (`desktop/src/shared/lib/entityLink.ts`) and message links via
+//! `desktop/src/features/messages/lib/messageLink.ts`. Mobile builds the
+//! same message URL in `mobile/lib/shared/deeplink/deep_link.dart`. Keep
+//! these formats byte-compatible (see the golden tests below).
 //!
 //! Callers are expected to validate inputs first (`validate_hex64`,
-//! `validate_repo_id`); the identifier charsets need no URL encoding.
+//! `validate_uuid`, `validate_repo_id`); the identifier charsets need no
+//! URL encoding.
 
 /// Build a `buzz://repo` link for a repository announcement (kind 30617).
 pub fn repo_link(owner: &str, repo_id: &str) -> String {
@@ -22,6 +23,19 @@ pub fn pull_request_link(event_id: &str, owner: &str, repo_id: &str) -> String {
 /// Build a `buzz://issue` link for an issue event (kind 1621).
 pub fn issue_link(event_id: &str, owner: &str, repo_id: &str) -> String {
     format!("buzz://issue?id={event_id}&owner={owner}&d={repo_id}")
+}
+
+/// Build a `buzz://message` link for a channel message.
+///
+/// Format: `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`.
+/// An empty `thread_root_id` is treated as "no thread".
+pub fn message_link(channel_id: &str, event_id: &str, thread_root_id: Option<&str>) -> String {
+    match thread_root_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(thread) => {
+            format!("buzz://message?channel={channel_id}&id={event_id}&thread={thread}")
+        }
+        None => format!("buzz://message?channel={channel_id}&id={event_id}"),
+    }
 }
 
 #[cfg(test)]
@@ -46,6 +60,27 @@ mod tests {
         assert_eq!(
             repo_link(OWNER, "buzz-world"),
             format!("buzz://repo?owner={OWNER}&d=buzz-world")
+        );
+    }
+
+    #[test]
+    fn message_link_matches_desktop_and_mobile() {
+        let channel = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(
+            message_link(channel, EVENT_ID, None),
+            format!("buzz://message?channel={channel}&id={EVENT_ID}")
+        );
+        assert_eq!(
+            message_link(channel, EVENT_ID, Some(EVENT_ID)),
+            format!("buzz://message?channel={channel}&id={EVENT_ID}&thread={EVENT_ID}")
+        );
+        assert_eq!(
+            message_link(channel, EVENT_ID, Some("")),
+            format!("buzz://message?channel={channel}&id={EVENT_ID}")
+        );
+        assert_eq!(
+            message_link(channel, EVENT_ID, Some("   ")),
+            format!("buzz://message?channel={channel}&id={EVENT_ID}")
         );
     }
 }

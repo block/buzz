@@ -835,6 +835,48 @@ pub async fn cmd_edit_message(
 }
 
 /// Vote on a forum post or comment.
+/// Emit a canonical `buzz://message` deep link. Local-only: no relay call.
+pub fn cmd_link_message(
+    channel_id: &str,
+    event_id: &str,
+    thread_root_id: Option<&str>,
+) -> Result<(), CliError> {
+    println!(
+        "{}",
+        message_link_payload(channel_id, event_id, thread_root_id)?
+    );
+    Ok(())
+}
+
+fn message_link_payload(
+    channel_id: &str,
+    event_id: &str,
+    thread_root_id: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
+    validate_uuid(channel_id)?;
+    validate_hex64(event_id)?;
+    let thread = thread_root_id.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(thread) = thread {
+        validate_hex64(thread)?;
+    }
+
+    let channel = parse_uuid(channel_id)?.to_string();
+    let event = event_id.to_ascii_lowercase();
+    let thread = thread.map(str::to_ascii_lowercase);
+    let link = crate::links::message_link(&channel, &event, thread.as_deref());
+
+    let mut body = serde_json::json!({
+        "link": link,
+        "channel": channel,
+        "id": event,
+    });
+    if let Some(thread) = thread {
+        body["thread"] = serde_json::Value::String(thread);
+    }
+    Ok(body)
+}
+
+/// Vote on a forum post or comment.
 pub async fn cmd_vote_on_post(
     client: &BuzzClient,
     event_id: &str,
@@ -984,6 +1026,11 @@ pub async fn dispatch(
             )
             .await
         }
+        MessagesCmd::Link {
+            channel,
+            event,
+            thread,
+        } => cmd_link_message(&channel, &event, thread.as_deref()),
         MessagesCmd::Vote { event, direction } => {
             cmd_vote_on_post(client, &event, &direction).await
         }
@@ -994,7 +1041,7 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        message_link_payload, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
@@ -1011,6 +1058,37 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+    const CHANNEL: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn message_link_payload_builds_canonical_url() {
+        let body = message_link_payload(CHANNEL, ID_A, None).unwrap();
+        let expected = format!("buzz://message?channel={CHANNEL}&id={ID_A}");
+        assert_eq!(body["link"].as_str(), Some(expected.as_str()));
+        assert_eq!(body["channel"].as_str(), Some(CHANNEL));
+        assert_eq!(body["id"].as_str(), Some(ID_A));
+        assert!(body.get("thread").is_none());
+    }
+
+    #[test]
+    fn message_link_payload_includes_thread_and_normalizes_hex() {
+        let mixed = ID_A.to_ascii_uppercase();
+        let body = message_link_payload(CHANNEL, &mixed, Some(&mixed)).unwrap();
+        let expected = format!("buzz://message?channel={CHANNEL}&id={ID_A}&thread={ID_A}");
+        assert_eq!(body["id"].as_str(), Some(ID_A));
+        assert_eq!(body["thread"].as_str(), Some(ID_A));
+        assert_eq!(body["link"].as_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn message_link_payload_rejects_bad_channel() {
+        assert!(message_link_payload("not-a-uuid", ID_A, None).is_err());
+    }
+
+    #[test]
+    fn message_link_payload_rejects_bad_event() {
+        assert!(message_link_payload(CHANNEL, "short", None).is_err());
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
