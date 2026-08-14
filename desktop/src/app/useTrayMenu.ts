@@ -23,9 +23,7 @@ type TrayAgentActivity = {
   elapsed: string;
 };
 
-type TrayAction =
-  | { kind: "newChannel" }
-  | { kind: "openChannel"; channelId: string };
+type TrayAction = { kind: "openChannel"; channelId: string };
 
 const MAX_RECENT_TRAY_ACTIVITIES = 5;
 
@@ -36,11 +34,9 @@ const MAX_RECENT_TRAY_ACTIVITIES = 5;
 export function useTrayMenu({
   channels,
   goChannel,
-  openCreateChannel,
 }: {
   channels: Channel[];
   goChannel: (channelId: string) => Promise<unknown>;
-  openCreateChannel: () => void;
 }): void {
   const activeTurns = useActiveAgentTurnsByChannel();
   const now = useNow(1000);
@@ -132,11 +128,7 @@ export function useTrayMenu({
         return;
       }
       for (const action of actions) {
-        if (action.kind === "newChannel") {
-          openCreateChannel();
-        } else {
-          void goChannel(action.channelId);
-        }
+        void goChannel(action.channelId);
       }
     };
 
@@ -156,5 +148,5 @@ export function useTrayMenu({
       disposed = true;
       unlisten?.();
     };
-  }, [goChannel, openCreateChannel]);
+  }, [goChannel]);
 }

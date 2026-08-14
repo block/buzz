@@ -30,7 +30,7 @@ use tauri::{
 
 const TRAY_ID: &str = "buzz-tray";
 const OPEN_BUZZ_ID: &str = "tray-open-buzz";
-const NEW_CHANNEL_ID: &str = "tray-new-channel";
+const MINIMIZE_BUZZ_ID: &str = "tray-minimize-buzz";
 const QUIT_ID: &str = "tray-quit";
 const OPEN_CHANNEL_PREFIX: &str = "tray-open-channel:";
 const OPEN_CHANNEL_ACTIVITY_SEPARATOR: char = '|';
@@ -230,7 +230,6 @@ struct TrayMenuState<R: Runtime> {
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum TrayAction {
-    NewChannel,
     OpenChannel {
         #[serde(rename = "channelId")]
         channel_id: String,
@@ -256,19 +255,26 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+fn minimize_main_window<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Err(error) = window.minimize() {
+        eprintln!("buzz-desktop: failed to minimize main window from tray: {error}");
+    }
+}
+
 fn queue_tray_action<R: Runtime>(app: &AppHandle<R>, mut action: TrayAction) {
     let state = app.state::<TrayMenuState<R>>();
     let Ok(mut queue) = state.action_queue.lock() else {
         eprintln!("buzz-desktop: tray action queue is unavailable");
         return;
     };
-    if let TrayAction::OpenChannel {
+    let TrayAction::OpenChannel {
         community_generation,
         ..
-    } = &mut action
-    {
-        *community_generation = queue.community_generation;
-    }
+    } = &mut action;
+    *community_generation = queue.community_generation;
     queue.pending_actions.push(action);
     drop(queue);
 
@@ -346,16 +352,16 @@ fn build_menu<R: Runtime>(
     append_separator(app, &menu)?;
     menu.append(&MenuItem::with_id(
         app,
-        NEW_CHANNEL_ID,
-        "New Channel",
+        OPEN_BUZZ_ID,
+        "Open Buzz",
         true,
         None::<&str>,
     )?)?;
     append_separator(app, &menu)?;
     menu.append(&MenuItem::with_id(
         app,
-        OPEN_BUZZ_ID,
-        "Open Buzz",
+        MINIMIZE_BUZZ_ID,
+        "Minimize Buzz",
         true,
         None::<&str>,
     )?)?;
@@ -466,10 +472,7 @@ fn apply_activity_presentation<R: Runtime>(
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         OPEN_BUZZ_ID => show_main_window(app),
-        NEW_CHANNEL_ID => {
-            show_main_window(app);
-            queue_tray_action(app, TrayAction::NewChannel);
-        }
+        MINIMIZE_BUZZ_ID => minimize_main_window(app),
         QUIT_ID => app.exit(0),
         _ => {
             let Some(channel_id) = id.strip_prefix(OPEN_CHANNEL_PREFIX) else {
@@ -551,12 +554,12 @@ pub fn take_tray_actions<R: Runtime>(app: AppHandle<R>) -> Result<Vec<TrayAction
 }
 
 fn requeue_actions(queue: &mut TrayActionQueue, mut actions: Vec<TrayAction>) {
-    actions.retain(|action| match action {
-        TrayAction::NewChannel => true,
-        TrayAction::OpenChannel {
+    actions.retain(|action| {
+        let TrayAction::OpenChannel {
             community_generation,
             ..
-        } => *community_generation == queue.community_generation,
+        } = action;
+        *community_generation == queue.community_generation
     });
     actions.append(&mut queue.pending_actions);
     queue.pending_actions = actions;
@@ -590,9 +593,7 @@ pub fn clear_tray_agent_activity<R: Runtime>(app: AppHandle<R>) -> Result<(), St
         .lock()
         .map_err(|_| "Buzz tray action queue is unavailable".to_string())?;
     queue.community_generation = queue.community_generation.wrapping_add(1);
-    queue
-        .pending_actions
-        .retain(|action| matches!(action, TrayAction::NewChannel));
+    queue.pending_actions.clear();
     drop(queue);
 
     update_tray_agent_activity(app, Vec::new(), Vec::new())
@@ -689,17 +690,5 @@ mod tests {
         );
 
         assert!(queue.pending_actions.is_empty());
-    }
-
-    #[test]
-    fn new_channel_actions_survive_community_change() {
-        let mut queue = TrayActionQueue {
-            community_generation: 2,
-            pending_actions: Vec::new(),
-        };
-
-        requeue_actions(&mut queue, vec![TrayAction::NewChannel]);
-
-        assert_eq!(queue.pending_actions, vec![TrayAction::NewChannel]);
     }
 }

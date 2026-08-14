@@ -1,5 +1,5 @@
 import type { Channel } from "@/shared/api/types";
-import { isMacPlatform } from "@/shared/lib/platform";
+import { isMacPlatform, isWindowsPlatform } from "@/shared/lib/platform";
 
 import { useTrayMenu } from "@/app/useTrayMenu";
 
@@ -7,35 +7,24 @@ import { useTrayMenu } from "@/app/useTrayMenu";
 export function AppShellTrayMenu({
   channels,
   goChannel,
-  openCreateChannel,
 }: {
   channels: Channel[];
   goChannel: (channelId: string) => Promise<unknown>;
-  openCreateChannel: () => void;
 }) {
-  if (!isMacPlatform()) return null;
-  return (
-    <MacAppShellTrayMenu
-      channels={channels}
-      goChannel={goChannel}
-      openCreateChannel={openCreateChannel}
-    />
-  );
+  if (!isMacPlatform() && !isWindowsPlatform()) return null;
+  return <NativeAppShellTrayMenu channels={channels} goChannel={goChannel} />;
 }
 
-function MacAppShellTrayMenu({
+function NativeAppShellTrayMenu({
   channels,
   goChannel,
-  openCreateChannel,
 }: {
   channels: Channel[];
   goChannel: (channelId: string) => Promise<unknown>;
-  openCreateChannel: () => void;
 }): null {
   useTrayMenu({
     channels,
     goChannel,
-    openCreateChannel,
   });
   return null;
 }

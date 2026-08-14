@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
-import { isMacPlatform } from "@/shared/lib/platform";
+import { isMacPlatform, isWindowsPlatform } from "@/shared/lib/platform";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
@@ -58,7 +58,7 @@ function resetCommunityState({
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
-  if (isTauri() && isMacPlatform()) {
+  if (isTauri() && (isMacPlatform() || isWindowsPlatform())) {
     void clearTrayAgentActivity();
   }
   if (resetAvatarState) {
