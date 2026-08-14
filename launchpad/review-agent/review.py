@@ -68,11 +68,21 @@ def render_review(findings: list[Finding], states: dict[str, str]) -> str:
         # A PR author can pad enough distinct sentences to make EVERY finding real
         # and still render past GitHub's own body limit -- amplification, not
         # evasion, and the previous unbounded loop let it suppress the whole
-        # review, Blockers included. Findings are already sorted by severity, so a
-        # budget applied HERE, in rendering order, drops only the lowest-severity
-        # tail -- never the highest -- and at least one finding always renders
-        # even if it alone exceeds the budget, so a review with real findings never
-        # renders as though it had none.
+        # review, Blockers included.
+        #
+        # Sorting by severity does NOT protect a specific finding here, and this
+        # must not be described as though it does: every Finding constructed in
+        # this codebase (contain.py, detect.py) uses the dataclass default and is
+        # "Blocker", so there is no severity spread to sort by in production --
+        # SEVERITY_ORDER.get(f.severity, 9) puts every real finding in the same
+        # bucket, and Python's stable sort then keeps them in insertion order.
+        # What this budget actually guarantees, independent of severity: at least
+        # one finding always renders even if it alone exceeds the budget, so a
+        # review with real findings never renders as though it had none; and any
+        # truncation is disclosed with an explicit count, never silent. If a
+        # future producer ever assigns differentiated severities, the sort then
+        # starts doing real prioritisation work for free -- it costs nothing to
+        # keep, but claims nothing it cannot back today.
         ordered = sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 9))
         rendered_bytes = 0
         omitted = 0
@@ -103,11 +113,9 @@ def render_review(findings: list[Finding], states: dict[str, str]) -> str:
         if omitted:
             lines.append(
                 f"**{omitted} further finding(s) omitted.** Rendering every finding "
-                f"would exceed a {MAX_FINDINGS_BYTES}-byte budget. Findings are "
-                "sorted by severity before this budget is applied, so what is "
-                "omitted is the lowest-severity tail, never the highest — but a "
-                "pull request producing enough findings to hit this budget is "
-                "itself worth escalating."
+                f"would exceed a {MAX_FINDINGS_BYTES}-byte budget. A pull request "
+                "producing enough findings to hit this budget is itself worth "
+                "escalating."
             )
             lines.append("")
     else:

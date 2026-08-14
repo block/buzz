@@ -24,7 +24,18 @@ CAP_PER_INVOCATION = 2 * 1024 * 1024
 #: States that mean "nothing was read", as distinct from "nothing is there".
 UNREADABLE = ("absent", "oversized", "unparseable")
 
-_CLOSING_KEYWORD = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)\b", re.IGNORECASE)
+#: GitHub recognises three forms after a closing keyword: a bare ``#123`` (this
+#: repo), a qualified ``owner/repo#123``, and a full issue URL. All three are
+#: author-controlled, so all three are matched here rather than only the bare form.
+_CLOSING_KEYWORD = re.compile(
+    r"\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+"
+    r"(?:"
+    r"(?P<qualified_repo>[\w.-]+/[\w.-]+)#(?P<qualified_num>\d+)"
+    r"|https?://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/(?P<url_num>\d+)"
+    r"|#(?P<bare_num>\d+)"
+    r")",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -159,20 +170,45 @@ def fetch_all(pr: int, repo: str = DEFAULT_REPO) -> dict[str, Surface]:
 
 
 def _linked_issue(body: Surface, repo: str) -> Surface:
-    """The issue a closing keyword names. Author-controlled: anyone can open an issue."""
+    """The issue(s) a closing keyword names. Author-controlled: anyone can open one.
+
+    ``.search()`` on the first match only covered a bare ``#123`` and only the
+    first closing keyword in the body — "Fixes #10, Closes owner/other#20" left
+    the second reference entirely unfetched, and a qualified or URL reference
+    matched nothing at all, silently omitting an author-controlled surface. Every
+    reference is now resolved and fetched, deduplicated, and joined; a fetch
+    failure on one target is skipped rather than discarding every other target's
+    text, since ``_gh`` already degrades a single failed call to "no content" and
+    an author cannot make ONE bad reference number hide every other one.
+    """
     if not body.readable:
         return Surface(
             "linked_issue", "absent", reason=f"pr_body was {body.state}, so no keyword could be read"
         )
-    match = _CLOSING_KEYWORD.search(body.text)
-    if not match:
+    targets: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _CLOSING_KEYWORD.finditer(body.text):
+        target_repo = match.group("qualified_repo") or match.group("url_repo") or repo
+        number = match.group("qualified_num") or match.group("url_num") or match.group("bare_num")
+        key = (target_repo, number)
+        if key not in seen:
+            seen.add(key)
+            targets.append(key)
+    if not targets:
         return Surface("linked_issue", "empty")
-    number = match.group(1)
-    return _json_field(
-        "linked_issue",
-        ["api", f"repos/{repo}/issues/{number}"],
-        lambda d: d.get("body") or "",
-    )
+    bodies: list[str] = []
+    for target_repo, number in targets:
+        ok, out, _reason = _gh(["api", f"repos/{target_repo}/issues/{number}"])
+        if not ok:
+            continue
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError:
+            continue
+        text = (payload.get("body") or "").strip()
+        if text:
+            bodies.append(text)
+    return _classify("linked_issue", True, "\n\n".join(bodies), "")
 
 
 def from_payload(path: str) -> dict[str, Surface]:

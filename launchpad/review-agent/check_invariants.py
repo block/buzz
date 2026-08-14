@@ -18,6 +18,7 @@ from fetch import (
     Surface,
     _classify,
     _joined_paginated,
+    _linked_issue,
     apply_invocation_cap,
 )
 from review import MAX_FINDINGS_BYTES, SEVERITY_ORDER, render_review
@@ -435,6 +436,78 @@ check(
     "X" * 100 in _always_one_body,
     "a single finding LARGER than the whole budget still renders -- never zero findings when something was found",
 )
+
+# --- linked_issue resolves every closing reference, not just the first bare #N -----
+# GitHub also recognises a qualified `owner/repo#N` and a full issue URL, and a body
+# may name more than one. `.search()` on a bare-#-only pattern caught only the first
+# reference in the narrowest of its three forms, silently dropping every other
+# author-controlled reference. Offline and deterministic: _gh is monkeypatched per
+# case, matching the pagination test's pattern above.
+print("\nlinked_issue resolves every closing-keyword reference, in all three forms")
+import fetch as _fetch_module_li
+
+
+def _fake_gh_issue_bodies(bodies: dict):
+    def _fake(args, accept=None):
+        # args[-1] is "repos/<owner>/<repo>/issues/<n>"
+        key = args[-1].removeprefix("repos/").rsplit("/issues/", 1)
+        target = f"{key[0]}#{key[1]}"
+        if target in bodies:
+            return True, __import__("json").dumps({"body": bodies[target]}), ""
+        return False, "", "404"
+
+    return _fake
+
+
+_cases = [
+    ("bare #N", "Fixes #10", {"launchpad-26/buzz#10": "bare body"}, "bare body"),
+    (
+        "qualified owner/repo#N",
+        "Closes other-org/other-repo#20",
+        {"other-org/other-repo#20": "qualified body"},
+        "qualified body",
+    ),
+    (
+        "full issue URL",
+        "Resolves https://github.com/some/where/issues/30",
+        {"some/where#30": "url body"},
+        "url body",
+    ),
+    (
+        "two references, two forms",
+        "Fixes #10, Closes other-org/other-repo#20",
+        {"launchpad-26/buzz#10": "first body", "other-org/other-repo#20": "second body"},
+        "first body\n\nsecond body",
+    ),
+]
+for label, pr_body_text, bodies, expected in _cases:
+    _real_gh_li = _fetch_module_li._gh
+    _fetch_module_li._gh = _fake_gh_issue_bodies(bodies)
+    try:
+        result = _linked_issue(Surface("pr_body", "ok", text=pr_body_text), "launchpad-26/buzz")
+    finally:
+        _fetch_module_li._gh = _real_gh_li
+    check(
+        result.state == "ok" and result.text == expected,
+        f"{label}: resolved to {expected!r} (got state={result.state!r} text={result.text!r})",
+    )
+
+# A failure on one referenced issue must not discard the others' text.
+_real_gh_li = _fetch_module_li._gh
+_fetch_module_li._gh = _fake_gh_issue_bodies({"launchpad-26/buzz#10": "the readable one"})
+try:
+    partial = _linked_issue(
+        Surface("pr_body", "ok", text="Fixes #10, Closes #999999"), "launchpad-26/buzz"
+    )
+finally:
+    _fetch_module_li._gh = _real_gh_li
+check(
+    partial.state == "ok" and partial.text == "the readable one",
+    f"one unreadable reference does not discard a sibling reference's text (got {partial!r})",
+)
+
+no_keyword = _linked_issue(Surface("pr_body", "ok", text="no closing keyword here"), "launchpad-26/buzz")
+check(no_keyword.state == "empty", "no closing keyword at all classifies as empty")
 
 print(f"\n{len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

@@ -304,7 +304,7 @@ A stage that builds a prompt must envelope first, without exception.
 | [#116](https://github.com/launchpad-26/buzz/issues/116) pre-flight | `fetch.fetch_all(pr, repo)` — emit one labelled field per entry point | concatenate surfaces into one blob, or build a prompt |
 | [#117](https://github.com/launchpad-26/buzz/issues/117) dimensions | `contain.render(surfaces, nonce)` before any text reaches a model | place any surface above the preamble or after the closing marker |
 | [#118](https://github.com/launchpad-26/buzz/issues/118) adjudication | `contain.findings_for(surfaces, nonce)` — returns `list[Finding]` and nothing else | re-read raw PR text to "check for itself" |
-| [#119](https://github.com/launchpad-26/buzz/issues/119) publish | `review.render_review(findings, states)` | publish evidence in raw form — quote post-escape or not at all |
+| [#119](https://github.com/launchpad-26/buzz/issues/119) publish | `review.render_review(findings, states)`, with `states` taken from `render()`'s own return, never re-derived | publish evidence in raw form — quote post-escape or not at all; re-apply `fetch.apply_invocation_cap` to build a second `states` |
 
 All four route the same seven labels: `pr_title`, `pr_body`, `pr_diff`,
 `pr_issue_comments`, `pr_review_comments`, `pr_review_bodies`, `linked_issue`.
@@ -313,9 +313,14 @@ All four route the same seven labels: `pr_title`, `pr_body`, `pr_diff`,
 first and pass the result. It is the only sanctioned producer — see § Envelope
 structure. `findings_for` returns findings alone; a stage that also needs the contained
 blocks calls `contain.render(surfaces, nonce)`, which returns
-`(document, findings, all_readable)`. #118 is told to adjudicate what containment
-already found, so `findings_for` is the narrower call that keeps it from reaching back
-to the surfaces.
+`(document, findings, all_readable, states)`. `states` is the aggregate-cap-applied
+state of every entry point — the same map `#119` needs for `render_review`'s second
+argument, returned here rather than left for a caller to rebuild by calling
+`fetch.apply_invocation_cap` a second time on its own, separately-held surfaces. A
+second application on a caller's own copy is exactly how a caller with no reason to
+know about it silently uses pre-cap states instead. #118 is told to adjudicate what
+containment already found, so `findings_for` is the narrower call that keeps it from
+reaching back to the surfaces.
 
 **#116 and this document agree, and the agreement is load-bearing.** #116's plan states
 that untrusted text is carried through as data and "the mitigation lives in the stage
