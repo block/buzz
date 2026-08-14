@@ -2,11 +2,13 @@ use nostr::{Event, EventId, Keys, PublicKey};
 use tauri::{AppHandle, State};
 
 mod forum;
+mod reply_recipient;
 
 use forum::{
     apply_link_preview_suppression, fetch_agent_owner_pubkeys, link_preview_suppression_targets,
 };
 pub use forum::{get_forum_posts, get_forum_thread};
+use reply_recipient::{add_reply_recipient, mention_refs, ResolvedThreadRef};
 
 use crate::{
     app_state::AppState,
@@ -431,7 +433,7 @@ pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<S
 async fn resolve_thread_ref(
     parent_event_id: &str,
     state: &AppState,
-) -> Result<events::ThreadRef, String> {
+) -> Result<ResolvedThreadRef, String> {
     let parent_eid =
         EventId::from_hex(parent_event_id).map_err(|e| format!("invalid parent event ID: {e}"))?;
 
@@ -470,9 +472,12 @@ async fn resolve_thread_ref(
         _ => parent_eid,
     };
 
-    Ok(events::ThreadRef {
-        root_event_id: root_eid,
-        parent_event_id: parent_eid,
+    Ok(ResolvedThreadRef {
+        thread_ref: events::ThreadRef {
+            root_event_id: root_eid,
+            parent_event_id: parent_eid,
+        },
+        parent_pubkey: parent.pubkey.to_hex(),
     })
 }
 
@@ -493,8 +498,7 @@ pub async fn send_channel_message(
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
-    let mentions = mention_pubkeys.unwrap_or_default();
-    let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
+    let mut mentions = mention_pubkeys.unwrap_or_default();
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
@@ -511,7 +515,7 @@ pub async fn send_channel_message(
         buzz_core_pkg::kind::KIND_FORUM_POST => events::build_forum_post(
             channel_uuid,
             content.trim(),
-            &mention_refs,
+            &mention_refs(&mentions),
             &media,
             &mention_refs_only,
         )?,
@@ -520,12 +524,12 @@ pub async fn send_channel_message(
                 .as_deref()
                 .ok_or("forum comment requires parent_event_id")?;
             let thread_ref = resolve_thread_ref(parent_id, &state).await?;
-            resolved_root = Some(thread_ref.root_event_id.to_hex());
+            resolved_root = Some(thread_ref.thread_ref.root_event_id.to_hex());
             events::build_forum_comment(
                 channel_uuid,
                 content.trim(),
-                &thread_ref,
-                &mention_refs,
+                &thread_ref.thread_ref,
+                &mention_refs(&mentions),
                 &media,
                 &mention_refs_only,
             )?
@@ -533,9 +537,14 @@ pub async fn send_channel_message(
         _ => {
             let thread_ref = match parent_event_id.as_deref() {
                 Some(pid) => {
-                    let tr = resolve_thread_ref(pid, &state).await?;
-                    resolved_root = Some(tr.root_event_id.to_hex());
-                    Some(tr)
+                    let resolved = resolve_thread_ref(pid, &state).await?;
+                    let sender_pubkey = {
+                        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+                        keys.public_key().to_hex()
+                    };
+                    add_reply_recipient(&mut mentions, &resolved.parent_pubkey, &sender_pubkey);
+                    resolved_root = Some(resolved.thread_ref.root_event_id.to_hex());
+                    Some(resolved.thread_ref)
                 }
                 None => None,
             };
@@ -543,7 +552,7 @@ pub async fn send_channel_message(
                 channel_uuid,
                 content.trim(),
                 thread_ref.as_ref(),
-                &mention_refs,
+                &mention_refs(&mentions),
                 &media,
                 &emoji,
                 &mention_refs_only,
@@ -771,7 +780,7 @@ pub async fn send_managed_agent_channel_message(
     let submission_auth_tag =
         managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
     let thread_ref = match parent_event_id.as_deref() {
-        Some(parent_id) => Some(resolve_thread_ref(parent_id, &state).await?),
+        Some(parent_id) => Some(resolve_thread_ref(parent_id, &state).await?.thread_ref),
         None => None,
     };
 
