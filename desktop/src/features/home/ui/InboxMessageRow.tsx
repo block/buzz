@@ -17,9 +17,11 @@ import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 export type InboxDisplayMessage = InboxContextMessage & {
   depth: number;
@@ -43,6 +45,8 @@ type InboxMessageRowProps = {
     remove: boolean,
   ) => Promise<void>;
   showUnreadBoundary?: boolean;
+  videoReviewCommentRootId?: string;
+  videoReviewContext?: VideoReviewContext;
 };
 
 export function InboxMessageRow({
@@ -58,10 +62,16 @@ export function InboxMessageRow({
   onSelectReplyTarget,
   onToggleReaction,
   showUnreadBoundary = false,
+  videoReviewCommentRootId,
+  videoReviewContext,
 }: InboxMessageRowProps) {
   const timelineMessage = React.useMemo(
     () => toTimelineMessage(message),
     [message],
+  );
+  const imetaByUrl = React.useMemo(
+    () => (message.tags ? parseImetaTags(message.tags) : undefined),
+    [message.tags],
   );
   const { customEmoji, emojiOnly } = useMessageEmoji(
     message.content,
@@ -231,7 +241,7 @@ export function InboxMessageRow({
           )}
 
           <div className={isContinuation ? "mt-0" : "mt-0.5"}>
-            <Markdown
+            <VideoReviewCommentMarkdown
               className={cn(
                 "max-w-full text-left text-sm text-foreground",
                 emojiOnly &&
@@ -251,8 +261,11 @@ export function InboxMessageRow({
                 timelineMessage.tags,
               )}
               customEmoji={customEmoji}
+              imetaByUrl={imetaByUrl}
               mentionNames={message.mentionNames}
               mentionPubkeysByName={message.mentionPubkeysByName}
+              videoReviewCommentRootId={videoReviewCommentRootId}
+              videoReviewContext={videoReviewContext}
             />
             <MessageReactions
               canToggle={canToggleReactions}
