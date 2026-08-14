@@ -34,6 +34,12 @@ function entityLinkPresentation(link: ParsedEntityLink) {
         icon: "issue" as const,
         label: `${link.dtag} · ${link.id.slice(0, 8)}`,
       };
+    case "project":
+      return {
+        ariaLabel: `Open project ${link.dtag}`,
+        icon: "project" as const,
+        label: link.dtag,
+      };
   }
 }
 

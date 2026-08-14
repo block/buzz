@@ -90,13 +90,14 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
       ),
     ),
   ];
+  const rootPromise = fetchEvents({
+    kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
+    "#a": repoAddresses,
+    limit: 2_000,
+  });
   const [rootResult, updateResult, commentResult, statusResult, assignResult] =
     await Promise.allSettled([
-      fetchEvents({
-        kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
+      rootPromise,
       fetchEvents({
         kinds: [KIND_GIT_PR_UPDATE],
         "#a": repoAddresses,
@@ -119,9 +120,17 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
       }),
       // Assignment state must reduce over the complete operation history —
       // the 2,000-comment window above is shared across every loaded repo
-      // and can evict older assignment operations. See
-      // fetchAssignmentOperationEvents.
-      fetchAssignmentOperationEvents(repoAddresses, fetchEvents),
+      // and can evict older assignment operations. Keyed by issue id (`#e`)
+      // because that is the only tag constraint the relay applies before its
+      // SQL LIMIT; see fetchAssignmentOperationEvents.
+      rootPromise.then((rootEvents) =>
+        fetchAssignmentOperationEvents(
+          rootEvents
+            .filter((event) => event.kind === KIND_GIT_ISSUE)
+            .map((event) => event.id),
+          fetchEvents,
+        ),
+      ),
     ]);
 
   if (rootResult.status === "rejected") {

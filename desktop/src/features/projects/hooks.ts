@@ -228,13 +228,14 @@ async function fetchRepoState(project: Repository): Promise<RepoState | null> {
 async function fetchProjectIssues(
   project: Repository,
 ): Promise<ProjectIssue[]> {
+  const issuePromise = relayClient.fetchEvents({
+    kinds: [KIND_GIT_ISSUE],
+    "#a": [project.repoAddress],
+    limit: 200,
+  });
   const [issueEvents, statusEvents, commentEvents, assignmentEvents] =
     await Promise.all([
-      relayClient.fetchEvents({
-        kinds: [KIND_GIT_ISSUE],
-        "#a": [project.repoAddress],
-        limit: 200,
-      }),
+      issuePromise,
       relayClient.fetchEvents({
         kinds: [
           KIND_GIT_STATUS_OPEN,
@@ -251,9 +252,12 @@ async function fetchProjectIssues(
         limit: 500,
       }),
       // Assignment state must reduce over the complete operation history, not
-      // whatever survives the bounded comment window above — see
-      // fetchAssignmentOperationEvents.
-      fetchAssignmentOperationEvents([project.repoAddress]),
+      // whatever survives the bounded comment window above. Keyed by issue id
+      // (`#e`) because that is the only tag constraint the relay applies
+      // before its SQL LIMIT — see fetchAssignmentOperationEvents.
+      issuePromise.then((events) =>
+        fetchAssignmentOperationEvents(events.map((event) => event.id)),
+      ),
     ]);
 
   return projectIssueEventsToIssues(

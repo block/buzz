@@ -5615,6 +5615,18 @@ function filterMockProjectEvents(filter: MockFilter): RelayEvent[] {
       ) {
         return false;
       }
+      if (
+        filter["#e"] &&
+        !event.tags.some(
+          (tag) => tag[0] === "e" && filter["#e"]?.includes(tag[1]),
+        )
+      ) {
+        return false;
+      }
+      // Inclusive `until`, like the relay's SQL `created_at <= $until`.
+      if (filter.until !== undefined && event.created_at > filter.until) {
+        return false;
+      }
       return true;
     })
     .sort((left, right) => right.created_at - left.created_at)
@@ -9915,10 +9927,12 @@ function sendToMockSocket(args: {
     }
 
     // Project queries: NIP-34 kinds, or kind:1 comments scoped by repo `a`
-    // tag (PR/issue discussions, approvals, review requests).
+    // tag or by issue/PR root `e` tag (discussions, approvals, review
+    // requests, assignment operations). Channel messages are kind 9, so a
+    // kind:1 `#e` query can only target project discussion events.
     if (
       filter.kinds?.some((kind) => MOCK_PROJECT_KINDS.has(kind)) ||
-      (filter.kinds?.includes(1) && filter["#a"])
+      (filter.kinds?.includes(1) && (filter["#a"] || filter["#e"]))
     ) {
       window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__ ??= [];
       window.__BUZZ_E2E_PROJECT_QUERY_FILTERS__.push(filter);

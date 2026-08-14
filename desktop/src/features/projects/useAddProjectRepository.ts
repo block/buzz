@@ -37,22 +37,40 @@ export type AddProjectRepositoryInput = {
   webUrl?: string;
 };
 
-async function addProjectRepository({
-  ownerControlAgentPubkey,
-  project,
-  ...input
-}: AddProjectRepositoryInput): Promise<{
+type FetchEventsInput = Parameters<(typeof relayClient)["fetchEvents"]>[0];
+
+/**
+ * Relay/publish seams injected by tests. The regression for the
+ * partial-publish heal must run the mutation itself — guards included — not
+ * just the template builder, so the whole flow takes its I/O through here.
+ */
+export type AddProjectRepositoryDeps = {
+  fetchEvents: (filter: FetchEventsInput) => Promise<RelayEvent[]>;
+  publishOwnedAgentAnnouncements: typeof publishOwnedAgentProjectAnnouncements;
+  publishOwnerAnnouncement: typeof publishProjectOwnerAnnouncement;
+};
+
+/** Exported for tests — production callers go through the mutation hook. */
+export async function addProjectRepository(
+  { ownerControlAgentPubkey, project, ...input }: AddProjectRepositoryInput,
+  deps?: Partial<AddProjectRepositoryDeps>,
+): Promise<{
   previousProjectId: string;
   project: Project;
   repository: Repository;
 }> {
+  const {
+    fetchEvents = relayClient.fetchEvents.bind(relayClient),
+    publishOwnedAgentAnnouncements = publishOwnedAgentProjectAnnouncements,
+    publishOwnerAnnouncement = publishProjectOwnerAnnouncement,
+  } = deps ?? {};
   const targetOwner = project.owner.toLowerCase();
 
   // Fetch the live signed project head immediately before mutating.
   // This prevents: (a) unknown-tag erasure from the cached UI projection,
   // (b) concurrent-write clobber when another session or the CLI advanced
   // the head after we loaded the page.
-  const liveHeads = await relayClient.fetchEvents({
+  const liveHeads = await fetchEvents({
     kinds: [KIND_PROJECT_ANNOUNCEMENT],
     authors: [targetOwner],
     "#d": [project.dtag],
@@ -65,24 +83,17 @@ async function addProjectRepository({
     );
   }
 
-  // Dominated-write guard: if the live head is newer than our cached snapshot,
-  // a concurrent session has already advanced the project — our mutation would
-  // overwrite their changes. Surface the conflict rather than silently clobbering.
-  if (liveHead.created_at > project.createdAt) {
-    throw new Error(
-      "This project was updated by another session while you were working. Refresh and try again.",
-    );
-  }
-
-  // Partial-publish detection must precede the guards below: the project
-  // event can land while the repository event fails, leaving the live head
-  // referencing a coordinate with no repository head (a dangling member).
-  // Probe for a repository head at the coordinate first so the template
-  // builder can distinguish "raced with another session" (throw) from
-  // "resume a partial publish" (heal by publishing only the missing event).
+  // Partial-publish detection must precede the dominated-write guard below:
+  // the project event can land while the repository event fails, leaving the
+  // live head referencing a coordinate with no repository head (a dangling
+  // member) — and a live head strictly newer than the cached snapshot,
+  // because the failed mutation never updated the cache. Probe for a
+  // repository head at the coordinate first so the template builder can
+  // distinguish "raced with another session" (throw) from "resume a partial
+  // publish" (heal by publishing only the missing event).
   const repositoryDtag = repositoryDtagFromName(input.name.trim());
   const existingRepoHeads = repositoryDtag
-    ? await relayClient.fetchEvents({
+    ? await fetchEvents({
         kinds: [KIND_REPO_ANNOUNCEMENT],
         authors: [targetOwner],
         "#d": [repositoryDtag],
@@ -130,7 +141,7 @@ async function addProjectRepository({
     // just the missing repository event.
     let events: RelayEvent[];
     try {
-      events = await publishOwnedAgentProjectAnnouncements(
+      events = await publishOwnedAgentAnnouncements(
         ownerControlAgentPubkey,
         templates.resume
           ? [{ ...templates.repository, createdAt: projectCreatedAt }]
@@ -147,7 +158,7 @@ async function addProjectRepository({
       if (!isDanglingProjectMemberPublish(error)) {
         throw error;
       }
-      const repositoryEvents = await publishOwnedAgentProjectAnnouncements(
+      const repositoryEvents = await publishOwnedAgentAnnouncements(
         ownerControlAgentPubkey,
         [{ ...templates.repository, createdAt: projectCreatedAt }],
       );
@@ -187,7 +198,7 @@ async function addProjectRepository({
     try {
       // Confirm grouping support before publishing the repository so older
       // relays cannot leave a new standalone repository behind.
-      const publication = await publishProjectOwnerAnnouncement({
+      const publication = await publishOwnerAnnouncement({
         ...templates.project,
         createdAt: projectCreatedAt,
         targetOwner,
@@ -221,7 +232,7 @@ async function addProjectRepository({
   let repository: Repository | null = null;
   let repositoryEvent: RelayEvent | null = null;
   const publishRepository = async (): Promise<RelayEvent> => {
-    const publication = await publishProjectOwnerAnnouncement({
+    const publication = await publishOwnerAnnouncement({
       ...templates.repository,
       createdAt: projectCreatedAt,
       targetOwner,
@@ -244,7 +255,7 @@ async function addProjectRepository({
     let alreadyStored = false;
     if (repositoryEvent) {
       try {
-        const stored = await relayClient.fetchEvents({
+        const stored = await fetchEvents({
           ids: [repositoryEvent.id],
           kinds: [KIND_REPO_ANNOUNCEMENT],
           limit: 1,
@@ -301,7 +312,8 @@ async function addProjectRepository({
 export function useAddProjectRepositoryMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: addProjectRepository,
+    mutationFn: (input: AddProjectRepositoryInput) =>
+      addProjectRepository(input),
     onSuccess: ({ previousProjectId, project }) => {
       if (previousProjectId !== project.id) {
         queryClient.removeQueries({
