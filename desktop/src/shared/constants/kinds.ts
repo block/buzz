@@ -10,6 +10,7 @@ export const KIND_NIP29_DELETE_EVENT = 9005;
 // Tag shapes are pinned by buzz-sdk builders + relay moderation_commands.rs.
 export const KIND_REPORT = 1984;
 export const KIND_PRODUCT_FEEDBACK = 42000;
+export const KIND_IA_ARCHIVE_REQUEST = 9035;
 export const KIND_MODERATION_BAN = 9040;
 export const KIND_MODERATION_UNBAN = 9041;
 export const KIND_MODERATION_TIMEOUT = 9042;

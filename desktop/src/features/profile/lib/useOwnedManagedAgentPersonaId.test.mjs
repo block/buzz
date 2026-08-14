@@ -4,8 +4,12 @@ import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { JSDOM } from "jsdom";
 
 import { relayClient } from "@/shared/api/relayClient";
-import { KIND_MANAGED_AGENT } from "@/shared/constants/kinds";
 import {
+  KIND_IA_ARCHIVE_REQUEST,
+  KIND_MANAGED_AGENT,
+} from "@/shared/constants/kinds";
+import {
+  personaIdFromOwnedManagedAgentArchive,
   personaIdFromOwnedManagedAgentEvent,
   useOwnedManagedAgentPersonaId,
 } from "./useOwnedManagedAgentPersonaId.ts";
@@ -33,10 +37,52 @@ function managedAgentEvent({
   );
 }
 
+function managedAgentArchive({
+  agentPubkey = AGENT,
+  personaId = "persona-reviewer",
+  secret = OWNER_SECRET,
+} = {}) {
+  return finalizeEvent(
+    {
+      created_at: 2,
+      kind: KIND_IA_ARCHIVE_REQUEST,
+      tags: [["p", agentPubkey]],
+      content: JSON.stringify({ persona_id: personaId }),
+    },
+    secret,
+  );
+}
+
 test("resolves an owner-signed historical agent key to its persona", () => {
   assert.equal(
     personaIdFromOwnedManagedAgentEvent(managedAgentEvent(), OWNER, AGENT),
     "persona-reviewer",
+  );
+});
+
+test("resolves a deleted historical agent key from its owner-signed archive request", () => {
+  assert.equal(
+    personaIdFromOwnedManagedAgentArchive(managedAgentArchive(), OWNER, AGENT),
+    "persona-reviewer",
+  );
+});
+
+test("rejects archive aliases with the wrong owner or target", () => {
+  assert.equal(
+    personaIdFromOwnedManagedAgentArchive(
+      managedAgentArchive({ secret: OTHER_SECRET }),
+      OWNER,
+      AGENT,
+    ),
+    null,
+  );
+  assert.equal(
+    personaIdFromOwnedManagedAgentArchive(
+      managedAgentArchive({ agentPubkey: "b".repeat(64) }),
+      OWNER,
+      AGENT,
+    ),
+    null,
   );
 });
 
@@ -81,6 +127,44 @@ test("rejects empty or malformed persona ids", () => {
   );
 });
 
+test("still resolves the live record when the archive lookup fails", async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    url: "http://localhost",
+  });
+  Object.assign(globalThis, {
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    window: dom.window,
+  });
+  const { act, cleanup, renderHook } = await import("@testing-library/react");
+  const originalFetchFirstEvent = relayClient.fetchFirstEvent;
+  relayClient.fetchFirstEvent = async (filter) => {
+    if (filter.kinds?.includes(KIND_IA_ARCHIVE_REQUEST)) {
+      throw new Error("archive lookup unavailable");
+    }
+    return managedAgentEvent();
+  };
+
+  try {
+    const { result } = renderHook(() =>
+      useOwnedManagedAgentPersonaId({
+        agentPubkey: AGENT,
+        enabled: true,
+        ownerPubkey: OWNER,
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.equal(result.current, "persona-reviewer");
+  } finally {
+    cleanup();
+    relayClient.fetchFirstEvent = originalFetchFirstEvent;
+    dom.window.close();
+  }
+});
+
 test("does not expose a persona result for stale lookup inputs", async () => {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "http://localhost",
@@ -93,7 +177,8 @@ test("does not expose a persona result for stale lookup inputs", async () => {
   });
   const { act, cleanup, renderHook } = await import("@testing-library/react");
   const originalFetchFirstEvent = relayClient.fetchFirstEvent;
-  relayClient.fetchFirstEvent = async () => managedAgentEvent();
+  relayClient.fetchFirstEvent = async (filter) =>
+    filter.kinds?.includes(KIND_MANAGED_AGENT) ? managedAgentEvent() : null;
   const observed = [];
 
   try {
