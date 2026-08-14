@@ -13,11 +13,13 @@ satisfied by a detector that had memorised the corpus.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from contain import CONTROL_FLAGS_ENV_VAR
 from corpus import load_benign, matrix
 from detect import detect
 
@@ -128,6 +130,7 @@ proc = subprocess.run(
     [sys.executable, str(HERE / "contain.py"), "--payload", str(payload), "--seed", "s6", "--json"],
     capture_output=True,
     text=True,
+    env={**os.environ, CONTROL_FLAGS_ENV_VAR: "true"},
 )
 data = json.loads(proc.stdout)
 kinds = {f["kind"] for f in data["containment_findings"]}

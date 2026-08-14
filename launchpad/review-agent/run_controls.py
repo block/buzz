@@ -27,6 +27,8 @@ CONTROLS = [
     ("check_step11.py", False),
     ("check_invariants.py", False),
     ("check_mutations.py", False),
+    ("check_flag_guard.py", False),
+    ("check_fetch_states.py", False),
 ]
 
 

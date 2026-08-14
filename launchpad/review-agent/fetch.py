@@ -50,29 +50,38 @@ class Surface:
         return self.state not in UNREADABLE
 
 
-def _gh(args: list[str], accept: str | None = None) -> tuple[bool, str, str]:
-    """Run gh. Returns (ok, stdout, reason). Never raises on a failed call."""
+def _gh(args: list[str], accept: str | None = None) -> tuple[str, str, str]:
+    """Run gh. Returns (state, stdout, reason). Never raises on a failed call.
+
+    ``state`` is one of "ok" (call succeeded and decoded), "absent" (the call
+    itself failed — missing binary, timeout, non-zero exit), or "unparseable"
+    (the call succeeded but the response cannot be decoded as UTF-8). Absent
+    and unparseable are different facts — one is usually transient (network,
+    auth, rate limit) and worth retrying, the other is permanent — so callers
+    must not collapse them into a single boolean the way malformed JSON
+    already isn't collapsed with a failed call.
+    """
     cmd = ["gh", *args]
     if accept:
         cmd += ["-H", f"Accept: {accept}"]
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=60)
     except FileNotFoundError:
-        return False, "", "gh is not installed"
+        return "absent", "", "gh is not installed"
     except subprocess.TimeoutExpired:
-        return False, "", "gh timed out after 60s"
+        return "absent", "", "gh timed out after 60s"
     if proc.returncode != 0:
         detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
-        return False, "", detail[-1] if detail else f"gh exited {proc.returncode}"
+        return "absent", "", detail[-1] if detail else f"gh exited {proc.returncode}"
     try:
-        return True, proc.stdout.decode("utf-8"), ""
+        return "ok", proc.stdout.decode("utf-8"), ""
     except UnicodeDecodeError as exc:
-        return False, "", f"response is not valid UTF-8: {exc}"
+        return "unparseable", "", f"response is not valid UTF-8: {exc}"
 
 
-def _classify(entry_point: str, ok: bool, text: str, reason: str) -> Surface:
-    if not ok:
-        return Surface(entry_point, "absent", reason=reason)
+def _classify(entry_point: str, state: str, text: str, reason: str) -> Surface:
+    if state != "ok":
+        return Surface(entry_point, state, reason=reason)
     if len(text.encode("utf-8")) > CAP_PER_ENTRY_POINT:
         # ``text`` is preserved, for the reason ``apply_invocation_cap`` gives for the
         # aggregate cap: the content is never rendered for an unreadable surface —
@@ -95,9 +104,9 @@ def _classify(entry_point: str, ok: bool, text: str, reason: str) -> Surface:
 
 
 def _json_field(entry_point: str, args: list[str], extract) -> Surface:
-    ok, out, reason = _gh(args)
-    if not ok:
-        return Surface(entry_point, "absent", reason=reason)
+    state, out, reason = _gh(args)
+    if state != "ok":
+        return Surface(entry_point, state, reason=reason)
     try:
         payload = json.loads(out)
     except json.JSONDecodeError as exc:
@@ -106,7 +115,7 @@ def _json_field(entry_point: str, args: list[str], extract) -> Surface:
         text = extract(payload)
     except (KeyError, TypeError, AttributeError) as exc:
         return Surface(entry_point, "unparseable", reason=f"unexpected shape: {exc}")
-    return _classify(entry_point, True, text or "", "")
+    return _classify(entry_point, "ok", text or "", "")
 
 
 def _joined(items: list[dict], key: str = "body") -> str:
@@ -140,10 +149,10 @@ def fetch_all(pr: int, repo: str = DEFAULT_REPO) -> dict[str, Surface]:
         "pr_body", ["api", f"{base}/pulls/{pr}"], lambda d: d.get("body") or ""
     )
 
-    ok, diff, reason = _gh(
+    state, diff, reason = _gh(
         ["api", f"{base}/pulls/{pr}"], accept="application/vnd.github.v3.diff"
     )
-    surfaces["pr_diff"] = _classify("pr_diff", ok, diff, reason)
+    surfaces["pr_diff"] = _classify("pr_diff", state, diff, reason)
 
     surfaces["pr_issue_comments"] = _json_field(
         "pr_issue_comments",
@@ -206,11 +215,11 @@ def _linked_issue(body: Surface, repo: str) -> Surface:
         return Surface("linked_issue", "empty")
     bodies: list[str] = []
     for target_repo, number in targets:
-        ok, out, reason = _gh(["api", f"repos/{target_repo}/issues/{number}"])
-        if not ok:
+        state, out, reason = _gh(["api", f"repos/{target_repo}/issues/{number}"])
+        if state != "ok":
             return Surface(
                 "linked_issue",
-                "absent",
+                state,
                 reason=f"{target_repo}#{number} could not be read: {reason}",
             )
         try:
@@ -218,13 +227,13 @@ def _linked_issue(body: Surface, repo: str) -> Surface:
         except json.JSONDecodeError as exc:
             return Surface(
                 "linked_issue",
-                "absent",
+                "unparseable",
                 reason=f"{target_repo}#{number}: malformed JSON: {exc}",
             )
         text = (payload.get("body") or "").strip()
         if text:
             bodies.append(text)
-    return _classify("linked_issue", True, "\n\n".join(bodies), "")
+    return _classify("linked_issue", "ok", "\n\n".join(bodies), "")
 
 
 def from_payload(path: str) -> dict[str, Surface]:
@@ -238,7 +247,7 @@ def from_payload(path: str) -> dict[str, Surface]:
                 entry_point, "absent", reason=f"captured payload has no {entry_point} field"
             )
             continue
-        surfaces[entry_point] = _classify(entry_point, True, raw[entry_point] or "", "")
+        surfaces[entry_point] = _classify(entry_point, "ok", raw[entry_point] or "", "")
     return surfaces
 
 

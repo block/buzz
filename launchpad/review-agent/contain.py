@@ -403,9 +403,17 @@ def findings_for(surfaces: dict, nonce: str) -> list:
     return findings
 
 
+#: Env var that must be "true" for --seed or --no-contain to be honoured. Both are
+#: "controls only" per CONTAINMENT.md's mutation-seam section — this is #137, the
+#: runtime guard that section says nothing enforces yet. A production caller that
+#: shells out to this CLI must never be able to reach either flag through argv alone.
+CONTROL_FLAGS_ENV_VAR = "REVIEW_AGENT_ALLOW_MUTATION"
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import json as _json
+    import os
 
     import fetch
 
@@ -432,6 +440,14 @@ def main(argv: list[str] | None = None) -> int:
         help="MUTATION SEAM — disable containment. Controls only; never in production.",
     )
     args = parser.parse_args(argv)
+
+    if (args.seed is not None or args.no_contain) and os.environ.get(
+        CONTROL_FLAGS_ENV_VAR
+    ) != "true":
+        parser.error(
+            "--seed and --no-contain are controls-only (CONTAINMENT.md, #137). Set "
+            f"{CONTROL_FLAGS_ENV_VAR}=true to use them outside a control run."
+        )
 
     surfaces = (
         fetch.from_payload(args.payload) if args.payload else fetch.fetch_all(args.pr, args.repo)

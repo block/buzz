@@ -12,11 +12,12 @@ Three criteria, per the plan:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 
-from contain import ENTRY_POINTS
+from contain import CONTROL_FLAGS_ENV_VAR, ENTRY_POINTS
 
 HERE = __file__.rsplit("/", 1)[0]
 PAYLOAD = f"{HERE}/fixtures/captured-pr.json"
@@ -34,8 +35,12 @@ failures: list[str] = []
 
 
 def run(args: list[str]) -> tuple[int, str]:
+    env = {**os.environ, CONTROL_FLAGS_ENV_VAR: "true"}
     proc = subprocess.run(
-        [sys.executable, f"{HERE}/contain.py", *args], capture_output=True, text=True
+        [sys.executable, f"{HERE}/contain.py", *args],
+        capture_output=True,
+        text=True,
+        env=env,
     )
     return proc.returncode, proc.stdout
 
