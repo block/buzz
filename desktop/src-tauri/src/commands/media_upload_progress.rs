@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{LazyLock, Mutex},
 };
 
@@ -8,18 +8,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{app_state::AppState, relay::classify_request_error};
 
-const MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS: usize = 128;
-
 #[derive(Default)]
 struct MediaUploadCancellations {
-    pending_order: VecDeque<String>,
     tokens: HashMap<String, CancellationToken>,
 }
 
 impl MediaUploadCancellations {
     fn begin(&mut self, progress_id: &str) -> CancellationToken {
         if let Some(cancel) = self.tokens.get(progress_id).cloned() {
-            self.pending_order.retain(|id| id != progress_id);
             return cancel;
         }
         let cancel = CancellationToken::new();
@@ -28,25 +24,12 @@ impl MediaUploadCancellations {
     }
 
     fn cancel(&mut self, progress_id: &str) {
-        if let Some(cancel) = self.tokens.get(progress_id) {
-            cancel.cancel();
-            return;
-        }
-
-        let cancel = CancellationToken::new();
+        let cancel = self.tokens.entry(progress_id.to_string()).or_default();
         cancel.cancel();
-        self.tokens.insert(progress_id.to_string(), cancel);
-        self.pending_order.push_back(progress_id.to_string());
-        while self.pending_order.len() > MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS {
-            if let Some(expired_id) = self.pending_order.pop_front() {
-                self.tokens.remove(&expired_id);
-            }
-        }
     }
 
     fn finish(&mut self, progress_id: &str) {
         self.tokens.remove(progress_id);
-        self.pending_order.retain(|id| id != progress_id);
     }
 }
 
@@ -191,23 +174,23 @@ mod tests {
     }
 
     #[test]
-    fn cancel_only_ids_are_bounded_and_oldest_entries_expire() {
+    fn dispatched_cancellations_are_not_evicted_before_begin() {
         let mut uploads = MediaUploadCancellations::default();
-        let ids = (0..MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS + 2)
-            .map(|index| format!("cancel-only-{index}"))
+        let ids = (0..129)
+            .map(|index| format!("dispatched-{index}"))
             .collect::<Vec<_>>();
 
         for id in &ids {
             uploads.cancel(id);
         }
 
-        assert_eq!(uploads.tokens.len(), MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS);
-        assert_eq!(
-            uploads.pending_order.len(),
-            MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS
-        );
-        assert!(!uploads.tokens.contains_key(&ids[0]));
-        assert!(!uploads.tokens.contains_key(&ids[1]));
-        assert!(uploads.tokens.contains_key(ids.last().expect("last id")));
+        let oldest = uploads.begin(&ids[0]);
+        assert!(oldest.is_cancelled());
+        assert_eq!(uploads.tokens.len(), ids.len());
+
+        for id in &ids {
+            uploads.finish(id);
+        }
+        assert!(uploads.tokens.is_empty());
     }
 }
