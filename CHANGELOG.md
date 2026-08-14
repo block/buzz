@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.13
+
+### Desktop and shared changes
+
+- fix(desktop): restore the agent trading-card mint button ([#5900](https://github.com/block/buzz/pull/5900)) ([`263c9bf76c18f0cde6cec9fb43d22f8895319380`](https://github.com/block/buzz/commit/263c9bf76c18f0cde6cec9fb43d22f8895319380))
+- Projects v3: unify sharing, discussions, and issue ownership ([#5792](https://github.com/block/buzz/pull/5792)) ([`122a8b8988869f0b1a7c056a76f7d16bfb0f6fdd`](https://github.com/block/buzz/commit/122a8b8988869f0b1a7c056a76f7d16bfb0f6fdd))
+
+### Other repository changes
+
+- fix(ci): read Playwright version without nested shell quoting ([#5910](https://github.com/block/buzz/pull/5910)) ([`09768100ec3420f0aa7cd278bd00fe0baab5de8d`](https://github.com/block/buzz/commit/09768100ec3420f0aa7cd278bd00fe0baab5de8d))
+- fix(mobile): unwrap batched observer telemetry ([#5805](https://github.com/block/buzz/pull/5805)) ([`0bb7c60f824a05ac4d8c8569ee1e74d200069b45`](https://github.com/block/buzz/commit/0bb7c60f824a05ac4d8c8569ee1e74d200069b45))
+
+[Compare desktop-v0.5.12...desktop-v0.5.13](https://github.com/block/buzz/compare/desktop-v0.5.12...desktop-v0.5.13)
+
 ## v0.5.12
 
 ### Desktop and shared changes
