@@ -32,7 +32,7 @@ enum _SearchFilter { all, messages, channels, people }
 
 const _searchFieldMinHeight = 36.0;
 const _searchIdleFieldHeight = 45.0;
-const _searchIdleTextSize = 15.0;
+const _searchIdleTextSize = 17.0;
 const _searchFieldVerticalPadding = Grid.xxs;
 const _searchFieldMoveDuration = Duration(milliseconds: 160);
 const _searchTitleReturnDuration = Duration(milliseconds: 80);
@@ -67,7 +67,7 @@ double _searchFieldHeight(BuildContext context) {
   const style = searchInputTextStyle;
   final scaledFontSize = MediaQuery.textScalerOf(
     context,
-  ).scale(style.fontSize ?? 15);
+  ).scale(style.fontSize ?? 17);
   final contentHeight =
       scaledFontSize * (style.height ?? 1) + _searchFieldVerticalPadding * 2;
   return contentHeight > _searchFieldMinHeight
@@ -80,7 +80,7 @@ double _idleSearchFieldHeight(BuildContext context) {
     context,
   ).scale(_searchIdleTextSize);
   final contentHeight =
-      scaledFontSize * (20 / _searchIdleTextSize) +
+      scaledFontSize * (22 / _searchIdleTextSize) +
       _searchFieldVerticalPadding * 2;
   return contentHeight > _searchIdleFieldHeight
       ? contentHeight
@@ -90,7 +90,7 @@ double _idleSearchFieldHeight(BuildContext context) {
 double _searchHeaderFiltersHeight(BuildContext context) {
   const style = filterChipTextStyle;
   final scaledLabelHeight =
-      MediaQuery.textScalerOf(context).scale(style.fontSize ?? 15) *
+      MediaQuery.textScalerOf(context).scale(style.fontSize ?? 17) *
       (style.height ?? 1);
   final chipHeight = scaledLabelHeight + _searchFilterChipVerticalPadding * 2;
   final contentHeight = chipHeight + _searchFilterBarVerticalPadding * 2;
