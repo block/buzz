@@ -72,7 +72,8 @@ Configuration (flags override env vars):
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
-The 'pack' subcommand runs locally and does not require a relay connection.
+The 'pack' and 'messages link' subcommands run locally and do not require
+a relay connection or BUZZ_PRIVATE_KEY.
 
 Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=write conflict
 Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
@@ -1966,12 +1967,20 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
+    // Pack and messages link are local-only — no relay connection or key.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
+    }
+    if let Cmd::Messages(MessagesCmd::Link {
+        channel,
+        event,
+        thread,
+    }) = cli.command
+    {
+        return commands::messages::cmd_link_message(&channel, &event, thread.as_deref());
     }
 
     // Auth: private key is required for all relay operations.

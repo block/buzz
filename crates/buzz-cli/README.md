@@ -109,6 +109,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `delete` | Delete a message |
 | | `get` | List messages in a channel |
 | | `thread` | Get a message thread |
+| | `link` | Build a `buzz://message` deep link (local) |
 | | `search` | Full-text search, filterable by author |
 | | `vote` | Vote on a forum post |
 | `channels` | `list` | List channels |

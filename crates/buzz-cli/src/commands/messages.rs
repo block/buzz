@@ -834,7 +834,6 @@ pub async fn cmd_edit_message(
     Ok(())
 }
 
-/// Vote on a forum post or comment.
 /// Emit a canonical `buzz://message` deep link. Local-only: no relay call.
 pub fn cmd_link_message(
     channel_id: &str,
@@ -853,14 +852,15 @@ fn message_link_payload(
     event_id: &str,
     thread_root_id: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
-    validate_uuid(channel_id)?;
-    validate_hex64(event_id)?;
+    let channel_id = channel_id.trim();
+    let event_id = event_id.trim();
     let thread = thread_root_id.map(str::trim).filter(|s| !s.is_empty());
     if let Some(thread) = thread {
         validate_hex64(thread)?;
     }
 
     let channel = parse_uuid(channel_id)?.to_string();
+    validate_hex64(event_id)?;
     let event = event_id.to_ascii_lowercase();
     let thread = thread.map(str::to_ascii_lowercase);
     let link = crate::links::message_link(&channel, &event, thread.as_deref());
@@ -1044,6 +1044,7 @@ mod tests {
         message_link_payload, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys,
     };
+    use crate::error::CliError;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1082,12 +1083,20 @@ mod tests {
 
     #[test]
     fn message_link_payload_rejects_bad_channel() {
-        assert!(message_link_payload("not-a-uuid", ID_A, None).is_err());
+        let err = message_link_payload("not-a-uuid", ID_A, None).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
     }
 
     #[test]
     fn message_link_payload_rejects_bad_event() {
-        assert!(message_link_payload(CHANNEL, "short", None).is_err());
+        let err = message_link_payload(CHANNEL, "short", None).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn message_link_payload_rejects_bad_thread() {
+        let err = message_link_payload(CHANNEL, ID_A, Some("nope")).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
     }
 
     #[test]

@@ -219,8 +219,11 @@ buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
 # messages thread
 buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
 
-# messages link (local, no relay)
-buzz messages link --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
+# messages link (local, no relay or BUZZ_PRIVATE_KEY)
+buzz messages link --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq -r .link
+# Expected: buzz://message?channel=<uuid>&id=<hex>
+buzz messages link --channel "$CHANNEL_ID" --event "$EVENT_ID" --thread "$EVENT_ID" | jq -r .link
+# Expected: buzz://message?channel=<uuid>&id=<hex>&thread=<hex>
 
 # messages search
 buzz messages search --query "Hello" | jq .
