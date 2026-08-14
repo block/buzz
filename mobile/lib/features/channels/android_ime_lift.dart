@@ -7,8 +7,11 @@ import 'package:flutter/material.dart';
 /// small wrapper follows the frame-by-frame inset; timelines apply the final
 /// inset once metrics settle.
 class AndroidImeLift extends StatelessWidget {
+  /// The composer subtree that follows the animated Android IME inset.
   final Widget child;
 
+  /// Creates a wrapper that lifts [child] without resizing its surrounding
+  /// message viewport on Android.
   const AndroidImeLift({super.key, required this.child});
 
   @override

@@ -7,9 +7,13 @@ import '../../shared/theme/theme.dart';
 
 /// Shared channel/thread control for returning to the newest message.
 class LatestMessageButton extends StatelessWidget {
+  /// Returns the message list to its newest item.
   final VoidCallback onPressed;
+
+  /// Optional key for inspecting or measuring the decorated glass surface.
   final Key? surfaceKey;
 
+  /// Creates the shared control for returning to the newest message.
   const LatestMessageButton({
     required this.onPressed,
     this.surfaceKey,
