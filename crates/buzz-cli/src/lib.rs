@@ -2239,6 +2239,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "set-directory",
                 "unarchive"
             ]
         );
@@ -2377,7 +2378,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),
