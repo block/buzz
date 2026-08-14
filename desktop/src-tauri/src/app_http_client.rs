@@ -70,7 +70,7 @@ impl AppHttpClient {
 
 /// Build the redirect-following HTTP client used by [`AppHttpClient`]. Keeping
 /// this in one function lets relay recovery create a fresh connection pool
-/// after a proxy or captive-portal interception.
+/// after a Cloudflare Access redirect.
 pub(crate) fn build_app_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))

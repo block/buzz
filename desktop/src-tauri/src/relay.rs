@@ -166,13 +166,39 @@ pub(crate) fn classify_request_error(e: &reqwest::Error) -> String {
 
 /// Detect responses that were intercepted by a captive portal or auth proxy.
 ///
-/// Returns `Some(msg)` when the response clearly did not come from the relay:
+/// Returns the interception kind when the response clearly did not come from
+/// the relay:
 /// - Cloudflare Access redirect (final URL on `*.cloudflareaccess.com`)
-/// - Any other HTML response (proxy login page, captive portal, etc.)
+/// - Any other HTML response (relay ingress, proxy login page, captive portal,
+///   etc.)
 ///
 /// Pure function: takes the already-extracted host and content-type strings so
 /// it can be unit-tested without constructing a real `reqwest::Response`.
-fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option<String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InterceptedResponse {
+    CloudflareAccess,
+    UnexpectedHtml,
+}
+
+impl InterceptedResponse {
+    fn message(self) -> &'static str {
+        match self {
+            Self::CloudflareAccess => {
+                "relay unreachable: network sign-in required (Cloudflare Access / VPN) \
+                 — re-authenticate and reconnect"
+            }
+            Self::UnexpectedHtml => {
+                "relay unreachable: relay returned an unexpected HTML page \
+                 (VPN or proxy sign-in?)"
+            }
+        }
+    }
+}
+
+fn classify_intercepted_response(
+    final_host: &str,
+    content_type: &str,
+) -> Option<InterceptedResponse> {
     let host = final_host.to_lowercase();
     let ct = content_type.to_lowercase();
 
@@ -180,20 +206,12 @@ fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option
     // Label-boundary check prevents `notcloudflareaccess.com.evil.example` from
     // matching.
     if host == "cloudflareaccess.com" || host.ends_with(".cloudflareaccess.com") {
-        return Some(
-            "relay unreachable: network sign-in required (Cloudflare Access / VPN) \
-             — re-authenticate and reconnect"
-                .to_string(),
-        );
+        return Some(InterceptedResponse::CloudflareAccess);
     }
 
     // Generic HTML body from any other proxy or captive portal.
     if ct.contains("text/html") {
-        return Some(
-            "relay unreachable: relay returned an unexpected HTML page \
-             (VPN or proxy sign-in?)"
-                .to_string(),
-        );
+        return Some(InterceptedResponse::UnexpectedHtml);
     }
 
     None
@@ -589,7 +607,7 @@ pub async fn submit_signed_event_with_keys(
 mod tests {
     use super::{
         build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-        extract_retry_in_hint, parse_command_response, relay_http_base_url,
+        extract_retry_in_hint, parse_command_response, relay_http_base_url, InterceptedResponse,
         MALFORMED_RESPONSE_MESSAGE,
     };
     use serde::Deserialize;
@@ -782,8 +800,8 @@ mod tests {
     #[test]
     fn intercepted_cloudflare_host_returns_some() {
         let result = classify_intercepted_response("sqprod.cloudflareaccess.com", "text/html");
-        assert!(result.is_some());
-        let msg = result.unwrap();
+        assert_eq!(result, Some(InterceptedResponse::CloudflareAccess));
+        let msg = result.unwrap().message();
         assert!(
             msg.starts_with("relay unreachable:"),
             "should have unreachable prefix"
@@ -795,8 +813,8 @@ mod tests {
     fn intercepted_cloudflare_apex_host_returns_some() {
         // The apex domain itself should also match.
         let result = classify_intercepted_response("cloudflareaccess.com", "application/json");
-        assert!(result.is_some());
-        let msg = result.unwrap();
+        assert_eq!(result, Some(InterceptedResponse::CloudflareAccess));
+        let msg = result.unwrap().message();
         assert!(msg.starts_with("relay unreachable:"));
         assert!(msg.contains("Cloudflare"));
     }
@@ -805,8 +823,8 @@ mod tests {
     fn intercepted_non_cloudflare_html_returns_some() {
         let result =
             classify_intercepted_response("proxy.corporate.example", "text/html; charset=utf-8");
-        assert!(result.is_some());
-        let msg = result.unwrap();
+        assert_eq!(result, Some(InterceptedResponse::UnexpectedHtml));
+        let msg = result.unwrap().message();
         assert!(msg.starts_with("relay unreachable:"));
     }
 
@@ -820,8 +838,8 @@ mod tests {
     fn content_type_case_insensitive() {
         // Uppercase content-type must still be detected.
         let result = classify_intercepted_response("proxy.example.com", "TEXT/HTML");
-        assert!(result.is_some());
-        assert!(result.unwrap().starts_with("relay unreachable:"));
+        assert_eq!(result, Some(InterceptedResponse::UnexpectedHtml));
+        assert!(result.unwrap().message().starts_with("relay unreachable:"));
     }
 
     #[test]
