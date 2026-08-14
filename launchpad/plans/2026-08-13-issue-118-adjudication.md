@@ -223,15 +223,30 @@ STEP 1  launchpad/review-agent/ADJUDICATION.md — the verdict contract,   [inde
         checked, because a finding arriving with an out-of-ladder
         `reported_severity` that the judge agrees with is never re-rated at all, so
         a guard watching only re-ratings never fires and the bad value is copied
-        into `severity` untouched. #117's own validator would have refused that
-        input upstream — and this stage is agnostic about its producer for the same
-        reason #119 is agnostic about its own, one hop further down the chain.
-        An out-of-ladder effective severity is an adjudication FAILURE for that
-        finding — UNPROVEN, `severity` set to the nearest legal value with the
-        refusal stated in `severity_reason` — never a published record. Where
-        `reported_severity` is itself out of ladder there is no safe fallback to
-        copy, so the finding is emitted at `Blocker` with the refusal named: this
-        stage may not silently decide that an unrateable finding is a small one.
+        into `severity` untouched.
+        BUT THAT CANNOT HAPPEN IF THE INPUT DOCUMENT IS VALIDATED FIRST, and this
+        stage does so: `run_adjudication.py`'s `main` runs #117's own
+        `findings.validate` against the input document BEFORE any adjudication
+        logic touches it, and exits non-zero, adjudicating nothing, when it
+        fails — the same input `reported_severity: "Info"` fails #117's
+        validator on its own severity check, so it never reaches this stage's
+        re-rating logic at all. This is stronger than "this stage is agnostic
+        about its producer": #119 is agnostic about ITS producer because #119
+        cannot re-validate a document it did not build from parts; this stage
+        CAN, because the input document is exactly #117's own output shape, and
+        the validator that checks it already exists. Refusing outright is also
+        the only answer that does not need one: there is no legal value to
+        preserve `reported_severity` AS once it already arrived broken, and
+        inventing one would be this stage deciding, silently, what the
+        dimension actually meant.
+        So an out-of-ladder EFFECTIVE severity this stage can still reach — one
+        this stage's OWN re-rating produced from a legal `reported_severity` — is
+        an adjudication FAILURE for that finding: UNPROVEN, `severity` set to the
+        nearest legal value with the refusal stated in `severity_reason`, and
+        `reported_severity` unchanged, since input validation already guarantees
+        it was legal to begin with. This stage may not silently decide that an
+        unrateable finding is a small one, and it is never asked to invent a
+        value for a field that arrived already broken.
         ESCALATE, NEVER APPROVE — stated as three concrete prohibitions rather than
         a slogan, because a slogan is not checkable:
           1. No field in this contract can carry an approval, a merge
@@ -304,8 +319,12 @@ STEP 1  launchpad/review-agent/ADJUDICATION.md — the verdict contract,   [inde
         it states UNPROVEN as the default and REFUTED as never a default; it states
         the three escalate-never-approve prohibitions; it states that `severity` is
         the re-rated value, `reported_severity` the dimension's, and that `severity`
-        is guaranteed to be in review.SEVERITY_ORDER with #119's bare subscript named
-        as the reason; it states that the `containment` block passes through
+        is guaranteed to be in review.SEVERITY_ORDER as DEFENCE IN DEPTH — #119
+        sorts with `.get(severity, 9)`, so this guard is not #119's only
+        defence, and the guarantee's own justification is that THIS stage is the
+        one that creates an out-of-ladder value by re-rating, and a producer that
+        relies on its consumer's default has moved the failure rather than
+        removed it; it states that the `containment` block passes through
         unadjudicated and cites CONTAINMENT.md § Severity contract; and it is
         referenced from a new row in CONTAINMENT.md's "Contract for later stages"
         table so the two documents point at each other rather than diverging quietly.
@@ -313,19 +332,32 @@ STEP 1  launchpad/review-agent/ADJUDICATION.md — the verdict contract,   [inde
 STEP 2  launchpad/review-agent/verdicts.py — the contract in code.           [needs 1]
         Pure functions and dataclasses over an already-parsed document. No
         subprocess, no network, no model call in this module.
-        `Verdict` and `Adjudication` dataclasses; `validate(document) -> list[str]`
-        returning EVERY violation rather than raising on the first, because a
-        validator that stops at the first error hides the rest and STEP 10's suite
-        asserts on the full list.
+        `Verdict` and `Adjudication` dataclasses; `validate(input_document,
+        output_document) -> list[str]` returning EVERY violation rather than
+        raising on the first, because a validator that stops at the first error
+        hides the rest and STEP 10's suite asserts on the full list.
+        VALIDATE TAKES BOTH DOCUMENTS, NOT ONE. An earlier revision declared
+        `validate(document) -> list[str]` and separately required it to report
+        the finding_id SYMMETRIC DIFFERENCE between input and output — but
+        `findings_in` is a COUNT (see below), and a count cannot tell a dropped
+        id from an invented one, or notice a swap that leaves the count
+        unchanged. The check the contract already promises needs the actual
+        input id SET, and the only place that set exists is the input document
+        itself. `run_adjudication.py`'s `main` holds both already — it read the
+        input off stdin before producing the output — so passing both costs
+        nothing there; it only looked free on `validate` because the count was
+        quietly standing in for a set it could never actually compare.
         `validate` enforces, at minimum: every finding carries exactly one `verdict`
         from the three values; `verdict_evidence` present and non-empty on all three;
         `severity` AND `reported_severity` both present and both IN
         review.SEVERITY_ORDER — a lowercase "blocker" or an "Info" is a violation in
         either field, not a curiosity, and checking only `severity` leaves the
         fallback STEP 6 copies from unchecked; `severity_reason` present whenever
-        severity differs from reported_severity; the input and output finding_id SETS are
-        equal, reported as the symmetric difference so both a drop and an invention
-        are named; `findings_out == findings_in == ` the sum of every report's
+        severity differs from reported_severity; the input and output finding_id SETS
+        — extracted from `input_document` and `output_document` respectively, never
+        from a count — are equal, reported as the symmetric difference so both a
+        drop and an invention are named; `findings_out == findings_in == ` the sum
+        of every report's
         `findings_count`; each report's `findings_count` still equals
         `len(findings)` after adjudication; `duplicate_of` names a finding_id
         present in the same document and never itself; every downgrade in
@@ -358,8 +390,12 @@ STEP 2  launchpad/review-agent/verdicts.py — the contract in code.           [
         exact failure the precondition in BUDGET exists to prevent; `validate`
         returns an empty list for a well-formed adjudicated document and, for one
         carrying four independent violations at once, returns four strings rather
-        than one; a document missing one input finding_id is rejected with that id
-        named; a document inventing a finding_id absent from the input is rejected;
+        than one; called as `validate(input_document, output_document)` where
+        `output_document` drops one input finding_id, rejected with that id
+        named; the SAME call with `output_document` instead carrying an invented
+        finding_id absent from `input_document`, rejected — the two cases a mere
+        COUNT comparison cannot tell apart, since both leave `findings_out ==
+        findings_in` true;
         a finding with `severity: "Info"` is rejected AND one with
         `reported_severity: "Info"` is rejected, the second being the case a guard
         watching only re-ratings never sees; a finding whose severity fell
@@ -399,6 +435,16 @@ STEP 3  launchpad/review-agent/run_adjudication.py — the CLI,  [needs 2]  <- R
           first, and a `pr` finding's `verdict_evidence` names what was checked —
           the claim, the missing file, the property of the change — rather than a
           line that does not exist.
+          THE INPUT IS VALIDATED BEFORE A SINGLE FINDING IS ADJUDICATED. `main`
+          runs #117's own `findings.validate` against the input document first,
+          and exits non-zero with no output at all when it fails — never
+          proceeding to re-rate or emit anything for a document that already
+          broke #117's own contract. This is what keeps STEP 2's severity
+          guarantee reachable: a finding whose `reported_severity` arrives
+          out-of-ladder (an "Info", say) fails #117's validator on that ground
+          alone, so it never reaches the re-rating logic where "there is no
+          legal value to preserve it as" would otherwise be a real question with
+          no good answer.
         A `--judge stub` default and a `--replay <dir>` mode reading STEP 9's
         recordings are the only two ways the suite ever obtains a verdict, so no
         control makes a model call.
@@ -413,8 +459,14 @@ STEP 3  launchpad/review-agent/run_adjudication.py — the CLI,  [needs 2]  <- R
         without raising and its verdict carries non-empty `verdict_evidence`; a
         fixture carrying all three containment kinds emits them unchanged with
         severity Blocker and no verdict field added to any of them; malformed JSON on
-        stdin exits non-zero and prints no document; and a control asserts no `gh`
-        subprocess and no HTTP client was invoked during a stub run.
+        stdin exits non-zero and prints no document; a fixture whose one finding
+        arrives with `reported_severity: "Info"` exits non-zero and prints no
+        document at all — validated and refused before adjudication, not
+        adjudicated into a best-effort output; a judge injected to REFUTE that
+        same finding is never called, asserted on the injected judge's own call
+        count, so the refusal is proven to happen before the judge runs rather
+        than after; and a control asserts no `gh` subprocess and no HTTP client
+        was invoked during a stub run.
 
 STEP 4  The nonce check and the `stages` manifest.                           [needs 3]
         One output #117 does not produce, and one it does that this stage must not
@@ -555,12 +607,17 @@ STEP 6  Escalate-only, enforced in code, and the total-refutation flag.      [ne
         `adjudication` stage entry's status is not "complete"; with the same judge
         against a document carrying zero findings, `total_refutation` is FALSE and
         the stage status is "complete"; with a judge injected to return severity
-        "Info", that finding is emitted UNPROVEN at its reported severity with a
-        reason and the document still passes `verdicts.validate`; with a fixture
-        whose finding ARRIVES carrying `reported_severity: "Info"` and a judge that
-        agrees with it — proposing no re-rating at all — that finding is likewise
-        emitted UNPROVEN with a reason, at Blocker, since no legal value exists to
-        fall back to; a BARE `review.SEVERITY_ORDER[f["severity"]]` subscript
+        "Info" over a finding whose `reported_severity` is legally in-ladder, that
+        finding is emitted UNPROVEN at its reported severity with a reason and the
+        document still passes `verdicts.validate` — this is the case STEP 3's
+        input validation does NOT catch, because the input was legal and only
+        this stage's own re-rating produced the bad value; the SIBLING case — a
+        fixture whose finding ARRIVES with `reported_severity: "Info"` already —
+        is STEP 3's job, not this control's: `run_adjudication.py` exits non-zero
+        on it before any judge runs, so it is asserted there and not repeated
+        here as a per-finding UNPROVEN case, since there is no legal
+        `reported_severity` for such a finding to have been emitted WITH; a BARE
+        `review.SEVERITY_ORDER[f["severity"]]` subscript
         succeeds for every finding in every output above, used bare on purpose so
         the control fails where a consumer without #119's `.get` default would; and
         with a judge injected to downgrade a Blocker to Low,
@@ -702,14 +759,91 @@ STEP 10 The control suite — one control per done-criterion.       [needs 4, 6,
         asserted by the injected runner above; and each bullet above has a
         separately named control.
 
-STEP 11 Prove each control can fail.                                        [needs 10]
-        For every check function in STEP 10, neuter it to a constant and confirm the
-        suite goes red. A control never observed failing has not been shown to test
-        anything, and this is the criterion most likely to be quietly downgraded to
-        "the suite passes".
-        done when: a recorded run shows, for each check function, the suite failing
-        while that function is neutered and passing when restored, with the raw
-        output pasted into the PR body.
+STEP 11 Prove each control can fail, against a targeted mutation.     [needs 10]
+        AN EARLIER REVISION NEUTERED EACH CHECK FUNCTION TO A CONSTANT, AND THAT
+        PROVES THE WRONG THING. Replacing a check with `return ["FAIL"]`
+        demonstrates only that the runner can register a hardcoded failure —
+        every check would pass this test identically, including one with its
+        actual comparison deleted, because the neutering never exercises the
+        comparison at all. `return []` (a neutered check reporting no
+        violations) proves even less: the suite stays green, which reads as the
+        control passing rather than as the defect this step exists to surface.
+        Neither result says whether the check catches the SPECIFIC regression
+        it exists for — a control that always fails and one that correctly
+        catches one defect are indistinguishable under this method, and so are a
+        control that always passes and one that correctly misses nothing. This
+        is the same defect class #109's own review chain has already found and
+        fixed in a sibling codebase's mutation harness — see
+        `feat/review-agent-untrusted-input`, `check_mutations.py` — and the fix
+        there is the model for this one.
+        Each of STEP 10's roughly fifteen controls instead gets ITS OWN named
+        mutation of `verdicts.py` or `run_adjudication.py` — a plausible
+        regression to that control's specific target, applied to a scratch copy,
+        never the working tree — and the suite must go red under that mutation
+        and green once it is reverted. A representative set, named here so an
+        implementer inherits the shape rather than inventing it fresh:
+          finding_id set equality — mutation: compare `findings_out ==
+            findings_in` (the counts) instead of the two id sets. Passes on a
+            swapped id, which is exactly the hole STEP 2's own fix closed.
+          the six added fields, each checked — mutation: delete the
+            `severity_reason` presence check alone. Only the control for THAT
+            field may fail; if a different field's control also fails, the
+            fixture is entangling fields a done-criterion requires be
+            independent.
+          out-of-ladder severity refused — mutation: drop the `reported_severity
+            in SEVERITY_ORDER` half of the guard, keeping the `severity` half.
+            Passes on a finding whose `reported_severity` arrived broken and
+            was never re-rated — the exact gap this plan's Codex pass found and
+            STEP 3 now closes at the input boundary; this mutation is what
+            proves STEP 3's refusal is load-bearing rather than redundant with
+            STEP 2's guarantee.
+          `total_refutation` correctness — mutation: set the flag whenever
+            `findings_out > 0`, dropping the "every verdict is REFUTED"
+            condition. Passes on a document with one CONFIRMED finding among
+            several REFUTED ones, which must NOT flag total refutation.
+          REFUTED findings still published — mutation: filter `reports[].
+            findings` to only CONFIRMED and UNPROVEN before emitting. Passes
+            silently unless a control specifically counts findings in, not just
+            findings whose verdict is not REFUTED.
+          no approval-shaped key — mutation: add a literal `"approved": null`
+            key to the Adjudication dataclass. A control asserting only that
+            approved is never `true` would pass under this mutation; the
+            control must reject the KEY's presence, not merely its value.
+          downgrades recorded both directions — mutation: append to
+            `downgrades` on every re-rating regardless of direction, including
+            upgrades. Passes on a control that only checks "every real downgrade
+            is recorded" without also checking "every recorded entry is a real
+            downgrade".
+          dedupe visible both ends — mutation: set `duplicate_of` on the
+            survivor rather than the duplicate. Passes on a control that checks
+            only that the field is set somewhere, not on which finding it
+            names.
+          containment passthrough — mutation: run `contain.escape` on
+            containment evidence before re-emitting it. Passes on a control that
+            checks the finding is present but not that its `evidence` field is
+            byte-identical to the input's.
+          nonce checked, not trusted — mutation: compare each report's marker
+            nonce to the FIRST report's marker instead of to the top-level
+            `nonce` key. Passes on any fixture where every report happens to
+            agree with itself, which is most of them; only a fixture where
+            reports agree with each other but disagree with the top-level key
+            catches it — see STEP 4's ordering rule.
+        The remaining controls follow the same requirement even where not
+        enumerated above: the mutation must be a change to what the PRODUCTION
+        CODE does, described precisely enough that a builder could apply it to
+        a scratch copy without guessing, and it must be the SMALLEST change
+        that defeats that control specifically — a mutation broad enough to
+        also break three other controls proves less than a narrow one that
+        breaks only its target.
+        done when: a recorded run shows, for each of STEP 10's controls, the
+        specific named mutation above applied to a scratch copy of the
+        production code (never the working tree), the suite failing while it is
+        applied, and the suite passing once it is reverted, with the raw output
+        of all runs pasted into the PR body; and for at least the finding_id,
+        total-refutation and out-of-ladder mutations, a control OTHER than the
+        one the mutation targets is confirmed to still pass under that mutation
+        — proof the mutations are targeted rather than incidentally breaking
+        the whole suite.
 
 STEP 12 Open the PR against launchpad.                                      [needs 11]
         AGENT_PR_TEMPLATE.md filled, `Closes #118`, `by:agent`, all raw output from
@@ -747,13 +881,16 @@ GATES  No verify gate is installed in this checkout — .claude/settings.json an
   applied, one disputed on its reasoning and applied anyway. The verified record is
   at launchpad/plans/reviews/2026-08-13-118-plan-review.md.
   The Blocker: this plan cited #119 as sorting by a bare `SEVERITY_ORDER[...]`
-  subscript, which #119 no longer does. The finding is right and the fix is made in
-  four places. Its stated timing is wrong, and the correction is recorded rather
-  than quietly absorbed: the report says #119's `.get` fix landed "before #118 was
-  written". `git log -1 --format='%ad' 47482549e` gives 2026-08-13 08:48:13, and
-  this plan was drafted from a grep run at ~08:20 that returned the bare subscript
-  at a line number that no longer exists. The claim was TRUE when written and was
-  falsified forty minutes later by a sibling worktree revising its plan. The lesson
+  subscript, which #119 no longer does. The finding is right, and the fix was made
+  in four places at the time — a fifth, in STEP 1's own done-when for what
+  ADJUDICATION.md must state, was missed by that pass and caught later by an
+  independent Codex review (see below); five places, now. Its stated timing is
+  wrong, and the correction is recorded rather than quietly absorbed: the report
+  says #119's `.get` fix landed "before #118 was written". `git log -1
+  --format='%ad' 47482549e` gives 2026-08-13 08:48:13, and this plan was drafted
+  from a grep run at ~08:20 that returned the bare subscript at a line number that
+  no longer exists. The claim was TRUE when written and was falsified forty
+  minutes later by a sibling worktree revising its plan. The lesson
   is the citation discipline #117 already adopted for line numbers, now extended to
   behavioural claims about unmerged sibling plans — cite the section and the quoted
   text, never the line.
@@ -837,6 +974,35 @@ GATES  No verify gate is installed in this checkout — .claude/settings.json an
   the step count, a done-when per step, a dependency tag per step, and the six
   named sections. It judges nothing about whether the steps are right, and it
   cannot tell you a step is already done.
+  Codex (`codex review --base origin/launchpad`) — HAS RUN ONCE, independent of
+  the three serina:review-plan passes above and of the model that wrote and
+  revised this plan through them. Five findings; four applied here, one (that
+  committing this plan violates AGENTS.md's "stable knowledge belongs in a
+  document, active work becomes a GitHub issue" rule) refuted rather than
+  applied — `launchpad/plans/` is this project's established, repeatedly-used
+  convention for exactly this artefact, used by #116, #117, #119 and #120's own
+  plans, none of which that rule was ever read to forbid.
+  The two real Blockers: `validate`'s finding_id equality check needed the input
+  and output id SETS to catch a drop or an invention, but its declared signature
+  took only the output document and `findings_in` is a bare count — a swapped
+  id left the count unchanged and invisible. `validate` now takes both
+  documents. And an input finding arriving with an already-invalid
+  `reported_severity` had no legal value to preserve it as, while the validator
+  requires both severity fields be in the ladder — an unsatisfiable combination
+  for that one shape of bad input. STEP 3 now validates the input against
+  #117's own `findings.validate` before adjudicating anything, so that shape is
+  refused wholesale rather than reaching a per-finding fallback with no good
+  answer.
+  Two real Mediums: one of the four places the SEVERITY_ORDER Blocker (above)
+  was fixed missed a fifth — STEP 1's own done-when for what ADJUDICATION.md
+  must say, still naming the bare subscript as the reason for a guarantee whose
+  actual reason is defence-in-depth. Fixed, and the "four places" claim above is
+  now five. And STEP 11's "neuter each check to a constant" proved only that the
+  runner can register a hardcoded failure, never that a control catches its
+  specific target defect — the same class of gap #109's own sibling codebase
+  (`feat/review-agent-untrusted-input`) found and fixed in its own mutation
+  harness. STEP 11 now pairs each control with a named, targeted mutation of
+  the production code it will eventually test, on that harness's model.
 
 BUDGET  STEP 9 eats the budget. The thing most likely to derail the issue is
   STEP 8, and it is a different risk from the one #117 carried.
