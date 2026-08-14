@@ -57,7 +57,7 @@ import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionH
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
-import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
+import { useManagedComposerLinkPreviews } from "./useComposerLinkPreviews";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
@@ -100,14 +100,14 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     syncContentRefFromEditorRef,
   } = useComposerContentState();
-  const [previewContent, setPreviewContent] = React.useState("");
   const {
     previewList: composerLinkPreviews,
     getReadyTags: getReadyLinkPreviewTags,
     hasPendingSnapshots: hasPendingLinkPreviewSnapshots,
     // Ref lets the submit guard block Enter/form/auto-submit until snapshots settle.
     hasPendingSnapshotsRef: hasPendingLinkPreviewSnapshotsRef,
-  } = useComposerLinkPreviews(previewContent, editTarget == null);
+    updateContent: updateLinkPreviewContent,
+  } = useManagedComposerLinkPreviews(editTarget == null);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
@@ -269,7 +269,7 @@ function MessageComposerImpl({
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
       setComposerContentFromText(text);
-      setPreviewContent(linkPreviewContent);
+      updateLinkPreviewContent(linkPreviewContent);
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
