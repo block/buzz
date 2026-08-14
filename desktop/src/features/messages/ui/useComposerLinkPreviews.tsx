@@ -360,7 +360,6 @@ export function useComposerLinkPreviews(
   // never left tagless waiting on a doomed upload.
   const uploadGenerationRef = React.useRef(new Map<string, number>());
   const activeHrefsRef = React.useRef(new Set<string>());
-  activeHrefsRef.current = new Set(candidates.map((preview) => preview.href));
 
   React.useEffect(() => {
     if (getCachedRelayOrigin()) return;
@@ -414,8 +413,25 @@ export function useComposerLinkPreviews(
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: stable href keys intentionally represent the live/stale sets; the arrays are rebuilt each render.
   React.useLayoutEffect(() => {
-    committedLiveHrefsRef.current = new Set(liveCandidates);
+    const previousLiveHrefs = committedLiveHrefsRef.current;
+    const activeLiveHrefs = new Set(liveCandidates);
+    activeHrefsRef.current = activeLiveHrefs;
+    committedLiveHrefsRef.current = activeLiveHrefs;
     committedLiveHrefVersionsRef.current = new Map(liveHrefVersions);
+
+    // Leaving the live draft ends the current re-entry cycle. Prune its phase so
+    // a later paste can consume healthy metadata that resolved while absent.
+    // Also advance the upload generation: an upload started before removal must
+    // never publish into a later incarnation of the same href.
+    for (const href of previousLiveHrefs) {
+      if (activeLiveHrefs.has(href)) continue;
+      reenteringHrefsRef.current.delete(href);
+      uploadGenerationRef.current.set(
+        href,
+        (uploadGenerationRef.current.get(href) ?? 0) + 1,
+      );
+    }
+
     if (staleReenteredHrefs.length === 0) return;
 
     for (const href of staleReenteredHrefs) {

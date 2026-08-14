@@ -254,6 +254,135 @@ test("composer forces a refetch and drops the stale tag on a fast clear+re-paste
   }
 });
 
+// A blocked re-entry can leave again before its forced refetch settles. The
+// abandoned phase must not poison a later paste of the now-healthy cached result.
+test("a removed blocked re-entry can later use metadata that resolved while absent", async () => {
+  const { act, cleanup, renderHook } = await import("@testing-library/react");
+  const { resetLinkPreviewMetadataCache } = await import(
+    "@/shared/lib/useResolvedLinkPreviews.ts"
+  );
+  const { updateComposerLinkPreviewInput, useComposerLinkPreviews } =
+    await import("./useComposerLinkPreviews.tsx");
+
+  resetLinkPreviewMetadataCache();
+  ipcHandlers.clear();
+  ipcHandlers.set("get_relay_http_url", () =>
+    Promise.resolve("https://relay.example.com"),
+  );
+  ipcHandlers.set("upload_media_bytes", () =>
+    Promise.resolve({
+      url: "https://relay.example.com/media/fresh-after-absence",
+      sha256: "f8e5",
+      size: 1,
+      type: "image/png",
+      uploaded: 0,
+    }),
+  );
+
+  let fetchCalls = 0;
+  let resolveRefetch;
+  ipcHandlers.set("fetch_link_preview_metadata", () => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) {
+      return Promise.resolve(
+        metadata({
+          imageFetchState: "transient_failure",
+          imageRetryAfterMs: 900_000,
+        }),
+      );
+    }
+    return new Promise((resolve) => {
+      resolveRefetch = () =>
+        resolve(
+          metadata({
+            imageDataUrl: "data:image/png;base64,QQ==",
+            imageDomain: "images.example.com",
+            imageFetchState: "image",
+          }),
+        );
+    });
+  });
+
+  const settle = async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+    });
+  };
+
+  try {
+    let previewInput = updateComposerLinkPreviewInput(
+      {
+        content: "",
+        hrefs: new Set(),
+        hrefVersions: new Map(),
+        nextHrefVersion: 0,
+      },
+      `see ${HREF}`,
+    );
+    const { result, rerender, unmount } = renderHook(
+      ({ content, hrefVersions }) =>
+        useComposerLinkPreviews(content, true, hrefVersions),
+      { initialProps: previewInput },
+    );
+
+    await settle();
+    assert.equal(result.current.getReadyTags().length, 1);
+
+    // Re-enter the cached negative and wait until its forced refetch is in flight.
+    await act(async () => {
+      previewInput = updateComposerLinkPreviewInput(previewInput, "see ");
+      previewInput = updateComposerLinkPreviewInput(
+        previewInput,
+        `see ${HREF}`,
+      );
+      rerender(previewInput);
+    });
+    await settle();
+    assert.equal(fetchCalls, 2);
+    assert.equal(result.current.getReadyTags().length, 0);
+    assert.equal(result.current.hasPendingSnapshots, true);
+
+    // Remove the blocked href, then let its refetch populate healthy metadata
+    // while no candidate is active.
+    await act(async () => {
+      previewInput = updateComposerLinkPreviewInput(previewInput, "see ");
+      rerender(previewInput);
+    });
+    await settle();
+    await act(async () => resolveRefetch());
+    await settle();
+    assert.equal(result.current.getReadyTags().length, 0);
+
+    // A later paste should use the healthy result immediately after debounce;
+    // the abandoned "blocked" phase must not survive and suppress its tag.
+    await act(async () => {
+      previewInput = updateComposerLinkPreviewInput(
+        previewInput,
+        `see ${HREF}`,
+      );
+      rerender(previewInput);
+    });
+    await settle();
+    const [freshTag] = result.current.getReadyTags();
+    assert.equal(
+      fetchCalls,
+      2,
+      "healthy metadata is preserved without a third fetch",
+    );
+    assert.equal(result.current.getReadyTags().length, 1);
+    assert.ok(
+      freshTag?.includes("https://relay.example.com/media/fresh-after-absence"),
+      "the later paste becomes sendable with metadata resolved while absent",
+    );
+    assert.equal(result.current.hasPendingSnapshots, false);
+
+    unmount();
+  } finally {
+    cleanup();
+    ipcHandlers.clear();
+  }
+});
+
 // ── Composer-hook regression: stale in-flight upload after re-entry ───────────
 //
 // A pre-clear transient-fallback snapshot upload (U1) can still be in flight
