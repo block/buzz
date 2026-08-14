@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use tauri::AppHandle;
 
-use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
+use super::agent_env::{
+    build_buzz_agent_provider_defaults, child_rust_log_filter, idle_pool_sleep_env,
+};
 
 use crate::{
     managed_agents::{
@@ -21,6 +23,7 @@ pub(crate) use path::{compose_path_entries, should_skip_claude_executable, shoul
 pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondToEnv};
 
 mod metadata;
+use metadata::persona_drift_state;
 pub(crate) use metadata::{
     apply_agent_display_env, resolve_session_title, runtime_metadata_env_vars,
     DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
@@ -40,8 +43,9 @@ use process::{
     terminate_runtime_receipt_with, valid_agent_runtime_receipt_with,
 };
 pub(crate) use process::{
-    current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
-    terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    connection_relay_url, current_instance_id, ensure_pair_connection_matches,
+    process_belongs_to_us, process_has_buzz_marker, process_is_running, terminate_process,
+    terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
 };
 
 mod orphan_sweep;
@@ -67,35 +71,6 @@ mod lifecycle;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
-
-/// Classify an agent's persona against the live catalog for the Agents-menu
-/// drift indicator. Returns `(out_of_date, orphaned)`.
-///
-/// Drift basis is the RECORD's `persona_source_version`, never the engram:
-/// - persona_id set + persona present: out_of_date when the snapshot hash
-///   differs from the persona's current content hash.
-/// - persona_id set + persona gone: orphaned (no current hash to respawn into,
-///   so never out_of_date — we must not tell the user to respawn into nothing).
-/// - no persona_id: neither — a hand-built agent has no persona to drift from.
-fn persona_drift_state(
-    record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::types::AgentDefinition],
-) -> (bool, bool) {
-    let Some(persona_id) = record.persona_id.as_deref() else {
-        return (false, false);
-    };
-    let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
-        return (false, true);
-    };
-    let current = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(persona),
-    );
-    let out_of_date = record
-        .persona_source_version
-        .as_deref()
-        .is_some_and(|pinned| pinned != current);
-    (out_of_date, false)
-}
 
 /// Resolve the runtime-pair key this record maps to for the active
 /// workspace: always the active workspace relay (the legacy per-record relay
@@ -393,10 +368,6 @@ pub(crate) fn configure_runtime_cli(
         }
         command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
     }
-}
-
-fn connection_relay_url(configured_relay_url: &str) -> String {
-    configured_relay_url.trim().to_string()
 }
 
 /// Spawn an agent process without holding any locks on records or runtimes.
@@ -927,22 +898,12 @@ pub fn spawn_agent_child(
     Ok(crate::managed_agents::ManagedAgentProcess {
         child,
         log_path,
-        // The trimmed value that actually went into the child's
-        // BUZZ_RELAY_URL above, not the raw `relay_url` parameter.
         connect_relay_url: effective_relay_url,
         spawn_config,
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
     })
-}
-
-fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
-    }
 }
 
 pub fn start_managed_agent_process(
@@ -967,6 +928,7 @@ pub fn start_managed_agent_process(
             .map_err(|error| format!("failed to inspect running process: {error}"))?
             .is_none()
         {
+            ensure_pair_connection_matches(runtime, &relay_url)?;
             return Ok(());
         }
 
@@ -1008,6 +970,10 @@ pub fn start_managed_agent_process(
 
 #[cfg(test)]
 mod test_fixtures;
+#[cfg(test)]
+pub(crate) use test_fixtures::make_pair_runtime_with_connect_url;
 
+#[cfg(test)]
+mod connect_url_tests;
 #[cfg(test)]
 mod tests;

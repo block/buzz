@@ -277,6 +277,12 @@ fn start_pair(
         .get_mut(&key)
         .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
     {
+        // Reuse is only valid when the live pair dials the requested URL:
+        // the canonical key folds host spellings, and a cross-spelling reuse
+        // would falsely report the requested tenant as started.
+        if let Some(runtime) = runtimes.get(&key) {
+            super::ensure_pair_connection_matches(runtime, &relay_url)?;
+        }
         let status = status_for(&app, record, &key, runtimes.get(&key), None);
         return Ok(status);
     }

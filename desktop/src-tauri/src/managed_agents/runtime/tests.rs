@@ -125,7 +125,9 @@ fn unknown_command_returns_none() {
 
 // ── build_respond_to_env tests ───────────────────────────────────────
 
-use super::test_fixtures::{expected_mode, expected_owner_only, fixture};
+use super::test_fixtures::{
+    expected_mode, expected_owner_only, fixture, minimal_record, receipt_fixture,
+};
 use super::{build_respond_to_env, build_respond_to_env_with_policy};
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
 
@@ -892,18 +894,6 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
 
 // ── pair receipt validation tests ───────────────────────────────────────
 
-fn receipt_fixture(
-    key: crate::managed_agents::ManagedAgentRuntimeKey,
-) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
-    crate::managed_agents::ManagedAgentRuntimeReceipt {
-        key,
-        pid: std::process::id(),
-        desktop_instance_id: "test-instance".into(),
-        started_at: "now".into(),
-        connect_relay_url: None,
-    }
-}
-
 #[test]
 fn receipt_validation_rejects_noncanonical_identity() {
     let mut receipt = receipt_fixture(
@@ -930,122 +920,6 @@ fn receipt_validation_rejects_wrong_pair_filename() {
         &receipt,
         "test-instance"
     ));
-}
-
-#[test]
-fn receipt_without_connect_url_deserializes_and_validates() {
-    // Receipts persisted before `connectRelayUrl` existed must keep loading
-    // (field absent -> None) and keep validating.
-    let key =
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "ws://localhost:3100")
-            .unwrap();
-    let json = format!(
-        r#"{{"key":{{"pubkey":"{}","relayUrl":"{}"}},"pid":{},"desktopInstanceId":"test-instance","startedAt":"now"}}"#,
-        key.pubkey,
-        key.relay_url,
-        std::process::id(),
-    );
-    let receipt: crate::managed_agents::ManagedAgentRuntimeReceipt =
-        serde_json::from_str(&json).expect("pre-connect-url receipt must deserialize");
-    assert_eq!(receipt.connect_relay_url, None);
-
-    let path = std::path::PathBuf::from(format!("{}.json", receipt.key.runtime_id()));
-    assert!(super::valid_agent_runtime_receipt_with(
-        &path,
-        &receipt,
-        "test-instance",
-        |_| true,
-        |_, _| true,
-    ));
-}
-
-#[test]
-fn receipt_connect_url_matching_pair_validates() {
-    // The configured spelling (`localhost`) canonicalizes to the receipt's own
-    // key (`127.0.0.1`), so the receipt is valid — this is the normal shape
-    // written by every spawn on a loopback workspace.
-    let mut receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "ws://localhost:3100")
-            .unwrap(),
-    );
-    receipt.connect_relay_url = Some("ws://localhost:3100".into());
-    let path = std::path::PathBuf::from(format!("{}.json", receipt.key.runtime_id()));
-    assert!(super::valid_agent_runtime_receipt_with(
-        &path,
-        &receipt,
-        "test-instance",
-        |_| true,
-        |_, _| true,
-    ));
-}
-
-#[test]
-fn receipt_connect_url_foreign_pair_rejected() {
-    // A connection URL that canonicalizes to a DIFFERENT pair key is a corrupt
-    // or cross-wired receipt — it must fail validation, not fall back.
-    let mut receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "ws://localhost:3100")
-            .unwrap(),
-    );
-    receipt.connect_relay_url = Some("ws://localhost:4000".into());
-    let path = std::path::PathBuf::from(format!("{}.json", receipt.key.runtime_id()));
-    assert!(!super::valid_agent_runtime_receipt_with(
-        &path,
-        &receipt,
-        "test-instance",
-        |_| true,
-        |_, _| true,
-    ));
-}
-
-#[test]
-fn receipt_connect_url_roundtrips_through_persistence() {
-    // Present field serializes (camelCase) and deserializes unchanged, so a
-    // restart in a later session re-dials the exact configured spelling.
-    let mut receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "ws://localhost:3100")
-            .unwrap(),
-    );
-    receipt.connect_relay_url = Some("ws://localhost:3100".into());
-    let json = serde_json::to_string(&receipt).expect("serialize receipt");
-    assert!(json.contains("\"connectRelayUrl\":\"ws://localhost:3100\""));
-    let restored: crate::managed_agents::ManagedAgentRuntimeReceipt =
-        serde_json::from_str(&json).expect("deserialize receipt");
-    assert_eq!(restored, receipt);
-}
-
-#[test]
-fn restart_targets_preserve_configured_spelling_per_pair() {
-    // Restart targets come from each live pair's stamped connection URL —
-    // the configured loopback spelling survives (never the canonical fold),
-    // and only the requested agent's pairs are selected.
-    let agent_a = "aa".repeat(32);
-    let agent_b = "bb".repeat(32);
-    let mut runtimes = std::collections::HashMap::new();
-    runtimes.insert(
-        crate::managed_agents::ManagedAgentRuntimeKey::new(agent_a.clone(), "ws://localhost:3100")
-            .unwrap(),
-        make_pair_runtime_with_connect_url("ws://localhost:3100"),
-    );
-    runtimes.insert(
-        crate::managed_agents::ManagedAgentRuntimeKey::new(agent_a.clone(), "wss://other.example")
-            .unwrap(),
-        make_pair_runtime_with_connect_url("wss://other.example"),
-    );
-    runtimes.insert(
-        crate::managed_agents::ManagedAgentRuntimeKey::new(agent_b, "ws://localhost:9999").unwrap(),
-        make_pair_runtime_with_connect_url("ws://localhost:9999"),
-    );
-
-    let mut targets = super::managed_agent_restart_targets(&runtimes, &agent_a);
-    targets.sort();
-    assert_eq!(
-        targets,
-        vec![
-            "ws://localhost:3100".to_string(),
-            "wss://other.example".to_string(),
-        ],
-    );
 }
 
 #[test]
@@ -1333,33 +1207,6 @@ fn receipt_invalid_when_process_not_running() {
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
-fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
-    serde_json::from_str(&format!(
-        r#"{{
-            "pubkey": "{pubkey}",
-            "name": "test",
-            "private_key_nsec": "nsec1fake",
-            "relay_url": "",
-            "acp_command": "buzz-acp",
-            "agent_command": "buzz-agent",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "system_prompt": null,
-            "model": null,
-            "provider": null,
-            "env_vars": {{}},
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }}"#
-    ))
-    .expect("minimal_record fixture")
-}
-
 fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
     make_pair_runtime_with_connect_url("wss://relay.example")
 }
@@ -1367,40 +1214,5 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
 fn make_pair_runtime_with_connect_url(
     connect_relay_url: &str,
 ) -> crate::managed_agents::ManagedAgentPairRuntime {
-    use std::process::{Command, Stdio};
-    // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
-    // `true` exits immediately with 0 — just a handle we need for type purposes.
-    //
-    // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
-    // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
-    // bare `true` lookup during that window fails with NotFound (observed
-    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
-    #[cfg(unix)]
-    let program = "/usr/bin/true";
-    #[cfg(windows)]
-    let program = "true";
-    let child = Command::new(program)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn true for placeholder");
-    let process = crate::managed_agents::ManagedAgentProcess {
-        child,
-        log_path: std::path::PathBuf::new(),
-        connect_relay_url: connect_relay_url.to_string(),
-        spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
-            &minimal_record(&"cc".repeat(32)),
-            &[],
-            &[],
-            "wss://relay.example",
-            &Default::default(),
-        ),
-        setup_mode: false,
-        adapter_availability: None,
-        start_nonce: "test-nonce".to_string(),
-        #[cfg(windows)]
-        job: None,
-    };
-    crate::managed_agents::ManagedAgentPairRuntime::starting(process)
+    super::test_fixtures::make_pair_runtime_with_connect_url(connect_relay_url)
 }

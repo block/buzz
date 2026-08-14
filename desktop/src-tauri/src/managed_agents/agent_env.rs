@@ -137,6 +137,14 @@ pub(crate) fn parse_agent_env_lines(raw: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
+pub(super) fn child_rust_log_filter() -> String {
+    match std::env::var("RUST_LOG") {
+        Ok(existing) if existing.contains("buzz_acp") => existing,
+        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
+        _ => "buzz_acp=info".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -562,9 +562,7 @@ async fn restart_single_agent_after_install(
         if record.backend != BackendKind::Local {
             return Err(format!("agent {pubkey_owned} is no longer a local agent"));
         }
-        // Collect the restart dial targets (each pair's configured connection
-        // URL, not the canonical key spelling) BEFORE the stop below drops the
-        // pairs — and their URLs — from the runtimes map.
+        // Dial targets (configured spellings) must be collected before the stop.
         let restart_targets =
             crate::managed_agents::managed_agent_restart_targets(&runtimes, &pubkey_owned);
         if restart_targets.is_empty() {

@@ -476,3 +476,54 @@ pub(crate) fn terminate_untracked_pair_runtime(
         super::super::remove_agent_runtime_receipt_path,
     )
 }
+
+/// A live pair may only be reused for a start request that dials the same
+/// URL it already holds. Canonical keys fold host spellings, so two distinct
+/// tenants can share one key; silently reusing across spellings would report
+/// the requested tenant as started while the child stays connected to the
+/// old one, and reconciliation would stop retrying.
+/// The error deliberately omits both URLs: they may carry query tokens, and
+/// this string lands in `last_error` and the UI.
+pub(crate) fn connection_relay_url(configured_relay_url: &str) -> String {
+    configured_relay_url.trim().to_string()
+}
+
+pub(crate) fn ensure_pair_connection_matches(
+    runtime: &ManagedAgentPairRuntime,
+    requested_relay_url: &str,
+) -> Result<(), String> {
+    if runtime.connect_relay_url == connection_relay_url(requested_relay_url) {
+        Ok(())
+    } else {
+        Err(
+            "connection-target conflict: a live runtime for this agent already exists under the \
+             same community identity but a different connection URL; stop the pair before \
+             starting it with the requested URL"
+                .into(),
+        )
+    }
+}
+
+/// Hand-written so `connect_relay_url` never renders verbatim:
+/// `normalize_relay_url` rejects userinfo but deliberately preserves query
+/// strings, so `wss://relay.example/ws?token=...` is a valid value. Same
+/// masking policy as `SpawnConfigSnapshot`'s `relay_url` (its single
+/// redaction authority), pinned by the owning-process Debug sentinel test.
+impl std::fmt::Debug for crate::managed_agents::ManagedAgentProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("ManagedAgentProcess");
+        s.field("child", &self.child)
+            .field("log_path", &self.log_path)
+            .field(
+                "connect_relay_url",
+                &crate::managed_agents::spawn_snapshot::diff::MASK,
+            )
+            .field("spawn_config", &self.spawn_config)
+            .field("setup_mode", &self.setup_mode)
+            .field("adapter_availability", &self.adapter_availability)
+            .field("start_nonce", &self.start_nonce);
+        #[cfg(windows)]
+        s.field("job", &self.job);
+        s.finish()
+    }
+}
