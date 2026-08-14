@@ -49,6 +49,7 @@ import {
 } from "@/features/profile/hooks";
 import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import { resolveProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
+import { useCanonicalManagedAgentProfile } from "@/features/profile/lib/useCanonicalManagedAgentProfile";
 import {
   AgentInstructionsFocusedView,
   ProfileSummaryView,
@@ -72,6 +73,7 @@ import {
   deriveProfileChannels,
   type ProfilePanelTab,
   type ProfilePanelView,
+  profilePanelTargetKey,
   resolveAgentInstruction,
   resolvePanelProfile,
   resolveProfileDisplayName,
@@ -86,6 +88,7 @@ import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type {
   AgentPersona,
   Channel,
@@ -99,7 +102,6 @@ import { useProfileEditAgentRequest } from "@/features/profile/ui/useProfileEdit
 export type { ProfilePanelTab, ProfilePanelView };
 
 export function UserProfilePanel({
-  callerChannelId = null,
   canResetWidth,
   currentPubkey,
   isSinglePanelView = false,
@@ -179,28 +181,27 @@ export function UserProfilePanel({
     React.useState<AgentPersona | null>(null);
   const [cardMintTarget, setCardMintTarget] =
     React.useState<CardMintTarget | null>(null);
+  const [requestedInstancePubkey, setRequestedInstancePubkey] = React.useState<
+    string | null
+  >(null);
+  const preserveRequestedInstance = Boolean(
+    pubkey &&
+      requestedInstancePubkey &&
+      normalizePubkey(pubkey) === normalizePubkey(requestedInstancePubkey),
+  );
 
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
-  const managedAgent = React.useMemo(() => {
-    const agents = managedAgentsQuery.data ?? [];
-    if (pubkey) {
-      const pubkeyLower = pubkey.toLowerCase();
-      return agents.find((agent) => agent.pubkey.toLowerCase() === pubkeyLower);
-    }
-    if (persona) {
-      return agents.find((agent) => agent.personaId === persona.id);
-    }
-    return undefined;
-  }, [managedAgentsQuery.data, persona, pubkey]);
-  const personaInstances = React.useMemo(() => {
-    if (!managedAgent?.personaId) return managedAgent ? [managedAgent] : [];
-    return (managedAgentsQuery.data ?? []).filter(
-      (agent) => agent.personaId === managedAgent.personaId,
-    );
-  }, [managedAgent, managedAgentsQuery.data]);
+  const { linkedPersonaId, managedAgent, personaInstances } =
+    useCanonicalManagedAgentProfile({
+      currentPubkey,
+      managedAgents: managedAgentsQuery.data,
+      personaId: persona?.id,
+      preserveRequestedInstance,
+      pubkey,
+    });
   const resolvedPersonaFromSource = React.useMemo(() => {
-    const personaId = persona?.id ?? managedAgent?.personaId;
+    const personaId = linkedPersonaId ?? managedAgent?.personaId;
     if (personaId) {
       const refreshedPersona = personasQuery.data?.find(
         (candidate) => candidate.id === personaId,
@@ -218,14 +219,14 @@ export function UserProfilePanel({
     return personasQuery.data?.find(
       (candidate) => candidate.id === managedAgent.personaId,
     );
-  }, [managedAgent?.personaId, persona, personasQuery.data]);
+  }, [linkedPersonaId, managedAgent?.personaId, persona, personasQuery.data]);
   const profileIdentityKey =
-    pubkey ?? managedAgent?.pubkey ?? `persona:${persona?.id ?? "unknown"}`;
+    managedAgent?.pubkey ?? pubkey ?? `persona:${persona?.id ?? "unknown"}`;
   const resolvedPersona = useRetainedPersona(
     resolvedPersonaFromSource,
     profileIdentityKey,
   );
-  const effectivePubkey = pubkey ?? managedAgent?.pubkey ?? null;
+  const effectivePubkey = managedAgent?.pubkey ?? pubkey ?? null;
   const pubkeyLower = effectivePubkey?.toLowerCase() ?? "";
 
   const profileQuery = useUserProfileQuery(effectivePubkey ?? undefined);
@@ -372,16 +373,16 @@ export function UserProfilePanel({
     }
     return map;
   }, [channelsQuery.data]);
-
-  const targetKey =
-    effectivePubkey ?? `persona:${resolvedPersona?.id ?? "unknown"}`;
+  const targetKey = profilePanelTargetKey(pubkey, persona?.id);
   const prevTargetKeyRef = React.useRef(targetKey);
   React.useEffect(() => {
     if (prevTargetKeyRef.current === targetKey) return;
     prevTargetKeyRef.current = targetKey;
+    if (preserveRequestedInstance) return;
+    setRequestedInstancePubkey(null);
     setView("summary", { replace: true });
     setTab("info", { replace: true });
-  }, [setTab, setView, targetKey]);
+  }, [preserveRequestedInstance, setTab, setView, targetKey]);
   const {
     canHuddle,
     canMessage,
@@ -788,7 +789,6 @@ export function UserProfilePanel({
           canInstantiateAgent={canInstantiateAgent}
           canOpenAgentLogs={canOpenAgentLogs}
           canViewActivity={canViewActivity}
-          callerChannelId={callerChannelId}
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}
           channels={profileChannels}
@@ -829,7 +829,11 @@ export function UserProfilePanel({
           onExportAgent={
             isBot && canManagePersona ? handleExportPersona : undefined
           }
-          onOpenInstance={(instancePubkey) => onOpenProfile?.(instancePubkey)}
+          onOpenInstance={(instancePubkey) => {
+            setRequestedInstancePubkey(instancePubkey);
+            onOpenProfile?.(instancePubkey);
+            setTab("runtime");
+          }}
           onOpenActivity={handleOpenActivity}
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}
