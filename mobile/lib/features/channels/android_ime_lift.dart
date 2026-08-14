@@ -26,5 +26,7 @@ class AndroidImeLift extends StatelessWidget {
   }
 }
 
+/// Whether channel and thread scaffolds should keep a fixed viewport while
+/// Android IME insets animate, with their composer lifted independently.
 bool get usesFixedAndroidImeViewport =>
     defaultTargetPlatform == TargetPlatform.android;
