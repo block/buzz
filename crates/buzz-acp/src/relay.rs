@@ -51,6 +51,13 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for individual ws.send() calls. Prevents a stalled socket from
 /// wedging the background task indefinitely.
 const WS_SEND_TIMEOUT_SECS: u64 = 10;
+/// Maximum time a subscription REQ may remain unconfirmed by an EOSE frame.
+///
+/// A successful WebSocket write proves only transport liveness. During relay
+/// recovery a REQ can be written to a socket without becoming a usable live
+/// subscription, leaving the harness connected but deaf. EOSE is the NIP-01
+/// confirmation that the relay accepted the query and completed its replay.
+const SUBSCRIPTION_EOSE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Diagnostic threshold: log when a connection has been stable for this long.
 /// The stability block resets `BgState::backoff_step` to 0 here so the next
 /// drop after a long healthy run retries at the short end of the ladder again.
@@ -1067,6 +1074,10 @@ struct BgState {
     /// A single failed channel REQ is parked here instead of aborting the whole
     /// reconnect. Drained by the main loop. Flushed on each reconnect attempt.
     resubscribe_retry: HashSet<Uuid>,
+    /// Subscription REQs written to the current socket but not yet confirmed
+    /// by EOSE. The per-subscription deadline turns a transport-only reconnect
+    /// into a verified subscription reconnect; expiry forces another reconnect.
+    pending_eose: HashMap<String, tokio::time::Instant>,
     /// Current position in the exponential backoff ladder.
     ///
     /// Persisted across calls to `wait_for_reconnect` so a flapping link stays at
@@ -1098,8 +1109,40 @@ impl BgState {
             observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
             resubscribe_retry: HashSet::new(),
+            pending_eose: HashMap::new(),
             backoff_step: 0,
         }
+    }
+
+    /// Arm or refresh the EOSE deadline for a subscription REQ.
+    fn expect_eose(&mut self, subscription_id: String) {
+        self.pending_eose.insert(
+            subscription_id,
+            tokio::time::Instant::now() + SUBSCRIPTION_EOSE_TIMEOUT,
+        );
+    }
+
+    /// Mark a subscription as confirmed by its EOSE frame.
+    fn confirm_eose(&mut self, subscription_id: &str) -> bool {
+        self.pending_eose.remove(subscription_id).is_some()
+    }
+
+    /// Earliest outstanding EOSE deadline, used by the main-loop timer arm.
+    fn next_eose_deadline(&self) -> Option<tokio::time::Instant> {
+        self.pending_eose.values().copied().min()
+    }
+
+    /// Outstanding subscriptions whose EOSE deadline has elapsed.
+    fn expired_eose_ids(&self) -> Vec<String> {
+        let now = tokio::time::Instant::now();
+        let mut ids: Vec<String> = self
+            .pending_eose
+            .iter()
+            .filter(|(_, deadline)| now >= **deadline)
+            .map(|(subscription_id, _)| subscription_id.clone())
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Record a received event for dedup and `since` tracking.
@@ -1153,6 +1196,7 @@ impl BgState {
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
         self.resubscribe_retry.remove(channel_id);
+        self.pending_eose.remove(&channel_sub_id(*channel_id));
     }
 
     /// Arm or extend the rate-limit gate.
@@ -1450,7 +1494,7 @@ async fn execute_connected_command(
                 return true;
             }
             let since = state.membership_last_seen.or(state.startup_watermark);
-            let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+            let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
             if sent {
                 state.membership_resub_needed = false;
                 if state.membership_last_seen.is_none() {
@@ -1471,7 +1515,7 @@ async fn execute_connected_command(
                 state.observer_resub_needed = true;
                 return true;
             }
-            let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
+            let sent = send_observer_control_subscribe(ws, state, agent_pubkey_hex).await;
             if sent {
                 state.observer_resub_needed = false;
                 true
@@ -1735,7 +1779,14 @@ async fn run_background_task(
                             (None, Some(l)) => Some(l),
                             (None, None) => state.startup_watermark,
                         };
-                    if send_membership_subscribe(&mut ws, &agent_pubkey_hex, replay_since).await {
+                    if send_membership_subscribe(
+                        &mut ws,
+                        &mut state,
+                        &agent_pubkey_hex,
+                        replay_since,
+                    )
+                    .await
+                    {
                         state.membership_resub_needed = false;
                         state.membership_dropped_since = None;
                         budget = budget.saturating_sub(1);
@@ -1747,7 +1798,8 @@ async fn run_background_task(
                     }
                 }
                 if state.observer_resub_needed && budget > 0 {
-                    if send_observer_control_subscribe(&mut ws, &agent_pubkey_hex).await {
+                    if send_observer_control_subscribe(&mut ws, &mut state, &agent_pubkey_hex).await
+                    {
                         state.observer_resub_needed = false;
                         budget = budget.saturating_sub(1);
                         any_sent = true;
@@ -1796,6 +1848,11 @@ async fn run_background_task(
                     .or_else(|| Some(tokio::time::Instant::now() + REQ_PACING_INTERVAL));
             }
         }
+
+        // Snapshot the deadline so the select arm does not borrow `state` while
+        // the other branches mutate it. EOSE handling removes confirmed IDs;
+        // the next loop iteration recomputes the earliest outstanding deadline.
+        let eose_deadline = state.next_eose_deadline();
 
         tokio::select! {
                    raw = ws.next() => {
@@ -2024,6 +2081,65 @@ async fn run_background_task(
                        }
                    }
 
+                   // Subscription liveness is stronger than socket liveness.
+                   // If a REQ was written but the relay never confirms it with
+                   // EOSE, reconnect instead of remaining connected-but-deaf.
+                   _ = async {
+                       match eose_deadline {
+                           Some(t) => tokio::time::sleep_until(t).await,
+                           None => std::future::pending::<()>().await,
+                       }
+                   } => {
+                       let expired = state.expired_eose_ids();
+                       if !expired.is_empty() {
+                           warn!(
+                               subscriptions = ?expired,
+                               timeout_secs = SUBSCRIPTION_EOSE_TIMEOUT.as_secs(),
+                               "subscription EOSE deadline expired — reconnecting"
+                           );
+                           let _ = event_tx.try_send(None);
+                           match try_autonomous_reconnect(
+                               &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                               &agent_pubkey_hex, &event_tx, &observer_control_tx,
+                               auth_tag.as_ref(),
+                           ).await {
+                               ReconnectOutcome::Shutdown => return,
+                               ReconnectOutcome::Ok => {
+                                   if matches!(
+                                       drain_post_reconnect(
+                                           &mut ws,
+                                           &mut cmd_rx,
+                                           &mut state,
+                                           &agent_pubkey_hex,
+                                       ).await,
+                                       ReconnectOutcome::Shutdown
+                                   ) { return; }
+                               }
+                               ReconnectOutcome::Failed => {
+                                   if matches!(
+                                       wait_for_reconnect(
+                                           &mut ws,
+                                           &mut cmd_rx,
+                                           &mut state,
+                                           &keys,
+                                           &relay_url,
+                                           &agent_pubkey_hex,
+                                           &event_tx,
+                                           &observer_control_tx,
+                                           true,
+                                           auth_tag.as_ref(),
+                                       ).await,
+                                       ReconnectOutcome::Shutdown
+                                   ) { return; }
+                               }
+                           }
+                           ping_sent = false;
+                           last_pong = Instant::now();
+                           connected_since = Instant::now();
+                           stable_logged = false;
+                       }
+                   }
+
                    // Pacing timer arm — wakes the loop for the next drain batch.
                    // `pending()` when no drain is in progress so this arm never
                    // fires spuriously and never blocks the other select! arms.
@@ -2204,7 +2320,14 @@ async fn handle_ws_message(
                     }
                 }
                 RelayMessage::Eose { subscription_id } => {
-                    debug!("EOSE for subscription {subscription_id}");
+                    if state.confirm_eose(&subscription_id) {
+                        // This is intentionally info-level: host watchdogs use
+                        // the confirmation as an ACP-layer health signal after
+                        // startup or reconnect, not merely process/socket health.
+                        info!("EOSE confirmed subscription {subscription_id}");
+                    } else {
+                        debug!("EOSE for untracked subscription {subscription_id}");
+                    }
                 }
                 RelayMessage::Notice { message } => {
                     // Fix 4: NOTICE at warn level.
@@ -2227,6 +2350,9 @@ async fn handle_ws_message(
                     subscription_id,
                     message,
                 } => {
+                    // CLOSED is a terminal response to this REQ. Any targeted
+                    // retry below will arm a fresh EOSE deadline.
+                    state.confirm_eose(&subscription_id);
                     // A per-channel membership denial means THIS channel is
                     // forbidden, not the whole connection. Drop just this
                     // channel's subscription and keep the socket — otherwise the
@@ -2285,7 +2411,8 @@ async fn handle_ws_message(
                     // resubscribe_after_reconnect() needs the subscription to
                     // still be in state so it can restore it.
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
-                        let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
+                        let sent =
+                            send_observer_control_subscribe(ws, state, agent_pubkey_hex).await;
                         if sent {
                             state.observer_control_sub_active = true;
                         } else {
@@ -2300,7 +2427,8 @@ async fn handle_ws_message(
                                 (None, Some(l)) => Some(l),
                                 (None, None) => state.startup_watermark,
                             };
-                        let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+                        let sent =
+                            send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
                         if sent {
                             // Success — subscription is live again.
                             state.membership_dropped_since = None;
@@ -2515,6 +2643,9 @@ async fn resubscribe_after_reconnect(
         // shared admission counter survives socket replacement.
         state.rate_limited_pending.clear();
         state.resubscribe_retry.clear();
+        // EOSE expectations belong to the old socket. Each successfully
+        // replayed REQ below arms a fresh deadline for the new connection.
+        state.pending_eose.clear();
     }
 
     let mut deferred_commands = VecDeque::new();
@@ -2584,7 +2715,7 @@ async fn resubscribe_after_reconnect(
                 (None, Some(l)) => Some(l),
                 (None, None) => state.startup_watermark,
             };
-            let sent = send_membership_subscribe(ws, agent_pubkey_hex, replay_since).await;
+            let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, replay_since).await;
             if sent {
                 state.membership_dropped_since = None;
                 state.membership_resub_needed = false;
@@ -2604,7 +2735,7 @@ async fn resubscribe_after_reconnect(
             if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
                 return ResubscribeResult::Shutdown;
             }
-            if !send_observer_control_subscribe(ws, agent_pubkey_hex).await {
+            if !send_observer_control_subscribe(ws, state, agent_pubkey_hex).await {
                 warn!("failed to resubscribe observer controls after reconnect");
                 retain_deferred_command_intent(state, &mut deferred_commands);
                 return ResubscribeResult::RetryConnection;
@@ -3175,7 +3306,7 @@ async fn wait_for_reconnect(
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_subscribe(
     ws: &mut WsStream,
-    _state: &BgState,
+    state: &mut BgState,
     channel_id: Uuid,
     agent_pubkey_hex: &str,
     since: Option<u64>,
@@ -3215,6 +3346,7 @@ async fn send_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
+                    state.expect_eose(sub_id);
                     debug!(
                         "subscribed to channel {channel_id}{}",
                         if since.is_some() {
@@ -3242,6 +3374,7 @@ async fn send_subscribe(
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_membership_subscribe(
     ws: &mut WsStream,
+    state: &mut BgState,
     agent_pubkey_hex: &str,
     since: Option<u64>,
 ) -> bool {
@@ -3269,6 +3402,7 @@ async fn send_membership_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
+                    state.expect_eose(MEMBERSHIP_NOTIF_SUB_ID.to_string());
                     debug!("subscribed to membership notifications (since={since_ts})");
                     true
                 }
@@ -3286,7 +3420,11 @@ async fn send_membership_subscribe(
 }
 
 /// Send a NIP-01 REQ for owner-to-agent observer control frames.
-async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> bool {
+async fn send_observer_control_subscribe(
+    ws: &mut WsStream,
+    state: &mut BgState,
+    agent_pubkey_hex: &str,
+) -> bool {
     let req = json!([
         "REQ",
         OBSERVER_CONTROL_SUB_ID,
@@ -3304,6 +3442,7 @@ async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &s
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
+                    state.expect_eose(OBSERVER_CONTROL_SUB_ID.to_string());
                     debug!("subscribed to observer control frames");
                     true
                 }
@@ -4211,6 +4350,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn relay_eose_confirms_a_written_subscription() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(1);
+        let keys = nostr::Keys::generate();
+        let mut state = BgState::new();
+        let subscription_id = "sub-eose-regression";
+        state.expect_eose(subscription_id.to_string());
+
+        assert!(
+            handle_ws_message(
+                Message::Text(format!(r#"["EOSE","{subscription_id}"]"#).into()),
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &keys,
+                "ws://test.invalid",
+                "agent-pubkey",
+                None,
+            )
+            .await
+        );
+        assert!(
+            state.pending_eose.is_empty(),
+            "EOSE must retire the reconnect health deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn written_subscription_without_eose_expires() {
+        let mut state = BgState::new();
+        state.expect_eose("silent-after-reconnect".to_string());
+
+        assert!(state.expired_eose_ids().is_empty());
+        tokio::time::advance(SUBSCRIPTION_EOSE_TIMEOUT).await;
+        assert_eq!(
+            state.expired_eose_ids(),
+            vec!["silent-after-reconnect".to_string()],
+            "a socket write alone must not mark the subscription healthy"
+        );
+    }
+
     #[test]
     fn parse_notice() {
         let text = r#"["NOTICE","hello from relay"]"#;
@@ -4407,6 +4590,7 @@ mod tests {
         let mut state = BgState::new();
         let channel_id = Uuid::new_v4();
         seed_test_subscription(&mut state, channel_id);
+        state.expect_eose("stale-old-socket".to_string());
         state.rate_limit_gate = Some(tokio::time::Instant::now() + Duration::from_millis(150));
 
         let result =
@@ -4416,6 +4600,10 @@ mod tests {
         assert!(matches!(result, ResubscribeResult::Ok));
         assert!(state.rate_limit_gate.is_some());
         assert!(state.rate_limited_pending.contains_key(&channel_id));
+        assert!(
+            !state.pending_eose.contains_key("stale-old-socket"),
+            "fresh reconnect must discard EOSE deadlines owned by the dead socket"
+        );
         assert!(
             timeout(Duration::from_millis(50), server.next())
                 .await
@@ -4431,6 +4619,10 @@ mod tests {
         let frame = next_test_frame(&mut server).await;
         assert_eq!(frame[0], "REQ");
         assert_eq!(frame[1], channel_sub_id(channel_id));
+        assert!(
+            state.pending_eose.contains_key(&channel_sub_id(channel_id)),
+            "the replayed REQ must remain unhealthy until the new socket sends EOSE"
+        );
     }
 
     #[tokio::test]
