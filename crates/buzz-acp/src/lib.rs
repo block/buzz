@@ -21,8 +21,8 @@ use std::time::Duration;
 use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_AGENT_PROFILE, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -88,6 +88,79 @@ async fn publish_presence(
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;
     Ok(())
+}
+
+fn build_agent_profile_event(
+    keys: &nostr::Keys,
+    name: &str,
+    respond_to: &RespondTo,
+    respond_to_allowlist: &HashSet<String>,
+    channel_ids: &HashSet<Uuid>,
+) -> Result<nostr::Event, relay::RelayError> {
+    let mut channel_ids: Vec<String> = channel_ids.iter().map(Uuid::to_string).collect();
+    channel_ids.sort();
+    let mut respond_to_allowlist: Vec<&str> =
+        respond_to_allowlist.iter().map(String::as_str).collect();
+    respond_to_allowlist.sort_unstable();
+    let content = serde_json::json!({
+        "name": name,
+        "agent_type": "agent",
+        "channel_ids": channel_ids,
+        "respond_to": respond_to.to_string(),
+        "respond_to_allowlist": respond_to_allowlist,
+        "status": "online",
+    })
+    .to_string();
+
+    nostr::EventBuilder::new(nostr::Kind::Custom(KIND_AGENT_PROFILE as u16), content)
+        .tags([])
+        .sign_with_keys(keys)
+        .map_err(|error| relay::RelayError::Http(format!("agent profile sign error: {error}")))
+}
+
+async fn publish_agent_profile(
+    rest_client: &relay::RestClient,
+    keys: &nostr::Keys,
+    respond_to: &RespondTo,
+    respond_to_allowlist: &HashSet<String>,
+    channel_ids: &HashSet<Uuid>,
+) -> Result<(), relay::RelayError> {
+    let name = std::env::var("BUZZ_ACP_AGENT_NAME")
+        .or_else(|_| std::env::var("AGENT_NAME"))
+        .unwrap_or_else(|_| keys.public_key().to_hex());
+    let event =
+        build_agent_profile_event(keys, &name, respond_to, respond_to_allowlist, channel_ids)?;
+
+    // Agent profiles are durable replaceable events. The HTTP bridge retries
+    // their submission, unlike the socket publisher which is tuned for
+    // disposable presence and typing updates.
+    rest_client.submit_event(&event).await?;
+    Ok(())
+}
+
+fn spawn_agent_profile_refresh(
+    rest_client: relay::RestClient,
+    keys: nostr::Keys,
+    respond_to: RespondTo,
+    respond_to_allowlist: HashSet<String>,
+    channel_ids: HashSet<Uuid>,
+) {
+    tokio::spawn(async move {
+        if let Err(error) = publish_agent_profile(
+            &rest_client,
+            &keys,
+            &respond_to,
+            &respond_to_allowlist,
+            &channel_ids,
+        )
+        .await
+        {
+            tracing::warn!(
+                channel_count = channel_ids.len(),
+                "failed to refresh agent profile after membership change: {error}"
+            );
+        }
+    });
 }
 
 fn emit_runtime_lifecycle(
@@ -1969,6 +2042,25 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    match publish_agent_profile(
+        &relay.rest_client(),
+        &config.keys,
+        &config.respond_to,
+        &config.respond_to_allowlist,
+        &subscribed_channel_ids,
+    )
+    .await
+    {
+        Ok(()) => tracing::info!(
+            channel_count = subscribed_channel_ids.len(),
+            "published agent profile"
+        ),
+        Err(error) => tracing::warn!(
+            channel_count = subscribed_channel_ids.len(),
+            "failed to publish agent profile: {error}"
+        ),
+    }
+
     if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
         relay_observer_publisher.take()
     {
@@ -2507,6 +2599,13 @@ async fn tokio_main() -> Result<()> {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
                                             subscribed_channel_ids.insert(ch);
+                                            spawn_agent_profile_refresh(
+                                                relay.rest_client(),
+                                                config.keys.clone(),
+                                                config.respond_to.clone(),
+                                                config.respond_to_allowlist.clone(),
+                                                subscribed_channel_ids.clone(),
+                                            );
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
@@ -2517,6 +2616,13 @@ async fn tokio_main() -> Result<()> {
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
                                     }
+                                    spawn_agent_profile_refresh(
+                                        relay.rest_client(),
+                                        config.keys.clone(),
+                                        config.respond_to.clone(),
+                                        config.respond_to_allowlist.clone(),
+                                        subscribed_channel_ids.clone(),
+                                    );
                                     // Drain queued events and invalidate sessions for the
                                     // removed channel. Events already in-flight will
                                     // complete normally (the relay may reject actions if
@@ -5045,6 +5151,42 @@ mod owner_control_command_tests {
             channel_id,
             ControlSignal::Rotate
         ));
+    }
+}
+
+#[cfg(test)]
+mod agent_profile_tests {
+    use super::*;
+
+    #[test]
+    fn agent_profile_advertises_the_current_routing_policy() {
+        let keys = nostr::Keys::generate();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let event = build_agent_profile_event(
+            &keys,
+            "Monty",
+            &RespondTo::Allowlist,
+            &HashSet::from(["b".repeat(64), "a".repeat(64)]),
+            &HashSet::from([channel_b, channel_a]),
+        )
+        .expect("profile should sign");
+        let content: serde_json::Value =
+            serde_json::from_str(&event.content).expect("profile content should be JSON");
+
+        assert_eq!(event.kind.as_u16(), KIND_AGENT_PROFILE as u16);
+        assert_eq!(content["name"], "Monty");
+        assert_eq!(content["respond_to"], "allowlist");
+        assert_eq!(
+            content["respond_to_allowlist"],
+            serde_json::json!(["a".repeat(64), "b".repeat(64)])
+        );
+        let mut expected_channel_ids = vec![channel_a.to_string(), channel_b.to_string()];
+        expected_channel_ids.sort();
+        assert_eq!(
+            content["channel_ids"],
+            serde_json::json!(expected_channel_ids)
+        );
     }
 }
 
