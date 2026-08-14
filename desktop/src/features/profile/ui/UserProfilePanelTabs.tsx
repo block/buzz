@@ -799,14 +799,9 @@ export function ProfileRuntimeTabContent({
   );
   const startOnLaunchField = configurationFields[startOnLaunchFieldIndex];
   const StartOnLaunchIcon = startOnLaunchField?.icon;
-  const configurationFieldsBeforeStartOnLaunch =
-    startOnLaunchFieldIndex >= 0
-      ? configurationFields.slice(0, startOnLaunchFieldIndex)
-      : configurationFields;
-  const configurationFieldsAfterStartOnLaunch =
-    startOnLaunchFieldIndex >= 0
-      ? configurationFields.slice(startOnLaunchFieldIndex + 1)
-      : [];
+  const remainingConfigurationFields = configurationFields.filter(
+    (_, index) => index !== startOnLaunchFieldIndex,
+  );
   const resolvedStartOnLaunchEnabled =
     startOnLaunchEnabled ?? startOnLaunchField?.displayValue === "Yes";
   const canToggleStartOnLaunch = onToggleStartOnLaunch !== undefined;
@@ -818,8 +813,10 @@ export function ProfileRuntimeTabContent({
     (field) => field.label === "Status",
   );
   const hasActivityRows =
-    statusDiagnosticsFields.length > 0 || showDiagnosticsIngress;
-  const hasConfigurationRows = configurationFields.length > 0;
+    statusDiagnosticsFields.length > 0 ||
+    startOnLaunchField !== undefined ||
+    showDiagnosticsIngress;
+  const hasConfigurationRows = remainingConfigurationFields.length > 0;
   const hasInstances = instances.length > 0;
 
   if (
@@ -867,27 +864,6 @@ export function ProfileRuntimeTabContent({
               variant="runtime"
             />
           ) : null}
-          {showDiagnosticsIngress ? (
-            <ProfileIngressRow
-              grouped
-              icon={ScrollText}
-              label="Harness log"
-              onClick={onOpenDiagnostics}
-              testId="user-profile-diagnostics-ingress"
-              trailing={diagnosticsSummary}
-            />
-          ) : null}
-        </ProfileSectionGroup>
-      ) : null}
-      {hasConfigurationRows ? (
-        <ProfileSectionGroup
-          testId="user-profile-agent-configuration-section"
-          title="Agent configuration"
-        >
-          <ProfileFieldRows
-            fields={configurationFieldsBeforeStartOnLaunch}
-            variant="runtime"
-          />
           {startOnLaunchField ? (
             <div
               aria-checked={resolvedStartOnLaunchEnabled}
@@ -928,8 +904,25 @@ export function ProfileRuntimeTabContent({
               />
             </div>
           ) : null}
+          {showDiagnosticsIngress ? (
+            <ProfileIngressRow
+              grouped
+              icon={ScrollText}
+              label="Harness log"
+              onClick={onOpenDiagnostics}
+              testId="user-profile-diagnostics-ingress"
+              trailing={diagnosticsSummary}
+            />
+          ) : null}
+        </ProfileSectionGroup>
+      ) : null}
+      {hasConfigurationRows ? (
+        <ProfileSectionGroup
+          testId="user-profile-agent-configuration-section"
+          title="Agent configuration"
+        >
           <ProfileFieldRows
-            fields={configurationFieldsAfterStartOnLaunch}
+            fields={remainingConfigurationFields}
             variant="runtime"
           />
         </ProfileSectionGroup>

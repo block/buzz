@@ -1652,6 +1652,30 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   const startOnLaunchToggle = page.getByTestId(
     "user-profile-start-on-launch-toggle",
   );
+  const activitySection = page.getByTestId(
+    "user-profile-runtime-activity-section",
+  );
+  await expect(
+    activitySection.getByTestId("user-profile-agent-status"),
+  ).toBeVisible();
+  await expect(
+    activitySection.getByTestId("user-profile-start-on-launch"),
+  ).toBeVisible();
+  const activityRowOrder = await activitySection
+    .locator("[data-testid^='user-profile-']")
+    .evaluateAll((rows) =>
+      rows
+        .map((row) => row.getAttribute("data-testid"))
+        .filter((testId): testId is string => testId !== null),
+    );
+  expect(activityRowOrder.indexOf("user-profile-start-on-launch")).toBe(
+    activityRowOrder.indexOf("user-profile-agent-status") + 1,
+  );
+  await expect(
+    page
+      .getByTestId("user-profile-agent-configuration-section")
+      .getByTestId("user-profile-start-on-launch"),
+  ).toHaveCount(0);
   await expect(startOnLaunchRow).not.toContainText("Yes");
   await expect(startOnLaunchRow).toBeChecked();
   await expect(startOnLaunchToggle).toHaveAttribute("data-state", "checked");
