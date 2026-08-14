@@ -275,46 +275,58 @@ fn archived_pubkeys_from_snapshot(snapshot: &nostr::Event) -> Vec<String> {
         .collect()
 }
 
-/// Read the relay's latest valid `kind:13535` archive snapshot. The frontend
-/// caches this and tests membership client-side to drive the "Archived" flair.
+/// Read the relay's latest valid `kind:13535` archive snapshot as lowercase
+/// hex pubkeys. Shared by the `list_archived_identities` command (frontend
+/// flair) and the backend nest regen (excluding archived agents from
+/// `AGENTS.md`).
 ///
 /// Per NIP-IA §Client Behavior and §Snapshot and Delta Consistency, only a
 /// snapshot signed by the relay identity advertised in NIP-11 `self` can affect
-/// archive state. If the relay has no stable `self`, fail open with an empty
-/// snapshot rather than trusting unauthenticated relay-authoritative state.
-#[tauri::command]
-pub async fn list_archived_identities(
-    state: State<'_, AppState>,
-) -> Result<ArchivedIdentitiesSnapshot, String> {
-    let Some(relay_self) = fetch_relay_self(&state).await? else {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+/// archive state. Every failure path — no stable `self`, no snapshot, a bad
+/// signature or wrong author, or a query error — **fails open** with an empty
+/// set rather than trusting unauthenticated relay-authoritative state.
+pub(crate) async fn fetch_archived_pubkeys(state: &AppState) -> Vec<String> {
+    let Ok(Some(relay_self)) = fetch_relay_self(state).await else {
+        return vec![];
     };
 
-    let events = query_relay(
-        &state,
+    let query = query_relay(
+        state,
         &[serde_json::json!({
             "authors": [relay_self.clone()],
             "kinds": [13535],
             "limit": 1,
         })],
     )
-    .await?;
+    .await;
+    let Ok(events) = query else {
+        return vec![];
+    };
 
     let Some(snapshot) = events.into_iter().next() else {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+        return vec![];
     };
 
     // Defense-in-depth: the filter should already restrict author, but the
     // client must still reject malformed or wrongly signed relay state.
     if !snapshot.verify_id() || !snapshot.verify_signature() {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+        return vec![];
     }
     if !snapshot.pubkey.to_hex().eq_ignore_ascii_case(&relay_self) {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+        return vec![];
     }
 
+    archived_pubkeys_from_snapshot(&snapshot)
+}
+
+/// Read the relay's latest valid `kind:13535` archive snapshot. The frontend
+/// caches this and tests membership client-side to drive the "Archived" flair.
+#[tauri::command]
+pub async fn list_archived_identities(
+    state: State<'_, AppState>,
+) -> Result<ArchivedIdentitiesSnapshot, String> {
     Ok(ArchivedIdentitiesSnapshot {
-        archived: archived_pubkeys_from_snapshot(&snapshot),
+        archived: fetch_archived_pubkeys(&state).await,
     })
 }
 

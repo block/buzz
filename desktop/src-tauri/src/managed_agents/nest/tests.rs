@@ -1,5 +1,9 @@
 use super::*;
 
+/// Relay URL every `make_agent` record is pinned to; render calls pass the same
+/// value so the relay-scope filter keeps them unless a test overrides it.
+const TEST_RELAY: &str = "ws://example.com:3000";
+
 #[test]
 fn nest_dir_is_under_home() {
     if let Some(dir) = nest_dir() {
@@ -454,7 +458,7 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         persona_id: persona_id.map(|s| s.to_string()),
         private_key_nsec: String::new(),
         auth_tag: None,
-        relay_url: String::new(),
+        relay_url: TEST_RELAY.to_string(),
         avatar_url: None,
         acp_command: String::new(),
         agent_command: String::new(),
@@ -511,7 +515,7 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
 fn test_render_dynamic_section_with_agents() {
     let personas = vec![make_persona("p1", "Builder")];
     let agents = vec![make_agent("Kit", Some("p1"))];
-    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    let output = render_dynamic_section(&personas, &agents, &HashSet::new(), TEST_RELAY);
     assert!(output.contains("| Kit | Builder | @Kit |"));
     assert!(output.contains("| Name | Persona | How to address |"));
     assert!(output.contains("## Workspace"));
@@ -519,7 +523,7 @@ fn test_render_dynamic_section_with_agents() {
 
 #[test]
 fn test_render_dynamic_section_empty() {
-    let output = render_dynamic_section(&[], &[], "ws://example.com:3000");
+    let output = render_dynamic_section(&[], &[], &HashSet::new(), TEST_RELAY);
     assert!(output.contains("No agents deployed yet"));
 }
 
@@ -527,8 +531,111 @@ fn test_render_dynamic_section_empty() {
 fn test_render_dynamic_section_agent_no_persona() {
     let personas = vec![make_persona("p1", "Builder")];
     let agents = vec![make_agent("Scout", Some("nonexistent"))];
-    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    let output = render_dynamic_section(&personas, &agents, &HashSet::new(), TEST_RELAY);
     assert!(output.contains("| Scout | — | @Scout |"));
+}
+
+#[test]
+fn test_render_excludes_archived_agents() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let mut live = make_agent("Live", Some("p1"));
+    live.pubkey = "aa".repeat(32);
+    let mut gone = make_agent("Archived", Some("p1"));
+    gone.pubkey = "bb".repeat(32);
+    let archived: HashSet<String> = [gone.pubkey.clone()].into_iter().collect();
+
+    let output = render_dynamic_section(&personas, &[live, gone], &archived, TEST_RELAY);
+
+    assert!(output.contains("| Live | Builder | @Live |"));
+    assert!(
+        !output.contains("Archived"),
+        "archived agent must not render"
+    );
+}
+
+#[test]
+fn test_render_archived_match_is_case_insensitive() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let mut gone = make_agent("Archived", Some("p1"));
+    gone.pubkey = "AB".repeat(32); // uppercase hex in the record
+                                   // Snapshot pubkeys are lowercased by `archived_pubkeys_from_snapshot`.
+    let archived: HashSet<String> = ["ab".repeat(32)].into_iter().collect();
+
+    let output = render_dynamic_section(&personas, &[gone], &archived, TEST_RELAY);
+
+    assert!(
+        output.contains("No agents deployed yet"),
+        "all-archived roster renders the empty placeholder"
+    );
+}
+
+#[test]
+fn test_render_empty_archived_set_renders_all() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let mut a = make_agent("Kit", Some("p1"));
+    a.pubkey = "cc".repeat(32);
+    // Fail-open: an empty snapshot (relay unreachable) must render everyone.
+    let output = render_dynamic_section(&personas, &[a], &HashSet::new(), TEST_RELAY);
+    assert!(output.contains("| Kit | Builder | @Kit |"));
+}
+
+#[test]
+fn test_render_excludes_foreign_relay_agents() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let here = make_agent("Local", Some("p1"));
+    let mut elsewhere = make_agent("Foreign", Some("p1"));
+    elsewhere.relay_url = "wss://defunct.communities.buzz.xyz".to_string();
+
+    let output = render_dynamic_section(&personas, &[here, elsewhere], &HashSet::new(), TEST_RELAY);
+
+    assert!(output.contains("| Local | Builder | @Local |"));
+    assert!(
+        !output.contains("Foreign"),
+        "an agent pinned to another relay must not render"
+    );
+}
+
+#[test]
+fn test_render_relay_match_ignores_trailing_slash_and_case() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let mut a = make_agent("Kit", Some("p1"));
+    a.relay_url = "WS://Example.com:3000/".to_string();
+    // Active relay lacks the trailing slash and differs in case.
+    let output = render_dynamic_section(&personas, &[a], &HashSet::new(), TEST_RELAY);
+    assert!(output.contains("| Kit | Builder | @Kit |"));
+}
+
+#[test]
+fn test_render_all_foreign_relay_renders_empty_placeholder() {
+    let personas = vec![make_persona("p1", "Builder")];
+    let mut a = make_agent("Kit", Some("p1"));
+    a.relay_url = "wss://defunct.communities.buzz.xyz".to_string();
+    let output = render_dynamic_section(&personas, &[a], &HashSet::new(), TEST_RELAY);
+    assert!(
+        output.contains("No agents deployed yet"),
+        "a store with no active-relay records renders the placeholder, not a bare header"
+    );
+}
+
+#[test]
+fn test_render_filters_are_order_independent() {
+    // A record that is BOTH foreign-relay and archived is dropped once; the two
+    // predicates are independent so neither filter's outcome depends on the
+    // other running first.
+    let personas = vec![make_persona("p1", "Builder")];
+    let keep = make_agent("Keep", Some("p1"));
+    let mut both = make_agent("Both", Some("p1"));
+    both.pubkey = "dd".repeat(32);
+    both.relay_url = "wss://defunct.communities.buzz.xyz".to_string();
+    let archived: HashSet<String> = [both.pubkey.clone()].into_iter().collect();
+
+    let output = render_dynamic_section(&personas, &[keep, both], &archived, TEST_RELAY);
+
+    assert!(output.contains("| Keep | Builder | @Keep |"));
+    assert!(
+        !output.contains("Both"),
+        "a foreign-and-archived record must not render"
+    );
 }
 
 #[test]
@@ -763,7 +870,7 @@ fn test_upsert_marker_in_code_block() {
 fn test_render_pipe_in_agent_name() {
     let personas = vec![make_persona("p1", "Builder")];
     let agents = vec![make_agent("Kit|Pro", Some("p1"))];
-    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    let output = render_dynamic_section(&personas, &agents, &HashSet::new(), TEST_RELAY);
 
     assert!(
         output.contains("Kit\\|Pro"),
@@ -792,7 +899,7 @@ fn test_render_pipe_in_agent_name() {
 fn test_render_newline_in_persona_name() {
     let personas = vec![make_persona("p1", "Builder\nExpert")];
     let agents = vec![make_agent("Scout", Some("p1"))];
-    let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+    let output = render_dynamic_section(&personas, &agents, &HashSet::new(), TEST_RELAY);
 
     assert!(
         output.contains("Builder Expert"),

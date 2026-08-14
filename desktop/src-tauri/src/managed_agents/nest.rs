@@ -11,7 +11,9 @@ use super::{load_managed_agents, load_personas, AgentDefinition, ManagedAgentRec
 #[cfg(test)]
 use super::{BackendKind, RespondTo};
 use crate::app_state::AppState;
+use crate::commands::fetch_archived_pubkeys;
 use crate::relay::relay_ws_url_with_override;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -523,19 +525,49 @@ fn escape_md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
+/// Normalize a relay URL for equality: trim surrounding space, drop a trailing
+/// slash, and lowercase. Scheme and host are ASCII-case-insensitive and these
+/// relay URLs carry no meaningful path, so this collapses the incidental
+/// variation (trailing `/`, casing) without over-parsing.
+fn normalize_relay_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// True iff the instance's pinned `relay_url` is the active workspace relay.
+/// A *local* check on data already in the store — unconditional, unlike the
+/// archive filter (there is no fetch to fail open on). Records pinned to a
+/// defunct relay must not render under the active relay's header.
+fn is_on_active_relay(record: &ManagedAgentRecord, active_relay_normalized: &str) -> bool {
+    normalize_relay_url(&record.relay_url) == active_relay_normalized
+}
+
+/// True iff the relay has archived this instance's identity. Membership is
+/// tested against the relay's `kind:13535` snapshot (lowercased hex); an empty
+/// set (relay unreachable) fails open — see [`regenerate_nest_context`].
+fn is_archived(record: &ManagedAgentRecord, archived: &HashSet<String>) -> bool {
+    archived.contains(&record.pubkey.to_ascii_lowercase())
+}
+
 pub fn render_dynamic_section(
     personas: &[AgentDefinition],
     agents: &[ManagedAgentRecord],
+    archived: &HashSet<String>,
     relay_url: &str,
 ) -> String {
-    let active_agents = if agents.is_empty() {
+    let active_relay = normalize_relay_url(relay_url);
+    let live: Vec<&ManagedAgentRecord> = agents
+        .iter()
+        .filter(|a| is_on_active_relay(a, &active_relay))
+        .filter(|a| !is_archived(a, archived))
+        .collect();
+    let active_agents = if live.is_empty() {
         "## Active Agents\n\n*(No agents deployed yet. Add agents in the Buzz desktop app.)*"
             .to_string()
     } else {
         let mut table =
             "## Active Agents\n\n| Name | Persona | How to address |\n|------|---------|----------------|"
                 .to_string();
-        for agent in agents {
+        for agent in live {
             let role = agent
                 .persona_id
                 .as_deref()
@@ -645,7 +677,7 @@ pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io
     Ok(())
 }
 
-pub fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
+pub async fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
     let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
     let agents_md = nest.join("AGENTS.md");
 
@@ -657,7 +689,11 @@ pub fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
     let agents = load_managed_agents(app)?;
     let state = app.state::<AppState>();
     let relay_url = relay_ws_url_with_override(&state);
-    let content = render_dynamic_section(&personas, &agents, &relay_url);
+    // Identity-archived agents live only in the relay's `kind:13535` snapshot;
+    // local records all read `is_active: true`. Fails open (empty set → render
+    // everyone) so an unreachable relay can't blank the roster.
+    let archived: HashSet<String> = fetch_archived_pubkeys(&state).await.into_iter().collect();
+    let content = render_dynamic_section(&personas, &agents, &archived, &relay_url);
     upsert_managed_section(&agents_md, &content)
         .map_err(|e| format!("regenerate nest context: {e}"))?;
 
@@ -668,10 +704,16 @@ pub fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
 ///
 /// All call sites treat regeneration as fire-and-forget — agents run fine with
 /// a stale AGENTS.md, so we warn and continue rather than propagating the error.
+/// Regeneration reads relay archive state, so it runs on a spawned async task;
+/// callers do not await it. A just-archived agent may linger for one regen
+/// cycle until the next regen (any agent/team edit or the next launch).
 pub fn try_regenerate_nest(app: &AppHandle) {
-    if let Err(error) = regenerate_nest_context(app) {
-        eprintln!("buzz-desktop: nest context regeneration failed: {error}");
-    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = regenerate_nest_context(&app).await {
+            eprintln!("buzz-desktop: nest context regeneration failed: {error}");
+        }
+    });
 }
 
 #[cfg(test)]
