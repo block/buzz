@@ -43,7 +43,14 @@ PREAMBLE = (
 
 #: Zero-width and bidirectional-control characters, stripped only to *detect* a
 #: look-alike. The payload itself is never silently rewritten.
-_INVISIBLE = re.compile("[\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]")
+#:
+#: The bidi ISOLATE controls (U+2066-U+2069: LRI/RLI/FSI/PDI) and U+061C (Arabic
+#: Letter Mark) were missing from the original \u2060-\u2064 run. A probe like
+#: BUZZ-UNTRU\u2066\u2069STED renders visually identical to the real delimiter and
+#: was neither escaped nor reported: find_lookalikes returned [] for it, the
+#: swallowed-attack shape this file exists to close. \u2065 is unassigned and
+#: harmless to include.
+_INVISIBLE = re.compile("[\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2069\u061c\ufeff]")
 
 #: Dash characters that read as an ASCII hyphen but are not one. NFKC leaves most of
 #: these alone, so a look-alike written with U+2011 would otherwise pass both the exact

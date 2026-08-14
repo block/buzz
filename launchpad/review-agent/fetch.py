@@ -176,10 +176,18 @@ def _linked_issue(body: Surface, repo: str) -> Surface:
     first closing keyword in the body — "Fixes #10, Closes owner/other#20" left
     the second reference entirely unfetched, and a qualified or URL reference
     matched nothing at all, silently omitting an author-controlled surface. Every
-    reference is now resolved and fetched, deduplicated, and joined; a fetch
-    failure on one target is skipped rather than discarding every other target's
-    text, since ``_gh`` already degrades a single failed call to "no content" and
-    an author cannot make ONE bad reference number hide every other one.
+    reference is now resolved, deduplicated and fetched.
+
+    A failed fetch on ANY target marks the whole surface ``absent``, rather than
+    being silently skipped while the others' text is joined. An earlier version
+    skipped a failed target and still returned "ok" with whatever text the other
+    targets yielded -- exactly the "absence of evidence reported as evidence"
+    CONTAINMENT.md forbids: a reference to a deleted, private or malformed issue
+    is indistinguishable from "nothing more to read", and the failed target is
+    precisely where an author could put the text this module exists to catch.
+    Failing the whole surface, named after the one target it could not read, is
+    the same conservative choice `_classify` already makes for every other
+    single-fetch surface.
     """
     if not body.readable:
         return Surface(
@@ -198,13 +206,21 @@ def _linked_issue(body: Surface, repo: str) -> Surface:
         return Surface("linked_issue", "empty")
     bodies: list[str] = []
     for target_repo, number in targets:
-        ok, out, _reason = _gh(["api", f"repos/{target_repo}/issues/{number}"])
+        ok, out, reason = _gh(["api", f"repos/{target_repo}/issues/{number}"])
         if not ok:
-            continue
+            return Surface(
+                "linked_issue",
+                "absent",
+                reason=f"{target_repo}#{number} could not be read: {reason}",
+            )
         try:
             payload = json.loads(out)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            return Surface(
+                "linked_issue",
+                "absent",
+                reason=f"{target_repo}#{number}: malformed JSON: {exc}",
+            )
         text = (payload.get("body") or "").strip()
         if text:
             bodies.append(text)

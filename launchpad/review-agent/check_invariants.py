@@ -492,7 +492,11 @@ for label, pr_body_text, bodies, expected in _cases:
         f"{label}: resolved to {expected!r} (got state={result.state!r} text={result.text!r})",
     )
 
-# A failure on one referenced issue must not discard the others' text.
+# A failure on ANY referenced issue fails the WHOLE surface -- never silently
+# joins whatever the other targets yielded. A reference to a deleted, private or
+# malformed issue is indistinguishable from "nothing more to read" if it is
+# skipped, and the failed target is exactly where the text this module exists
+# to catch could be sitting.
 _real_gh_li = _fetch_module_li._gh
 _fetch_module_li._gh = _fake_gh_issue_bodies({"launchpad-26/buzz#10": "the readable one"})
 try:
@@ -502,8 +506,8 @@ try:
 finally:
     _fetch_module_li._gh = _real_gh_li
 check(
-    partial.state == "ok" and partial.text == "the readable one",
-    f"one unreadable reference does not discard a sibling reference's text (got {partial!r})",
+    partial.state == "absent" and "999999" in partial.reason,
+    f"one unreadable reference fails the whole surface, naming which one (got {partial!r})",
 )
 
 no_keyword = _linked_issue(Surface("pr_body", "ok", text="no closing keyword here"), "launchpad-26/buzz")
