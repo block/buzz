@@ -117,19 +117,14 @@ pub(super) fn tombstone_managed_agent_pending(
     }
 }
 
-/// Build and sign the NIP-IA `kind:9035` archive request enqueued when an
-/// agent is deleted. Pure given the keys — unit-testable without an
-/// `AppHandle`. Reuses the same wire builder as the GUI's Archive action
-/// (`events::build_archive_identity_request`); the machine-readable reason is
-/// `retired` (NIP-IA suggested code for a deliberately decommissioned key).
-///
-/// The owner auth tag is minted locally from the same keys used to sign the
-/// request, avoiding a network fetch while the managed-agent store lock is
-/// held. The relay still independently verifies it against the agent's live
-/// kind:0.
+/// Build an owner-authenticated NIP-IA `kind:9035` archive request for a deleted agent.
+/// Definition-linked agents carry the persona id in `content`, where it survives the
+/// kind:30177 tombstone as owner-signed historical alias data. The request uses the
+/// same builder as the GUI Archive action and the NIP-IA `retired` reason.
 pub(super) fn build_agent_archive_request(
     keys: &nostr::Keys,
     agent_pubkey: &str,
+    persona_id: Option<&str>,
 ) -> Result<nostr::Event, String> {
     let auth_tag = if keys
         .public_key()
@@ -149,9 +144,13 @@ pub(super) fn build_agent_archive_request(
                 .map_err(|_| "owner auth tag must have four elements".to_string())?,
         )
     };
+    let content = persona_id
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| serde_json::json!({ "persona_id": id }).to_string())
+        .unwrap_or_default();
     crate::events::build_archive_identity_request(
         agent_pubkey,
-        "",
+        &content,
         Some("retired"),
         None,
         auth_tag.as_ref(),
@@ -160,22 +159,15 @@ pub(super) fn build_agent_archive_request(
     .map_err(|e| format!("failed to sign archive request: {e}"))
 }
 
-/// Enqueue a NIP-IA `kind:9035` archive request for a deleted agent, retained
-/// next to its kind:5 tombstone with `pending_sync = 1`.
-///
-/// The tombstone removes the agent's 30177 record cross-device, but the
-/// agent's `kind:0` and channel membership keep populating member pickers and
-/// autocomplete on the relay until the identity is archived. Retaining the
-/// request here gives archival the same offline durability as the tombstone;
-/// the flush loop is the sole publisher and re-signs the request with a fresh
-/// `created_at` at publish time, because the relay enforces a ±120s freshness
-/// window on 9035s.
-///
-/// Same contract as `tombstone_managed_agent_pending`: called inside the
-/// `managed_agents_store_lock`-held delete body, never across an `.await`,
-/// best-effort — a failure is logged and swallowed so it never blocks the
-/// disk-authoritative delete.
-pub(super) fn archive_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubkey: &str) {
+/// Durably enqueue the archive request next to the kind:5 tombstone. The flush
+/// loop re-signs it with a relay-fresh timestamp. Best-effort and lock-scoped,
+/// matching `tombstone_managed_agent_pending`.
+pub(super) fn archive_managed_agent_pending(
+    app: &AppHandle,
+    state: &AppState,
+    agent_pubkey: &str,
+    persona_id: Option<&str>,
+) {
     use crate::managed_agents::retention::{open_retention_db, retain_event, RetainedEvent};
     use buzz_core_pkg::kind::KIND_IA_ARCHIVE_REQUEST;
     use nostr::JsonUtil;
@@ -183,7 +175,7 @@ pub(super) fn archive_managed_agent_pending(app: &AppHandle, state: &AppState, a
     let result = (|| -> Result<(), String> {
         let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let owner_pubkey = scope.owner_keys.public_key().to_hex();
-        let event = build_agent_archive_request(&scope.owner_keys, agent_pubkey)?;
+        let event = build_agent_archive_request(&scope.owner_keys, agent_pubkey, persona_id)?;
         let conn = open_retention_db(&scope.db_path)?;
         retain_event(
             &conn,
@@ -1321,6 +1313,10 @@ pub async fn delete_managed_agent(
                 }
             }
 
+            let persona_id = records
+                .iter()
+                .find(|record| record.pubkey == pubkey)
+                .and_then(|record| record.persona_id.clone());
             if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
                 stop_managed_agent_process(&app, record, &mut runtimes)?;
             }
@@ -1341,7 +1337,7 @@ pub async fn delete_managed_agent(
             // NIP-IA: archive the deleted agent's identity on the relay so it
             // stops appearing in member pickers and autocomplete. Same
             // best-effort, inside-the-lock contract as the tombstone above.
-            archive_managed_agent_pending(&app, &state, &pubkey);
+            archive_managed_agent_pending(&app, &state, &pubkey, persona_id.as_deref());
         }
         try_regenerate_nest(&app);
         Ok(())
