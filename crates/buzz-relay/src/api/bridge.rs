@@ -21,7 +21,7 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-async fn enforce_http_admission(
+pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: &nostr::PublicKey,
@@ -1938,7 +1938,10 @@ pub async fn workflow_webhook(
                         buzz_db::workflow::RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
-                        Some(&format!("definition parse error: {e}")),
+                        Some(buzz_db::workflow::WorkflowRunFailure {
+                            code: "invalid_definition",
+                            message: &format!("definition parse error: {e}"),
+                        }),
                     )
                     .await
                 {

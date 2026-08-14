@@ -396,6 +396,7 @@ CREATE TABLE workflow_runs (
     started_at          TIMESTAMPTZ,
     completed_at        TIMESTAMPTZ,
     error_message       TEXT,
+    error_code          TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (community_id, id),
     FOREIGN KEY (community_id, workflow_id)

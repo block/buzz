@@ -1448,6 +1448,8 @@ fn format_conversation_context(
 #[derive(Default)]
 pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
+    /// Owner-signed instructions for an active huddle channel.
+    pub huddle_instructions: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
     /// True when delivery-delta filtering removed at least one event that this
@@ -1496,13 +1498,14 @@ pub(crate) struct StandingContext<'a> {
     pub system_prompt: Option<&'a str>,
     pub team_instructions: Option<&'a str>,
     pub agent_core: Option<&'a str>,
+    pub huddle_instructions: Option<&'a str>,
     pub agent_canvas: Option<&'a str>,
 }
 
 impl StandingContext<'_> {
     /// Render the sections in the order legacy agents have always seen them.
     pub(crate) fn sections(&self) -> Vec<String> {
-        let mut sections = Vec::with_capacity(5);
+        let mut sections = Vec::with_capacity(6);
         if let Some(bp) = self.base_prompt {
             sections.push(base_section(bp));
         }
@@ -1518,6 +1521,13 @@ impl StandingContext<'_> {
         }
         if let Some(core) = self.agent_core {
             sections.push(core.to_string());
+        }
+        if let Some(instructions) = self
+            .huddle_instructions
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(format!("[Huddle Instructions]\n{instructions}"));
         }
         if let Some(canvas) = self.agent_canvas {
             sections.push(canvas.to_string());
@@ -1587,6 +1597,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
                 system_prompt: args.system_prompt,
                 team_instructions: args.team_instructions,
                 agent_core: args.agent_core,
+                huddle_instructions: args.huddle_instructions,
                 agent_canvas: args.agent_canvas,
             }
             .sections(),
@@ -2644,6 +2655,7 @@ mod tests {
             system_prompt: Some("test system prompt"),
             team_instructions: Some("ship small"),
             agent_core: Some(core),
+            huddle_instructions: None,
             agent_canvas: Some(canvas),
             standing_context_sent: sent,
             ..Default::default()

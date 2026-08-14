@@ -4,7 +4,7 @@ import * as React from "react";
 
 import { useProfileQuery, useSelfProfileCache } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { useHuddle } from "../HuddleContext";
+import { useHuddle, useHuddleLevels } from "../HuddleContext";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { HuddleParticipantsControl } from "./ParticipantList";
 
@@ -28,14 +28,8 @@ function isVisible(state: HuddleRosterState | null) {
 
 /** Larger, persistent roster for the companion huddle room window. */
 export function HuddleRoomHeader() {
-  const {
-    activeSpeakers,
-    interruptAgentSpeech,
-    isMuted,
-    micConnected,
-    micLevel,
-    speakerLevels,
-  } = useHuddle();
+  const { interruptAgentSpeech, isMuted, micConnected } = useHuddle();
+  const { activeSpeakers, micLevel, speakerLevels } = useHuddleLevels();
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
   const selfProfileCache = useSelfProfileCache();

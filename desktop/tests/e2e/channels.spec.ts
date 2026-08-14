@@ -781,33 +781,18 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
   expect(expandedOpenIndex).toBeLessThan(startIndex);
   expect(sendCommands).not.toContain("add_channel_members");
 
-  const sentMessageCommand = sendCommandPayloads.find((entry) => {
-    if (entry.command !== "plugin:websocket|send") {
-      return false;
-    }
-    const data = (entry.payload as { message?: { data?: string } } | undefined)
-      ?.message?.data;
-    if (!data) {
-      return false;
-    }
-    const frame = JSON.parse(data) as unknown[];
-    return (
-      frame[0] === "EVENT" &&
-      (frame[1] as { content?: string } | undefined)?.content.includes(
-        "for a hand",
-      )
-    );
-  });
-  const sentMessageData = (
-    sentMessageCommand?.payload as { message?: { data?: string } } | undefined
-  )?.message?.data;
-  expect(sentMessageData).toBeTruthy();
-  const sentMessageEvent = (
-    JSON.parse(sentMessageData ?? "[]") as [string, { tags?: string[][] }]
-  )[1];
-  const sentChannelId = sentMessageEvent.tags?.find(
-    (tag) => tag[0] === "h",
-  )?.[1];
+  const sentMessageCommand = sendCommandPayloads.find(
+    (entry) =>
+      entry.command === "send_channel_message" &&
+      (
+        entry.payload as { content?: string; channelId?: string } | undefined
+      )?.content?.includes("for a hand"),
+  );
+  const sentChannelId = (
+    sentMessageCommand?.payload as
+      | { content?: string; channelId?: string }
+      | undefined
+  )?.channelId;
   expect(sentChannelId).toBeTruthy();
   await expect(
     page.locator("[data-active='true'][data-channel-id]"),
@@ -1048,7 +1033,15 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   await expect(input).toContainText("Fizz");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
-  const failedSendChannelId = await readOutgoingChannelId(page, "for a hand");
+  const failedSendChannelId = (
+    commandsAfterFailure.find(
+      (entry) =>
+        entry.command === "send_channel_message" &&
+        (
+          entry.payload as { content?: string; channelId?: string } | undefined
+        )?.content?.includes("for a hand"),
+    )?.payload as { content?: string; channelId?: string } | undefined
+  )?.channelId;
   expect(failedSendChannelId).toBeTruthy();
   expect(commandsAfterFailure.map((entry) => entry.command)).not.toContain(
     "add_channel_members",
@@ -1075,29 +1068,15 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
     ),
   ).toBe(baselineOpenDmCount + 1);
   const retryCommands = allCommands.slice(retryBaseline);
-  const retrySend = retryCommands.find((entry) => {
-    if (entry.command !== "plugin:websocket|send") {
-      return false;
-    }
-    const data = (entry.payload as { message?: { data?: string } } | undefined)
-      ?.message?.data;
-    if (!data) {
-      return false;
-    }
-    const frame = JSON.parse(data) as unknown[];
-    return (
-      frame[0] === "EVENT" &&
-      (frame[1] as { content?: string } | undefined)?.content === retryMessage
-    );
-  });
-  const retrySendData = (
-    retrySend?.payload as { message?: { data?: string } } | undefined
-  )?.message?.data;
-  expect(retrySendData).toBeTruthy();
-  const retryEvent = (
-    JSON.parse(retrySendData ?? "[]") as [string, { tags?: string[][] }]
-  )[1];
-  const retryChannelId = retryEvent.tags?.find((tag) => tag[0] === "h")?.[1];
+  const retrySend = retryCommands.find(
+    (entry) =>
+      entry.command === "send_channel_message" &&
+      (entry.payload as { content?: string; channelId?: string } | undefined)
+        ?.content === retryMessage,
+  );
+  const retryChannelId = (
+    retrySend?.payload as { content?: string; channelId?: string } | undefined
+  )?.channelId;
   expect(retryChannelId).toBeTruthy();
   expect(retryChannelId).not.toBe(failedSendChannelId);
   await expect(
@@ -1231,7 +1210,7 @@ test("does not reopen a direct message after leaving the composer", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("does not reopen a sent direct message after leaving during cache reseed", async ({
+test("opens a sent direct message without waiting for a channel-list refresh", async ({
   page,
 }) => {
   await page.goto("/");
@@ -1241,29 +1220,37 @@ test("does not reopen a sent direct message after leaving during cache reseed", 
   await page
     .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
     .click();
-  const staleMessage = "Stay on the channel after cache reseed";
-  await page.getByTestId("message-input").fill(staleMessage);
+  const message = "Open without a channel-list refresh";
+  await page.getByTestId("message-input").fill(message);
+  const baselineChannelsReads = commandCount(
+    await readCommandLog(page),
+    "get_channels",
+  );
+  const baselineHttpSends = commandCount(
+    await readCommandLog(page),
+    "send_channel_message",
+  );
   await page.evaluate(() => {
     const testWindow = window as Window & {
       __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
     };
     testWindow.__BUZZ_E2E__ ??= {};
     testWindow.__BUZZ_E2E__.mock ??= {};
-    testWindow.__BUZZ_E2E__.mock.channelsReadDelayMs = 1_000;
+    testWindow.__BUZZ_E2E__.mock.channelsReadDelayMs = 3_000;
   });
 
   await page.getByTestId("send-message").click();
-  await expect
-    .poll(async () => hasOutgoingEventWithContent(page, staleMessage))
-    .toBe(true);
-
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await page.waitForTimeout(1_250);
-  await expect(page).toHaveURL(
-    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie", {
+    timeout: 1_000,
+  });
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+  expect(commandCount(await readCommandLog(page), "get_channels")).toBe(
+    baselineChannelsReads,
   );
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  expect(commandCount(await readCommandLog(page), "send_channel_message")).toBe(
+    baselineHttpSends + 1,
+  );
+  await expect(page).toHaveURL(/\/channels\/[0-9a-f-]+(?:\?|$)/);
 });
 
 test("shows capped participant stack in group direct message header", async ({
