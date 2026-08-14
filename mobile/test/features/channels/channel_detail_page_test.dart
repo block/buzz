@@ -37,6 +37,7 @@ import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
@@ -763,6 +764,10 @@ void main() {
       expect(find.text('Forum threads are not on mobile yet'), findsNothing);
       // The compose bar for stream messages should not appear.
       expect(find.text('Message…'), findsNothing);
+      final scaffold = tester.widget<FrostedScaffold>(
+        find.byType(FrostedScaffold).first,
+      );
+      expect(scaffold.resizeToAvoidBottomInset, isTrue);
     });
 
     testWidgets('renders video attachments from imeta tags in the timeline', (

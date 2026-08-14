@@ -5,6 +5,9 @@ class ComposeBar extends HookConsumerWidget {
   final String channelName;
   final String? hintText;
   final ComposeBarOnSend onSend;
+
+  /// Runs immediately before the editor requests focus, allowing a parent to
+  /// prepare focus-dependent layout (for example, following a thread tail).
   final VoidCallback? onFocusRequested;
 
   /// Optional thread IDs for thread-scoped typing indicators.

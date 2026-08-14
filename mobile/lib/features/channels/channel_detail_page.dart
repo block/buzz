@@ -300,7 +300,8 @@ class ChannelDetailPage extends HookConsumerWidget {
     }, [channel.id, readState.isReady, readTimestamp]);
 
     return FrostedScaffold(
-      resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
+      resizeToAvoidBottomInset:
+          !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
