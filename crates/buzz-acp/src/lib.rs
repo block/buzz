@@ -1413,6 +1413,10 @@ struct SlotCircuit {
     /// Prevents duplicate spawns from maintenance ticks that fire before the
     /// previous spawn_and_init completes.
     respawn_in_flight: bool,
+    /// True once a circuit-open alert has been emitted for this slot and
+    /// not yet followed by a successful respawn. Lets the respawn-complete
+    /// path emit a matching "recovered" alert exactly once.
+    alerted_open: bool,
 }
 
 /// Result of [`SlotCircuit::record_crash`].
@@ -1794,6 +1798,7 @@ mod idle_pool_sleep_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight,
+            alerted_open: false,
         }
     }
 
@@ -2373,6 +2378,7 @@ async fn tokio_main() -> Result<()> {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         })
         .collect();
 
@@ -2484,6 +2490,10 @@ async fn tokio_main() -> Result<()> {
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
+                    if crash_history[rr.index].alerted_open {
+                        crash_history[rr.index].alerted_open = false;
+                        emit_circuit_recovered_alert(observer.as_ref(), rr.index);
+                    }
                     respawn_collected = true;
                 }
                 Err(e) => {
@@ -3990,6 +4000,27 @@ fn emit_circuit_open_alert(
     );
 }
 
+/// Emit a user-visible alert when a slot that previously tripped its circuit
+/// breaker ([`emit_circuit_open_alert`]) has successfully respawned.
+///
+/// Closes the loop for an owner watching the observer stream: they see both
+/// when a slot went dark and when it came back, rather than only the former.
+fn emit_circuit_recovered_alert(observer: Option<&observer::ObserverHandle>, agent_index: usize) {
+    let Some(observer) = observer else {
+        return;
+    };
+    observer.emit(
+        "circuit_recovered",
+        Some(agent_index),
+        &observer::context_for(None, None, None),
+        serde_json::json!({
+            "error": format!(
+                "Agent slot {agent_index} recovered — its circuit breaker probe succeeded and it is responding again."
+            ),
+        }),
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -4447,6 +4478,7 @@ fn recover_panicked_agent(
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = i, "circuit open after panic — not respawning");
             emit_circuit_open_alert(observer.as_ref(), i, meta.channel_id, "panicked");
+            slot.alerted_open = true;
             return;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -4662,6 +4694,7 @@ fn spawn_respawn_task(
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = index, "circuit open — not respawning");
             emit_circuit_open_alert(observer.as_ref(), index, None, "crashed");
+            slot.alerted_open = true;
             return false;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -7494,6 +7527,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7566,6 +7600,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7680,6 +7715,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7741,6 +7777,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7822,6 +7859,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7910,6 +7948,7 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                alerted_open: false,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8002,6 +8041,7 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                alerted_open: false,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8108,6 +8148,7 @@ mod error_outcome_emission_tests {
                 crash_times: Vec::new(),
                 open_until: None,
                 respawn_in_flight: false,
+                alerted_open: false,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8185,6 +8226,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8279,6 +8321,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8407,6 +8450,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8537,6 +8581,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8726,6 +8771,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8812,6 +8858,7 @@ mod error_outcome_emission_tests {
             crash_times: Vec::new(),
             open_until: None,
             respawn_in_flight: false,
+            alerted_open: false,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
