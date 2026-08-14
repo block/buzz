@@ -144,6 +144,41 @@ void main() {
     await result;
   });
 
+  test(
+    'falls back to metadata DM recipients when membership is empty',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final signingKey = nostr.Keys.generate().nsec;
+      final sender = nostr.Keys(
+        nostr.Nip19.decode(payload: signingKey).data,
+      ).public;
+      final recipient = 'b' * 64;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+        fetchMembers: (_) async => const [],
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'hello from an unavailable roster',
+        channel: _dmChannel([sender, recipient]),
+        mentionPubkeys: const [],
+      );
+      await session.published;
+
+      expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+        ['p', recipient],
+      ]);
+
+      session.accept();
+      await result;
+    },
+  );
+
   test('falls back to metadata DM recipients when membership fails', () async {
     final session = _PendingPublishRelaySession();
     final signingKey = nostr.Keys.generate().nsec;

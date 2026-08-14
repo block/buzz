@@ -127,7 +127,7 @@ class SendMessage {
     }
 
     final author = authorPubkey?.toLowerCase();
-    final participants = members != null
+    final participants = members != null && members.isNotEmpty
         ? members.map((member) => member.pubkey)
         : channel.participantPubkeys;
     return {
