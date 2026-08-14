@@ -1039,23 +1039,59 @@ pub async fn discover_managed_agent_prereqs(
 
 #[tauri::command]
 pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
-    // Query kind:10100 agent profile events from the relay.
-    let events = query_relay(
+    let managed_agent_events = query_relay(
         &state,
         &[serde_json::json!({
-            "kinds": [10100],
+            "kinds": [30177],
         })],
     )
     .await?;
 
-    // The convert helper returns `{"agents": [...]}`. Extract and re-deserialize
-    // into the strongly-typed `Vec<RelayAgentInfo>` the frontend expects.
-    let value = nostr_convert::agents_from_events(&events);
-    let agents = value
-        .get("agents")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
+    let agent_pubkeys = nostr_convert::managed_agent_pubkeys_from_events(&managed_agent_events);
+    if agent_pubkeys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let profile_events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "authors": agent_pubkeys.iter().collect::<Vec<_>>(),
+            "kinds": [0],
+        })],
+    )
+    .await?;
+    let mut agents = nostr_convert::relay_agents_from_managed_agent_events(
+        &managed_agent_events,
+        &profile_events,
+    );
+    if agents.is_empty() {
+        return Ok(agents);
+    }
+
+    let verified_agent_pubkeys: std::collections::HashSet<String> =
+        agents.iter().map(|agent| agent.pubkey.clone()).collect();
+    let Some(relay_pubkey) = super::identity_archive::fetch_relay_self(&state).await? else {
+        return Ok(agents);
+    };
+    let membership_events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [39002],
+            "authors": [relay_pubkey.clone()],
+            "#p": verified_agent_pubkeys.iter().collect::<Vec<_>>(),
+        })],
+    )
+    .await?;
+    let channel_ids = nostr_convert::agent_channel_ids_from_member_events(
+        &membership_events,
+        &verified_agent_pubkeys,
+        &relay_pubkey,
+    );
+    for agent in &mut agents {
+        agent.channel_ids = channel_ids.get(&agent.pubkey).cloned().unwrap_or_default();
+    }
+
+    Ok(agents)
 }
 
 #[cfg(test)]
