@@ -5,7 +5,7 @@ import 'package:intl/intl.dart';
 export '../../shared/utils/string_utils.dart' show shortPubkey;
 
 final _weekdayFormat = DateFormat('EEEE');
-final _monthDayFormat = DateFormat('MMMM d');
+final _weekdayMonthDayFormat = DateFormat('EEEE, MMMM d');
 final _monthDayYearFormat = DateFormat('MMMM d, y');
 final _shortMonthDayFormat = DateFormat('MMM d');
 final _messageTimeFormat = DateFormat('h:mm a', 'en_US');
@@ -13,16 +13,20 @@ final _messageTimeFormat = DateFormat('h:mm a', 'en_US');
 /// Days in a week, past which the weekday name stops being unambiguous.
 const _weekdayBandDays = 7;
 
-/// Label for a day divider: "Today", "Yesterday", "Monday", "March 31", or
-/// "March 31, 2025".
+/// Label for a day divider: "Today", "Yesterday", "Monday",
+/// "Tuesday, March 31", or "March 31, 2025".
 ///
 /// ```
 /// Today            → "Today"
 /// Yesterday        → "Yesterday"
 /// 2–6 days ago     → "Monday"
-/// older, this year → "March 31"
+/// older, this year → "Tuesday, March 31"
 /// earlier years    → "March 31, 2025"
 /// ```
+///
+/// The weekday rides along within the current year — it still orients ("was
+/// that a weekend?") well past the six-day band. Beyond a year it stops
+/// earning its width, and the year takes its place.
 ///
 /// Mirrors `formatDayGroupLabel` in `desktop/src/shared/lib/datetime.ts`,
 /// including its two departures from the Block writing standard: the day is
@@ -50,7 +54,7 @@ String formatDayHeading(int unixSeconds, {@visibleForTesting DateTime? now}) {
   }
 
   return date.year == now.year
-      ? _monthDayFormat.format(date)
+      ? _weekdayMonthDayFormat.format(date)
       : _monthDayYearFormat.format(date);
 }
 

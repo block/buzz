@@ -30,17 +30,21 @@ void main() {
       );
     });
 
-    test('a week back switches to a date, without the current year', () {
-      // Seven days is the first day a weekday name stops being unambiguous.
-      expect(
-        formatDayHeading(_ts(DateTime(2026, 4, 16, 9)), now: now),
-        'April 16',
-      );
-      expect(
-        formatDayHeading(_ts(DateTime(2026, 3, 31, 12)), now: now),
-        'March 31',
-      );
-    });
+    test(
+      'a week back switches to weekday + date, without the current year',
+      () {
+        // Seven days is the first day a bare weekday name stops being
+        // unambiguous, so the date joins it.
+        expect(
+          formatDayHeading(_ts(DateTime(2026, 4, 16, 9)), now: now),
+          'Thursday, April 16',
+        );
+        expect(
+          formatDayHeading(_ts(DateTime(2026, 3, 31, 12)), now: now),
+          'Tuesday, March 31',
+        );
+      },
+    );
 
     test('an earlier year keeps the year', () {
       expect(
@@ -75,8 +79,9 @@ void main() {
       final earlyTomorrow = _ts(DateTime(2026, 4, 24, 0, 1));
 
       expect(formatDayHeading(lateTonight, now: now), 'Today');
-      // A future timestamp must not borrow a weekday that reads as the past.
-      expect(formatDayHeading(earlyTomorrow, now: now), 'April 24');
+      // A future timestamp must not read as the recent past. The attached
+      // date keeps the weekday from being mistaken for last Friday.
+      expect(formatDayHeading(earlyTomorrow, now: now), 'Friday, April 24');
     });
 
     test('cross-month boundary: April 1 → March 31 is yesterday', () {

@@ -39,12 +39,12 @@ test("two to six days back reads as the weekday alone", () => {
 
 test("seven days back leaves the weekday band, so it can't repeat a name", () => {
   // Same weekday name as today — a weekday label here would be ambiguous.
-  assert.equal(formatDayGroupLabel(at(2026, 6, 23), NOW), "July 23");
+  assert.equal(formatDayGroupLabel(at(2026, 6, 23), NOW), "Thursday, July 23");
 });
 
 test("older dates in the current year omit the year", () => {
-  assert.equal(formatDayGroupLabel(at(2026, 5, 20), NOW), "June 20");
-  assert.equal(formatDayGroupLabel(at(2026, 0, 3), NOW), "January 3");
+  assert.equal(formatDayGroupLabel(at(2026, 5, 20), NOW), "Saturday, June 20");
+  assert.equal(formatDayGroupLabel(at(2026, 0, 3), NOW), "Saturday, January 3");
 });
 
 test("dates in earlier years include the year", () => {
@@ -91,7 +91,7 @@ test("no label carries an ordinal suffix", () => {
 test("a future timestamp is not labelled with a past weekday", () => {
   // Clock skew, or a relay running ahead. "Tuesday" would read as last Tuesday.
   const nextWeek = at(2026, 7, 4);
-  assert.equal(formatDayGroupLabel(nextWeek, NOW), "August 4");
+  assert.equal(formatDayGroupLabel(nextWeek, NOW), "Tuesday, August 4");
   // Still same-day, so Today remains correct for small skew.
   assert.equal(formatDayGroupLabel(at(2026, 6, 30, 23, 0), NOW), "Today");
 });
@@ -118,7 +118,7 @@ test("compact mode drops the time outside today", () => {
   const opts = { nowSeconds: NOW };
   assert.equal(formatItemTimestamp(at(2026, 6, 29, 9, 5), opts), "Yesterday");
   assert.equal(formatItemTimestamp(at(2026, 6, 27, 9, 5), opts), "Monday");
-  assert.equal(formatItemTimestamp(at(2026, 5, 20, 9, 5), opts), "Jun 20");
+  assert.equal(formatItemTimestamp(at(2026, 5, 20, 9, 5), opts), "Sat, Jun 20");
   assert.equal(
     formatItemTimestamp(at(2025, 5, 20, 9, 5), opts),
     "Jun 20, 2025",
@@ -137,7 +137,7 @@ test("roomy mode keeps the time at every band, joined with 'at'", () => {
   );
   assert.equal(
     formatItemTimestamp(at(2026, 5, 20, 14, 34), opts),
-    "Jun 20 at 2:34 PM",
+    "Sat, Jun 20 at 2:34 PM",
   );
   assert.equal(
     formatItemTimestamp(at(2025, 5, 20, 14, 34), opts),

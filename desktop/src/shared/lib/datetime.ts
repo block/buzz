@@ -15,7 +15,8 @@ const WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
   weekday: "long",
 });
 
-const MONTH_DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const WEEKDAY_MONTH_DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  weekday: "long",
   month: "long",
   day: "numeric",
 });
@@ -26,10 +27,14 @@ const MONTH_DAY_YEAR_FORMATTER = new Intl.DateTimeFormat("en-US", {
   year: "numeric",
 });
 
-const SHORT_MONTH_DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-});
+const SHORT_WEEKDAY_SHORT_MONTH_DAY_FORMATTER = new Intl.DateTimeFormat(
+  "en-US",
+  {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  },
+);
 
 const SHORT_MONTH_DAY_YEAR_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -53,9 +58,14 @@ const WEEKDAY_BAND_DAYS = 7;
  * Today          → "Today"
  * Yesterday      → "Yesterday"
  * 2–6 days ago   → "Monday"
- * older, this year → "June 20"
+ * older, this year → "Saturday, June 20"
  * earlier years  → "June 20, 2025"
  * ```
+ *
+ * The weekday rides along within the current year — feedback was that it still
+ * orients ("was that a weekend?") well past the six-day band. Beyond a year it
+ * stops earning its width: nobody maps "Friday" to anything a year later, and
+ * the year itself needs the room.
  *
  * Deliberate deviation from the standard: the standard collapses anything over
  * ten months old to month and year ("Aug 2022"). A group label has to *identify*
@@ -87,7 +97,7 @@ export function formatDayGroupLabel(
   }
 
   return date.getFullYear() === now.getFullYear()
-    ? MONTH_DAY_FORMATTER.format(date)
+    ? WEEKDAY_MONTH_DAY_FORMATTER.format(date)
     : MONTH_DAY_YEAR_FORMATTER.format(date);
 }
 
@@ -100,9 +110,12 @@ export function formatDayGroupLabel(
  * Today   → "2:34 PM"             Today   → "2:34 PM"
  * Yest.   → "Yesterday"           Yest.   → "Yesterday at 2:34 PM"
  * 2–6d    → "Monday"              2–6d    → "Monday at 2:34 PM"
- * year    → "Jun 20"              year    → "Jun 20 at 2:34 PM"
+ * year    → "Sat, Jun 20"         year    → "Sat, Jun 20 at 2:34 PM"
  * older   → "Jun 20, 2025"        older   → "Jun 20, 2025 at 2:34 PM"
  * ```
+ *
+ * The weekday stays through the current year (abbreviated, matching the month)
+ * and drops once the year appears — see `formatDayGroupLabel` for why.
  *
  * Today needs no date word in either mode: a bare clock time already reads as
  * today, and "Today at 2:34 PM" is longer without saying more.
@@ -138,7 +151,7 @@ export function formatItemTimestamp(
   } else {
     dayLabel =
       date.getFullYear() === now.getFullYear()
-        ? SHORT_MONTH_DAY_FORMATTER.format(date)
+        ? SHORT_WEEKDAY_SHORT_MONTH_DAY_FORMATTER.format(date)
         : SHORT_MONTH_DAY_YEAR_FORMATTER.format(date);
   }
 
