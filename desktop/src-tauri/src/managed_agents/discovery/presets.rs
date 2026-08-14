@@ -154,15 +154,6 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli: Some("amp"),
     },
     PresetHarness {
-        id: "hermes",
-        label: "Hermes Agent",
-        command: "hermes-acp",
-        args: &[],
-        install_instructions_url: "https://hermes-agent.nousresearch.com",
-        install_hint: "Buzz talks to Hermes Agent through its hermes-acp command.",
-        underlying_cli: None,
-    },
-    PresetHarness {
         id: "openclaw",
         label: "OpenClaw",
         command: "openclaw",

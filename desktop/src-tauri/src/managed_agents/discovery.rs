@@ -211,6 +211,42 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: None,
         auth_probe_args: None,
     },
+    KnownAcpRuntime {
+        id: "hermes",
+        label: "Hermes Agent",
+        commands: &["hermes-acp"],
+        aliases: &["hermes-agent"],
+        avatar_url: "",
+        // Hermes terminal subprocesses intentionally sanitize signing secrets.
+        // Give Hermes the credential-scoped Buzz MCP shell so message sends can
+        // emit recipient p-tags without exposing the key to generic tools.
+        mcp_command: Some("buzz-dev-mcp"),
+        mcp_hooks: true,
+        underlying_cli: Some("hermes"),
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://hermes-agent.nousresearch.com/docs",
+        adapter_install_instructions_url: "https://hermes-agent.nousresearch.com/docs",
+        cli_install_hint: "Install and configure Hermes Agent before using this runtime.",
+        adapter_install_hint: "Hermes Agent provides the hermes-acp adapter.",
+        skill_dir: Some(".hermes/skills"),
+        supports_acp_model_switching: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `hermes setup` to configure a provider."),
+        auth_probe_args: None,
+    },
 ];
 
 /// Skill discovery directories declared by known runtimes.
@@ -444,7 +480,9 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" | "hermes" | "hermes-acp" | "hermes-agent" => {
+            Some(Vec::new())
+        }
         _ => None,
     }
 }
