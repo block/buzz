@@ -2,7 +2,7 @@
 //!
 //! `allowed` gates whether an inbound SMS is admitted at all; `default_project`
 //! is the NIP-MP project `d`-tag the sms-operator persona dispatches into when
-//! the sender is unambiguous. See migrations/0031_sms_identities.sql.
+//! the sender is unambiguous. See migrations/0032_sms_identities.sql.
 
 use sqlx::{PgPool, Row};
 
