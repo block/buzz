@@ -303,6 +303,11 @@ export const ChannelPane = React.memo(function ChannelPane({
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
+      threadContext?: {
+        parentEventId: string | null;
+        threadHeadId: string | null;
+      } | null,
+      forceRest?: boolean,
     ) => {
       const shouldCompleteWelcomeBanner =
         isActiveWelcomeChannel &&
@@ -310,7 +315,14 @@ export const ChannelPane = React.memo(function ChannelPane({
           mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
 
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
-      await onSendMessage(content, mentionPubkeys, mediaTags, channelId);
+      await onSendMessage(
+        content,
+        mentionPubkeys,
+        mediaTags,
+        channelId,
+        threadContext,
+        forceRest,
+      );
 
       if (
         channelId &&

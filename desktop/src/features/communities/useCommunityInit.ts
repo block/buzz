@@ -22,6 +22,7 @@ import {
 } from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import { resetBackgroundMediaUploads } from "@/features/messages/lib/backgroundMediaUploadStore";
+import { resetLinkPreviewPreparations } from "@/features/messages/lib/linkPreviewPreparationStore";
 import {
   resetActiveAgentTurnsStore,
   saveActiveAgentTurnsForCommunity,
@@ -73,6 +74,7 @@ async function resetCommunityState({
   resetVideoPlayerState();
   resetRenderScopedReactionHydration();
   resetBackgroundMediaUploads();
+  resetLinkPreviewPreparations();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
 }
