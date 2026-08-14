@@ -6,8 +6,11 @@ import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -41,10 +44,38 @@ final _dataset = () {
     ),
     _entry(
       'point_up',
-      native: '\u{261D}\u{1F3FD}',
+      native: '\u{261D}\u{1F3FB}',
       categoryId: 'people',
       name: 'Index Pointing Up',
       skinIndex: 1,
+    ),
+    _entry(
+      'point_up',
+      native: '\u{261D}\u{1F3FC}',
+      categoryId: 'people',
+      name: 'Index Pointing Up',
+      skinIndex: 2,
+    ),
+    _entry(
+      'point_up',
+      native: '\u{261D}\u{1F3FD}',
+      categoryId: 'people',
+      name: 'Index Pointing Up',
+      skinIndex: 3,
+    ),
+    _entry(
+      'point_up',
+      native: '\u{261D}\u{1F3FE}',
+      categoryId: 'people',
+      name: 'Index Pointing Up',
+      skinIndex: 4,
+    ),
+    _entry(
+      'point_up',
+      native: '\u{261D}\u{1F3FF}',
+      categoryId: 'people',
+      name: 'Index Pointing Up',
+      skinIndex: 5,
     ),
   ];
   final nature = [
@@ -95,6 +126,29 @@ final _tallDataset = () {
 const _customEmoji = [
   CustomEmoji(shortcode: 'partyparrot', url: 'https://example.test/parrot.gif'),
 ];
+
+const _nativeEmojiPickerChannel = MethodChannel('buzz/native_emoji_picker');
+
+void _setMockNativeEmojiPickerHandler(
+  Future<Object?> Function(MethodCall call)? handler,
+) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_nativeEmojiPickerChannel, handler);
+}
+
+Future<void> _sendNativeEmojiPickerCall(
+  WidgetTester tester,
+  String method, [
+  Object? arguments,
+]) async {
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    _nativeEmojiPickerChannel.name,
+    _nativeEmojiPickerChannel.codec.encodeMethodCall(
+      MethodCall(method, arguments),
+    ),
+    null,
+  );
+}
 
 Future<SharedPreferences> _prefs() {
   SharedPreferences.setMockInitialValues({});
@@ -147,26 +201,113 @@ void main() {
       // shortcut into it, not a page switcher.
       final grid = find.byKey(const ValueKey('emoji-picker-grid'));
       expect(grid, findsOneWidget);
+      final sectionKeys = tester
+          .widget<CustomScrollView>(grid)
+          .slivers
+          .whereType<SliverMainAxisGroup>()
+          .map((sliver) => sliver.key);
       expect(
-        find.descendant(
-          of: grid,
-          matching: find.byKey(const ValueKey('emoji-tile-grinning')),
+        sectionKeys,
+        containsAllInOrder(const [
+          ValueKey('emoji-section-people'),
+          ValueKey('emoji-section-nature'),
+          ValueKey('emoji-section-custom'),
+        ]),
+      );
+    });
+
+    testWidgets(
+      'search shares the sheet header with the shared close control',
+      (tester) async {
+        await _pumpPicker(tester, prefs: await _prefs());
+
+        final search = tester.getRect(
+          find.byKey(const ValueKey('emoji-picker-search')),
+        );
+        final close = tester.getRect(find.byTooltip('Close sheet'));
+
+        expect(close.size, const Size.square(44));
+        expect(search.center.dy, close.center.dy);
+        expect(close.left - search.right, Grid.xxs);
+      },
+    );
+
+    testWidgets('the Flutter picker keeps the established tray height', (
+      tester,
+    ) async {
+      await _pumpPicker(tester, prefs: await _prefs());
+
+      final picker = find.byType(EmojiPickerSheet);
+      final context = tester.element(picker);
+      expect(
+        tester.getSize(picker).height,
+        closeTo(MediaQuery.sizeOf(context).height * 0.62, 0.5),
+      );
+      expect(find.byType(DraggableScrollableSheet), findsNothing);
+    });
+
+    testWidgets('the Flutter search field is a full pill', (tester) async {
+      await _pumpPicker(tester, prefs: await _prefs());
+
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('emoji-picker-search')),
+      );
+      final border = field.decoration!.border! as OutlineInputBorder;
+      expect(border.borderRadius, BorderRadius.circular(Radii.full));
+    });
+
+    testWidgets('uses the shared sheet surface instead of a picker override', (
+      tester,
+    ) async {
+      final prefs = await _prefs();
+      final theme = AppTheme.light().copyWith(
+        colorScheme: lightColorScheme.copyWith(
+          surfaceContainerHighest: Colors.grey,
         ),
-        findsOneWidget,
+        bottomSheetTheme: const BottomSheetThemeData(
+          backgroundColor: Colors.green,
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            myPubkeyProvider.overrideWithValue('self'),
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            customEmojiListProvider.overrideWithValue(_customEmoji),
+          ],
+          child: MaterialApp(
+            theme: theme,
+            home: Scaffold(
+              body: Builder(
+                builder: (context) => FilledButton(
+                  onPressed: () =>
+                      showEmojiPicker(context: context, onSelect: (_) {}),
+                  child: const Text('Open picker'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open picker'));
+      await tester.pumpAndSettle();
+
+      final ancestorMaterials = find
+          .ancestor(
+            of: find.byType(EmojiPickerSheet),
+            matching: find.byType(Material),
+          )
+          .evaluate()
+          .map((element) => element.widget as Material);
+      expect(
+        ancestorMaterials.map((material) => material.color),
+        contains(Colors.green),
       );
       expect(
-        find.descendant(
-          of: grid,
-          matching: find.byKey(const ValueKey('emoji-tile-fire')),
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(
-          of: grid,
-          matching: find.byKey(const ValueKey('emoji-tile-custom-partyparrot')),
-        ),
-        findsOneWidget,
+        ancestorMaterials.map((material) => material.color),
+        isNot(contains(Colors.grey)),
       );
     });
 
@@ -174,21 +315,27 @@ void main() {
       await _pumpPicker(tester, prefs: await _prefs());
 
       // The rail used to be a short left-aligned strip. Every section now gets
-      // one evenly-sized slot across the same width the search field spans.
-      final searchField = tester.getRect(
-        find.byKey(const ValueKey('emoji-picker-search')),
-      );
+      // one evenly-sized slot across the tray, while search shares its row with
+      // the close control above.
+      final picker = tester.getRect(find.byType(EmojiPickerSheet));
       final people = tester.getRect(find.byTooltip('Smileys & People'));
       final nature = tester.getRect(find.byTooltip('Animals & Nature'));
       final custom = tester.getRect(find.byTooltip('Custom'));
+      final skinTone = tester.getRect(find.byTooltip('Skin tone'));
 
       expect(nature.left, greaterThan(people.left));
       expect(custom.left, greaterThan(nature.left));
       expect(people.width, closeTo(nature.width, 0.5));
       expect(people.width, closeTo(custom.width, 0.5));
-      // First slot starts and last slot ends on the search field's edges.
-      expect(people.left, closeTo(searchField.left, 0.5));
-      expect(custom.right, closeTo(searchField.right, 0.5));
+      expect(people.width, closeTo(skinTone.width, 0.5));
+      expect(people.left, closeTo(picker.left + Grid.gutter, 0.5));
+      expect(skinTone.right, closeTo(picker.right - Grid.gutter, 0.5));
+      expect(
+        tester.getSize(
+          find.byKey(const ValueKey('emoji-skin-tone-dot-selected')),
+        ),
+        const Size.square(16),
+      );
     });
 
     testWidgets('tapping the rail scrolls the grid instead of replacing it', (
@@ -223,6 +370,8 @@ void main() {
 
       await _pumpPicker(tester, prefs: await _prefs());
       expect(find.byTooltip('Custom'), findsOneWidget);
+      await tester.tap(find.byTooltip('Custom'));
+      await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('emoji-tile-custom-partyparrot')),
         findsOneWidget,
@@ -236,14 +385,16 @@ void main() {
 
       // A community's own emoji used to get their own looser 6-per-row grid,
       // which read as a different component bolted onto the sheet.
-      final native = tester.getRect(
-        find.byKey(const ValueKey('emoji-tile-fire')),
-      );
+      final nativeWidth = tester
+          .getRect(find.byKey(const ValueKey('emoji-tile-grinning')))
+          .width;
+      await tester.tap(find.byTooltip('Custom'));
+      await tester.pumpAndSettle();
       final custom = tester.getRect(
         find.byKey(const ValueKey('emoji-tile-custom-partyparrot')),
       );
-      expect(custom.width, closeTo(native.width, 0.5));
-      expect(custom.height, closeTo(native.height, 0.5));
+      expect(custom.width, closeTo(nativeWidth, 0.5));
+      expect(custom.height, closeTo(40, 0.5));
     });
 
     testWidgets('typing filters across the standard and custom sets', (
@@ -326,16 +477,27 @@ void main() {
     testWidgets('a standard emoji emits its glyph', (tester) async {
       final selected = await _pumpPicker(tester, prefs: await _prefs());
 
+      await tester.tap(find.byTooltip('Animals & Nature'));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('emoji-tile-fire')));
       await tester.pumpAndSettle();
 
       expect(selected, ['\u{1F525}']);
     });
 
-    testWidgets('a skin-tone variant is selectable', (tester) async {
+    testWidgets('skin tone choice shows and emits one selected variant', (
+      tester,
+    ) async {
       final selected = await _pumpPicker(tester, prefs: await _prefs());
 
-      await tester.tap(find.byKey(const ValueKey('emoji-tile-point_up-1')));
+      expect(find.byKey(const ValueKey('emoji-tile-point_up')), findsOneWidget);
+      expect(find.byKey(const ValueKey('emoji-tile-point_up-1')), findsNothing);
+
+      await tester.tap(find.byTooltip('Skin tone'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('emoji-skin-tone-3')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('emoji-tile-point_up')));
       await tester.pumpAndSettle();
 
       expect(selected, ['\u{261D}\u{1F3FD}']);
@@ -344,6 +506,8 @@ void main() {
     testWidgets('a custom emoji emits :shortcode:', (tester) async {
       final selected = await _pumpPicker(tester, prefs: await _prefs());
 
+      await tester.tap(find.byTooltip('Custom'));
+      await tester.pumpAndSettle();
       await tester.tap(
         find.byKey(const ValueKey('emoji-tile-custom-partyparrot')),
       );
@@ -358,6 +522,8 @@ void main() {
       final prefs = await _prefs();
       final selected = await _pumpPicker(tester, prefs: prefs);
 
+      await tester.tap(find.byTooltip('Animals & Nature'));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('emoji-tile-fire')));
       await tester.pumpAndSettle();
 
@@ -389,6 +555,117 @@ void main() {
       await tester.pump();
 
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    });
+  });
+
+  group('iOS native emoji picker', () {
+    testWidgets('passes shared theme and custom emoji into the native sheet', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await _prefs();
+      MethodCall? presentation;
+      final selected = <String>[];
+      var dismissals = 0;
+      _setMockNativeEmojiPickerHandler((call) async {
+        presentation = call;
+        return true;
+      });
+
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              myPubkeyProvider.overrideWithValue('self'),
+              customEmojiListProvider.overrideWithValue(_customEmoji),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Scaffold(
+                body: Builder(
+                  builder: (context) => FilledButton(
+                    onPressed: () => showEmojiPicker(
+                      context: context,
+                      onSelect: selected.add,
+                      onDismiss: () => dismissals += 1,
+                    ),
+                    child: const Text('Open picker'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('Open picker'));
+        await tester.pump();
+
+        expect(presentation?.method, 'present');
+        final arguments = presentation?.arguments as Map<Object?, Object?>;
+        expect(arguments['surfaceColor'], lightColorScheme.surface.toARGB32());
+        expect(arguments['skinTone'], 0);
+        expect(arguments['customEmoji'], [
+          {
+            'shortcode': 'partyparrot',
+            'url': 'https://example.test/parrot.gif',
+          },
+        ]);
+        expect(find.byType(EmojiPickerSheet), findsNothing);
+
+        await _sendNativeEmojiPickerCall(tester, 'skinToneChanged', 4);
+        await _sendNativeEmojiPickerCall(tester, 'selected', '\u{1F525}');
+        await _sendNativeEmojiPickerCall(tester, 'dismissed');
+        expect(selected, ['\u{1F525}']);
+        expect(dismissals, 1);
+        expect(prefs.getInt('buzz.emoji-picker.skin-tone.v1'), 4);
+      } finally {
+        _setMockNativeEmojiPickerHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('falls back to the Flutter picker when native cannot present', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await _prefs();
+      _setMockNativeEmojiPickerHandler((_) async => false);
+
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              myPubkeyProvider.overrideWithValue('self'),
+              emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+              customEmojiListProvider.overrideWithValue(_customEmoji),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Scaffold(
+                body: Builder(
+                  builder: (context) => FilledButton(
+                    onPressed: () =>
+                        showEmojiPicker(context: context, onSelect: (_) {}),
+                    child: const Text('Open picker'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('Open picker'));
+        await tester.pumpAndSettle();
+        expect(find.byType(EmojiPickerSheet), findsOneWidget);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeEmojiPickerHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
   });
 
