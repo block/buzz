@@ -74,7 +74,13 @@ for name, payload in CORPUS:
     )
 
 # The seam must be single-valued: off means bare text on every entry point.
-from contain import ENTRY_POINTS  # noqa: E402
+import os  # noqa: E402
+
+from contain import CONTROL_FLAGS_ENV_VAR, ENTRY_POINTS  # noqa: E402
+
+# contain()'s own runtime guard (#137) requires this explicitly for enabled=False,
+# the same way the CLI requires it for --no-contain.
+os.environ[CONTROL_FLAGS_ENV_VAR] = "true"
 
 seam_ok = all(
     contain(ep, "payload", NONCE, enabled=False).block == "payload" for ep in ENTRY_POINTS

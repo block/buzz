@@ -12,10 +12,16 @@ that proves it does not.
 
 from __future__ import annotations
 
+import os
 import sys
 
-from contain import ENTRY_POINTS
+from contain import CONTROL_FLAGS_ENV_VAR, ENTRY_POINTS
 from suite import run_all
+
+# This control's entire purpose is proving the seam collapses containment — the one
+# legitimate reason to pass enabled=False directly. contain()'s own runtime guard
+# (#137) requires this explicitly, the same way the CLI does.
+os.environ[CONTROL_FLAGS_ENV_VAR] = "true"
 
 failures: list[str] = []
 

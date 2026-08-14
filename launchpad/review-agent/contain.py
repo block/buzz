@@ -13,6 +13,7 @@ a full bypass.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import secrets
 import unicodedata
@@ -22,6 +23,15 @@ from dataclasses import dataclass, field
 TOKEN = "BUZZ-UNTRUSTED"
 ESC = "~"
 ESC_TOKEN = ESC + "U"
+
+#: Env var that must be "true" for contain()/render() to run with enabled=False, or
+#: for the CLI's --seed/--no-contain. Both are "controls only" per CONTAINMENT.md's
+#: mutation-seam section — this is #137, the runtime guard that section says
+#: nothing enforces yet. Checked HERE, in contain() itself, not only in the CLI's
+#: argument parsing — CONTAINMENT.md tells future stages (#117, #118) to call
+#: render()/contain() directly, never through the CLI, and a gate that only watched
+#: argv would leave every one of those direct callers completely unprotected.
+CONTROL_FLAGS_ENV_VAR = "REVIEW_AGENT_ALLOW_MUTATION"
 
 #: The seven author-controlled surfaces. See CONTAINMENT.md § Envelope structure.
 ENTRY_POINTS = (
@@ -284,6 +294,14 @@ def contain(
     if entry_point not in ENTRY_POINTS:
         raise ValueError(f"unknown entry point: {entry_point!r}")
 
+    if not enabled and os.environ.get(CONTROL_FLAGS_ENV_VAR) != "true":
+        raise RuntimeError(
+            "contain(enabled=False) is controls-only (CONTAINMENT.md, #137). Set "
+            f"{CONTROL_FLAGS_ENV_VAR}=true to disable containment outside a control "
+            "run. This guard lives here, not only in the CLI, because CONTAINMENT.md "
+            "tells later stages to call render()/contain() directly."
+        )
+
     findings = find_lookalikes(raw, entry_point)
 
     if not enabled:
@@ -403,17 +421,9 @@ def findings_for(surfaces: dict, nonce: str) -> list:
     return findings
 
 
-#: Env var that must be "true" for --seed or --no-contain to be honoured. Both are
-#: "controls only" per CONTAINMENT.md's mutation-seam section — this is #137, the
-#: runtime guard that section says nothing enforces yet. A production caller that
-#: shells out to this CLI must never be able to reach either flag through argv alone.
-CONTROL_FLAGS_ENV_VAR = "REVIEW_AGENT_ALLOW_MUTATION"
-
-
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import json as _json
-    import os
 
     import fetch
 

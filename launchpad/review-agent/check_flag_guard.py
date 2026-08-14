@@ -76,5 +76,38 @@ check(
     f"--no-contain with REVIEW_AGENT_ALLOW_MUTATION=true still works (exit {code}): {err[-300:]}",
 )
 
+# --- contain() itself must refuse enabled=False directly, not only via the CLI --
+# CONTAINMENT.md tells later stages (#117, #118) to call render()/contain() DIRECTLY,
+# never through the CLI — a gate that only watched argv would leave those callers
+# completely unprotected. This is the gap an independent review found in the first
+# version of this fix.
+
+from contain import CONTROL_FLAGS_ENV_VAR as _ENV_VAR
+from contain import contain as _contain
+from contain import make_nonce as _make_nonce
+
+_saved_env = os.environ.pop(_ENV_VAR, None)
+try:
+    try:
+        _contain("pr_body", "payload", _make_nonce("guard"), enabled=False)
+        check(False, "contain(enabled=False) without the env var raises")
+    except RuntimeError as exc:
+        check(
+            _ENV_VAR in str(exc),
+            f"contain(enabled=False) without the env var names the env var (got: {exc})",
+        )
+
+    os.environ[_ENV_VAR] = "true"
+    result = _contain("pr_body", "payload", _make_nonce("guard"), enabled=False)
+    check(
+        result.block == "payload",
+        "contain(enabled=False) with the env var still disables containment",
+    )
+finally:
+    if _saved_env is None:
+        os.environ.pop(_ENV_VAR, None)
+    else:
+        os.environ[_ENV_VAR] = _saved_env
+
 print(f"\n{len(failures)} failure(s)")
 sys.exit(1 if failures else 0)
