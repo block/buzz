@@ -67,6 +67,19 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "fileAssociations": [
+      {
+        "ext": ["buzzteam"],
+        "name": "Buzz Team",
+        "description": "Buzz team snapshot",
+        "role": "Editor",
+        "rank": "Owner",
+        "exportedType": {
+          "identifier": "xyz.block.buzz.team",
+          "conformsTo": ["public.json"]
+        }
+      }
+    ],
     "macOS": {
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist",

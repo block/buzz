@@ -59,7 +59,7 @@ mod qr_download;
 mod relay_members;
 mod relay_reconnect;
 mod social;
-mod team_snapshot;
+pub(crate) mod team_snapshot;
 mod teams;
 mod updater;
 mod window_chrome;

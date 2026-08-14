@@ -5,7 +5,7 @@
 //! reuses the existing `AgentSnapshot` type from `agent_snapshot.rs`.
 //!
 //! Two encodings:
-//!   - `.team.json` — canonical; supports memory when selected.
+//!   - `.buzzteam` — canonical JSON; supports memory when selected.
 //!   - `.team.png` — 1×1 placeholder PNG with manifest in a `buzz_team_snapshot`
 //!     tEXt chunk; supports memory when selected. Since `TeamRecord` has no
 //!     team-level avatar, the image body is always the 1×1 placeholder; member
@@ -71,7 +71,7 @@ pub struct TeamSnapshotMeta {
 
 /// The top-level `buzz-team-snapshot v1` manifest.
 ///
-/// Serializes to / from JSON. Embedded in `.team.json` directly, or in the
+/// Serializes to / from JSON. Embedded in `.buzzteam` directly, or in the
 /// `buzz_team_snapshot` tEXt chunk of a `.team.png` (base64-encoded).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

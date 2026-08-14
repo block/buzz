@@ -26,6 +26,7 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod native_team_snapshot;
 mod native_websocket;
 mod nostr_bind;
 pub mod nostr_convert;
@@ -73,6 +74,11 @@ use managed_agents::{
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
+use native_team_snapshot::{
+    acknowledge_pending_native_team_snapshot, enqueue_startup_buzzteam_paths, handle_opened_urls,
+    handle_single_instance_args, read_pending_native_team_snapshot,
+    take_pending_native_team_snapshot, PendingNativeTeamSnapshots,
+};
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
 use shutdown::{is_restart_request, shut_down_app};
@@ -113,17 +119,11 @@ pub fn run() {
         }
     }
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // Focus the existing window when a duplicate instance launches.
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_focus();
-            }
-            // Forward any deep link URLs from the duplicate launch.
-            for arg in &argv {
-                if arg.starts_with("buzz://") {
-                    handle_deep_link_url(app, arg);
-                }
-            }
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            // Preserve upstream duplicate-launch behavior before routing
+            // deep links or opened .buzzteam files from the new instance.
+            native_team_snapshot::focus_main_window(app);
+            handle_single_instance_args(app, &argv, &cwd);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
@@ -303,12 +303,18 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(PendingNativeTeamSnapshots::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            let startup_argv = std::env::args().collect::<Vec<_>>();
+            let startup_cwd = std::env::current_dir()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            enqueue_startup_buzzteam_paths(&app_handle, &startup_argv, &startup_cwd);
             #[cfg(target_os = "macos")]
             {
                 tray_menu::init(&app_handle)?;
@@ -615,6 +621,9 @@ pub fn run() {
             terminal_runtime::terminal_focus,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            take_pending_native_team_snapshot,
+            read_pending_native_team_snapshot,
+            acknowledge_pending_native_team_snapshot,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,
@@ -925,6 +934,8 @@ pub fn run() {
     let run_shutdown_done = Arc::clone(&shutdown_done);
     let restart_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {
+        #[cfg(target_os = "macos")]
+        RunEvent::Opened { urls } => handle_opened_urls(app_handle, urls),
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => show_main_window(app_handle),
         #[cfg(target_os = "macos")]

@@ -82,6 +82,17 @@ export type EncodedTeamSnapshotPayload = {
   fileName: string;
 };
 
+export type PendingNativeTeamSnapshot = {
+  id: string;
+  fileName: string;
+  error: string | null;
+};
+
+export type NativeTeamSnapshotBytes = {
+  fileName: string;
+  fileBytes: number[];
+};
+
 export type TeamSnapshotMemberPreview = {
   displayName: string;
   systemPrompt: string | null;
@@ -171,6 +182,29 @@ export async function encodeTeamSnapshotForSend(
       format,
     },
   );
+}
+
+export async function takePendingNativeTeamSnapshot(): Promise<PendingNativeTeamSnapshot | null> {
+  return invokeTauri<PendingNativeTeamSnapshot | null>(
+    "take_pending_native_team_snapshot",
+  );
+}
+
+export async function readPendingNativeTeamSnapshot(
+  id: string,
+): Promise<NativeTeamSnapshotBytes> {
+  return invokeTauri<NativeTeamSnapshotBytes>(
+    "read_pending_native_team_snapshot",
+    { id },
+  );
+}
+
+export async function acknowledgePendingNativeTeamSnapshot(
+  id: string,
+): Promise<boolean> {
+  return invokeTauri<boolean>("acknowledge_pending_native_team_snapshot", {
+    id,
+  });
 }
 
 export async function previewTeamSnapshotImport(

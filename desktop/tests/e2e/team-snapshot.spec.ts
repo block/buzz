@@ -532,5 +532,5 @@ test("team sharing keeps link copy and export in the shared surface", async ({
   ).toHaveText("Team only");
   await expect(
     exportDialog.getByTestId("team-snapshot-format-trigger"),
-  ).toHaveText("PNG");
+  ).toHaveText("Buzz team");
 });

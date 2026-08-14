@@ -1,9 +1,20 @@
 import * as React from "react";
 import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
 import {
+  acceptPendingSnapshotImport,
+  claimPendingSnapshotImport,
   consumePendingSnapshotImport,
+  rejectPendingSnapshotImport,
+  releasePendingSnapshotImport,
   subscribeSnapshotImport,
+  type PendingSnapshotImport,
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
+import {
+  acknowledgeNativeTeamSnapshotError,
+  consumeNativeTeamSnapshotError,
+  markNativeTeamSnapshotErrorDisplayed,
+  subscribeNativeTeamSnapshotError,
+} from "@/features/agents/nativeTeamSnapshotError";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -98,33 +109,89 @@ export function AgentsView() {
         (value) => value.trim().length > 0,
       ),
   );
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
-  React.useEffect(() => {
-    // Consume a snapshot import that was enqueued before navigation (e.g. from
-    // a timeline AgentSnapshotCard click that navigated here).
-    const pending = consumePendingSnapshotImport();
-    if (pending) {
-      if (pending.snapshotKind === "team") {
-        void teamActions.handleImportTeamSnapshotFile(
-          pending.fileBytes,
-          pending.fileName,
-        );
-      } else {
-        void personas.handleImportSnapshotFile(
-          pending.fileBytes,
-          pending.fileName,
-        );
-      }
-    }
+  const activeSnapshotImportId = React.useRef<string | null>(null);
 
-    return subscribeSnapshotImport(({ fileBytes, fileName, snapshotKind }) => {
-      if (snapshotKind === "team") {
-        void teamActions.handleImportTeamSnapshotFile(fileBytes, fileName);
-      } else {
-        void personas.handleImportSnapshotFile(fileBytes, fileName);
+  const acceptSnapshotImport = React.useCallback(
+    async ({
+      id,
+      fileBytes,
+      fileName,
+      snapshotKind,
+    }: PendingSnapshotImport) => {
+      if (!claimPendingSnapshotImport(id)) return;
+      const accepted =
+        snapshotKind === "team"
+          ? await teamActions.handleImportTeamSnapshotFile(fileBytes, fileName)
+          : await personas.handleImportSnapshotFile(fileBytes, fileName);
+      if (!accepted) {
+        rejectPendingSnapshotImport(id);
+        return;
       }
-    });
+      if (acceptPendingSnapshotImport(id)) {
+        activeSnapshotImportId.current = id;
+      }
+    },
+    [
+      personas.handleImportSnapshotFile,
+      teamActions.handleImportTeamSnapshotFile,
+    ],
+  );
+
+  // Acceptance does not release this queue head: only dialog closure ends
+  // ownership and permits the next snapshot import to be delivered.
+  React.useEffect(() => {
+    const pending = consumePendingSnapshotImport();
+    if (pending) acceptSnapshotImport(pending);
+    return subscribeSnapshotImport(acceptSnapshotImport);
+  }, [acceptSnapshotImport]);
+
+  const releaseActiveSnapshotImport = React.useCallback(() => {
+    const id = activeSnapshotImportId.current;
+    if (id && releasePendingSnapshotImport(id)) {
+      activeSnapshotImportId.current = null;
+    }
   }, []);
+
+  const displayNativeTeamSnapshotError = React.useCallback(
+    ({ id, message }: { id: string; message: string }) => {
+      agents.setActionErrorMessage(message);
+      markNativeTeamSnapshotErrorDisplayed(id);
+    },
+    [agents.setActionErrorMessage],
+  );
+
+  React.useEffect(() => {
+    const pending = consumeNativeTeamSnapshotError();
+    if (pending) displayNativeTeamSnapshotError(pending);
+    return subscribeNativeTeamSnapshotError(displayNativeTeamSnapshotError);
+  }, [displayNativeTeamSnapshotError]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: acknowledgement must run after the action-error state update has rendered
+  React.useEffect(() => {
+    const pending = consumeNativeTeamSnapshotError();
+    if (pending && markNativeTeamSnapshotErrorDisplayed(pending.id)) {
+      acknowledgeNativeTeamSnapshotError(pending.id);
+    }
+  }, [agents.actionErrorMessage]);
+
+  const hadPersonaSnapshotImport = React.useRef(false);
+  const hadTeamSnapshotImport = React.useRef(false);
+
+  React.useEffect(() => {
+    const isOpen = personas.snapshotImportState !== null;
+    if (hadPersonaSnapshotImport.current && !isOpen) {
+      releaseActiveSnapshotImport();
+    }
+    hadPersonaSnapshotImport.current = isOpen;
+  }, [personas.snapshotImportState, releaseActiveSnapshotImport]);
+
+  React.useEffect(() => {
+    const isOpen = teamActions.teamSnapshotImportState !== null;
+    if (hadTeamSnapshotImport.current && !isOpen) {
+      releaseActiveSnapshotImport();
+    }
+    hadTeamSnapshotImport.current = isOpen;
+  }, [teamActions.teamSnapshotImportState, releaseActiveSnapshotImport]);
 
   return (
     <>
@@ -637,7 +704,7 @@ export function AgentsView() {
       ) : null}
       {/* Hidden file input for team snapshot import via file picker */}
       <input
-        accept=".team.json,.team.png"
+        accept=".buzzteam,.team.json,.team.png"
         className="hidden"
         data-testid="team-snapshot-import-input"
         ref={teamImportInputRef}

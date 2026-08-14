@@ -11915,6 +11915,12 @@ export function maybeInstallE2eTauriMocks() {
       case "take_pending_community_deep_link":
         // Mirrors the Rust queue: peek the head; acknowledge removes it.
         return mockPendingCommunityDeepLinks[0] ?? null;
+      case "take_pending_native_team_snapshot":
+        return null;
+      case "read_pending_native_team_snapshot":
+        throw new Error("mock: no native team snapshot is pending");
+      case "acknowledge_pending_native_team_snapshot":
+        return true;
       case "acknowledge_pending_community_deep_link": {
         const { id } = payload as { id: string };
         const index = mockPendingCommunityDeepLinks.findIndex(

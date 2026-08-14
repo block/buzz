@@ -304,6 +304,22 @@ test("resolveSnapshotCard: .team.png with image/png returns team snapshot card",
   assert.equal(card.thumb, undefined);
 });
 
+test("resolveSnapshotCard: .buzzteam with sha256 returns team snapshot card", () => {
+  const card = resolveSnapshotCard(
+    {
+      m: "application/json",
+      size: 5000,
+      filename: "my-team.buzzteam",
+      x: SHA256,
+    },
+    JSON_URL,
+    "",
+  );
+  assert.ok(card !== null);
+  assert.equal(card.snapshotKind, "team");
+  assert.equal(card.filename, "my-team.buzzteam");
+});
+
 test("resolveSnapshotCard: plain .team without suffix is not a snapshot", () => {
   const card = resolveSnapshotCard(
     { m: "application/json", filename: "team.json", x: SHA256 },
