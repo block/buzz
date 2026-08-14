@@ -11,8 +11,7 @@ use super::{load_managed_agents, load_personas, AgentDefinition, ManagedAgentRec
 #[cfg(test)]
 use super::{BackendKind, RespondTo};
 use crate::app_state::AppState;
-use crate::commands::fetch_archived_pubkeys;
-use crate::relay::relay_ws_url_with_override;
+use crate::commands::{capture_relay_target, fetch_archived_pubkeys_at};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -666,19 +665,22 @@ pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io
 }
 
 /// Serializes nest-context writes so a slow, stale regeneration cannot roll the
-/// file back over a newer one.
+/// file back over a newer one. This is an ordered, latest-write-wins gate — not
+/// a work coalescer: every superseded generation still performs its relay reads,
+/// then drops its result at commit time. Adding a true dirty-loop owner would be
+/// a larger change and is unwarranted at this user-driven trigger rate.
 ///
 /// Each regeneration request claims a monotonic generation *synchronously* at
-/// request time (see [`NestRegenCoalescer::claim`]), so the generation encodes
+/// request time (see [`NestRegenGate::claim`]), so the generation encodes
 /// program order: boot's regen is claimed before `apply_workspace`'s, an edit's
 /// regen before the next edit's. The claimed generation travels with the
-/// spawned task and gates its write in [`NestRegenCoalescer::commit`]: a task
+/// spawned task and gates its write in [`NestRegenGate::commit`]: a task
 /// whose generation is below the high-water mark drops its result instead of
 /// overwriting the newer file. The commit lock is held across the compare and
 /// the synchronous file write, so two tasks cannot both read a stale mark and
 /// both write — a bare mutex acquired around only the write would still permit
 /// that stale-last rollback.
-struct NestRegenCoalescer {
+struct NestRegenGate {
     /// Next generation to hand out. `fetch_add` under a single atomic preserves
     /// the program order of `claim` calls regardless of memory ordering.
     next_gen: AtomicU64,
@@ -686,7 +688,7 @@ struct NestRegenCoalescer {
     last_written: Mutex<u64>,
 }
 
-impl NestRegenCoalescer {
+impl NestRegenGate {
     const fn new() -> Self {
         Self {
             next_gen: AtomicU64::new(1),
@@ -709,7 +711,7 @@ impl NestRegenCoalescer {
         let mut last = self
             .last_written
             .lock()
-            .expect("nest regen coalescer lock poisoned");
+            .expect("nest regen gate lock poisoned");
         if generation < *last {
             return Ok(false);
         }
@@ -719,8 +721,8 @@ impl NestRegenCoalescer {
     }
 }
 
-/// Process-wide coalescer for nest-context regeneration.
-static NEST_REGEN: NestRegenCoalescer = NestRegenCoalescer::new();
+/// Process-wide ordered write gate for nest-context regeneration.
+static NEST_REGEN: NestRegenGate = NestRegenGate::new();
 
 pub async fn regenerate_nest_context(app: &AppHandle, generation: u64) -> Result<(), String> {
     let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
@@ -733,15 +735,22 @@ pub async fn regenerate_nest_context(app: &AppHandle, generation: u64) -> Result
     let personas = load_personas(app)?;
     let agents = load_managed_agents(app)?;
     let state = app.state::<AppState>();
-    let relay_url = relay_ws_url_with_override(&state);
+    // Capture the relay target once, before any network work, so this
+    // generation's rendered footer, NIP-11 signer, and snapshot query all
+    // belong to one relay even if a workspace switch changes the override
+    // between the two archive awaits below.
+    let target = capture_relay_target(&state);
     // Identity-archived agents live only in the relay's `kind:13535` snapshot;
     // local records all read `is_active: true`. Fails open (empty set → render
     // everyone) so an unreachable relay can't blank the roster. The archive read
-    // and the relay URL above are read for this generation; a later generation's
+    // uses the same captured target as the rendered relay; a later generation's
     // task always wins the commit, so a fallback-relay boot render cannot bury a
     // later apply_workspace render.
-    let archived: HashSet<String> = fetch_archived_pubkeys(&state).await.into_iter().collect();
-    let content = render_dynamic_section(&personas, &agents, &archived, &relay_url);
+    let archived: HashSet<String> = fetch_archived_pubkeys_at(&state, &target)
+        .await
+        .into_iter()
+        .collect();
+    let content = render_dynamic_section(&personas, &agents, &archived, &target.ws_url);
     NEST_REGEN
         .commit(&agents_md, &content, generation)
         .map_err(|e| format!("regenerate nest context: {e}"))?;
@@ -755,7 +764,7 @@ pub async fn regenerate_nest_context(app: &AppHandle, generation: u64) -> Result
 /// All call sites treat regeneration as fire-and-forget — agents run fine with
 /// a stale AGENTS.md, so we warn and continue rather than propagating the error.
 /// The generation is claimed *here*, synchronously, so it encodes call order;
-/// the spawned task carries it into [`NestRegenCoalescer::commit`], which drops
+/// the spawned task carries it into [`NestRegenGate::commit`], which drops
 /// a stale render rather than letting a slow task overwrite a newer file. A
 /// just-archived agent may linger for one regen cycle until the next regen (any
 /// agent/team edit or the next launch).

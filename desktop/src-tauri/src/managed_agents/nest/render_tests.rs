@@ -1,5 +1,5 @@
 //! Tests for the dynamic AGENTS.md section renderer, the managed-section
-//! upsert, and the regeneration coalescer. Split from `tests.rs` to keep
+//! upsert, and the regeneration gate. Split from `tests.rs` to keep
 //! each test file under the repository's per-file line ratchet.
 
 use super::*;
@@ -518,19 +518,19 @@ fn commit_newer_generation_wins_over_a_stale_finisher() {
     // When A finally finishes and commits LAST, its lower generation is dropped
     // so the file still reflects B. Ordering of *finishing* is the only variable —
     // the generation, claimed at request time, decides the winner.
-    let coalescer = NestRegenCoalescer::new();
+    let gate = NestRegenGate::new();
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
 
-    let gen_a = coalescer.claim(); // pre-edit request
-    let gen_b = coalescer.claim(); // post-edit request
+    let gen_a = gate.claim(); // pre-edit request
+    let gen_b = gate.claim(); // post-edit request
     assert!(gen_a < gen_b);
 
     // B (newer) commits first.
-    assert!(coalescer.commit(&file, "post-edit roster", gen_b).unwrap());
+    assert!(gate.commit(&file, "post-edit roster", gen_b).unwrap());
     // A (older) finishes last and must be dropped.
     assert!(
-        !coalescer.commit(&file, "pre-edit roster", gen_a).unwrap(),
+        !gate.commit(&file, "pre-edit roster", gen_a).unwrap(),
         "a stale (lower-generation) render must not overwrite a newer one"
     );
 
@@ -548,15 +548,15 @@ fn commit_boot_fallback_relay_cannot_bury_apply_workspace_relay() {
     // fallback relay) is claimed first but finishes last; the apply_workspace
     // regen (generation 2, workspace relay) commits first. The workspace relay
     // render must survive even though the fallback-relay task writes afterward.
-    let coalescer = NestRegenCoalescer::new();
+    let gate = NestRegenGate::new();
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
 
-    let boot_gen = coalescer.claim(); // boot, fallback relay
-    let apply_gen = coalescer.claim(); // apply_workspace, workspace relay
+    let boot_gen = gate.claim(); // boot, fallback relay
+    let apply_gen = gate.claim(); // apply_workspace, workspace relay
 
     // apply_workspace's render lands first.
-    assert!(coalescer
+    assert!(gate
         .commit(
             &file,
             "## Workspace\n- Relay: wss://workspace.example",
@@ -564,7 +564,7 @@ fn commit_boot_fallback_relay_cannot_bury_apply_workspace_relay() {
         )
         .unwrap());
     // Boot's slower fallback-relay render finishes last and is dropped.
-    assert!(!coalescer
+    assert!(!gate
         .commit(
             &file,
             "## Workspace\n- Relay: wss://fallback.example",
@@ -584,14 +584,14 @@ fn commit_boot_fallback_relay_cannot_bury_apply_workspace_relay() {
 fn commit_equal_generation_is_allowed() {
     // The gate rejects only strictly-lower generations. Re-committing the same
     // generation (e.g. a retried request) is permitted and refreshes the file.
-    let coalescer = NestRegenCoalescer::new();
+    let gate = NestRegenGate::new();
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
 
-    let gen = coalescer.claim();
-    assert!(coalescer.commit(&file, "first", gen).unwrap());
+    let gen = gate.claim();
+    assert!(gate.commit(&file, "first", gen).unwrap());
     assert!(
-        coalescer.commit(&file, "second", gen).unwrap(),
+        gate.commit(&file, "second", gen).unwrap(),
         "an equal generation must still be allowed to write"
     );
 

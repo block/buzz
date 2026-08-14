@@ -18,10 +18,42 @@ use crate::{
     app_state::AppState,
     events,
     relay::{
-        classify_request_error, query_relay, relay_http_base_url, relay_ws_url_with_override,
-        submit_event, SubmitEventResponse,
+        classify_request_error, query_relay, query_relay_at, relay_api_base_url,
+        relay_http_base_url, relay_ws_url, relay_ws_url_with_override, submit_event,
+        workspace_relay_override, SubmitEventResponse,
     },
 };
+
+/// A relay target resolved from a single workspace-override read, so a caller
+/// that performs several relay requests cannot mix two relays if the workspace
+/// override changes mid-flight.
+///
+/// `relay_ws_url_with_override` and `relay_api_base_url_with_override` each read
+/// the override independently; a workspace switch between two such reads can
+/// pair one relay's NIP-11 signer with another relay's snapshot query.
+/// Capturing both fields from one read — matching those two functions' exact
+/// precedence, including the standalone `BUZZ_RELAY_HTTP` path when no override
+/// is set — guarantees the pair is internally consistent.
+pub(crate) struct RelayTarget {
+    /// Relay WebSocket URL (drives the NIP-11 fetch and the rendered footer).
+    pub ws_url: String,
+    /// Relay HTTP API base URL (drives `/query`).
+    pub api_base_url: String,
+}
+
+/// Capture the effective relay target once, before any network work.
+pub(crate) fn capture_relay_target(state: &AppState) -> RelayTarget {
+    match workspace_relay_override(state) {
+        Some(url) => RelayTarget {
+            api_base_url: relay_http_base_url(&url),
+            ws_url: url,
+        },
+        None => RelayTarget {
+            ws_url: relay_ws_url(),
+            api_base_url: relay_api_base_url(),
+        },
+    }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -228,8 +260,18 @@ struct RelayInformationDocument {
 }
 
 pub(crate) async fn fetch_relay_self(state: &AppState) -> Result<Option<String>, String> {
-    let relay_url = relay_ws_url_with_override(state);
-    let http_url = relay_http_base_url(&relay_url);
+    fetch_relay_self_at(state, &relay_ws_url_with_override(state)).await
+}
+
+/// Like [`fetch_relay_self`] but reads NIP-11 from an explicit relay WS URL
+/// instead of re-resolving the workspace override. Used by
+/// [`fetch_archived_pubkeys_at`] so the advertised signer and the snapshot
+/// query belong to the same captured relay target.
+pub(crate) async fn fetch_relay_self_at(
+    state: &AppState,
+    relay_url: &str,
+) -> Result<Option<String>, String> {
+    let http_url = relay_http_base_url(relay_url);
     let response = state
         .http_client
         .get(&http_url)
@@ -286,12 +328,25 @@ fn archived_pubkeys_from_snapshot(snapshot: &nostr::Event) -> Vec<String> {
 /// signature or wrong author, or a query error — **fails open** with an empty
 /// set rather than trusting unauthenticated relay-authoritative state.
 pub(crate) async fn fetch_archived_pubkeys(state: &AppState) -> Vec<String> {
-    let Ok(Some(relay_self)) = fetch_relay_self(state).await else {
+    fetch_archived_pubkeys_at(state, &capture_relay_target(state)).await
+}
+
+/// Like [`fetch_archived_pubkeys`] but resolves both the NIP-11 signer and the
+/// snapshot query against one captured [`RelayTarget`] instead of re-reading
+/// the workspace override for each. This keeps a regeneration's advertised
+/// signer and its snapshot query on the same relay even if the workspace
+/// override changes between the two awaits.
+pub(crate) async fn fetch_archived_pubkeys_at(
+    state: &AppState,
+    target: &RelayTarget,
+) -> Vec<String> {
+    let Ok(Some(relay_self)) = fetch_relay_self_at(state, &target.ws_url).await else {
         return vec![];
     };
 
-    let query = query_relay(
+    let query = query_relay_at(
         state,
+        &target.api_base_url,
         &[serde_json::json!({
             "authors": [relay_self.clone()],
             "kinds": [13535],
@@ -489,5 +544,90 @@ mod tests {
         assert_eq!(minimal.target_pubkey, "abc");
         assert_eq!(minimal.content, "");
         assert!(minimal.reason.is_none());
+    }
+
+    /// Regression for the cross-relay capture defect: `fetch_archived_pubkeys_at`
+    /// must resolve BOTH the NIP-11 signer and the `/query` snapshot against the
+    /// single captured [`RelayTarget`], never re-reading the live workspace
+    /// override. Two loopback relays advertise distinct signers and archive
+    /// distinct pubkeys; we capture relay A, then mutate the override to relay B
+    /// before the fetch. Because capture happens once up front, the override's
+    /// value at any later instant — including between the two archive awaits —
+    /// is irrelevant by construction, so setting it to B is the strongest form
+    /// of that perturbation. A must supply both the signer and the snapshot.
+    ///
+    /// RED-on-revert: restore `fetch_archived_pubkeys` to read the override for
+    /// each leg (`fetch_relay_self` + `query_relay`) and this returns B's pubkey.
+    #[tokio::test]
+    async fn archived_fetch_never_crosses_relays_mid_flight() {
+        use crate::app_state::build_app_state;
+        use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
+        use axum::{routing::get, routing::post, Json, Router};
+
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        // Build a loopback relay that advertises `relay_keys` as its NIP-11
+        // `self` and serves a relay-signed 13535 snapshot archiving `archived`.
+        async fn spawn_relay(relay_keys: Keys, archived: String) -> String {
+            let self_hex = relay_keys.public_key().to_hex();
+            let snapshot = EventBuilder::new(Kind::Custom(13535), "")
+                .tags([
+                    Tag::parse(["-"]).unwrap(),
+                    Tag::parse(["p", &archived]).unwrap(),
+                ])
+                .sign_with_keys(&relay_keys)
+                .unwrap();
+            let snapshot_json = serde_json::to_value(&snapshot).unwrap();
+
+            let router = Router::new()
+                .route(
+                    "/",
+                    get(move || {
+                        let self_hex = self_hex.clone();
+                        async move { Json(serde_json::json!({ "self": self_hex })) }
+                    }),
+                )
+                .route(
+                    "/query",
+                    post(move || {
+                        let snapshot_json = snapshot_json.clone();
+                        async move { Json(serde_json::json!([snapshot_json])) }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, router).await.ok();
+            });
+            format!("ws://{addr}")
+        }
+
+        let relay_a_keys = Keys::generate();
+        let relay_b_keys = Keys::generate();
+        // Distinct archived pubkeys, unrelated to either relay's signing key —
+        // nostr 0.37's EventBuilder silently drops a `p` tag that references the
+        // event's own signer, so the archived key must not equal the relay key.
+        let archived_on_a = Keys::generate().public_key().to_hex();
+        let archived_on_b = Keys::generate().public_key().to_hex();
+        let relay_a = spawn_relay(relay_a_keys, archived_on_a.clone()).await;
+        let relay_b = spawn_relay(relay_b_keys, archived_on_b.clone()).await;
+
+        let state = build_app_state();
+
+        // Capture relay A, then swap the override to relay B before the fetch.
+        *state.relay_url_override.lock().unwrap() = Some(relay_a.clone());
+        let target = capture_relay_target(&state);
+        *state.relay_url_override.lock().unwrap() = Some(relay_b.clone());
+
+        let archived = fetch_archived_pubkeys_at(&state, &target).await;
+
+        assert_eq!(
+            archived,
+            vec![archived_on_a],
+            "signer and snapshot must both come from the captured relay A, \
+             never the mutated override (relay B)"
+        );
+        reset_rate_limit_gate();
     }
 }
