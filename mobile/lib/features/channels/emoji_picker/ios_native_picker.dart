@@ -25,19 +25,24 @@ Future<void> _presentIosEmojiPicker({
 
   _nativeEmojiPickerChannel.setMethodCallHandler((call) async {
     switch (call.method) {
+      case 'mediaHeaders':
+        final url = call.arguments;
+        return url is String
+            ? mediaAuth.headersFor(url)
+            : const <String, String>{};
       case 'selected':
         final emoji = call.arguments;
         if (emoji is String && emoji.isNotEmpty) onSelect(emoji);
-        return;
+        return null;
       case 'dismissed':
         finish();
-        return;
+        return null;
       case 'skinToneChanged':
         final value = call.arguments;
         if (value is int) {
           await prefs.setInt(_emojiSkinTonePrefsKey, _validSkinTone(value));
         }
-        return;
+        return null;
     }
   });
 
@@ -47,11 +52,7 @@ Future<void> _presentIosEmojiPicker({
       <String, Object>{
         'customEmoji': [
           for (final emoji in customEmoji)
-            <String, Object>{
-              'shortcode': emoji.shortcode,
-              'url': emoji.url,
-              'headers': mediaAuth.headersFor(emoji.url),
-            },
+            <String, String>{'shortcode': emoji.shortcode, 'url': emoji.url},
         ],
         'recent': [for (final entry in recent) entry.emoji],
         'skinTone': _validSkinTone(prefs.getInt(_emojiSkinTonePrefsKey)),

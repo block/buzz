@@ -154,18 +154,23 @@ void _setMockNativeEmojiPickerHandler(
       .setMockMethodCallHandler(_nativeEmojiPickerChannel, handler);
 }
 
-Future<void> _sendNativeEmojiPickerCall(
+Future<Object?> _sendNativeEmojiPickerCall(
   WidgetTester tester,
   String method, [
   Object? arguments,
 ]) async {
+  final response = Completer<ByteData?>();
   await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
     _nativeEmojiPickerChannel.name,
     _nativeEmojiPickerChannel.codec.encodeMethodCall(
       MethodCall(method, arguments),
     ),
-    null,
+    response.complete,
   );
+  final envelope = await response.future;
+  return envelope == null
+      ? null
+      : _nativeEmojiPickerChannel.codec.decodeEnvelope(envelope);
 }
 
 Future<SharedPreferences> _prefs() {
@@ -676,15 +681,29 @@ void main() {
           {
             'shortcode': 'partyparrot',
             'url': 'https://example.test/parrot.gif',
-            'headers': <String, String>{},
           },
           {
             'shortcode': 'buzzbee',
             'url': 'https://relay.example/media/buzzbee.png',
-            'headers': {'Authorization': startsWith('Nostr ')},
           },
         ]);
         expect(find.byType(EmojiPickerSheet), findsNothing);
+
+        final externalHeaders = await _sendNativeEmojiPickerCall(
+          tester,
+          'mediaHeaders',
+          'https://example.test/parrot.gif',
+        );
+        expect(externalHeaders, <String, String>{});
+        final relayHeaders = await _sendNativeEmojiPickerCall(
+          tester,
+          'mediaHeaders',
+          'https://relay.example/media/buzzbee.png',
+        );
+        expect(
+          (relayHeaders as Map<Object?, Object?>)['Authorization'],
+          startsWith('Nostr '),
+        );
 
         await _sendNativeEmojiPickerCall(tester, 'skinToneChanged', 4);
         await _sendNativeEmojiPickerCall(tester, 'selected', '\u{1F525}');

@@ -1,4 +1,5 @@
 import Flutter
+import ImageIO
 import SwiftUI
 import UIKit
 
@@ -46,7 +47,6 @@ private struct NativeEmojiItem: Identifiable, Hashable {
   let glyph: String?
   let skinVariants: [String]
   let imageURL: URL?
-  let imageHeaders: [String: String]
 }
 
 private struct NativeEmojiSkinTone: Identifiable {
@@ -162,8 +162,7 @@ private enum NativeEmojiPickerDataLoader {
           keywords: keywords,
           glyph: defaultGlyph,
           skinVariants: glyphs,
-          imageURL: nil,
-          imageHeaders: [:]
+          imageURL: nil
         )
         items.append(item)
         standardItems.append(item)
@@ -191,7 +190,6 @@ private enum NativeEmojiPickerDataLoader {
       else {
         return nil
       }
-      let headers = (raw["headers"] as? [String: String]) ?? [:]
       return NativeEmojiItem(
         id: "custom-\(shortcode)",
         shortcode: shortcode,
@@ -200,8 +198,7 @@ private enum NativeEmojiPickerDataLoader {
         keywords: [],
         glyph: nil,
         skinVariants: [],
-        imageURL: url,
-        imageHeaders: headers
+        imageURL: url
       )
     }
     let customByValue = Dictionary(
@@ -672,7 +669,6 @@ private struct NativeEmojiPickerView: View {
         if let url = item.imageURL {
           NativeEmojiRemoteImage(
             url: url,
-            headers: item.imageHeaders,
             fallbackColor: appearance.secondaryText
           )
           .frame(width: 28, height: 28)
@@ -699,10 +695,11 @@ private struct NativeEmojiPickerView: View {
 
 private struct NativeEmojiRemoteImage: View {
   let url: URL
-  let headers: [String: String]
   let fallbackColor: UIColor
 
   @State private var phase: Phase = .loading
+  private static let maxDownloadBytes = 10 * 1024 * 1024
+  private static let maxThumbnailPixels = 84
 
   private enum Phase {
     case loading
@@ -723,17 +720,44 @@ private struct NativeEmojiRemoteImage: View {
       }
     }
     .task(id: requestIdentity) {
-      var request = URLRequest(url: url)
-      for (name, value) in headers {
-        request.setValue(value, forHTTPHeaderField: name)
-      }
       do {
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let requestHeaders = try await NativeEmojiPickerCoordinator.mediaHeaders(
+          for: url
+        )
+        var request = URLRequest(url: url)
+        for (name, value) in requestHeaders {
+          request.setValue(value, forHTTPHeaderField: name)
+        }
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard
           let httpResponse = response as? HTTPURLResponse,
-          (200..<300).contains(httpResponse.statusCode),
-          let image = UIImage(data: data)
+          (200..<300).contains(httpResponse.statusCode)
         else {
+          phase = .failure
+          return
+        }
+        if let contentLength = httpResponse.value(forHTTPHeaderField: "Content-Length"),
+          let byteCount = Int(contentLength),
+          byteCount > Self.maxDownloadBytes
+        {
+          phase = .failure
+          return
+        }
+        var data = Data()
+        let expected = httpResponse.expectedContentLength
+        if expected > 0 {
+          data.reserveCapacity(
+            Int(min(expected, Int64(Self.maxDownloadBytes)))
+          )
+        }
+        for try await byte in bytes {
+          guard data.count < Self.maxDownloadBytes else {
+            phase = .failure
+            return
+          }
+          data.append(byte)
+        }
+        guard let image = Self.thumbnail(from: data) else {
           phase = .failure
           return
         }
@@ -744,20 +768,40 @@ private struct NativeEmojiRemoteImage: View {
     }
   }
 
+  private static func thumbnail(from data: Data) -> UIImage? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+      return nil
+    }
+    let options: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: maxThumbnailPixels,
+      kCGImageSourceShouldCacheImmediately: true,
+    ]
+    guard
+      let image = CGImageSourceCreateThumbnailAtIndex(
+        source,
+        0,
+        options as CFDictionary
+      )
+    else {
+      return nil
+    }
+    return UIImage(cgImage: image)
+  }
+
   private var requestIdentity: String {
-    let headerIdentity =
-      headers
-      .sorted { $0.key < $1.key }
-      .map { "\($0.key):\($0.value)" }
-      .joined(separator: "\n")
-    return "\(url.absoluteString)\n\(headerIdentity)"
+    url.absoluteString
   }
 }
+
+private struct NativeEmojiMediaHeaderError: Error {}
 
 final class NativeEmojiPickerCoordinator: NSObject,
   UIAdaptivePresentationControllerDelegate
 {
   private let channel: FlutterMethodChannel
+  private static weak var activeCoordinator: NativeEmojiPickerCoordinator?
   private weak var parentViewController: UIViewController?
   private weak var presentedController: UIViewController?
   private var didNotifyDismissal = false
@@ -772,8 +816,22 @@ final class NativeEmojiPickerCoordinator: NSObject,
     )
     self.parentViewController = parentViewController
     super.init()
+    Self.activeCoordinator = self
     channel.setMethodCallHandler { [weak self] call, result in
       self?.handle(call, result: result)
+    }
+  }
+
+  static func mediaHeaders(for url: URL) async throws -> [String: String] {
+    guard let channel = activeCoordinator?.channel else { return [:] }
+    return try await withCheckedThrowingContinuation { continuation in
+      channel.invokeMethod("mediaHeaders", arguments: url.absoluteString) { result in
+        if result is FlutterError {
+          continuation.resume(throwing: NativeEmojiMediaHeaderError())
+          return
+        }
+        continuation.resume(returning: result as? [String: String] ?? [:])
+      }
     }
   }
 
