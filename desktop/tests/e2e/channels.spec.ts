@@ -2724,24 +2724,29 @@ test("channel settings only prompt editors to add an empty description", async (
   page,
 }) => {
   await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_MUTATE_CHANNEL__ === "function" &&
+      typeof window.__BUZZ_E2E_INVALIDATE_CHANNELS__ === "function",
+  );
   await page.evaluate(
     async ({ generalChannelId, randomChannelId }) => {
       const bridge = window as Window & {
-        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
-        __BUZZ_E2E_MUTATE_CHANNEL__?: (options: {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__: () => Promise<void>;
+        __BUZZ_E2E_MUTATE_CHANNEL__: (options: {
           channelId: string;
           description?: string;
         }) => void;
       };
-      bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__({
         channelId: generalChannelId,
         description: "",
       });
-      bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__({
         channelId: randomChannelId,
         description: "",
       });
-      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__();
     },
     {
       generalChannelId: GENERAL_CHANNEL_ID,
