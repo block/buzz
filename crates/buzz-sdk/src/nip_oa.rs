@@ -165,12 +165,86 @@ pub fn compute_auth_tag(
     Ok(tag_json.to_string())
 }
 
+/// Evaluate the `created_at` clauses of a `conditions` string against the
+/// timestamp of the signed event that presented the attestation.
+///
+/// Both bounds are **strict**: `created_at<N` requires `timestamp < N` and
+/// `created_at>N` requires `timestamp > N`, so a timestamp exactly on either
+/// bound is rejected. `kind=` clauses are not time bounds and are ignored here;
+/// callers that restrict kinds must do so themselves.
+///
+/// Structural validity is *not* re-checked — [`validate_conditions`] runs as
+/// part of tag verification, and this is deliberately tolerant of clauses it
+/// does not interpret so that a future clause type cannot be silently read as
+/// "unbounded".
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] when a bound is unparseable or when the
+/// timestamp falls outside the attested window.
+pub fn evaluate_time_bounds(conditions: &str, timestamp: u64) -> Result<(), SdkError> {
+    for clause in conditions.split('&').filter(|clause| !clause.is_empty()) {
+        if let Some(bound) = clause.strip_prefix("created_at<") {
+            let bound = bound.parse::<u64>().map_err(|_| {
+                SdkError::InvalidInput(format!("invalid created_at< bound: {bound}"))
+            })?;
+            if timestamp >= bound {
+                return Err(SdkError::InvalidInput(format!(
+                    "auth tag time bound not satisfied: {timestamp} >= {bound}"
+                )));
+            }
+        } else if let Some(bound) = clause.strip_prefix("created_at>") {
+            let bound = bound.parse::<u64>().map_err(|_| {
+                SdkError::InvalidInput(format!("invalid created_at> bound: {bound}"))
+            })?;
+            if timestamp <= bound {
+                return Err(SdkError::InvalidInput(format!(
+                    "auth tag time bound not satisfied: {timestamp} <= {bound}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verify a NIP-OA `auth` tag *and* enforce its time bounds against the
+/// timestamp of the signed event that presented it.
+///
+/// [`verify_auth_tag`] proves only that the owner signed this attestation for
+/// this agent; it says nothing about *when* the attestation is valid. Any
+/// caller that grants authority from a tag — recording ownership, admitting a
+/// session, selecting a rate class — must use this function instead, or an
+/// expired credential is indistinguishable from a live one.
+///
+/// `timestamp` is the `created_at` of the signed authentication event carrying
+/// the tag (the NIP-42 AUTH event, or the NIP-98 request event), never wall
+/// clock: the bound is a property of what the owner authorized, so it has to be
+/// judged against the same signed artifact the attestation travelled with.
+///
+/// # Errors
+///
+/// Everything [`verify_auth_tag`] rejects, plus [`SdkError::InvalidInput`] when
+/// `timestamp` falls outside the attested window.
+pub fn verify_auth_tag_at(
+    auth_tag_json: &str,
+    agent_pubkey: &PublicKey,
+    timestamp: u64,
+) -> Result<PublicKey, SdkError> {
+    let (owner_pubkey, conditions) = verify_auth_tag_parts(auth_tag_json, agent_pubkey)?;
+    evaluate_time_bounds(&conditions, timestamp)?;
+    Ok(owner_pubkey)
+}
+
 /// Verify a NIP-OA `auth` tag JSON string against the given `agent_pubkey`.
 ///
 /// Reconstructs the preimage, hashes it, and verifies the Schnorr signature
 /// against the owner pubkey embedded in the tag.
 ///
 /// Returns the owner's [`PublicKey`] on success.
+///
+/// **This does not evaluate the tag's `created_at` bounds.** Use
+/// [`verify_auth_tag_at`] anywhere the result grants authority; this entry
+/// point remains for callers that only need to read the attested owner.
 ///
 /// # Errors
 ///
@@ -180,6 +254,16 @@ pub fn verify_auth_tag(
     auth_tag_json: &str,
     agent_pubkey: &PublicKey,
 ) -> Result<PublicKey, SdkError> {
+    verify_auth_tag_parts(auth_tag_json, agent_pubkey).map(|(owner_pubkey, _)| owner_pubkey)
+}
+
+/// Shared body of [`verify_auth_tag`] and [`verify_auth_tag_at`]: everything
+/// except the time-bound evaluation. Returns the attested owner alongside the
+/// `conditions` string the signature commits to.
+fn verify_auth_tag_parts(
+    auth_tag_json: &str,
+    agent_pubkey: &PublicKey,
+) -> Result<(PublicKey, String), SdkError> {
     let arr = parse_json_array(auth_tag_json)?;
 
     if arr.len() != 4 {
@@ -232,7 +316,7 @@ pub fn verify_auth_tag(
         .verify_schnorr(&sig, &message, &xonly)
         .map_err(|e| SdkError::InvalidInput(format!("signature verification failed: {e}")))?;
 
-    Ok(owner_pubkey)
+    Ok((owner_pubkey, conditions.to_string()))
 }
 
 /// Parse a NIP-OA `auth` tag JSON string into a [`Tag`] without verifying the
@@ -591,5 +675,78 @@ mod tests {
         let bad =
             serde_json::json!(["auth", OWNER_PUBKEY_HEX, "kind=1&", "a".repeat(128)]).to_string();
         assert!(parse_auth_tag(&bad).is_err());
+    }
+
+    /// Both bounds are strict, so a timestamp exactly on either one is outside
+    /// the window. Pinned explicitly because an off-by-one here is the
+    /// difference between honouring an expiry and ignoring it for one second.
+    #[test]
+    fn test_time_bounds_are_strict_at_both_edges() {
+        let conditions = "created_at>100&created_at<200";
+
+        assert!(evaluate_time_bounds(conditions, 150).is_ok(), "inside");
+        assert!(
+            evaluate_time_bounds(conditions, 101).is_ok(),
+            "lower edge+1"
+        );
+        assert!(
+            evaluate_time_bounds(conditions, 199).is_ok(),
+            "upper edge-1"
+        );
+
+        assert!(evaluate_time_bounds(conditions, 100).is_err(), "== lower");
+        assert!(evaluate_time_bounds(conditions, 200).is_err(), "== upper");
+        assert!(
+            evaluate_time_bounds(conditions, 99).is_err(),
+            "not yet valid"
+        );
+        assert!(evaluate_time_bounds(conditions, 201).is_err(), "expired");
+    }
+
+    /// An unbounded tag never expires, and a `kind=` clause is not a time bound.
+    #[test]
+    fn test_time_bounds_ignore_non_temporal_conditions() {
+        assert!(evaluate_time_bounds("", 0).is_ok());
+        assert!(evaluate_time_bounds("kind=1", u64::MAX).is_ok());
+        assert!(evaluate_time_bounds("kind=1&created_at<200", 199).is_ok());
+        assert!(evaluate_time_bounds("kind=1&created_at<200", 200).is_err());
+    }
+
+    /// The regression this whole entry point exists for: a signature that
+    /// verifies is not the same as a credential that is currently valid.
+    /// `verify_auth_tag` accepts both; `verify_auth_tag_at` separates them.
+    #[test]
+    fn test_verify_at_rejects_expired_and_not_yet_valid_tags() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let agent_pubkey = agent_keys.public_key();
+
+        let expired = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at<1000")
+            .expect("compute expired tag");
+        let not_yet = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at>9000")
+            .expect("compute not-yet-valid tag");
+
+        // Signature-only verification cannot tell these apart from a live tag.
+        assert!(verify_auth_tag(&expired, &agent_pubkey).is_ok());
+        assert!(verify_auth_tag(&not_yet, &agent_pubkey).is_ok());
+
+        assert!(verify_auth_tag_at(&expired, &agent_pubkey, 999).is_ok());
+        assert!(verify_auth_tag_at(&expired, &agent_pubkey, 1000).is_err());
+        assert!(verify_auth_tag_at(&not_yet, &agent_pubkey, 9001).is_ok());
+        assert!(verify_auth_tag_at(&not_yet, &agent_pubkey, 9000).is_err());
+    }
+
+    /// Time bounds are evaluated *after* the signature, never instead of it:
+    /// a tag minted for another agent stays rejected inside its window.
+    #[test]
+    fn test_verify_at_still_enforces_the_signature_binding() {
+        let owner_keys = Keys::generate();
+        let attested_agent_keys = Keys::generate();
+        let impostor_keys = Keys::generate();
+
+        let tag = compute_auth_tag(&owner_keys, &attested_agent_keys.public_key(), "")
+            .expect("compute auth tag");
+
+        assert!(verify_auth_tag_at(&tag, &impostor_keys.public_key(), 1_000).is_err());
     }
 }

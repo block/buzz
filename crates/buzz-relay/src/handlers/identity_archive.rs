@@ -332,28 +332,9 @@ fn enforce_request_auth_time_bounds(auth_tag_json: &str, created_at: u64) -> Res
         .get(2)
         .ok_or_else(|| "auth tag missing conditions".to_string())?;
 
-    for clause in conditions.split('&').filter(|clause| !clause.is_empty()) {
-        if let Some(bound) = clause.strip_prefix("created_at<") {
-            let bound = bound
-                .parse::<u64>()
-                .map_err(|_| format!("invalid created_at< bound: {bound}"))?;
-            if created_at >= bound {
-                return Err(format!(
-                    "request auth time bound not satisfied: created_at {created_at} >= {bound}"
-                ));
-            }
-        } else if let Some(bound) = clause.strip_prefix("created_at>") {
-            let bound = bound
-                .parse::<u64>()
-                .map_err(|_| format!("invalid created_at> bound: {bound}"))?;
-            if created_at <= bound {
-                return Err(format!(
-                    "request auth time bound not satisfied: created_at {created_at} <= {bound}"
-                ));
-            }
-        }
-    }
-    Ok(())
+    // Shared with the ownership-materialization path so the two cannot drift:
+    // this handler's notion of "expired" is the only one in the tree.
+    buzz_sdk::nip_oa::evaluate_time_bounds(conditions, created_at).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

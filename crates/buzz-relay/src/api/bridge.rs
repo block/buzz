@@ -55,17 +55,28 @@ pub(crate) async fn enforce_http_admission(
     }
 }
 
+/// Outcome of bridge authentication.
+#[derive(Debug)]
+pub(crate) struct BridgeAuth {
+    /// The authenticated public key.
+    pub pubkey: nostr::PublicKey,
+    /// Event ID used for replay detection. Zero hash in X-Pubkey dev mode,
+    /// where there is no signed event and so no replay concern.
+    pub event_id_bytes: [u8; 32],
+    /// `created_at` of the NIP-98 request event, when one authenticated this
+    /// request. `None` in X-Pubkey dev mode: nothing was signed, so there is no
+    /// timestamp a NIP-OA attestation's bounds could be judged against.
+    pub created_at: Option<u64>,
+}
+
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
-///
-/// Returns the authenticated public key and an event ID for replay detection.
-/// For X-Pubkey dev mode, the event ID is a zero hash (no replay concern).
 pub(crate) fn verify_bridge_auth(
     headers: &HeaderMap,
     method: &str,
     url: &str,
     body: Option<&[u8]>,
     require_auth_token: bool,
-) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+) -> Result<BridgeAuth, (StatusCode, Json<Value>)> {
     verify_bridge_auth_with_options(headers, method, url, body, require_auth_token, false)
 }
 
@@ -76,7 +87,7 @@ pub(crate) fn verify_bridge_auth_with_options(
     body: Option<&[u8]>,
     require_auth_token: bool,
     require_payload: bool,
-) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+) -> Result<BridgeAuth, (StatusCode, Json<Value>)> {
     // Try NIP-98 first (Authorization: Nostr <base64>)
     if let Some(auth_str) = headers
         .get("authorization")
@@ -111,7 +122,11 @@ pub(crate) fn verify_bridge_auth_with_options(
         let pubkey = buzz_auth::verify_nip98_event(&event_json, url, method, body)
             .map_err(|e| api_error(StatusCode::UNAUTHORIZED, &format!("NIP-98: {e}")))?;
 
-        return Ok((pubkey, event_id_bytes));
+        return Ok(BridgeAuth {
+            pubkey,
+            event_id_bytes,
+            created_at: Some(event.created_at.as_secs()),
+        });
     }
 
     // Dev-mode fallback: X-Pubkey header (only when require_auth_token is false)
@@ -120,7 +135,11 @@ pub(crate) fn verify_bridge_auth_with_options(
             let pubkey = nostr::PublicKey::from_hex(hex_val)
                 .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid X-Pubkey hex"))?;
             // Zero event ID — no replay detection needed for dev mode
-            return Ok((pubkey, [0u8; 32]));
+            return Ok(BridgeAuth {
+                pubkey,
+                event_id_bytes: [0u8; 32],
+                created_at: None,
+            });
         }
     }
 
@@ -637,7 +656,11 @@ pub async fn submit_event(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let BridgeAuth {
+        pubkey,
+        event_id_bytes,
+        created_at: auth_event_created_at,
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -650,8 +673,16 @@ pub async fn submit_event(
     // runs inside the helper.  The thin wrapper here owns the single terminal
     // attribution line so it fires for every outcome, including admission/
     // replay/membership failures that previously returned before any log fired.
-    let outcome =
-        submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let outcome = submit_event_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        auth_event_created_at,
+    )
+    .await;
 
     match &outcome {
         SubmitOutcome::Ok { accepted, kind, .. } => {
@@ -760,6 +791,7 @@ async fn submit_event_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    auth_event_created_at: Option<u64>,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
@@ -811,7 +843,23 @@ async fn submit_event_authed(
     )
     .await
     {
-        Ok(owner) => super::relay_members::resolve_nip_oa_owner(owner, &pubkey_bytes, auth_tag),
+        // Without a NIP-98 request event there is no signed timestamp to judge
+        // the attestation's time bounds against (X-Pubkey dev auth), so no
+        // ownership is recorded rather than treating the tag as unbounded.
+        Ok(owner) => match auth_event_created_at {
+            Some(created_at) => {
+                super::relay_members::resolve_nip_oa_owner(
+                    state,
+                    tenant.community(),
+                    owner,
+                    &pubkey_bytes,
+                    auth_tag,
+                    created_at,
+                )
+                .await
+            }
+            None => None,
+        },
         Err(e) => {
             return SubmitOutcome::Err {
                 status: e.0,
@@ -902,7 +950,11 @@ pub async fn query_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let BridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -1389,7 +1441,11 @@ pub async fn count_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let BridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -2157,8 +2213,11 @@ async fn authorize_moderation_read(
         _ => path.to_string(),
     };
     let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
-    let (pubkey, event_id_bytes) =
-        verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+    let BridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -2620,7 +2679,7 @@ mod tests {
         let tenant_a = fresh_tenant("host-a.example");
         let expected_url = nip98_expected_url(config_relay_url, &tenant_a, "/events");
 
-        let (pubkey, _event_id_bytes) =
+        let BridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
                 .expect("matching-host NIP-98 event must verify");
         assert_eq!(
@@ -2669,7 +2728,7 @@ mod tests {
             Some("limit=20&status=open"),
         );
 
-        let (pubkey, _event_id_bytes) =
+        let BridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("query-bearing moderation read must verify against the same query");
         assert_eq!(pubkey, keys.public_key());
@@ -2726,7 +2785,7 @@ mod tests {
             Some("limit=20"),
         );
 
-        let (pubkey, _event_id_bytes) =
+        let BridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("audit query-bearing read must verify");
         assert_eq!(pubkey, keys.public_key());
@@ -2751,7 +2810,7 @@ mod tests {
         );
         assert_eq!(expected_url, "https://host-a.example/moderation/restricted");
 
-        let (pubkey, _event_id_bytes) =
+        let BridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("query-less restricted read must verify against the bare path");
         assert_eq!(pubkey, keys.public_key());

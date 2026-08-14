@@ -6,7 +6,10 @@
 //! agent→owner backfill (observer frame auth, agent rate class) is then resolved
 //! with [`crate::api::relay_members::resolve_nip_oa_owner`], which keeps the
 //! delegated owner when membership came through one and otherwise verifies the
-//! presented tag — a direct member's attestation is just as self-proving.
+//! presented tag — including for a direct member, whose attestation was
+//! previously dropped. On a closed relay the claimed owner must itself be a
+//! relay member, and the tag's time bounds are enforced against this AUTH
+//! event's `created_at`.
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
@@ -78,6 +81,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     // The tag is integrity-protected by the event's Schnorr signature — if
     // tampered, NIP-42 verification will fail before we ever inspect it.
     let auth_tag_json = extract_auth_tag_json(&event);
+    // Captured before `verify_auth_event` consumes the event. The NIP-OA tag
+    // rides inside this AUTH event and is integrity-protected by its signature,
+    // so this is the timestamp the attestation's time bounds are judged against.
+    let auth_event_created_at = event.created_at.as_secs();
 
     let relay_url =
         crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
@@ -243,13 +250,19 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // (needed for observer frame auth and for the agent rate class).
             // `enforce_relay_membership` reports an owner only when membership was
             // granted *through* it, so a direct member's tag is resolved here —
-            // on closed relays too, matching the ban cascade above, which already
-            // trusts the same tag unconditionally.
+            // on closed relays too, subject to the owner itself being a relay
+            // member. The tag's time bounds are judged against this AUTH event's
+            // `created_at`: the tag is carried inside it and integrity-protected
+            // by its signature, so it is the artifact the attestation authorized.
             let nip_oa_owner = crate::api::relay_members::resolve_nip_oa_owner(
+                &state,
+                conn.tenant.community(),
                 nip_oa_owner,
                 pubkey.as_bytes(),
                 auth_tag_json.as_deref(),
-            );
+                auth_event_created_at,
+            )
+            .await;
 
             // Stash NIP-OA owner on the auth context only after the shared
             // backfill confirms the first-write-wins relationship.
