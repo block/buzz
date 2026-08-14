@@ -110,6 +110,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_token_env_vars: &[],
     },
     KnownAcpRuntime {
         id: "claude",
@@ -143,6 +144,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
         auth_probe_args: Some(&["claude", "auth", "status"]),
+        auth_token_env_vars: &["CLAUDE_CODE_OAUTH_TOKEN"],
     },
     KnownAcpRuntime {
         id: "codex",
@@ -177,6 +179,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+        auth_token_env_vars: &[],
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -210,6 +213,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_token_env_vars: &[],
     },
 ];
 
@@ -999,6 +1003,21 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
         || t.starts_with("npm uninstall -g ")
 }
 
+/// True when any of `env_vars` is set to a non-whitespace value.
+///
+/// A set token is evidence about the runtime Buzz will actually spawn, whereas
+/// `auth_probe_args` reports on a sibling CLI that may resolve credentials from
+/// somewhere else entirely. When they disagree, the token wins: it is read by
+/// the process that has to do the work.
+pub(crate) fn auth_token_env_var_present(
+    env_vars: &[&str],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> bool {
+    env_vars
+        .iter()
+        .any(|name| lookup(name).is_some_and(|value| !value.trim().is_empty()))
+}
+
 /// Run a CLI auth probe with a 10-second process-level timeout.
 ///
 /// Spawns the probe CLI as a child process. Stdout and stderr are drained on
@@ -1445,6 +1464,20 @@ pub fn discover_acp_runtimes_from(
         .map(discover_acp_runtime_phase1)
         .collect();
 
+    // Phase 1.5: a token in the environment is proof about the runtime we
+    // actually spawn, unlike the sibling CLI `auth_probe_args` interrogates.
+    // Settle those first so they short-circuit the probe and its 10s timeout.
+    for partial in &mut partials {
+        if partial.entry.availability == AcpAvailabilityStatus::Available
+            && auth_token_env_var_present(partial.runtime.auth_token_env_vars, |name| {
+                std::env::var(name).ok()
+            })
+        {
+            partial.entry.auth_status = AuthStatus::LoggedIn;
+            partial.entry.login_hint = None;
+        }
+    }
+
     // Phase 2: run auth probes in parallel for entries that need them.
     // Spawn one thread per probeable entry; total cost = max(probe latency).
     let probe_handles: Vec<(usize, std::thread::JoinHandle<AuthStatus>)> = partials
@@ -1452,6 +1485,10 @@ pub fn discover_acp_runtimes_from(
         .enumerate()
         .filter_map(|(idx, partial)| {
             if partial.entry.availability != AcpAvailabilityStatus::Available {
+                return None;
+            }
+            // Already settled by a token in Phase 1.5 -- do not spend a probe.
+            if partial.entry.auth_status == AuthStatus::LoggedIn {
                 return None;
             }
             let probe_args = partial.runtime.auth_probe_args?;

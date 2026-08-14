@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
-    apply_agent_command_update, classify_runtime, codex_adapter_availability,
-    codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
-    effective_agent_command, find_nvm_default_bin, find_via_login_shell,
+    apply_agent_command_update, auth_token_env_var_present, classify_runtime,
+    codex_adapter_availability, codex_adapter_is_outdated, create_time_agent_command_override,
+    default_agent_command, effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
     try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
@@ -1836,4 +1836,93 @@ fn discovery_publish_path_drops_mid_flight_delete() {
         lookup_loaded_harness_by_id("mid-flight-delete").is_none(),
         "discovery's publish must not resurrect a harness deleted mid-discovery"
     );
+}
+
+// ── Auth-token evidence ──────────────────────────────────────────────────────
+//
+// `auth_probe_args` runs a sibling CLI. For `claude` that is the Claude Code
+// CLI, while the runtime Buzz spawns is `claude-agent-acp`, which also honours
+// `CLAUDE_CODE_OAUTH_TOKEN` -- invisible to the probe. A machine was observed
+// where the CLI reported logged out while the adapter completed a turn
+// successfully, purely because that token was set.
+
+fn env_from(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'static {
+    let owned: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    move |name: &str| {
+        owned
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    }
+}
+
+#[test]
+fn a_set_token_counts_as_auth_evidence() {
+    assert!(auth_token_env_var_present(
+        &["CLAUDE_CODE_OAUTH_TOKEN"],
+        env_from(&[("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-abc")]),
+    ));
+}
+
+#[test]
+fn an_unset_token_is_not_evidence() {
+    assert!(!auth_token_env_var_present(
+        &["CLAUDE_CODE_OAUTH_TOKEN"],
+        env_from(&[]),
+    ));
+}
+
+#[test]
+fn an_empty_or_whitespace_token_is_not_evidence() {
+    // An exported-but-empty variable is the shape a half-finished shell profile
+    // leaves behind; treating it as proof would reintroduce the false positive
+    // this check exists to avoid.
+    for value in ["", "   ", "\t\n"] {
+        assert!(
+            !auth_token_env_var_present(
+                &["CLAUDE_CODE_OAUTH_TOKEN"],
+                env_from(&[("CLAUDE_CODE_OAUTH_TOKEN", value)]),
+            ),
+            "{value:?} must not count"
+        );
+    }
+}
+
+#[test]
+fn a_runtime_declaring_no_token_vars_is_never_short_circuited() {
+    assert!(!auth_token_env_var_present(
+        &[],
+        env_from(&[("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-abc")]),
+    ));
+}
+
+#[test]
+fn any_one_of_several_declared_vars_is_enough() {
+    assert!(auth_token_env_var_present(
+        &["FIRST_TOKEN", "SECOND_TOKEN"],
+        env_from(&[("SECOND_TOKEN", "value")]),
+    ));
+}
+
+#[test]
+fn claude_declares_the_adapter_token_and_other_runtimes_do_not() {
+    let claude = super::KNOWN_ACP_RUNTIMES
+        .iter()
+        .find(|runtime| runtime.id == "claude")
+        .expect("claude runtime");
+    assert_eq!(claude.auth_token_env_vars, &["CLAUDE_CODE_OAUTH_TOKEN"]);
+
+    for runtime in super::KNOWN_ACP_RUNTIMES
+        .iter()
+        .filter(|r| r.id != "claude")
+    {
+        assert!(
+            runtime.auth_token_env_vars.is_empty(),
+            "{} must not claim token evidence without a documented reason",
+            runtime.id
+        );
+    }
 }
