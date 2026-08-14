@@ -61,6 +61,7 @@ class _AppearanceSection extends ConsumerWidget {
 void _showAppearanceModeSheet(BuildContext context) {
   showBuzzModalBottomSheet<void>(
     context: context,
+    title: 'Appearance',
     showDragHandle: true,
     builder: (_) => const _AppearanceModeSheet(),
   );
@@ -80,15 +81,6 @@ class _AppearanceModeSheet extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              0,
-              Grid.gutter,
-              Grid.xxs,
-            ),
-            child: Text('Appearance', style: context.textTheme.titleMedium),
-          ),
           for (final option in _modeOptions)
             AppListRow(
               icon: option.icon,

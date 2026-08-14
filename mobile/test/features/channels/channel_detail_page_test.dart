@@ -7,6 +7,8 @@ import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart' as http_testing;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
@@ -35,6 +37,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
+import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -187,6 +190,7 @@ Widget _buildTestable({
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
   RelaySessionNotifier? relaySessionNotifier,
+  http.Client? mediaClient,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -238,6 +242,12 @@ Widget _buildTestable({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      if (mediaClient != null) ...[
+        mediaGetAuthServiceProvider.overrideWithValue(
+          MediaGetAuthService(baseUrl: 'https://relay.example', nsec: null),
+        ),
+        mediaHttpClientProvider.overrideWithValue(mediaClient),
+      ],
       if (relaySessionNotifier != null)
         relaySessionProvider.overrideWith(() => relaySessionNotifier),
       // Compose bar drafts persist through SharedPreferences.
@@ -344,6 +354,86 @@ void main() {
   });
 
   group('ChannelDetailPage', () {
+    testWidgets('uses the shared 32px masked presence avatar in DM headers', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
+      final avatar = tester.widget<MaskedAvatarBadge>(avatarFinder);
+      expect(tester.getSize(avatarFinder), const Size.square(32));
+      expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
+      expect(avatar.badge, isNotNull);
+      expect(
+        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
+        findsOneWidget,
+      );
+      final name = tester.widget<Text>(
+        find.byKey(const ValueKey('dm-header-name')),
+      );
+      final presence = tester.widget<Text>(
+        find.byKey(const ValueKey('dm-header-presence')),
+      );
+      expect(name.style?.fontSize, 16);
+      expect(name.style?.fontWeight, FontWeight.w500);
+      expect(presence.style?.fontSize, 14);
+      expect(presence.style?.fontWeight, FontWeight.w400);
+      expect(find.byTooltip('View members'), findsNothing);
+    });
+
+    testWidgets('keeps the Members action for group DMs', (tester) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Group direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 3,
+        participants: const ['Self', 'Alice', 'Bob'],
+        participantPubkeys: const ['self', 'alice', 'bob'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('View members'), findsOneWidget);
+    });
+
     testWidgets(
       'restores the previous channel replay priority after a nested pop',
       (tester) async {
@@ -732,6 +822,12 @@ void main() {
               joinedAt: DateTime(2025),
               displayName: 'Alice',
             ),
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+              displayName: 'Agent',
+            ),
           ],
         ),
       );
@@ -743,6 +839,65 @@ void main() {
       expect(find.text('Alice'), findsOneWidget);
       expect(find.text('Member'), findsOneWidget);
       expect(find.text('Owner'), findsOneWidget);
+      expect(find.text('People · 2'), findsOneWidget);
+      expect(find.text('Agents · 1'), findsOneWidget);
+      expect(find.text('PEOPLE — 2'), findsNothing);
+      expect(find.text('BOTS — 1'), findsNothing);
+    });
+
+    testWidgets('members sheet has no divider and pads a one-member list', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'owner',
+              joinedAt: DateTime(2025),
+              displayName: 'Self',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('View members'));
+      await tester.pumpAndSettle();
+
+      final contentPadding = find.byKey(
+        const ValueKey('members-sheet-content-padding'),
+      );
+      expect(contentPadding, findsOneWidget);
+      expect(
+        find.descendant(of: contentPadding, matching: find.byType(Divider)),
+        findsNothing,
+      );
+      expect(
+        (tester.widget<Padding>(contentPadding).padding as EdgeInsets).bottom,
+        0,
+      );
+      final viewport = tester.widget<ConstrainedBox>(
+        find.byKey(const ValueKey('members-sheet-viewport')),
+      );
+      expect(viewport.constraints.maxHeight, 400 + Grid.md);
+      expect(
+        (tester
+                    .widget<ListView>(
+                      find.byKey(const ValueKey('members-sheet-list')),
+                    )
+                    .padding!
+                as EdgeInsets)
+            .bottom,
+        Grid.md,
+      );
+      expect(
+        find.byKey(const ValueKey('buzz-sheet-surface-margin')),
+        findsNothing,
+      );
+      expect(find.text('People · 1'), findsOneWidget);
+      expect(tester.widget<Text>(find.text('People · 1')).style?.fontSize, 14);
     });
 
     testWidgets('hides composer for archived channels', (tester) async {
@@ -1025,6 +1180,46 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('keeps animated message avatars static and transparent', (
+      tester,
+    ) async {
+      const posterUrl = 'https://relay.example/media/alice-poster.png';
+      const animationUrl = 'https://relay.example/media/alice-avatar.png';
+      final profileUrl =
+          '$posterUrl#buzz-anim=${Uri.encodeComponent(animationUrl)}';
+      final mediaClient = http_testing.MockClient(
+        (_) async => http.Response.bytes(_transparentPng, 200),
+      );
+      addTearDown(mediaClient.close);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(id: 'animated-avatar', pubkey: 'alice', content: 'Hello'),
+          ],
+          users: {
+            'alice': UserProfile(
+              pubkey: 'alice',
+              displayName: 'Alice',
+              avatarUrl: profileUrl,
+            ),
+          },
+          mediaClient: mediaClient,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<CircleAvatar>(find.byType(CircleAvatar)).backgroundColor,
+        Colors.transparent,
+      );
+      expect(tester.widget<MediaImage>(find.byType(MediaImage)).url, posterUrl);
+      expect(
+        find.byKey(const ValueKey('progressive-animated-avatar-animation')),
         findsNothing,
       );
     });
@@ -2890,6 +3085,107 @@ void main() {
       expect(find.text('Copy public key'), findsOneWidget);
       expect(find.byType(UserProfileSheet), findsOneWidget);
     });
+
+    testWidgets(
+      'profile sheet shows the poster before autoplay and restores it on tap',
+      (tester) async {
+        const posterUrl = 'https://relay.example/media/alice-poster.png';
+        const animationUrl = 'https://relay.example/media/alice-avatar.png';
+        final profileUrl =
+            '$posterUrl#buzz-anim=${Uri.encodeComponent(animationUrl)}';
+        final animationResponse = Completer<http.Response>();
+        final mediaClient = http_testing.MockClient(
+          (request) => request.url.toString() == animationUrl
+              ? animationResponse.future
+              : Future.value(http.Response.bytes(_transparentPng, 200)),
+        );
+        addTearDown(mediaClient.close);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'sys-huddle-animated-avatar',
+                kind: EventKind.huddleStarted,
+                pubkey: 'alice',
+              ),
+            ],
+            users: {
+              'alice': UserProfile(
+                pubkey: 'alice',
+                displayName: 'Alice',
+                avatarUrl: profileUrl,
+              ),
+            },
+            mediaClient: mediaClient,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byType(CircleAvatar));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(UserProfileSheet), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-poster')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(
+            const ValueKey('progressive-animated-avatar-animation-loading'),
+          ),
+          findsOneWidget,
+        );
+
+        animationResponse.complete(http.Response.bytes(_transparentPng, 200));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey('progressive-animated-avatar-animation-ready'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-poster')),
+          findsNothing,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('selected-profile-avatar')));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-animation')),
+          findsNothing,
+        );
+        expect(
+          tester
+              .widget<MediaImage>(
+                find.descendant(
+                  of: find.byKey(const ValueKey('selected-profile-avatar')),
+                  matching: find.byType(MediaImage),
+                ),
+              )
+              .url,
+          posterUrl,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('selected-profile-avatar')));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-animation')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-poster')),
+          findsNothing,
+        );
+      },
+    );
 
     testWidgets('opens a profile sheet from a generic system avatar', (
       tester,
@@ -6264,6 +6560,10 @@ List<String> _replayedChannelIds(_RecordingRelaySocket socket) => socket
           ((message[2] as Map<String, dynamic>)['#h'] as List).single as String,
     )
     .toList();
+
+final _transparentPng = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+);
 
 class _TestNavigatorObserver extends NavigatorObserver {
   int pushCount = 0;

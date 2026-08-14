@@ -34,6 +34,7 @@ import { LinkPreviewList } from "@/shared/ui/link-preview-list";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import {
   computeConfigNudge,
+  selectNudgeLeadingContent,
   selectProseOrNudge,
 } from "@/shared/lib/computeConfigNudge";
 import {
@@ -105,6 +106,7 @@ import {
   imageLightboxCornerRadiiFromElement,
   imageLightboxCornerRadiiStyle,
   imageLightboxExpandedCornerRadii,
+  getImageLightboxFocusableElements,
   imageLightboxReturnTargetForItem,
   imageLightboxSourceScopeForTrigger,
   imageLightboxStyle,
@@ -152,28 +154,6 @@ type ImageBlockProps = {
 type WebKitGestureLikeEvent = Event & {
   scale?: number;
 };
-
-function getImageLightboxFocusableElements(
-  container: HTMLElement,
-): HTMLElement[] {
-  return Array.from(
-    container.querySelectorAll<HTMLElement>(
-      [
-        "a[href]",
-        "button:not(:disabled)",
-        "input:not(:disabled)",
-        "select:not(:disabled)",
-        "textarea:not(:disabled)",
-        "[tabindex]:not([tabindex='-1'])",
-      ].join(","),
-    ),
-  ).filter(
-    (element) =>
-      !element.hasAttribute("disabled") &&
-      element.getAttribute("aria-hidden") !== "true" &&
-      element.getClientRects().length > 0,
-  );
-}
 
 function ImageZoomOverlay({
   alt,
@@ -1442,6 +1422,13 @@ export function createMarkdownComponents(
         {children}
       </SpoilerInline>
     ),
+    span: function MarkdownSpan({ children, node: _node, ...props }) {
+      const { leadingInlineContent } = useMarkdownRuntime();
+      if ("data-leading-inline-content" in props) {
+        return <>{leadingInlineContent}</>;
+      }
+      return <span {...props}>{children}</span>;
+    },
     a: MarkdownAnchor,
     blockquote: ({ children }) => (
       <blockquote className="border-l-2 border-border pl-4 italic text-muted-foreground [&>*:first-child]:mt-0 [&>*+*]:mt-2">
@@ -1559,7 +1546,7 @@ export function createMarkdownComponents(
     ol: ({ children }) => (
       <ol className={cn("list-decimal", listClassName)}>{children}</ol>
     ),
-    p: ({ children }) => {
+    p: function MarkdownParagraph({ children }) {
       // Detect media-only paragraphs (images + <br> from remarkBreaks).
       // Multi-image: render as a compact, count-aware mosaic. Two images split
       // a row, three form a hero-and-stack triptych, and larger odd counts let
@@ -1715,11 +1702,11 @@ export function createMarkdownComponents(
 }
 
 /**
- * The component map only varies by the two boolean render flags, so at most
- * four instances ever exist. Module-stable maps mean cached markdown element
+ * The component map only varies by the three boolean render flags, so at most
+ * eight instances ever exist. Module-stable maps mean cached markdown element
  * trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
-const MARKDOWN_COMPONENT_SCHEMA_VERSION = "7";
+const MARKDOWN_COMPONENT_SCHEMA_VERSION = "8";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
 type MarkdownComponentSet = { components: Components; variant: string };
@@ -1733,9 +1720,10 @@ type MarkdownComponentSet = { components: Components; variant: string };
  */
 function getMarkdownComponents(
   interactive: boolean,
+  leadingInlineContent: boolean,
   mediaInset: boolean,
 ): MarkdownComponentSet {
-  const variant = `${MARKDOWN_COMPONENT_SCHEMA_VERSION}:${interactive ? "i" : ""}${mediaInset ? "m" : ""}`;
+  const variant = `${MARKDOWN_COMPONENT_SCHEMA_VERSION}:${interactive ? "i" : ""}${leadingInlineContent ? "l" : ""}${mediaInset ? "m" : ""}`;
   let entry = markdownComponentsByVariant.get(variant);
   if (!entry) {
     entry = {
@@ -1756,6 +1744,7 @@ function MarkdownInner({
   imetaByUrl,
   interactive = true,
   agentMentionPubkeysByName,
+  leadingInlineContent,
   mediaInset = false,
   messageId,
   linkPreviewsSuppressed = false,
@@ -1810,6 +1799,7 @@ function MarkdownInner({
       agentMentionPubkeysByName,
       channels,
       imetaByUrl,
+      leadingInlineContent,
       mentionPubkeysByName,
       onOpenChannel,
       onOpenEntityLink,
@@ -1829,6 +1819,7 @@ function MarkdownInner({
       agentMentionPubkeysByName,
       channels,
       imetaByUrl,
+      leadingInlineContent,
       mentionPubkeysByName,
       onOpenChannel,
       onOpenEntityLink,
@@ -1861,7 +1852,12 @@ function MarkdownInner({
 
   // When a config-nudge suppresses the prose (selectProseOrNudge returns
   // null), skip the parse entirely — it would be thrown away unrendered.
-  const componentSet = getMarkdownComponents(interactive, mediaInset);
+  const hasLeadingInlineContent = leadingInlineContent != null;
+  const componentSet = getMarkdownComponents(
+    interactive,
+    hasLeadingInlineContent,
+    mediaInset,
+  );
   const markdownNode =
     configNudge === null
       ? renderCachedMarkdown({
@@ -1869,6 +1865,7 @@ function MarkdownInner({
           components: componentSet.components,
           content: processedContent,
           customEmoji,
+          leadingInlineContent: hasLeadingInlineContent,
           mentionNames,
           searchQuery,
           variant: componentSet.variant,
@@ -1904,6 +1901,7 @@ function MarkdownInner({
               className="max-w-full flex-wrap overflow-visible pb-0"
               data-config-nudge=""
             >
+              {selectNudgeLeadingContent(configNudge, leadingInlineContent)}
               <ConfigNudgeCard nudge={configNudge} />
             </AttachmentGroup>
           ) : null}
@@ -1936,6 +1934,7 @@ export const Markdown = React.memo(
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
     shallowArrayEqual(prev.channelNames, next.channelNames) &&
     prev.imetaByUrl === next.imetaByUrl &&
+    prev.leadingInlineContent === next.leadingInlineContent &&
     prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
     prev.searchQuery === next.searchQuery &&
     prev.snapshotSharedBy === next.snapshotSharedBy &&

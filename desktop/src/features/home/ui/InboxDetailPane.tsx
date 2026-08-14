@@ -19,7 +19,10 @@ import { ProjectInboxDetail } from "@/features/home/ui/ProjectInboxDetail";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
-import { hasInboxThreadContext } from "@/features/home/lib/inboxViewHelpers";
+import {
+  hasInboxThreadContext,
+  toTimelineMessage,
+} from "@/features/home/lib/inboxViewHelpers";
 import {
   type InboxDisplayMessage,
   InboxMessageRow,
@@ -35,6 +38,10 @@ import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionP
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import { buildEditMentionState } from "@/features/messages/lib/draftMentionRefs";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import {
+  buildVideoReviewPresentationByMessageId,
+  hasRenderedVideoAttachment,
+} from "@/features/messages/lib/videoReviewContext";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
@@ -46,6 +53,7 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { VideoReviewNavigationProvider } from "@/shared/ui/VideoReviewNavigation";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -63,6 +71,9 @@ const MembersSidebar = React.lazy(async () => {
   const module = await import("@/features/channels/ui/MembersSidebar");
   return { default: module.MembersSidebar };
 });
+
+const EMPTY_CONTEXT_MESSAGES: InboxContextMessage[] = [];
+const EMPTY_REPLIES: InboxReply[] = [];
 
 type InboxDetailPaneProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -143,7 +154,11 @@ export function InboxDetailPane(props: InboxDetailPaneProps) {
     );
   }
 
-  return <InboxMessageDetailPane {...props} />;
+  return (
+    <VideoReviewNavigationProvider>
+      <InboxMessageDetailPane {...props} />
+    </VideoReviewNavigationProvider>
+  );
 }
 
 function InboxMessageDetailPane({
@@ -160,9 +175,9 @@ function InboxMessageDetailPane({
   hasThreadContextLoadError = false,
   isThreadContextLoading = false,
   item,
-  messages = [],
+  messages = EMPTY_CONTEXT_MESSAGES,
   profiles,
-  replies = [],
+  replies = EMPTY_REPLIES,
   channel,
   contextChannelName = null,
   currentPubkey,
@@ -199,7 +214,6 @@ function InboxMessageDetailPane({
   // Build the plain, non-virtualized timeline the shared hook anchors against.
   // Live arrivals rerun its layout compensation without changing the target.
 
-  const selectedMessage = messages.find((message) => message.isSelected);
   // A latest reply can represent an Inbox conversation. Resolve the actual
   // root from loaded context or the complete feed group; never treat an
   // unresolved root/profile lookup as an authoritative empty audience.
@@ -234,34 +248,100 @@ function InboxMessageDetailPane({
         )
       : []
     : undefined;
-  const pendingReplyMessages: InboxDisplayMessage[] = replies.map((reply) => ({
-    ...reply,
-    depth: reply.depth ?? (selectedMessage?.depth ?? 0) + 1,
-    isSelected: false,
-    mentionNames: [],
-  }));
-  const displayMessages: InboxDisplayMessage[] =
-    messages.length > 0
-      ? [...messages, ...pendingReplyMessages]
-      : item
-        ? [
-            {
-              authorLabel: item.senderLabel,
-              authorPubkey: item.item.pubkey,
-              avatarUrl: item.avatarUrl,
-              content: item.preview,
-              createdAt: item.item.createdAt,
-              depth: 0,
-              fullTimestampLabel: item.fullTimestampLabel,
-              id: item.id,
-              isSelected: true,
-              mentionNames: item.mentionNames,
-              mentionPubkeysByName: item.mentionPubkeysByName,
-              timeLabel: formatTime(item.item.createdAt),
-            },
-            ...pendingReplyMessages,
-          ]
-        : pendingReplyMessages;
+  const displayMessages = React.useMemo<InboxDisplayMessage[]>(() => {
+    const selectedMessage = messages.find((message) => message.isSelected);
+    const pendingReplyMessages: InboxDisplayMessage[] = replies.map(
+      (reply) => ({
+        ...reply,
+        depth: reply.depth ?? (selectedMessage?.depth ?? 0) + 1,
+        isSelected: false,
+        mentionNames: [],
+      }),
+    );
+
+    if (messages.length > 0) {
+      return [...messages, ...pendingReplyMessages];
+    }
+    if (!item) return pendingReplyMessages;
+
+    const threadReference = getThreadReference(item.item.tags);
+    return [
+      {
+        authorLabel: item.senderLabel,
+        authorPubkey: item.item.pubkey,
+        avatarUrl: item.avatarUrl,
+        content: item.preview,
+        createdAt: item.item.createdAt,
+        depth: 0,
+        fullTimestampLabel: item.fullTimestampLabel,
+        id: item.id,
+        isSelected: true,
+        mentionNames: item.mentionNames,
+        mentionPubkeysByName: item.mentionPubkeysByName,
+        kind: item.item.kind,
+        parentId: threadReference.parentId,
+        rootId: threadReference.rootId,
+        tags: item.item.tags,
+        timeLabel: formatTime(item.item.createdAt),
+      },
+      ...pendingReplyMessages,
+    ];
+  }, [item, messages, replies]);
+  const videoReviewMessages = React.useMemo(
+    () => displayMessages.map(toTimelineMessage),
+    [displayMessages],
+  );
+  const videoReviewChannelType =
+    item?.item.channelType === "dm" ||
+    item?.item.channelType === "stream" ||
+    item?.item.channelType === "forum"
+      ? item.item.channelType
+      : null;
+  const handleSendVideoReviewComment = React.useCallback(
+    (
+      message: TimelineMessage,
+      content: string,
+      mentionPubkeys: string[],
+      mediaTags?: string[][],
+      parentEventId?: string,
+    ) =>
+      onSendReply({
+        content,
+        mediaTags,
+        mentionPubkeys,
+        parentEventId: parentEventId ?? message.id,
+      }),
+    [onSendReply],
+  );
+  const videoReviewPresentation = React.useMemo(
+    () =>
+      buildVideoReviewPresentationByMessageId(
+        {
+          channelId: item?.item.channelId,
+          channelName: contextChannelName ?? item?.channelLabel ?? undefined,
+          channelType: videoReviewChannelType,
+          isSendingVideoReviewComment: isSendingReply,
+          messages: videoReviewMessages,
+          onSendVideoReviewComment: canReply
+            ? handleSendVideoReviewComment
+            : undefined,
+          onToggleReaction,
+          profiles,
+        },
+        hasRenderedVideoAttachment,
+      ),
+    [
+      canReply,
+      contextChannelName,
+      handleSendVideoReviewComment,
+      isSendingReply,
+      item,
+      onToggleReaction,
+      profiles,
+      videoReviewChannelType,
+      videoReviewMessages,
+    ],
+  );
   const { onScroll } = useAnchoredScroll({
     channelId: conversationId,
     contentRef,
@@ -674,6 +754,12 @@ function InboxMessageDetailPane({
                   onSelectReplyTarget={handleSelectReplyTarget}
                   onToggleReaction={onToggleReaction}
                   showUnreadBoundary={hasUnreadBoundary}
+                  videoReviewCommentRootId={videoReviewPresentation.commentRootIdsByMessageId.get(
+                    message.id,
+                  )}
+                  videoReviewContext={videoReviewPresentation.contextsByMessageId.get(
+                    message.id,
+                  )}
                 />
               );
             })}

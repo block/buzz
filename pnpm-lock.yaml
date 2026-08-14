@@ -192,6 +192,9 @@ importers:
       lucide-react:
         specifier: ^1.0.0
         version: 1.16.0(react@19.2.8)
+      mdast-util-from-markdown:
+        specifier: ^2.0.3
+        version: 2.0.3
       motion:
         specifier: ^12.38.0
         version: 12.40.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

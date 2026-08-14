@@ -919,6 +919,7 @@ test("remarkMessageLinks: text inside inlineCode is left alone", () => {
 
 import {
   computeConfigNudge,
+  selectNudgeLeadingContent,
   selectProseOrNudge,
 } from "../lib/computeConfigNudge.ts";
 import { stripConfigNudgeSentinel } from "../lib/configNudge.ts";
@@ -949,7 +950,7 @@ function nudgeBody(agentPubkey) {
 // `computeConfigNudge.ts` — `computeConfigNudge` to detect the payload and
 // `selectProseOrNudge` for the prose-suppression branch — without importing
 // any Tauri or context dependencies.
-function GuardStub({ content, configNudgeAuthorPubkey }) {
+function GuardStub({ content, configNudgeAuthorPubkey, leadingInlineContent }) {
   const configNudge = computeConfigNudge(
     content,
     true,
@@ -967,7 +968,11 @@ function GuardStub({ content, configNudgeAuthorPubkey }) {
     null,
     selectProseOrNudge(configNudge, markdownNode),
     configNudge !== null
-      ? React.createElement("div", { "data-config-nudge": "" })
+      ? React.createElement(
+          "div",
+          { "data-config-nudge": "" },
+          selectNudgeLeadingContent(configNudge, leadingInlineContent),
+        )
       : null,
   );
 }
@@ -996,6 +1001,28 @@ test("nudgeGuard_sentinelPresentMatchingAuthor_cardRenderedProseAbsent", () => {
   );
 });
 
+test("nudgeGuard_sentinelPresentMatchingAuthor_preservesLeadingContent", () => {
+  const body = nudgeBody(AGENT_PUBKEY);
+  const html = renderToStaticMarkup(
+    React.createElement(GuardStub, {
+      content: body,
+      configNudgeAuthorPubkey: AGENT_PUBKEY,
+      leadingInlineContent: React.createElement(
+        "span",
+        { "data-video-review-timecode": "" },
+        "[00:10]",
+      ),
+    }),
+  );
+  assert.ok(
+    html.includes("data-video-review-timecode"),
+    "leading video-review content must remain visible beside the nudge card",
+  );
+  assert.ok(
+    !html.includes("data-markdown-prose"),
+    "nudge prose must remain suppressed while leading content is preserved",
+  );
+});
 test("nudgeGuard_sentinelPresentWrongAuthor_proseRenderedCardAbsent", () => {
   // Sentinel present, but author pubkey is human — auth guard rejects, prose shown.
   const body = nudgeBody(AGENT_PUBKEY);

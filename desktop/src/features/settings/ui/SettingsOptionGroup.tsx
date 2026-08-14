@@ -16,23 +16,24 @@ export function SettingsOptionGroup({
   surface?: "framed" | "soft";
   title?: React.ReactNode;
 }) {
+  const hasHeader = Boolean(title || description || headerAction);
+
   return (
-    <div
-      className={cn(
-        surface === "soft"
-          ? "overflow-hidden rounded-2xl bg-muted/20"
-          : "overflow-hidden rounded-xl border border-border/70 bg-background/70 divide-y divide-border/55",
-        className,
-      )}
-      {...props}
-    >
-      {title ? (
-        <div className="flex min-h-14 items-center justify-between gap-4 px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
+    <div className={cn("space-y-2", className)} {...props}>
+      {hasHeader ? (
+        <div
+          className="flex min-h-7 items-end gap-3 px-4"
+          data-slot="settings-section-header"
+        >
+          <div className="min-w-0 flex-1">
+            {title ? (
+              <h2 className="text-sm font-semibold text-muted-foreground/70">
+                {title}
+              </h2>
+            ) : null}
             {description ? (
               <p
-                className="mt-1 text-sm font-normal text-muted-foreground/70"
+                className="mt-0.5 text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
                 {description}
@@ -42,8 +43,30 @@ export function SettingsOptionGroup({
           {headerAction ? <div className="shrink-0">{headerAction}</div> : null}
         </div>
       ) : null}
-      {children}
+      <div
+        className={cn(
+          surface === "soft"
+            ? "overflow-hidden rounded-2xl bg-muted/20"
+            : "divide-y divide-border/55 overflow-hidden rounded-xl border border-border/70 bg-background/70",
+        )}
+        data-slot="settings-section-card"
+      >
+        {children}
+      </div>
     </div>
+  );
+}
+
+export function SettingsOptionGroupList({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={cn("space-y-12", className)}
+      data-slot="settings-section-list"
+      {...props}
+    />
   );
 }
 

@@ -130,6 +130,7 @@ export default defineConfig({
         "**/profile-nsec-reveal.spec.ts",
         "**/profile-backup-settings.spec.ts",
         "**/signout-confirmation.spec.ts",
+        "**/settings-section-layout.spec.ts",
         "**/agent-provider-dropdowns.spec.ts",
         "**/agent-lifecycle-feedback.spec.ts",
         "**/agent-access-warning.spec.ts",

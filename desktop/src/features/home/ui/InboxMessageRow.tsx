@@ -4,10 +4,12 @@ import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import type { InboxContextMessage } from "@/features/home/lib/inbox";
 import { toTimelineMessage } from "@/features/home/lib/inboxViewHelpers";
 import { formatTimeWithoutDayPeriod } from "@/features/messages/lib/dateFormatters";
+import { formatItemTimestamp } from "@/shared/lib/datetime";
 import type { TimelineMessage } from "@/features/messages/types";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
 import { MessageAgentOwner } from "@/features/messages/ui/MessageAgentOwner";
+import { MessageMetaSeparator } from "@/features/messages/ui/MessageHeader";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { UnreadDivider } from "@/features/messages/ui/UnreadDivider";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
@@ -15,9 +17,11 @@ import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 export type InboxDisplayMessage = InboxContextMessage & {
   depth: number;
@@ -41,6 +45,8 @@ type InboxMessageRowProps = {
     remove: boolean,
   ) => Promise<void>;
   showUnreadBoundary?: boolean;
+  videoReviewCommentRootId?: string;
+  videoReviewContext?: VideoReviewContext;
 };
 
 export function InboxMessageRow({
@@ -56,10 +62,16 @@ export function InboxMessageRow({
   onSelectReplyTarget,
   onToggleReaction,
   showUnreadBoundary = false,
+  videoReviewCommentRootId,
+  videoReviewContext,
 }: InboxMessageRowProps) {
   const timelineMessage = React.useMemo(
     () => toTimelineMessage(message),
     [message],
+  );
+  const imetaByUrl = React.useMemo(
+    () => (message.tags ? parseImetaTags(message.tags) : undefined),
+    [message.tags],
   );
   const { customEmoji, emojiOnly } = useMessageEmoji(
     message.content,
@@ -93,6 +105,21 @@ export function InboxMessageRow({
   const profileRole = isAuthorAgent ? "bot" : undefined;
   const hoverTimestampLabel = formatTimeWithoutDayPeriod(
     message.timeLabel ?? message.fullTimestampLabel,
+  );
+  // Derived here rather than plumbed in with the message: the thread pane has no
+  // day divider to supply the date, and deriving on render means a row does not
+  // keep saying "Today" after midnight. `fullTimestampLabel` stays the absolute
+  // value behind the hover title.
+  const timestampLabel = formatItemTimestamp(message.createdAt, {
+    withTime: true,
+  });
+  const timestampNode = (
+    <p
+      className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground/55"
+      title={message.fullTimestampLabel}
+    >
+      {timestampLabel}
+    </p>
   );
 
   return (
@@ -192,19 +219,29 @@ export function InboxMessageRow({
                 </span>
               </UserProfilePopover>
               {message.isAgent ? (
-                <MessageAgentOwner
-                  ownerLabel={message.ownerLabel}
-                  ownerPubkey={message.ownerPubkey}
-                />
-              ) : null}
-              <p className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground/55">
-                {message.fullTimestampLabel}
-              </p>
+                <>
+                  <MessageAgentOwner
+                    ownerLabel={message.ownerLabel}
+                    ownerPubkey={message.ownerPubkey}
+                  />
+                  {/*
+                    Grouped with the timestamp so the divider never wraps to the
+                    start of a line on its own. Gap matches the container's, so
+                    spacing reads the same either side of the divider.
+                  */}
+                  <span className="inline-flex min-w-0 items-center gap-x-2">
+                    <MessageMetaSeparator />
+                    {timestampNode}
+                  </span>
+                </>
+              ) : (
+                timestampNode
+              )}
             </div>
           )}
 
           <div className={isContinuation ? "mt-0" : "mt-0.5"}>
-            <Markdown
+            <VideoReviewCommentMarkdown
               className={cn(
                 "max-w-full text-left text-sm text-foreground",
                 emojiOnly &&
@@ -224,8 +261,11 @@ export function InboxMessageRow({
                 timelineMessage.tags,
               )}
               customEmoji={customEmoji}
+              imetaByUrl={imetaByUrl}
               mentionNames={message.mentionNames}
               mentionPubkeysByName={message.mentionPubkeysByName}
+              videoReviewCommentRootId={videoReviewCommentRootId}
+              videoReviewContext={videoReviewContext}
             />
             <MessageReactions
               canToggle={canToggleReactions}
