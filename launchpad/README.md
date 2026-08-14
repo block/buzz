@@ -113,7 +113,8 @@ Both paths are checked in CI, so structure holds whether the PR came from the br
 or the CLI.
 
 Branch from `launchpad`, commit with `-s` (the DCO check is not optional), and expect to
-need one approving review — the branch is protected and you can't approve your own.
+need two approving reviews from reviewers with write access — the branch is protected
+and you can't approve your own.
 
 ---
 
