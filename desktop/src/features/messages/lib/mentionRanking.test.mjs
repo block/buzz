@@ -139,3 +139,24 @@ test("rankMentionCandidates: owned teams rank with runnable personas", () => {
     ["team", "identity"],
   );
 });
+
+test("rankMentionCandidates: fullwidth ｜ in display name matches halfwidth | query", () => {
+  const agent = candidate({
+    displayName: "Hermes｜居遊所總管",
+    isAgent: true,
+    isMember: true,
+  });
+
+  assert.deepEqual(rankedPubkeys([agent], "hermes|"), [OTHER_BRAIN_PUBKEY]);
+  assert.deepEqual(rankedPubkeys([agent], "hermes｜居"), [OTHER_BRAIN_PUBKEY]);
+});
+
+test("rankMentionCandidates: segment after ｜ matches as its own word", () => {
+  const agent = candidate({
+    displayName: "Hermes｜居遊所總管",
+    isAgent: true,
+    isMember: true,
+  });
+
+  assert.deepEqual(rankedPubkeys([agent], "居遊"), [OTHER_BRAIN_PUBKEY]);
+});
