@@ -39,23 +39,34 @@ class AgentActivitySheet extends HookConsumerWidget {
     );
     final botName = profile?.label ?? shortPubkey(agentPubkey);
 
-    // Auto-scroll to bottom on new items.
+    // Follow live activity only while the user is already reading its tail.
+    // New bot items are passive updates, so correcting with an animation at
+    // max extent makes iOS repeatedly rubber-band at the bottom.
     final sheetControllerRef = useRef<ScrollController?>(null);
     final previousLength = useRef(0);
+    final autoScrollQueued = useRef(false);
 
     useEffect(() {
       final sc = sheetControllerRef.value;
       if (transcript.length > previousLength.value &&
           sc != null &&
-          sc.hasClients) {
+          sc.hasClients &&
+          !autoScrollQueued.value) {
+        final position = sc.position;
+        final wasAtTail =
+            position.maxScrollExtent - position.pixels <= 1;
+        if (!wasAtTail) {
+          previousLength.value = transcript.length;
+          return null;
+        }
+        final previousPixels = position.pixels;
+        autoScrollQueued.value = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (sc.hasClients) {
-            sc.animateTo(
-              sc.position.maxScrollExtent,
-              duration: const Duration(milliseconds: 150),
-              curve: Curves.easeOut,
-            );
-          }
+          autoScrollQueued.value = false;
+          if (!sc.hasClients || sc.position.pixels + 1 < previousPixels) return;
+          final maxScrollExtent = sc.position.maxScrollExtent;
+          if (maxScrollExtent - sc.position.pixels <= 1) return;
+          sc.jumpTo(maxScrollExtent);
         });
       }
       previousLength.value = transcript.length;

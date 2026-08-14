@@ -350,7 +350,16 @@ class _MessageList extends HookConsumerWidget {
         return null;
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted) scrollToLatest();
+        // Incoming messages are passive layout updates, not user navigation.
+        // In a reversed list an already-pinned tail normally stays put; if it
+        // needs correction, realign with an instant jump rather than restarting
+        // a 220ms bottom-edge animation for every agent event on iOS.
+        if (!context.mounted ||
+            !followsLatest.value ||
+            hasUserScrolled.value) {
+          return;
+        }
+        realignLatestAfterLayoutChange();
       });
       return null;
     }, [latestEntryId]);
