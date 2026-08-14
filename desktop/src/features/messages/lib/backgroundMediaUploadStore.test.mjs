@@ -24,7 +24,7 @@ function deferred() {
 
 test("cancels only uploads whose native commands were dispatched", async () => {
   const releaseUpload = deferred();
-  const startedProgressIds = new Set();
+  const startedProgressIds = new Map();
   const cancelled = [];
   const dispatched = [];
   const released = [];
@@ -61,7 +61,7 @@ test("cancels only uploads whose native commands were dispatched", async () => {
 });
 
 test("releases ownership when dispatch rejects", async () => {
-  const startedProgressIds = new Set();
+  const startedProgressIds = new Map();
   const released = [];
 
   await assert.rejects(
@@ -81,4 +81,37 @@ test("releases ownership when dispatch rejects", async () => {
 
   assert.equal(startedProgressIds.size, 0);
   assert.deepEqual(released, ["rejected"]);
+});
+
+test("waits for cancellation before releasing renderer ownership", async () => {
+  const releaseUpload = deferred();
+  const releaseCancellation = deferred();
+  const startedProgressIds = new Map();
+  const events = [];
+  const uploadPromise = dispatchTrackedMediaUpload(
+    {},
+    "ordered",
+    new AbortController().signal,
+    startedProgressIds,
+    async (_file, _id, _signal, onDispatch) => {
+      onDispatch();
+      await releaseUpload.promise;
+      return descriptor;
+    },
+    async () => events.push("release"),
+  );
+  await Promise.resolve();
+
+  cancelStartedMediaUploads(startedProgressIds, async () => {
+    events.push("cancel-start");
+    await releaseCancellation.promise;
+    events.push("cancel-finish");
+  });
+  releaseUpload.resolve();
+  await Promise.resolve();
+  assert.deepEqual(events, ["cancel-start"]);
+
+  releaseCancellation.resolve();
+  await uploadPromise;
+  assert.deepEqual(events, ["cancel-start", "cancel-finish", "release"]);
 });

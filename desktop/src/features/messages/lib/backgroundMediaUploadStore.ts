@@ -27,7 +27,7 @@ type BackgroundUploadTask = {
   id: number;
   isCompleting: boolean;
   onCancel?: () => void;
-  startedProgressIds: Set<string>;
+  startedProgressIds: Map<string, Promise<void> | null>;
 };
 
 type BackgroundUploadSnapshot = {
@@ -190,11 +190,15 @@ function cancelTask(
 }
 
 export function cancelStartedMediaUploads(
-  startedProgressIds: ReadonlySet<string>,
+  startedProgressIds: Map<string, Promise<void> | null>,
   cancel: (progressId: string) => Promise<void> = cancelMediaUpload,
 ): void {
-  for (const id of startedProgressIds) {
-    void cancel(id).catch(() => undefined);
+  for (const [id, cancellation] of startedProgressIds) {
+    if (cancellation) continue;
+    startedProgressIds.set(
+      id,
+      cancel(id).catch(() => undefined),
+    );
   }
 }
 
@@ -202,14 +206,18 @@ export async function dispatchTrackedMediaUpload(
   file: File,
   id: string,
   signal: AbortSignal,
-  startedProgressIds: Set<string>,
+  startedProgressIds: Map<string, Promise<void> | null>,
   upload: typeof uploadMediaFile = uploadMediaFile,
   release: (progressId: string) => Promise<void> = releaseMediaUpload,
 ): Promise<BlobDescriptor> {
   try {
-    return await upload(file, id, signal, () => startedProgressIds.add(id));
+    return await upload(file, id, signal, () =>
+      startedProgressIds.set(id, null),
+    );
   } finally {
+    const cancellation = startedProgressIds.get(id);
     startedProgressIds.delete(id);
+    if (cancellation) await cancellation;
     await release(id).catch(() => undefined);
   }
 }
@@ -256,7 +264,7 @@ export function prepareBackgroundMediaUpload(
     })),
     id: taskId,
     isCompleting: false,
-    startedProgressIds: new Set(),
+    startedProgressIds: new Map(),
   };
   let started = false;
   tasks.set(taskId, task);

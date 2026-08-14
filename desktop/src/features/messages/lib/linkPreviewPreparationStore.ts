@@ -89,8 +89,9 @@ async function uploadDataUrl(
   if (signal.aborted) return { failed: true, sha256: "", url: "" };
 
   const progressId = `link-preview-${nextUploadId++}`;
+  let cancellation: Promise<void> | null = null;
   const cancel = () => {
-    void cancelMediaUpload(progressId).catch(() => undefined);
+    cancellation ??= cancelMediaUpload(progressId).catch(() => undefined);
   };
   signal.addEventListener("abort", cancel, { once: true });
   try {
@@ -101,6 +102,7 @@ async function uploadDataUrl(
     return { failed: true, sha256: "", url: "" };
   } finally {
     signal.removeEventListener("abort", cancel);
+    if (cancellation) await cancellation;
     await releaseMediaUpload(progressId).catch(() => undefined);
   }
 }
