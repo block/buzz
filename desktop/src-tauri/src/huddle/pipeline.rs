@@ -277,10 +277,6 @@ pub(crate) async fn post_connect_setup(
 ///
 /// Returns `Ok(true)` if the pipeline was started, `Ok(false)` if models are
 /// not ready (voice-only mode), or `Err` on a real failure.
-///
-/// Creates the shared `tts_active` flag and passes it to the STT pipeline
-/// for barge-in / echo gating. The same flag is later passed to the TTS
-/// pipeline so it can signal when audio is playing.
 pub(crate) async fn maybe_start_stt_pipeline(
     state: &AppState,
     ephemeral_channel_id: &str,
@@ -309,7 +305,6 @@ pub(crate) async fn maybe_start_stt_pipeline(
     // Take the old pipeline OUT of the lock before dropping — Drop joins
     // the worker thread (~200ms) and must not block under the mutex.
     let (
-        tts_active,
         agent_pubkeys_arc,
         session_gen,
         expected_generation,
@@ -345,7 +340,6 @@ pub(crate) async fn maybe_start_stt_pipeline(
             None
         };
         (
-            Arc::clone(&hs.tts_active),
             Arc::clone(&hs.agent_pubkeys),
             Arc::clone(&hs.session_generation),
             hs.session_generation.load(Ordering::Acquire),
@@ -359,12 +353,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
     drop(old_stt);
 
     let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(
-            model_dir,
-            tts_active,
-            ptt_active_for_stt,
-            manual_mic_unmuted_for_stt,
-        )
+        stt::SttPipeline::new(model_dir, ptt_active_for_stt, manual_mic_unmuted_for_stt)
     })
     .await;
     let (pipeline, text_rx) = match constructed {

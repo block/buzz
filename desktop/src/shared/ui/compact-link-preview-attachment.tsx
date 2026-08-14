@@ -1,5 +1,5 @@
 import { ImageOff } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
 import { cn } from "@/shared/lib/cn";
@@ -13,6 +13,7 @@ import {
 } from "@/shared/ui/attachment";
 import { LinkPreviewControls } from "@/shared/ui/link-preview-controls";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
+import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 
 function getHostname(preview: ResolvedLinkPreview): string {
   if (preview.href.startsWith("buzz://")) return preview.provider;
@@ -64,6 +65,13 @@ export function CompactLinkPreviewAttachment({
   const imageSrc =
     preview.imageState === "image" ? (preview.imageDataUrl ?? null) : null;
   const [failedImageSrc, setFailedImageSrc] = useState<string | null>(null);
+  // The shell clips its corners with a smooth-corner (squircle) path, and the
+  // thumbnail sits flush against its left edge — so the thumbnail's left
+  // corners are carved by that path while its right corners are its own.
+  // A plain border-radius can never match a squircle of the same radius, so
+  // give the thumbnail the same treatment: both sides then share one curve.
+  const thumbnailRef = useRef<HTMLDivElement | null>(null);
+  useSmoothCorners(thumbnailRef);
   const showImage = Boolean(imageSrc && failedImageSrc !== imageSrc);
   const showFallback =
     preview.imageState === "fallback" || Boolean(imageSrc && !showImage);
@@ -88,8 +96,9 @@ export function CompactLinkPreviewAttachment({
       >
         {reserveImage ? (
           <AttachmentMedia
+            ref={thumbnailRef}
             aria-hidden={showImage ? undefined : "true"}
-            className="aspect-auto h-16 w-26 rounded-xl bg-muted"
+            className="aspect-auto h-16 w-26 rounded-2xl bg-muted"
             data-link-preview-thumbnail=""
             variant="image"
           >
