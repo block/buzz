@@ -326,6 +326,8 @@ type E2eConfig = {
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
     applyCommunityDelayMs?: number;
+    /** Reject `clear_pending_navigation_deep_links` with this message. */
+    clearPendingNavigationDeepLinksError?: string;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
     /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
@@ -475,6 +477,13 @@ type E2eConfig = {
       relayUrl: string;
       code?: string | null;
       name?: string | null;
+    }>;
+    pendingNavigationDeepLinks?: Array<{
+      id: string;
+      kind: "channel" | "message";
+      channelId: string;
+      messageId?: string | null;
+      threadRootId?: string | null;
     }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
@@ -4360,6 +4369,24 @@ function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
     ...pending,
     code: pending.code ?? null,
     name: pending.name ?? null,
+  }));
+}
+
+let mockPendingNavigationDeepLinks: Array<{
+  id: string;
+  kind: "channel" | "message";
+  channelId: string;
+  messageId: string | null;
+  threadRootId: string | null;
+}> = [];
+
+function resetMockPendingNavigationDeepLinks(config: E2eConfig | null) {
+  mockPendingNavigationDeepLinks = (
+    config?.mock?.pendingNavigationDeepLinks ?? []
+  ).map((pending) => ({
+    ...pending,
+    messageId: pending.messageId ?? null,
+    threadRootId: pending.threadRootId ?? null,
   }));
 }
 
@@ -10176,6 +10203,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
+  resetMockPendingNavigationDeepLinks(config);
   initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
   if (config.mock?.windowLabel) {
@@ -11924,6 +11952,22 @@ export function maybeInstallE2eTauriMocks() {
           return false;
         }
         mockPendingCommunityDeepLinks.splice(index, 1);
+        return true;
+      }
+      case "clear_pending_navigation_deep_links":
+        if (activeConfig?.mock?.clearPendingNavigationDeepLinksError) {
+          throw new Error(
+            activeConfig.mock.clearPendingNavigationDeepLinksError,
+          );
+        }
+        mockPendingNavigationDeepLinks.length = 0;
+        return;
+      case "take_pending_navigation_deep_link":
+        return mockPendingNavigationDeepLinks[0] ?? null;
+      case "acknowledge_pending_navigation_deep_link": {
+        const { id } = payload as { id: string };
+        if (mockPendingNavigationDeepLinks[0]?.id !== id) return false;
+        mockPendingNavigationDeepLinks.shift();
         return true;
       }
       case "get_relay_http_url":

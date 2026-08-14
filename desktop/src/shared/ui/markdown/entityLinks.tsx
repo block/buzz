@@ -12,6 +12,31 @@ import {
   type SupportedLinkPreview,
 } from "@/shared/lib/linkPreview";
 
+import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
+
+function entityLinkPresentation(link: ParsedEntityLink) {
+  switch (link.type) {
+    case "repo":
+      return {
+        ariaLabel: `Open repository ${link.dtag}`,
+        icon: "repo" as const,
+        label: link.dtag,
+      };
+    case "pr":
+      return {
+        ariaLabel: `Open pull request ${link.id.slice(0, 8)} in repository ${link.dtag}`,
+        icon: "pr" as const,
+        label: `${link.dtag} · ${link.id.slice(0, 8)}`,
+      };
+    case "issue":
+      return {
+        ariaLabel: `Open issue ${link.id.slice(0, 8)} in repository ${link.dtag}`,
+        icon: "issue" as const,
+        label: `${link.dtag} · ${link.id.slice(0, 8)}`,
+      };
+  }
+}
+
 /**
  * Navigate to the project detail view for a `buzz://pr|issue|repo` link.
  * The link's (owner, d) coordinate is exactly the `/projects/$projectId`
@@ -76,17 +101,19 @@ function resolveEntityHref(
  * default anchor.
  */
 export function renderEntityLinkAnchor({
-  anchorProps,
   children,
   href,
   onOpenEntityLink,
   relayOrigin,
+  interactive = true,
+  asChip = true,
 }: {
-  anchorProps: React.ComponentPropsWithoutRef<"a">;
   children: React.ReactNode;
   href: string | undefined;
   onOpenEntityLink: (link: ParsedEntityLink) => void;
   relayOrigin: string | null;
+  interactive?: boolean;
+  asChip?: boolean;
 }): React.ReactElement | null {
   if (!href) return null;
 
@@ -95,18 +122,33 @@ export function renderEntityLinkAnchor({
 
   const parsed = parseEntityLink(canonicalHref);
   if (!parsed.ok) return null;
+  const presentation = entityLinkPresentation(parsed.value);
+
+  if (!asChip) {
+    return (
+      <BuzzInlineLink
+        href={href}
+        title={href}
+        aria-label={presentation.ariaLabel}
+        interactive={interactive}
+        onOpenLink={() => onOpenEntityLink(parsed.value)}
+      >
+        {children}
+      </BuzzInlineLink>
+    );
+  }
 
   return (
-    <a
-      {...anchorProps}
-      className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
+    <BuzzLinkChip
+      data-buzz-link-kind={parsed.value.type}
       href={href}
-      onClick={(event) => {
-        event.preventDefault();
-        onOpenEntityLink(parsed.value);
-      }}
+      icon={presentation.icon}
+      title={href}
+      aria-label={presentation.ariaLabel}
+      interactive={interactive}
+      onOpenLink={() => onOpenEntityLink(parsed.value)}
     >
-      {children}
-    </a>
+      {presentation.label}
+    </BuzzLinkChip>
   );
 }
