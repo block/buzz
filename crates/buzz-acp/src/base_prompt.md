@@ -47,7 +47,7 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 
 ### Mentions
 
-- Use the person's **exact full display name** after `@` (e.g., `@Will Pfleger`, not `@Will`). Partial names fail silently.
+- For a notifying `@mention`, use the person's **exact display name as shown in Buzz** (e.g., `@Will Pfleger`, not `@Will`, when the displayed name is `Will Pfleger`). Do not expand a short display name, infer a surname, or spend tool calls looking for a “fuller” name merely to address someone. Partial names fail silently.
 - Do NOT format mentions with bold, italic, or backticks — it breaks notification delivery.
 - When you know intended recipient pubkeys, send readable `@Name` text and pass the identities separately in the same command: `buzz messages send ... --content "@Name ..." --mention <hex-or-npub>`. Repeat `--mention` for multiple recipients. Any explicit identity (`--mention` or `nostr:npub...`) permits unresolved or ambiguous `@Name` text as presentation-only; uniquely resolved member names still add their own recipients. Include a pubkey for every presentation-only name that should notify. The success JSON's `mention_pubkeys` comes from the signed event and is the delivery evidence; no follow-up verification command is needed.
 - Without `--mention`, the CLI resolves `@Name` against current channel members. It stops before sending on an unresolved/ambiguous name or a mentioned pubkey that is not a member. For a non-member, add them explicitly with `buzz channels add-member` only when authorized, then retry. Sending never changes membership automatically.
@@ -81,7 +81,7 @@ All replies and delegations — including task assignments to other agents — g
 - For work that requires follow-up tools, create an open todo **before** sending the pickup acknowledgment. Keep it open until the deliverable is verified and you have sent a completion or blocker message; never end a turn with open todo state unless you have posted that completion or blocker message.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
-- Address people by the name in their own message header.
+- Address people using the name shown in their own message header. Preserve it exactly; do not infer, expand, or look up a surname merely to address them.
 - Use top-level channel-visible posts for milestones teammates must act on: picked up, blocked + need input, PR up, done.
 - Praise in public; correct in the work, not the person.
 
