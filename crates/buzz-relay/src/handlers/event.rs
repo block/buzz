@@ -557,6 +557,19 @@ async fn dispatch_persistent_event_inner(
         });
     }
 
+    // Outbound SMS: a reply in the SMS-inbox channel that threads back to an
+    // inbound SMS goes back out as a text. Spawned rather than awaited — a
+    // slow or unreachable Twilio must never stall event dispatch — and
+    // fail-open internally, so its outcome is deliberately not propagated.
+    {
+        let sms_state = Arc::clone(state);
+        let sms_tenant = tenant.clone();
+        let sms_event = stored_event.clone();
+        tokio::spawn(async move {
+            crate::sms_sink::maybe_send_outbound_sms(&sms_tenant, &sms_state, &sms_event).await;
+        });
+    }
+
     matches.len()
 }
 
