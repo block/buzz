@@ -17,6 +17,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::managed_agents::discovery::known_skill_dirs;
@@ -525,22 +527,6 @@ fn escape_md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
-/// Normalize a relay URL for equality: trim surrounding space, drop a trailing
-/// slash, and lowercase. Scheme and host are ASCII-case-insensitive and these
-/// relay URLs carry no meaningful path, so this collapses the incidental
-/// variation (trailing `/`, casing) without over-parsing.
-fn normalize_relay_url(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_ascii_lowercase()
-}
-
-/// True iff the instance's pinned `relay_url` is the active workspace relay.
-/// A *local* check on data already in the store — unconditional, unlike the
-/// archive filter (there is no fetch to fail open on). Records pinned to a
-/// defunct relay must not render under the active relay's header.
-fn is_on_active_relay(record: &ManagedAgentRecord, active_relay_normalized: &str) -> bool {
-    normalize_relay_url(&record.relay_url) == active_relay_normalized
-}
-
 /// True iff the relay has archived this instance's identity. Membership is
 /// tested against the relay's `kind:13535` snapshot (lowercased hex); an empty
 /// set (relay unreachable) fails open — see [`regenerate_nest_context`].
@@ -554,10 +540,12 @@ pub fn render_dynamic_section(
     archived: &HashSet<String>,
     relay_url: &str,
 ) -> String {
-    let active_relay = normalize_relay_url(relay_url);
+    // Every managed agent is eligible on every community — `relay_url` is a
+    // legacy creation-era field that `effective_agent_relay_url()` deliberately
+    // ignores, and snapshot-imported records store it empty by design. The only
+    // roster filter is identity-archive.
     let live: Vec<&ManagedAgentRecord> = agents
         .iter()
-        .filter(|a| is_on_active_relay(a, &active_relay))
         .filter(|a| !is_archived(a, archived))
         .collect();
     let active_agents = if live.is_empty() {
@@ -677,7 +665,64 @@ pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io
     Ok(())
 }
 
-pub async fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
+/// Serializes nest-context writes so a slow, stale regeneration cannot roll the
+/// file back over a newer one.
+///
+/// Each regeneration request claims a monotonic generation *synchronously* at
+/// request time (see [`NestRegenCoalescer::claim`]), so the generation encodes
+/// program order: boot's regen is claimed before `apply_workspace`'s, an edit's
+/// regen before the next edit's. The claimed generation travels with the
+/// spawned task and gates its write in [`NestRegenCoalescer::commit`]: a task
+/// whose generation is below the high-water mark drops its result instead of
+/// overwriting the newer file. The commit lock is held across the compare and
+/// the synchronous file write, so two tasks cannot both read a stale mark and
+/// both write — a bare mutex acquired around only the write would still permit
+/// that stale-last rollback.
+struct NestRegenCoalescer {
+    /// Next generation to hand out. `fetch_add` under a single atomic preserves
+    /// the program order of `claim` calls regardless of memory ordering.
+    next_gen: AtomicU64,
+    /// Highest generation already written. `0` means nothing written yet.
+    last_written: Mutex<u64>,
+}
+
+impl NestRegenCoalescer {
+    const fn new() -> Self {
+        Self {
+            next_gen: AtomicU64::new(1),
+            last_written: Mutex::new(0),
+        }
+    }
+
+    /// Claim the next generation. Call synchronously at request time so the
+    /// value reflects when the regeneration was requested, not when its task
+    /// happens to run.
+    fn claim(&self) -> u64 {
+        self.next_gen.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Commit `content` for `generation`, dropping the write when a newer
+    /// generation has already committed. Returns whether the file was written.
+    /// The lock spans the compare and the write so the check-and-write is
+    /// atomic and no await occurs while it is held.
+    fn commit(&self, agents_md: &Path, content: &str, generation: u64) -> io::Result<bool> {
+        let mut last = self
+            .last_written
+            .lock()
+            .expect("nest regen coalescer lock poisoned");
+        if generation < *last {
+            return Ok(false);
+        }
+        upsert_managed_section(agents_md, content)?;
+        *last = generation;
+        Ok(true)
+    }
+}
+
+/// Process-wide coalescer for nest-context regeneration.
+static NEST_REGEN: NestRegenCoalescer = NestRegenCoalescer::new();
+
+pub async fn regenerate_nest_context(app: &AppHandle, generation: u64) -> Result<(), String> {
     let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
     let agents_md = nest.join("AGENTS.md");
 
@@ -691,30 +736,40 @@ pub async fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
     let relay_url = relay_ws_url_with_override(&state);
     // Identity-archived agents live only in the relay's `kind:13535` snapshot;
     // local records all read `is_active: true`. Fails open (empty set → render
-    // everyone) so an unreachable relay can't blank the roster.
+    // everyone) so an unreachable relay can't blank the roster. The archive read
+    // and the relay URL above are read for this generation; a later generation's
+    // task always wins the commit, so a fallback-relay boot render cannot bury a
+    // later apply_workspace render.
     let archived: HashSet<String> = fetch_archived_pubkeys(&state).await.into_iter().collect();
     let content = render_dynamic_section(&personas, &agents, &archived, &relay_url);
-    upsert_managed_section(&agents_md, &content)
+    NEST_REGEN
+        .commit(&agents_md, &content, generation)
         .map_err(|e| format!("regenerate nest context: {e}"))?;
 
     Ok(())
 }
 
-/// Convenience wrapper: regenerates nest context, logging a warning on failure.
+/// Convenience wrapper: claims a regeneration generation, then regenerates on a
+/// spawned task, logging a warning on failure.
 ///
 /// All call sites treat regeneration as fire-and-forget — agents run fine with
 /// a stale AGENTS.md, so we warn and continue rather than propagating the error.
-/// Regeneration reads relay archive state, so it runs on a spawned async task;
-/// callers do not await it. A just-archived agent may linger for one regen
-/// cycle until the next regen (any agent/team edit or the next launch).
+/// The generation is claimed *here*, synchronously, so it encodes call order;
+/// the spawned task carries it into [`NestRegenCoalescer::commit`], which drops
+/// a stale render rather than letting a slow task overwrite a newer file. A
+/// just-archived agent may linger for one regen cycle until the next regen (any
+/// agent/team edit or the next launch).
 pub fn try_regenerate_nest(app: &AppHandle) {
+    let generation = NEST_REGEN.claim();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = regenerate_nest_context(&app).await {
+        if let Err(error) = regenerate_nest_context(&app, generation).await {
             eprintln!("buzz-desktop: nest context regeneration failed: {error}");
         }
     });
 }
 
+#[cfg(test)]
+mod render_tests;
 #[cfg(test)]
 mod tests;
