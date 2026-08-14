@@ -226,6 +226,13 @@ gh pr create --base launchpad
   place it is stated without admin.
 - **Do not force-push during review.** Push new commits instead — force-pushing hides
   what changed from the reviewer.
+- **Run `gh repo set-default launchpad-26/buzz` once per clone, before the first
+  `gh issue create` or `gh pr create`.** Without it, `gh`'s default-repo resolution
+  targets `block/buzz` — the parent repository — for any command with no explicit
+  `--repo`. A write aimed at this fork (an issue, a PR comment) silently lands on
+  upstream's public tracker instead, and the mistake is not visible until someone
+  looks there. The setting lands in the shared `.git/config`, so it covers every
+  worktree of the clone, not just the one it was run in.
 
 Before running any git command, activate the toolchain or hooks fail on `PATH`:
 
