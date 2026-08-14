@@ -797,6 +797,7 @@ async fn handle_workflow_def(
             &workflow_name,
             &definition_json_final,
             &hash,
+            event.id.as_bytes(),
         )
         .await
         .map_err(|e| match e {
@@ -832,6 +833,23 @@ async fn handle_workflow_def(
     })
 }
 
+async fn caller_controls_workflow(
+    state: &Arc<AppState>,
+    community_id: CommunityId,
+    workflow_owner: &[u8],
+    caller: &[u8],
+) -> Result<bool, IngestError> {
+    if workflow_owner == caller {
+        return Ok(true);
+    }
+
+    state
+        .db
+        .is_agent_owner(community_id, workflow_owner, caller)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: workflow owner check: {e}")))
+}
+
 async fn handle_workflow_trigger(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -860,10 +878,11 @@ async fn handle_workflow_trigger(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow not found".into()))?;
 
-    // 3. Manual triggers execute with the workflow owner's authority, so only
-    // the owner may start them. Channel membership alone is insufficient: a
+    // 3. Manual triggers execute with the workflow owner's authority. Permit
+    // that principal and, when the owner is a managed agent, its immutable
+    // NIP-OA human owner. Channel membership alone remains insufficient: a
     // member could otherwise invoke another user's webhook or message actions.
-    if workflow.owner_pubkey != self_bytes {
+    if !caller_controls_workflow(state, community_id, &workflow.owner_pubkey, &self_bytes).await? {
         return Err(IngestError::Rejected(
             "forbidden: not authorized to trigger this workflow".into(),
         ));
@@ -909,25 +928,26 @@ async fn handle_workflow_trigger(
     };
 
     // 4. Execute: create workflow run
-    let mut trigger_ctx = TriggerContext {
+    let Some(definition_event_id) = workflow.definition_event_id.as_deref() else {
+        return Err(IngestError::Rejected(
+            "invalid: owner-signed workflow revision is unavailable".into(),
+        ));
+    };
+    // Manual commands are signed causes, not webhook cargo. Command content is
+    // never copied into arbitrary trigger fields; adding parameterized manual
+    // runs requires an explicit trust-labelled contract.
+    let trigger_ctx = TriggerContext {
         channel_id: workflow
             .channel_id
             .map(|id| id.to_string())
             .unwrap_or_default(),
         author: hex::encode(&self_bytes),
+        definition_event_id: hex::encode(definition_event_id),
+        cause: Some(buzz_workflow::executor::WorkflowCause::Command(
+            event.id.to_hex(),
+        )),
         ..Default::default()
     };
-    if !event.content.is_empty() {
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&event.content) {
-            for (k, v) in map {
-                let val_str = match v {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                };
-                trigger_ctx.webhook_fields.insert(k, val_str);
-            }
-        }
-    }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
     let event_id_bytes = event.id.as_bytes().to_vec();

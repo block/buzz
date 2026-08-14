@@ -232,19 +232,53 @@ async fn is_owner_or_sibling(
 /// siblings may fire a turn — the explicit allowlist and `anyone` mode do
 /// NOT apply inside DMs. `Nobody` still drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
-/// Provenance carried by a relay-delivered workflow message.
-#[derive(Clone)]
-struct WorkflowDelegationClaim {
+/// Cause carried by a relay-signed workflow doorbell.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum WorkflowCauseClaim {
+    Event(nostr::EventId),
+    Schedule(String),
+    Command(nostr::EventId),
+    Webhook,
+}
+
+/// Structurally valid relay delivery envelope. This grants no authority by itself.
+#[derive(Clone, Debug)]
+struct WorkflowDoorbellClaim {
     owner: String,
     definition_id: nostr::EventId,
     step_id: String,
+    cause: WorkflowCauseClaim,
 }
 
-/// Validate the relay delivery envelope, but do not grant authority yet.
-fn workflow_delegation_claim(
+#[derive(Clone, Debug)]
+struct TrustedWorkflowDoorbell {
+    owner: String,
+    rendered_content: String,
+    dedup_key: Option<String>,
+    webhook_definition: Option<String>,
+}
+
+fn exact_tags<'a>(event: &'a nostr::Event, name: &str) -> Vec<&'a nostr::Tag> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(name))
+        .collect()
+}
+
+fn is_workflow_delivery_candidate(event: &nostr::Event, relay_self: Option<&str>) -> bool {
+    relay_self.is_some_and(|relay| {
+        event.kind.as_u16() as u32 == buzz_core::kind::KIND_STREAM_MESSAGE
+            && event.pubkey.to_hex().eq_ignore_ascii_case(relay)
+            && !exact_tags(event, "buzz:workflow").is_empty()
+    })
+}
+
+/// Validate the distinguished relay delivery shape, without granting authority.
+fn workflow_doorbell_claim(
     event: &nostr::Event,
     relay_self: Option<&str>,
-) -> Option<WorkflowDelegationClaim> {
+) -> Option<WorkflowDoorbellClaim> {
     let relay_self = relay_self?;
     if event.kind.as_u16() as u32 != buzz_core::kind::KIND_STREAM_MESSAGE
         || !event.pubkey.to_hex().eq_ignore_ascii_case(relay_self)
@@ -253,131 +287,329 @@ fn workflow_delegation_claim(
         return None;
     }
 
-    let exact_tag = |name: &str| {
-        event
-            .tags
-            .iter()
-            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(name))
-            .collect::<Vec<_>>()
-    };
+    let markers = exact_tags(event, "buzz:workflow");
+    if markers.len() != 1 || markers[0].as_slice() != ["buzz:workflow", "doorbell-v1"] {
+        return None;
+    }
+    let owners = exact_tags(event, "workflow-owner");
+    if owners.len() != 1 || owners[0].as_slice().len() != 2 {
+        return None;
+    }
+    let owner = owners[0].as_slice()[1].to_ascii_lowercase();
+    nostr::PublicKey::from_hex(&owner).ok()?;
 
-    let workflow_markers = exact_tag("buzz:workflow");
-    if workflow_markers.len() != 1 || workflow_markers[0].as_slice() != ["buzz:workflow", "true"] {
+    let definitions = exact_tags(event, "workflow-definition");
+    if definitions.len() != 1 || definitions[0].as_slice().len() != 3 {
         return None;
     }
-
-    let owner_tags = exact_tag("workflow-owner");
-    if owner_tags.len() != 1 || owner_tags[0].as_slice().len() != 2 {
-        return None;
-    }
-    let owner = owner_tags[0].as_slice()[1].to_ascii_lowercase();
-    if owner.len() != 64
-        || !owner.chars().all(|c| c.is_ascii_hexdigit())
-        || nostr::PublicKey::from_hex(&owner).is_err()
-    {
-        return None;
-    }
-
-    let definition_tags = exact_tag("workflow-definition");
-    if definition_tags.len() != 1 || definition_tags[0].as_slice().len() != 3 {
-        return None;
-    }
-    let definition_id = nostr::EventId::from_hex(&definition_tags[0].as_slice()[1]).ok()?;
-    let step_id = definition_tags[0].as_slice()[2].clone();
+    let definition_id = nostr::EventId::from_hex(&definitions[0].as_slice()[1]).ok()?;
+    let step_id = definitions[0].as_slice()[2].clone();
     if step_id.is_empty() {
         return None;
     }
 
-    Some(WorkflowDelegationClaim {
+    let causes = exact_tags(event, "workflow-cause");
+    if causes.len() != 1 || causes[0].as_slice().len() != 3 {
+        return None;
+    }
+    let cause = match causes[0].as_slice()[1].as_str() {
+        "event" if event.content.is_empty() => {
+            WorkflowCauseClaim::Event(nostr::EventId::from_hex(&causes[0].as_slice()[2]).ok()?)
+        }
+        "command" if event.content.is_empty() => {
+            WorkflowCauseClaim::Command(nostr::EventId::from_hex(&causes[0].as_slice()[2]).ok()?)
+        }
+        "schedule" if event.content.is_empty() && !causes[0].as_slice()[2].is_empty() => {
+            WorkflowCauseClaim::Schedule(causes[0].as_slice()[2].clone())
+        }
+        "webhook" if causes[0].as_slice()[2].is_empty() => WorkflowCauseClaim::Webhook,
+        _ => return None,
+    };
+
+    Some(WorkflowDoorbellClaim {
         owner,
         definition_id,
         step_id,
+        cause,
     })
 }
 
-/// Verify that an owner-signed definition authorizes this exact output shape.
-fn definition_authorizes_message(
-    claim: &WorkflowDelegationClaim,
-    message: &nostr::Event,
-    message_channel: Uuid,
-    definition: &nostr::Event,
-) -> bool {
-    if definition.id != claim.definition_id
-        || definition.kind.as_u16() as u32 != buzz_core::kind::KIND_WORKFLOW_DEF
-        || !definition
-            .pubkey
-            .to_hex()
-            .eq_ignore_ascii_case(&claim.owner)
-        || definition.verify().is_err()
-    {
-        return false;
-    }
-
-    let definition_channels: Vec<_> = definition
-        .tags
-        .iter()
-        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
-        .collect();
-    if definition_channels.len() != 1
-        || definition_channels[0].as_slice().len() != 2
-        || definition_channels[0].as_slice()[1]
-            .parse::<Uuid>()
-            .ok()
-            .filter(|id| *id == message_channel)
-            .is_none()
-    {
-        return false;
-    }
-
-    let Ok((workflow, _)) = buzz_workflow::WorkflowEngine::parse_yaml(&definition.content) else {
-        return false;
-    };
-    let Some(step) = workflow.steps.iter().find(|step| step.id == claim.step_id) else {
-        return false;
-    };
-    match &step.action {
-        buzz_workflow::schema::ActionDef::SendMessage { text, channel } => {
-            let channel_matches = channel
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none_or(|value| value.parse::<Uuid>().ok() == Some(message_channel));
-            channel_matches
-                && buzz_workflow::executor::rendered_template_matches(
-                    &workflow,
-                    &step.id,
-                    text,
-                    &message.content,
-                )
-        }
-        _ => false,
-    }
-}
-
-/// Return the workflow principal only when the owner-signed definition authorizes it.
-///
-/// The relay signature authenticates delivery, not delegation. The referenced
-/// kind:30620 event is fetched independently and its owner signature, channel,
-/// step, and message template are all checked. Every lookup or verification
-/// failure falls back to ordinary relay-author authorization.
-async fn trusted_workflow_owner(
-    event: &nostr::Event,
-    channel_id: Uuid,
-    relay_self: Option<&str>,
+async fn query_exact_event(
+    id: nostr::EventId,
     rest_client: &relay::RestClient,
-) -> Option<String> {
-    let claim = workflow_delegation_claim(event, relay_self)?;
-    let filter = nostr::Filter::new().id(claim.definition_id);
-    let response = tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter]))
-        .await
-        .ok()?
-        .ok()?;
+) -> Option<nostr::Event> {
+    let response = tokio::time::timeout(
+        Duration::from_millis(2000),
+        rest_client.query(&[nostr::Filter::new().id(id)]),
+    )
+    .await
+    .ok()?
+    .ok()?;
     let events = response.as_array()?;
     if events.len() != 1 {
         return None;
     }
-    let definition = serde_json::from_value::<nostr::Event>(events[0].clone()).ok()?;
-    definition_authorizes_message(&claim, event, channel_id, &definition).then_some(claim.owner)
+    let event = serde_json::from_value::<nostr::Event>(events[0].clone()).ok()?;
+    (event.id == id && event.verify().is_ok()).then_some(event)
+}
+
+fn event_channel_matches(event: &nostr::Event, channel_id: Uuid) -> bool {
+    let channels = exact_tags(event, "h");
+    channels.len() == 1
+        && channels[0].as_slice().len() == 2
+        && channels[0].as_slice()[1].parse::<Uuid>().ok() == Some(channel_id)
+}
+
+fn definition_channel_matches(definition: &nostr::Event, channel_id: Uuid) -> bool {
+    event_channel_matches(definition, channel_id)
+}
+
+fn workflow_uuid(definition: &nostr::Event) -> Option<Uuid> {
+    let tags = exact_tags(definition, "d");
+    (tags.len() == 1 && tags[0].as_slice().len() == 2)
+        .then(|| tags[0].as_slice()[1].parse().ok())
+        .flatten()
+}
+
+fn template_references_prior_outputs(template: &str) -> bool {
+    let mut remaining = template;
+    while let Some(start) = remaining.find("{{") {
+        let after_open = &remaining[start + 2..];
+        let Some(end) = after_open.find("}}") else {
+            return after_open.trim_start().starts_with("steps.");
+        };
+        let path = after_open[..end]
+            .split('|')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if path.starts_with("steps.") {
+            return true;
+        }
+        remaining = &after_open[end + 2..];
+    }
+    false
+}
+
+fn step_condition_depends_on_prior_outputs(condition: &str) -> bool {
+    condition
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token.starts_with("steps_") || token == "steps")
+}
+
+fn command_targets_workflow(command: &nostr::Event, workflow_id: Uuid) -> bool {
+    let references: Vec<_> = exact_tags(command, "d")
+        .into_iter()
+        .chain(exact_tags(command, "e"))
+        .collect();
+    references.len() == 1
+        && references[0].as_slice().len() == 2
+        && references[0].as_slice()[1] == workflow_id.to_string()
+}
+
+/// Maximum serialized webhook cargo admitted into a doorbell prompt.
+const MAX_WORKFLOW_WEBHOOK_CARGO_BYTES: usize = 61_440;
+
+/// Refetch owner authority and cause, then render the signed template locally.
+async fn trusted_workflow_doorbell(
+    event: &nostr::Event,
+    channel_id: Uuid,
+    relay_self: Option<&str>,
+    rest_client: &relay::RestClient,
+) -> Option<TrustedWorkflowDoorbell> {
+    use buzz_workflow::executor::{resolve_template, TriggerContext};
+    use buzz_workflow::schema::ActionDef;
+
+    let claim = workflow_doorbell_claim(event, relay_self)?;
+    let definition = query_exact_event(claim.definition_id, rest_client).await?;
+    if definition.kind.as_u16() as u32 != buzz_core::kind::KIND_WORKFLOW_DEF
+        || !definition
+            .pubkey
+            .to_hex()
+            .eq_ignore_ascii_case(&claim.owner)
+        || !definition_channel_matches(&definition, channel_id)
+    {
+        return None;
+    }
+    let workflow_id = workflow_uuid(&definition)?;
+    let (workflow, _) = buzz_workflow::WorkflowEngine::parse_yaml(&definition.content).ok()?;
+    let step = workflow
+        .steps
+        .iter()
+        .find(|step| step.id == claim.step_id)?;
+    let ActionDef::SendMessage { text, channel } = &step.action else {
+        return None;
+    };
+    if channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| value.parse::<Uuid>().ok() != Some(channel_id))
+    {
+        return None;
+    }
+
+    let (trigger_ctx, dedup_key, webhook_definition) = match &claim.cause {
+        WorkflowCauseClaim::Event(id) => {
+            let source = query_exact_event(*id, rest_client).await?;
+            if !event_channel_matches(&source, channel_id) {
+                return None;
+            }
+            let stored = buzz_core::StoredEvent::new(source, Some(channel_id));
+            let ctx = buzz_workflow::build_trigger_context(&stored);
+            if !buzz_workflow::trigger_matches_signed_event(
+                &workflow,
+                &ctx,
+                stored.event.kind.as_u16() as u32,
+            )
+            .await
+            {
+                return None;
+            }
+            (
+                ctx,
+                Some(format!("{}:event:{id}", claim.definition_id)),
+                None,
+            )
+        }
+        WorkflowCauseClaim::Command(id) => {
+            let command = query_exact_event(*id, rest_client).await?;
+            let command_author = command.pubkey.to_hex();
+            let command_controls_workflow = command_author.eq_ignore_ascii_case(&claim.owner)
+                || check_sibling_via_profile(&claim.owner, &command_author, rest_client).await;
+            if command.kind.as_u16() as u32 != buzz_core::kind::KIND_WORKFLOW_TRIGGER
+                || !command_controls_workflow
+                || !command_targets_workflow(&command, workflow_id)
+            {
+                return None;
+            }
+            (
+                TriggerContext {
+                    author: command_author,
+                    channel_id: channel_id.to_string(),
+                    ..Default::default()
+                },
+                Some(format!("{}:command:{id}", claim.definition_id)),
+                None,
+            )
+        }
+        WorkflowCauseClaim::Schedule(slot) => {
+            let slot_time = chrono::DateTime::parse_from_rfc3339(slot)
+                .ok()?
+                .with_timezone(&chrono::Utc);
+            if !buzz_workflow::schedule_cause_matches(&workflow, slot_time) {
+                return None;
+            }
+            let timestamp = slot_time.timestamp().to_string();
+            (
+                TriggerContext {
+                    channel_id: channel_id.to_string(),
+                    timestamp,
+                    ..Default::default()
+                },
+                Some(format!("{}:schedule:{slot}", claim.definition_id)),
+                None,
+            )
+        }
+        WorkflowCauseClaim::Webhook => {
+            if !matches!(workflow.trigger, buzz_workflow::schema::TriggerDef::Webhook)
+                || event.content.len() > MAX_WORKFLOW_WEBHOOK_CARGO_BYTES
+            {
+                return None;
+            }
+            let fields: HashMap<String, String> =
+                serde_json::from_str::<serde_json::Value>(&event.content)
+                    .ok()?
+                    .as_object()?
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            value
+                                .as_str()
+                                .map(ToOwned::to_owned)
+                                .unwrap_or_else(|| value.to_string()),
+                        )
+                    })
+                    .collect();
+            (
+                TriggerContext {
+                    channel_id: channel_id.to_string(),
+                    webhook_fields: fields,
+                    ..Default::default()
+                },
+                None,
+                Some(claim.definition_id.to_hex()),
+            )
+        }
+    };
+    if let Some(condition) = &step.if_expr {
+        if step_condition_depends_on_prior_outputs(condition)
+            || !buzz_workflow::executor::evaluate_condition(
+                condition,
+                &trigger_ctx,
+                &HashMap::new(),
+            )
+            .await
+            .ok()?
+        {
+            return None;
+        }
+    }
+    // Doorbells carry signed trigger provenance, not mutable outputs from prior
+    // workflow actions. Never turn an unverifiable step output into literal
+    // owner-authorized prompt text.
+    if template_references_prior_outputs(text) {
+        return None;
+    }
+    let rendered = resolve_template(text, &trigger_ctx, &HashMap::new()).ok()?;
+    let rendered_content = if matches!(claim.cause, WorkflowCauseClaim::Webhook) {
+        format!("[Untrusted external webhook data rendered into owner-declared trigger slots]\n{rendered}")
+    } else {
+        rendered
+    };
+    Some(TrustedWorkflowDoorbell {
+        owner: claim.owner,
+        rendered_content,
+        dedup_key,
+        webhook_definition,
+    })
+}
+
+fn with_doorbell_content(event: &nostr::Event, content: String) -> Option<nostr::Event> {
+    let mut value = serde_json::to_value(event).ok()?;
+    value["content"] = serde_json::Value::String(content);
+    serde_json::from_value(value).ok()
+}
+
+fn admit_workflow_cause(
+    key: &str,
+    current: &mut HashSet<String>,
+    previous: &mut HashSet<String>,
+) -> bool {
+    if current.contains(key) || previous.contains(key) {
+        return false;
+    }
+    current.insert(key.to_owned());
+    if current.len() >= 1000 {
+        *previous = std::mem::take(current);
+    }
+    true
+}
+
+fn admit_workflow_webhook(
+    definition: &str,
+    limits: &mut HashMap<String, (f64, std::time::Instant)>,
+    now: std::time::Instant,
+) -> bool {
+    let bucket = limits.entry(definition.to_owned()).or_insert((5.0, now));
+    bucket.0 = (bucket.0 + now.duration_since(bucket.1).as_secs_f64() / 12.0).min(5.0);
+    bucket.1 = now;
+    if bucket.0 < 1.0 {
+        return false;
+    }
+    bucket.0 -= 1.0;
+    true
 }
 
 async fn author_allowed(
@@ -2330,6 +2562,12 @@ async fn tokio_main() -> Result<()> {
     // Rotates at 1000 entries instead of clearing the entire set at 2000.
     let mut seen_membership_current: HashSet<String> = HashSet::new();
     let mut seen_membership_previous: HashSet<String> = HashSet::new();
+    // Semantic workflow-cause dedup. Two generations keep memory bounded while
+    // ensuring reconnect replays cannot open multiple turns for the same cause.
+    let mut seen_workflow_current: HashSet<String> = HashSet::new();
+    let mut seen_workflow_previous: HashSet<String> = HashSet::new();
+    // Per-definition webhook token buckets: five immediate, then five/minute.
+    let mut webhook_limits: HashMap<String, (f64, std::time::Instant)> = HashMap::new();
 
     // Channels the agent has been removed from. When a checked-out agent is
     // returned to the pool, its sessions for these channels are stripped, and
@@ -2589,7 +2827,7 @@ async fn tokio_main() -> Result<()> {
                 buzz_event = relay.next_event() => {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
-                        Some(buzz_event) => {
+                        Some(mut buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
@@ -2829,19 +3067,48 @@ async fn tokio_main() -> Result<()> {
                             // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                let workflow_owner = trusted_workflow_owner(
+                                let doorbell_shape = is_workflow_delivery_candidate(
+                                    &buzz_event.event,
+                                    relay_self.as_deref(),
+                                );
+                                let workflow = trusted_workflow_doorbell(
                                     &buzz_event.event,
                                     buzz_event.channel_id,
                                     relay_self.as_deref(),
                                     &ctx.rest_client,
-                                )
-                                .await;
-                                let principal = workflow_owner.as_deref().unwrap_or(&author);
-                                // DM hardening: resolve channel type (fail-closed
-                                // to DM) so allowlist/anyone modes cannot be
-                                // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
+                                ).await;
+                                if doorbell_shape && workflow.is_none() {
+                                    tracing::warn!(channel_id = %buzz_event.channel_id, "invalid workflow doorbell — dropping fail closed");
+                                    continue;
+                                }
+                                if let Some(workflow) = &workflow {
+                                    if let Some(key) = &workflow.dedup_key {
+                                        if !admit_workflow_cause(
+                                            key,
+                                            &mut seen_workflow_current,
+                                            &mut seen_workflow_previous,
+                                        ) {
+                                            tracing::debug!(channel_id = %buzz_event.channel_id, "duplicate workflow cause — dropping");
+                                            continue;
+                                        }
+                                    }
+                                    if let Some(definition) = &workflow.webhook_definition {
+                                        if !admit_workflow_webhook(
+                                            definition,
+                                            &mut webhook_limits,
+                                            std::time::Instant::now(),
+                                        ) {
+                                            tracing::warn!(channel_id = %buzz_event.channel_id, "workflow webhook rate limit exceeded — dropping");
+                                            continue;
+                                        }
+                                    }
+                                    let Some(rendered) = with_doorbell_content(&buzz_event.event, workflow.rendered_content.clone()) else {
+                                        continue;
+                                    };
+                                    buzz_event.event = rendered;
+                                }
+                                let principal = workflow.as_ref().map(|value| value.owner.as_str()).unwrap_or(&author);
+                                let is_dm = is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
@@ -2849,18 +3116,9 @@ async fn tokio_main() -> Result<()> {
                                     is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
-                                )
-                                .await;
+                                ).await;
                                 if !allowed {
-                                    tracing::debug!(
-                                        channel_id = %buzz_event.channel_id,
-                                        author = %author,
-                                        principal = %principal,
-                                        workflow_delegated = workflow_owner.is_some(),
-                                        mode = %config.respond_to,
-                                        is_dm,
-                                        "inbound author gate — dropping event"
-                                    );
+                                    tracing::debug!(channel_id = %buzz_event.channel_id, author = %author, principal = %principal, workflow_delegated = workflow.is_some(), mode = %config.respond_to, is_dm, "inbound author gate — dropping event");
                                     continue;
                                 }
                             }
@@ -5046,12 +5304,10 @@ mod workflow_authority_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    fn definition(owner: &Keys, channel: Uuid, text: &str) -> nostr::Event {
+    fn definition(owner: &Keys, channel: Uuid, trigger: &str, text: &str) -> nostr::Event {
         EventBuilder::new(
             Kind::Custom(buzz_core::kind::KIND_WORKFLOW_DEF as u16),
-            format!(
-                "name: signed\ntrigger:\n  on: webhook\nsteps:\n  - id: wake\n    action: send_message\n    text: '{text}'\n"
-            ),
+            format!("name: signed\ntrigger:\n  on: {trigger}\nsteps:\n  - id: wake\n    action: send_message\n    text: '{text}'\n"),
         )
         .tags([
             Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
@@ -5061,18 +5317,20 @@ mod workflow_authority_tests {
         .unwrap()
     }
 
-    fn workflow_event(
+    fn doorbell(
         relay: &Keys,
         owner: &Keys,
         definition: &nostr::Event,
         channel: Uuid,
-        text: &str,
+        cause: [&str; 3],
+        content: &str,
     ) -> nostr::Event {
-        EventBuilder::new(Kind::Custom(9), text)
+        EventBuilder::new(Kind::Custom(9), content)
             .tags([
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["buzz:workflow", "doorbell-v1"]).unwrap(),
                 Tag::parse(["workflow-owner", &owner.public_key().to_hex()]).unwrap(),
                 Tag::parse(["workflow-definition", &definition.id.to_hex(), "wake"]).unwrap(),
+                Tag::parse(cause).unwrap(),
                 Tag::parse(["h", &channel.to_string()]).unwrap(),
             ])
             .sign_with_keys(relay)
@@ -5080,171 +5338,126 @@ mod workflow_authority_tests {
     }
 
     #[test]
-    fn owner_signed_definition_authorizes_exact_and_templated_content() {
+    fn distinguished_shape_accepts_exact_pointer_and_webhook_cargo() {
         let relay = Keys::generate();
         let owner = Keys::generate();
         let channel = Uuid::new_v4();
-        let exact = definition(&owner, channel, "wake now");
-        let message = workflow_event(&relay, &owner, &exact, channel, "wake now");
-        let claim =
-            workflow_delegation_claim(&message, Some(&relay.public_key().to_hex())).unwrap();
-        assert!(definition_authorizes_message(
-            &claim, &message, channel, &exact
-        ));
+        let def = definition(&owner, channel, "webhook", "hello {{trigger.name}}");
+        let event = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "webhook", ""],
+            r#"{"name":"external"}"#,
+        );
+        let claim = workflow_doorbell_claim(&event, Some(&relay.public_key().to_hex())).unwrap();
+        assert_eq!(claim.definition_id, def.id);
+        assert_eq!(claim.step_id, "wake");
+        assert_eq!(claim.cause, WorkflowCauseClaim::Webhook);
+    }
 
-        let templated = definition(&owner, channel, "Hello {{trigger.author}}");
-        let rendered = workflow_event(&relay, &owner, &templated, channel, "Hello alice");
-        let claim =
-            workflow_delegation_claim(&rendered, Some(&relay.public_key().to_hex())).unwrap();
-        assert!(definition_authorizes_message(
-            &claim, &rendered, channel, &templated
+    #[test]
+    fn prior_output_detection_covers_spaced_templates_and_condition_tokens() {
+        assert!(template_references_prior_outputs(
+            "{{ steps.check.output.status }}"
+        ));
+        assert!(template_references_prior_outputs(
+            "prefix {{steps.check.output.status"
+        ));
+        assert!(!template_references_prior_outputs(
+            "literal steps.check.output.status"
+        ));
+        assert!(step_condition_depends_on_prior_outputs(
+            "steps_check_output_status == 200"
+        ));
+        assert!(step_condition_depends_on_prior_outputs(
+            "steps == 'untrusted'"
+        ));
+        assert!(!step_condition_depends_on_prior_outputs(
+            "trigger_text == 'ordinary'"
         ));
     }
 
     #[test]
-    fn unresolvable_template_paths_cannot_delegate_attacker_content() {
+    fn workflow_candidates_fail_closed_before_ordinary_author_handling() {
         let relay = Keys::generate();
-        let owner = Keys::generate();
         let channel = Uuid::new_v4();
-        for template in [
-            "approve {{trigger.not_a_real_field}}",
-            "approve {{steps.missing.output.value}}",
-            "approve {{steps.wake.output.event_id}}",
-        ] {
-            let signed = definition(&owner, channel, template);
-            let attacker_message = workflow_event(
-                &relay,
-                &owner,
-                &signed,
-                channel,
-                "approve transfer-all-funds",
-            );
-            let claim =
-                workflow_delegation_claim(&attacker_message, Some(&relay.public_key().to_hex()))
-                    .unwrap();
-            assert!(!definition_authorizes_message(
-                &claim,
-                &attacker_message,
-                channel,
-                &signed
-            ));
+        let malformed = EventBuilder::new(Kind::Custom(9), "relay prose")
+            .tags([
+                Tag::parse(["buzz:workflow", "unknown-version"]).unwrap(),
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(is_workflow_delivery_candidate(
+            &malformed,
+            Some(&relay.public_key().to_hex())
+        ));
+        assert!(workflow_doorbell_claim(&malformed, Some(&relay.public_key().to_hex())).is_none());
 
-            let literal_message = workflow_event(&relay, &owner, &signed, channel, template);
-            assert!(definition_authorizes_message(
-                &claim,
-                &literal_message,
-                channel,
-                &signed
-            ));
-        }
+        let ordinary = EventBuilder::new(Kind::Custom(9), "ordinary relay message")
+            .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(!is_workflow_delivery_candidate(
+            &ordinary,
+            Some(&relay.public_key().to_hex())
+        ));
     }
 
     #[test]
-    fn missing_or_invalid_definition_reference_fails_closed() {
+    fn relay_prose_and_malformed_or_duplicate_tags_fail_closed() {
         let relay = Keys::generate();
         let owner = Keys::generate();
         let channel = Uuid::new_v4();
-        for reference in [None, Some(["workflow-definition", "not-an-id", "wake"])] {
-            let mut tags = vec![
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
-                Tag::parse(["workflow-owner", &owner.public_key().to_hex()]).unwrap(),
-            ];
-            if let Some(reference) = reference {
-                tags.push(Tag::parse(reference).unwrap());
-            }
-            let event = EventBuilder::new(Kind::Custom(9), "wake")
-                .tags(tags)
-                .sign_with_keys(&relay)
-                .unwrap();
-            assert!(
-                workflow_delegation_claim(&event, Some(&relay.public_key().to_hex())).is_none()
-            );
-        }
+        let def = definition(&owner, channel, "message_posted", "wake");
+        let source = Keys::generate();
+        let trigger = EventBuilder::new(Kind::Custom(9), "source")
+            .sign_with_keys(&source)
+            .unwrap();
+        let prose = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "event", &trigger.id.to_hex()],
+            "relay-controlled prose",
+        );
+        assert!(workflow_doorbell_claim(&prose, Some(&relay.public_key().to_hex())).is_none());
 
-        let definition = definition(&owner, channel, "wake");
-        let mut duplicate = workflow_event(&relay, &owner, &definition, channel, "wake");
+        let mut duplicate = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "event", &trigger.id.to_hex()],
+            "",
+        );
         duplicate
             .tags
-            .push(Tag::parse(["workflow-definition", &definition.id.to_hex(), "wake"]).unwrap());
-        assert!(
-            workflow_delegation_claim(&duplicate, Some(&relay.public_key().to_hex())).is_none()
-        );
-    }
-
-    #[test]
-    fn signature_author_channel_step_and_content_mismatches_fail_closed() {
-        let relay = Keys::generate();
-        let owner = Keys::generate();
-        let attacker = Keys::generate();
-        let channel = Uuid::new_v4();
-        let signed = definition(&owner, channel, "Hello {{trigger.author}}");
-        let message = workflow_event(&relay, &owner, &signed, channel, "Hello alice");
-        let claim =
-            workflow_delegation_claim(&message, Some(&relay.public_key().to_hex())).unwrap();
-
-        let forged_author = definition(&attacker, channel, "Hello {{trigger.author}}");
-        let forged_claim = WorkflowDelegationClaim {
-            definition_id: forged_author.id,
-            ..claim.clone()
-        };
-        assert!(!definition_authorizes_message(
-            &forged_claim,
-            &message,
-            channel,
-            &forged_author
-        ));
-
-        let mut bad_signature = signed.clone();
-        bad_signature.content.push_str("tampered");
-        assert!(!definition_authorizes_message(
-            &claim,
-            &message,
-            channel,
-            &bad_signature
-        ));
-        assert!(!definition_authorizes_message(
-            &claim,
-            &message,
-            Uuid::new_v4(),
-            &signed
-        ));
-
-        let wrong_step = WorkflowDelegationClaim {
-            step_id: "missing".into(),
-            ..claim.clone()
-        };
-        assert!(!definition_authorizes_message(
-            &wrong_step,
-            &message,
-            channel,
-            &signed
-        ));
-
-        let wrong_content = workflow_event(&relay, &owner, &signed, channel, "Goodbye alice");
-        assert!(!definition_authorizes_message(
-            &claim,
-            &wrong_content,
-            channel,
-            &signed
-        ));
+            .push(Tag::parse(["workflow-cause", "schedule", "2026-08-14T00:00:00Z"]).unwrap());
+        assert!(workflow_doorbell_claim(&duplicate, Some(&relay.public_key().to_hex())).is_none());
     }
 
     async fn rest_client_serving(
-        response: serde_json::Value,
+        responses: Vec<serde_json::Value>,
     ) -> (relay::RestClient, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let body = response.to_string();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0; 8192];
-            let _ = socket.read(&mut request).await;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
+            for response_body in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                let body = response_body.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
         });
         (
             relay::RestClient {
@@ -5258,61 +5471,186 @@ mod workflow_authority_tests {
     }
 
     #[tokio::test]
-    async fn fetched_owner_signed_definition_grants_authority() {
+    async fn owner_signed_event_cause_is_refetched_and_rendered_locally() {
         let relay = Keys::generate();
         let owner = Keys::generate();
+        let author = Keys::generate();
         let channel = Uuid::new_v4();
-        let signed = definition(&owner, channel, "Hello {{trigger.author}}");
-        let message = workflow_event(&relay, &owner, &signed, channel, "Hello alice");
-        let (client, server) = rest_client_serving(serde_json::json!([signed])).await;
+        let def = definition(
+            &owner,
+            channel,
+            "message_posted",
+            "Hello {{trigger.author}}: {{trigger.text}}",
+        );
+        let source = EventBuilder::new(Kind::Custom(9), "signed source")
+            .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
+            .sign_with_keys(&author)
+            .unwrap();
+        let pointer = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "event", &source.id.to_hex()],
+            "",
+        );
+        let (client, server) =
+            rest_client_serving(vec![serde_json::json!([def]), serde_json::json!([source])]).await;
+
+        let trusted = trusted_workflow_doorbell(
+            &pointer,
+            channel,
+            Some(&relay.public_key().to_hex()),
+            &client,
+        )
+        .await
+        .expect("trusted doorbell");
         assert_eq!(
-            trusted_workflow_owner(
-                &message,
-                channel,
-                Some(&relay.public_key().to_hex()),
-                &client,
-            )
-            .await,
-            Some(owner.public_key().to_hex())
+            trusted.rendered_content,
+            format!("Hello {}: signed source", author.public_key().to_hex())
+        );
+        assert_eq!(trusted.owner, owner.public_key().to_hex());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn human_owner_signed_command_authorizes_agent_owned_workflow() {
+        let relay = Keys::generate();
+        let human = Keys::generate();
+        let agent = Keys::generate();
+        let channel = Uuid::new_v4();
+        let def = definition(&agent, channel, "webhook", "manual by {{trigger.author}}");
+        let workflow_id = workflow_uuid(&def).unwrap();
+        let command = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORKFLOW_TRIGGER as u16),
+            "",
+        )
+        .tags([Tag::parse(["d", &workflow_id.to_string()]).unwrap()])
+        .sign_with_keys(&human)
+        .unwrap();
+        let auth_json =
+            buzz_sdk::nip_oa::compute_auth_tag(&human, &agent.public_key(), "").expect("auth tag");
+        let auth_parts: Vec<String> = serde_json::from_str(&auth_json).unwrap();
+        let profile = EventBuilder::new(Kind::Metadata, "{}")
+            .tags([Tag::parse(auth_parts).unwrap()])
+            .sign_with_keys(&agent)
+            .unwrap();
+        let pointer = doorbell(
+            &relay,
+            &agent,
+            &def,
+            channel,
+            ["workflow-cause", "command", &command.id.to_hex()],
+            "",
+        );
+        let (client, server) = rest_client_serving(vec![
+            serde_json::json!([def]),
+            serde_json::json!([command]),
+            serde_json::json!([profile]),
+        ])
+        .await;
+
+        let trusted = trusted_workflow_doorbell(
+            &pointer,
+            channel,
+            Some(&relay.public_key().to_hex()),
+            &client,
+        )
+        .await
+        .expect("human owner command should retain agent workflow authority");
+        assert_eq!(
+            trusted.rendered_content,
+            format!("manual by {}", human.public_key().to_hex())
         );
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn definition_fetch_failure_fails_closed() {
+    async fn unverifiable_prior_step_output_fails_closed() {
         let relay = Keys::generate();
         let owner = Keys::generate();
         let channel = Uuid::new_v4();
-        let signed = definition(&owner, channel, "wake");
-        let message = workflow_event(&relay, &owner, &signed, channel, "wake");
-        let client = relay::RestClient {
-            http: reqwest::Client::new(),
-            base_url: "http://127.0.0.1:1".into(),
-            keys: Keys::generate(),
-            auth_tag_json: None,
-        };
-        assert!(trusted_workflow_owner(
-            &message,
+        let def = definition(
+            &owner,
+            channel,
+            "webhook",
+            "status {{steps.call.output.body}}",
+        );
+        let pointer = doorbell(
+            &relay,
+            &owner,
+            &def,
+            channel,
+            ["workflow-cause", "webhook", ""],
+            "{}",
+        );
+        let (client, server) = rest_client_serving(vec![serde_json::json!([def])]).await;
+        assert!(trusted_workflow_doorbell(
+            &pointer,
             channel,
             Some(&relay.public_key().to_hex()),
             &client,
         )
         .await
         .is_none());
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn semantic_cause_dedup_survives_generation_rotation() {
+        let mut current = HashSet::new();
+        let mut previous = HashSet::new();
+        assert!(admit_workflow_cause(
+            "definition:event:cause",
+            &mut current,
+            &mut previous,
+        ));
+        for index in 0..999 {
+            assert!(admit_workflow_cause(
+                &format!("other:{index}"),
+                &mut current,
+                &mut previous,
+            ));
+        }
+        assert!(current.is_empty(), "the full generation should rotate");
+        assert!(!admit_workflow_cause(
+            "definition:event:cause",
+            &mut current,
+            &mut previous,
+        ));
+    }
+
+    #[test]
+    fn webhook_rate_limit_bursts_five_then_refills() {
+        let mut limits = HashMap::new();
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            assert!(admit_workflow_webhook("definition", &mut limits, start));
+        }
+        assert!(!admit_workflow_webhook("definition", &mut limits, start));
+        assert!(admit_workflow_webhook(
+            "definition",
+            &mut limits,
+            start + Duration::from_secs(12),
+        ));
+        assert!(
+            admit_workflow_webhook("other-definition", &mut limits, start),
+            "limits are isolated per workflow revision"
+        );
     }
 
     #[test]
     fn p_tags_never_supply_workflow_authority() {
         let relay = Keys::generate();
         let owner = Keys::generate().public_key().to_hex();
-        let event = EventBuilder::new(Kind::Custom(9), "run")
+        let event = EventBuilder::new(Kind::Custom(9), "")
             .tags([
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["buzz:workflow", "doorbell-v1"]).unwrap(),
                 Tag::parse(["p", &owner]).unwrap(),
             ])
             .sign_with_keys(&relay)
             .unwrap();
-        assert!(workflow_delegation_claim(&event, Some(&relay.public_key().to_hex())).is_none());
+        assert!(workflow_doorbell_claim(&event, Some(&relay.public_key().to_hex())).is_none());
     }
 }
 

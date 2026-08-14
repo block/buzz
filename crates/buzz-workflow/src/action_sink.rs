@@ -3,11 +3,25 @@
 //! The relay implements [`ActionSink`] to provide direct DB access to the
 //! executor, replacing the HTTP loopback pattern.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
 use uuid::Uuid;
+
+use crate::executor::WorkflowCause;
+
+/// Provenance attached to a workflow-generated agent doorbell.
+#[derive(Debug, Clone)]
+pub struct DoorbellContext {
+    /// Exact owner-signed kind:30620 definition revision.
+    pub definition_event_id: String,
+    /// Semantic cause of this run.
+    pub cause: WorkflowCause,
+    /// Webhook-only untrusted external fields. Empty for signed causes.
+    pub webhook_fields: HashMap<String, String>,
+}
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +77,7 @@ pub trait ActionSink: Send + Sync {
     ///   tag; the relay keypair signs the event)
     ///
     /// Returns the event ID hex string on success.
+    #[allow(clippy::too_many_arguments)]
     fn send_message(
         &self,
         community_id: CommunityId,
@@ -71,5 +86,6 @@ pub trait ActionSink: Send + Sync {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        doorbell: &DoorbellContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

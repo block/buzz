@@ -359,14 +359,6 @@ impl WorkflowEngine {
 
         let trigger_ctx = build_trigger_context(event);
 
-        let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("Failed to serialize trigger context: {e}");
-                return Ok(());
-            }
-        };
-
         for workflow in workflows.iter() {
             let def: WorkflowDef = match serde_json::from_value(workflow.definition.clone()) {
                 Ok(d) => d,
@@ -401,6 +393,22 @@ impl WorkflowEngine {
                 continue;
             }
 
+            let Some(definition_event_id) = workflow.definition_event_id.as_deref() else {
+                tracing::warn!(workflow_id = %workflow.id, "Skipping workflow — owner-signed definition revision is unavailable");
+                continue;
+            };
+            let definition_event_id = hex::encode(definition_event_id);
+            let mut workflow_trigger_ctx = trigger_ctx.clone();
+            workflow_trigger_ctx.definition_event_id = definition_event_id.clone();
+            workflow_trigger_ctx.cause =
+                Some(executor::WorkflowCause::Event(event.event.id.to_hex()));
+            let workflow_trigger_ctx_json = match serde_json::to_value(&workflow_trigger_ctx) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(workflow_id = %workflow.id, "Failed to serialize workflow provenance: {error}");
+                    continue;
+                }
+            };
             let trigger_event_id_bytes = event.event.id.as_bytes().to_vec();
             let run_id = match self
                 .db
@@ -408,7 +416,7 @@ impl WorkflowEngine {
                     community_id,
                     workflow.id,
                     Some(&trigger_event_id_bytes),
-                    Some(&trigger_ctx_json),
+                    Some(&workflow_trigger_ctx_json),
                 )
                 .await
             {
@@ -427,7 +435,7 @@ impl WorkflowEngine {
 
             let engine = Arc::clone(self);
             let def_clone = def.clone();
-            let ctx_clone = trigger_ctx.clone();
+            let ctx_clone = workflow_trigger_ctx;
 
             tokio::spawn(async move {
                 let result =
@@ -648,9 +656,17 @@ impl WorkflowEngine {
 
                 // Fix 5: handle serialization errors explicitly rather than silently
                 // dropping the trigger context with .ok().
+                let Some(definition_event_id) = workflow.definition_event_id.as_deref() else {
+                    tracing::warn!(workflow_id = %workflow.id, "Cron tick: owner-signed definition revision is unavailable");
+                    continue;
+                };
                 let trigger_ctx = executor::TriggerContext {
                     channel_id: channel_id.to_string(),
-                    timestamp: now.timestamp().to_string(),
+                    timestamp: scheduled_for.timestamp().to_string(),
+                    definition_event_id: hex::encode(definition_event_id),
+                    cause: Some(executor::WorkflowCause::Schedule(
+                        scheduled_for.to_rfc3339(),
+                    )),
                     ..Default::default()
                 };
                 let trigger_ctx_json = match serde_json::to_value(&trigger_ctx) {
@@ -875,6 +891,42 @@ fn interval_prefilter_should_fire(
     false
 }
 
+/// Validate a relay-provided schedule cause against the signed definition.
+/// Freshness/skew is intentionally a separate policy: this checks only that
+/// the slot is an exact cron occurrence or interval boundary.
+pub fn schedule_cause_matches(def: &WorkflowDef, slot: DateTime<Utc>) -> bool {
+    match &def.trigger {
+        schema::TriggerDef::Schedule {
+            cron: Some(expr),
+            interval: None,
+        } => {
+            let Ok(schedule) = schema::normalize_cron(expr).parse::<cron::Schedule>() else {
+                return false;
+            };
+            let previous = slot - chrono::Duration::seconds(1);
+            schedule.after(&previous).next() == Some(slot)
+        }
+        schema::TriggerDef::Schedule {
+            cron: None,
+            interval: Some(duration),
+        } => executor::parse_duration_secs(duration)
+            .ok()
+            .is_some_and(|seconds| seconds > 0 && slot.timestamp().rem_euclid(seconds as i64) == 0),
+        _ => false,
+    }
+}
+
+/// Validate that a signed source event semantically satisfies a workflow trigger.
+/// Used by ACP doorbell verification after independently refetching the source.
+pub async fn trigger_matches_signed_event(
+    def: &WorkflowDef,
+    trigger_ctx: &executor::TriggerContext,
+    kind_u32: u32,
+) -> bool {
+    trigger_matches_event(&def.trigger, kind_u32)
+        && should_fire_workflow(def, trigger_ctx, Uuid::nil()).await
+}
+
 /// Check emoji and filter-expression conditions that determine whether a
 /// matched workflow should actually fire. Extracted from `on_event` to keep
 /// the per-workflow loop body small.
@@ -1017,6 +1069,8 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         emoji,
         message_id,
         webhook_fields: HashMap::new(),
+        definition_event_id: String::new(),
+        cause: None,
     }
 }
 
@@ -1054,6 +1108,39 @@ fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedule_cause_requires_exact_cron_or_interval_slot() {
+        let cron: WorkflowDef = serde_json::from_value(serde_json::json!({
+            "name": "cron",
+            "trigger": { "on": "schedule", "cron": "0 * * * *" },
+            "steps": [{ "id": "wake", "action": "send_message", "text": "wake" }],
+            "enabled": true
+        }))
+        .unwrap();
+        let on_hour = DateTime::parse_from_rfc3339("2026-08-14T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(schedule_cause_matches(&cron, on_hour));
+        assert!(!schedule_cause_matches(
+            &cron,
+            on_hour + chrono::Duration::seconds(1)
+        ));
+
+        let interval: WorkflowDef = serde_json::from_value(serde_json::json!({
+            "name": "interval",
+            "trigger": { "on": "schedule", "interval": "5m" },
+            "steps": [{ "id": "wake", "action": "send_message", "text": "wake" }],
+            "enabled": true
+        }))
+        .unwrap();
+        let boundary = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        assert!(schedule_cause_matches(&interval, boundary));
+        assert!(!schedule_cause_matches(
+            &interval,
+            boundary + chrono::Duration::seconds(1)
+        ));
+    }
 
     #[test]
     fn cron_fire_instant_matches_within_window() {
