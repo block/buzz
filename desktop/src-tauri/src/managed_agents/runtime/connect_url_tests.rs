@@ -135,3 +135,48 @@ fn pair_reuse_across_spellings_is_a_connection_target_conflict() {
     // No URL disclosure: the message must not echo either spelling.
     assert!(!err.contains("3100"));
 }
+
+#[test]
+fn pair_reuse_folds_connection_equivalent_spellings() {
+    // Host case, explicit default port, root slash, and the FQDN root dot
+    // are connection-equivalent per the tenancy authority - none of these
+    // may read as a conflict after harmless config formatting drift.
+    for (live, requested) in [
+        ("ws://localhost:3000", "ws://LocalHost:3000"),
+        ("wss://relay.example", "wss://relay.example:443"),
+        ("ws://localhost:3000", "ws://localhost:3000/"),
+        ("wss://relay.example", "wss://relay.example."),
+        ("ws://relay.example:80/ws", "ws://Relay.Example:80/ws"),
+        ("ws://relay.example?token=x", "ws://relay.example/?token=x"),
+        ("ws://[::1]:3000", "ws://[0:0:0:0:0:0:0:1]:3000"),
+    ] {
+        let runtime = make_pair_runtime_with_connect_url(live);
+        assert!(
+            super::ensure_pair_connection_matches(&runtime, requested).is_ok(),
+            "equivalent spellings must not conflict: {live} vs {requested}",
+        );
+    }
+}
+
+#[test]
+fn pair_reuse_keeps_tenancy_significant_differences_conflicting() {
+    // Scheme, non-default port, and path differences are real target
+    // differences - and the loopback split stays a conflict (see
+    // pair_reuse_across_spellings_is_a_connection_target_conflict).
+    for (live, requested) in [
+        ("ws://relay.example:3000", "wss://relay.example:3000"),
+        ("ws://relay.example:3000", "ws://relay.example:3001"),
+        ("ws://relay.example:3000/a", "ws://relay.example:3000/b"),
+        ("ws://relay.example:443", "ws://relay.example"),
+        ("wss://relay.example:80", "wss://relay.example"),
+        ("ws://relay.example?token=x", "ws://relay.example?token=y"),
+        ("ws://[::1]:3000", "ws://localhost:3000"),
+        ("ws://[::1]:3000", "ws://127.0.0.1:3000"),
+    ] {
+        let runtime = make_pair_runtime_with_connect_url(live);
+        assert!(
+            super::ensure_pair_connection_matches(&runtime, requested).is_err(),
+            "distinct targets must conflict: {live} vs {requested}",
+        );
+    }
+}

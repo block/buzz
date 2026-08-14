@@ -477,22 +477,83 @@ pub(crate) fn terminate_untracked_pair_runtime(
     )
 }
 
-/// A live pair may only be reused for a start request that dials the same
-/// URL it already holds. Canonical keys fold host spellings, so two distinct
-/// tenants can share one key; silently reusing across spellings would report
-/// the requested tenant as started while the child stays connected to the
-/// old one, and reconciliation would stop retrying.
-/// The error deliberately omits both URLs: they may carry query tokens, and
-/// this string lands in `last_error` and the UI.
+/// The URL a child is dialed with: the configured spelling, trimmed. The
+/// canonical form is identity-only; connection code preserves the authority.
 pub(crate) fn connection_relay_url(configured_relay_url: &str) -> String {
     configured_relay_url.trim().to_string()
 }
 
+/// Comparable connection target, parsed with `url::Url`: lowercased scheme,
+/// case-folded host with a single FQDN root dot stripped (mirroring the
+/// tenancy authority `tenant::normalize_host`), a port only when it is not
+/// the scheme's own default, a root-slash-folded path, and the query kept
+/// verbatim. Folds spellings that reach the same tenant while preserving
+/// tenancy-significant differences: `localhost`, `127.0.0.1`, and `[::1]`
+/// stay three distinct hosts, and `ws` vs `wss`, non-default ports (including
+/// the OTHER scheme's default), paths, and query strings stay distinct.
+/// `None` for unparsable URLs - the caller falls back to exact comparison.
+fn connection_target(raw: &str) -> Option<ConnectionTarget> {
+    let url = url::Url::parse(raw.trim()).ok()?;
+    let scheme = url.scheme().to_ascii_lowercase();
+    let host = {
+        let host = url.host_str()?.to_ascii_lowercase();
+        host.strip_suffix('.').map(str::to_string).unwrap_or(host)
+    };
+    let default_port = match scheme.as_str() {
+        "ws" | "http" => Some(80),
+        "wss" | "https" => Some(443),
+        _ => None,
+    };
+    let port = url
+        .port_or_known_default()
+        .filter(|port| Some(*port) != default_port);
+    let path = match url.path() {
+        "/" => String::new(),
+        path => path.to_string(),
+    };
+    let query = url.query().map(str::to_string);
+    Some(ConnectionTarget {
+        scheme,
+        host,
+        port,
+        path,
+        query,
+    })
+}
+
+/// See [`connection_target`].
+#[derive(PartialEq)]
+struct ConnectionTarget {
+    scheme: String,
+    host: String,
+    port: Option<u16>,
+    path: String,
+    query: Option<String>,
+}
+
+/// A live pair may only be reused for a start request that dials the same
+/// connection target it already holds. Canonical keys fold host spellings,
+/// so two distinct tenants can share one key; silently reusing across
+/// spellings would report the requested tenant as started while the child
+/// stays connected to the old one, and reconciliation would stop retrying.
+/// Equivalence is by [`connection_target`], so harmless formatting drift
+/// (host case, default port, root slash, FQDN dot) never reads as a
+/// conflict. The error deliberately omits both URLs: they may carry query
+/// tokens, and this string lands in `last_error` and the UI.
 pub(crate) fn ensure_pair_connection_matches(
     runtime: &ManagedAgentPairRuntime,
     requested_relay_url: &str,
 ) -> Result<(), String> {
-    if runtime.connect_relay_url == connection_relay_url(requested_relay_url) {
+    let matches = match (
+        connection_target(&runtime.connect_relay_url),
+        connection_target(requested_relay_url),
+    ) {
+        (Some(live), Some(requested)) => live == requested,
+        // Fail closed on unparsable URLs: only byte-identical trimmed
+        // spellings count as the same target.
+        _ => runtime.connect_relay_url == connection_relay_url(requested_relay_url),
+    };
+    if matches {
         Ok(())
     } else {
         Err(

@@ -92,22 +92,53 @@ export function canonicalRelayUrl(raw: string): string | null {
   );
 }
 
+/**
+ * Comparable connection target mirroring the backend's tenancy authority
+ * (buzz-core's `tenant::normalize_host`): lowercase host, strip an explicit
+ * default port and the FQDN root dot, fold the root-path slash - WITHOUT
+ * folding loopback spellings, which are distinct tenants on a host-scoped
+ * relay. Returns null when the URL cannot be parsed as ws/wss.
+ */
+export function connectionTargetUrl(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  const defaultPort = url.protocol === "ws:" ? "80" : "443";
+  const port = url.port && url.port !== defaultPort ? `:${url.port}` : "";
+  const path = url.pathname === "/" ? "" : url.pathname;
+  return `${url.protocol}//${host}${port}${path}${url.search}`;
+}
+
 export function findManagedAgentRuntime(
   runtimes: readonly ManagedAgentRuntimeStatus[],
   pubkey: string,
   relayUrl: string,
 ): ManagedAgentRuntimeStatus | undefined {
   const normalizedPubkey = pubkey.toLowerCase();
-  // Backend rows carry the canonical pair URL; the caller passes the
-  // community's stored URL, which may differ in spelling (localhost vs
-  // 127.0.0.1, default port, trailing slash). Compare canonically, keeping
-  // the exact-string checks as a fallback for unparsable stored URLs.
+  const requestedTarget = connectionTargetUrl(relayUrl);
   const canonical = canonicalRelayUrl(relayUrl);
-  return runtimes.find(
-    (runtime) =>
-      runtime.pubkey.toLowerCase() === normalizedPubkey &&
-      (runtime.relayUrl === relayUrl ||
+  return runtimes.find((runtime) => {
+    if (runtime.pubkey.toLowerCase() !== normalizedPubkey) return false;
+    // A row carrying the actual dial spelling is authoritative: canonical
+    // matching would alias distinct loopback tenants that share one runtime
+    // key, letting the wrong community's card claim - and stop - this child.
+    if (runtime.requestedRelayUrl != null) {
+      return (
         runtime.requestedRelayUrl === relayUrl ||
-        (canonical !== null && runtime.relayUrl === canonical)),
-  );
+        (requestedTarget !== null &&
+          connectionTargetUrl(runtime.requestedRelayUrl) === requestedTarget)
+      );
+    }
+    // Legacy rows without the dial spelling keep the canonical fallback
+    // (exact-string check first, for unparsable stored URLs).
+    return (
+      runtime.relayUrl === relayUrl ||
+      (canonical !== null && runtime.relayUrl === canonical)
+    );
+  });
 }
