@@ -4275,8 +4275,24 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_teaches_repo_context_and_learning_loop() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("read its root `AGENTS.md`"));
+        assert!(prompt.contains("path-local `AGENTS.md`"));
+        assert!(
+            prompt.contains("product, architecture, and vision documents as design constraints")
+        );
+        assert!(prompt.contains("CI and live workflow evidence answer different questions"));
+        assert!(prompt.contains("record the invariant in the same session"));
+        assert!(prompt.contains("update the team's shared guidance"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("use the person's **exact display name as shown in Buzz**"));
+        assert!(prompt.contains("Do not expand a short display name, infer a surname"));
+        assert!(prompt.contains("Preserve it exactly; do not infer, expand, or look up a surname"));
         assert!(prompt.contains("--mention <hex-or-npub>"));
         assert!(prompt.contains("every presentation-only name that should notify"));
         assert!(
