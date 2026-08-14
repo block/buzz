@@ -3,6 +3,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
+import { useModerationNavResolution } from "@/features/admin-console/hooks";
+import { shouldShowModerationNav } from "@/features/admin-console/nav";
 import {
   canManageCommunityMembers,
   shouldWarnMissingMembershipSnapshot,
@@ -48,7 +50,7 @@ type SettingsViewProps = SettingsPanelProps & {
   section: SettingsSection;
 };
 
-const settingsNavGroups: Array<{
+export const settingsNavGroups: Array<{
   label: string;
   sections: SettingsSection[];
 }> = [
@@ -67,7 +69,7 @@ const settingsNavGroups: Array<{
   },
   {
     label: "Communities",
-    sections: ["hosted-communities", "community-members"],
+    sections: ["hosted-communities", "community-members", "moderation"],
   },
   {
     label: "App",
@@ -129,6 +131,7 @@ export function SettingsView({
 }: SettingsViewProps) {
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
+  const moderationNav = useModerationNavResolution();
   const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
     return settingsSections.filter((s) => {
@@ -146,9 +149,14 @@ export function SettingsView({
       if (s.value === "community-members") {
         return canManageCommunityMembers(myMembershipQuery.data);
       }
+      // Moderation surfaces the relay admin console. Hidden until the origin
+      // resolves (no flash of a dead entry); then gated by origin + probe.
+      if (s.value === "moderation") {
+        return moderationNav != null && shouldShowModerationNav(moderationNav);
+      }
       return true;
     });
-  }, [myMembershipQuery.data, featureState]);
+  }, [myMembershipQuery.data, moderationNav, featureState]);
 
   const [isLoaded, setIsLoaded] = React.useState(false);
   const [appVersion, setAppVersion] = React.useState<string | null>(null);
@@ -163,10 +171,18 @@ export function SettingsView({
   }, []);
 
   React.useEffect(() => {
+    // Defer section normalization while a direct link (`?section=moderation`)
+    // targets the Moderation entry and its visibility is still unresolved.
+    // That entry's visibility depends on an async origin+probe resolver
+    // (`moderationNav` is `undefined` until it resolves); redirecting first
+    // would bounce a valid direct link before the probe can authorize.
+    if (section === "moderation" && moderationNav === undefined) {
+      return;
+    }
     if (!visibleSections.some((entry) => entry.value === section)) {
       onSectionChange(visibleSections[0]?.value ?? "appearance");
     }
-  }, [onSectionChange, section, visibleSections]);
+  }, [moderationNav, onSectionChange, section, visibleSections]);
 
   React.useEffect(() => {
     if (!isMobile && !sidebarOpen) {
