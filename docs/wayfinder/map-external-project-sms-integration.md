@@ -150,8 +150,10 @@ ids (traversal, absolute, UNC, null byte, `$HOME`, `%USERPROFILE%`, case/whitesp
 variants) and also asserts a legitimate id still resolves, so it is not vacuously
 rejecting everything.
 
-**Still NOT verified:** no live relay, harness, or agent process has been run. All of the
-above is unit-level verification (re-run directly, not taken from build-agent reports).
+**Still NOT verified (as of the routing/pack work above):** no live relay, harness, or
+agent process had been run at that point. All of it was unit-level verification (re-run
+directly, not taken from build-agent reports). See the live-deployment section at the
+bottom for what has since been verified against a running relay.
 
 **Build environment gotcha:** the `C:\` drive on this machine is 100% full, which breaks
 the MSVC linker (`LNK1108: cannot write file at 0x0`). Prefix cargo with
@@ -240,3 +242,52 @@ canvas, delivery state, and turn counters.
 ---
 Sources: buzz-external-integration-design workflow (5 research agents), run 2026-08-12
 Last updated: 2026-08-12
+
+## 2026-08-14: first live deployment — inbound path verified against a running relay
+
+Deployed to Railway (project `resplendent-patience`) as a **separate, isolated** service
+`buzz-relay-sms` with its own Postgres and Redis, at
+`https://buzz-relay-sms-production.up.railway.app`. The pre-existing `block/buzz:main`
+relay and its database were deliberately left untouched — see "why not shared" below.
+
+### Verified live (not unit-level)
+
+- **Migration `0032_sms_identities` applied against a real Postgres** — the relay logged
+  `Database migrations complete` on boot. Previously this was the standing "not verified
+  against a live Postgres" gap for slices 6/7b.
+- **`POST /hooks/sms/inbound` exists and is reachable** — returns 403/415 rather than the
+  404 the upstream image returns, which is the direct proof the route is live.
+- **The endpoint is not an oracle.** A form-encoded POST with *no* `X-Twilio-Signature`
+  and one with a *bogus* signature both return `403` with a byte-identical
+  `{"error":"request not accepted"}` body (diffed, not eyeballed). This is the
+  anti-probing property the design called for, now confirmed on a real deployment.
+- **Fail-closed when unconfigured.** The above 403s are currently produced by the
+  "Twilio not configured" guard (no `TWILIO_AUTH_TOKEN` set yet), which is itself the
+  correct documented behavior — it rejects rather than skipping validation. **Note the
+  precise limit of this evidence: it verifies fail-closed-when-unconfigured, NOT that
+  signature validation accepts a genuine Twilio signature.** That needs real credentials
+  and remains unverified.
+
+### Still NOT verified
+
+Real Twilio credentials, a genuinely Twilio-signed inbound request, allow-list acceptance
+of a real number, the outbound `sms_sink` against Twilio's live API, the operator persona
+dispatching, and any live external-repo dispatch (slices 4/5/11).
+
+### Deployment gotchas worth keeping
+
+1. **Railway's `redeploy` re-runs the same snapshot**, it does *not* rebuild from the
+   configured branch. It silently redeployed the fork's stale `main` and every Docker
+   layer came back cached — which looks exactly like a successful build of the intended
+   code. A **push to the tracked branch** is what triggers a real build. Check
+   `list-deployments`' `meta.commitHash`/`meta.branch` before trusting a green deploy.
+2. **The git object-store conformance probe is a hard startup gate** and requires a
+   working S3/MinIO backend; it aborts the relay with
+   `git conformance probe failed: s3 backend error ... localhost:9000` on any deployment
+   without one. Set `BUZZ_GIT_CONFORMANCE_PROBE=false` for SMS-only test relays. This is
+   unrelated to SMS but will burn time if unexpected.
+3. **Why not share the existing relay's Postgres:** the running relay's image
+   (`ghcr.io/block/buzz:sha-cd2125c`) predates migrations `0029`/`0030`, which add
+   write-fence *triggers to every community-scoped table* and **drop** unique/check/FK
+   constraints. Pointing this branch at that database would have schema-migrated a live
+   production DB underneath a binary that predates the change. Isolated infra avoided it.
