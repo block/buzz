@@ -17,6 +17,7 @@ export async function uploadMediaFile(
   file: File,
   progressId?: string,
   signal?: AbortSignal,
+  onDispatch?: () => void,
 ): Promise<BlobDescriptor> {
   const headers: Record<string, string> = {
     "x-buzz-filename": encodeRawIpcHeader(file.name),
@@ -28,7 +29,7 @@ export async function uploadMediaFile(
   if (signal?.aborted) throw new Error("upload cancelled");
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (signal?.aborted) throw new Error("upload cancelled");
-
+  onDispatch?.();
   return invokeTauriRaw<BlobDescriptor>("upload_media_bytes_raw", bytes, {
     headers,
   });

@@ -23,6 +23,7 @@ type BackgroundUploadTask = {
   id: number;
   isCompleting: boolean;
   onCancel?: () => void;
+  startedProgressIds: Set<string>;
 };
 
 type BackgroundUploadSnapshot = {
@@ -180,10 +181,31 @@ function cancelTask(
   task.canceled = true;
   task.abortController.abort();
   if (notify) task.onCancel?.();
-  for (let index = 0; index < task.fileProgress.length; index += 1) {
-    void cancelMediaUpload(progressId(task.id, index)).catch(() => undefined);
-  }
+  cancelStartedMediaUploads(task.startedProgressIds);
   finishTask(task.id);
+}
+
+export function cancelStartedMediaUploads(
+  startedProgressIds: ReadonlySet<string>,
+  cancel: (progressId: string) => Promise<void> = cancelMediaUpload,
+): void {
+  for (const id of startedProgressIds) {
+    void cancel(id).catch(() => undefined);
+  }
+}
+
+export async function dispatchTrackedMediaUpload(
+  file: File,
+  id: string,
+  signal: AbortSignal,
+  startedProgressIds: Set<string>,
+  upload: typeof uploadMediaFile = uploadMediaFile,
+): Promise<BlobDescriptor> {
+  try {
+    return await upload(file, id, signal, () => startedProgressIds.add(id));
+  } finally {
+    startedProgressIds.delete(id);
+  }
 }
 
 function yieldForUploadFeedback(): Promise<void> {
@@ -228,6 +250,7 @@ export function prepareBackgroundMediaUpload(
     })),
     id: taskId,
     isCompleting: false,
+    startedProgressIds: new Set(),
   };
   let started = false;
   tasks.set(taskId, task);
@@ -252,10 +275,12 @@ export function prepareBackgroundMediaUpload(
           for (let index = 0; index < attachments.length; index += 1) {
             if (task.canceled) return;
             const attachment = attachments[index];
-            const descriptor = await uploadMediaFile(
+            const id = progressId(taskId, index);
+            const descriptor = await dispatchTrackedMediaUpload(
               attachment.file,
-              progressId(taskId, index),
+              id,
               task.abortController.signal,
+              task.startedProgressIds,
             );
             if (task.canceled) return;
             task.filePhases[index] = "finishing";
