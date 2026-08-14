@@ -162,8 +162,14 @@ fn bounded_error_data(data: &serde_json::Value) -> String {
 fn redact_error_data(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(entries) => {
+            let has_sensitive_name = entries.iter().any(|(key, value)| {
+                matches!(canonical_error_data_key(key).as_str(), "key" | "name")
+                    && value.as_str().is_some_and(is_sensitive_error_data_key)
+            });
             for (key, value) in entries {
-                if is_sensitive_error_data_key(key) {
+                if is_sensitive_error_data_key(key)
+                    || (has_sensitive_name && canonical_error_data_key(key) == "value")
+                {
                     *value = serde_json::Value::String(REDACTED_AGENT_ERROR_DATA.to_string());
                 } else {
                     redact_error_data(value);
@@ -179,15 +185,19 @@ fn redact_error_data(value: &mut serde_json::Value) {
     }
 }
 
-fn is_sensitive_error_data_key(key: &str) -> bool {
-    let canonical: String = key
-        .chars()
+fn canonical_error_data_key(key: &str) -> String {
+    key.chars()
         .filter(|character| character.is_ascii_alphanumeric())
         .map(|character| character.to_ascii_lowercase())
-        .collect();
+        .collect()
+}
+
+fn is_sensitive_error_data_key(key: &str) -> bool {
+    let canonical = canonical_error_data_key(key);
 
     matches!(canonical.as_str(), "auth" | "bearer" | "pwd" | "token")
         || canonical.contains("authorization")
+        || canonical.ends_with("authtag")
         || canonical.contains("apikey")
         || canonical.contains("password")
         || canonical.contains("passwd")
@@ -4897,6 +4907,60 @@ mod tests {
         );
         assert_eq!(data["nested"][1]["credentials"], REDACTED_AGENT_ERROR_DATA);
         assert_eq!(data["nested"][2]["safe"]["token_count"], 42);
+    }
+
+    #[test]
+    fn agent_error_from_json_redacts_named_credential_values() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {
+                "request": {
+                    "params": {
+                        "mcpServers": [{
+                            "env": [
+                                {
+                                    "name": "BUZZ_RELAY_URL",
+                                    "value": "wss://relay.example"
+                                },
+                                {
+                                    "name": "BUZZ_PRIVATE_KEY",
+                                    "value": "nsec-secret"
+                                },
+                                {
+                                    "name": "BUZZ_AUTH_TAG",
+                                    "value": "auth-tag-secret"
+                                },
+                                {
+                                    "key": "OPENAI_API_KEY",
+                                    "value": "api-key-secret"
+                                }
+                            ]
+                        }]
+                    }
+                },
+                "auth_tag": "direct-auth-tag-secret"
+            }
+        });
+
+        let AcpError::AgentError {
+            data: Some(data), ..
+        } = super::agent_error_from_json(&error)
+        else {
+            panic!("expected AgentError with diagnostic data");
+        };
+        let data: serde_json::Value =
+            serde_json::from_str(&data).expect("redacted diagnostic should remain valid JSON");
+        let env = &data["request"]["params"]["mcpServers"][0]["env"];
+
+        assert_eq!(env[0]["value"], "wss://relay.example");
+        assert_eq!(env[1]["name"], "BUZZ_PRIVATE_KEY");
+        assert_eq!(env[1]["value"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(env[2]["name"], "BUZZ_AUTH_TAG");
+        assert_eq!(env[2]["value"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(env[3]["key"], "OPENAI_API_KEY");
+        assert_eq!(env[3]["value"], REDACTED_AGENT_ERROR_DATA);
+        assert_eq!(data["auth_tag"], REDACTED_AGENT_ERROR_DATA);
     }
 
     #[test]
