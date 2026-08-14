@@ -23,7 +23,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz feed` | `get` |
 | `buzz social` | `publish`, `notes` |
 | `buzz repos` | `create`, `get`, `list` |
-| `buzz issues` | `create`, `get`, `list`, `status`, `assign` |
+| `buzz issues` | `assign`, `comment`, `create`, `get`, `list`, `status`, `unassign` |
 | `buzz pr` | `open`, `update`, `get`, `list`, `status` |
 | `buzz upload` | `file` |
 

@@ -12,6 +12,7 @@ import {
   KIND_GIT_STATUS_DRAFT,
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_OPEN,
+  KIND_STREAM_MESSAGE,
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
 import {
@@ -104,7 +105,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
         limit: 2_000,
       }),
       fetchEvents({
-        kinds: [KIND_TEXT_NOTE],
+        kinds: [KIND_TEXT_NOTE, KIND_STREAM_MESSAGE],
         "#a": repoAddresses,
         limit: 2_000,
       }),

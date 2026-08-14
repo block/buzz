@@ -15,6 +15,10 @@ import { toast } from "sonner";
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
+  useManagedAgentsQuery,
+  useRelayAgentsQuery,
+} from "@/features/agents/hooks";
+import {
   type ProjectIssue,
   type Repository as Project,
   useCreateProjectIssueCommentMutation,
@@ -275,9 +279,26 @@ export function ProjectIssueDetail({
   project: Project;
 }) {
   const commentMutation = useCreateProjectIssueCommentMutation(project);
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const relayAgentsQuery = useRelayAgentsQuery();
   const members = React.useMemo(
     () => issueMembers(project, issue, profiles),
     [issue, profiles, project],
+  );
+  const agentPubkeys = React.useMemo(
+    () =>
+      new Set([
+        ...(managedAgentsQuery.data ?? []).map((agent) =>
+          normalizePubkey(agent.pubkey),
+        ),
+        ...(relayAgentsQuery.data ?? []).map((agent) =>
+          normalizePubkey(agent.pubkey),
+        ),
+        ...Object.entries(profiles ?? {}).flatMap(([pubkey, profile]) =>
+          profile.isAgent ? [normalizePubkey(pubkey)] : [],
+        ),
+      ]),
+    [managedAgentsQuery.data, profiles, relayAgentsQuery.data],
   );
   const handleCommentSubmit = React.useCallback(
     async (
@@ -287,6 +308,9 @@ export function ProjectIssueDetail({
     ) => {
       try {
         await commentMutation.mutateAsync({
+          agentMentionPubkeys: mentionPubkeys.filter((pubkey) =>
+            agentPubkeys.has(normalizePubkey(pubkey)),
+          ),
           content,
           issue,
           mediaTags,
@@ -300,7 +324,7 @@ export function ProjectIssueDetail({
         throw error;
       }
     },
-    [commentMutation, issue],
+    [agentPubkeys, commentMutation, issue],
   );
   const identityQuery = useIdentityQuery();
   const status = issueStatusVisual(issue.status);
@@ -400,6 +424,8 @@ export function ProjectIssueDetail({
         data-testid="project-issue-comment-composer"
       >
         <ForumComposer
+          channelId={project.channelId}
+          channelType="forum"
           className="border border-border/60 bg-background/45"
           disabled={commentMutation.isPending}
           isSending={commentMutation.isPending}
