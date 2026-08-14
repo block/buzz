@@ -120,11 +120,27 @@ fn collect_stored_events(rows: Vec<PgRow>) -> Result<Vec<StoredEvent>> {
 /// [`FEED_CONVERSATION_EVENT_CAP`] events per conversation, and whole
 /// conversations are emitted newest-activity-first so the final `LIMIT`
 /// truncates at a conversation boundary instead of mid-window.
+///
+/// ## Pagination (`until`)
+///
+/// `until` is an **inclusive** upper bound (nostr convention) on
+/// `conv_latest` — the conversation's latest activity — NOT on individual
+/// event timestamps. Bounding per-event would split a conversation across
+/// pages under a new key; bounding the conversation keeps each page a set
+/// of whole conversations strictly older than (or tied with) the cursor.
+/// The candidate scan itself stays unbounded-by-`until` on purpose: the
+/// window ranks a conversation's newest events globally, so re-scanning
+/// keeps `conv_latest` (and therefore page membership) stable across pages.
+/// Callers page with `until` = the oldest `conv_latest` in hand and dedupe
+/// the overlap row; pagination depth is bounded by
+/// [`FEED_WINDOW_SCAN_CAP`] — conversations older than the newest 2000
+/// mention-events are not reachable through this feed.
 fn build_mentions_query(
     community: CommunityId,
     pubkey_bytes: &[u8],
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> QueryBuilder<sqlx::Postgres> {
     let limit = limit.min(FEED_MAX_LIMIT);
@@ -172,9 +188,14 @@ fn build_mentions_query(
          FROM keyed k \
          ) \
          SELECT {EVENT_COLS_UNALIASED} FROM ranked \
-         WHERE conv_rank <= {FEED_CONVERSATION_EVENT_CAP} \
-         ORDER BY conv_latest DESC, conv_key, created_at DESC LIMIT "
+         WHERE conv_rank <= {FEED_CONVERSATION_EVENT_CAP}"
     ));
+    if let Some(u) = until {
+        // Conversation-level bound: pages cut on conv_latest so a
+        // conversation is never split across pages (see doc comment).
+        qb.push(" AND conv_latest <= ").push_bind(u);
+    }
+    qb.push(" ORDER BY conv_latest DESC, conv_key, created_at DESC LIMIT ");
     qb.push_bind(limit);
     qb
 }
@@ -193,6 +214,7 @@ pub async fn query_mentions(
     pubkey_bytes: &[u8],
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
     let mut conn = pool.acquire().await?;
@@ -202,6 +224,7 @@ pub async fn query_mentions(
         pubkey_bytes,
         accessible_channel_ids,
         since,
+        until,
         limit,
     )
     .await
@@ -216,6 +239,7 @@ pub(crate) async fn query_mentions_on(
     pubkey_bytes: &[u8],
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
     let mut qb = build_mentions_query(
@@ -223,6 +247,7 @@ pub(crate) async fn query_mentions_on(
         pubkey_bytes,
         accessible_channel_ids,
         since,
+        until,
         limit,
     );
     let rows = qb.build().fetch_all(&mut *conn).await?;
@@ -234,6 +259,7 @@ fn build_needs_action_query(
     pubkey_bytes: &[u8],
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> QueryBuilder<sqlx::Postgres> {
     let limit = limit.min(FEED_MAX_LIMIT);
@@ -256,6 +282,10 @@ fn build_needs_action_query(
     if let Some(s) = since {
         qb.push(" AND m.event_created_at >= ").push_bind(s);
     }
+    if let Some(u) = until {
+        // Flat query: the inclusive nostr `until` bounds event time directly.
+        qb.push(" AND m.event_created_at <= ").push_bind(u);
+    }
     qb.push(" ORDER BY m.event_created_at DESC LIMIT ")
         .push_bind(limit);
     qb
@@ -277,6 +307,7 @@ pub async fn query_needs_action(
     pubkey_bytes: &[u8],
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
     let mut conn = pool.acquire().await?;
@@ -286,6 +317,7 @@ pub async fn query_needs_action(
         pubkey_bytes,
         accessible_channel_ids,
         since,
+        until,
         limit,
     )
     .await
@@ -298,6 +330,7 @@ pub(crate) async fn query_needs_action_on(
     pubkey_bytes: &[u8],
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
     let mut qb = build_needs_action_query(
@@ -305,6 +338,7 @@ pub(crate) async fn query_needs_action_on(
         pubkey_bytes,
         accessible_channel_ids,
         since,
+        until,
         limit,
     );
     let rows = qb.build().fetch_all(&mut *conn).await?;
@@ -315,6 +349,7 @@ fn build_activity_query(
     community: CommunityId,
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> QueryBuilder<sqlx::Postgres> {
     let limit = limit.min(FEED_MAX_LIMIT);
@@ -331,6 +366,10 @@ fn build_activity_query(
     if let Some(s) = since {
         qb.push(" AND created_at >= ").push_bind(s);
     }
+    if let Some(u) = until {
+        // Flat query: the inclusive nostr `until` bounds event time directly.
+        qb.push(" AND created_at <= ").push_bind(u);
+    }
     qb.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
     qb
 }
@@ -346,10 +385,19 @@ pub async fn query_activity(
     community: CommunityId,
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
     let mut conn = pool.acquire().await?;
-    query_activity_on(&mut conn, community, accessible_channel_ids, since, limit).await
+    query_activity_on(
+        &mut conn,
+        community,
+        accessible_channel_ids,
+        since,
+        until,
+        limit,
+    )
+    .await
 }
 
 /// [`query_activity`] on a specific session — see [`query_mentions_on`].
@@ -358,9 +406,10 @@ pub(crate) async fn query_activity_on(
     community: CommunityId,
     accessible_channel_ids: &[Uuid],
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<StoredEvent>> {
-    let mut qb = build_activity_query(community, accessible_channel_ids, since, limit);
+    let mut qb = build_activity_query(community, accessible_channel_ids, since, until, limit);
     let rows = qb.build().fetch_all(&mut *conn).await?;
     collect_stored_events(rows)
 }
@@ -531,6 +580,7 @@ mod tests {
             &mentioned_bytes,
             &[channel_a, channel_b],
             None,
+            None,
             10,
         )
         .await
@@ -578,6 +628,7 @@ mod tests {
             community_a,
             &actor_bytes,
             &[channel_a, channel_b],
+            None,
             None,
             10,
         )
@@ -637,7 +688,7 @@ mod tests {
         )
         .await;
 
-        let global_only = query_activity(&pool, community_a, &[], None, 10)
+        let global_only = query_activity(&pool, community_a, &[], None, None, 10)
             .await
             .expect("query activity global only");
         assert!(global_only.iter().any(|row| row.event.id == a_global.id));
@@ -648,7 +699,7 @@ mod tests {
         assert!(global_only.iter().all(|row| row.event.id != b_global.id));
         assert!(global_only.iter().all(|row| row.event.id != b_channel.id));
 
-        let visible = query_activity(&pool, community_a, &[channel_a, channel_b], None, 10)
+        let visible = query_activity(&pool, community_a, &[channel_a, channel_b], None, None, 10)
             .await
             .expect("query visible activity");
         assert!(visible.iter().any(|row| row.event.id == a_global.id));
@@ -899,7 +950,7 @@ mod tests {
     #[test]
     fn empty_channel_list_means_global_only() {
         let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
-        let mut qb = build_activity_query(community, &[], None, 10);
+        let mut qb = build_activity_query(community, &[], None, None, 10);
         let query = qb.build();
         let sql_str = sqlx::Execute::sql(query);
         let sql = sql_str.as_str();
@@ -922,7 +973,7 @@ mod tests {
     fn non_empty_channel_list_includes_global_and_accessible_channels() {
         let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
         let channel_id = Uuid::new_v4();
-        let mut qb = build_activity_query(community, &[channel_id], None, 10);
+        let mut qb = build_activity_query(community, &[channel_id], None, None, 10);
         let query = qb.build();
         let sql_str = sqlx::Execute::sql(query);
         let sql = sql_str.as_str();
@@ -938,7 +989,7 @@ mod tests {
         let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
         let pubkey = vec![0x42; 32];
         let channel_id = Uuid::new_v4();
-        let mut qb = build_mentions_query(community, &pubkey, &[channel_id], None, 10);
+        let mut qb = build_mentions_query(community, &pubkey, &[channel_id], None, None, 10);
         let query = qb.build();
         let sql_str = sqlx::Execute::sql(query);
         let sql = sql_str.as_str();
@@ -968,7 +1019,7 @@ mod tests {
         let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
         let pubkey = vec![0x42; 32];
         let channel_id = Uuid::new_v4();
-        let mut qb = build_mentions_query(community, &pubkey, &[channel_id], None, 10);
+        let mut qb = build_mentions_query(community, &pubkey, &[channel_id], None, None, 10);
         let query = qb.build();
         let sql_str = sqlx::Execute::sql(query);
         let sql = sql_str.as_str();
@@ -996,6 +1047,31 @@ mod tests {
         assert!(
             sql.contains(&format!("LIMIT {FEED_WINDOW_SCAN_CAP}")),
             "candidate scan must stay bounded: {sql}"
+        );
+    }
+
+    #[test]
+    fn mentions_query_until_bounds_conversation_latest_not_event_time() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let pubkey = vec![0x42; 32];
+        let channel_id = Uuid::new_v4();
+        let until = chrono::Utc::now();
+        let mut qb = build_mentions_query(community, &pubkey, &[channel_id], None, Some(until), 10);
+        let query = qb.build();
+        let sql_str = sqlx::Execute::sql(query);
+        let sql = sql_str.as_str();
+
+        assert!(
+            sql.contains("AND conv_latest <= "),
+            "until must bound the conversation's latest activity: {sql}"
+        );
+        // The cursor must not leak into the candidate scan: bounding the scan
+        // would change which events rank into a conversation's newest-N and
+        // make page membership unstable across pages.
+        let candidates_cte = sql.split("), keyed AS (").next().expect("candidate CTE");
+        assert!(
+            !candidates_cte.contains("<="),
+            "candidate scan must stay unbounded by the pagination cursor: {sql}"
         );
     }
 
@@ -1064,9 +1140,17 @@ mod tests {
             .await;
         }
 
-        let rows = query_mentions(&pool, community, &mentioned_bytes, &[channel], None, 20)
-            .await
-            .expect("query windowed mentions");
+        let rows = query_mentions(
+            &pool,
+            community,
+            &mentioned_bytes,
+            &[channel],
+            None,
+            None,
+            20,
+        )
+        .await
+        .expect("query windowed mentions");
 
         assert!(rows.len() <= 20, "limit must hold: got {} rows", rows.len());
         for standalone in &standalone_ids {
@@ -1091,12 +1175,93 @@ mod tests {
         );
     }
 
+    /// Paging contract: `until` = the previous page's oldest conversation
+    /// activity must return the next-older conversations, whole, with the
+    /// boundary conversation as the only overlap (inclusive cursor — clients
+    /// dedupe by conversation key).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn query_mentions_pages_by_conversation_cursor() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let mentioned_pubkey = "05".repeat(32);
+        let mentioned_bytes = hex::decode(&mentioned_pubkey).expect("hex pubkey");
+
+        let base = chrono::Utc::now().timestamp() - 10_000;
+
+        // 9 standalone conversations at distinct times, oldest first.
+        let mut ids_oldest_first = Vec::new();
+        for n in 0..9 {
+            let event = store_feed_event_at(
+                &pool,
+                community,
+                KIND_STREAM_MESSAGE,
+                &format!("paged {n}"),
+                Some(channel),
+                vec![Tag::parse(["p", mentioned_pubkey.as_str()]).unwrap()],
+                base + n * 100,
+            )
+            .await;
+            ids_oldest_first.push(event.id);
+        }
+
+        // Page 1: newest 3 conversations (limit counts events; 1 event each).
+        let page1 = query_mentions(
+            &pool,
+            community,
+            &mentioned_bytes,
+            &[channel],
+            None,
+            None,
+            3,
+        )
+        .await
+        .expect("page 1");
+        let page1_ids: Vec<_> = page1.iter().map(|row| row.event.id).collect();
+        assert_eq!(
+            page1_ids,
+            vec![
+                ids_oldest_first[8],
+                ids_oldest_first[7],
+                ids_oldest_first[6]
+            ],
+            "page 1 must be the newest three conversations, newest first"
+        );
+
+        // Page 2: cursor = page 1's oldest activity. Inclusive bound, so the
+        // boundary conversation leads and the next-older ones follow.
+        let cursor = page1.last().expect("page 1 nonempty").event.created_at;
+        let cursor_ts = chrono::DateTime::from_timestamp(cursor.as_secs() as i64, 0).unwrap();
+        let page2 = query_mentions(
+            &pool,
+            community,
+            &mentioned_bytes,
+            &[channel],
+            None,
+            Some(cursor_ts),
+            3,
+        )
+        .await
+        .expect("page 2");
+        let page2_ids: Vec<_> = page2.iter().map(|row| row.event.id).collect();
+        assert_eq!(
+            page2_ids,
+            vec![
+                ids_oldest_first[6],
+                ids_oldest_first[5],
+                ids_oldest_first[4]
+            ],
+            "page 2 must start at the inclusive cursor and continue older"
+        );
+    }
+
     #[test]
     fn needs_action_query_is_tenant_scoped_and_joins_mentions_by_composite_key() {
         let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
         let pubkey = vec![0x42; 32];
         let channel_id = Uuid::new_v4();
-        let mut qb = build_needs_action_query(community, &pubkey, &[channel_id], None, 10);
+        let mut qb = build_needs_action_query(community, &pubkey, &[channel_id], None, None, 10);
         let query = qb.build();
         let sql_str = sqlx::Execute::sql(query);
         let sql = sql_str.as_str();

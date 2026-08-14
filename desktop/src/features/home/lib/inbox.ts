@@ -430,6 +430,51 @@ export function getInboxItemConversationId(item: FeedItem) {
   );
 }
 
+/**
+ * Pagination cursor for the mentions feed: the oldest conversation's latest
+ * activity across the events in hand.
+ *
+ * The relay pages the mentions feed on `conv_latest` (the conversation's
+ * newest event time), so the next-page `until` must be the smallest
+ * `conv_latest` we have — NOT the oldest event time. An event-time cursor
+ * would be older than the boundary conversation's `conv_latest` whenever that
+ * conversation carries several events, and every conversation whose latest
+ * activity falls in that gap would be skipped, never to surface.
+ *
+ * Grouping must mirror the relay's key (`dm:<channel>` / thread root), which
+ * needs channel types to recognize DMs — callers must not paginate before the
+ * channel list has loaded. Returns `null` when no mention events are in hand.
+ */
+export function getOldestConversationActivity(
+  mentions: readonly FeedItem[],
+  channels?: InboxChannel[],
+): number | null {
+  const channelById = new Map(
+    (channels ?? []).map((channel) => [channel.id, channel]),
+  );
+  const latestByConversation = new Map<string, number>();
+
+  for (const item of mentions) {
+    const channelType = resolveItemChannel(item, channelById).type;
+    const key = getInboxConversationId(
+      item.tags,
+      item.id,
+      item.channelId,
+      channelType,
+      item.kind,
+    );
+    const latest = latestByConversation.get(key) ?? 0;
+    if (item.createdAt > latest) {
+      latestByConversation.set(key, item.createdAt);
+    }
+  }
+
+  if (latestByConversation.size === 0) {
+    return null;
+  }
+  return Math.min(...latestByConversation.values());
+}
+
 /** Finds the Inbox row containing an event, including grouped events. */
 export function findInboxItemByEventId(
   items: readonly InboxItem[],

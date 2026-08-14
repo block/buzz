@@ -246,6 +246,8 @@ export type HomeFeedResponse = {
 
 export type GetHomeFeedInput = {
   since?: number;
+  /** Inclusive pagination cursor — see getOldestConversationActivity. */
+  until?: number;
   limit?: number;
   types?: string;
 };
@@ -1014,11 +1016,7 @@ export type GlobalAgentConfig = {
   preferred_runtime: string | null;
 };
 
-/**
- * Result returned by `set_global_agent_config`.
- *
- * Mirrors the Rust `GlobalAgentConfigSaveResult` struct.
- */
+/** Result returned by `set_global_agent_config`. Mirrors the Rust `GlobalAgentConfigSaveResult` struct. */
 export type GlobalAgentConfigSaveResult = {
   /** The persisted global config (after strip-on-write). */
   config: GlobalAgentConfig;

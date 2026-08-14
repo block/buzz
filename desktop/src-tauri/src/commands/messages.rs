@@ -46,6 +46,7 @@ const TIMELINE_KINDS: [u32; 11] = [
 #[tauri::command]
 pub async fn get_feed(
     since: Option<i64>,
+    until: Option<i64>,
     limit: Option<u32>,
     types: Option<String>,
     state: State<'_, AppState>,
@@ -68,14 +69,10 @@ pub async fn get_feed(
         keys.public_key().to_hex()
     };
 
-    // Mentions: messages that reference me via #p.
-    //
-    // `feed_types` routes this filter through the relay's feed path, whose
-    // mentions query windows **per conversation** (newest conversations first,
-    // a few newest events each) instead of a flat newest-N-events cut. The
-    // flat cut let one chatty thread/DM fill the whole window and starve
-    // every other conversation out of the Inbox. The kinds below still bound
-    // the generic-query fallback for older relays that ignore `feed_types`.
+    // Mentions: messages that reference me via #p. `feed_types` routes this
+    // through the relay's per-conversation-windowed feed path (newest
+    // conversations first, a few newest events each) so one chatty thread
+    // can't starve the Inbox; kinds still bound the non-feed_types fallback.
     let mut mention_filter = serde_json::json!({
         "feed_types": ["mentions"],
         "kinds": [
@@ -106,6 +103,13 @@ pub async fn get_feed(
     });
     if let Some(s) = since {
         approval_filter["since"] = serde_json::json!(s);
+    }
+    // Inclusive pagination cursor — the relay feed path bounds each
+    // conversation's latest activity with it (see buzz-db feed.rs), so a page
+    // is whole conversations; the client dedupes the boundary overlap.
+    if let Some(u) = until {
+        mention_filter["until"] = serde_json::json!(u);
+        approval_filter["until"] = serde_json::json!(u);
     }
 
     let mention_events = if want_mentions {

@@ -7096,6 +7096,7 @@ async function handleLeaveChannel(
 async function handleGetFeed(
   args: {
     since?: number;
+    until?: number;
     limit?: number;
     types?: string;
   },
@@ -7336,6 +7337,9 @@ async function handleGetFeed(
     ): RawFeedItem[] =>
       includeType(category)
         ? [...mockFeedOverrides[category], ...defaultFeed[category]]
+            .filter(
+              (item) => args.until == null || item.created_at <= args.until,
+            )
             .sort((left, right) => right.created_at - left.created_at)
             .slice(0, limit)
         : [];
@@ -7373,27 +7377,32 @@ async function handleGetFeed(
   // faithful here is what lets the inbox windowing e2e exercise the same
   // relay path the desktop app uses.
   const limit = args.limit ?? 50;
-  const mentionEvents = await relayQuery(config, [
-    {
-      feed_types: ["mentions"],
-      kinds: [
-        9,
-        40002,
-        1,
-        45001,
-        45003,
-        KIND_GIT_PULL_REQUEST,
-        KIND_GIT_PR_UPDATE,
-        KIND_GIT_ISSUE,
-        KIND_GIT_STATUS_OPEN,
-        KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_CLOSED,
-        KIND_GIT_STATUS_DRAFT,
-      ],
-      "#p": [identity.pubkey],
-      limit,
-    },
-  ]);
+  const mentionFilter: Record<string, unknown> = {
+    feed_types: ["mentions"],
+    kinds: [
+      9,
+      40002,
+      1,
+      45001,
+      45003,
+      KIND_GIT_PULL_REQUEST,
+      KIND_GIT_PR_UPDATE,
+      KIND_GIT_ISSUE,
+      KIND_GIT_STATUS_OPEN,
+      KIND_GIT_STATUS_MERGED,
+      KIND_GIT_STATUS_CLOSED,
+      KIND_GIT_STATUS_DRAFT,
+    ],
+    "#p": [identity.pubkey],
+    limit,
+  };
+  // Mirror the native bridge: `until` rides the nostr filter into the feed
+  // path, where it bounds each conversation's latest activity (conv_latest)
+  // — the pagination cursor for older inbox pages.
+  if (args.until != null) {
+    mentionFilter.until = args.until;
+  }
+  const mentionEvents = await relayQuery(config, [mentionFilter]);
 
   // Look up channel names for feed items
   const channelIdsInFeed = [

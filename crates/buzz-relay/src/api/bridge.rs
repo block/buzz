@@ -1070,6 +1070,13 @@ async fn query_events_authed(
         let since = filter
             .since
             .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
+        // Pagination cursor: nostr-standard inclusive `until`. For mentions
+        // it bounds the conversation's latest activity (whole-conversation
+        // pages, see build_mentions_query); for the flat feeds it bounds
+        // event time.
+        let until = filter
+            .until
+            .and_then(|u| chrono::DateTime::from_timestamp(u.as_secs() as i64, 0));
 
         let mut seen_types = std::collections::HashSet::new();
         let mut seen = std::collections::HashSet::new();
@@ -1096,6 +1103,7 @@ async fn query_events_authed(
                         &pubkey_bytes,
                         &accessible_channels,
                         since,
+                        until,
                         remaining,
                     )
                     .await
@@ -1108,6 +1116,7 @@ async fn query_events_authed(
                         &pubkey_bytes,
                         &accessible_channels,
                         since,
+                        until,
                         remaining,
                     )
                     .await
@@ -1119,6 +1128,7 @@ async fn query_events_authed(
                         tenant.community(),
                         &accessible_channels,
                         since,
+                        until,
                         remaining,
                     )
                     .await

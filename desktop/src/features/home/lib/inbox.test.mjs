@@ -6,6 +6,7 @@ import {
   findInboxItemByEventId,
   getInboxConversationId,
   getInboxTypeLabel,
+  getOldestConversationActivity,
 } from "./inbox.ts";
 
 const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
@@ -593,4 +594,66 @@ test("nested-anchor: old selected event stays resolvable by conversationId after
 
   // The new representative is the latest reply.
   assert.equal(inboxItem.id, LATEST_EVENT_ID);
+});
+
+test("getOldestConversationActivity returns min of per-conversation latest, not oldest event", () => {
+  // Conversation A (thread root-a): replies at t=100 and t=500 → conv_latest 500.
+  // Conversation B (top-level event b-only): single event at t=300 → conv_latest 300.
+  // Oldest event overall is 100, but the cursor must be min(conv_latest) = 300.
+  const mentions = [
+    item({
+      id: "a-old",
+      createdAt: 100,
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", "root-a", "", "root"],
+        ["e", "root-a", "", "reply"],
+      ],
+    }),
+    item({
+      id: "a-new",
+      createdAt: 500,
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", "root-a", "", "root"],
+        ["e", "a-old", "", "reply"],
+      ],
+    }),
+    item({
+      id: "b-only",
+      createdAt: 300,
+      tags: [["h", CHANNEL_ID]],
+    }),
+  ];
+
+  assert.equal(getOldestConversationActivity(mentions, channels), 300);
+});
+
+test("getOldestConversationActivity groups DM events by channel", () => {
+  // Two events in the same DM channel are one conversation (conv_latest 400),
+  // even though their thread tags differ.
+  const mentions = [
+    item({
+      id: "dm-old",
+      createdAt: 200,
+      channelId: DM_CHANNEL_ID,
+      tags: [["h", DM_CHANNEL_ID]],
+    }),
+    item({
+      id: "dm-new",
+      createdAt: 400,
+      channelId: DM_CHANNEL_ID,
+      tags: [
+        ["h", DM_CHANNEL_ID],
+        ["e", "dm-root-2", "", "root"],
+        ["e", "dm-root-2", "", "reply"],
+      ],
+    }),
+  ];
+
+  assert.equal(getOldestConversationActivity(mentions, channels), 400);
+});
+
+test("getOldestConversationActivity returns null for no mentions", () => {
+  assert.equal(getOldestConversationActivity([], channels), null);
 });

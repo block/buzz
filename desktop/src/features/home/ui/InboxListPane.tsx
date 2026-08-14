@@ -1,4 +1,11 @@
-import { Bell, Clock, Ellipsis, ExternalLink, MailOpen } from "lucide-react";
+import {
+  Bell,
+  Clock,
+  Ellipsis,
+  ExternalLink,
+  Loader2,
+  MailOpen,
+} from "lucide-react";
 import * as React from "react";
 
 import {
@@ -179,9 +186,16 @@ type InboxListPaneProps = {
   draftItems: DraftViewItem[];
   doneSet: ReadonlySet<string>;
   filter: InboxFilter;
+  /** True while an older page is in flight — renders the list-tail spinner. */
+  isLoadingOlder?: boolean;
   items: InboxItem[];
   onFilterChange: (filter: InboxFilter) => void;
   onDeleteDraft: (draftKey: string) => void;
+  /**
+   * Fetch the next page of older conversations. Called when the list scrolls
+   * near its end; absent when pagination is unavailable or exhausted.
+   */
+  onLoadOlder?: () => void;
   onMarkRead: (itemId: string) => void;
   onMarkUnread: (itemId: string) => void;
   onOpenDirect: (item: InboxItem) => void;
@@ -207,9 +221,11 @@ export function InboxListPane({
   draftItems,
   doneSet,
   filter,
+  isLoadingOlder = false,
   items,
   onFilterChange,
   onDeleteDraft,
+  onLoadOlder,
   onMarkRead,
   onMarkUnread,
   onOpenDirect,
@@ -231,6 +247,33 @@ export function InboxListPane({
   const isDrafts = filter === "drafts";
   const isMixedInboxView = filter === "all";
   const scrollRef = React.useRef<HTMLDivElement>(null);
+
+  // Scroll-end pagination: when the list scrolls within a viewport of its
+  // bottom, ask for the next page of older conversations. Listener-based (not
+  // row-visibility) so it works with the virtualized rows, and re-checked on
+  // items growth so a short page that doesn't fill the viewport still chains
+  // to the next fetch.
+  const onLoadOlderRef = React.useRef(onLoadOlder);
+  onLoadOlderRef.current = onLoadOlder;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: items.length + isLoadingOlder are intentional re-check triggers — a short page that doesn't fill the viewport must chain to the next fetch
+  React.useEffect(() => {
+    const scrollEl = scrollRef.current;
+    if (!scrollEl || !onLoadOlder) {
+      return;
+    }
+    const maybeLoadOlder = () => {
+      const { scrollTop, clientHeight, scrollHeight } = scrollEl;
+      if (scrollHeight - (scrollTop + clientHeight) < clientHeight) {
+        onLoadOlderRef.current?.();
+      }
+    };
+    scrollEl.addEventListener("scroll", maybeLoadOlder, { passive: true });
+    maybeLoadOlder();
+    return () => {
+      scrollEl.removeEventListener("scroll", maybeLoadOlder);
+    };
+  }, [onLoadOlder, items.length, isLoadingOlder]);
+
   const inboxRows = React.useMemo(
     () =>
       buildInboxListRows({
@@ -610,44 +653,54 @@ export function InboxListPane({
           ref={scrollRef}
         >
           {visibleInboxRows.length > 0 ? (
-            <VirtualizedList
-              estimateSize={96}
-              getItemKey={(row) => row.key}
-              items={visibleInboxRows}
-              renderItem={(row) => {
-                if (row.kind === "inbox") {
-                  return renderItem(row.item, row.dueReminder);
-                }
+            <>
+              <VirtualizedList
+                estimateSize={96}
+                getItemKey={(row) => row.key}
+                items={visibleInboxRows}
+                renderItem={(row) => {
+                  if (row.kind === "inbox") {
+                    return renderItem(row.item, row.dueReminder);
+                  }
 
-                const source = reminderSources.get(row.reminder.id);
-                return (
-                  <PersonalItemRow
-                    id={row.reminder.id}
-                    location={
-                      source?.channel
-                        ? source.channel.channelType === "dm"
-                          ? {
-                              text: `In DM with ${source.channelLabel}`,
-                              channelLabel: null,
-                            }
-                          : { text: "In", channelLabel: source.channelLabel }
-                        : null
-                    }
-                    onClick={() => {
-                      onSelectReminder(row.reminder.id);
-                    }}
-                    preview={
-                      row.reminder.content.target?.preview ||
-                      row.reminder.content.note ||
-                      "Reminder"
-                    }
-                    selected={selectedReminderId === row.reminder.id}
-                    status={formatReminderStatus(row.reminder.notBefore)}
-                  />
-                );
-              }}
-              scrollRef={scrollRef}
-            />
+                  const source = reminderSources.get(row.reminder.id);
+                  return (
+                    <PersonalItemRow
+                      id={row.reminder.id}
+                      location={
+                        source?.channel
+                          ? source.channel.channelType === "dm"
+                            ? {
+                                text: `In DM with ${source.channelLabel}`,
+                                channelLabel: null,
+                              }
+                            : { text: "In", channelLabel: source.channelLabel }
+                          : null
+                      }
+                      onClick={() => {
+                        onSelectReminder(row.reminder.id);
+                      }}
+                      preview={
+                        row.reminder.content.target?.preview ||
+                        row.reminder.content.note ||
+                        "Reminder"
+                      }
+                      selected={selectedReminderId === row.reminder.id}
+                      status={formatReminderStatus(row.reminder.notBefore)}
+                    />
+                  );
+                }}
+                scrollRef={scrollRef}
+              />
+              {isLoadingOlder ? (
+                <div
+                  className="flex items-center justify-center py-3"
+                  data-testid="home-inbox-loading-older"
+                >
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              ) : null}
+            </>
           ) : (
             <div className="flex h-full min-h-64 items-center justify-center px-6 text-center">
               <div>

@@ -26,6 +26,7 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import { finalizeEvent, type VerifiedEvent } from "nostr-tools/pure";
 
 import { installRelayBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { scrollInboxListToText } from "../helpers/inboxScroll";
 import { assertRelaySeeded } from "../helpers/seed";
 
 const SHOTS = "test-results/inbox-windowing";
@@ -194,9 +195,12 @@ test.describe("inbox feed windowing", () => {
     await expect(list).toContainText(`chatty dm update ${CHATTY_COUNT - 1}`, {
       timeout: 15_000,
     });
-    // …and every standalone mention conversation survives the window.
+    // …and every standalone mention conversation survives — on the first
+    // page when the relay holds few conversations, or reachable via
+    // scroll-end cursor pagination when other (newer) conversations from
+    // sibling specs share the relay. Either way, nothing is starved out.
     for (let i = 0; i < STANDALONE_COUNT; i++) {
-      await expect(list).toContainText(standaloneMarker(i));
+      await scrollInboxListToText(page, list, standaloneMarker(i));
     }
 
     await page.screenshot({

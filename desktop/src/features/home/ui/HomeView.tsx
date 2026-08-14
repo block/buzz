@@ -93,6 +93,9 @@ type HomeViewProps = {
     threadRootId?: string | null,
   ) => void;
   onRefresh: () => void;
+  /** Fetch the next page of older conversations (scroll-end pagination). */
+  onLoadOlder?: () => void;
+  isLoadingOlder?: boolean;
 };
 
 export function HomeView({
@@ -103,6 +106,8 @@ export function HomeView({
   availableChannelIds,
   onOpenContext,
   onRefresh,
+  onLoadOlder,
+  isLoadingOlder = false,
 }: HomeViewProps) {
   const relaySelfPubkey = useRelaySelfQuery().data;
   const [homeInboxRef, homeInboxWidthPx] = useElementWidth<HTMLDivElement>();
@@ -111,10 +116,8 @@ export function HomeView({
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
   const [unreadOnly, setUnreadOnly] = React.useState(false);
-  // Explicit selections are mirrored to the URL (`?item=`), so back/forward
-  // restores the detail pane each history entry was showing and reloads
-  // restore it from the URL. Default/automatic selection stays local-only —
-  // background data loads must never trigger navigations.
+  // Explicit selections mirror to `?item=` so back/forward/reload restore the
+  // detail pane; automatic selection stays local-only (no navigations).
   const { applyPatch: applyInboxSearchPatch, values: inboxSearchValues } =
     useHistorySearchState(INBOX_SEARCH_KEYS);
   const isReminders = filter === "reminders";
@@ -145,9 +148,9 @@ export function HomeView({
     isReminders,
     viewportWidthPx: homeInboxWidthPx,
   });
-  // `?item=` is Messages-mode-only machinery: a reminder never enters the
-  // FeedItem selection model, so reload while in Reminders mode keeps a stale
-  // `?item=` unconsumed and does not snap back to a feed-item detail view.
+  // `?item=` is Messages-mode-only: a reminder never enters the FeedItem
+  // selection model, so a Reminders-mode reload keeps a stale `?item=`
+  // unconsumed rather than snapping back to a feed-item detail view.
   const urlSelectedItemId = isMessagesMode ? inboxSearchValues.item : null;
   const profilePanelPubkey = inboxSearchValues.profile;
   const profilePanelTab = profilePanelTabFromSearch(
@@ -265,11 +268,8 @@ export function HomeView({
     });
 
   const threadContextFeedItem = activeLatchedItem;
-  // Derive the default composer parent from the active anchor's own tags so
-  // that InboxDetailPane can recover the original reply target even when the
-  // anchor event has been displaced from the current groupItems. This is null
-  // until the active item is resolved (anchor not yet found in feedItems and
-  // no matching committed latch).
+  // Default composer parent from the anchor's own tags: InboxDetailPane can
+  // recover the reply target even after groupItems displaced the anchor.
   const latchedDefaultParentId =
     activeLatchedItem !== null
       ? (getThreadReference(activeLatchedItem.tags).parentId ??
@@ -417,11 +417,9 @@ export function HomeView({
         : null,
     [inboxItems, selectedEventId],
   );
-  // selectedConversationId: prefer the InboxItem-derived conversationId (stable
-  // group key). Fall back to deriving it from the latched FeedItem when the
-  // anchored event is no longer present in any group's items — this keeps the
-  // correct row selected (by conversationId) even after the anchor event has
-  // been displaced from groupItems by a newer representative.
+  // selectedConversationId: prefer the InboxItem-derived conversationId
+  // (stable group key); fall back to deriving it from the latched FeedItem
+  // when a newer representative displaced the anchored event from groupItems.
   const latchedConversationId = activeLatchedItem
     ? getInboxItemConversationId(activeLatchedItem)
     : null;
@@ -444,9 +442,9 @@ export function HomeView({
     selectedConversationId,
     unreadOnly,
   ]);
-  // A filter change may only retain detail for a conversation that remains
-  // visible. The filter handler selects the next valid row in the same update,
-  // so the detail pane never renders a stale conversation between states.
+  // A filter change may only retain detail for a still-visible conversation;
+  // the handler selects the next valid row in the same update, so the detail
+  // pane never renders a stale conversation between states.
   const selectedItem = React.useMemo(() => {
     if (!selectedEventId) return null;
     const fromFiltered = findInboxItemByEventId(filteredItems, selectedEventId);
@@ -695,9 +693,11 @@ export function HomeView({
               doneSet={effectiveDoneSet}
               dueReminderCount={dueReminderCount}
               filter={filter}
+              isLoadingOlder={isLoadingOlder}
               items={filteredItems}
               onDeleteDraft={handleDeleteDraft}
               onFilterChange={handleFilterChange}
+              onLoadOlder={onLoadOlder}
               onMarkRead={markItemRead}
               onMarkUnread={markItemUnread}
               onOpenDirect={(item) => {

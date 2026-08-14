@@ -1,7 +1,8 @@
 import * as React from "react";
 
 import { useAppShell } from "@/app/AppShellContext";
-import { useHomeFeedQuery } from "@/features/home/hooks";
+import { useChannelsQuery } from "@/features/channels/hooks";
+import { useHomeFeedPagination, useHomeFeedQuery } from "@/features/home/hooks";
 import { HomeView } from "@/features/home/ui/HomeView";
 import type { HomeFeedResponse } from "@/shared/api/types";
 import {
@@ -25,25 +26,32 @@ export function HomeScreen({
   onOpenContext,
 }: HomeScreenProps) {
   const homeFeedQuery = useHomeFeedQuery();
+  const channelsQuery = useChannelsQuery();
   const { threadActivityFeedItems } = useAppShell();
+  // Older inbox pages, cursor-fetched on scroll-end and merged under the
+  // live (30s-polled) first page.
+  const pagination = useHomeFeedPagination(
+    homeFeedQuery.data,
+    channelsQuery.data,
+  );
 
   const augmentedFeed = React.useMemo((): HomeFeedResponse | undefined => {
-    if (!homeFeedQuery.data) return undefined;
+    if (!pagination.feed) return undefined;
     if (threadActivityFeedItems.length === 0) {
-      return homeFeedQuery.data;
+      return pagination.feed;
     }
 
     return {
-      ...homeFeedQuery.data,
+      ...pagination.feed,
       feed: {
-        ...homeFeedQuery.data.feed,
+        ...pagination.feed.feed,
         activity: [
-          ...homeFeedQuery.data.feed.activity,
+          ...pagination.feed.feed.activity,
           ...threadActivityFeedItems,
         ],
       },
     };
-  }, [homeFeedQuery.data, threadActivityFeedItems]);
+  }, [pagination.feed, threadActivityFeedItems]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -61,6 +69,8 @@ export function HomeScreen({
         }
         feed={augmentedFeed}
         isLoading={homeFeedQuery.isLoading}
+        isLoadingOlder={pagination.isFetchingOlder}
+        onLoadOlder={pagination.hasOlder ? pagination.fetchOlder : undefined}
         onOpenContext={onOpenContext}
         onRefresh={() => {
           void homeFeedQuery.refetch();
