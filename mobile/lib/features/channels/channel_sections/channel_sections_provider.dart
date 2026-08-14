@@ -51,12 +51,11 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
       return const ChannelSectionsState();
     }
 
-    // Sections are relay-scoped (Desktop #1477). Prefer the active community
-    // origin so a workspace switch remounts with a fresh local key.
-    final relayUrl = activeCommunity?.relayUrl.trim().isNotEmpty == true
-        ? activeCommunity!.relayUrl.trim()
-        : relayConfig.baseUrl.trim();
-    if (relayUrl.isEmpty) {
+    // Sections are relay-scoped (Desktop #1477). The active community origin is
+    // the only scope key — no fallback, so the one-time legacy migration can
+    // never be consumed under a different key while the community is loading.
+    final relayUrl = activeCommunity?.relayUrl.trim();
+    if (relayUrl == null || relayUrl.isEmpty) {
       return const ChannelSectionsState();
     }
 
