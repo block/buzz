@@ -242,6 +242,17 @@ pub struct RestClient {
 fn is_retriable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
+const MAX_HTTP_ERROR_DETAIL_CHARS: usize = 512;
+
+fn http_error_detail(body: &str) -> Option<String> {
+    let detail: String = body
+        .trim()
+        .chars()
+        .take(MAX_HTTP_ERROR_DETAIL_CHARS)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    (!detail.is_empty()).then_some(detail)
+}
 
 /// Base retry delays for transient HTTP failures: 500ms, 1s, 2s.
 /// Jitter (±20%) is applied at call time via `jittered_duration`.
@@ -346,10 +357,17 @@ impl RestClient {
                     )));
                 }
                 Ok(resp) => {
+                    let status = resp.status();
+                    let detail = resp
+                        .text()
+                        .await
+                        .ok()
+                        .and_then(|body| http_error_detail(&body));
+                    let suffix = detail
+                        .as_deref()
+                        .map_or_else(String::new, |body| format!(": {body}"));
                     return Err(RelayError::Http(format!(
-                        "{method} {} returned HTTP {}",
-                        path,
-                        resp.status()
+                        "{method} {path} returned HTTP {status}{suffix}"
                     )));
                 }
                 Err(e) if e.is_timeout() || e.is_connect() => {
@@ -4152,6 +4170,19 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn http_error_detail_is_bounded_and_single_line() {
+        assert_eq!(
+            http_error_detail("  {\"error\":\"invalid job kind\"}\n"),
+            Some("{\"error\":\"invalid job kind\"}".to_string())
+        );
+        let oversized = "x".repeat(MAX_HTTP_ERROR_DETAIL_CHARS + 1);
+        assert_eq!(
+            http_error_detail(&oversized).expect("bounded detail").len(),
+            MAX_HTTP_ERROR_DETAIL_CHARS
+        );
+        assert_eq!(http_error_detail(" \r\n\t "), None);
+    }
 
     async fn membership_resolver(
         responses: Vec<Value>,
