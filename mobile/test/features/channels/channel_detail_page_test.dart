@@ -4582,10 +4582,12 @@ void main() {
           ['e', 'root', '', 'reply'],
         ],
       );
+      final relaySession = _TrackingRelaySession();
 
       await tester.pumpWidget(
         _buildTestable(
           messages: [root, target],
+          relaySessionNotifier: relaySession,
           threadReplies: {
             'root': [target],
           },
@@ -4622,12 +4624,14 @@ void main() {
 
       expect(find.byType(ThreadDetailPage), findsOneWidget);
       expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(relaySession.visibleChannels, [_testChannel.id]);
 
       await tester.pageBack();
       await tester.pumpAndSettle();
 
       expect(find.text('Open activity thread'), findsOneWidget);
       expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(relaySession.visibleChannels, isEmpty);
     });
   });
 
@@ -7474,6 +7478,27 @@ class _ErrorMessagesNotifier extends ChannelMessagesNotifier {
   @override
   AsyncValue<List<NostrEvent>> build() =>
       AsyncError('Connection failed', StackTrace.current);
+}
+
+class _TrackingRelaySession extends RelaySessionNotifier {
+  final visibleChannels = <String>[];
+
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+
+  @override
+  void Function() registerVisibleChannel(String channelId) {
+    final release = super.registerVisibleChannel(channelId);
+    visibleChannels.add(channelId);
+    var released = false;
+    return () {
+      if (released) return;
+      released = true;
+      visibleChannels.remove(channelId);
+      release();
+    };
+  }
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {

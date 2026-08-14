@@ -84,6 +84,10 @@ class ThreadDetailPage extends HookConsumerWidget {
           ? appView.viewInsets.bottom / appView.devicePixelRatio
           : 0.0,
     );
+    useEffect(() {
+      final session = ref.read(relaySessionProvider.notifier);
+      return session.registerVisibleChannel(channelId);
+    }, [channelId]);
     final sendMessage = ref.read(sendMessageProvider);
     // Relay thread queries are keyed by the outermost root, even when this
     // page displays a nested branch. Query that root, then select this head's
