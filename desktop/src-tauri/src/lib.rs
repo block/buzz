@@ -8,6 +8,7 @@ mod deep_link;
 mod egress_guard;
 mod event_sync;
 mod events;
+mod google_meet;
 mod huddle;
 mod identity_storage;
 mod initial_window;
@@ -305,6 +306,7 @@ pub fn run() {
         .manage(PendingCommunityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
+        .manage(google_meet::GoogleMeetLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
         .setup(move |app| {
@@ -631,6 +633,11 @@ pub fn run() {
             archive_builderlab_community,
             unarchive_builderlab_community,
             transfer_builderlab_community,
+            google_meet::start_google_meet_connect,
+            google_meet::cancel_google_meet_connect,
+            google_meet::get_google_meet_connection_status,
+            google_meet::disconnect_google_meet_account,
+            google_meet::create_instant_google_meet,
             title_bar_double_click,
             get_identity,
             get_nsec,

@@ -6,6 +6,7 @@ import { useHuddle } from "@/features/huddle";
 import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
 import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import { buildHuddleChannelName } from "@/features/huddle/lib/huddleChannelName";
+import { GoogleMeetButton } from "@/features/googleMeet/ui/GoogleMeetButton";
 import {
   useAvailableAcpRuntimes,
   useManagedAgentsQuery,
@@ -182,6 +183,13 @@ export function ChannelMembersBar({
     />
   );
 
+  const googleMeetButton = (
+    <GoogleMeetButton
+      channel={channel}
+      renderMode={variant === "compact" ? "menu-item" : "button"}
+    />
+  );
+
   const controls =
     variant === "compact" ? (
       <DropdownMenu modal={false}>
@@ -217,6 +225,7 @@ export function ChannelMembersBar({
             </DropdownMenuItem>
           ) : null}
           {huddleIndicator}
+          {googleMeetButton}
           <DropdownMenuItem
             data-testid="channel-management-trigger"
             onSelect={onManageChannel}
@@ -267,6 +276,7 @@ export function ChannelMembersBar({
         ) : null}
 
         {huddleIndicator}
+        {googleMeetButton}
 
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>

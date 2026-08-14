@@ -1185,6 +1185,33 @@ export async function cancelPairing(): Promise<void> {
   await invokeTauri("cancel_pairing");
 }
 
+export type GoogleMeetInfo = {
+  meetingUri: string;
+  meetingCode: string | null;
+};
+
+/** Opens the system browser for Google sign-in and resolves once the
+ * refresh token is saved. Rejects if canceled, timed out, or denied. */
+export async function startGoogleMeetConnect(): Promise<void> {
+  await invokeTauri("start_google_meet_connect");
+}
+
+export async function cancelGoogleMeetConnect(): Promise<void> {
+  await invokeTauri("cancel_google_meet_connect");
+}
+
+export async function getGoogleMeetConnectionStatus(): Promise<boolean> {
+  return invokeTauri<boolean>("get_google_meet_connection_status");
+}
+
+export async function disconnectGoogleMeetAccount(): Promise<void> {
+  await invokeTauri("disconnect_google_meet_account");
+}
+
+export async function createInstantGoogleMeet(): Promise<GoogleMeetInfo> {
+  return invokeTauri<GoogleMeetInfo>("create_instant_google_meet");
+}
+
 export async function applyCommunity(
   relayUrl: string,
   nsec?: string,

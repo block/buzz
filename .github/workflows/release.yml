@@ -158,6 +158,17 @@ jobs:
           # future confusion.
           BUZZ_UPDATER_PUBLIC_KEY: "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBQjE2Q0NGRjYzMTlBNTgKUldSWW1qSDJ6Mnl4K3VxaWdpYi9DVDNYdUI5amF3dnhJb0JCWUdmTXJpTk9MZGYrdUFqMXdyRVIK"
           BUZZ_UPDATER_ENDPOINT: "https://github.com/ranjank2alpha/buzz/releases/latest/download/latest.json"
+          # Google Meet integration (desktop/src-tauri/src/google_meet.rs):
+          # unlike the updater pubkey above, these ARE confidential and must
+          # come from repo secrets, not be hardcoded here. build.rs reads
+          # them via `option_env!` and treats a missing value as "feature
+          # not configured" rather than a build failure, so this workflow
+          # still succeeds even before these secrets are added — the
+          # "Connect Google account" button just reports the build isn't
+          # configured for it yet. See CONTEXT.md for the one-time Google
+          # Cloud Console setup these secrets come from.
+          BUZZ_BUILD_GOOGLE_MEET_CLIENT_ID: ${{ secrets.BUZZ_BUILD_GOOGLE_MEET_CLIENT_ID }}
+          BUZZ_BUILD_GOOGLE_MEET_CLIENT_SECRET: ${{ secrets.BUZZ_BUILD_GOOGLE_MEET_CLIENT_SECRET }}
         with:
           projectPath: desktop
           tagName: ${{ github.ref_name }}

@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Buzz",
-  "version": "0.5.5-4",
+  "version": "0.5.5-5",
   "identifier": "xyz.block.buzz.app",
   "build": {
     "beforeDevCommand": {
-      "script": "exec ./node_modules/.bin/vite",
+      "script": "npx vite",
       "cwd": "..",
       "wait": false
     },

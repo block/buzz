@@ -40,6 +40,12 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Clearer unread indicators for channels and DMs in the sidebar",
     ],
   },
+  {
+    version: 5,
+    bullets: [
+      "Start a Google Meet from any channel or DM — connect your Google account in Settings, then share a call link in one click",
+    ],
+  },
 ];
 
 /**
