@@ -5,6 +5,7 @@ import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 
 type UserAvatarSize = "xs" | "sm" | "md";
@@ -35,6 +36,7 @@ export function UserAvatar({
   testId,
 }: UserAvatarProps) {
   useMediaProxyPort();
+  useRelayOrigin();
   const initials = getInitials(displayName);
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
