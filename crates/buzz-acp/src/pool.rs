@@ -1196,7 +1196,11 @@ async fn create_session_and_apply_model(
         with_huddle_instructions(
             with_core(
                 with_team(
-                    framed_system_prompt(effective_cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                    framed_system_prompt(
+                        effective_cwd,
+                        ctx.base_prompt,
+                        ctx.system_prompt.as_deref(),
+                    ),
                     ctx.team_instructions.as_deref(),
                 ),
                 agent_core,
