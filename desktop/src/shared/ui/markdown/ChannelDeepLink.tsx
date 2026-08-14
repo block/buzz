@@ -6,6 +6,7 @@ import {
 } from "@/features/messages/lib/channelLink";
 
 import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
+import { MessageLinkPill } from "./MessageLinkPill";
 import { useMarkdownRuntime } from "./runtimeContext";
 import { getReactNodeText } from "./utils";
 
@@ -28,13 +29,16 @@ export function ChannelDeepLinkAnchor({
   if (!href) return <>{children}</>;
   const parsed = parseChannelLink(href);
   if (!parsed.ok) return <>{children}</>;
+  const messageLink = parsed.value.messageId
+    ? {
+        channelId: parsed.value.channelId,
+        messageId: parsed.value.messageId,
+        threadRootId: null,
+      }
+    : null;
   const openLink = () =>
-    parsed.value.messageId
-      ? onOpenMessageLink({
-          channelId: parsed.value.channelId,
-          messageId: parsed.value.messageId,
-          threadRootId: null,
-        })
+    messageLink
+      ? onOpenMessageLink(messageLink)
       : onOpenChannel(parsed.value.channelId);
   const authoredLabel = getReactNodeText(children);
   if (authoredLabel !== href) {
@@ -42,12 +46,23 @@ export function ChannelDeepLinkAnchor({
       <BuzzInlineLink
         href={href}
         title={href}
-        aria-label={`Open channel: ${authoredLabel}`}
+        aria-label={`${messageLink ? "Open message" : "Open channel"}: ${authoredLabel}`}
         interactive={interactive}
         onOpenLink={openLink}
       >
         {children}
       </BuzzInlineLink>
+    );
+  }
+  if (messageLink) {
+    return (
+      <MessageLinkPill
+        channels={channels}
+        href={href}
+        interactive={interactive}
+        link={messageLink}
+        onOpenMessageLink={onOpenMessageLink}
+      />
     );
   }
   const label = channelPermalinkLabel(channels, parsed.value.channelId);
@@ -58,7 +73,7 @@ export function ChannelDeepLinkAnchor({
       title={href}
       aria-label={`Open channel ${label}`}
       interactive={interactive}
-      onOpenLink={openLink}
+      onOpenLink={() => onOpenChannel(parsed.value.channelId)}
     >
       {label}
     </BuzzLinkChip>
@@ -76,14 +91,24 @@ export function MarkdownChannelDeepLink({
   const href = String(children ?? "");
   const parsed = parseChannelLink(href);
   if (!parsed.ok) return <span data-channel-deep-link="">{href}</span>;
-  const openLink = () =>
-    parsed.value.messageId
-      ? onOpenMessageLink({
-          channelId: parsed.value.channelId,
-          messageId: parsed.value.messageId,
-          threadRootId: null,
-        })
-      : onOpenChannel(parsed.value.channelId);
+  const messageLink = parsed.value.messageId
+    ? {
+        channelId: parsed.value.channelId,
+        messageId: parsed.value.messageId,
+        threadRootId: null,
+      }
+    : null;
+  if (messageLink) {
+    return (
+      <MessageLinkPill
+        channels={channels}
+        href={href}
+        interactive={interactive}
+        link={messageLink}
+        onOpenMessageLink={onOpenMessageLink}
+      />
+    );
+  }
   const label = channelPermalinkLabel(channels, parsed.value.channelId);
   return (
     <BuzzLinkChip
@@ -93,7 +118,7 @@ export function MarkdownChannelDeepLink({
       title={href}
       aria-label={`Open channel ${label}`}
       interactive={interactive}
-      onOpenLink={openLink}
+      onOpenLink={() => onOpenChannel(parsed.value.channelId)}
     >
       {label}
     </BuzzLinkChip>

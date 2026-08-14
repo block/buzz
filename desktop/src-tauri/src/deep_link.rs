@@ -192,7 +192,11 @@ fn activate_main_window(app: &tauri::AppHandle) {
 }
 
 fn parse_channel_deep_link(url: &Url) -> Option<serde_json::Value> {
-    if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() {
+    if url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return None;
     }
     let mut segments = url.path_segments()?;
@@ -747,6 +751,7 @@ mod tests {
             "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/",
             "buzz://channel/one?extra=true",
             "buzz://channel/one#fragment",
+            "buzz://:pass@channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "buzz://channel/not-a-uuid",
             "buzz://channel/%2F",
             "buzz://channel/%00",
