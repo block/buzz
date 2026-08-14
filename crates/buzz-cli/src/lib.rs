@@ -260,6 +260,29 @@ impl RespondToArg {
     }
 }
 
+/// Audience mode for the kind:10100 directory record. Unlike [`RespondToArg`]
+/// (draft updates, where an allowlist cannot be carried), the directory record
+/// stores the allowlist inline, so all three harness modes are expressible.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum DirectoryRespondToArg {
+    #[value(name = "owner-only")]
+    OwnerOnly,
+    #[value(name = "allowlist")]
+    Allowlist,
+    #[value(name = "anyone")]
+    Anyone,
+}
+
+impl DirectoryRespondToArg {
+    pub(crate) fn to_wire(self) -> &'static str {
+        match self {
+            Self::OwnerOnly => "owner-only",
+            Self::Allowlist => "allowlist",
+            Self::Anyone => "anyone",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum AgentsCmd {
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
@@ -365,6 +388,40 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+    /// Publish this identity's kind:10100 directory record (name, channels, audience)
+    #[command(
+        after_help = "Clients that gate agent mentions on directory evidence (kind:10100) \
+need `channel_ids` and `respond_to` in the record's content; \
+`buzz channels set-add-policy` writes only `channel_add_policy` and, because \
+kind:10100 is replaceable, clobbers everything else. This command \
+read-merges the existing record so unrelated fields (including \
+`channel_add_policy`) survive a republish.\n\n\
+Defaults: --name falls back to this identity's kind:0 display_name/name.\n\n\
+Examples:\n  \
+buzz agents set-directory --respond-to anyone --channels-from-membership\n  \
+buzz agents set-directory --name \"QC Lead\" --respond-to allowlist \
+--allow <PUBKEY> --channel-id <UUID>"
+    )]
+    SetDirectory {
+        /// Directory display name; defaults to this identity's kind:0 name
+        #[arg(long)]
+        name: Option<String>,
+        /// Channel UUID the agent responds in (repeatable)
+        #[arg(long = "channel-id", value_name = "UUID")]
+        channel_ids: Vec<String>,
+        /// Derive channel ids from this identity's current channel memberships
+        #[arg(long, default_value_t = false, conflicts_with = "channel_ids")]
+        channels_from_membership: bool,
+        /// Who may see and mention this agent
+        #[arg(long, value_enum)]
+        respond_to: DirectoryRespondToArg,
+        /// Allowlisted pubkey (repeatable; requires --respond-to allowlist)
+        #[arg(long = "allow", value_name = "PUBKEY")]
+        respond_to_allowlist: Vec<String>,
+        /// Presence hint stored in the record
+        #[arg(long, default_value = "online")]
+        status: String,
+    },
 }
 
 #[derive(Subcommand)]
