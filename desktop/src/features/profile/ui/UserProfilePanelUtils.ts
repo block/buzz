@@ -88,8 +88,14 @@ export function profilePanelTabFromSearch(value: unknown): ProfilePanelTab {
   return parseProfilePanelTab(value) ?? "info";
 }
 
+export function profilePanelTargetKey(
+  pubkey: string | undefined,
+  personaId: string | undefined,
+): string {
+  return pubkey ?? `persona:${personaId ?? "unknown"}`;
+}
+
 export type UserProfilePanelProps = {
-  callerChannelId?: string | null;
   canResetWidth?: boolean;
   currentPubkey?: string;
   isSinglePanelView?: boolean;

@@ -12,6 +12,7 @@ import type {
   ProfilePanelTab,
   ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanel";
+import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import type { Channel } from "@/shared/api/types";
 export type ChannelPaneProps = {
   activeChannel: Channel | null;
@@ -97,7 +98,10 @@ export type ChannelPaneProps = {
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   onOpenMembers?: () => void;
-  onOpenProfilePanel: (pubkey: string) => void;
+  onOpenProfilePanel: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
   onOpenThread: (message: TimelineMessage) => void;
   onResetThreadPanelWidth: () => void;
   onSelectThreadReplyTarget: (message: TimelineMessage) => void;

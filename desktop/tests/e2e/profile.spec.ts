@@ -5,6 +5,7 @@ import {
   installMockBridge,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 import { expectEmojiMartStylesInstalled } from "../helpers/css";
 import { openProfileMenu, openSettings } from "../helpers/settings";
 
@@ -71,6 +72,102 @@ async function expectHashSearchParam(
   value: string | null,
 ) {
   await expect.poll(() => getHashSearchParam(page, name)).toBe(value);
+}
+
+async function readVisibleProfileSurface(page: Page) {
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+
+  return panel.evaluate((element) => {
+    const isVisible = (candidate: Element) => {
+      if (!(candidate instanceof HTMLElement)) return false;
+      const style = getComputedStyle(candidate);
+      const rect = candidate.getBoundingClientRect();
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    };
+    const visibleTestIds = Array.from(
+      element.querySelectorAll<HTMLElement>("[data-testid]"),
+    )
+      .filter(isVisible)
+      .map((candidate) => candidate.dataset.testid)
+      .filter((value): value is string => Boolean(value))
+      .filter(
+        (value) =>
+          (value.startsWith("user-profile-") ||
+            value.startsWith("agent-config-")) &&
+          !value.endsWith("resize-handle"),
+      )
+      .sort();
+    const visibleControls = Array.from(
+      element.querySelectorAll<HTMLElement>(
+        'button, [role="button"], [role="tab"], [role="switch"]',
+      ),
+    )
+      .filter(isVisible)
+      .map((candidate) => ({
+        label:
+          candidate.getAttribute("aria-label") ??
+          candidate.textContent?.replace(/\s+/g, " ").trim() ??
+          "",
+        testId: candidate.dataset.testid ?? null,
+      }))
+      .filter(({ label, testId }) => label.length > 0 || testId !== null)
+      .filter(({ testId }) => !testId?.endsWith("resize-handle"))
+      .sort((left, right) =>
+        `${left.testId}:${left.label}`.localeCompare(
+          `${right.testId}:${right.label}`,
+        ),
+      );
+
+    const activityChannelLabel = element
+      .querySelector<HTMLElement>(
+        '[data-testid="user-profile-activity-channel-label"]',
+      )
+      ?.textContent?.replace(/\s+/g, " ")
+      .trim();
+
+    return {
+      activityChannelLabel: activityChannelLabel ?? null,
+      visibleControls,
+      visibleTestIds,
+    };
+  });
+}
+
+async function readOwnedAgentProfileContract(page: Page) {
+  const tabs = ["info", "runtime", "channels", "memories"] as const;
+  const contract: Partial<
+    Record<
+      (typeof tabs)[number],
+      Awaited<ReturnType<typeof readVisibleProfileSurface>>
+    >
+  > = {};
+
+  for (const tab of tabs) {
+    const trigger = page.getByTestId(`user-profile-tab-${tab}`);
+    await expect(trigger).toBeVisible();
+    if ((await trigger.getAttribute("data-state")) !== "active") {
+      await trigger.click();
+    }
+    await expect(trigger).toHaveAttribute("data-state", "active");
+    if (tab === "memories") {
+      await expect(page.getByTestId("agent-memory-section")).toBeVisible();
+    }
+    await waitForAnimations(page);
+    contract[tab] = await readVisibleProfileSurface(page);
+  }
+
+  await page.getByTestId("user-profile-tab-info").click();
+  await expect(page.getByTestId("user-profile-tab-info")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  return contract;
 }
 
 async function addGenericAgent(
@@ -240,6 +337,83 @@ test("profile panel shows communication actions as quick action tiles", async ({
   await waveAction.click();
   await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
   await expect(page.getByTestId("message-wave-attachment")).toBeVisible();
+});
+
+test("owned agent profile stays in parity between Agents and its DM", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    agentMemory: createMockAgentMemoryListing(),
+    oaOwnerIsMe: true,
+  });
+  await page.goto("/");
+  const agentName = "Parity Bot";
+  const agentPubkey = await addGenericAgent(
+    page,
+    "general",
+    agentName,
+    "Keep every profile entry point in sync.",
+  );
+
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  await page.getByTestId("user-profile-message").click();
+  await expect(page.getByTestId("chat-header-dm-avatar")).toBeVisible();
+  const dmChannelId = await page.evaluate(() => {
+    const match = window.location.hash.match(/\/channels\/([^?]+)/);
+    if (!match?.[1]) {
+      throw new Error("Could not resolve the agent DM channel id.");
+    }
+    return decodeURIComponent(match[1]);
+  });
+  await page.evaluate(
+    ({ dmChannelId, pubkey }) => {
+      const seed = (
+        window as Window & {
+          __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+            agentPubkey: string;
+            channelId: string;
+            turnId: string;
+          }) => void;
+        }
+      ).__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seed) {
+        throw new Error("Active-turn test bridge is unavailable.");
+      }
+      seed({
+        agentPubkey: pubkey,
+        channelId: "00000000-0000-0000-0000-000000000001",
+        turnId: "profile-parity-other-channel",
+      });
+      seed({
+        agentPubkey: pubkey,
+        channelId: dmChannelId,
+        turnId: "profile-parity-dm-channel",
+      });
+    },
+    { dmChannelId, pubkey: agentPubkey },
+  );
+
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  const agentsSurface = await readOwnedAgentProfileContract(page);
+
+  await page.getByTestId("user-profile-message").click();
+  await expect(page.getByTestId("chat-header-dm-avatar")).toBeVisible();
+  await page
+    .getByTestId("chat-header")
+    .getByRole("button", { name: `Open profile for ${agentName}` })
+    .click();
+  await expect(page.getByTestId("user-profile-public-key")).toContainText(
+    agentPubkey.slice(0, 8),
+  );
+  const dmSurface = await readOwnedAgentProfileContract(page);
+
+  expect(dmSurface).toEqual(agentsSurface);
 });
 
 test("keeps the saved profile description after a community round trip", async ({
@@ -1224,12 +1398,12 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     page
       .getByTestId("user-profile-public-key")
       .locator('[data-slot="profile-field-icon"]'),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
   await expect(
     page
       .getByTestId("user-profile-managed-by")
       .locator('[data-slot="profile-field-icon"]'),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
   const managedByRow = page.getByTestId("user-profile-managed-by");
   const managedByActionIndicator = page.getByTestId(
     "user-profile-managed-by-action-indicator",
@@ -1249,6 +1423,18 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   const instructionRow = page.getByTestId("user-profile-agent-instruction-row");
   await expect(instructionRow).toContainText("Agent instructions");
   await expect(instructionRow).not.toContainText("View");
+  await expect(
+    instructionRow.locator('[data-slot="profile-ingress-icon"]'),
+  ).toHaveCount(1);
+  for (const rowTestId of [
+    "user-profile-agent-instruction-row",
+    "user-profile-public-key",
+    "user-profile-managed-by",
+  ]) {
+    await expect(
+      page.getByTestId(rowTestId).locator(":scope > span.rounded-full"),
+    ).toHaveCount(0);
+  }
   const publicKeyRow = page.getByTestId("user-profile-public-key");
   const publicKeyCopy = page.getByTestId("user-profile-public-key-copy-status");
   await expect(publicKeyCopy).toHaveCSS("opacity", "0");
@@ -1415,6 +1601,11 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     }),
   ).toBeVisible();
   await expect(
+    page
+      .getByTestId("user-profile-agent-status")
+      .locator('[data-slot="profile-field-icon"]'),
+  ).toHaveCount(1);
+  await expect(
     page.getByTestId("user-profile-model-settings-section"),
   ).toBeVisible();
   await expect(
@@ -1428,6 +1619,12 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     page.getByTestId("user-profile-agent-instruction-row"),
   ).toHaveCount(0);
   const modelEditRow = page.getByRole("button", { name: "Edit Model" });
+  await expect(
+    modelEditRow.locator('[data-slot="agent-config-field-icon"]'),
+  ).toHaveCount(1);
+  await expect(modelEditRow.locator(":scope > span.rounded-full")).toHaveCount(
+    0,
+  );
   const modelEditIndicator = page.getByTestId(
     "agent-config-model-edit-indicator",
   );
@@ -1441,14 +1638,44 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     .getByRole("button", { name: "Cancel" })
     .click();
   const acpRow = page.getByTestId("user-profile-acp");
+  await expect(acpRow.locator('[data-slot="profile-field-icon"]')).toHaveCount(
+    1,
+  );
   const acpCopy = page.getByTestId("user-profile-acp-copy-status");
   await expect(acpCopy).toHaveCSS("opacity", "0");
   await acpRow.hover();
   await expect(acpCopy).toHaveCSS("opacity", "1");
   const startOnLaunchRow = page.getByTestId("user-profile-start-on-launch");
+  await expect(
+    startOnLaunchRow.locator('[data-slot="profile-field-icon"]'),
+  ).toHaveCount(1);
   const startOnLaunchToggle = page.getByTestId(
     "user-profile-start-on-launch-toggle",
   );
+  const activitySection = page.getByTestId(
+    "user-profile-runtime-activity-section",
+  );
+  await expect(
+    activitySection.getByTestId("user-profile-agent-status"),
+  ).toBeVisible();
+  await expect(
+    activitySection.getByTestId("user-profile-start-on-launch"),
+  ).toBeVisible();
+  const activityRowOrder = await activitySection
+    .locator("[data-testid^='user-profile-']")
+    .evaluateAll((rows) =>
+      rows
+        .map((row) => row.getAttribute("data-testid"))
+        .filter((testId): testId is string => testId !== null),
+    );
+  expect(activityRowOrder.indexOf("user-profile-start-on-launch")).toBe(
+    activityRowOrder.indexOf("user-profile-agent-status") + 1,
+  );
+  await expect(
+    page
+      .getByTestId("user-profile-agent-configuration-section")
+      .getByTestId("user-profile-start-on-launch"),
+  ).toHaveCount(0);
   await expect(startOnLaunchRow).not.toContainText("Yes");
   await expect(startOnLaunchRow).toBeChecked();
   await expect(startOnLaunchToggle).toHaveAttribute("data-state", "checked");
@@ -1513,6 +1740,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   const diagnosticsIngress = page.getByTestId(
     "user-profile-diagnostics-ingress",
   );
+  await expect(
+    diagnosticsIngress.locator('[data-slot="profile-ingress-icon"]'),
+  ).toHaveCount(1);
   await expect(diagnosticsIngress).not.toContainText("View");
   await expect(
     diagnosticsIngress.locator("svg.lucide-chevron-right"),
@@ -1596,6 +1826,76 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   );
   await page.getByTestId("agent-memory-truncated").click();
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
+});
+
+test("an older agent message opens the same persona instance as the Agents library", async ({
+  page,
+}) => {
+  const personaId = "profile-parity-agent";
+  const historicalPubkey = TEST_IDENTITIES.charlie.pubkey;
+  const currentPubkey = "d".repeat(64);
+  await installMockBridge(page, {
+    agentMemory: createMockAgentMemoryListing(),
+    managedAgents: [
+      {
+        channelNames: ["agents"],
+        name: "Earlier Parity Agent",
+        personaId,
+        pubkey: historicalPubkey,
+        status: "stopped",
+      },
+      {
+        channelNames: ["agents"],
+        name: "Current Parity Agent",
+        personaId,
+        pubkey: currentPubkey,
+        status: "running",
+      },
+    ],
+    oaOwnerIsMe: true,
+    personas: [
+      {
+        displayName: "Parity Agent",
+        id: personaId,
+        isActive: true,
+        systemPrompt: "Keep every profile entry point in sync.",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Stop");
+  const agentsLibraryContract = await readOwnedAgentProfileContract(page);
+
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${historicalPubkey}`).click();
+  await expectHashSearchParam(page, "profile", historicalPubkey);
+  await expectHashSearchParam(page, "profileTab", "runtime");
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Start agent");
+  await expect(
+    page.getByTestId(`user-profile-instance-${historicalPubkey}`),
+  ).toContainText("Current");
+
+  await page.getByTestId("auxiliary-panel-close").click();
+  await page.getByTestId("channel-agents").click();
+  const historicalMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Indexing the channel catalog now." });
+  await expect(historicalMessage).toBeVisible();
+  await historicalMessage.locator("button").first().click();
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Stop");
+  const messageContract = await readOwnedAgentProfileContract(page);
+
+  expect(messageContract).toEqual(agentsLibraryContract);
 });
 
 test("restored Inbox deep link hides the back arrow", async ({ page }) => {
@@ -1723,12 +2023,50 @@ test("declared owner sees runtime tab without a relay-agent record", async ({
   );
   await expect(panel.getByTestId("user-profile-runtime")).toHaveCount(0);
   await expect(panel.getByTestId("user-profile-respond-to")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-runtime-preview")).toHaveCount(
+    0,
+  );
+  await expect(
+    panel.getByTestId("user-profile-runtime-preview-notice"),
+  ).toHaveCount(0);
+  await expect(panel.getByText("Harness log", { exact: true })).toHaveCount(0);
 
   // No relay/managed runtime record means no write or management affordance —
   // only the truthful NIP-OA profile signal is rendered in Runtime.
   await expect(panel.getByText("Model")).toHaveCount(0);
   await expect(
     panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
+  ).toHaveCount(0);
+});
+
+test("non-owner agent profile shows only reported public agent data", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Indexing the channel catalog now." });
+  await expect(messageRow).toBeVisible();
+  await messageRow.locator("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByTestId("user-profile-agent-type")).toContainText(
+    "codex",
+  );
+  await expect(panel.getByTestId("user-profile-capabilities")).toContainText(
+    "code, reviews",
+  );
+  await expect(panel.getByRole("tab", { name: "Runtime" })).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-runtime-preview")).toHaveCount(
+    0,
+  );
+  await expect(
+    panel.getByTestId("user-profile-runtime-preview-notice"),
   ).toHaveCount(0);
 });
 
@@ -2222,7 +2560,9 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
     "settings-harnesses",
     "settings-global-agent-config",
   ]) {
-    const section = agentsPage.getByTestId(testId);
+    const section = agentsPage
+      .getByTestId(testId)
+      .locator('[data-slot="settings-section-card"]');
     await expect(section).toBeVisible();
     await expect(section).toHaveCSS("border-radius", "12px");
     await expect(section).toHaveCSS("border-top-width", "1px");
