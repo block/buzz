@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{LazyLock, Mutex},
 };
 
@@ -8,26 +8,62 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{app_state::AppState, relay::classify_request_error};
 
-static MEDIA_UPLOAD_CANCELLATIONS: LazyLock<Mutex<HashMap<String, CancellationToken>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+const MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS: usize = 128;
+
+#[derive(Default)]
+struct MediaUploadCancellations {
+    pending_order: VecDeque<String>,
+    tokens: HashMap<String, CancellationToken>,
+}
+
+impl MediaUploadCancellations {
+    fn begin(&mut self, progress_id: &str) -> CancellationToken {
+        if let Some(cancel) = self.tokens.get(progress_id).cloned() {
+            self.pending_order.retain(|id| id != progress_id);
+            return cancel;
+        }
+        let cancel = CancellationToken::new();
+        self.tokens.insert(progress_id.to_string(), cancel.clone());
+        cancel
+    }
+
+    fn cancel(&mut self, progress_id: &str) {
+        if let Some(cancel) = self.tokens.get(progress_id) {
+            cancel.cancel();
+            return;
+        }
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        self.tokens.insert(progress_id.to_string(), cancel);
+        self.pending_order.push_back(progress_id.to_string());
+        while self.pending_order.len() > MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS {
+            if let Some(expired_id) = self.pending_order.pop_front() {
+                self.tokens.remove(&expired_id);
+            }
+        }
+    }
+
+    fn finish(&mut self, progress_id: &str) {
+        self.tokens.remove(progress_id);
+        self.pending_order.retain(|id| id != progress_id);
+    }
+}
+
+static MEDIA_UPLOAD_CANCELLATIONS: LazyLock<Mutex<MediaUploadCancellations>> =
+    LazyLock::new(|| Mutex::new(MediaUploadCancellations::default()));
 
 pub(super) fn begin_media_upload(progress_id: Option<&str>) -> Option<CancellationToken> {
     let progress_id = progress_id?;
-    let mut uploads = MEDIA_UPLOAD_CANCELLATIONS.lock().ok()?;
-    if let Some(cancel) = uploads.get(progress_id) {
-        return Some(cancel.clone());
-    }
-    let cancel = CancellationToken::new();
-    uploads.insert(progress_id.to_string(), cancel.clone());
-    Some(cancel)
+    MEDIA_UPLOAD_CANCELLATIONS
+        .lock()
+        .ok()
+        .map(|mut uploads| uploads.begin(progress_id))
 }
 
 pub(super) fn cancel_media_upload(progress_id: &str) {
     if let Ok(mut uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
-        let cancel = uploads
-            .entry(progress_id.to_string())
-            .or_insert_with(CancellationToken::new);
-        cancel.cancel();
+        uploads.cancel(progress_id);
     }
 }
 
@@ -36,7 +72,7 @@ pub(super) fn finish_media_upload(progress_id: Option<&str>) {
         return;
     };
     if let Ok(mut uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
-        uploads.remove(progress_id);
+        uploads.finish(progress_id);
     }
 }
 
@@ -152,5 +188,26 @@ mod tests {
 
         assert!(cancellation.is_cancelled());
         finish_media_upload(Some(&progress_id));
+    }
+
+    #[test]
+    fn cancel_only_ids_are_bounded_and_oldest_entries_expire() {
+        let mut uploads = MediaUploadCancellations::default();
+        let ids = (0..MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS + 2)
+            .map(|index| format!("cancel-only-{index}"))
+            .collect::<Vec<_>>();
+
+        for id in &ids {
+            uploads.cancel(id);
+        }
+
+        assert_eq!(uploads.tokens.len(), MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS);
+        assert_eq!(
+            uploads.pending_order.len(),
+            MAX_PENDING_MEDIA_UPLOAD_CANCELLATIONS
+        );
+        assert!(!uploads.tokens.contains_key(&ids[0]));
+        assert!(!uploads.tokens.contains_key(&ids[1]));
+        assert!(uploads.tokens.contains_key(ids.last().expect("last id")));
     }
 }
