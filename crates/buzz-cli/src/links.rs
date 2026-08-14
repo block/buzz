@@ -8,10 +8,39 @@
 //!
 //! Callers are expected to validate inputs first (`validate_hex64`,
 //! `validate_repo_id`); the identifier charsets need no URL encoding.
+//!
+//! Coordinate links additionally accept an optional `&tab=<tab>` parameter
+//! (`files|commits|issues|prs|contributors|channels`) selecting a workspace tab on
+//! the receiving side. The CLI builders emit the canonical no-tab form
+//! (overview); the parameter exists for the desktop's tab-aware copy-link
+//! button.
+
+/// Whether a d-tag can be expressed in a `buzz://` link.
+///
+/// Project slugs accept up to 1024 bytes of arbitrary UTF-8, but the link
+/// format is restricted to `[a-zA-Z0-9._-]{1,64}` (no leading dot, no `..`)
+/// so links need no escaping and stay safe to paste. Callers must check
+/// before building a link and omit the field when it returns false, rather
+/// than emitting a link no client can parse. Mirrors `isValidDtag` in
+/// `desktop/src/shared/lib/entityLink.ts`.
+pub fn is_linkable_dtag(dtag: &str) -> bool {
+    !dtag.is_empty()
+        && dtag.len() <= 64
+        && !dtag.starts_with('.')
+        && !dtag.contains("..")
+        && dtag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
 
 /// Build a `buzz://repo` link for a repository announcement (kind 30617).
 pub fn repo_link(owner: &str, repo_id: &str) -> String {
     format!("buzz://repo?owner={owner}&d={repo_id}")
+}
+
+/// Build a `buzz://project` link for a project announcement (kind 30621).
+pub fn project_link(owner: &str, project_id: &str) -> String {
+    format!("buzz://project?owner={owner}&d={project_id}")
 }
 
 /// Build a `buzz://pr` link for a pull request event (kind 1618).
@@ -27,25 +56,49 @@ pub fn issue_link(event_id: &str, owner: &str, repo_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
-    const OWNER: &str = "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
-    const EVENT_ID: &str = "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
+    fn golden() -> Value {
+        serde_json::from_str(include_str!("../../../test-fixtures/entity-links.json"))
+            .expect("valid entity-links golden fixture")
+    }
 
-    // Golden strings shared with desktop/src/shared/lib/entityLink.test.mjs
-    // ("builders emit the canonical cross-language link format").
     #[test]
     fn golden_format_matches_desktop() {
+        let golden = golden();
+        let owner = golden["owner"].as_str().unwrap();
+        let event_id = golden["eventId"].as_str().unwrap();
+        let dtag = golden["dtag"].as_str().unwrap();
         assert_eq!(
-            pull_request_link(EVENT_ID, OWNER, "buzz-world"),
-            format!("buzz://pr?id={EVENT_ID}&owner={OWNER}&d=buzz-world")
+            pull_request_link(event_id, owner, dtag),
+            golden["links"]["pullRequest"].as_str().unwrap()
         );
         assert_eq!(
-            issue_link(EVENT_ID, OWNER, "buzz-world"),
-            format!("buzz://issue?id={EVENT_ID}&owner={OWNER}&d=buzz-world")
+            issue_link(event_id, owner, dtag),
+            golden["links"]["issue"].as_str().unwrap()
         );
         assert_eq!(
-            repo_link(OWNER, "buzz-world"),
-            format!("buzz://repo?owner={OWNER}&d=buzz-world")
+            repo_link(owner, dtag),
+            golden["links"]["repository"].as_str().unwrap()
         );
+        assert_eq!(
+            project_link(owner, dtag),
+            golden["links"]["project"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn linkable_dtag_matches_the_desktop_charset() {
+        let golden = golden();
+        for ok in golden["validDtags"].as_array().unwrap() {
+            let ok = ok.as_str().unwrap();
+            assert!(is_linkable_dtag(ok), "{ok:?} should be linkable");
+        }
+        assert!(is_linkable_dtag(&"a".repeat(64)));
+        for bad in golden["invalidDtags"].as_array().unwrap() {
+            let bad = bad.as_str().unwrap();
+            assert!(!is_linkable_dtag(bad), "{bad:?} should not be linkable");
+        }
+        assert!(!is_linkable_dtag(&"a".repeat(65)));
     }
 }

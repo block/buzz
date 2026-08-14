@@ -24,6 +24,7 @@ import {
   relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
+import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
 import { projectTerminalLabel } from "@/features/projects/ui/useOpenProjectTerminal";
 import {
   PROJECT_LIST_ROW_CLASS,
@@ -50,6 +51,7 @@ import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 
 function ProjectUpdatedLabel({
@@ -169,6 +171,10 @@ const PROJECT_STAT_ITEMS = [
   },
 ] as const;
 
+/**
+ * Textual commit/PR/issue counts. Repository lists show these next to the
+ * activity bar; project lists show the bar alone (counts via its tooltips).
+ */
 export function ProjectStatsRow({
   summary,
   fixedColumns = false,
@@ -224,7 +230,10 @@ export function ProjectActivityBar({
     // z-10 lifts the bar above the card's full-surface open button so it
     // can receive hover events. Fixed h-2 wrapper keeps layout stable
     // while the inner bar grows on hover.
-    <div className="group/activity-bar relative z-10 flex h-2 w-full items-center">
+    <div
+      className="group/activity-bar relative z-10 flex h-2 w-full items-center"
+      data-testid="project-activity-bar"
+    >
       <div className="flex h-1.5 w-full gap-px overflow-hidden rounded-full bg-muted/60 transition-all duration-150 group-hover/activity-bar:h-2">
         {total > 0
           ? items
@@ -395,6 +404,10 @@ function ProjectActionsMenu({
   return (
     <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
       <ProjectListRowMenu label={`More options for ${project.name}`}>
+        <CopyShareLinkMenuItem
+          link={projectShareLink(project)}
+          testId={`project-copy-link-${project.dtag}`}
+        />
         <DropdownMenuItem
           onSelect={(event) => {
             event.preventDefault();
@@ -541,13 +554,8 @@ export function ProjectGridCard({
           />
         </div>
 
-        <div className="mt-auto">
-          <div className="flex min-w-0 items-center px-4 pb-2 pt-1">
-            <ProjectStatsRow summary={summary} />
-          </div>
-          <div className="px-4 pb-3">
-            <ProjectActivityBar summary={summary} />
-          </div>
+        <div className="mt-auto px-4 pb-3 pt-2">
+          <ProjectActivityBar summary={summary} />
         </div>
       </div>
     </Card>
@@ -612,11 +620,10 @@ export function ProjectListRow({
             />
           </div>
           <div
-            className="hidden items-center gap-3 xl:flex"
+            className="hidden items-center xl:flex"
             data-testid="projects-row-summary"
           >
-            <ProjectStatsRow fixedColumns summary={summary} />
-            <div className="w-20 shrink-0">
+            <div className="w-32 shrink-0">
               <ProjectActivityBar summary={summary} />
             </div>
           </div>
