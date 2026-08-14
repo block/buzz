@@ -9,6 +9,7 @@ import 'features/activity/inbox_local_state_provider.dart';
 import 'features/activity/inbox_read_state.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
+import 'features/invites/invite_create_page.dart';
 import 'features/pairing/pairing_page.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/deep_link_dispatcher.dart';
@@ -50,9 +51,13 @@ class App extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final themeMode = ref.watch(themeProvider);
-    final accentIndex = ref.watch(accentProvider);
-    final schemeName = ref.watch(schemeProvider);
+    final communityTheme = ref.watch(communityThemeProvider);
+    final themeMode = communityTheme.mode;
+    final accentIndex = effectiveAccentIndex(
+      communityTheme.theme,
+      communityTheme.accent,
+    );
+    final schemeName = communityTheme.theme;
     final authState = ref.watch(authProvider);
 
     final resolved = resolveSchemes(schemeName, themeMode);
@@ -143,8 +148,12 @@ class App extends HookConsumerWidget {
   }
 }
 
-Widget _buildSettingsPage(BuildContext context) =>
-    const SettingsPage(profileHeader: SettingsProfileHeader());
+Widget _buildSettingsPage(BuildContext context) => SettingsPage(
+  profileHeader: const SettingsProfileHeader(),
+  invitePageBuilder: (_) => const CommunityInvitePage(),
+  identityRecoveryPageBuilder: (_) =>
+      const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
+);
 
 class _SplashScreen extends StatelessWidget {
   const _SplashScreen();

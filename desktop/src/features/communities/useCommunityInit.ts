@@ -13,8 +13,9 @@ import { getIdentity } from "@/shared/api/tauriIdentity";
 import { clearTrayAgentActivity } from "@/shared/api/trayMenu";
 import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
-import { resetLinkPreviewTitleCache } from "@/shared/lib/useResolvedLinkPreviews";
+import { resetLinkPreviewMetadataCache } from "@/shared/lib/useResolvedLinkPreviews";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
+import { resetNavigationDeepLinkDrain } from "@/shared/deep-link";
 import {
   clearAllDrafts,
   initDraftStore,
@@ -47,12 +48,13 @@ import type { Community } from "./types";
  * destroyed via effect cleanup and do not need entries here.
  * See AGENTS.md "Community Switching" for the full contract.
  */
-function resetCommunityState({
+async function resetCommunityState({
   resetAvatarState,
 }: {
   resetAvatarState: boolean;
-}): void {
+}): Promise<void> {
   relayClient.disconnect();
+  await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
   clearAllDrafts();
   resetAgentObserverStore();
@@ -67,12 +69,12 @@ function resetCommunityState({
   }
   resetSidebarRelayConnectionCardState();
   resetMediaCaches();
+  resetLinkPreviewMetadataCache();
   resetVideoPlayerState();
   resetRenderScopedReactionHydration();
   resetBackgroundMediaUploads();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
-  resetLinkPreviewTitleCache();
 }
 
 type CommunityInitResult =
@@ -97,6 +99,7 @@ export function useCommunityInit(
   activeCommunity: Community | null,
   communityKey: string,
   isSharedIdentity: boolean,
+  suppressAutoConnect = false,
 ): CommunityInitResult {
   const [result, setResult] = useState<CommunityInitResult>({
     isReady: false,
@@ -122,6 +125,31 @@ export function useCommunityInit(
 
     async function init() {
       if (!activeCommunity) {
+        if (hasInitializedRef.current) {
+          if (prevCommunityIdRef.current) {
+            saveActiveAgentTurnsForCommunity(prevCommunityIdRef.current);
+            prevCommunityIdRef.current = null;
+          }
+          try {
+            await resetCommunityState({ resetAvatarState: true });
+          } catch (error) {
+            console.error("Failed to reset community state:", error);
+            if (!cancelled) {
+              setResult({
+                isReady: false,
+                needsSetup: false,
+                appliedKey: null,
+                error:
+                  error instanceof Error
+                    ? `Could not safely leave community: ${error.message}`
+                    : "Could not safely leave community",
+              });
+            }
+            return;
+          }
+          appliedRelayUrlRef.current = null;
+          hasInitializedRef.current = false;
+        }
         try {
           const defaultRelayUrl = await getDefaultRelayUrl();
           const autoConnectDefaultRelay =
@@ -131,9 +159,10 @@ export function useCommunityInit(
           // relay as the first community. Public builds retain community
           // selection even when BUZZ_RELAY_URL is overridden at runtime.
           if (
-            isSharedIdentity ||
-            (autoConnectDefaultRelay &&
-              shouldAutoConnectDefaultRelay(defaultRelayUrl))
+            !suppressAutoConnect &&
+            (isSharedIdentity ||
+              (autoConnectDefaultRelay &&
+                shouldAutoConnectDefaultRelay(defaultRelayUrl)))
           ) {
             const identity = await getIdentity();
             if (cancelled) return;
@@ -196,10 +225,26 @@ export function useCommunityInit(
           // store under the outgoing community ID and delete its snapshot.
           prevCommunityIdRef.current = null;
         }
-        resetCommunityState({
-          resetAvatarState:
-            appliedRelayUrlRef.current !== activeCommunity.relayUrl,
-        });
+        try {
+          await resetCommunityState({
+            resetAvatarState:
+              appliedRelayUrlRef.current !== activeCommunity.relayUrl,
+          });
+        } catch (error) {
+          console.error("Failed to reset community state:", error);
+          if (!cancelled) {
+            setResult({
+              isReady: false,
+              needsSetup: false,
+              appliedKey: null,
+              error:
+                error instanceof Error
+                  ? `Could not safely switch communities: ${error.message}`
+                  : "Could not safely switch communities",
+            });
+          }
+          return;
+        }
       }
       hasInitializedRef.current = true;
       appliedRelayUrlRef.current = activeCommunity.relayUrl;
@@ -290,6 +335,7 @@ export function useCommunityInit(
     activeCommunity?.token,
     activeCommunity?.reposDir,
     isSharedIdentity,
+    suppressAutoConnect,
     communityKey,
   ]);
 

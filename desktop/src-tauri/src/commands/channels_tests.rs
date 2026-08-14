@@ -2,6 +2,7 @@
 // channels.rs under the per-file line cap.
 
 use super::*;
+use crate::models::ChannelInfo;
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
 /// Build a signed event for testing with the given kind, content, and tags.
@@ -264,6 +265,131 @@ fn duplicate_channel_rejection_is_ensure_success_only() {
     assert!(!is_duplicate_channel_rejection(
         "duplicate: unrelated local error"
     ));
+}
+
+// ── compute_channels_hash ─────────────────────────────────────────────────────
+
+fn make_channel(id: &str, name: &str, last_message_at: Option<String>) -> ChannelInfo {
+    ChannelInfo {
+        id: id.to_string(),
+        name: name.to_string(),
+        channel_type: "stream".to_string(),
+        visibility: "open".to_string(),
+        description: "".to_string(),
+        topic: None,
+        purpose: None,
+        member_count: 0,
+        member_pubkeys: Vec::new(),
+        last_message_at,
+        archived_at: None,
+        participants: Vec::new(),
+        participant_pubkeys: Vec::new(),
+        is_member: true,
+        ttl_seconds: None,
+        ttl_deadline: None,
+    }
+}
+
+#[test]
+fn hash_is_order_insensitive() {
+    let c1 = make_channel("aaa", "Alpha", None);
+    let c2 = make_channel("bbb", "Beta", None);
+    let c3 = make_channel("aaa", "Alpha", None);
+    let c4 = make_channel("bbb", "Beta", None);
+
+    assert_eq!(
+        compute_channels_hash(&[c1, c2]),
+        compute_channels_hash(&[c4, c3]),
+        "hash must be insensitive to channel list ordering",
+    );
+}
+
+#[test]
+fn hash_ignores_last_message_at() {
+    let c_none = make_channel("chan-1", "Alpha", None);
+    let c_some = make_channel("chan-1", "Alpha", Some("2026-01-01T00:00:00Z".to_string()));
+
+    assert_eq!(
+        compute_channels_hash(&[c_none]),
+        compute_channels_hash(&[c_some]),
+        "hash must be insensitive to last_message_at",
+    );
+}
+
+#[test]
+fn hash_changes_on_metadata_change() {
+    let c1 = make_channel("chan-1", "Alpha", None);
+    let c2 = make_channel("chan-1", "AlphaRenamed", None);
+
+    assert_ne!(
+        compute_channels_hash(&[c1]),
+        compute_channels_hash(&[c2]),
+        "hash must change when channel name changes",
+    );
+}
+
+#[test]
+fn hash_changes_on_membership_change() {
+    let mut c1 = make_channel("chan-1", "Alpha", None);
+    let mut c2 = make_channel("chan-1", "Alpha", None);
+    c1.member_pubkeys = vec![PK_A.to_string()];
+    c2.member_pubkeys = vec![PK_A.to_string(), PK_B.to_string()];
+
+    assert_ne!(
+        compute_channels_hash(&[c1]),
+        compute_channels_hash(&[c2]),
+        "hash must change when member_pubkeys changes",
+    );
+}
+
+#[test]
+fn not_modified_returns_none_when_hash_matches() {
+    let channels = vec![make_channel("chan-1", "General", None)];
+    let hash = compute_channels_hash(&channels);
+
+    // Mirror the get_channels command decision logic.
+    let known_hash = Some(hash.clone());
+    let is_not_modified = known_hash.as_deref() == Some(hash.as_str());
+
+    assert!(
+        is_not_modified,
+        "identical hash must trigger the not-modified short-circuit",
+    );
+}
+
+#[test]
+fn not_modified_does_not_trigger_on_hash_mismatch() {
+    let channels = vec![make_channel("chan-1", "General", None)];
+    let hash = compute_channels_hash(&channels);
+    let known_hash = Some("0000000000000000".to_string());
+
+    let is_not_modified = known_hash.as_deref() == Some(hash.as_str());
+
+    assert!(
+        !is_not_modified,
+        "stale hash must NOT trigger the not-modified short-circuit",
+    );
+}
+
+#[test]
+fn hash_is_stable_for_same_input() {
+    // Verifies that the FNV-1a output is deterministic across calls within
+    // the same process (unlike std DefaultHasher which uses random seeds).
+    let channels = vec![
+        make_channel("aaa", "General", Some("2026-01-01T00:00:00Z".to_string())),
+        make_channel("bbb", "Random", None),
+    ];
+    let first = compute_channels_hash(&channels);
+    let channels2 = vec![
+        make_channel("aaa", "General", None), // last_message_at change is ignored
+        make_channel("bbb", "Random", None),
+    ];
+    let second = compute_channels_hash(&channels2);
+
+    assert_eq!(
+        first, second,
+        "hash must be deterministic and ignore last_message_at"
+    );
 }
 
 #[test]

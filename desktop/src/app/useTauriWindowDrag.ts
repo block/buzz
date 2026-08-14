@@ -15,6 +15,10 @@ export function useTauriWindowDrag() {
         return;
       }
 
+      // A native window drag replaces the browser's normal pointer gesture.
+      // Cancel that gesture before handing control to Tauri so moving from the
+      // titlebar across page copy cannot start a text selection.
+      event.preventDefault();
       void getCurrentWindow().startDragging();
     }
 

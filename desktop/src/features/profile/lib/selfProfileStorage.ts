@@ -11,16 +11,12 @@
  * prevents one community's cached identity from bleeding into another.
  */
 
-const STORAGE_KEY_PREFIX = "buzz-self-profile.v1";
+export { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 
-/**
- * Normalizes a relay URL for use in storage keys.
- * Trim, strip trailing slashes, lowercase — ensures equivalent URLs map to
- * the same key regardless of formatting differences.
- */
-export function normalizeRelayUrl(relayUrl: string): string {
-  return relayUrl.trim().replace(/\/+$/, "").toLowerCase();
-}
+const STORAGE_KEY_PREFIX = "buzz-self-profile.v1";
+export const MAX_SELF_PROFILE_CACHES_PER_RELAY = 8;
+export const MAX_SELF_PROFILE_CACHES = 32;
 
 /**
  * Dispatched on window after a successful writeSelfProfileCache so that any
@@ -134,6 +130,141 @@ export function readSelfProfileCache(
 }
 
 /**
+ * Memoized count of localStorage keys matching the self-profile prefix.
+ * null = uninitialized (first write triggers the scan).
+ *
+ * This is NOT community-scoped: localStorage is shared across all communities
+ * in the same origin, so the count persists across community switches. It must
+ * not be added to resetCommunityState().
+ *
+ * Multi-tab caveat: writes from other tabs bypass this tab's memo, so the count
+ * can under-count. The resync-on-divergence check in trimSelfProfileCaches
+ * corrects this on the next over-cap scan, bounded by MAX_SELF_PROFILE_CACHES.
+ */
+let _memoizedProfileKeyCount: number | null = null;
+
+/**
+ * Returns the memoized key count, scanning once on first call.
+ * Subsequent calls are O(1). Returns null if the scan throws (storage
+ * locked/unavailable); callers treat null as "skip trimming."
+ */
+function ensureProfileKeyCount(): number | null {
+  if (_memoizedProfileKeyCount !== null) return _memoizedProfileKeyCount;
+  try {
+    let count = 0;
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key?.startsWith(`${STORAGE_KEY_PREFIX}:`)) count++;
+    }
+    _memoizedProfileKeyCount = count;
+    return count;
+  } catch {
+    // Leave memo null — a partial count must never be memoized. The next
+    // call will rescan when storage recovers.
+    return null;
+  }
+}
+
+/** Reset module state between tests. Not for production use. */
+export function _resetProfileKeyCountForTest(): void {
+  _memoizedProfileKeyCount = null;
+}
+
+/**
+ * Trims self-profile caches to stay within per-relay and global caps.
+ *
+ * Fast path (O(1)): when the memoized total is ≤ MAX_SELF_PROFILE_CACHES_PER_RELAY,
+ * no relay can exceed the per-relay cap, so both caps are satisfied without
+ * any localStorage iteration.
+ *
+ * Slow path: key-only scan to check per-relay and global counts; if over cap,
+ * a full parse-scan selects entries for eviction by updatedAt. The memoized
+ * count is resynced if the scan finds it diverged (e.g. another tab deleted
+ * keys between writes).
+ */
+function trimSelfProfileCaches(relayUrl: string, preservedKey: string): void {
+  const relayPrefix = `${STORAGE_KEY_PREFIX}:${normalizeRelayUrl(relayUrl)}:`;
+
+  // O(1) fast path: ≤ per-relay cap total → definitely under both caps.
+  // null = scan failed (storage locked); skip trimming so the write still lands.
+  const memoTotal = ensureProfileKeyCount();
+  if (memoTotal === null || memoTotal <= MAX_SELF_PROFILE_CACHES_PER_RELAY)
+    return;
+
+  // Key-only scan to get accurate totals (no getItem, no parsing).
+  let totalEntryCount = 0;
+  let relayEntryCount = 0;
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const key = window.localStorage.key(i);
+    if (!key?.startsWith(`${STORAGE_KEY_PREFIX}:`)) continue;
+    totalEntryCount += 1;
+    if (key.startsWith(relayPrefix)) relayEntryCount += 1;
+  }
+
+  // Resync memo if it diverged due to external deletions (another tab, the
+  // TTL sweep, etc.).
+  if (totalEntryCount !== memoTotal) {
+    _memoizedProfileKeyCount = totalEntryCount;
+  }
+
+  if (
+    totalEntryCount <= MAX_SELF_PROFILE_CACHES &&
+    relayEntryCount <= MAX_SELF_PROFILE_CACHES_PER_RELAY
+  ) {
+    return;
+  }
+
+  // Full parse-scan: collect entries for eviction by updatedAt.
+  const entries: Array<{ key: string; updatedAt: number }> = [];
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const key = window.localStorage.key(i);
+    if (!key?.startsWith(`${STORAGE_KEY_PREFIX}:`)) continue;
+    const raw = window.localStorage.getItem(key);
+    if (!raw) continue;
+    try {
+      entries.push({
+        key,
+        updatedAt: parseSelfProfileCache(JSON.parse(raw))?.updatedAt ?? 0,
+      });
+    } catch {
+      entries.push({ key, updatedAt: 0 });
+    }
+  }
+  const relayEntries = entries.filter((entry) =>
+    entry.key.startsWith(relayPrefix),
+  );
+  const keysToRemove = new Set<string>();
+  for (const candidates of [relayEntries, entries]) {
+    const maxEntries =
+      candidates === relayEntries
+        ? MAX_SELF_PROFILE_CACHES_PER_RELAY
+        : MAX_SELF_PROFILE_CACHES;
+    const removable = candidates
+      .filter((entry) => entry.key !== preservedKey)
+      .sort((left, right) => left.updatedAt - right.updatedAt);
+    let removeCount =
+      candidates.filter((entry) => !keysToRemove.has(entry.key)).length -
+      maxEntries;
+    for (const entry of removable) {
+      if (removeCount <= 0) break;
+      if (keysToRemove.has(entry.key)) continue;
+      keysToRemove.add(entry.key);
+      removeCount -= 1;
+    }
+  }
+  for (const key of keysToRemove) window.localStorage.removeItem(key);
+
+  // Update memo to reflect evictions.
+  if (_memoizedProfileKeyCount !== null) {
+    _memoizedProfileKeyCount = Math.max(
+      0,
+      (totalEntryCount !== memoTotal ? totalEntryCount : memoTotal) -
+        keysToRemove.size,
+    );
+  }
+}
+
+/**
  * Writes the cache to localStorage and fires SELF_PROFILE_CACHE_EVENT so
  * mounted components can re-read without polling.
  *
@@ -150,8 +281,15 @@ export function writeSelfProfileCache(
     // The 30s profile refetch otherwise re-stringifies ~341KB, rewrites it,
     // dispatches the cache event, and re-parses on the listener side even
     // when nothing changed. Skip the write and event entirely when identical.
-    if (window.localStorage.getItem(key) === serialized) return true;
+    const existingRaw = window.localStorage.getItem(key);
+    if (existingRaw === serialized) return true;
+    const isNew = existingRaw === null;
     window.localStorage.setItem(key, serialized);
+    // Increment memo when a genuinely new key is added.
+    if (isNew && _memoizedProfileKeyCount !== null) {
+      _memoizedProfileKeyCount++;
+    }
+    trimSelfProfileCaches(relayUrl, key);
     // localStorage is not reactive — dispatch a custom event so any mounted
     // listeners (e.g. useEffect with addEventListener) can re-read the cache
     // without a polling interval.
@@ -179,6 +317,13 @@ export function removeSelfProfileCachesForRelay(relayUrl: string): void {
     }
     for (const key of toRemove) {
       window.localStorage.removeItem(key);
+    }
+    // Keep memo consistent with the removals performed by this module.
+    if (_memoizedProfileKeyCount !== null) {
+      _memoizedProfileKeyCount = Math.max(
+        0,
+        _memoizedProfileKeyCount - toRemove.length,
+      );
     }
   } catch {
     // Storage access failures are non-fatal.

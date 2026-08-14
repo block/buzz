@@ -82,6 +82,10 @@ pub(super) fn preset_catalog_entry(
         login_hint: None,
         source: HarnessSource::Preset,
         definition_env: Default::default(),
+        // Derived from the static preset command (`def.command`). This ensures
+        // unavailable entries (command: null in JSON, None here) still carry
+        // the cap — the harness cap is command-keyed, not availability-gated.
+        max_parallelism: crate::managed_agents::harness_max_parallelism(def.command),
     }
 }
 
@@ -404,5 +408,66 @@ mod tests {
         assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
         assert!(!entry.requires_external_cli);
         assert!(entry.underlying_cli_path.is_none());
+    }
+
+    // ── Catalog max_parallelism: command-keyed execution policy ──────────────
+
+    /// Unavailable OpenClaw (command not on PATH → command: null in JSON):
+    /// max_parallelism must still be Some(5) — derived from the static `def.command`,
+    /// not the probed `entry.command`.
+    #[test]
+    fn openclaw_preset_unavailable_carries_max_parallelism() {
+        let openclaw = PRESET_HARNESSES
+            .iter()
+            .find(|p| p.id == "openclaw")
+            .expect("openclaw preset must be present");
+
+        // Simulate "not installed" — resolver always returns None.
+        let entry = preset_catalog_entry(openclaw, |_| None);
+        assert_eq!(entry.availability, AcpAvailabilityStatus::NotInstalled);
+        assert!(
+            entry.command.is_none(),
+            "unavailable entry must have command: null"
+        );
+        assert_eq!(
+            entry.max_parallelism,
+            Some(crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM),
+            "unavailable OpenClaw must still carry max_parallelism {}",
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM
+        );
+    }
+
+    /// Available OpenClaw: max_parallelism present regardless of install status.
+    #[test]
+    fn openclaw_preset_available_carries_max_parallelism() {
+        let openclaw = PRESET_HARNESSES
+            .iter()
+            .find(|p| p.id == "openclaw")
+            .expect("openclaw preset must be present");
+
+        let entry = preset_catalog_entry(openclaw, |cmd| {
+            (cmd == openclaw.id || cmd == "openclaw")
+                .then(|| std::path::PathBuf::from("/usr/local/bin/openclaw"))
+        });
+        assert_eq!(
+            entry.max_parallelism,
+            Some(crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM),
+            "available OpenClaw must carry max_parallelism {}",
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM
+        );
+    }
+
+    /// Uncapped preset (devin): max_parallelism must be None.
+    #[test]
+    fn uncapped_preset_has_no_max_parallelism() {
+        let devin = PRESET_HARNESSES
+            .iter()
+            .find(|p| p.id == "devin")
+            .expect("devin preset must be present");
+        let entry = preset_catalog_entry(devin, |_| None);
+        assert_eq!(
+            entry.max_parallelism, None,
+            "uncapped preset (devin) must have max_parallelism: None"
+        );
     }
 }

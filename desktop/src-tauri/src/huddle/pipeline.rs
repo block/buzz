@@ -277,10 +277,6 @@ pub(crate) async fn post_connect_setup(
 ///
 /// Returns `Ok(true)` if the pipeline was started, `Ok(false)` if models are
 /// not ready (voice-only mode), or `Err` on a real failure.
-///
-/// Creates the shared `tts_active` flag and passes it to the STT pipeline
-/// for barge-in / echo gating. The same flag is later passed to the TTS
-/// pipeline so it can signal when audio is playing.
 pub(crate) async fn maybe_start_stt_pipeline(
     state: &AppState,
     ephemeral_channel_id: &str,
@@ -312,7 +308,6 @@ pub(crate) async fn maybe_start_stt_pipeline(
     // Take the old pipeline OUT of the lock before dropping — Drop joins
     // the worker thread (~200ms) and must not block under the mutex.
     let (
-        tts_active,
         agent_pubkeys_arc,
         session_gen,
         expected_generation,
@@ -348,7 +343,6 @@ pub(crate) async fn maybe_start_stt_pipeline(
             None
         };
         (
-            Arc::clone(&hs.tts_active),
             Arc::clone(&hs.agent_pubkeys),
             Arc::clone(&hs.session_generation),
             hs.session_generation.load(Ordering::Acquire),
@@ -365,7 +359,6 @@ pub(crate) async fn maybe_start_stt_pipeline(
         stt::SttPipeline::new(
             model_dir,
             stt_family,
-            tts_active,
             ptt_active_for_stt,
             manual_mic_unmuted_for_stt,
         )
@@ -663,14 +656,24 @@ pub(crate) fn spawn_transcription_task(
                 .clone();
 
             let p_tags: Vec<&str> = agent_pubkeys.iter().map(|s| s.as_str()).collect();
-            let builder =
-                match events::build_message(channel_uuid, &t, None, &p_tags, &[], &[], &[]) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("buzz-desktop: STT build_message: {e}");
-                        continue;
-                    }
-                };
+            let builder = match events::build_message(
+                channel_uuid,
+                &t,
+                None,
+                &p_tags,
+                &[],
+                &[],
+                &[],
+                &[],
+                None,
+                &crate::relay::relay_api_base_url(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("buzz-desktop: STT build_message: {e}");
+                    continue;
+                }
+            };
             // Wait before signing: the relay enforces NIP-98 freshness (±60s)
             // and the gate may hold for up to MAX_HINT_SECONDS (300s). Sign
             // the kind event and build NIP-98 auth after the wait so both

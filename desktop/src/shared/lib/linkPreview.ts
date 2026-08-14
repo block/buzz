@@ -19,20 +19,17 @@ export type SupportedLinkPreviewKind =
   | "google-drive-folder"
   | "google-docs-document"
   | "google-sheets-spreadsheet"
-  | "google-slides-presentation";
+  | "google-slides-presentation"
+  | "generic-link";
 
 export type SupportedLinkPreview = {
   kind: SupportedLinkPreviewKind;
   href: string;
-  provider:
-    | "Buzz"
-    | "GitHub"
-    | "Linear"
-    | "Google Drive"
-    | "Google Docs"
-    | "Google Sheets"
-    | "Google Slides";
+  provider: string;
   title: string;
+  /** Sanitized native-fetched bitmap; never a remote URL. */
+  imageDataUrl?: string | null;
+  imageDomain?: string | null;
   typeLabel:
     | "PR"
     | "issue"
@@ -41,16 +38,17 @@ export type SupportedLinkPreview = {
     | "folder"
     | "document"
     | "spreadsheet"
-    | "presentation";
+    | "presentation"
+    | "link";
 };
 
 // Buzz relay hosts differ per community, so relay git URLs are recognized by
 // their distinctive path shape (`/git/<64-hex-pubkey>/<repo>`) rather than by
-// hostname, and require an explicit scheme.
+// hostname, and require an explicit scheme. Generic previews remain HTTPS-only.
 const SUPPORTED_URL_RE =
-  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+|buzz:\/\/(?:pr|issue|repo)\?[^\s<>"'\]]+)/gi;
+  /(^|[\s([{<>"'])(https:\/\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+|buzz:\/\/(?:pr|issue|repo)\?[^\s<>"'\]]+|(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+)/gi;
 const MARKDOWN_SUPPORTED_LINK_RE =
-  /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+|https?:\/\/[^)\s<>"']+\/git\/[a-f0-9]{64}\/[^)\s<>"']+|buzz:\/\/(?:pr|issue|repo)\?[^)\s<>"']+)\)/gi;
+  /!?\[([^\]\n]+)\]\((https:\/\/[^)\s<>"']+|https?:\/\/[^)\s<>"']+\/git\/[a-f0-9]{64}\/[^)\s<>"']+|buzz:\/\/(?:pr|issue|repo)\?[^)\s<>"']+|(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
 const MAX_PREVIEWS = 8;
 
 type HiddenRange = {
@@ -273,9 +271,17 @@ function createPreview(
   typeLabel: SupportedLinkPreview["typeLabel"],
   title: string,
 ): SupportedLinkPreview {
+  // Strip the `#fragment` from the preview identity. A fragment is a
+  // client-only anchor into the page — the preview (and the signed snapshot's
+  // canonicalUrl) is of the page itself. Keeping it would fail the
+  // fragment-free snapshot-URL guard, so a link like `pull/3767#review-1`
+  // would silently get no preview at all. The message body keeps the raw URL,
+  // so click-through to the anchor is preserved.
+  const canonical = new URL(parsed.href);
+  canonical.hash = "";
   return {
     kind,
-    href: parsed.href,
+    href: canonical.href,
     provider,
     title,
     typeLabel,
@@ -543,13 +549,28 @@ export function parseSupportedLinkPreview(
     return null;
   }
 
-  return (
+  const recognized =
     parseBuzzGitLink(parsed, activeRelayOrigin ?? null) ??
     parseGithubLink(parsed) ??
     parseLinearIssue(parsed) ??
     parseGoogleDriveLink(parsed) ??
-    parseGoogleDocsLink(parsed)
-  );
+    parseGoogleDocsLink(parsed);
+  if (recognized) return recognized;
+  const hostname = normalizeHostname(parsed);
+  if (
+    parsed.protocol !== "https:" ||
+    [
+      "github.com",
+      "linear.app",
+      "drive.google.com",
+      "docs.google.com",
+    ].includes(hostname)
+  ) {
+    return null;
+  }
+
+  const provider = hostname;
+  return createPreview("generic-link", parsed, provider, "link", provider);
 }
 
 export function isSupportedLinkAutolinkLabel(

@@ -509,7 +509,8 @@ fn linked_instance_ignores_model_provider_prompt_writes() {
         Some(Some("explicit-model".to_string())),
         Some(Some("explicit-prov".to_string())),
         Some(Some("explicit-prompt".to_string())),
-    );
+    )
+    .unwrap();
 
     assert!(
         record.model.is_none(),
@@ -560,7 +561,8 @@ fn definition_less_instance_accepts_model_provider_prompt_writes() {
         Some(Some("new-model".to_string())),
         Some(Some("new-prov".to_string())),
         Some(Some("new-prompt".to_string())),
-    );
+    )
+    .unwrap();
 
     assert_eq!(record.model.as_deref(), Some("new-model"));
     assert_eq!(record.provider.as_deref(), Some("new-prov"));
@@ -577,19 +579,12 @@ fn is_databricks_provider_matches_both_variants() {
 }
 
 #[test]
-fn databricks_interactive_auth_requires_explicit_intent_and_no_static_token() {
-    assert!(should_start_interactive_auth(
-        "",
-        DatabricksAuthIntent::InteractiveModelPicker
-    ));
-    assert!(!should_start_interactive_auth(
-        "",
-        DatabricksAuthIntent::PassiveDraftDiscovery
-    ));
-    assert!(!should_start_interactive_auth(
-        "static-token",
-        DatabricksAuthIntent::InteractiveModelPicker
-    ));
+fn databricks_interactive_auth_launches_only_without_a_static_token() {
+    // Phase 2: both surfaces launch the browser flow when the token is empty;
+    // the surface distinction is now cooldown-only (asserted separately). A
+    // configured static token still short-circuits interactive auth entirely.
+    assert!(should_start_interactive_auth(""));
+    assert!(!should_start_interactive_auth("static-token"));
 }
 
 #[test]
