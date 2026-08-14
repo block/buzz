@@ -46,6 +46,7 @@ private struct NativeEmojiItem: Identifiable, Hashable {
   let glyph: String?
   let skinVariants: [String]
   let imageURL: URL?
+  let imageHeaders: [String: String]
 }
 
 private struct NativeEmojiSkinTone: Identifiable {
@@ -161,7 +162,8 @@ private enum NativeEmojiPickerDataLoader {
           keywords: keywords,
           glyph: defaultGlyph,
           skinVariants: glyphs,
-          imageURL: nil
+          imageURL: nil,
+          imageHeaders: [:]
         )
         items.append(item)
         standardItems.append(item)
@@ -189,6 +191,7 @@ private enum NativeEmojiPickerDataLoader {
       else {
         return nil
       }
+      let headers = (raw["headers"] as? [String: String]) ?? [:]
       return NativeEmojiItem(
         id: "custom-\(shortcode)",
         shortcode: shortcode,
@@ -197,7 +200,8 @@ private enum NativeEmojiPickerDataLoader {
         keywords: [],
         glyph: nil,
         skinVariants: [],
-        imageURL: url
+        imageURL: url,
+        imageHeaders: headers
       )
     }
     let customByValue = Dictionary(
@@ -666,17 +670,11 @@ private struct NativeEmojiPickerView: View {
     } label: {
       Group {
         if let url = item.imageURL {
-          AsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-              image.resizable().scaledToFit()
-            case .failure:
-              Image(systemName: "sparkles")
-                .foregroundStyle(Color(uiColor: appearance.secondaryText))
-            default:
-              ProgressView().controlSize(.mini)
-            }
-          }
+          NativeEmojiRemoteImage(
+            url: url,
+            headers: item.imageHeaders,
+            fallbackColor: appearance.secondaryText
+          )
           .frame(width: 28, height: 28)
         } else {
           Text(value).font(.system(size: 28))
@@ -696,6 +694,63 @@ private struct NativeEmojiPickerView: View {
       return item.skinVariants.first ?? item.value
     }
     return item.skinVariants[selectedSkinTone]
+  }
+}
+
+private struct NativeEmojiRemoteImage: View {
+  let url: URL
+  let headers: [String: String]
+  let fallbackColor: UIColor
+
+  @State private var phase: Phase = .loading
+
+  private enum Phase {
+    case loading
+    case success(UIImage)
+    case failure
+  }
+
+  var body: some View {
+    Group {
+      switch phase {
+      case .loading:
+        ProgressView().controlSize(.mini)
+      case .success(let image):
+        Image(uiImage: image).resizable().scaledToFit()
+      case .failure:
+        Image(systemName: "sparkles")
+          .foregroundStyle(Color(uiColor: fallbackColor))
+      }
+    }
+    .task(id: requestIdentity) {
+      var request = URLRequest(url: url)
+      for (name, value) in headers {
+        request.setValue(value, forHTTPHeaderField: name)
+      }
+      do {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard
+          let httpResponse = response as? HTTPURLResponse,
+          (200..<300).contains(httpResponse.statusCode),
+          let image = UIImage(data: data)
+        else {
+          phase = .failure
+          return
+        }
+        phase = .success(image)
+      } catch {
+        if !Task.isCancelled { phase = .failure }
+      }
+    }
+  }
+
+  private var requestIdentity: String {
+    let headerIdentity =
+      headers
+      .sorted { $0.key < $1.key }
+      .map { "\($0.key):\($0.value)" }
+      .joined(separator: "\n")
+    return "\(url.absoluteString)\n\(headerIdentity)"
   }
 }
 

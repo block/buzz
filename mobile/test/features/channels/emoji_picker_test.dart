@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/recent_emoji_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
@@ -12,6 +14,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../../helpers/widget_helpers.dart';
 
@@ -126,6 +129,21 @@ final _tallDataset = () {
 const _customEmoji = [
   CustomEmoji(shortcode: 'partyparrot', url: 'https://example.test/parrot.gif'),
 ];
+const _relayCustomEmoji = [
+  CustomEmoji(
+    shortcode: 'buzzbee',
+    url: 'https://relay.example/media/buzzbee.png',
+  ),
+];
+
+class _FakeCustomEmojiPaletteNotifier extends CustomEmojiPaletteNotifier {
+  _FakeCustomEmojiPaletteNotifier(this.palette);
+
+  final Future<List<CustomEmoji>> palette;
+
+  @override
+  Future<List<CustomEmoji>> build() => palette;
+}
 
 const _nativeEmojiPickerChannel = MethodChannel('buzz/native_emoji_picker');
 
@@ -604,6 +622,10 @@ void main() {
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       final prefs = await _prefs();
+      final mediaAuth = MediaGetAuthService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+      );
       MethodCall? presentation;
       final selected = <String>[];
       var dismissals = 0;
@@ -618,7 +640,12 @@ void main() {
             overrides: [
               savedPrefsProvider.overrideWithValue(prefs),
               myPubkeyProvider.overrideWithValue('self'),
-              customEmojiListProvider.overrideWithValue(_customEmoji),
+              customEmojiPaletteProvider.overrideWith(
+                () => _FakeCustomEmojiPaletteNotifier(
+                  Future.value([..._customEmoji, ..._relayCustomEmoji]),
+                ),
+              ),
+              mediaGetAuthServiceProvider.overrideWithValue(mediaAuth),
             ],
             child: MaterialApp(
               theme: AppTheme.light(),
@@ -649,6 +676,12 @@ void main() {
           {
             'shortcode': 'partyparrot',
             'url': 'https://example.test/parrot.gif',
+            'headers': <String, String>{},
+          },
+          {
+            'shortcode': 'buzzbee',
+            'url': 'https://relay.example/media/buzzbee.png',
+            'headers': {'Authorization': startsWith('Nostr ')},
           },
         ]);
         expect(find.byType(EmojiPickerSheet), findsNothing);
@@ -659,6 +692,56 @@ void main() {
         expect(selected, ['\u{1F525}']);
         expect(dismissals, 1);
         expect(prefs.getInt('buzz.emoji-picker.skin-tone.v1'), 4);
+      } finally {
+        _setMockNativeEmojiPickerHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('awaits the custom emoji palette before presenting', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await _prefs();
+      final palette = Completer<List<CustomEmoji>>();
+      MethodCall? presentation;
+      _setMockNativeEmojiPickerHandler((call) async {
+        presentation = call;
+        return true;
+      });
+
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              customEmojiPaletteProvider.overrideWith(
+                () => _FakeCustomEmojiPaletteNotifier(palette.future),
+              ),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Scaffold(
+                body: Builder(
+                  builder: (context) => FilledButton(
+                    onPressed: () =>
+                        showEmojiPicker(context: context, onSelect: (_) {}),
+                    child: const Text('Open picker'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('Open picker'));
+        await tester.pump();
+        expect(presentation, isNull);
+
+        palette.complete(_customEmoji);
+        await tester.pumpAndSettle();
+        expect(presentation?.method, 'present');
       } finally {
         _setMockNativeEmojiPickerHandler(null);
         debugDefaultTargetPlatformOverride = previousPlatform;
@@ -680,7 +763,10 @@ void main() {
               savedPrefsProvider.overrideWithValue(prefs),
               myPubkeyProvider.overrideWithValue('self'),
               emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
-              customEmojiListProvider.overrideWithValue(_customEmoji),
+              customEmojiPaletteProvider.overrideWith(
+                () =>
+                    _FakeCustomEmojiPaletteNotifier(Future.value(_customEmoji)),
+              ),
             ],
             child: MaterialApp(
               theme: AppTheme.light(),

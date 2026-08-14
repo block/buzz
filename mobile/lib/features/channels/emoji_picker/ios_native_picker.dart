@@ -8,8 +8,10 @@ Future<void> _presentIosEmojiPicker({
   VoidCallback? onDismiss,
 }) async {
   final container = ProviderScope.containerOf(context, listen: false);
-  final customEmoji = container.read(customEmojiListProvider);
+  final customEmoji = await container.read(customEmojiPaletteProvider.future);
+  if (!context.mounted) return;
   final recent = container.read(recentEmojiProvider);
+  final mediaAuth = container.read(mediaGetAuthServiceProvider);
   final prefs = container.read(savedPrefsProvider);
   final colors = context.colors;
   var dismissed = false;
@@ -45,7 +47,11 @@ Future<void> _presentIosEmojiPicker({
       <String, Object>{
         'customEmoji': [
           for (final emoji in customEmoji)
-            <String, String>{'shortcode': emoji.shortcode, 'url': emoji.url},
+            <String, Object>{
+              'shortcode': emoji.shortcode,
+              'url': emoji.url,
+              'headers': mediaAuth.headersFor(emoji.url),
+            },
         ],
         'recent': [for (final entry in recent) entry.emoji],
         'skinTone': _validSkinTone(prefs.getInt(_emojiSkinTonePrefsKey)),
