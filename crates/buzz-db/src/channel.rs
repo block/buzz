@@ -1295,7 +1295,7 @@ pub async fn update_channel_name(
     .await?
     .ok_or(DbError::ChannelNotFound(channel_id))?;
 
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE channels SET name = $1, updated_at = NOW() \
          WHERE community_id = $2 AND id = $3 AND deleted_at IS NULL",
     )
@@ -1304,6 +1304,9 @@ pub async fn update_channel_name(
     .bind(channel_id)
     .execute(&mut *tx)
     .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::ChannelNotFound(channel_id));
+    }
 
     tx.commit().await?;
     Ok((previous_name, name.to_owned()))
