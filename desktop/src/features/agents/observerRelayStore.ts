@@ -37,6 +37,11 @@ const MAX_OBSERVER_EVENTS = 3000;
 // ever made per-agent, where a fixed headroom could exceed a smaller cap.
 const OBSERVER_EVENTS_LOW_WATER = Math.floor(MAX_OBSERVER_EVENTS * 0.9);
 const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
+const MAX_PENDING_UNKNOWN_AGENT_FRAMES_PER_PUBKEY = 25;
+const MAX_PENDING_UNKNOWN_AGENT_FRAME_BYTES = 1_000_000;
+const PENDING_UNKNOWN_AGENT_FRAME_TTL_MS = 60_000;
+const PROCESSED_LIVE_ENVELOPE_TTL_MS = 10 * 60_000;
+const MAX_PROCESSED_LIVE_ENVELOPES = 2_000;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
@@ -138,7 +143,19 @@ const agentManagementListeners = new Set<
 // recompute the union, so co-mounted callers no longer clobber each other.
 const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
-const pendingUnknownAgentFrames: RelayEvent[] = [];
+const candidateAgentsBySubscription = new Map<string, Set<string>>();
+const resolvedAgentsBySubscription = new Map<string, Set<string>>();
+type ObserverDecryptor = (event: RelayEvent) => Promise<unknown>;
+type PendingUnknownAgentFrame = {
+  event: RelayEvent;
+  queuedAt: number;
+  byteLength: number;
+  decrypt: ObserverDecryptor;
+};
+const pendingUnknownAgentFrames = new Map<string, PendingUnknownAgentFrame[]>();
+let pendingUnknownAgentFrameCount = 0;
+let pendingUnknownAgentFrameBytes = 0;
+const processedLiveEnvelopeIds = new Map<string, number>();
 
 // Callback invoked when session_config_captured is received, so React Query
 // can invalidate the config-surface query for the affected agent. Wired up
@@ -154,33 +171,182 @@ export function setSessionConfigCapturedCallback(
 function recomputeKnownAgentPubkeys() {
   knownAgentPubkeys.clear();
   for (const subscriptionAgents of knownAgentsBySubscription.values()) {
-    for (const pubkey of subscriptionAgents) {
-      knownAgentPubkeys.add(pubkey);
+    for (const pubkey of subscriptionAgents) knownAgentPubkeys.add(pubkey);
+  }
+}
+
+function unresolvedAgentPubkeys(): Set<string> {
+  const unresolved = new Set<string>();
+  for (const [subscriptionId, candidates] of candidateAgentsBySubscription) {
+    const resolved =
+      resolvedAgentsBySubscription.get(subscriptionId) ?? new Set();
+    for (const pubkey of candidates) {
+      if (!resolved.has(pubkey)) unresolved.add(pubkey);
     }
+  }
+  return unresolved;
+}
+
+function definitivelyForeignAgentPubkeys(): Set<string> {
+  const unresolved = unresolvedAgentPubkeys();
+  const foreign = new Set<string>();
+  for (const resolved of resolvedAgentsBySubscription.values()) {
+    for (const pubkey of resolved) {
+      if (!knownAgentPubkeys.has(pubkey) && !unresolved.has(pubkey))
+        foreign.add(pubkey);
+    }
+  }
+  return foreign;
+}
+
+function removePendingFrame(pubkey: string, index: number) {
+  const frames = pendingUnknownAgentFrames.get(pubkey);
+  if (!frames) return;
+  const [removed] = frames.splice(index, 1);
+  if (removed) {
+    pendingUnknownAgentFrameCount -= 1;
+    pendingUnknownAgentFrameBytes -= removed.byteLength;
+  }
+  if (frames.length === 0) pendingUnknownAgentFrames.delete(pubkey);
+}
+
+function pruneExpiredPendingFrames(now: number) {
+  for (const [pubkey, frames] of pendingUnknownAgentFrames) {
+    for (let index = frames.length - 1; index >= 0; index -= 1) {
+      if (now - frames[index].queuedAt > PENDING_UNKNOWN_AGENT_FRAME_TTL_MS) {
+        removePendingFrame(pubkey, index);
+      }
+    }
+  }
+}
+
+function oldestPendingFrame(): {
+  pubkey: string;
+  index: number;
+  queuedAt: number;
+} | null {
+  let oldest: { pubkey: string; index: number; queuedAt: number } | null = null;
+  for (const [pubkey, frames] of pendingUnknownAgentFrames) {
+    for (let index = 0; index < frames.length; index += 1) {
+      const queuedAt = frames[index].queuedAt;
+      if (!oldest || queuedAt < oldest.queuedAt)
+        oldest = { pubkey, index, queuedAt };
+    }
+  }
+  return oldest;
+}
+
+function queuePendingFrame(
+  pubkey: string,
+  event: RelayEvent,
+  decrypt: ObserverDecryptor,
+  now: number,
+) {
+  pruneExpiredPendingFrames(now);
+  const byteLength = new TextEncoder().encode(JSON.stringify(event)).byteLength;
+  if (byteLength > MAX_PENDING_UNKNOWN_AGENT_FRAME_BYTES) return;
+  const frames = pendingUnknownAgentFrames.get(pubkey) ?? [];
+  if (frames.some((pending) => pending.event.id === event.id)) return;
+  frames.push({ event, queuedAt: now, byteLength, decrypt });
+  pendingUnknownAgentFrames.set(pubkey, frames);
+  pendingUnknownAgentFrameCount += 1;
+  pendingUnknownAgentFrameBytes += byteLength;
+  while (frames.length > MAX_PENDING_UNKNOWN_AGENT_FRAMES_PER_PUBKEY) {
+    removePendingFrame(pubkey, 0);
+  }
+  while (
+    pendingUnknownAgentFrameCount > MAX_PENDING_UNKNOWN_AGENT_FRAMES ||
+    pendingUnknownAgentFrameBytes > MAX_PENDING_UNKNOWN_AGENT_FRAME_BYTES
+  ) {
+    const oldest = oldestPendingFrame();
+    if (!oldest) break;
+    removePendingFrame(oldest.pubkey, oldest.index);
+  }
+}
+
+function takePendingFrames(pubkey: string, now: number) {
+  pruneExpiredPendingFrames(now);
+  const frames = pendingUnknownAgentFrames.get(pubkey) ?? [];
+  pendingUnknownAgentFrames.delete(pubkey);
+  for (const frame of frames) {
+    pendingUnknownAgentFrameCount -= 1;
+    pendingUnknownAgentFrameBytes -= frame.byteLength;
+  }
+  return frames.sort(
+    (left, right) =>
+      left.event.created_at - right.event.created_at ||
+      left.event.id.localeCompare(right.event.id),
+  );
+}
+
+function discardPendingFrames(pubkey: string, now: number) {
+  takePendingFrames(pubkey, now);
+}
+
+function hasProcessedLiveEnvelope(eventId: string, now: number): boolean {
+  for (const [id, processedAt] of processedLiveEnvelopeIds) {
+    if (now - processedAt > PROCESSED_LIVE_ENVELOPE_TTL_MS) {
+      processedLiveEnvelopeIds.delete(id);
+    }
+  }
+  return processedLiveEnvelopeIds.has(eventId);
+}
+
+function markLiveEnvelopeProcessed(eventId: string, now: number) {
+  processedLiveEnvelopeIds.set(eventId, now);
+  while (processedLiveEnvelopeIds.size > MAX_PROCESSED_LIVE_ENVELOPES) {
+    const oldest = processedLiveEnvelopeIds.keys().next().value;
+    if (typeof oldest !== "string") break;
+    processedLiveEnvelopeIds.delete(oldest);
   }
 }
 
 function registerKnownAgents(
   subscriptionId: string,
   pubkeys: readonly string[],
+  candidatePubkeys: readonly string[] = pubkeys,
+  resolvedPubkeys: readonly string[] = candidatePubkeys,
+  now = Date.now(),
 ) {
+  const previouslyKnown = new Set(knownAgentPubkeys);
   knownAgentsBySubscription.set(
     subscriptionId,
     new Set(pubkeys.map((pubkey) => normalizePubkey(pubkey))),
   );
+  candidateAgentsBySubscription.set(
+    subscriptionId,
+    new Set(candidatePubkeys.map((pubkey) => normalizePubkey(pubkey))),
+  );
+  resolvedAgentsBySubscription.set(
+    subscriptionId,
+    new Set(resolvedPubkeys.map((pubkey) => normalizePubkey(pubkey))),
+  );
   recomputeKnownAgentPubkeys();
-  if (knownAgentPubkeys.size > 0 && pendingUnknownAgentFrames.length > 0) {
-    const pending = pendingUnknownAgentFrames.splice(0);
-    for (const event of pending) {
+  pruneExpiredPendingFrames(now);
+  for (const pubkey of knownAgentPubkeys) {
+    if (previouslyKnown.has(pubkey)) continue;
+    for (const pending of takePendingFrames(pubkey, now)) {
       eventProcessingQueue = eventProcessingQueue.then(() =>
-        handleRelayObserverEvent(event, generation),
+        handleRelayObserverEvent(
+          pending.event,
+          generation,
+          pending.decrypt,
+          now,
+        ),
       );
     }
+  }
+  for (const pubkey of definitivelyForeignAgentPubkeys()) {
+    discardPendingFrames(pubkey, now);
   }
 }
 
 function unregisterKnownAgents(subscriptionId: string) {
-  if (knownAgentsBySubscription.delete(subscriptionId)) {
+  const knownChanged = knownAgentsBySubscription.delete(subscriptionId);
+  const candidatesChanged =
+    candidateAgentsBySubscription.delete(subscriptionId);
+  const resolvedChanged = resolvedAgentsBySubscription.delete(subscriptionId);
+  if (knownChanged || candidatesChanged || resolvedChanged) {
     recomputeKnownAgentPubkeys();
   }
 }
@@ -219,8 +385,8 @@ function observerTag(event: RelayEvent, tagName: string) {
 function appendAgentEvents(
   agentPubkey: string,
   events: readonly ObserverEvent[],
-): boolean {
-  if (events.length === 0) return false;
+): ObserverEvent[] {
+  if (events.length === 0) return [];
 
   const key = normalizePubkey(agentPubkey);
   const current = eventsByAgent.get(key) ?? [];
@@ -234,7 +400,7 @@ function appendAgentEvents(
   const admissible = floor
     ? events.filter((event) => isObserverEventAfter(event, floor))
     : events;
-  if (admissible.length === 0) return false;
+  if (admissible.length === 0) return [];
 
   const seen = new Set(
     current.map(
@@ -248,7 +414,7 @@ function appendAgentEvents(
     seen.add(eventKey);
     added.push(event);
   }
-  if (added.length === 0) return false;
+  if (added.length === 0) return [];
 
   const sortedAdded = added.sort(compareObserverEvents);
   const sorted = [...current, ...sortedAdded].sort(compareObserverEvents);
@@ -289,11 +455,11 @@ function appendAgentEvents(
   }
 
   invalidateSnapshot(key);
-  return true;
+  return sortedAdded;
 }
 
 function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
-  if (appendAgentEvents(agentPubkey, [event])) {
+  if (appendAgentEvents(agentPubkey, [event]).length > 0) {
     notifyListeners();
   }
 }
@@ -435,9 +601,12 @@ function processLiveObserverEvents(
   // callbacks. Those callbacks historically observed their triggering frame
   // in the raw/transcript stores; batching must preserve that visibility while
   // deferring only the global external-store publication.
-  const observerChanged = appendAgentEvents(agentPubkey, events);
+  const addedEvents = appendAgentEvents(agentPubkey, events);
 
-  for (const parsed of events) {
+  // Dispatch specialized callbacks only for events newly admitted to retained
+  // state. Relay reconnects and pending-frame replay may deliver the same
+  // authenticated envelope again; deduplication must cover side effects too.
+  for (const parsed of addedEvents) {
     // Track the latest-live-session-id per (agent, channel) on the live path.
     // Only set when the parsed event carries both a sessionId and channelId,
     // so we never attribute a session to the wrong channel.
@@ -479,7 +648,7 @@ function processLiveObserverEvents(
 
   // Preserve the harness's envelope backpressure: retained state was committed
   // before specialized callbacks, but external-store subscribers publish once.
-  if (observerChanged) {
+  if (addedEvents.length > 0) {
     notifyListeners();
   }
 }
@@ -487,6 +656,8 @@ function processLiveObserverEvents(
 async function handleRelayObserverEvent(
   event: RelayEvent,
   activeGeneration: number,
+  decrypt: ObserverDecryptor = decryptObserverEvent,
+  now = Date.now(),
 ) {
   const agentPubkey = observerTag(event, "agent");
   const frame = observerTag(event, "frame");
@@ -494,30 +665,27 @@ async function handleRelayObserverEvent(
     return;
   }
 
-  // Ownership data arrives asynchronously during startup. Buffer raw signed
-  // frames until the first trusted-agent set is registered, then re-run this
-  // same gate. Once initialized, unknown agents are rejected immediately.
-  if (!knownAgentPubkeys.has(normalizePubkey(agentPubkey))) {
-    if (knownAgentsBySubscription.size === 0 || knownAgentPubkeys.size === 0) {
-      pendingUnknownAgentFrames.push(event);
-      if (pendingUnknownAgentFrames.length > MAX_PENDING_UNKNOWN_AGENT_FRAMES) {
-        pendingUnknownAgentFrames.shift();
-      }
+  const normalizedAgentPubkey = normalizePubkey(agentPubkey);
+  // Reject spoofed envelopes before either retaining or decrypting them.
+  if (normalizePubkey(event.pubkey) !== normalizedAgentPubkey) {
+    return;
+  }
+
+  if (!knownAgentPubkeys.has(normalizedAgentPubkey)) {
+    if (!definitivelyForeignAgentPubkeys().has(normalizedAgentPubkey)) {
+      queuePendingFrame(normalizedAgentPubkey, event, decrypt, now);
     }
     return;
   }
 
-  // Defense-in-depth: verify the event sender matches the claimed agent pubkey.
-  // The relay gates on is_agent_owner, but a compromised relay could misroute.
-  if (normalizePubkey(event.pubkey) !== normalizePubkey(agentPubkey)) {
-    return;
-  }
+  if (hasProcessedLiveEnvelope(event.id, now)) return;
 
   try {
-    const parsed = (await decryptObserverEvent(event)) as ObserverEvent;
+    const parsed = (await decrypt(event)) as ObserverEvent;
     if (activeGeneration !== generation) {
       return;
     }
+    markLiveEnvelopeProcessed(event.id, now);
     processLiveObserverEvents(agentPubkey, unwrapObserverBatch(parsed));
   } catch (error) {
     if (activeGeneration !== generation) {
@@ -707,6 +875,8 @@ export function shouldObserveManagedAgents(
 
 export function useManagedAgentObserverBridge(
   agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
+  candidatePubkeys: readonly string[] = agents.map((agent) => agent.pubkey),
+  resolvedPubkeys: readonly string[] = candidatePubkeys,
 ) {
   const subscriptionId = React.useId();
   const hasManagedAgent = shouldObserveManagedAgents(agents);
@@ -716,15 +886,35 @@ export function useManagedAgentObserverBridge(
     [agents],
   );
 
-  // Keep this subscriber's slice of the trusted-pubkey set in sync with its
-  // own agent list. The store recomputes the union across all subscribers, so
-  // a co-mounted caller no longer wipes out this caller's agents.
+  const candidatePubkeyKey = candidatePubkeys.join(",");
+  const normalizedCandidatePubkeys = React.useMemo(
+    () => candidatePubkeyKey.split(",").filter(Boolean),
+    [candidatePubkeyKey],
+  );
+  const resolvedPubkeyKey = resolvedPubkeys.join(",");
+  const normalizedResolvedPubkeys = React.useMemo(
+    () => resolvedPubkeyKey.split(",").filter(Boolean),
+    [resolvedPubkeyKey],
+  );
+
+  // Keep this subscriber's trusted and fully-resolved candidate sets in sync.
+  // A resolved candidate absent from agentPubkeys is definitively foreign.
   React.useEffect(() => {
-    registerKnownAgents(subscriptionId, agentPubkeys);
+    registerKnownAgents(
+      subscriptionId,
+      agentPubkeys,
+      normalizedCandidatePubkeys,
+      normalizedResolvedPubkeys,
+    );
     return () => {
       unregisterKnownAgents(subscriptionId);
     };
-  }, [subscriptionId, agentPubkeys]);
+  }, [
+    subscriptionId,
+    agentPubkeys,
+    normalizedCandidatePubkeys,
+    normalizedResolvedPubkeys,
+  ]);
 
   React.useEffect(() => {
     if (!hasManagedAgent) {
@@ -827,7 +1017,7 @@ export function injectObserverEventsForE2E(
   agentPubkey: string,
   events: ObserverEvent[],
 ) {
-  if (appendAgentEvents(agentPubkey, events)) {
+  if (appendAgentEvents(agentPubkey, events).length > 0) {
     notifyListeners();
   }
 }
@@ -840,7 +1030,7 @@ export function syncAgentObserverEvents(
   agentPubkey: string,
   events: ObserverEvent[],
 ) {
-  if (appendAgentEvents(agentPubkey, events)) {
+  if (appendAgentEvents(agentPubkey, events).length > 0) {
     notifyListeners();
   }
 }
@@ -858,7 +1048,12 @@ export function resetAgentObserverStore() {
   archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
-  pendingUnknownAgentFrames.length = 0;
+  candidateAgentsBySubscription.clear();
+  resolvedAgentsBySubscription.clear();
+  pendingUnknownAgentFrames.clear();
+  pendingUnknownAgentFrameCount = 0;
+  pendingUnknownAgentFrameBytes = 0;
+  processedLiveEnvelopeIds.clear();
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
   onSessionConfigCaptured = null;
@@ -878,6 +1073,63 @@ export function _testRegisterKnownAgents(
   pubkeys: readonly string[],
 ): void {
   registerKnownAgents(subscriptionId, pubkeys);
+}
+
+/** Test-only: drive the real pre-decrypt live trust gate. */
+export async function _testHandleRelayObserverEvent(
+  event: RelayEvent,
+  decrypt: ObserverDecryptor = decryptObserverEvent,
+  now = Date.now(),
+): Promise<void> {
+  await handleRelayObserverEvent(event, generation, decrypt, now);
+}
+
+/** Test-only: resolve a profile-candidate batch and drain the event queue. */
+export async function _testResolveKnownAgents(
+  subscriptionId: string,
+  trustedPubkeys: readonly string[],
+  resolvedPubkeys: readonly string[],
+  now = Date.now(),
+): Promise<void> {
+  registerKnownAgents(
+    subscriptionId,
+    trustedPubkeys,
+    resolvedPubkeys,
+    resolvedPubkeys,
+    now,
+  );
+  await eventProcessingQueue;
+}
+
+/** Test-only: model one subscriber's independent candidate/resolution slice. */
+export async function _testRegisterAgentResolution(
+  subscriptionId: string,
+  trustedPubkeys: readonly string[],
+  candidatePubkeys: readonly string[],
+  resolvedPubkeys: readonly string[],
+  now = Date.now(),
+): Promise<void> {
+  registerKnownAgents(
+    subscriptionId,
+    trustedPubkeys,
+    candidatePubkeys,
+    resolvedPubkeys,
+    now,
+  );
+  await eventProcessingQueue;
+}
+
+/** Test-only: inspect bounded startup retention. */
+export function _testPendingUnknownAgentFrameCount(): number {
+  return pendingUnknownAgentFrameCount;
+}
+
+export function _testPendingUnknownAgentFrameBytes(): number {
+  return pendingUnknownAgentFrameBytes;
+}
+
+export function _testPendingUnknownAgentPubkeys(): string[] {
+  return [...pendingUnknownAgentFrames.keys()].sort();
 }
 
 /** Test-only: exercise live envelope ordering without relay/decryption setup. */

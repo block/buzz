@@ -19,6 +19,7 @@ import {
   getAgentTranscript,
   subscribeAgentObserverStore,
   subscribeAgentManagementRequests,
+  syncAgentObserverEvents,
   resetAgentObserverStore,
   _testProcessLiveObserverEvents,
 } from "./observerRelayStore.ts";
@@ -1719,6 +1720,34 @@ describe("observer → active-turns bridge sync", () => {
     assert.equal(observerNotifications, 1);
   });
 
+  it("does not re-dispatch management callbacks for duplicate replay", () => {
+    const managementFrame = makeEvent({
+      seq: 2,
+      kind: "acp_message",
+      timestamp: "2024-01-01T00:00:01Z",
+      payload: {
+        type: "agent_management_request",
+        action: "create",
+        requestId: "request-duplicate",
+        request: {
+          channelId: "chan-1",
+          displayName: "Fleet Observer",
+          systemPrompt: "Observe the fleet.",
+        },
+      },
+    });
+    let callbacks = 0;
+    const unsubscribe = subscribeAgentManagementRequests(() => {
+      callbacks += 1;
+    });
+
+    _testProcessLiveObserverEvents(AGENT, [managementFrame]);
+    _testProcessLiveObserverEvents(AGENT, [managementFrame]);
+    unsubscribe();
+
+    assert.equal(callbacks, 1);
+  });
+
   it("does not publish when a replay batch is entirely duplicate", () => {
     const events = [makeEvent({ seq: 1, kind: "turn_started" })];
     injectObserverEventsForE2E(AGENT, events);
@@ -1732,6 +1761,25 @@ describe("observer → active-turns bridge sync", () => {
 
     assert.equal(observerNotifications, 0);
     assert.equal(getAgentObserverSnapshot(AGENT, true).events.length, 1);
+  });
+
+  it("does not publish duplicate decoded replay through the sync bridge", () => {
+    const events = [
+      makeEvent({
+        seq: 41,
+        timestamp: "2024-01-01T00:00:41Z",
+        kind: "turn_started",
+      }),
+    ];
+    syncAgentObserverEvents(AGENT, events);
+    let observerNotifications = 0;
+    const unsubscribeObserver = subscribeAgentObserverStore(() => {
+      observerNotifications += 1;
+    });
+    syncAgentObserverEvents(AGENT, events);
+    unsubscribeObserver();
+
+    assert.equal(observerNotifications, 0);
   });
 
   it("skips agents that are neither running nor deployed", () => {

@@ -16,8 +16,15 @@ import {
   injectObserverEventsForE2E,
   getAgentObserverSnapshot,
   resetAgentObserverStore,
-  _testRegisterKnownAgents,
+  subscribeAgentManagementRequests,
   _testGetArchivedChannelEvents,
+  _testHandleRelayObserverEvent,
+  _testPendingUnknownAgentFrameCount,
+  _testPendingUnknownAgentFrameBytes,
+  _testPendingUnknownAgentPubkeys,
+  _testRegisterAgentResolution,
+  _testRegisterKnownAgents,
+  _testResolveKnownAgents,
 } from "@/features/agents/observerRelayStore.ts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -1185,5 +1192,245 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
     );
     assert.equal(archived[0].kind, "batch");
     assert.equal(archived[0].seq, 31);
+  });
+
+  it("buffers a remote live frame until later owned-profile trust hydration", async () => {
+    _testRegisterKnownAgents("local-first", [OTHER_PUBKEY]);
+
+    const frame = makeRawEvent({ created_at: 2 });
+    await _testHandleRelayObserverEvent(
+      frame,
+      makeDecrypt(makeObserverEvent()),
+      1_000,
+    );
+
+    assert.equal(
+      _testPendingUnknownAgentFrameCount(),
+      1,
+      "a remote turn frame received before its owned profile hydrates must wait for the later trust expansion",
+    );
+
+    await _testResolveKnownAgents(
+      "remote",
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      1_001,
+    );
+    assert.equal(_testPendingUnknownAgentFrameCount(), 0);
+    assert.equal(getAgentObserverSnapshot(AGENT_PUBKEY, true).events.length, 1);
+  });
+
+  it("replays an encrypted batch envelope after trust hydration", async () => {
+    _testRegisterKnownAgents("local-first", [OTHER_PUBKEY]);
+    const batch = makeObserverEvent({
+      kind: "batch",
+      payload: {
+        events: [
+          makeObserverEvent({ seq: 2, timestamp: "2026-01-01T00:00:02.000Z" }),
+          makeObserverEvent({ seq: 1, timestamp: "2026-01-01T00:00:01.000Z" }),
+        ],
+      },
+    });
+    await _testHandleRelayObserverEvent(
+      makeRawEvent(),
+      makeDecrypt(batch),
+      1_000,
+    );
+    await _testResolveKnownAgents(
+      "remote",
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      1_001,
+    );
+    assert.deepEqual(
+      getAgentObserverSnapshot(AGENT_PUBKEY, true).events.map(
+        (event) => event.seq,
+      ),
+      [1, 2],
+    );
+  });
+
+  it("discards frames for a profile resolved as foreign", async () => {
+    _testRegisterKnownAgents("local-first", [OTHER_PUBKEY]);
+    await _testHandleRelayObserverEvent(
+      makeRawEvent(),
+      makeDecrypt(makeObserverEvent()),
+      1_000,
+    );
+    await _testResolveKnownAgents("remote", [], [AGENT_PUBKEY], 1_001);
+    assert.equal(_testPendingUnknownAgentFrameCount(), 0);
+    assert.equal(getAgentObserverSnapshot(AGENT_PUBKEY, true).events.length, 0);
+  });
+
+  it("bounds pending frames by count and bytes", async () => {
+    _testRegisterKnownAgents("local-first", [OTHER_PUBKEY]);
+    for (let index = 0; index < 140; index += 1) {
+      await _testHandleRelayObserverEvent(
+        makeRawEvent({
+          id: index.toString(16).padStart(64, "0"),
+          content: "x".repeat(20_000),
+        }),
+        makeDecrypt(makeObserverEvent()),
+        1_000 + index,
+      );
+    }
+    assert.ok(_testPendingUnknownAgentFrameCount() <= 100);
+    assert.ok(_testPendingUnknownAgentFrameBytes() <= 1_000_000);
+  });
+
+  it("expires unresolved frames before trust hydration", async () => {
+    _testRegisterKnownAgents("local-first", [OTHER_PUBKEY]);
+    await _testHandleRelayObserverEvent(
+      makeRawEvent(),
+      makeDecrypt(makeObserverEvent()),
+      1_000,
+    );
+    await _testResolveKnownAgents(
+      "remote",
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      62_001,
+    );
+    assert.equal(_testPendingUnknownAgentFrameCount(), 0);
+    assert.equal(getAgentObserverSnapshot(AGENT_PUBKEY, true).events.length, 0);
+  });
+
+  it("replays only the unresolved pubkey that becomes trusted", async () => {
+    const secondAgent = "c".repeat(64);
+    _testRegisterKnownAgents("local-first", [OTHER_PUBKEY]);
+    await _testHandleRelayObserverEvent(
+      makeRawEvent(),
+      makeDecrypt(makeObserverEvent()),
+      1_000,
+    );
+    await _testHandleRelayObserverEvent(
+      makeRawEvent({
+        pubkey: secondAgent,
+        tags: [
+          ["p", OTHER_PUBKEY],
+          ["agent", secondAgent],
+          ["frame", "telemetry"],
+        ],
+      }),
+      makeDecrypt(makeObserverEvent({ seq: 2 })),
+      1_001,
+    );
+    await _testResolveKnownAgents(
+      "remote",
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      1_002,
+    );
+    assert.deepEqual(_testPendingUnknownAgentPubkeys(), [secondAgent]);
+    assert.equal(getAgentObserverSnapshot(AGENT_PUBKEY, true).events.length, 1);
+    assert.equal(getAgentObserverSnapshot(secondAgent, true).events.length, 0);
+  });
+
+  it("does not replay a pending frame twice after repeated hydration", async () => {
+    _testRegisterKnownAgents("local-first", [OTHER_PUBKEY]);
+    await _testHandleRelayObserverEvent(
+      makeRawEvent(),
+      makeDecrypt(makeObserverEvent()),
+      1_000,
+    );
+    await _testResolveKnownAgents(
+      "remote",
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      1_001,
+    );
+    await _testResolveKnownAgents(
+      "remote",
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      1_002,
+    );
+    assert.equal(getAgentObserverSnapshot(AGENT_PUBKEY, true).events.length, 1);
+  });
+
+  it("one subscriber cannot discard another subscriber's unresolved candidate", async () => {
+    await _testRegisterAgentResolution(
+      "still-loading",
+      [],
+      [AGENT_PUBKEY],
+      [],
+      1_000,
+    );
+    await _testHandleRelayObserverEvent(
+      makeRawEvent(),
+      makeDecrypt(makeObserverEvent()),
+      1_000,
+    );
+
+    await _testRegisterAgentResolution(
+      "already-loaded",
+      [],
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      1_001,
+    );
+    assert.deepEqual(_testPendingUnknownAgentPubkeys(), [AGENT_PUBKEY]);
+
+    await _testRegisterAgentResolution(
+      "still-loading",
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      [AGENT_PUBKEY],
+      1_002,
+    );
+    assert.equal(getAgentObserverSnapshot(AGENT_PUBKEY, true).events.length, 1);
+  });
+
+  it("does not reprocess a live envelope after its event leaves retained state", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    let callbacks = 0;
+    const unsubscribe = subscribeAgentManagementRequests(() => {
+      callbacks += 1;
+    });
+    const management = makeObserverEvent({
+      kind: "acp_message",
+      payload: {
+        type: "agent_management_request",
+        action: "create",
+        requestId: "old-envelope",
+        request: {
+          channelId: "chan-1",
+          displayName: "Old Envelope",
+          systemPrompt: "Do not replay.",
+        },
+      },
+    });
+    const raw = makeRawEvent({ id: "1".repeat(64) });
+    await _testHandleRelayObserverEvent(raw, makeDecrypt(management), 1_000);
+
+    injectObserverEventsForE2E(
+      AGENT_PUBKEY,
+      Array.from({ length: 3_001 }, (_, index) =>
+        makeObserverEvent({
+          seq: index + 2,
+          timestamp: new Date(1_800_000_000_000 + index).toISOString(),
+        }),
+      ),
+    );
+    assert.equal(
+      getAgentObserverSnapshot(AGENT_PUBKEY, true).events.some(
+        (event) => event.seq === management.seq,
+      ),
+      false,
+    );
+
+    await _testHandleRelayObserverEvent(raw, makeDecrypt(management), 2_000);
+    unsubscribe();
+    assert.equal(callbacks, 1);
+  });
+
+  it("never queues a sender that does not match the claimed agent", async () => {
+    _testRegisterKnownAgents("local-first", [OTHER_PUBKEY]);
+    await _testHandleRelayObserverEvent(
+      makeRawEvent({ pubkey: OTHER_PUBKEY }),
+      makeDecrypt(makeObserverEvent()),
+      1_000,
+    );
+    assert.equal(_testPendingUnknownAgentFrameCount(), 0);
   });
 });

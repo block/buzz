@@ -2070,6 +2070,46 @@ test("non-owner agent profile shows only reported public agent data", async ({
   ).toHaveCount(0);
 });
 
+test("remote-owned Hermes profile lists its authoritative channel", async ({
+  page,
+}) => {
+  const remoteAgentPubkey =
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: remoteAgentPubkey,
+        displayName: "Hermes",
+        isAgent: true,
+        ownerPubkey: "deadbeef".repeat(8),
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page.getByTestId("message-row").filter({
+    has: page.getByText("Indexing remotely for my owner."),
+  });
+  await expect(messageRow.first()).toBeVisible({ timeout: 5_000 });
+  await messageRow.first().getByRole("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  await expect(panel.getByRole("heading", { name: "Hermes" })).toBeVisible();
+  await panel.getByTestId("user-profile-tab-channels").click();
+
+  const channelList = panel.getByTestId("user-profile-channels-list");
+  await expect(channelList).toContainText("#agents");
+  await expect(channelList).not.toContainText("#general");
+  await panel.screenshot({
+    animations: "disabled",
+    path: "test-results/remote-owned-agent/profile-channels-hermes.png",
+  });
+});
+
 test("owned agent absent from relay/managed lists still renders agent framing", async ({
   page,
 }) => {

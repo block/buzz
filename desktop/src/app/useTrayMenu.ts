@@ -10,6 +10,9 @@ import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { UserProfileSummary } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { useNow } from "@/shared/lib/useNow";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
@@ -23,11 +26,51 @@ type TrayAgentActivity = {
   elapsed: string;
 };
 
+type TrayAgentActivityState = TrayAgentActivity & {
+  agentPubkey: string;
+};
+
 type TrayAction =
   | { kind: "newChannel" }
   | { kind: "openChannel"; channelId: string };
 
 const MAX_RECENT_TRAY_ACTIVITIES = 5;
+
+export function resolveTrayAgentName({
+  knownAgentName,
+  profile,
+  pubkey,
+}: {
+  knownAgentName?: string;
+  profile?: Pick<UserProfileSummary, "displayName" | "name">;
+  pubkey: string;
+}): string {
+  return (
+    profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
+    knownAgentName?.trim() ||
+    `Agent ${truncatePubkey(pubkey)}`
+  );
+}
+
+export function resolveTrayActivities({
+  activities,
+  knownAgentNames,
+  profiles,
+}: {
+  activities: TrayAgentActivityState[];
+  knownAgentNames: Map<string, string>;
+  profiles?: UserProfileLookup;
+}): TrayAgentActivity[] {
+  return activities.map(({ agentPubkey, ...activity }) => ({
+    ...activity,
+    agentName: resolveTrayAgentName({
+      knownAgentName: knownAgentNames.get(normalizePubkey(agentPubkey)),
+      profile: profiles?.[normalizePubkey(agentPubkey)],
+      pubkey: agentPubkey,
+    }),
+  }));
+}
 
 /**
  * Keeps Buzz's native tray menu synchronized with active agent turns and
@@ -47,20 +90,40 @@ export function useTrayMenu({
   const managedAgents = useManagedAgentsQuery().data;
   const relayAgents = useRelayAgentsQuery().data;
   const previousActivitiesRef = React.useRef(
-    new Map<string, TrayAgentActivity>(),
+    new Map<string, TrayAgentActivityState>(),
   );
   const [recentActivities, setRecentActivities] = React.useState<
-    TrayAgentActivity[]
+    TrayAgentActivityState[]
   >([]);
+  const activityAgentPubkeys = React.useMemo(
+    () => [
+      ...new Set(
+        [
+          ...activeTurns.flatMap((turn) => turn.agentPubkeys),
+          ...recentActivities.map((activity) => activity.agentPubkey),
+        ].map((pubkey) => normalizePubkey(pubkey)),
+      ),
+    ],
+    [activeTurns, recentActivities],
+  );
+  const profiles = useUsersBatchQuery(activityAgentPubkeys, {
+    enabled: activityAgentPubkeys.length > 0,
+  }).data?.profiles;
+  const knownAgentNames = React.useMemo(
+    () =>
+      new Map(
+        [...(managedAgents ?? []), ...(relayAgents ?? [])].map((agent) => [
+          normalizePubkey(agent.pubkey),
+          agent.name,
+        ]),
+      ),
+    [managedAgents, relayAgents],
+  );
 
-  const activities = React.useMemo<TrayAgentActivity[]>(() => {
+  const activities = React.useMemo<TrayAgentActivityState[]>(() => {
     const channelNames = new Map(
       channels.map((channel) => [channel.id, channel.name]),
     );
-    const agentNames = new Map<string, string>();
-    for (const agent of [...(managedAgents ?? []), ...(relayAgents ?? [])]) {
-      agentNames.set(normalizePubkey(agent.pubkey), agent.name);
-    }
 
     return activeTurns.flatMap((channelTurn) =>
       channelTurn.agentPubkeys.map((pubkey) => {
@@ -70,9 +133,12 @@ export function useTrayMenu({
 
         return {
           activityId: `${channelTurn.channelId}:${normalizePubkey(pubkey)}`,
-          agentName:
-            agentNames.get(normalizePubkey(pubkey)) ??
-            `Agent ${truncatePubkey(pubkey)}`,
+          agentPubkey: pubkey,
+          agentName: resolveTrayAgentName({
+            knownAgentName: knownAgentNames.get(normalizePubkey(pubkey)),
+            profile: profiles?.[normalizePubkey(pubkey)],
+            pubkey,
+          }),
           channelId: channelTurn.channelId,
           channelName:
             channelNames.get(channelTurn.channelId) ?? "Unknown channel",
@@ -82,7 +148,7 @@ export function useTrayMenu({
         };
       }),
     );
-  }, [activeTurns, channels, managedAgents, now, relayAgents]);
+  }, [activeTurns, channels, knownAgentNames, now, profiles]);
 
   React.useEffect(() => {
     const currentActivities = new Map(
@@ -109,12 +175,20 @@ export function useTrayMenu({
   React.useEffect(() => {
     if (!isTauri()) return;
     void invoke("update_tray_agent_activity", {
-      activities,
-      recentActivities,
+      activities: resolveTrayActivities({
+        activities,
+        knownAgentNames,
+        profiles,
+      }),
+      recentActivities: resolveTrayActivities({
+        activities: recentActivities,
+        knownAgentNames,
+        profiles,
+      }),
     }).catch((error) => {
       console.error("Failed to update the macOS tray menu", error);
     });
-  }, [activities, recentActivities]);
+  }, [activities, knownAgentNames, profiles, recentActivities]);
 
   React.useEffect(() => {
     if (!isTauri()) return;

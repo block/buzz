@@ -44,6 +44,10 @@ import {
   WelcomeComposerGuidanceLayer,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
+import {
+  completeActivityAgentRoster,
+  composeThreadActivityPubkeys,
+} from "@/features/channels/ui/threadComposerActivity";
 import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
@@ -348,6 +352,15 @@ export const ChannelPane = React.memo(function ChannelPane({
     activeChannel?.id ?? null,
   );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
+  const composerActivityAgents = React.useMemo(
+    () =>
+      completeActivityAgentRoster(
+        activityAgents,
+        composerWorkingBotPubkeys,
+        profiles ?? {},
+      ),
+    [activityAgents, composerWorkingBotPubkeys, profiles],
+  );
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
     hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
@@ -363,8 +376,16 @@ export const ChannelPane = React.memo(function ChannelPane({
           ) === index,
       );
   }, [botTypingEntries, openThreadHeadId]);
+  const threadComposerWorkingBotPubkeys = React.useMemo(
+    () =>
+      composeThreadActivityPubkeys(
+        composerWorkingBotPubkeys,
+        threadComposerBotTypingPubkeys,
+      ),
+    [composerWorkingBotPubkeys, threadComposerBotTypingPubkeys],
+  );
   const hasThreadComposerBotActivity =
-    threadComposerBotTypingPubkeys.length > 0;
+    threadComposerWorkingBotPubkeys.length > 0;
   const directMessageIntro = React.useMemo(
     () =>
       buildDirectMessageIntro({
@@ -725,7 +746,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     overlay height or move the conversation. Its natural
                     content height remains responsive. */}
                 <ChannelComposerActivityAccessory
-                  agents={activityAgents}
+                  agents={composerActivityAgents}
                   channel={activeChannel}
                   currentPubkey={currentPubkey}
                   onOpenAgentSession={onOpenAgentSession}
@@ -827,12 +848,12 @@ export const ChannelPane = React.memo(function ChannelPane({
                 activityAccessoryContent={
                   hasThreadComposerBotActivity ? (
                     <BotActivityComposerAction
-                      agents={activityAgents}
+                      agents={composerActivityAgents}
                       channelId={activeChannel?.id ?? null}
                       onOpenAgentSession={onOpenAgentSession}
                       openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}
-                      workingBotPubkeys={threadComposerBotTypingPubkeys}
+                      workingBotPubkeys={threadComposerWorkingBotPubkeys}
                       variant="inline"
                     />
                   ) : null

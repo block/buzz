@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  deriveProfileChannels,
   parseProfilePanelTab,
   parseProfilePanelView,
   personaManagedAgentUpdate,
@@ -9,6 +10,9 @@ import {
   profilePanelTargetKey,
   profilePanelViewFromSearch,
 } from "./UserProfilePanelUtils.ts";
+
+const OWNER_PUBKEY = "a".repeat(64);
+const REMOTE_AGENT_PUBKEY = "b".repeat(64);
 
 function agent(overrides = {}) {
   return {
@@ -82,6 +86,53 @@ function runtime(overrides = {}) {
     ...overrides,
   };
 }
+
+test("deriveProfileChannels includes authoritative membership for a verified remote-owned agent", () => {
+  const channel = {
+    id: "channel-1",
+    name: "Activity acceptance",
+    memberPubkeys: [REMOTE_AGENT_PUBKEY],
+  };
+  const profile = {
+    isAgent: true,
+    ownerPubkey: OWNER_PUBKEY,
+  };
+
+  assert.deepEqual(
+    deriveProfileChannels(
+      REMOTE_AGENT_PUBKEY,
+      undefined,
+      undefined,
+      [channel],
+      profile,
+      OWNER_PUBKEY,
+    ),
+    [{ id: channel.id, name: channel.name }],
+  );
+
+  assert.deepEqual(
+    deriveProfileChannels(
+      REMOTE_AGENT_PUBKEY,
+      undefined,
+      undefined,
+      [channel],
+      { ...profile, isAgent: false },
+      OWNER_PUBKEY,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    deriveProfileChannels(
+      REMOTE_AGENT_PUBKEY,
+      undefined,
+      undefined,
+      [channel],
+      profile,
+      "c".repeat(64),
+    ),
+    [],
+  );
+});
 
 test("personaManagedAgentUpdate syncs edited persona identity to linked agent", () => {
   assert.deepEqual(personaManagedAgentUpdate(agent(), persona()), {
