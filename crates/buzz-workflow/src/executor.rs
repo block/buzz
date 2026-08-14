@@ -59,6 +59,83 @@ impl TriggerContext {
     }
 }
 
+/// Return whether `rendered` could have been produced from `template`.
+///
+/// Literal text is matched exactly and each syntactically resolvable
+/// `{{trigger.X}}` or `{{steps.ID.output.X}}` expression is treated as one
+/// interpolated field. Unknown expressions remain literal, matching
+/// [`resolve_template`]. This intentionally verifies only the owner-signed
+/// template skeleton: trigger and prior-step values are runtime data and are not
+/// themselves owner-signed. Unclosed expressions are also literal.
+pub fn rendered_template_matches(template: &str, rendered: &str) -> bool {
+    fn is_dynamic_expression(expr: &str) -> bool {
+        let mut parts = expr.splitn(2, '|');
+        let path = parts.next().unwrap_or("").trim();
+        let path_is_dynamic = path
+            .strip_prefix("trigger.")
+            .is_some_and(|field| !field.is_empty())
+            || path.strip_prefix("steps.").is_some_and(|rest| {
+                let mut parts = rest.splitn(3, '.');
+                parts.next().is_some_and(|step| !step.is_empty())
+                    && parts.next() == Some("output")
+                    && parts.next().is_some_and(|field| !field.is_empty())
+            });
+        if !path_is_dynamic {
+            return false;
+        }
+
+        parts.next().is_none_or(|filter| {
+            let filter = filter.trim();
+            filter == "npub"
+                || filter == "truncate_pubkey"
+                || filter
+                    .strip_prefix("truncate(")
+                    .and_then(|value| value.strip_suffix(')'))
+                    .is_some_and(|value| value.trim().parse::<usize>().is_ok())
+        })
+    }
+
+    let mut literals = Vec::new();
+    let mut literal = String::new();
+    let mut remaining = template;
+    while let Some(start) = remaining.find("{{") {
+        literal.push_str(&remaining[..start]);
+        let after_open = &remaining[start + 2..];
+        let Some(end) = after_open.find("}}") else {
+            literal.push_str("{{");
+            literal.push_str(after_open);
+            remaining = "";
+            break;
+        };
+        let expr = after_open[..end].trim();
+        if is_dynamic_expression(expr) {
+            literals.push(std::mem::take(&mut literal));
+        } else {
+            literal.push_str("{{");
+            literal.push_str(expr);
+            literal.push_str("}}");
+        }
+        remaining = &after_open[end + 2..];
+    }
+    literal.push_str(remaining);
+    literals.push(literal);
+
+    if literals.len() == 1 {
+        return rendered == literals[0];
+    }
+
+    let Some(mut cursor) = rendered.strip_prefix(&literals[0]) else {
+        return false;
+    };
+    for literal in &literals[1..literals.len() - 1] {
+        let Some(at) = cursor.find(literal) else {
+            return false;
+        };
+        cursor = &cursor[at + literal.len()..];
+    }
+    cursor.ends_with(literals.last().expect("literals is non-empty"))
+}
+
 /// Resolve `{{trigger.X}}` and `{{steps.ID.output.X}}` placeholders in a string.
 ///
 /// Supports filters:
@@ -586,7 +663,14 @@ pub async fn dispatch_action(
 
                     let event_id = engine
                         .action_sink()?
-                        .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                        .send_message(
+                            community_id,
+                            workflow.id,
+                            step_id,
+                            &channel_id,
+                            text,
+                            &owner_pubkey_hex,
+                        )
                         .await
                         .map_err(WorkflowError::from)?;
 
@@ -1632,6 +1716,96 @@ mod tests {
         let out =
             resolve_template("{{trigger.author}}{{trigger.emoji}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "abc123def456fire");
+    }
+
+    #[test]
+    fn rendered_template_matching_preserves_literal_skeleton() {
+        assert!(rendered_template_matches("literal", "literal"));
+        assert!(!rendered_template_matches("literal", "other"));
+        assert!(rendered_template_matches(
+            "Hello {{trigger.author}}, status={{steps.check.output.state}}",
+            "Hello alice, status=green"
+        ));
+        assert!(!rendered_template_matches(
+            "Hello {{trigger.author}}, status={{steps.check.output.state}}",
+            "Goodbye alice, status=green"
+        ));
+        assert!(rendered_template_matches(
+            "pre{{trigger.author}}mid{{trigger.emoji}}post",
+            "preamid🔥post"
+        ));
+        assert!(!rendered_template_matches(
+            "pre{{trigger.author}}mid{{trigger.emoji}}post",
+            "preapostmid🔥"
+        ));
+    }
+
+    #[test]
+    fn rendered_template_matching_handles_empty_and_adjacent_literals() {
+        assert!(rendered_template_matches(
+            "{{trigger.author}}{{trigger.emoji}}",
+            "alice🔥"
+        ));
+        assert!(rendered_template_matches("{{trigger.author}}", ""));
+        assert!(rendered_template_matches(
+            "{{trigger.author}}x{{trigger.emoji}}x{{trigger.text}}",
+            "axbxc"
+        ));
+        assert!(!rendered_template_matches(
+            "{{trigger.author}}x{{trigger.emoji}}x{{trigger.text}}",
+            "abc"
+        ));
+    }
+
+    #[test]
+    fn rendered_template_matching_treats_unknown_and_unclosed_expressions_as_literal() {
+        assert!(rendered_template_matches(
+            "before {{unknown.var}} after",
+            "before {{unknown.var}} after"
+        ));
+        assert!(!rendered_template_matches(
+            "before {{unknown.var}} after",
+            "before attacker after"
+        ));
+        assert!(rendered_template_matches(
+            "Hello {{trigger.author}} / {{unknown.var}}",
+            "Hello alice / {{unknown.var}}"
+        ));
+        assert!(rendered_template_matches(
+            "Hello {{trigger.author",
+            "Hello {{trigger.author"
+        ));
+        assert!(!rendered_template_matches(
+            "Hello {{trigger.author",
+            "Hello alice"
+        ));
+    }
+
+    #[test]
+    fn rendered_template_matching_accepts_only_supported_expression_shapes() {
+        assert!(rendered_template_matches(
+            "{{ trigger.author | npub }}",
+            "npub1owner"
+        ));
+        assert!(rendered_template_matches(
+            "{{trigger.text | truncate(5)}}",
+            "hello"
+        ));
+        for literal_template in [
+            "{{}}",
+            "{{trigger.}}",
+            "{{steps.check.state}}",
+            "{{steps..output.state}}",
+            "{{steps.check.output.}}",
+            "{{trigger.author | unknown}}",
+            "{{trigger.text | truncate(nope)}}",
+        ] {
+            assert!(rendered_template_matches(
+                literal_template,
+                literal_template
+            ));
+            assert!(!rendered_template_matches(literal_template, "attacker"));
+        }
     }
 
     #[tokio::test]

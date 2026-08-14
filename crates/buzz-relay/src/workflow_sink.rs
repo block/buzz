@@ -8,8 +8,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_DEF};
 use buzz_core::tenant::CommunityId;
+use buzz_db::event::EventQuery;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
@@ -173,10 +174,13 @@ impl ActionSink for RelayActionSink {
     fn send_message(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
+        step_id: &str,
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let step_id = step_id.to_owned();
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
@@ -240,6 +244,30 @@ impl ActionSink for RelayActionSink {
             })?;
             let author_pubkey_bytes = author_pubkey.to_bytes().to_vec();
             let author_pubkey_hex = author_pubkey.to_hex();
+            // The kind:30620 event is the owner's signed authority artifact.
+            // Resolve the current live event by its NIP-33 coordinate and bind
+            // the output to its exact event ID. ACP fetches and verifies this
+            // event independently before treating the message as owner-authored.
+            let mut definition_query = EventQuery::for_community(tenant.community());
+            definition_query.channel_id = Some(channel_uuid);
+            definition_query.kinds = Some(vec![KIND_WORKFLOW_DEF as i32]);
+            definition_query.pubkey = Some(author_pubkey_bytes.clone());
+            definition_query.d_tag = Some(workflow_id.to_string());
+            definition_query.limit = Some(1);
+            let definition = state
+                .db
+                .query_events(&definition_query)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "owner-signed workflow definition {workflow_id} is unavailable"
+                    ))
+                })?;
+            let definition_event_id = definition.event.id.to_hex();
+
             let is_member = state
                 .is_member_cached(tenant.community(), channel_uuid, &author_pubkey_bytes)
                 .await
@@ -252,8 +280,10 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `workflow-owner` carries the sole authorization principal;
-            //      `p` tags remain attribution/mention routing only
+            //    - `workflow-owner` identifies the claimed principal, but ACP
+            //      grants authority only from the referenced owner-signed definition
+            //    - `workflow-definition` binds the exact kind:30620 event and step
+            //    - `p` tags remain attribution/mention routing only
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - one `p` tag per `@Name` that resolves to a channel member,
@@ -261,6 +291,9 @@ impl ActionSink for RelayActionSink {
             let mut tags = vec![
                 Tag::parse(["workflow-owner", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow-owner tag: {e}")))?,
+                Tag::parse(["workflow-definition", &definition_event_id, &step_id]).map_err(
+                    |e| ActionSinkError::EventBuild(format!("workflow-definition tag: {e}")),
+                )?,
                 Tag::parse(["p", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
@@ -672,10 +705,29 @@ mod integration_tests {
             .await
             .expect("add agent member");
 
+        let workflow_id = Uuid::new_v4();
+        let definition = EventBuilder::new(
+            Kind::Custom(KIND_WORKFLOW_DEF as u16),
+            "name: ptag\ntrigger:\n  on: webhook\nsteps:\n  - id: notify\n    action: send_message\n    text: heads up @Robby — please take a look\n",
+        )
+        .tags([
+            Tag::parse(["d", &workflow_id.to_string()]).expect("d tag"),
+            Tag::parse(["h", &channel.id.to_string()]).expect("h tag"),
+        ])
+        .sign_with_keys(&author)
+        .expect("sign definition");
+        state
+            .db
+            .insert_event(community, &definition, Some(channel.id))
+            .await
+            .expect("persist definition");
+
         let sink = RelayActionSink::new(&state);
         let event_id_hex = sink
             .send_message(
                 community,
+                workflow_id,
+                "notify",
                 &channel.id.to_string(),
                 "heads up @Robby — please take a look",
                 &author_hex,
@@ -722,6 +774,23 @@ mod integration_tests {
             workflow_owner_targets,
             vec![author_hex.as_str()],
             "workflow output must carry exactly one dedicated owner authority tag"
+        );
+
+        let definition_targets: Vec<&[String]> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("workflow-definition"))
+            .map(|t| t.as_slice())
+            .collect();
+        assert_eq!(definition_targets.len(), 1);
+        assert_eq!(
+            definition_targets[0],
+            [
+                "workflow-definition",
+                definition.id.to_hex().as_str(),
+                "notify"
+            ]
         );
         assert_eq!(
             stored.event.pubkey,

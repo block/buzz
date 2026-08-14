@@ -7,6 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use uuid::Uuid;
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +54,8 @@ pub trait ActionSink: Send + Sync {
     ///   under *this* community, never the deployment/default tenant — the run
     ///   carries its owning community so a workflow in community B posts into B
     ///   even though the side effect has no inbound connection to bind.
+    /// - `workflow_id`: UUID of the owner-signed kind:30620 definition
+    /// - `step_id`: ID of the `send_message` step being executed
     /// - `channel_id`: UUID string of the target channel
     /// - `text`: message body (must not be empty/whitespace-only)
     /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
@@ -63,6 +66,8 @@ pub trait ActionSink: Send + Sync {
     fn send_message(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
+        step_id: &str,
         channel_id: &str,
         text: &str,
         author_pubkey: &str,

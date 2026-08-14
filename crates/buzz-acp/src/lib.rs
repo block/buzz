@@ -232,13 +232,19 @@ async fn is_owner_or_sibling(
 /// siblings may fire a turn — the explicit allowlist and `anyone` mode do
 /// NOT apply inside DMs. `Nobody` still drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
-/// Return the workflow principal asserted by a trusted relay-generated event.
-///
-/// Authority requires all of: kind:9, the configured endpoint's NIP-11 `self`
-/// as cryptographic author, exactly one `buzz:workflow=true` marker, and exactly
-/// one valid `workflow-owner` pubkey. `p` tags are deliberately ignored here:
-/// they route mentions and cannot grant authority.
-fn trusted_workflow_owner(event: &nostr::Event, relay_self: Option<&str>) -> Option<String> {
+/// Provenance carried by a relay-delivered workflow message.
+#[derive(Clone)]
+struct WorkflowDelegationClaim {
+    owner: String,
+    definition_id: nostr::EventId,
+    step_id: String,
+}
+
+/// Validate the relay delivery envelope, but do not grant authority yet.
+fn workflow_delegation_claim(
+    event: &nostr::Event,
+    relay_self: Option<&str>,
+) -> Option<WorkflowDelegationClaim> {
     let relay_self = relay_self?;
     if event.kind.as_u16() as u32 != buzz_core::kind::KIND_STREAM_MESSAGE
         || !event.pubkey.to_hex().eq_ignore_ascii_case(relay_self)
@@ -247,20 +253,20 @@ fn trusted_workflow_owner(event: &nostr::Event, relay_self: Option<&str>) -> Opt
         return None;
     }
 
-    let workflow_markers: Vec<_> = event
-        .tags
-        .iter()
-        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow"))
-        .collect();
+    let exact_tag = |name: &str| {
+        event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(name))
+            .collect::<Vec<_>>()
+    };
+
+    let workflow_markers = exact_tag("buzz:workflow");
     if workflow_markers.len() != 1 || workflow_markers[0].as_slice() != ["buzz:workflow", "true"] {
         return None;
     }
 
-    let owner_tags: Vec<_> = event
-        .tags
-        .iter()
-        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("workflow-owner"))
-        .collect();
+    let owner_tags = exact_tag("workflow-owner");
     if owner_tags.len() != 1 || owner_tags[0].as_slice().len() != 2 {
         return None;
     }
@@ -271,7 +277,102 @@ fn trusted_workflow_owner(event: &nostr::Event, relay_self: Option<&str>) -> Opt
     {
         return None;
     }
-    Some(owner)
+
+    let definition_tags = exact_tag("workflow-definition");
+    if definition_tags.len() != 1 || definition_tags[0].as_slice().len() != 3 {
+        return None;
+    }
+    let definition_id = nostr::EventId::from_hex(&definition_tags[0].as_slice()[1]).ok()?;
+    let step_id = definition_tags[0].as_slice()[2].clone();
+    if step_id.is_empty() {
+        return None;
+    }
+
+    Some(WorkflowDelegationClaim {
+        owner,
+        definition_id,
+        step_id,
+    })
+}
+
+/// Verify that an owner-signed definition authorizes this exact output shape.
+fn definition_authorizes_message(
+    claim: &WorkflowDelegationClaim,
+    message: &nostr::Event,
+    message_channel: Uuid,
+    definition: &nostr::Event,
+) -> bool {
+    if definition.id != claim.definition_id
+        || definition.kind.as_u16() as u32 != buzz_core::kind::KIND_WORKFLOW_DEF
+        || !definition
+            .pubkey
+            .to_hex()
+            .eq_ignore_ascii_case(&claim.owner)
+        || definition.verify().is_err()
+    {
+        return false;
+    }
+
+    let definition_channels: Vec<_> = definition
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+        .collect();
+    if definition_channels.len() != 1
+        || definition_channels[0].as_slice().len() != 2
+        || definition_channels[0].as_slice()[1]
+            .parse::<Uuid>()
+            .ok()
+            .filter(|id| *id == message_channel)
+            .is_none()
+    {
+        return false;
+    }
+
+    let Ok((workflow, _)) = buzz_workflow::WorkflowEngine::parse_yaml(&definition.content) else {
+        return false;
+    };
+    let Some(step) = workflow.steps.iter().find(|step| step.id == claim.step_id) else {
+        return false;
+    };
+    match &step.action {
+        buzz_workflow::schema::ActionDef::SendMessage { text, channel } => {
+            let channel_matches = channel
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none_or(|value| value.parse::<Uuid>().ok() == Some(message_channel));
+            channel_matches
+                && buzz_workflow::executor::rendered_template_matches(text, &message.content)
+        }
+        _ => false,
+    }
+}
+
+/// Return the workflow principal only when the owner-signed definition authorizes it.
+///
+/// The relay signature authenticates delivery, not delegation. The referenced
+/// kind:30620 event is fetched independently and its owner signature, channel,
+/// step, and message template are all checked. Every lookup or verification
+/// failure falls back to ordinary relay-author authorization.
+async fn trusted_workflow_owner(
+    event: &nostr::Event,
+    channel_id: Uuid,
+    relay_self: Option<&str>,
+    rest_client: &relay::RestClient,
+) -> Option<String> {
+    let claim = workflow_delegation_claim(event, relay_self)?;
+    let filter = nostr::Filter::new().id(claim.definition_id);
+    let response = tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter]))
+        .await
+        .ok()?
+        .ok()?;
+    let events = response.as_array()?;
+    if events.len() != 1 {
+        return None;
+    }
+    let definition = serde_json::from_value::<nostr::Event>(events[0].clone()).ok()?;
+    definition_authorizes_message(&claim, event, channel_id, &definition).then_some(claim.owner)
 }
 
 async fn author_allowed(
@@ -2723,8 +2824,13 @@ async fn tokio_main() -> Result<()> {
                             // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                let workflow_owner =
-                                    trusted_workflow_owner(&buzz_event.event, relay_self.as_deref());
+                                let workflow_owner = trusted_workflow_owner(
+                                    &buzz_event.event,
+                                    buzz_event.channel_id,
+                                    relay_self.as_deref(),
+                                    &ctx.rest_client,
+                                )
+                                .await;
                                 let principal = workflow_owner.as_deref().unwrap_or(&author);
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
@@ -4935,82 +5041,231 @@ mod workflow_authority_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    fn workflow_event(signer: &Keys, owner: Option<&str>, marker: bool) -> nostr::Event {
-        let mut tags = Vec::new();
-        if marker {
-            tags.push(Tag::parse(["buzz:workflow", "true"]).unwrap());
-        }
-        if let Some(owner) = owner {
-            tags.push(Tag::parse(["workflow-owner", owner]).unwrap());
-        }
-        EventBuilder::new(Kind::Custom(9), "run")
-            .tags(tags)
-            .sign_with_keys(signer)
+    fn definition(owner: &Keys, channel: Uuid, text: &str) -> nostr::Event {
+        EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_WORKFLOW_DEF as u16),
+            format!(
+                "name: signed\ntrigger:\n  on: webhook\nsteps:\n  - id: wake\n    action: send_message\n    text: '{text}'\n"
+            ),
+        )
+        .tags([
+            Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+        ])
+        .sign_with_keys(owner)
+        .unwrap()
+    }
+
+    fn workflow_event(
+        relay: &Keys,
+        owner: &Keys,
+        definition: &nostr::Event,
+        channel: Uuid,
+        text: &str,
+    ) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), text)
+            .tags([
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["workflow-owner", &owner.public_key().to_hex()]).unwrap(),
+                Tag::parse(["workflow-definition", &definition.id.to_hex(), "wake"]).unwrap(),
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(relay)
             .unwrap()
     }
 
     #[test]
-    fn requires_relay_signature_marker_and_dedicated_owner() {
+    fn owner_signed_definition_authorizes_exact_and_templated_content() {
         let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let event = workflow_event(&relay, Some(&owner), true);
-        assert_eq!(
-            trusted_workflow_owner(&event, Some(&relay.public_key().to_hex())),
-            Some(owner)
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        let exact = definition(&owner, channel, "wake now");
+        let message = workflow_event(&relay, &owner, &exact, channel, "wake now");
+        let claim =
+            workflow_delegation_claim(&message, Some(&relay.public_key().to_hex())).unwrap();
+        assert!(definition_authorizes_message(
+            &claim, &message, channel, &exact
+        ));
+
+        let templated = definition(
+            &owner,
+            channel,
+            "Hello {{trigger.author}}, status={{steps.check.output.state}}",
+        );
+        let rendered = workflow_event(
+            &relay,
+            &owner,
+            &templated,
+            channel,
+            "Hello alice, status=green",
+        );
+        let claim =
+            workflow_delegation_claim(&rendered, Some(&relay.public_key().to_hex())).unwrap();
+        assert!(definition_authorizes_message(
+            &claim, &rendered, channel, &templated
+        ));
+    }
+
+    #[test]
+    fn missing_or_invalid_definition_reference_fails_closed() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        for reference in [None, Some(["workflow-definition", "not-an-id", "wake"])] {
+            let mut tags = vec![
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["workflow-owner", &owner.public_key().to_hex()]).unwrap(),
+            ];
+            if let Some(reference) = reference {
+                tags.push(Tag::parse(reference).unwrap());
+            }
+            let event = EventBuilder::new(Kind::Custom(9), "wake")
+                .tags(tags)
+                .sign_with_keys(&relay)
+                .unwrap();
+            assert!(
+                workflow_delegation_claim(&event, Some(&relay.public_key().to_hex())).is_none()
+            );
+        }
+
+        let definition = definition(&owner, channel, "wake");
+        let mut duplicate = workflow_event(&relay, &owner, &definition, channel, "wake");
+        duplicate
+            .tags
+            .push(Tag::parse(["workflow-definition", &definition.id.to_hex(), "wake"]).unwrap());
+        assert!(
+            workflow_delegation_claim(&duplicate, Some(&relay.public_key().to_hex())).is_none()
         );
     }
 
     #[test]
-    fn rejects_forged_missing_and_ambiguous_provenance() {
+    fn signature_author_channel_step_and_content_mismatches_fail_closed() {
         let relay = Keys::generate();
+        let owner = Keys::generate();
         let attacker = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let relay_hex = relay.public_key().to_hex();
-        assert!(trusted_workflow_owner(
-            &workflow_event(&attacker, Some(&owner), true),
-            Some(&relay_hex)
+        let channel = Uuid::new_v4();
+        let signed = definition(&owner, channel, "Hello {{trigger.author}}");
+        let message = workflow_event(&relay, &owner, &signed, channel, "Hello alice");
+        let claim =
+            workflow_delegation_claim(&message, Some(&relay.public_key().to_hex())).unwrap();
+
+        let forged_author = definition(&attacker, channel, "Hello {{trigger.author}}");
+        let forged_claim = WorkflowDelegationClaim {
+            definition_id: forged_author.id,
+            ..claim.clone()
+        };
+        assert!(!definition_authorizes_message(
+            &forged_claim,
+            &message,
+            channel,
+            &forged_author
+        ));
+
+        let mut bad_signature = signed.clone();
+        bad_signature.content.push_str("tampered");
+        assert!(!definition_authorizes_message(
+            &claim,
+            &message,
+            channel,
+            &bad_signature
+        ));
+        assert!(!definition_authorizes_message(
+            &claim,
+            &message,
+            Uuid::new_v4(),
+            &signed
+        ));
+
+        let wrong_step = WorkflowDelegationClaim {
+            step_id: "missing".into(),
+            ..claim.clone()
+        };
+        assert!(!definition_authorizes_message(
+            &wrong_step,
+            &message,
+            channel,
+            &signed
+        ));
+
+        let wrong_content = workflow_event(&relay, &owner, &signed, channel, "Goodbye alice");
+        assert!(!definition_authorizes_message(
+            &claim,
+            &wrong_content,
+            channel,
+            &signed
+        ));
+    }
+
+    async fn rest_client_serving(
+        response: serde_json::Value,
+    ) -> (relay::RestClient, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let body = response.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (
+            relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: Keys::generate(),
+                auth_tag_json: None,
+            },
+            server,
         )
-        .is_none());
-        assert!(trusted_workflow_owner(
-            &workflow_event(&relay, Some(&owner), false),
-            Some(&relay_hex)
-        )
-        .is_none());
-        assert!(
-            trusted_workflow_owner(&workflow_event(&relay, None, true), Some(&relay_hex)).is_none()
+    }
+
+    #[tokio::test]
+    async fn fetched_owner_signed_definition_grants_authority() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        let signed = definition(&owner, channel, "Hello {{trigger.author}}");
+        let message = workflow_event(&relay, &owner, &signed, channel, "Hello alice");
+        let (client, server) = rest_client_serving(serde_json::json!([signed])).await;
+        assert_eq!(
+            trusted_workflow_owner(
+                &message,
+                channel,
+                Some(&relay.public_key().to_hex()),
+                &client,
+            )
+            .await,
+            Some(owner.public_key().to_hex())
         );
+        server.await.unwrap();
+    }
 
-        let duplicate = EventBuilder::new(Kind::Custom(9), "run")
-            .tags([
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
-                Tag::parse(["workflow-owner", &owner]).unwrap(),
-                Tag::parse(["workflow-owner", &owner]).unwrap(),
-            ])
-            .sign_with_keys(&relay)
-            .unwrap();
-        assert!(trusted_workflow_owner(&duplicate, Some(&relay_hex)).is_none());
-
-        let malformed_marker = EventBuilder::new(Kind::Custom(9), "run")
-            .tags([
-                Tag::parse(["buzz:workflow", "false"]).unwrap(),
-                Tag::parse(["workflow-owner", &owner]).unwrap(),
-            ])
-            .sign_with_keys(&relay)
-            .unwrap();
-        assert!(trusted_workflow_owner(&malformed_marker, Some(&relay_hex)).is_none());
-
-        let malformed_owner = EventBuilder::new(Kind::Custom(9), "run")
-            .tags([
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
-                Tag::parse(["workflow-owner", &owner, "extra"]).unwrap(),
-            ])
-            .sign_with_keys(&relay)
-            .unwrap();
-        assert!(trusted_workflow_owner(&malformed_owner, Some(&relay_hex)).is_none());
-
-        let mut tampered = workflow_event(&relay, Some(&owner), true);
-        tampered.content = "tampered after signing".to_string();
-        assert!(trusted_workflow_owner(&tampered, Some(&relay_hex)).is_none());
+    #[tokio::test]
+    async fn definition_fetch_failure_fails_closed() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        let signed = definition(&owner, channel, "wake");
+        let message = workflow_event(&relay, &owner, &signed, channel, "wake");
+        let client = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".into(),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        assert!(trusted_workflow_owner(
+            &message,
+            channel,
+            Some(&relay.public_key().to_hex()),
+            &client,
+        )
+        .await
+        .is_none());
     }
 
     #[test]
@@ -5024,7 +5279,7 @@ mod workflow_authority_tests {
             ])
             .sign_with_keys(&relay)
             .unwrap();
-        assert!(trusted_workflow_owner(&event, Some(&relay.public_key().to_hex())).is_none());
+        assert!(workflow_delegation_claim(&event, Some(&relay.public_key().to_hex())).is_none());
     }
 }
 
