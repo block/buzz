@@ -514,7 +514,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         WidgetsBinding.instance.removeObserver(observer);
         observer.dispose();
       };
-    }, [appView, itemScrollController, replies.length]);
+    }, [appView, itemScrollController]);
 
     useEffect(() {
       if (usesFixedAndroidImeViewport) {
