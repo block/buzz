@@ -3895,4 +3895,258 @@ mod tests {
             "attribution line must carry the pubkey;\nlog:\n{log}"
         );
     }
+    // ── NIP-OA owner materialization over the real HTTP path ────────────────
+    //
+    // These enter at `submit_event_authed`, the authenticated core of
+    // `POST /events`: everything outside it is NIP-98 verification and the
+    // attribution log, and everything the owner path touches — the membership
+    // gate, `resolve_nip_oa_owner`, `materialize_nip_oa_owner` — is inside.
+    // Reverting the production call site makes the first test below fail,
+    // which the previous pure unit tests did not.
+    //
+    // `#[ignore]`d because they need Postgres and Redis; CI selects them by
+    // name (`test(/nip_oa_owner_/)`), since no job runs this crate's default
+    // test set.
+
+    async fn nip_oa_test_state() -> Option<(Arc<AppState>, sqlx::PgPool)> {
+        let mut config = crate::config::Config::from_env().ok()?;
+        // The regression is closed-relay-only: on an open relay the owner was
+        // always recorded.
+        config.require_relay_membership = true;
+        let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .ok()?,
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        Some((Arc::new(state), pool))
+    }
+
+    async fn seed_community(pool: &sqlx::PgPool) -> TenantContext {
+        let id = uuid::Uuid::new_v4();
+        let host = format!("nip-oa-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        TenantContext::resolved(buzz_core::CommunityId::from_uuid(id), host)
+    }
+
+    /// A signed event for the request body. Its ingest outcome is irrelevant:
+    /// owner materialization happens before ingest, so the assertion holds
+    /// whether or not the event itself is accepted.
+    fn body_event(keys: &Keys) -> Vec<u8> {
+        let event = EventBuilder::new(Kind::TextNote, "nip-oa owner materialization probe")
+            .sign_with_keys(keys)
+            .expect("sign body event");
+        serde_json::to_vec(&event).expect("serialize body event")
+    }
+
+    fn auth_tag_headers(tag_json: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-auth-tag", tag_json.parse().expect("header value"));
+        headers
+    }
+
+    async fn stored_owner(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &nostr::PublicKey,
+    ) -> Option<Vec<u8>> {
+        state
+            .db
+            .get_agent_channel_policy(tenant.community(), agent.as_bytes())
+            .await
+            .expect("read agent policy")
+            .and_then(|(_, owner)| owner)
+    }
+
+    /// Run one `POST /events` submission as `agent`, presenting `tag_json`.
+    async fn submit_with_tag(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        agent: &Keys,
+        tag_json: Option<&str>,
+        auth_event_created_at: u64,
+    ) {
+        let headers = match tag_json {
+            Some(tag) => auth_tag_headers(tag),
+            None => HeaderMap::new(),
+        };
+        submit_event_authed(
+            state,
+            tenant,
+            &headers,
+            &body_event(agent),
+            agent.public_key(),
+            fresh_nip98_event_id_bytes(),
+            Some(auth_event_created_at),
+        )
+        .await;
+    }
+
+    /// The regression itself: a direct relay member on a closed relay presents
+    /// a valid attestation, and the owner is recorded. Before the fix this
+    /// silently resolved to no owner, so `owner_only` policies had nothing to
+    /// match and observer frames were refused.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_records_owner_for_direct_member() {
+        let Some((state, pool)) = nip_oa_test_state().await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("compute auth tag");
+        submit_with_tag(&state, &tenant, &agent, Some(&tag), 1_000).await;
+
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "a direct member's verified owner must be recorded on a closed relay",
+        );
+    }
+
+    /// A member cannot mint a throwaway keypair, attest itself, and have that
+    /// key trusted: the resolved owner selects the agent rate class and is
+    /// first-write-wins, so an untrusted key must never reach the record.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_refuses_an_owner_that_is_not_a_relay_member() {
+        let Some((state, pool)) = nip_oa_test_state().await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let stranger = Keys::generate();
+
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &agent.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("add relay member");
+
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&stranger, &agent.public_key(), "")
+            .expect("compute auth tag");
+        submit_with_tag(&state, &tenant, &agent, Some(&tag), 1_000).await;
+
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+            "a non-member owner must not be recorded on a closed relay",
+        );
+    }
+
+    /// A signature that verifies is not a credential that is valid: an expired
+    /// attestation must not materialize, or expiry means nothing.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_refuses_an_expired_attestation() {
+        let Some((state, pool)) = nip_oa_test_state().await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let expired =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "created_at<1000")
+                .expect("compute auth tag");
+        // Auth event is at the bound, which is outside it — bounds are strict.
+        submit_with_tag(&state, &tenant, &agent, Some(&expired), 1_000).await;
+
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+            "an expired attestation must not be materialized",
+        );
+
+        // Same tag, inside its window: proves the refusal above is the time
+        // bound and not some unrelated rejection.
+        submit_with_tag(&state, &tenant, &agent, Some(&expired), 999).await;
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "the same attestation inside its window must be recorded",
+        );
+    }
+
+    /// Membership alone never invents an owner.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_without_a_tag_records_nothing() {
+        let Some((state, pool)) = nip_oa_test_state().await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &agent.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("add relay member");
+
+        submit_with_tag(&state, &tenant, &agent, None, 1_000).await;
+
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+        );
+    }
 }
