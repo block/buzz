@@ -409,18 +409,44 @@ fn command_targets_workflow(command: &nostr::Event, workflow_id: Uuid) -> bool {
 
 /// Maximum serialized webhook cargo admitted into a doorbell prompt.
 const MAX_WORKFLOW_WEBHOOK_CARGO_BYTES: usize = 61_440;
+/// Maximum wall-clock distance between a relay-signed workflow doorbell and
+/// admission by the harness. This bounds replay age and tolerated clock skew
+/// without rejecting workflows that legitimately delay or suspend after their
+/// original cause.
+const WORKFLOW_DOORBELL_FRESHNESS_SECS: i64 = 300;
+
+fn workflow_doorbell_is_fresh_at(
+    delivery_time: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    (delivery_time.timestamp() - now.timestamp()).unsigned_abs()
+        <= WORKFLOW_DOORBELL_FRESHNESS_SECS as u64
+}
+
+fn workflow_doorbell_claim_at(
+    event: &nostr::Event,
+    relay_self: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<WorkflowDoorbellClaim> {
+    let delivery_time = chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)?;
+    if !workflow_doorbell_is_fresh_at(delivery_time, now) {
+        return None;
+    }
+    workflow_doorbell_claim(event, relay_self)
+}
 
 /// Refetch owner authority and cause, then render the signed template locally.
-async fn trusted_workflow_doorbell(
+async fn trusted_workflow_doorbell_at(
     event: &nostr::Event,
     channel_id: Uuid,
     relay_self: Option<&str>,
     rest_client: &relay::RestClient,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Option<TrustedWorkflowDoorbell> {
     use buzz_workflow::executor::{resolve_template, TriggerContext};
     use buzz_workflow::schema::ActionDef;
 
-    let claim = workflow_doorbell_claim(event, relay_self)?;
+    let claim = workflow_doorbell_claim_at(event, relay_self, now)?;
     let definition = query_exact_event(claim.definition_id, rest_client).await?;
     if definition.kind.as_u16() as u32 != buzz_core::kind::KIND_WORKFLOW_DEF
         || !definition
@@ -497,7 +523,9 @@ async fn trusted_workflow_doorbell(
             let slot_time = chrono::DateTime::parse_from_rfc3339(slot)
                 .ok()?
                 .with_timezone(&chrono::Utc);
-            if !buzz_workflow::schedule_cause_matches(&workflow, slot_time) {
+            if slot_time.to_rfc3339() != *slot
+                || !buzz_workflow::schedule_cause_matches(&workflow, slot_time)
+            {
                 return None;
             }
             let timestamp = slot_time.timestamp().to_string();
@@ -574,6 +602,22 @@ async fn trusted_workflow_doorbell(
         dedup_key,
         webhook_definition,
     })
+}
+
+async fn trusted_workflow_doorbell(
+    event: &nostr::Event,
+    channel_id: Uuid,
+    relay_self: Option<&str>,
+    rest_client: &relay::RestClient,
+) -> Option<TrustedWorkflowDoorbell> {
+    trusted_workflow_doorbell_at(
+        event,
+        channel_id,
+        relay_self,
+        rest_client,
+        chrono::Utc::now(),
+    )
+    .await
 }
 
 fn with_doorbell_content(event: &nostr::Event, content: String) -> Option<nostr::Event> {
@@ -5317,13 +5361,14 @@ mod workflow_authority_tests {
         .unwrap()
     }
 
-    fn doorbell(
+    fn doorbell_at(
         relay: &Keys,
         owner: &Keys,
         definition: &nostr::Event,
         channel: Uuid,
         cause: [&str; 3],
         content: &str,
+        created_at: nostr::Timestamp,
     ) -> nostr::Event {
         EventBuilder::new(Kind::Custom(9), content)
             .tags([
@@ -5333,8 +5378,146 @@ mod workflow_authority_tests {
                 Tag::parse(cause).unwrap(),
                 Tag::parse(["h", &channel.to_string()]).unwrap(),
             ])
+            .custom_created_at(created_at)
             .sign_with_keys(relay)
             .unwrap()
+    }
+
+    fn doorbell(
+        relay: &Keys,
+        owner: &Keys,
+        definition: &nostr::Event,
+        channel: Uuid,
+        cause: [&str; 3],
+        content: &str,
+    ) -> nostr::Event {
+        doorbell_at(
+            relay,
+            owner,
+            definition,
+            channel,
+            cause,
+            content,
+            nostr::Timestamp::now(),
+        )
+    }
+
+    #[test]
+    fn doorbell_freshness_includes_boundary_and_rejects_both_directions() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        let def = definition(&owner, channel, "webhook", "wake");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-14T18:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let boundary = chrono::Duration::seconds(WORKFLOW_DOORBELL_FRESHNESS_SECS);
+        let relay_pubkey = relay.public_key().to_hex();
+        let claim_at = |created_at: chrono::DateTime<chrono::Utc>| {
+            let event = doorbell_at(
+                &relay,
+                &owner,
+                &def,
+                channel,
+                ["workflow-cause", "webhook", ""],
+                "{}",
+                nostr::Timestamp::from(created_at.timestamp() as u64),
+            );
+            workflow_doorbell_claim_at(&event, Some(&relay_pubkey), now)
+        };
+
+        assert!(claim_at(now - boundary).is_some());
+        assert!(claim_at(now + boundary).is_some());
+        assert!(claim_at(now - boundary - chrono::Duration::seconds(1)).is_none());
+        assert!(claim_at(now + boundary + chrono::Duration::seconds(1)).is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_and_future_doorbells_fail_before_all_cause_verifiers() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        let def = definition(&owner, channel, "webhook", "wake");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-14T18:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let outside = chrono::Duration::seconds(WORKFLOW_DOORBELL_FRESHNESS_SECS + 1);
+        let causes = [
+            ["workflow-cause", "event", &"0".repeat(64)],
+            ["workflow-cause", "command", &"1".repeat(64)],
+            ["workflow-cause", "schedule", "2026-08-14T18:00:00+00:00"],
+            ["workflow-cause", "webhook", ""],
+        ];
+
+        for delivery_time in [now - outside, now + outside] {
+            for cause in &causes {
+                let pointer = doorbell_at(
+                    &relay,
+                    &owner,
+                    &def,
+                    channel,
+                    [cause[0], cause[1], cause[2]],
+                    if cause[1] == "webhook" { "{}" } else { "" },
+                    nostr::Timestamp::from(delivery_time.timestamp() as u64),
+                );
+                let (client, server) = rest_client_serving(vec![]).await;
+                assert!(
+                    trusted_workflow_doorbell_at(
+                        &pointer,
+                        channel,
+                        Some(&relay.public_key().to_hex()),
+                        &client,
+                        now,
+                    )
+                    .await
+                    .is_none(),
+                    "{} cause at {delivery_time} must fail freshness",
+                    cause[1]
+                );
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn old_schedule_slot_is_accepted_only_with_canonical_encoding_on_fresh_doorbell() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        let def = definition(
+            &owner,
+            channel,
+            "schedule\n  interval: 60s",
+            "slot {{trigger.timestamp}}",
+        );
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-14T18:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let canonical_slot = (now - chrono::Duration::hours(24)).to_rfc3339();
+        let equivalent_slot = canonical_slot.replace("+00:00", "Z");
+
+        for (slot, accepted) in [(canonical_slot, true), (equivalent_slot, false)] {
+            let pointer = doorbell_at(
+                &relay,
+                &owner,
+                &def,
+                channel,
+                ["workflow-cause", "schedule", &slot],
+                "",
+                nostr::Timestamp::from(now.timestamp() as u64),
+            );
+            let (client, server) = rest_client_serving(vec![serde_json::json!([def])]).await;
+            let trusted = trusted_workflow_doorbell_at(
+                &pointer,
+                channel,
+                Some(&relay.public_key().to_hex()),
+                &client,
+                now,
+            )
+            .await;
+            assert_eq!(trusted.is_some(), accepted, "schedule slot {slot}");
+            server.await.unwrap();
+        }
     }
 
     #[test]
@@ -5482,26 +5665,32 @@ mod workflow_authority_tests {
             "message_posted",
             "Hello {{trigger.author}}: {{trigger.text}}",
         );
+        let now = chrono::Utc::now();
         let source = EventBuilder::new(Kind::Custom(9), "signed source")
             .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
+            .custom_created_at(nostr::Timestamp::from(
+                (now - chrono::Duration::hours(24)).timestamp() as u64,
+            ))
             .sign_with_keys(&author)
             .unwrap();
-        let pointer = doorbell(
+        let pointer = doorbell_at(
             &relay,
             &owner,
             &def,
             channel,
             ["workflow-cause", "event", &source.id.to_hex()],
             "",
+            nostr::Timestamp::from(now.timestamp() as u64),
         );
         let (client, server) =
             rest_client_serving(vec![serde_json::json!([def]), serde_json::json!([source])]).await;
 
-        let trusted = trusted_workflow_doorbell(
+        let trusted = trusted_workflow_doorbell_at(
             &pointer,
             channel,
             Some(&relay.public_key().to_hex()),
             &client,
+            now,
         )
         .await
         .expect("trusted doorbell");
