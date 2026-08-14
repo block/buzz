@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::managed_agents::{
-    validate_heartbeat_preflight_configuration, HeartbeatHarnessStamp, ManagedAgentPairRuntime,
-    ManagedAgentRecord, ManagedAgentRuntimeKey, DEFAULT_ACP_COMMAND,
+    missing_command_message, resolve_command, validate_heartbeat_preflight_configuration,
+    HeartbeatHarnessStamp, ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+    DEFAULT_ACP_COMMAND,
 };
 
 const CONFIG_ENV: &str = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG";
@@ -204,6 +205,31 @@ pub(super) fn verify(
     record: &ManagedAgentRecord,
 ) -> Result<Option<VerifiedHeartbeatHarness>, String> {
     verify_with(record, &DesignatedHarnessResolver, &ProcessHarnessProber)
+}
+
+pub(super) fn resolve_spawn_command(
+    record: &ManagedAgentRecord,
+    verified: Option<&VerifiedHeartbeatHarness>,
+) -> Result<PathBuf, String> {
+    match verified {
+        Some(verified) => Ok(verified.path.clone()),
+        None => resolve_command(&record.acp_command)
+            .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command")),
+    }
+}
+
+pub(super) fn verify_unchanged_before_spawn(
+    record: &ManagedAgentRecord,
+    expected: &Option<VerifiedHeartbeatHarness>,
+) -> Result<(), String> {
+    if &verify(record)? != expected {
+        return Err("bundled buzz-acp changed before designated spawn".into());
+    }
+    Ok(())
+}
+
+pub(super) fn stamp(verified: Option<&VerifiedHeartbeatHarness>) -> Option<HeartbeatHarnessStamp> {
+    verified.map(|verified| verified.stamp.clone())
 }
 
 fn current_stamp(record: &ManagedAgentRecord) -> Result<Option<HeartbeatHarnessStamp>, String> {

@@ -7,9 +7,8 @@ use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        normalize_agent_args, open_log_file, resolve_command, spawn_key_refusal, KnownAcpRuntime,
+        ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -478,11 +477,8 @@ pub fn spawn_agent_child(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    let resolved_acp_command = match heartbeat_harness.as_ref() {
-        Some(verified) => verified.path.clone(),
-        None => resolve_command(&record.acp_command)
-            .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?,
-    };
+    let resolved_acp_command =
+        heartbeat_preflight::resolve_spawn_command(record, heartbeat_harness.as_ref())?;
     let effective_mcp_command = known_acp_runtime(effective_command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("");
@@ -886,9 +882,7 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    if heartbeat_preflight::verify(record)? != heartbeat_harness {
-        return Err("bundled buzz-acp changed before designated spawn".into());
-    }
+    heartbeat_preflight::verify_unchanged_before_spawn(record, &heartbeat_harness)?;
     let child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
@@ -923,9 +917,7 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
-        heartbeat_harness
-            .as_ref()
-            .map(|verified| verified.stamp.clone()),
+        heartbeat_preflight::stamp(heartbeat_harness.as_ref()),
         &record.name,
     ));
     #[cfg(not(windows))]
@@ -936,7 +928,7 @@ pub fn spawn_agent_child(
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
-        heartbeat_harness: heartbeat_harness.map(|verified| verified.stamp),
+        heartbeat_harness: heartbeat_preflight::stamp(heartbeat_harness.as_ref()),
     })
 }
 
