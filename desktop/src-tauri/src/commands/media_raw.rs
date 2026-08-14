@@ -67,6 +67,12 @@ pub fn cancel_media_upload(progress_id: String) {
     cancel_registered_media_upload(&progress_id);
 }
 
+/// Release the renderer's ownership after its upload promise settles.
+#[tauri::command]
+pub fn release_media_upload(progress_id: String) {
+    finish_media_upload(Some(&progress_id));
+}
+
 /// Upload raw IPC bytes without expanding a large browser File into JSON.
 #[tauri::command]
 pub async fn upload_media_bytes_raw(

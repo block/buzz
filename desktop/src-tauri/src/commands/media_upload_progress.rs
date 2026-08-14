@@ -174,6 +174,40 @@ mod tests {
     }
 
     #[test]
+    fn late_cancellation_after_native_finish_is_removed_on_release() {
+        let mut uploads = MediaUploadCancellations::default();
+        let id = "late-cancel";
+
+        uploads.begin(id);
+        uploads.finish(id);
+        uploads.cancel(id);
+        assert!(uploads.tokens.contains_key(id));
+
+        uploads.finish(id);
+        assert!(!uploads.tokens.contains_key(id));
+    }
+
+    #[test]
+    fn repeated_concurrent_cycles_leave_no_registry_entries() {
+        let mut uploads = MediaUploadCancellations::default();
+        let ids = (0..256)
+            .map(|index| format!("cycle-{index}"))
+            .collect::<Vec<_>>();
+
+        for id in &ids {
+            uploads.begin(id);
+        }
+        for id in &ids {
+            uploads.cancel(id);
+        }
+        for id in &ids {
+            uploads.finish(id);
+        }
+
+        assert!(uploads.tokens.is_empty());
+    }
+
+    #[test]
     fn dispatched_cancellations_are_not_evicted_before_begin() {
         let mut uploads = MediaUploadCancellations::default();
         let ids = (0..129)

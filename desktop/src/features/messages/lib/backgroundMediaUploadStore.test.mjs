@@ -27,6 +27,7 @@ test("cancels only uploads whose native commands were dispatched", async () => {
   const startedProgressIds = new Set();
   const cancelled = [];
   const dispatched = [];
+  const released = [];
   const upload = async (_file, id, _signal, onDispatch) => {
     dispatched.push(id);
     onDispatch();
@@ -41,6 +42,7 @@ test("cancels only uploads whose native commands were dispatched", async () => {
     new AbortController().signal,
     startedProgressIds,
     upload,
+    async (id) => released.push(id),
   );
   await Promise.resolve();
 
@@ -55,4 +57,28 @@ test("cancels only uploads whose native commands were dispatched", async () => {
   releaseUpload.resolve();
   await uploadPromise;
   assert.equal(startedProgressIds.size, 0);
+  assert.deepEqual(released, [ids[0]]);
+});
+
+test("releases ownership when dispatch rejects", async () => {
+  const startedProgressIds = new Set();
+  const released = [];
+
+  await assert.rejects(
+    dispatchTrackedMediaUpload(
+      {},
+      "rejected",
+      new AbortController().signal,
+      startedProgressIds,
+      async (_file, id, _signal, onDispatch) => {
+        onDispatch();
+        throw new Error(`rejected ${id}`);
+      },
+      async (id) => released.push(id),
+    ),
+    /rejected rejected/,
+  );
+
+  assert.equal(startedProgressIds.size, 0);
+  assert.deepEqual(released, ["rejected"]);
 });

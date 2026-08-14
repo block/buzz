@@ -1,7 +1,11 @@
 import * as React from "react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
-import { cancelMediaUpload, uploadMediaFile } from "@/shared/api/tauriMedia";
+import {
+  cancelMediaUpload,
+  releaseMediaUpload,
+  uploadMediaFile,
+} from "@/shared/api/tauriMedia";
 import {
   type BackgroundMediaUploadPhase,
   isNativeMediaUploadPhase,
@@ -200,11 +204,13 @@ export async function dispatchTrackedMediaUpload(
   signal: AbortSignal,
   startedProgressIds: Set<string>,
   upload: typeof uploadMediaFile = uploadMediaFile,
+  release: (progressId: string) => Promise<void> = releaseMediaUpload,
 ): Promise<BlobDescriptor> {
   try {
     return await upload(file, id, signal, () => startedProgressIds.add(id));
   } finally {
     startedProgressIds.delete(id);
+    await release(id).catch(() => undefined);
   }
 }
 

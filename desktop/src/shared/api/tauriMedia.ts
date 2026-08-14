@@ -40,6 +40,11 @@ export async function cancelMediaUpload(progressId: string): Promise<void> {
   await invokeTauri("cancel_media_upload", { progressId });
 }
 
+/** Release the renderer's cancellation ownership after an upload settles. */
+export async function releaseMediaUpload(progressId: string): Promise<void> {
+  await invokeTauri("release_media_upload", { progressId });
+}
+
 /**
  * Open a native single-file picker constrained to images and upload the
  * chosen file. Non-image files are rejected in Rust (via MIME sniffing)

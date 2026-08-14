@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { uploadMediaBytes } from "@/shared/api/tauri";
-import { cancelMediaUpload } from "@/shared/api/tauriMedia";
+import { cancelMediaUpload, releaseMediaUpload } from "@/shared/api/tauriMedia";
 import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
 import {
   buildLinkPreviewSnapshotTag,
@@ -101,6 +101,7 @@ async function uploadDataUrl(
     return { failed: true, sha256: "", url: "" };
   } finally {
     signal.removeEventListener("abort", cancel);
+    await releaseMediaUpload(progressId).catch(() => undefined);
   }
 }
 

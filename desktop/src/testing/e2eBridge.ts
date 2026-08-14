@@ -12823,6 +12823,11 @@ export function maybeInstallE2eTauriMocks() {
         if (progressId) cancelledMediaUploadIds.add(progressId);
         return null;
       }
+      case "release_media_upload": {
+        const progressId = (payload as { progressId?: string }).progressId;
+        if (progressId) cancelledMediaUploadIds.delete(progressId);
+        return null;
+      }
       case "upload_media_bytes_raw":
         return resolveMockUploadDescriptorForBytes(
           {
