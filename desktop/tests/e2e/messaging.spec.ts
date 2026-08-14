@@ -1,9 +1,16 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test, type Locator } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
+
+const LINK_PREVIEW_IMAGE = readFileSync(
+  new URL("../fixtures/github-pr-5629-og.png", import.meta.url),
+);
+const LINK_PREVIEW_IMAGE_DATA_URL = `data:image/png;base64,${LINK_PREVIEW_IMAGE.toString("base64")}`;
 
 async function waitForReadyComposerSnapshots(
   page: import("@playwright/test").Page,
@@ -208,8 +215,7 @@ test.beforeEach(async ({ page }, testInfo) => {
                       siteName: "GitHub",
                       description:
                         "A polished, stable preview for shared links.",
-                      imageDataUrl:
-                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                      imageDataUrl: LINK_PREVIEW_IMAGE_DATA_URL,
                       imageDomain: "opengraph.githubassets.com",
                       faviconDataUrl:
                         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -280,44 +286,63 @@ test.beforeEach(async ({ page }, testInfo) => {
                               "link-preview-image",
                             ],
                           }
-                        : testInfo.title.includes("link preview") ||
-                            testInfo.title.includes("supported Compact")
+                        : testInfo.title.includes(
+                              "sent link preview media uses",
+                            )
                           ? {
+                              mediaProxyInitiallyUnavailable: true,
                               linkPreviewMetadata: {
                                 title: "Buzz pull request",
                                 siteName: "GitHub",
                                 description:
                                   "A sender-authored preview snapshot.",
-                                imageDataUrl: null,
-                                imageDomain: null,
+                                imageDataUrl:
+                                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                                imageDomain: "opengraph.githubassets.com",
+                                faviconDataUrl:
+                                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                               },
-                              linkPreviewMetadataDelayMs:
-                                testInfo.title.includes(
-                                  "loading card before cold resolver work",
-                                )
-                                  ? 10_000
-                                  : testInfo.title.includes(
-                                        "send does not wait",
-                                      )
-                                    ? 3_000
-                                    : testInfo.title.includes("draft auto-send")
-                                      ? 500
-                                      : testInfo.title.includes(
-                                            "style defaults",
-                                          ) ||
-                                          testInfo.title.includes(
-                                            "attachment-sized",
-                                          )
-                                        ? 1_500
-                                        : undefined,
-                              linkPreviewMetadataStartBlockMs:
-                                testInfo.title.includes(
-                                  "loading card before cold resolver work",
-                                )
-                                  ? 150
-                                  : undefined,
                             }
-                          : undefined;
+                          : testInfo.title.includes("link preview") ||
+                              testInfo.title.includes("supported Compact")
+                            ? {
+                                linkPreviewMetadata: {
+                                  title: "Buzz pull request",
+                                  siteName: "GitHub",
+                                  description:
+                                    "A sender-authored preview snapshot.",
+                                  imageDataUrl: null,
+                                  imageDomain: null,
+                                },
+                                linkPreviewMetadataDelayMs:
+                                  testInfo.title.includes(
+                                    "loading card before cold resolver work",
+                                  )
+                                    ? 10_000
+                                    : testInfo.title.includes(
+                                          "send does not wait",
+                                        )
+                                      ? 3_000
+                                      : testInfo.title.includes(
+                                            "draft auto-send",
+                                          )
+                                        ? 500
+                                        : testInfo.title.includes(
+                                              "style defaults",
+                                            ) ||
+                                            testInfo.title.includes(
+                                              "attachment-sized",
+                                            )
+                                          ? 1_500
+                                          : undefined,
+                                linkPreviewMetadataStartBlockMs:
+                                  testInfo.title.includes(
+                                    "loading card before cold resolver work",
+                                  )
+                                    ? 150
+                                    : undefined,
+                              }
+                            : undefined;
   const mock = testInfo.title.includes("unresolvable preview")
     ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 800 }
     : baseMock;
@@ -460,6 +485,81 @@ test("markdown tables overflow wide content and fill the message when narrow", a
       }),
     )
     .toBeLessThanOrEqual(1);
+});
+
+test("sent link preview media uses the authenticated proxy in compact and rich cards", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?proxy=1";
+  const fallbackMediaPattern =
+    /^buzz-media:\/\/localhost\/media\/[\da-f]{64}\.png$/;
+  const proxyMediaPattern =
+    /^http:\/\/127\.0\.0\.1:54321\/media\/[\da-f]{64}\.png$/;
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#22c55e"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+  await waitForReadyComposerSnapshots(page);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const compactPreview = row.locator(
+    '[data-link-preview="github-pull-request"]',
+  );
+  const compactThumbnail = compactPreview
+    .locator("[data-link-preview-thumbnail] img")
+    .first();
+  const compactFavicon = compactPreview.locator(
+    "img[data-link-preview-hostname-favicon]",
+  );
+  await expect(compactThumbnail).toHaveAttribute("src", fallbackMediaPattern);
+  await expect(compactFavicon).toHaveAttribute("src", fallbackMediaPattern);
+
+  const releasedPort = await page.evaluate(() =>
+    window.__BUZZ_E2E_RELEASE_MEDIA_PROXY__?.(),
+  );
+  expect(releasedPort).toBe(54321);
+  await expect(compactThumbnail).toHaveAttribute("src", proxyMediaPattern);
+  await expect(compactFavicon).toHaveAttribute("src", proxyMediaPattern);
+  await expect
+    .poll(() => compactThumbnail.evaluate((image) => image.naturalWidth))
+    .toBe(40);
+
+  // The compact thumbnail sits flush against the card shell's left edge, so the
+  // shell's smooth-corner clip carves those corners. It must therefore carry
+  // the same treatment itself, or its right corners render as a plain arc
+  // against the shell's smoothed left corners. See the invariant in
+  // `shared/ui/smoothCorners.ts`.
+  const compactThumbnailFrame = compactPreview
+    .locator("[data-link-preview-thumbnail]")
+    .first();
+  await expectCornerRadiusPx(compactPreview, 16);
+  await expectCornerRadiusPx(compactThumbnailFrame, 16);
+  await expectSmoothCorners(compactThumbnailFrame);
+
+  await openSettings(page, "appearance");
+  await page.getByTestId("link-preview-style-trigger").click();
+  await page.getByTestId("link-preview-style-rich").click();
+  await page.getByTestId("settings-back-to-app").click();
+
+  const richPreview = row.locator(
+    '[data-link-preview="github-pull-request"][data-link-preview-inline]',
+  );
+  const richThumbnail = richPreview
+    .locator("[data-link-preview-thumbnail] img")
+    .first();
+  const richFavicon = richPreview.locator("img[data-link-preview-favicon]");
+  await expect(richThumbnail).toHaveAttribute("src", proxyMediaPattern);
+  await expect(richFavicon).toHaveAttribute("src", proxyMediaPattern);
+  await expect
+    .poll(() => richThumbnail.evaluate((image) => image.naturalWidth))
+    .toBe(40);
 });
 
 test("link preview style defaults to compact and Rich unfurls descriptions", async ({
@@ -1220,6 +1320,58 @@ test("composer link preview embeds stay attachment-sized while loading and ready
   }
 });
 
+test("compact link preview image geometry truncates long titles to one line", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?geometry=1";
+  // Sent snapshot media is relay-hosted and rewritten through the
+  // authenticated media proxy (#5627), so serve the fixture from the mock
+  // proxy origin rather than the raw relay origin.
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: LINK_PREVIEW_IMAGE,
+      contentType: "image/png",
+    }),
+  );
+  await page.setViewportSize({ width: 800, height: 700 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+  await waitForReadyComposerSnapshots(page);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const card = row.locator('[data-link-preview="github-pull-request"]');
+  const thumbnail = card.locator("[data-link-preview-thumbnail]");
+  const title = card.locator('[data-slot="attachment-title"]');
+  const image = thumbnail.locator("img");
+  await expect(card).toHaveAttribute("data-image-state", "image");
+  await expect(image).toBeVisible();
+  await expect
+    .poll(() => image.evaluate((element) => element.naturalWidth))
+    .toBeGreaterThan(0);
+  await expect(card).toHaveCSS("height", "64px");
+  await expect(thumbnail).toHaveCSS("height", "64px");
+  await expect(thumbnail).toHaveCSS("width", "104px");
+  await expect(title).toHaveText(
+    "Ship a wider horizontal preview with a two-line title that wraps cleanly",
+  );
+  await expect(title).toHaveCSS("white-space", "nowrap");
+  await expect
+    .poll(() =>
+      title.evaluate((element) => element.scrollWidth - element.clientWidth),
+    )
+    .toBeGreaterThan(1);
+
+  if (process.env.BUZZ_LINK_PREVIEW_SCREENSHOTS_DIR) {
+    await waitForAnimations(page);
+    await row.screenshot({
+      animations: "disabled",
+      path: `${process.env.BUZZ_LINK_PREVIEW_SCREENSHOTS_DIR}/recipient-compact-long-title.png`,
+    });
+  }
+});
+
 test("composer no-image link embeds keep the attachment footprint", async ({
   page,
 }) => {
@@ -1731,6 +1883,286 @@ test("send message to DM channel p-tags the recipient", async ({ page }) => {
       }, message),
     )
     .toContainEqual(["p", TEST_IDENTITIES.alice.pubkey]);
+});
+
+test("sends a thread message to its parent channel with a root-thread link", async ({
+  page,
+}) => {
+  const timestamp = Date.now();
+  const rootContent = `🧵 Share source thread ${timestamp}`;
+  const priorChannelMessage = `Prior channel message ${timestamp}`;
+  const replySummary = `Share this reply ${timestamp}`;
+  const attachmentSha = "d".repeat(64);
+  const attachmentUrl = `http://localhost:3000/media/${attachmentSha}.txt`;
+  const customEmojiUrl = "https://example.com/send-to-channel-party.svg";
+  const previewUrl = "https://github.com/block/buzz/pull/5305";
+  const ownReplyContent = [
+    `${replySummary} with @alice :party:`,
+    `[launch-notes.txt](${attachmentUrl})`,
+    previewUrl,
+  ].join("\n\n");
+  const imetaTag = [
+    "imeta",
+    `url ${attachmentUrl}`,
+    "m text/plain",
+    `x ${attachmentSha}`,
+    "size 42",
+    "filename launch-notes.txt",
+  ];
+  const emojiTag = ["emoji", "party", customEmojiUrl];
+  const mentionTag = ["mention", TEST_IDENTITIES.alice.pubkey];
+  const linkPreviewTag = [
+    "link-preview",
+    "snapshot",
+    "1",
+    previewUrl,
+    "Add Send to channel for thread messages",
+    "GitHub",
+    "A shared link preview preserved from the source thread message.",
+    "",
+    "",
+    "",
+    "",
+  ];
+
+  await page.route(customEmojiUrl, (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><circle cx="16" cy="16" r="15" fill="#a78bfa"/><path d="M8 18l5 5 11-13" fill="none" stroke="white" stroke-width="3"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      (window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+        channelName: "general",
+      }) ??
+        false),
+  );
+
+  const { ownReplyId, rootId } = await page.evaluate(
+    ({ alicePubkey, ownReply, root, semanticTags }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const rootEvent = emit({
+        channelName: "general",
+        content: root,
+        pubkey: alicePubkey,
+      });
+      const ownReplyEvent = emit({
+        channelName: "general",
+        content: ownReply,
+        extraTags: semanticTags,
+        mentionPubkeys: [alicePubkey],
+        parentEventId: rootEvent.id,
+      });
+      return {
+        ownReplyId: ownReplyEvent.id,
+        rootId: rootEvent.id,
+      };
+    },
+    {
+      alicePubkey: TEST_IDENTITIES.alice.pubkey,
+      ownReply: ownReplyContent,
+      root: rootContent,
+      semanticTags: [imetaTag, emojiTag, mentionTag, linkPreviewTag],
+    },
+  );
+
+  const timeline = page.getByTestId("message-timeline");
+  const rootRow = timeline.locator(`[data-message-id="${rootId}"]`);
+  await expect(rootRow).toContainText(rootContent);
+
+  await page.getByTestId("message-input").fill(priorChannelMessage);
+  await page.getByTestId("send-message").click();
+  const priorChannelRow = timeline
+    .getByTestId("message-row")
+    .filter({ hasText: priorChannelMessage });
+  await expect(priorChannelRow).toBeVisible();
+  await expect(priorChannelRow.getByTestId("message-send-status")).toHaveCount(
+    0,
+  );
+
+  await timeline
+    .locator(
+      `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
+    )
+    .click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadRootRow = threadPanel.locator(`[data-message-id="${rootId}"]`);
+  const rootMoreActions = threadRootRow.getByTestId(`more-actions-${rootId}`);
+  await rootMoreActions.click({ force: true });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Send to channel" }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+
+  const ownReplyRow = threadPanel.locator(`[data-message-id="${ownReplyId}"]`);
+  await expect(ownReplyRow).toContainText(replySummary);
+  await ownReplyRow
+    .getByTestId(`more-actions-${ownReplyId}`)
+    .click({ force: true });
+  const sendToChannelItem = page.getByRole("menuitem", {
+    name: "Send to channel",
+  });
+  const sendToChannelIcon = sendToChannelItem.getByTestId(
+    "send-to-channel-icon",
+  );
+  await expect(sendToChannelIcon).toBeVisible();
+  await expect(sendToChannelIcon).toHaveAttribute("aria-hidden", "true");
+  await expect(sendToChannelIcon).toHaveClass(/lucide-hash-arrow-in/);
+  await expect
+    .poll(async () => {
+      const box = await sendToChannelIcon.boundingBox();
+      return box ? [box.width, box.height] : null;
+    })
+    .toEqual([16, 16]);
+  await sendToChannelItem.click();
+
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "Sent to channel" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate((content) => {
+        return Boolean(
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) =>
+              entry.command === "send_channel_message" &&
+              (entry.payload as { content?: string } | undefined)?.content ===
+                content,
+          ),
+        );
+      }, ownReplyContent),
+    )
+    .toBe(true);
+  const sentPayload = await page.evaluate(
+    (content) =>
+      (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+        (entry) =>
+          entry.command === "send_channel_message" &&
+          (entry.payload as { content?: string } | undefined)?.content ===
+            content,
+      )?.payload as Record<string, unknown> | undefined,
+    ownReplyContent,
+  );
+  expect(sentPayload).toMatchObject({
+    channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+    content: ownReplyContent,
+    emojiTags: [emojiTag],
+    linkPreviewTags: [linkPreviewTag],
+    mediaTags: [imetaTag],
+    mentionPubkeys: [TEST_IDENTITIES.alice.pubkey],
+    mentionTags: [mentionTag],
+    parentEventId: null,
+    sentFromThreadTag: ["buzz:sent-from-thread", rootId, rootContent],
+  });
+
+  await page.getByTestId("auxiliary-panel-close").click();
+
+  const sharedRow = timeline
+    .getByTestId("message-row")
+    .filter({ hasText: replySummary })
+    .last();
+  await expect
+    .poll(async () => {
+      if (await sharedRow.isVisible()) return true;
+      const scrollToLatest = page.getByTestId("message-scroll-to-latest");
+      if (await scrollToLatest.isVisible()) await scrollToLatest.click();
+      return false;
+    })
+    .toBe(true);
+  await expect(sharedRow.getByTestId("message-author")).toHaveText(
+    "npub1mock...",
+  );
+  await expect(sharedRow.getByTestId("message-avatar-fallback")).toBeVisible();
+  await expect(sharedRow.locator('[data-mention=""]')).toContainText("alice");
+  await expect(sharedRow.locator("img[data-custom-emoji]")).toHaveAttribute(
+    "src",
+    customEmojiUrl,
+  );
+  await expect(sharedRow.getByTestId("file-card")).toContainText(
+    "launch-notes.txt",
+  );
+  await expect(
+    sharedRow.locator('[data-link-preview="github-pull-request"]'),
+  ).toContainText("Add Send to channel for thread messages");
+  const sourceLine = sharedRow.getByTestId("sent-from-thread");
+  await expect(sourceLine).toContainText("Sent from thread:");
+  await expect(sourceLine).toHaveClass(/message-markdown/);
+  await expect(sourceLine).toHaveClass(/pt-0\.5/);
+  await expect(sourceLine).toHaveClass(/text-sm/);
+  await expect(sourceLine).toHaveClass(/font-normal/);
+  await expect(sourceLine).toHaveClass(/leading-4/);
+  await expect(sourceLine).toHaveClass(/text-muted-foreground\/70/);
+  const rootLink = sourceLine.locator("[data-message-link]");
+  const sourcePrefix = sourceLine.locator("span").first();
+  const rootLinkLabel = rootContent;
+  await expect(rootLink).toHaveText(rootLinkLabel);
+  await expect(rootLink).toHaveAttribute(
+    "aria-label",
+    "Open thread in general",
+  );
+  await expect(rootLink).toHaveAttribute("title", rootLinkLabel);
+  await expect(rootLink).toHaveClass(/max-w-80/);
+  await expect(rootLink).toHaveClass(/truncate/);
+  await expect(rootLink).toHaveClass(/inline-block/);
+  await expect(rootLink).toHaveClass(/font-medium/);
+  await expect(rootLink).not.toHaveClass(/mention-chip/);
+  await expect(rootLink).not.toHaveClass(/border-b/);
+  const rootLinkText = rootLink.locator("[data-message-link-text]");
+  const rootLinkEmoji = rootLink.locator("[data-message-link-emoji]");
+  await expect(rootLinkText).toHaveText(` Share source thread ${timestamp}`);
+  await expect(rootLinkText).not.toHaveClass(/border-b/);
+  await expect(rootLinkEmoji).toHaveText("🧵");
+  await expect(rootLinkEmoji).not.toHaveClass(/border-b/);
+  await expect(rootLink).not.toHaveAttribute("data-hovered");
+  const [prefixColor, linkColorBeforeHover] = await Promise.all([
+    sourcePrefix.evaluate((element) => getComputedStyle(element).color),
+    rootLink.evaluate((element) => getComputedStyle(element).color),
+  ]);
+  expect(linkColorBeforeHover).not.toBe(prefixColor);
+  await expect
+    .poll(() =>
+      rootLink.evaluate((element) => getComputedStyle(element).backgroundColor),
+    )
+    .toBe("rgba(0, 0, 0, 0)");
+  await expect
+    .poll(() =>
+      rootLinkText.evaluate((element) => getComputedStyle(element).boxShadow),
+    )
+    .toBe("none");
+
+  await rootLink.hover();
+  await expect(rootLink).toHaveAttribute("data-hovered", "");
+  await expect
+    .poll(() => rootLink.evaluate((element) => getComputedStyle(element).color))
+    .toBe(linkColorBeforeHover);
+  await expect
+    .poll(() =>
+      rootLinkText.evaluate(
+        (element) => getComputedStyle(element).boxShadow !== "none",
+      ),
+    )
+    .toBe(true);
+
+  await expect
+    .poll(() =>
+      rootLinkEmoji.evaluate((element) => getComputedStyle(element).boxShadow),
+    )
+    .toBe("none");
+
+  await rootLink.click();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    rootContent,
+  );
 });
 
 test("shows your avatar on your own message when profile avatar is set", async ({

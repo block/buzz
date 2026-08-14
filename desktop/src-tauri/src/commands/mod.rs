@@ -5,7 +5,6 @@ mod agent_discovery;
 mod agent_logs;
 mod agent_metric_archive;
 mod agent_model_process;
-mod agent_model_update;
 mod agent_models;
 mod agent_models_env;
 mod agent_providers;
@@ -26,6 +25,7 @@ mod identity_archive;
 mod join_policy;
 mod legacy_storage;
 mod link_preview;
+mod managed_agent_definition;
 pub(crate) mod media;
 mod media_animated;
 mod media_download;
@@ -36,6 +36,8 @@ mod media_transcode;
 mod media_upload_progress;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_llm;
+#[cfg(feature = "mesh-llm")]
+pub(crate) mod mesh_readiness;
 mod messages;
 mod notifications;
 mod observer_archive;

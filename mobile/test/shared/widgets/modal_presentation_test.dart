@@ -3,6 +3,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/modal_presentation.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -30,6 +31,10 @@ void main() {
           ),
           findsOneWidget,
         );
+        final contentClip = tester.widget<ClipRSuperellipse>(
+          find.byKey(const ValueKey('concentric-sheet-content-clip')),
+        );
+        expect(contentClip.borderRadius, BorderRadius.circular(Radii.dialog));
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
@@ -75,6 +80,66 @@ void main() {
     },
   );
 
+  testWidgets('native titled sheets leave the concentric surface unobscured', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    const surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      surfaceChannel,
+      (call) async => call.method == 'isSupported' ? true : null,
+    );
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => FilledButton(
+                onPressed: () => showBuzzModalBottomSheet<void>(
+                  context: context,
+                  title: 'Members',
+                  builder: (_) => const Text('Sheet body'),
+                ),
+                child: const Text('Open sheet'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open sheet'));
+      await tester.pumpAndSettle();
+
+      final nativeSurface = tester.widget<UiKitView>(find.byType(UiKitView));
+      expect(
+        nativeSurface.creationParams,
+        containsPair('color', lightColorScheme.surface.toARGB32()),
+      );
+      expect(nativeSurface.creationParams, isNot(contains('headerGradient')));
+      expect(
+        find.byKey(const ValueKey('buzz-sheet-header-gradient')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('buzz-sheet-surface-clip')),
+        findsNothing,
+      );
+      final contentClip = tester.widget<ClipRSuperellipse>(
+        find.byKey(const ValueKey('concentric-sheet-content-clip')),
+      );
+      expect(contentClip.borderRadius, BorderRadius.circular(Radii.dialog * 2));
+      expect(contentClip.clipBehavior, Clip.antiAlias);
+      expect(find.text('Members'), findsOneWidget);
+    } finally {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        surfaceChannel,
+        null,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   testWidgets(
     'non-iOS sheets use Flutter drag handle and shared close control',
     (tester) async {
@@ -88,6 +153,7 @@ void main() {
                 builder: (context) => FilledButton(
                   onPressed: () => showBuzzModalBottomSheet<void>(
                     context: context,
+                    title: 'Sheet title',
                     showDragHandle: true,
                     builder: (_) => const Text('Sheet body'),
                   ),
@@ -102,8 +168,51 @@ void main() {
         await tester.pumpAndSettle();
 
         final closeButton = find.byTooltip('Close sheet');
+        final title = find.byKey(const ValueKey('buzz-sheet-title'));
         expect(closeButton, findsOneWidget);
+        expect(title, findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('buzz-sheet-surface-clip')),
+          findsOneWidget,
+        );
         expect(tester.getSize(closeButton), const Size.square(44));
+        expect(tester.widget<Text>(title).style?.fontSize, 16);
+        expect(
+          find.byKey(const ValueKey('buzz-sheet-header-gradient')),
+          findsNothing,
+        );
+        expect(
+          tester
+              .widget<ColoredBox>(
+                find.byKey(const ValueKey('buzz-sheet-surface')),
+              )
+              .color,
+          lightColorScheme.surface,
+        );
+        expect(
+          tester.getTopLeft(find.text('Sheet body')).dy -
+              tester
+                  .getTopLeft(find.byKey(const ValueKey('buzz-sheet-surface')))
+                  .dy,
+          80,
+        );
+        expect(find.byType(BackdropFilter), findsNothing);
+        expect(
+          tester.widget<BottomSheet>(find.byType(BottomSheet)).backgroundColor,
+          Colors.transparent,
+        );
+        expect(
+          tester.getCenter(title).dx,
+          closeTo(tester.getCenter(find.byType(BottomSheet)).dx, 0.01),
+        );
+        expect(
+          tester.getCenter(title).dy,
+          closeTo(tester.getCenter(closeButton).dy, 0.01),
+        );
+        expect(
+          tester.getCenter(closeButton).dx,
+          greaterThan(tester.getCenter(title).dx),
+        );
         final closeGutter = find.ancestor(
           of: closeButton,
           matching: find.byWidgetPredicate(
@@ -125,17 +234,33 @@ void main() {
         expect(gutterRect.right - closeRect.right, Grid.gutter);
         expect(
           tester.widget<BottomSheet>(find.byType(BottomSheet)).showDragHandle,
-          isTrue,
+          isFalse,
         );
         expect(
           find.byKey(const ValueKey('buzz-sheet-drag-handle')),
-          findsNothing,
+          findsOneWidget,
         );
-        expect(find.text('Sheet body'), findsOneWidget);
-
-        await tester.tap(closeButton);
+        expect(
+          tester.getTopLeft(closeButton).dy -
+              tester.getTopLeft(find.byType(BottomSheet)).dy,
+          Grid.gutter,
+        );
+        final dismissHandle = find.bySemanticsLabel('Dismiss').first;
+        expect(dismissHandle, findsOneWidget);
+        final semantics = tester.getSemantics(dismissHandle);
+        expect(semantics.flagsCollection.isButton, isTrue);
+        expect(
+          semantics.getSemanticsData().hasAction(SemanticsAction.tap),
+          isTrue,
+        );
+        tester.binding.performSemanticsAction(
+          SemanticsActionEvent(
+            type: SemanticsAction.tap,
+            viewId: tester.view.viewId,
+            nodeId: semantics.id,
+          ),
+        );
         await tester.pumpAndSettle();
-
         expect(find.text('Sheet body'), findsNothing);
       } finally {
         debugDefaultTargetPlatformOverride = null;
@@ -178,7 +303,14 @@ void main() {
       );
       expect(internalHandle, findsOneWidget);
       expect(tester.getSize(internalHandle), const Size(32, 4));
-      expect(find.bySemanticsLabel('Drag handle'), findsOneWidget);
+      final dismissHandle = find.bySemanticsLabel('Dismiss');
+      expect(dismissHandle, findsOneWidget);
+      final semantics = tester.getSemantics(dismissHandle);
+      expect(semantics.flagsCollection.isButton, isTrue);
+      expect(
+        semantics.getSemanticsData().hasAction(SemanticsAction.tap),
+        isTrue,
+      );
       expect(find.byTooltip('Close sheet'), findsOneWidget);
       expect(find.text('Sheet body'), findsOneWidget);
     } finally {

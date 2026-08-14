@@ -500,15 +500,18 @@ async function getMockChannels(page: Page) {
       throw new Error("Mock invoke bridge is unavailable.");
     }
 
-    return (await invoke("get_channels")) as Array<{
-      id: string;
-      name: string;
-      channel_type: string;
-      visibility: "open" | "private";
-      member_count: number;
-      is_member: boolean;
-      ttl_seconds: number | null;
-    }>;
+    const payload = (await invoke("get_channels")) as {
+      channels: Array<{
+        id: string;
+        name: string;
+        channel_type: string;
+        visibility: "open" | "private";
+        member_count: number;
+        is_member: boolean;
+        ttl_seconds: number | null;
+      }> | null;
+    };
+    return payload.channels ?? [];
   });
 }
 

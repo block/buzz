@@ -164,7 +164,6 @@ function MessageComposerImpl({
     media.queuedAttachmentsRef.current.length === 0;
   const ownsDropZone = mediaController === undefined;
   const backgroundUpload = useBackgroundMediaUpload();
-  // Restore/persist drafts at a key boundary; the hook handles StrictMode.
   useDraftPersistLifecycle({
     effectiveDraftKey,
     channelId,
@@ -254,6 +253,7 @@ function MessageComposerImpl({
     mentionNames: mentions.knownNames,
     agentMentionNames: mentions.agentKnownNames,
     channelNames: channelLinks.knownChannelNames,
+    messageLinkChannels: channelLinks.channels,
     customEmoji,
     onSubmit: () => submitMessageRef.current(),
     onEditLastOwnMessage: () => {
@@ -360,9 +360,9 @@ function MessageComposerImpl({
       const editableBody = stripImetaMediaLines(editTarget.body, editableImeta);
       setComposerContent(editableBody);
       richText.setContent(editableBody);
-      // Seed the composer's pending-imeta state with the original event's
-      // attachments so they show up in `ComposerAttachments` and the user
-      // can remove existing ones / add new ones before saving.
+      // Seed pending imeta with removable originals before saving the edit.
+      // New attachments can then be added through the same row.
+      mentions.restoreDraftMentionRefs(editTarget.mentionRefs ?? []);
       media.setPendingImeta(editableImeta);
       media.clearQueuedAttachments();
       setSpoileredAttachmentUrls(
@@ -485,7 +485,6 @@ function MessageComposerImpl({
     },
     [richText.editor, mentions.clearMentions, customEmoji],
   );
-  // ── @ mention picker (toolbar button) ───────────────────────────────
   const openMentionPicker = React.useCallback(() => {
     if (!richText.editor) return;
     const { text, cursor } = richText.getPlainTextAndCursor();
@@ -517,15 +516,14 @@ function MessageComposerImpl({
     // Edit mode
     if (editTargetRef.current && onEditSaveRef.current) {
       if (isEditSubmissionLocked) return;
-      // No empty-edit guard here: clearing an edit to empty (no text, no
-      // attachments) flows through to onEditSave as empty content, which
-      // deletes the message instead of publishing it (see handleEditSave).
+      // Empty edits delete the message through handleEditSave.
       await submitMessageEdit({
         content: trimmed,
         editTargetId: editTargetRef.current.id,
         customEmoji,
         originalContent: editTargetRef.current.body,
         ownerPubkey: ownerPubkeyRef.current,
+        editTarget: editTargetRef.current,
         getMentionRefs: mentions.getDraftMentionRefs,
         pendingImeta: media.pendingImetaRef.current,
         queuedAttachments: media.queuedAttachmentsRef.current,
@@ -551,6 +549,7 @@ function MessageComposerImpl({
           setSpoileredAttachmentUrls(draft.spoileredAttachmentUrls);
         },
         restoreMentionRefs: mentions.restoreDraftMentionRefs,
+        revalidateMentionPubkeys: mentions.revalidateMentionPubkeys,
         shouldRestoreComposer: () => canRestoreEditDraftRef.current,
         setDeferredUploadPending: setDeferredEditPending,
         setUploadError: (message) =>
@@ -638,6 +637,7 @@ function MessageComposerImpl({
     effectiveDraftKey,
     mentions.getDraftMentionRefs,
     mentions.restoreDraftMentionRefs,
+    mentions.revalidateMentionPubkeys,
   ]);
   submitMessageRef.current = submitMessage;
   // ── Auto-submit on draft send ────────────────────────────────────────────

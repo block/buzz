@@ -45,9 +45,10 @@ class _ChannelsBody extends StatelessWidget {
             onRefresh: onRefresh,
             child: CustomScrollView(
               controller: scrollController,
-              // The transparent gap shows the top section and must not absorb
-              // taps meant for the community or profile controls beneath it.
-              hitTestBehavior: HitTestBehavior.deferToChild,
+              // Transparent list gaps must remain hit-testable so a new drag
+              // can interrupt ballistic scrolling. The app bar is painted
+              // later and retains its community and profile controls.
+              hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
                 if (usesPinnedGradient)

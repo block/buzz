@@ -5,9 +5,9 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
+pub(super) use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
-pub(super) use super::agent_model_update::apply_model_provider_prompt_update;
 #[cfg(test)]
 use super::agent_models_env::env_value;
 use super::agent_models_env::{
@@ -749,7 +749,7 @@ pub async fn update_managed_agent(
             input.model,
             input.provider,
             input.system_prompt,
-        );
+        )?;
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }

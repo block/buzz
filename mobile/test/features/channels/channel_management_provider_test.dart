@@ -222,6 +222,114 @@ void main() {
     });
   });
 
+  group('channelMembersProvider', () {
+    test('waits for the relay connection before fetching members', () async {
+      final session = _ConnectionAwareRelaySession();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      final subscription = container.listen(
+        channelMembersProvider(_channelId),
+        (_, _) {},
+      );
+      addTearDown(subscription.close);
+
+      expect(
+        await container.read(channelMembersProvider(_channelId).future),
+        isEmpty,
+      );
+      expect(session.historyQueryCount, 0);
+
+      session.connect();
+      await container.pump();
+      final members = await container.read(
+        channelMembersProvider(_channelId).future,
+      );
+
+      expect(session.historyQueryCount, 1);
+      expect(members, hasLength(1));
+      expect(members.single.pubkey, _memberPubkey);
+      expect(members.single.role, 'admin');
+    });
+
+    test(
+      'keeps the provider member snapshot available during reconnect',
+      () async {
+        final session = _ConnectionAwareRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        final subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
+
+        session.connect();
+        await container.pump();
+        final connectedMembers = await container.read(
+          channelMembersProvider(_channelId).future,
+        );
+        expect(connectedMembers, hasLength(1));
+        expect(session.historyQueryCount, 1);
+
+        session.setStatus(SessionStatus.reconnecting);
+        await container.pump();
+
+        final reconnectingMembers = container
+            .read(channelMembersProvider(_channelId))
+            .asData
+            ?.value;
+        expect(reconnectingMembers, connectedMembers);
+        expect(session.historyQueryCount, 1);
+      },
+    );
+
+    test('keeps the member snapshot available during reconnect', () {
+      final cachedMembers = [
+        ChannelMember(
+          pubkey: _memberPubkey,
+          role: 'member',
+          joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+        ),
+      ];
+      final refreshedMember = ChannelMember(
+        pubkey: _memberPubkey,
+        role: 'admin',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+      );
+
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: const AsyncData([]),
+          sessionStatus: SessionStatus.connected,
+          cachedMembers: cachedMembers,
+        ),
+        isEmpty,
+      );
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: const AsyncData([]),
+          sessionStatus: SessionStatus.reconnecting,
+          cachedMembers: cachedMembers,
+        ),
+        same(cachedMembers),
+      );
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: AsyncData([refreshedMember]),
+          sessionStatus: SessionStatus.connected,
+          cachedMembers: cachedMembers,
+        ),
+        [refreshedMember],
+      );
+    });
+  });
+
   group('directory providers relay-config invalidation', () {
     NostrEvent profile(String pubkey, String name) => NostrEvent(
       id: '$pubkey-profile',
@@ -333,6 +441,55 @@ void main() {
       expect(session.searchQueryCount, 2);
     });
   });
+}
+
+const _channelId = '11111111-1111-4111-8111-111111111111';
+const _memberPubkey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+class _ConnectionAwareRelaySession extends RelaySessionNotifier {
+  int historyQueryCount = 0;
+
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+
+  void connect() {
+    state = const SessionState(status: SessionStatus.connected);
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    historyQueryCount++;
+    return [
+      NostrEvent(
+        id: 'members',
+        pubkey: 'owner',
+        createdAt: 1,
+        kind: 39002,
+        tags: const [
+          ['d', _channelId],
+          ['p', _memberPubkey, 'wss://relay.example', 'admin'],
+        ],
+        content: '',
+        sig: 'sig',
+      ),
+    ];
+  }
+
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async => () {};
 }
 
 /// Fake [RelaySessionNotifier] that serves canned kind:0 profile events from

@@ -1,5 +1,16 @@
 part of '../channel_detail_page.dart';
 
+const _dmHeaderAvatarSize = 32.0;
+const _dmPresenceDotRatio = 8 / 14;
+
+bool _showsMembersAction(Channel channel) {
+  if (!channel.isDm) return true;
+  final participants = channel.participantPubkeys
+      .map((pubkey) => pubkey.toLowerCase())
+      .toSet();
+  return participants.length != 2;
+}
+
 double _scaledTextHeight(BuildContext context, TextStyle style) {
   final scaledFontSize = MediaQuery.textScalerOf(
     context,
@@ -8,15 +19,15 @@ double _scaledTextHeight(BuildContext context, TextStyle style) {
 }
 
 double _dmAppBarTitleContentHeight(BuildContext context) {
-  const titleStyle = channelTitleTextStyle;
-  final presenceStyle = context.textTheme.bodySmall;
-  if (presenceStyle == null) {
-    return 30;
+  final titleStyle = context.textTheme.titleSmall;
+  final presenceStyle = context.textTheme.bodyMedium;
+  if (titleStyle == null || presenceStyle == null) {
+    return _dmHeaderAvatarSize;
   }
   final textHeight =
       _scaledTextHeight(context, titleStyle) +
       _scaledTextHeight(context, presenceStyle);
-  return textHeight > 30 ? textHeight : 30;
+  return textHeight > _dmHeaderAvatarSize ? textHeight : _dmHeaderAvatarSize;
 }
 
 class _MembersButton extends ConsumerWidget {
@@ -41,6 +52,7 @@ class _MembersButton extends ConsumerWidget {
       onPressed: () {
         showBuzzModalBottomSheet<void>(
           context: context,
+          title: 'Members',
           isScrollControlled: true,
           showDragHandle: true,
           builder: (_) =>
@@ -80,8 +92,6 @@ class _DmAppBarTitle extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profiles = ref.watch(userCacheProvider);
-    final presenceMap = ref.watch(presenceCacheProvider);
     final normalizedCurrent = currentPubkey?.toLowerCase();
 
     String? otherPubkey;
@@ -92,7 +102,18 @@ class _DmAppBarTitle extends ConsumerWidget {
       }
     }
 
-    final profile = otherPubkey != null ? profiles[otherPubkey] : null;
+    final profile = ref.watch(
+      userCacheProvider.select(
+        (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
+      ),
+    );
+    final presence = ref.watch(
+      presenceCacheProvider.select(
+        (presenceMap) => otherPubkey == null
+            ? 'offline'
+            : (presenceMap[otherPubkey] ?? 'offline'),
+      ),
+    );
 
     if (otherPubkey != null) {
       if (profile == null) {
@@ -102,14 +123,12 @@ class _DmAppBarTitle extends ConsumerWidget {
     }
 
     final avatarUrl = profile?.avatarUrl;
+    final animatedAvatar = parseAnimatedAvatarUrl(avatarUrl);
     final initial =
         profile?.initial ??
         (channel.participants.isNotEmpty
             ? channel.participants.first[0].toUpperCase()
             : '?');
-    final presence = otherPubkey != null
-        ? (presenceMap[otherPubkey] ?? 'offline')
-        : 'offline';
     final presenceLabel = switch (presence) {
       'online' => 'Online',
       'away' => 'Away',
@@ -118,16 +137,17 @@ class _DmAppBarTitle extends ConsumerWidget {
 
     return Row(
       children: [
-        SizedBox(
-          width: 30,
-          height: 30,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              AvatarImage(
-                imageUrl: avatarUrl,
-                radius: 14,
-                backgroundColor: context.colors.primaryContainer,
+        MaskedAvatarBadge(
+          key: const ValueKey('dm-header-avatar'),
+          size: _dmHeaderAvatarSize,
+          geometry: AvatarBadgeMaskGeometry.presenceDot,
+          avatar: ClipOval(
+            child: ColoredBox(
+              color: animatedAvatar == null
+                  ? context.colors.primaryContainer
+                  : Colors.transparent,
+              child: AvatarImageContent(
+                imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
                 fallback: Text(
                   initial,
                   style: context.textTheme.labelSmall?.copyWith(
@@ -136,27 +156,23 @@ class _DmAppBarTitle extends ConsumerWidget {
                   ),
                 ),
               ),
-              Positioned(
-                right: -1,
-                bottom: -1,
-                child: Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: switch (presence) {
-                      'online' => context.appColors.success,
-                      'away' => context.appColors.warning,
-                      _ => context.colors.outline,
-                    },
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: context.colors.surface,
-                      width: 1.5,
-                    ),
-                  ),
+            ),
+          ),
+          badge: Center(
+            child: FractionallySizedBox(
+              widthFactor: _dmPresenceDotRatio,
+              heightFactor: _dmPresenceDotRatio,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: switch (presence) {
+                    'online' => context.appColors.success,
+                    'away' => context.appColors.warning,
+                    _ => context.colors.outline,
+                  },
+                  shape: BoxShape.circle,
                 ),
               ),
-            ],
+            ),
           ),
         ),
         const SizedBox(width: Grid.xxs),
@@ -176,7 +192,8 @@ class _DmAppBarTitle extends ConsumerWidget {
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: channelTitleTextStyle,
+                      key: const ValueKey('dm-header-name'),
+                      style: context.textTheme.titleSmall,
                     ),
                   ),
                   if (channel.isEphemeral) ...[
@@ -187,7 +204,8 @@ class _DmAppBarTitle extends ConsumerWidget {
               ),
               Text(
                 presenceLabel,
-                style: context.textTheme.bodySmall?.copyWith(
+                key: const ValueKey('dm-header-presence'),
+                style: context.textTheme.bodyMedium?.copyWith(
                   color: context.colors.onSurfaceVariant,
                 ),
               ),
