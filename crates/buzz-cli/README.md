@@ -34,6 +34,7 @@ buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --br
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
+buzz messages link --channel <uuid> --event <event-id>
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
@@ -108,6 +109,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `delete` | Delete a message |
 | | `get` | List messages in a channel |
 | | `thread` | Get a message thread |
+| | `link` | Build a `buzz://message` deep link (local) |
 | | `search` | Full-text search, filterable by author |
 | | `vote` | Vote on a forum post |
 | `channels` | `list` | List channels |

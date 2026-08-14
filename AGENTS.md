@@ -201,7 +201,13 @@ or invoke with the full path.
 ### Deep Links
 
 `buzz://message?channel=<uuid>&id=<hex>` links reference a specific message
-thread. To read the linked thread:
+thread. To emit one:
+
+```bash
+buzz messages link --channel <uuid> --event <hex>
+```
+
+To read the linked thread:
 
 ```bash
 buzz messages thread --channel <uuid> --event <hex> --format compact

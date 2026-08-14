@@ -72,7 +72,8 @@ Configuration (flags override env vars):
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
-The 'pack' subcommand runs locally and does not require a relay connection.
+The 'pack' and 'messages link' subcommands run locally and do not require
+a relay connection or BUZZ_PRIVATE_KEY.
 
 Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=write conflict
 Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
@@ -512,6 +513,21 @@ pub enum MessagesCmd {
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
+    },
+    /// Build a `buzz://message` deep link for a channel event
+    #[command(
+        after_help = "Prints JSON `{link, channel, id}` (and `thread` when given). Does not hit the relay.\n\nExamples:\n  buzz messages link --channel <UUID> --event <HEX>\n  buzz messages link --channel <UUID> --event <HEX> --thread <HEX>"
+    )]
+    Link {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Message event ID (64-char hex)
+        #[arg(long)]
+        event: String,
+        /// Optional thread root event ID (64-char hex)
+        #[arg(long)]
+        thread: Option<String>,
     },
     /// Upvote or downvote a forum post
     Vote {
@@ -1951,12 +1967,20 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
+    // Pack and messages link are local-only — no relay connection or key.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
+    }
+    if let Cmd::Messages(MessagesCmd::Link {
+        channel,
+        event,
+        thread,
+    }) = cli.command
+    {
+        return commands::messages::cmd_link_message(&channel, &event, thread.as_deref());
     }
 
     // Auth: private key is required for all relay operations.

@@ -219,6 +219,12 @@ buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
 # messages thread
 buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
 
+# messages link (local, no relay or BUZZ_PRIVATE_KEY)
+buzz messages link --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq -r .link
+# Expected: buzz://message?channel=<uuid>&id=<hex>
+buzz messages link --channel "$CHANNEL_ID" --event "$EVENT_ID" --thread "$EVENT_ID" | jq -r .link
+# Expected: buzz://message?channel=<uuid>&id=<hex>&thread=<hex>
+
 # messages search
 buzz messages search --query "Hello" | jq .
 buzz messages search --query "CLI test" --limit 5 | jq .
@@ -565,6 +571,7 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 4 | `messages delete` | ☐ | |
 | 5 | `messages get` | ☐ | With limit |
 | 6 | `messages thread` | ☐ | |
+| 6b | `messages link` | ☐ | Local URL, no relay |
 | 7 | `messages search` | ☐ | With limit |
 | 8 | `messages vote` | ☐ | Up and down |
 | 9 | `channels list` | ☐ | With visibility, member |
