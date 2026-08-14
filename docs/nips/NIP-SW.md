@@ -14,24 +14,6 @@ NIP-SW defines one relay-authoritative channel-section workspace per `(community
 
 The relay sees structural section UUIDs, ordering, and channel assignments. Section names and icons are ciphertext under a random per-workspace content key. That key is wrapped separately to each authorized reader using NIP-44; it grants confidentiality access, never mutation authority.
 
-This design deliberately does not permit delegates to replace the legacy kind-30078 `d=channel-sections` whole-store blob. Typed normalized commands prevent one stale writer from replacing unrelated state.
-
-## Design rationale and alternatives considered
-
-### Why not share the legacy blob key?
-
-Sharing the legacy kind-30078 content key would grant confidentiality access, not scoped mutation authority. A parameterized replaceable event is owned by its signer, so a delegate cannot update the owner's `(kind, d-tag)` coordinate without the owner's signing key. Sharing that private key or an owner-capable signer would grant the owner's identity far beyond channel sections and would make revocation require rotating the owner identity.
-
-Allowing delegate-authored blobs under a new owner-scoped namespace would still require a new authorization protocol. It would also prevent the relay from enforcing the `viewer`, `mover`, and `manager` distinction: ciphertext does not reveal whether a proposed replacement contains only an allowed channel move or also renames, deletes, or reorders sections. Buzz's governing rule is that the relay, rather than client UI, enforces access control (`VISION.md`, “Access control”).
-
-Finally, a shared key does not provide merge semantics. Every writer would replace the complete store, so two valid edits could overwrite one another according to whole-blob last-writer-wins ordering. Encryption cannot make that safe. Typed commands, monotonic revisions, and idempotent action IDs instead give the relay a readable mutation boundary and deterministic conflict handling without allowing one stale operation to replace unrelated state.
-
-### Why structure is readable and meaning is encrypted
-
-The relay can authorize and resolve conflicts only over fields it can inspect. It therefore reads the minimum structural state needed for those decisions: section UUIDs and order, channel assignments, roles, and command metadata. Section names and icons do not affect authorization or conflict resolution, so they remain encrypted under the workspace content key. NIP-44 wraps that key separately for each authorized reader; possession of the key grants decryption, never permission to mutate.
-
-This is a deliberate tension with `VISION.md`'s preference for server-managed encryption so relay-hosted content remains available to eDiscovery. It is not a visibility regression. The legacy kind-30078 section store is already held by the relay as an owner-encrypted, relay-opaque blob. NIP-SW makes its structure, assignments, grants, and signed mutation history relay-readable and auditable while preserving the existing confidentiality boundary only for names and icons. Relay visibility therefore strictly increases. If names and icons must also be available to eDiscovery, they require a separate product decision to replace this existing personal-metadata confidentiality boundary with server-managed encryption; sharing the legacy content key would not solve the authority or concurrency problems above.
-
 ## Kinds
 
 | Kind | Name | Signer | Storage | Stage |
