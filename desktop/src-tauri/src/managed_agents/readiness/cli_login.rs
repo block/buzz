@@ -206,7 +206,8 @@ mod tests {
     fn static_runtime_env_auth_bypasses_login_probe() {
         let exe = present_binary_str();
         let mut runtime = make_runtime(static_commands(vec![exe]), Some(exe));
-        runtime.auth_evidence = crate::managed_agents::AuthEvidenceStrategy::StaticEnvKeys(&["TOKEN"]);
+        runtime.auth_evidence =
+            crate::managed_agents::AuthEvidenceStrategy::StaticEnvKeys(&["TOKEN"]);
         let env = BTreeMap::from([("TOKEN".to_string(), "secret".to_string())]);
 
         let requirements = requirements_with_effective_env(

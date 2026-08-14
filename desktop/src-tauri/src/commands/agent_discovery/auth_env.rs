@@ -104,10 +104,17 @@ mod tests {
 
         let envs = configured(std::slice::from_ref(&persona), &[agent], &global);
 
-        assert!(envs.iter().any(|env| env.get("GLOBAL_KEY") == Some(&"global".into())));
-        assert!(envs.iter().any(|env| env.get("PERSONA_KEY") == Some(&"persona".into())));
+        assert!(envs
+            .iter()
+            .any(|env| env.get("GLOBAL_KEY") == Some(&"global".into())));
+        assert!(envs
+            .iter()
+            .any(|env| env.get("PERSONA_KEY") == Some(&"persona".into())));
         let agent_env = envs.last().expect("agent environment");
-        assert_eq!(agent_env.get("AGENT_KEY").map(String::as_str), Some("agent"));
+        assert_eq!(
+            agent_env.get("AGENT_KEY").map(String::as_str),
+            Some("agent")
+        );
         assert_eq!(agent_env.get("SHARED_KEY").map(String::as_str), Some(""));
     }
 }

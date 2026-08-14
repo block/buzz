@@ -312,11 +312,7 @@ env_key = "CUSTOM_API_KEY=secret"
         let env = BTreeMap::from([("CODEX_HOME".to_string(), "/child/codex".to_string())]);
 
         assert_eq!(
-            codex_config_path_from(
-                &env,
-                Some("/desktop/codex".into()),
-                Some("/user".into())
-            ),
+            codex_config_path_from(&env, Some("/desktop/codex".into()), Some("/user".into())),
             Some(std::path::PathBuf::from("/child/codex/config.toml"))
         );
     }
