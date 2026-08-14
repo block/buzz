@@ -20,7 +20,14 @@ class ConcentricSheetSurface extends HookWidget {
   final bool enabled;
   final Color? color;
 
+  static bool providesSurfaceOf(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<_ConcentricSheetSurfaceScope>()
+          ?.providesSurface ??
+      false;
+
   static const _surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
+  static const _nativeContentClipRadius = Radii.dialog * 2;
 
   Future<bool> _checkNativeSurfaceSupport() async {
     try {
@@ -48,7 +55,7 @@ class ConcentricSheetSurface extends HookWidget {
     final nativeSurfaceSupported = useFuture(supportFuture).data ?? false;
 
     if (!shouldCheckNativeSurface) {
-      return child;
+      return _ConcentricSheetSurfaceScope(providesSurface: false, child: child);
     }
 
     final surfaceColor = color ?? context.colors.surface;
@@ -83,9 +90,37 @@ class ConcentricSheetSurface extends HookWidget {
                 clipBehavior: Clip.antiAlias,
               ),
             ),
-          child,
+          ClipRSuperellipse(
+            key: const ValueKey('concentric-sheet-content-clip'),
+            // UIKit's container-concentric corner resolves substantially
+            // larger than its minimum radius on an edge-inset iOS sheet. Keep
+            // the Flutter content inside that continuous outline; a 24pt
+            // circular clip still lets scrolling rows show through the native
+            // corner cutouts.
+            borderRadius: BorderRadius.circular(
+              nativeSurfaceSupported ? _nativeContentClipRadius : Radii.dialog,
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: _ConcentricSheetSurfaceScope(
+              providesSurface: true,
+              child: child,
+            ),
+          ),
         ],
       ),
     );
   }
+}
+
+class _ConcentricSheetSurfaceScope extends InheritedWidget {
+  const _ConcentricSheetSurfaceScope({
+    required this.providesSurface,
+    required super.child,
+  });
+
+  final bool providesSurface;
+
+  @override
+  bool updateShouldNotify(_ConcentricSheetSurfaceScope oldWidget) =>
+      oldWidget.providesSurface != providesSurface;
 }

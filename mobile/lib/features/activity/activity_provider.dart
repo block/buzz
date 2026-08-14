@@ -214,48 +214,55 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         if (channel.isDm && channel.isMember) channel.id,
     ];
 
-    final results = await Future.wait([
+    final filters = <NostrFilter>[
       // Mentions of me on user-visible channel content.
-      session.fetchHistory(
-        NostrFilter(
-          kinds: const [9, 40002, 1, 45001, 45003],
-          tags: {
-            '#p': [myPk],
-          },
-          limit: 50,
-        ),
+      NostrFilter(
+        kinds: const [9, 40002, 1, 45001, 45003],
+        tags: {
+          '#p': [myPk],
+        },
+        limit: 50,
       ),
       // Workflow approvals addressed to me.
-      session.fetchHistory(
-        NostrFilter(
-          kinds: const [46010, 46011, 46012],
-          tags: {
-            '#p': [myPk],
-          },
-          limit: 20,
-        ),
+      NostrFilter(
+        kinds: const [46010, 46011, 46012],
+        tags: {
+          '#p': [myPk],
+        },
+        limit: 20,
       ),
       // Agent job lifecycle events addressed to me.
-      session.fetchHistory(
-        NostrFilter(
-          kinds: const [43001, 43002, 43003, 43004, 43005, 43006],
-          tags: {
-            '#p': [myPk],
-          },
-          limit: 20,
-        ),
+      NostrFilter(
+        kinds: const [43001, 43002, 43003, 43004, 43005, 43006],
+        tags: {
+          '#p': [myPk],
+        },
+        limit: 20,
       ),
       // Recent DM traffic (filtered to other senders below).
-      if (dmChannelIds.isEmpty)
-        Future.value(const <NostrEvent>[])
-      else
-        session.fetchHistory(
-          NostrFilter(kinds: const [9], tags: {'#h': dmChannelIds}, limit: 30),
-        ),
-    ]);
+      if (dmChannelIds.isNotEmpty)
+        NostrFilter(kinds: const [9], tags: {'#h': dmChannelIds}, limit: 30),
+    ];
+
+    // The HTTP bridge keeps each NIP-01 filter's independent limit while
+    // executing the batch with bounded server-side concurrency. One request
+    // here replaces the four simultaneous websocket history subscriptions that
+    // otherwise compete with channel and preference startup sync.
+    final events = await _queryWithWebSocketFallback(session, filters);
 
     bool isFromOther(NostrEvent e) =>
         e.pubkey.toLowerCase() != myPk.toLowerCase();
+    bool isAddressedToMe(NostrEvent event) => event.tags.any(
+      (tag) =>
+          tag.length > 1 &&
+          tag[0] == 'p' &&
+          tag[1].toLowerCase() == myPk.toLowerCase(),
+    );
+
+    const mentionKinds = {9, 40002, 1, 45001, 45003};
+    const needsActionKinds = {46010, 46011, 46012};
+    const agentActivityKinds = {43001, 43002, 43003, 43004, 43005, 43006};
+    final dmChannelIdSet = dmChannelIds.toSet();
 
     // Dedupe across sources by event id, keeping the higher-priority
     // category (needs_action > mention > agent_activity > activity).
@@ -271,10 +278,38 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       }
     }
 
-    add(results[1], 'needs_action');
-    add(results[0].where(isFromOther), 'mention');
-    add(results[2], 'agent_activity');
-    add(results[3].where(isFromOther), 'activity');
+    add(
+      events.where(
+        (event) =>
+            needsActionKinds.contains(event.kind) && isAddressedToMe(event),
+      ),
+      'needs_action',
+    );
+    add(
+      events.where(
+        (event) =>
+            mentionKinds.contains(event.kind) &&
+            isAddressedToMe(event) &&
+            isFromOther(event),
+      ),
+      'mention',
+    );
+    add(
+      events.where(
+        (event) =>
+            agentActivityKinds.contains(event.kind) && isAddressedToMe(event),
+      ),
+      'agent_activity',
+    );
+    add(
+      events.where(
+        (event) =>
+            event.kind == 9 &&
+            dmChannelIdSet.contains(event.channelId) &&
+            isFromOther(event),
+      ),
+      'activity',
+    );
 
     final items = byId.values.toList()
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -297,6 +332,41 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           if (i.category == 'agent_activity') i,
       ],
     );
+  }
+
+  Future<List<NostrEvent>> _queryWithWebSocketFallback(
+    RelaySessionNotifier session,
+    List<NostrFilter> filters,
+  ) async {
+    try {
+      return await session.queryRelay(filters);
+    } catch (error) {
+      debugPrint(
+        '[ActivityNotifier] batched history query failed; '
+        'using bounded websocket fallback: $error',
+      );
+    }
+
+    const fallbackConcurrency = 4;
+    final events = <NostrEvent>[];
+    for (var start = 0; start < filters.length; start += fallbackConcurrency) {
+      final end = start + fallbackConcurrency < filters.length
+          ? start + fallbackConcurrency
+          : filters.length;
+      final results = await Future.wait(
+        filters.sublist(start, end).map((filter) async {
+          try {
+            return await session.fetchHistory(filter);
+          } catch (_) {
+            return const <NostrEvent>[];
+          }
+        }),
+      );
+      for (final result in results) {
+        events.addAll(result);
+      }
+    }
+    return events;
   }
 
   FeedItem _feedItem(NostrEvent event, {required String category}) {

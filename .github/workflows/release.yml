@@ -775,6 +775,63 @@ jobs:
             ${{ steps.artifacts.outputs.exe }}
             ${{ steps.artifacts.outputs.sig }}
 
+  desktop-release-smoke:
+    name: Desktop release smoke
+    if: github.repository == 'block/buzz'
+    runs-on: ubuntu-latest
+    needs: setup
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          persist-credentials: false
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+      - name: Get Playwright version
+        id: pw-version
+        run: echo "version=$(cd desktop && node -e \"console.log(require('@playwright/test/package.json').version)\")" >> "$GITHUB_OUTPUT"
+      - name: Restore Playwright browser cache
+        id: playwright-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: cd desktop && pnpm exec playwright install chromium
+      - name: Install Playwright system dependencies
+        run: cd desktop && pnpm exec playwright install-deps chromium
+      - name: Save Playwright browser cache
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+      - name: Build test relay
+        run: cargo build --profile ci -p buzz-relay
+      - name: Run deterministic correctness smoke
+        env:
+          BUZZ_E2E_RELAY_BIN: ${{ github.workspace }}/target/ci/buzz-relay
+          BUZZ_RELEASE_SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/release-smoke-artifacts
+        run: just desktop-release-smoke
+      - name: Upload release-smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-release-smoke
+          path: |
+            release-smoke-artifacts
+            desktop/test-results
+            desktop/playwright-release-smoke-report
+          if-no-files-found: warn
+          retention-days: 14
+
   assemble-manifest:
     name: Assemble multi-platform latest.json
     # Only the tag-bound setup path can reach this job.
@@ -785,9 +842,10 @@ jobs:
       needs.release-macos-x64.result == 'success' &&
       needs.release-linux.result == 'success' &&
       needs.release-windows.result == 'success' &&
+      needs.desktop-release-smoke.result == 'success' &&
       github.ref == format('refs/tags/desktop-v{0}', needs.setup.outputs.version)
     runs-on: ubuntu-latest
-    needs: [setup, release, release-macos-x64, release-linux, release-windows]
+    needs: [setup, release, release-macos-x64, release-linux, release-windows, desktop-release-smoke]
     timeout-minutes: 10
     permissions:
       contents: write

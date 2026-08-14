@@ -9,6 +9,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/animated_avatar.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -17,6 +18,7 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/skeleton.dart';
@@ -338,11 +340,12 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ],
               ),
         actions: [
-          _MembersButton(
-            channelId: resolvedChannel.id,
-            channel: resolvedChannel,
-            currentPubkey: currentPubkey,
-          ),
+          if (_showsMembersAction(resolvedChannel))
+            _MembersButton(
+              channelId: resolvedChannel.id,
+              channel: resolvedChannel,
+              currentPubkey: currentPubkey,
+            ),
           IconButton(
             color: context.colors.primary,
             onPressed: () async {
@@ -524,6 +527,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                             channelId: channel.id,
                             content: content,
                             mentionPubkeys: mentionPubkeys,
+                            channel: resolvedChannel,
                             mediaTags: mediaTags,
                           ),
                     ),

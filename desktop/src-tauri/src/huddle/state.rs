@@ -137,6 +137,8 @@ pub struct HuddleState {
     pub ptt_active: Arc<AtomicBool>,
     /// True while the clickable microphone control is manually unmuted.
     /// In PTT mode, either this flag or `ptt_active` opens the STT gate.
+    /// Defaults to muted so push-to-talk actually gates the microphone
+    /// until the user explicitly opens it.
     #[serde(skip)]
     pub manual_mic_unmuted: Arc<AtomicBool>,
 }
@@ -226,7 +228,7 @@ impl Default for HuddleState {
             session_generation: Arc::new(AtomicU64::new(0)),
             voice_input_mode: VoiceInputMode::default(),
             ptt_active: Arc::new(AtomicBool::new(false)),
-            manual_mic_unmuted: Arc::new(AtomicBool::new(true)),
+            manual_mic_unmuted: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -339,10 +341,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_push_to_talk_with_an_open_microphone() {
+    fn defaults_to_push_to_talk_with_a_muted_microphone() {
         let state = HuddleState::default();
         assert_eq!(state.voice_input_mode, super::VoiceInputMode::PushToTalk);
-        assert!(state.manual_mic_unmuted.load(Ordering::Acquire));
+        assert!(!state.manual_mic_unmuted.load(Ordering::Acquire));
     }
 
     #[test]
