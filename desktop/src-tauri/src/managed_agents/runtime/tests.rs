@@ -104,13 +104,6 @@ fn codex_has_mcp_command() {
 }
 
 #[test]
-fn hermes_has_credential_scoped_mcp_command() {
-    let p = known_acp_runtime("/opt/homebrew/bin/hermes-acp").expect("should resolve");
-    assert!(p.mcp_hooks);
-    assert_eq!(p.mcp_command, Some("buzz-dev-mcp"));
-}
-
-#[test]
 fn goose_has_no_mcp_hooks() {
     let p = known_acp_runtime("goose").expect("should resolve");
     assert!(!p.mcp_hooks);

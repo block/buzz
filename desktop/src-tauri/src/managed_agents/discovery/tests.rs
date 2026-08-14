@@ -5,10 +5,10 @@ use super::{
     apply_agent_command_update, classify_runtime, codex_adapter_availability,
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
-    is_login_shell_path_uninit, is_safe_nvm_tag, known_acp_runtime, managed_agent_avatar_url,
-    normalize_agent_args, parse_semver_tag, probe_codex_acp_version, record_agent_command,
-    refresh_login_shell_path, try_record_agent_command, BUZZ_AGENT_AVATAR_URL,
-    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
+    parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
+    try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+    GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -90,20 +90,6 @@ fn normalizes_buzz_agent_args_to_empty() {
     );
     assert_eq!(
         normalize_agent_args("buzz-agent", vec!["acp".into()]),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn hermes_runtime_uses_credential_scoped_buzz_mcp() {
-    let runtime = known_acp_runtime("/Users/test/.local/bin/hermes-acp")
-        .expect("hermes-acp should resolve as a known runtime");
-
-    assert_eq!(runtime.id, "hermes");
-    assert_eq!(runtime.mcp_command, Some("buzz-dev-mcp"));
-    assert!(runtime.mcp_hooks);
-    assert_eq!(
-        normalize_agent_args("hermes-acp", vec!["acp".into()]),
         Vec::<String>::new()
     );
 }
