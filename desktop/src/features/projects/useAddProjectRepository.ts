@@ -6,14 +6,15 @@ import {
   type Repository,
 } from "@/features/projects/hooks";
 import { isUnsupportedProjectKindError } from "@/features/projects/projectCreation";
+import { publishOwnedAgentProjectAnnouncements } from "@/features/projects/projectOwnerControl";
 import { buildAddedRepositoryEventTemplatesFromHead } from "@/features/projects/projectRepositoryCreation";
 import {
   addRepositoryToProject,
   eventToRepository,
 } from "@/features/projects/projectModels";
+import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
-import { signRelayEvent } from "@/shared/api/tauri";
-import { getIdentity } from "@/shared/api/tauriIdentity";
+import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
@@ -25,11 +26,13 @@ export type AddProjectRepositoryInput = {
   cloneUrl?: string;
   description?: string;
   name: string;
+  ownerControlAgentPubkey?: string;
   project: Project;
   webUrl?: string;
 };
 
 async function addProjectRepository({
+  ownerControlAgentPubkey,
   project,
   ...input
 }: AddProjectRepositoryInput): Promise<{
@@ -37,7 +40,7 @@ async function addProjectRepository({
   project: Project;
   repository: Repository;
 }> {
-  const identity = await getIdentity();
+  const targetOwner = project.owner.toLowerCase();
 
   // Fetch the live signed project head immediately before mutating.
   // This prevents: (a) unknown-tag erasure from the cached UI projection,
@@ -45,7 +48,7 @@ async function addProjectRepository({
   // the head after we loaded the page.
   const liveHeads = await relayClient.fetchEvents({
     kinds: [KIND_PROJECT_ANNOUNCEMENT],
-    authors: [identity.pubkey],
+    authors: [targetOwner],
     "#d": [project.dtag],
     limit: 1,
   });
@@ -69,7 +72,7 @@ async function addProjectRepository({
     ...input,
     existingRepositoryAddresses: project.repositoryAddresses,
     liveHead,
-    ownerPubkey: identity.pubkey,
+    ownerPubkey: targetOwner,
   });
 
   // Cross-project d-tag clobber guard: if the owner already has a 30617
@@ -79,7 +82,7 @@ async function addProjectRepository({
   // thrown before we reach here).
   const existingRepoHeads = await relayClient.fetchEvents({
     kinds: [KIND_REPO_ANNOUNCEMENT],
-    authors: [identity.pubkey],
+    authors: [targetOwner],
     "#d": [templates.repositoryDtag],
     limit: 1,
   });
@@ -89,25 +92,56 @@ async function addProjectRepository({
     );
   }
 
-  const [projectEvent, repositoryEvent] = await Promise.all([
-    signRelayEvent({
-      ...templates.project,
-      createdAt: Math.max(
-        Math.floor(Date.now() / 1_000),
-        liveHead.created_at + 1,
+  const projectCreatedAt = Math.max(
+    Math.floor(Date.now() / 1_000),
+    liveHead.created_at + 1,
+  );
+  if (ownerControlAgentPubkey) {
+    const events = await publishOwnedAgentProjectAnnouncements(
+      ownerControlAgentPubkey,
+      [
+        { ...templates.project, createdAt: projectCreatedAt },
+        { ...templates.repository, createdAt: projectCreatedAt },
+      ],
+    );
+    const projectEvent = events.find(
+      (event) => event.kind === KIND_PROJECT_ANNOUNCEMENT,
+    );
+    const repositoryEvent = events.find(
+      (event) => event.kind === KIND_REPO_ANNOUNCEMENT,
+    );
+    const repository = repositoryEvent
+      ? eventToRepository(repositoryEvent, getCachedRelayOrigin())
+      : null;
+    if (!projectEvent || !repository) {
+      throw new Error(
+        "The owner agent updated the project but its response was incomplete. Refresh and try again.",
+      );
+    }
+    return {
+      previousProjectId: project.id,
+      project: addRepositoryToProject(
+        project,
+        repository,
+        projectEvent.created_at,
       ),
-    }),
-    signRelayEvent(templates.repository),
-  ]);
+      repository,
+    };
+  }
 
+  let projectEvent: RelayEvent;
   try {
     // Confirm grouping support before publishing the repository so older
     // relays cannot leave a new standalone repository behind.
-    await relayClient.publishEvent(
-      projectEvent,
-      "Timed out updating the project.",
-      "Failed to update the project.",
-    );
+    const publication = await publishProjectOwnerAnnouncement({
+      ...templates.project,
+      createdAt: projectCreatedAt,
+      targetOwner,
+    });
+    projectEvent = publication.event;
+    if (publication.publicationError) {
+      throw new Error(publication.publicationError);
+    }
   } catch (error) {
     if (isUnsupportedProjectKindError(error)) {
       throw new Error(
@@ -130,15 +164,21 @@ async function addProjectRepository({
   // This keeps the mutation idempotent: re-submitting the same signed event is
   // safe because event ids are deterministic hashes of the content+pubkey+timestamp.
   let repository: Repository | null = null;
-  const publishRepository = async (): Promise<void> => {
-    await relayClient.publishEvent(
-      repositoryEvent,
-      "Timed out creating the repository.",
-      "Failed to create the repository.",
-    );
+  let repositoryEvent: RelayEvent | null = null;
+  const publishRepository = async (): Promise<RelayEvent> => {
+    const publication = await publishProjectOwnerAnnouncement({
+      ...templates.repository,
+      createdAt: projectCreatedAt,
+      targetOwner,
+    });
+    repositoryEvent = publication.event;
+    if (publication.publicationError) {
+      throw new Error(publication.publicationError);
+    }
+    return publication.event;
   };
   try {
-    await publishRepository();
+    repositoryEvent = await publishRepository();
     repository = eventToRepository(repositoryEvent, getCachedRelayOrigin());
     if (!repository) {
       throw new Error("The repository was created but could not be read.");
@@ -147,23 +187,25 @@ async function addProjectRepository({
     // Query by event id: if the relay already has this event, the ACK was
     // merely lost — the write succeeded and we can proceed normally.
     let alreadyStored = false;
-    try {
-      const stored = await relayClient.fetchEvents({
-        ids: [repositoryEvent.id],
-        kinds: [KIND_REPO_ANNOUNCEMENT],
-        limit: 1,
-      });
-      alreadyStored = stored.length > 0;
-    } catch {
-      // Ignore — if the query itself fails we fall through to the retry.
+    if (repositoryEvent) {
+      try {
+        const stored = await relayClient.fetchEvents({
+          ids: [repositoryEvent.id],
+          kinds: [KIND_REPO_ANNOUNCEMENT],
+          limit: 1,
+        });
+        alreadyStored = stored.length > 0;
+      } catch {
+        // Ignore — if the query itself fails we fall through to the retry.
+      }
     }
-    if (alreadyStored) {
+    if (alreadyStored && repositoryEvent) {
       repository = eventToRepository(repositoryEvent, getCachedRelayOrigin());
     } else {
       // The relay rejected or never received the event. Retry once with the
       // same signed event (safe — deterministic id).
       try {
-        await publishRepository();
+        repositoryEvent = await publishRepository();
         repository = eventToRepository(repositoryEvent, getCachedRelayOrigin());
       } catch (retryError) {
         const message =
@@ -173,13 +215,16 @@ async function addProjectRepository({
         // The project already lists the coordinate. Surface a partial-write
         // error with the event id so the user (or a future repair pass) can
         // query the relay directly and re-submit the signed event if needed.
+        const eventLabel = repositoryEvent
+          ? `event ${repositoryEvent.id.slice(0, 8)}…`
+          : "an event that could not be signed";
         throw new Error(
-          `The project was updated but the repository could not be created (event ${repositoryEvent.id.slice(0, 8)}…): ${message} ` +
+          `The project was updated but the repository could not be created (${eventLabel}): ${message} ` +
             `The add-repository operation is idempotent — re-run Add repository with the same name to resume: the recovery query will find the stored event or retry the publish.`,
         );
       }
     }
-    if (!repository) {
+    if (!repository && repositoryEvent) {
       repository = eventToRepository(repositoryEvent, getCachedRelayOrigin());
     }
     if (!repository) {

@@ -1314,7 +1314,7 @@ test("pushed local branch can open a pull request", async ({ page }) => {
     .getByRole("menuitemradio", { name: "feature/projects-workflow" })
     .click();
   await page.getByRole("tab", { name: "Pull Request", exact: true }).click();
-  await page.getByRole("button", { name: "Pull Request", exact: true }).click();
+  await page.getByRole("button", { name: "New pull request" }).click();
   await expect(page.getByTestId("create-pull-request-repository")).toHaveValue(
     /:buzz$/,
   );
@@ -1363,7 +1363,7 @@ test("project issue can be created from the issues header", async ({
   await openBuzzProject(page);
 
   await page.getByRole("tab", { name: "Issues", exact: true }).click();
-  await page.getByRole("button", { name: "Issues", exact: true }).click();
+  await page.getByRole("button", { name: "New issue" }).click();
   await page
     .getByTestId("create-issue-title")
     .fill("Document the broken workflow");

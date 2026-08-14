@@ -476,6 +476,12 @@ type E2eConfig = {
       code?: string | null;
       name?: string | null;
     }>;
+    // Entity links captured before React mounts. The app drains and acknowledges
+    // this mocked Rust-side queue after installing its event listener.
+    pendingEntityDeepLinks?: Array<{
+      id: string;
+      href: string;
+    }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
     identityLost?: boolean;
@@ -4363,6 +4369,14 @@ function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
   }));
 }
 
+let mockPendingEntityDeepLinks: Array<{ id: string; href: string }> = [];
+
+function resetMockPendingEntityDeepLinks(config: E2eConfig | null) {
+  mockPendingEntityDeepLinks = (config?.mock?.pendingEntityDeepLinks ?? []).map(
+    (pending) => ({ ...pending }),
+  );
+}
+
 function recordMockUserStatus(event: RelayEvent) {
   const dTag = event.tags.find((tag) => tag[0] === "d")?.[1];
   if (dTag) {
@@ -5592,7 +5606,9 @@ function createMockEvent(
   tags: string[][],
   pubkey = DEFAULT_MOCK_IDENTITY.pubkey,
   createdAt = Math.floor(Date.now() / 1000),
-  id = crypto.randomUUID().replace(/-/g, ""),
+  // 64 hex chars like a real event id — share-link builders reject shorter
+  // ids, so copy-link buttons only render with full-length ids.
+  id = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, ""),
 ): RelayEvent {
   return {
     id,
@@ -10176,6 +10192,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
+  resetMockPendingEntityDeepLinks(config);
   initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
   if (config.mock?.windowLabel) {
@@ -11737,6 +11754,87 @@ export function maybeInstallE2eTauriMocks() {
           message: `Deleted branch ${input.branch}.`,
         };
       }
+      case "publish_project_owner_announcement": {
+        const { input } = payload as {
+          input: {
+            content: string;
+            createdAt?: number;
+            kind: number;
+            tags: string[][];
+            targetOwner: string;
+          };
+        };
+        const normalizedTargetOwner = input.targetOwner.toLowerCase();
+        const canSignAsOwner =
+          (identity?.pubkey ?? MOCK_IDENTITY_PUBKEY).toLowerCase() ===
+            normalizedTargetOwner ||
+          mockManagedAgents.some(
+            (agent) => agent.pubkey.toLowerCase() === normalizedTargetOwner,
+          );
+        if (!canSignAsOwner) {
+          throw new Error(
+            "Only the owner identity or the owner of its managed agent can perform this action.",
+          );
+        }
+        const event = createMockEvent(
+          input.kind,
+          input.content,
+          input.tags,
+          normalizedTargetOwner,
+          input.createdAt,
+        );
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
+          content: event.content,
+          createdAt: event.created_at,
+          kind: event.kind,
+          tags: event.tags,
+        });
+
+        let publicationError: string | null = null;
+        if (
+          event.kind === KIND_PROJECT_ANNOUNCEMENT &&
+          window.__BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__
+        ) {
+          publicationError = "restricted: unknown event kind";
+        } else {
+          const rejectionIndex =
+            window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.indexOf(
+              event.kind,
+            ) ?? -1;
+          if (rejectionIndex >= 0) {
+            window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.splice(
+              rejectionIndex,
+              1,
+            );
+            publicationError = "mock project event rejection";
+          } else {
+            getMockProjectEventStore().push(event);
+            const acceptedProjectEvents =
+              window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ ?? [];
+            acceptedProjectEvents.push({
+              content: event.content,
+              kind: event.kind,
+              tags: event.tags,
+            });
+            window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ = acceptedProjectEvents;
+            const failedAckIndex =
+              window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?.indexOf(
+                event.kind,
+              ) ?? -1;
+            if (failedAckIndex >= 0) {
+              window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?.splice(
+                failedAckIndex,
+                1,
+              );
+              publicationError = "mock lost project acknowledgement";
+            }
+          }
+        }
+        return {
+          event: JSON.stringify(event),
+          publication_error: publicationError,
+        };
+      }
       case "sign_project_pull_request_status": {
         const { input } = payload as {
           input: {
@@ -11924,6 +12022,16 @@ export function maybeInstallE2eTauriMocks() {
           return false;
         }
         mockPendingCommunityDeepLinks.splice(index, 1);
+        return true;
+      }
+      case "take_pending_entity_deep_link":
+        return mockPendingEntityDeepLinks[0] ?? null;
+      case "acknowledge_pending_entity_deep_link": {
+        const { id } = payload as { id: string };
+        if (mockPendingEntityDeepLinks[0]?.id !== id) {
+          return false;
+        }
+        mockPendingEntityDeepLinks.shift();
         return true;
       }
       case "get_relay_http_url":

@@ -3,7 +3,10 @@ import * as React from "react";
 import { invokeTauri } from "@/shared/api/tauri";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
-import { eventToRepository } from "@/features/projects/projectModels";
+import {
+  eventToExplicitProject,
+  eventToRepository,
+} from "@/features/projects/projectModels";
 import { eventToProjectIssue } from "@/features/projects/projectIssues.mjs";
 import { eventToProjectPullRequest } from "@/features/projects/projectPullRequests.mjs";
 import {
@@ -13,10 +16,11 @@ import {
   KIND_GIT_STATUS_DRAFT,
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_OPEN,
+  KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 
-import { parseEntityLink } from "./entityLink";
+import { isEntityLink, parseEntityLink } from "./entityLink";
 import {
   buzzEntityFallbackTitle,
   type SupportedLinkPreview,
@@ -236,6 +240,37 @@ export async function fetchBuzzEntityMetadata(
   if (!parsed.ok) return null;
 
   const { owner, dtag } = parsed.value;
+  if (parsed.value.type === "project") {
+    const projectAddress = `${KIND_PROJECT_ANNOUNCEMENT}:${owner}:${dtag}`;
+    const projectEvents = await fetchEvents({
+      kinds: [KIND_PROJECT_ANNOUNCEMENT],
+      authors: [owner],
+      "#d": [dtag],
+      limit: 1,
+    });
+    // Repository maps are only needed to resolve a project's repository read
+    // models, which the card does not show — empty maps still validate the
+    // announcement envelope and resolve name/description.
+    const project = projectEvents
+      .map((event) => eventToExplicitProject(event, new Map(), new Map()))
+      .find((candidate) => candidate?.projectAddress === projectAddress);
+    if (!project) return null;
+
+    const repositoryCount = project.repositoryAddresses.length;
+    return {
+      siteName: project.name,
+      faviconDataUrl: null,
+      imageDataUrl: null,
+      imageDomain: null,
+      title: project.description || project.name,
+      description: compactMetadata([
+        repositoryCount > 0
+          ? `${repositoryCount} ${repositoryCount === 1 ? "repository" : "repositories"}`
+          : null,
+      ]),
+    };
+  }
+
   const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${owner}:${dtag}`;
   const repoEvents = await fetchEvents({
     kinds: [KIND_REPO_ANNOUNCEMENT],
@@ -338,9 +373,7 @@ type ResolvedMetadataByHref = Record<
 
 /** Only auto-generated titles may be replaced; explicit markdown labels win. */
 export function shouldResolveTitle(preview: SupportedLinkPreview): boolean {
-  if (preview.kind !== "buzz-pull-request" && preview.kind !== "buzz-issue") {
-    return true;
-  }
+  if (!isEntityLink(preview.href)) return true;
   const parsed = parseEntityLink(preview.href);
   return parsed.ok && preview.title === buzzEntityFallbackTitle(parsed.value);
 }
@@ -388,7 +421,8 @@ export function isBuzzEntityPreview(preview: SupportedLinkPreview): boolean {
   return (
     preview.kind === "buzz-pull-request" ||
     preview.kind === "buzz-issue" ||
-    preview.kind === "buzz-repository"
+    preview.kind === "buzz-repository" ||
+    preview.kind === "buzz-project"
   );
 }
 

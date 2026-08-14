@@ -140,6 +140,7 @@ export function ReadmePanel({
   gitDataState,
   externalHost,
   externalUrl,
+  hideHeader,
   sourceControls,
   unavailableReason,
 }: {
@@ -149,13 +150,18 @@ export function ReadmePanel({
   gitDataState: "checking" | "available" | "empty" | "unavailable";
   externalHost?: string;
   externalUrl?: string | null;
+  /**
+   * Skip the header rows entirely — the workspace layout renders the source
+   * controls and last-changed timestamp itself.
+   */
+  hideHeader?: boolean;
   unavailableReason?: ProjectRepoUnavailableReason;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
 }) {
   // Two header rows, mirroring the files panel: controls on top, then the
   // file identity row.
-  const header = (
+  const header = hideHeader ? null : (
     <>
       {sourceControls ? (
         <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
@@ -163,7 +169,6 @@ export function ReadmePanel({
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
-            compact
             createBranchDisabled={sourceControls.createBranchDisabled}
             createBranchTitle={sourceControls.createBranchTitle}
             deleteBranchDisabled={sourceControls.deleteBranchDisabled}
