@@ -1,6 +1,8 @@
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
 
+use super::managed_agent_definition::validate_create_definition;
+
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -571,13 +573,14 @@ pub async fn create_managed_agent(
     if name.is_empty() {
         return Err("agent name is required".to_string());
     }
-    let codex_task_binding = prepare_codex_task_binding(&input)?;
     let requested_persona_id = input
         .persona_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    validate_create_definition(&name, requested_persona_id.as_deref(), &input)?;
+    let codex_task_binding = prepare_codex_task_binding(&input)?;
     if let Some(parallelism) = input.parallelism {
         if !(1..=32).contains(&parallelism) {
             return Err("parallelism must be between 1 and 32".to_string());

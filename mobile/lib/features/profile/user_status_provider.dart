@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -11,11 +13,20 @@ import 'user_status_cache_provider.dart';
 /// for publishing. Publishes via WebSocket (triggers fan-out). No heartbeat
 /// needed — user status events are parameterised replaceable, not ephemeral.
 class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
+  Timer? _expirationTimer;
+
   @override
-  Future<UserStatus?> build() {
+  Future<UserStatus?> build() async {
     ref.watch(relayClientProvider);
     ref.watch(relaySessionProvider);
-    return _fetch();
+    ref.onDispose(() {
+      _expirationTimer?.cancel();
+      _expirationTimer = null;
+    });
+
+    final status = await _fetch();
+    _scheduleExpiration(status);
+    return status;
   }
 
   Future<UserStatus?> _fetch() async {
@@ -55,13 +66,18 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
         (a, b) => a.createdAt >= b.createdAt ? a : b,
       );
       final status = UserStatus.fromEvent(latest);
-      return status.isEmpty ? null : status;
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      return status.isEmpty || status.isExpiredAt(now) ? null : status;
     } catch (_) {
       return null;
     }
   }
 
-  Future<void> setStatus(String text, String emoji) async {
+  Future<void> setStatus(
+    String text,
+    String emoji, {
+    DateTime? expiresAt,
+  }) async {
     final trimmed = text.trim();
     final config = ref.read(relayConfigProvider);
     final nsec = config.nsec;
@@ -72,6 +88,9 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     ];
     if (emoji.isNotEmpty) {
       tags.add(['emoji', emoji]);
+    }
+    if (expiresAt != null) {
+      tags.add(['expiration', '${expiresAt.millisecondsSinceEpoch ~/ 1000}']);
     }
 
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
@@ -92,9 +111,13 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
             text: trimmed,
             emoji: emoji,
             updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            expiresAt: expiresAt == null
+                ? null
+                : expiresAt.millisecondsSinceEpoch ~/ 1000,
           )
         : null;
     state = AsyncValue.data(newStatus);
+    _scheduleExpiration(newStatus);
 
     // Also update the shared cache so other UI reads stay consistent.
     final keyPair = nostr.Keys(privkeyHex);
@@ -103,6 +126,50 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
   }
 
   Future<void> clearStatus() => setStatus('', '');
+
+  void _scheduleExpiration(UserStatus? status) {
+    _expirationTimer?.cancel();
+    _expirationTimer = null;
+    final deadline = status?.expirationDateTime;
+    if (deadline == null) return;
+
+    final remaining = deadline.difference(DateTime.now());
+    _expirationTimer = Timer(
+      remaining.isNegative ? Duration.zero : remaining,
+      _expireCurrentStatus,
+    );
+  }
+
+  void _expireCurrentStatus() {
+    final current = state.asData?.value;
+    if (current == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    if (!current.isExpiredAt(now)) {
+      // Timer callbacks can land just before the Unix-second boundary.
+      _expirationTimer = Timer(
+        const Duration(milliseconds: 50),
+        _expireCurrentStatus,
+      );
+      return;
+    }
+
+    state = const AsyncValue.data(null);
+    final pubkey = _currentPubkey();
+    if (pubkey != null) {
+      ref.read(userStatusCacheProvider.notifier).updateStatus(pubkey, null);
+    }
+  }
+
+  String? _currentPubkey() {
+    final nsec = ref.read(relayConfigProvider).nsec;
+    if (nsec == null || nsec.isEmpty) return null;
+    try {
+      final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
+      return nostr.Keys(privkeyHex).public.toLowerCase();
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 final userStatusProvider =

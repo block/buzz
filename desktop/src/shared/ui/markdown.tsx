@@ -23,7 +23,6 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
 import { parseSupportedLinkPreview } from "@/shared/lib/linkPreview";
-import { parseLinkPreviewSnapshots } from "@/shared/lib/linkPreviewSnapshot";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
@@ -115,6 +114,7 @@ import { MarkdownTable } from "./markdown/MarkdownTable";
 import { ProgressiveImage } from "./markdown/ProgressiveImage";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { renderCachedMarkdown } from "./markdown/nodeCache";
+import { useMessageLinkPreviews } from "./markdown/useMessageLinkPreviews";
 import {
   MarkdownRuntimeContext,
   useMarkdownRuntime,
@@ -1362,7 +1362,6 @@ function createMarkdownComponents(
           return (
             <MessageLinkPill
               channels={channels}
-              href={href}
               interactive={interactive}
               link={messageLinkTarget.link}
               onOpenMessageLink={onOpenMessageLink}
@@ -1721,7 +1720,6 @@ function createMarkdownComponents(
       return (
         <MessageLinkPill
           channels={channels}
-          href={href}
           interactive={interactive}
           link={parsed.value}
           onOpenMessageLink={onOpenMessageLink}
@@ -1811,19 +1809,13 @@ function MarkdownInner({
     [goChannel],
   );
   const relayOrigin = useRelayOrigin();
-  const resolvedLinkPreviews = React.useMemo(
-    () =>
-      interactive && !linkPreviewsSuppressed
-        ? parseLinkPreviewSnapshots(linkPreviewTags, content, relayOrigin)
-        : [],
-    [
-      content,
-      interactive,
-      linkPreviewTags,
-      linkPreviewsSuppressed,
-      relayOrigin,
-    ],
-  );
+  const resolvedLinkPreviews = useMessageLinkPreviews({
+    content,
+    interactive,
+    linkPreviewTags,
+    linkPreviewsSuppressed,
+    relayOrigin,
+  });
   const configNudge = React.useMemo(
     () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
     [content, interactive, configNudgeAuthorPubkey],
