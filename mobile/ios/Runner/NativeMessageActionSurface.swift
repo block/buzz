@@ -73,6 +73,17 @@ enum NativeMessageActionSurfaceLayout {
 
 @available(iOS 16.0, *)
 enum NativeMessageActionSurfaceAppearance {
+  static func interfaceStyle(from value: Any?) -> UIUserInterfaceStyle {
+    switch value as? String {
+    case "dark":
+      return .dark
+    case "light":
+      return .light
+    default:
+      return .unspecified
+    }
+  }
+
   static func backdropEffect(reduceTransparency: Bool) -> UIVisualEffect? {
     guard !reduceTransparency else { return nil }
 
@@ -246,6 +257,9 @@ final class NativeMessageActionSurfacePlatformView: NSObject,
       from: arguments?["errorColor"],
       fallback: .systemRed
     )
+    let interfaceStyle = NativeMessageActionSurfaceAppearance.interfaceStyle(
+      from: arguments?["interfaceStyle"]
+    )
     let actionArguments = arguments?["actions"] as? [[String: Any]]
     let actions =
       actionArguments?.compactMap(
@@ -267,8 +281,10 @@ final class NativeMessageActionSurfacePlatformView: NSObject,
     surfaceView.backgroundColor = .clear
     surfaceView.clipsToBounds = false
     surfaceView.accessibilityViewIsModal = true
+    surfaceView.overrideUserInterfaceStyle = interfaceStyle
 
     backdropView.translatesAutoresizingMaskIntoConstraints = false
+    backdropView.overrideUserInterfaceStyle = interfaceStyle
     backdropView.layer.cornerRadius = NativeMessageActionSurfaceLayout.cornerRadius
     backdropView.layer.cornerCurve = .continuous
     backdropView.layer.masksToBounds = true

@@ -461,6 +461,7 @@ class _IosNativeMessageActionSurface extends HookWidget {
         'foregroundColor': context.colors.onSurface.toARGB32(),
         'separatorColor': context.colors.outlineVariant.toARGB32(),
         'errorColor': context.colors.error.toARGB32(),
+        'interfaceStyle': context.colors.brightness.name,
       },
       creationParamsCodec: const StandardMessageCodec(),
       onPlatformViewCreated: (id) => viewId.value = id,

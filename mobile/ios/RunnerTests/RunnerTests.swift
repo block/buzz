@@ -482,6 +482,21 @@ class RunnerTests: XCTestCase {
     )
   }
 
+  func testNativeMessageActionSurfaceMatchesFlutterInterfaceStyle() {
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "dark"),
+      .dark
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "light"),
+      .light
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "system"),
+      .unspecified
+    )
+  }
+
   private func displayP3Image(red: CGFloat, green: CGFloat, blue: CGFloat) throws -> UIImage {
     let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
     let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
