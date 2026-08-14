@@ -233,6 +233,13 @@ function fetchLinkPreviewMetadata(
 const metadataLoader = createMetadataLoader({
   fetcher: fetchLinkPreviewMetadata,
 });
+
+/** Share the same deduplicated metadata job between composer rendering and send preparation. */
+export async function loadLinkPreviewMetadata(
+  href: string,
+): Promise<LinkPreviewMetadata | null> {
+  return (await metadataLoader.load(href)).metadata;
+}
 const ENTITY_STATUS_KINDS = [
   KIND_GIT_STATUS_OPEN,
   KIND_GIT_STATUS_MERGED,

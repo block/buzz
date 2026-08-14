@@ -60,7 +60,10 @@ pub(super) async fn fetch_oembed_metadata(
                 fetch_sanitized_image(thumbnail_url, false),
             )
             .await
-            .unwrap_or(Err(ImageFetchError::Transient { retry_after: None })),
+            .unwrap_or(Err(ImageFetchError::Transient {
+                retry_after: None,
+                retry_inline: false,
+            })),
         ),
         None => None,
     };
