@@ -315,8 +315,11 @@ pub async fn query_relay_at(
         .post(&url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
-        .body(body_bytes);
-    let response = send_relay_request(&state.http_client, request).await?;
+        .body(body_bytes.clone());
+    let response = send_relay_request(&state.http_client, request, || {
+        build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)
+    })
+    .await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
@@ -345,7 +348,10 @@ pub async fn query_relay_at_with_keys(
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
-    let response = send_relay_request(&state.http_client, request.body(body_bytes)).await?;
+    let response = send_relay_request(&state.http_client, request.body(body_bytes.clone()), || {
+        build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)
+    })
+    .await?;
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
@@ -444,7 +450,10 @@ pub async fn sync_managed_agent_profile(
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
-    let response = send_relay_request(&state.http_client, request.body(body_bytes)).await?;
+    let response = send_relay_request(&state.http_client, request.body(body_bytes.clone()), || {
+        build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)
+    })
+    .await?;
 
     if !response.status().is_success() {
         let msg = relay_error_message(response).await;
@@ -556,7 +565,10 @@ pub async fn submit_signed_event_with_keys(
         request = request.header("x-auth-tag", tag);
     }
 
-    let response = send_relay_request(&state.http_client, request.body(body_bytes)).await?;
+    let response = send_relay_request(&state.http_client, request.body(body_bytes.clone()), || {
+        build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)
+    })
+    .await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);

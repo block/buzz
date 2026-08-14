@@ -33,8 +33,11 @@ pub async fn submit_signed_event_at_with_keys(
         .post(&url)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json")
-        .body(body_bytes);
-    let response = send_relay_request(&state.http_client, request).await?;
+        .body(body_bytes.clone());
+    let response = send_relay_request(&state.http_client, request, || {
+        build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)
+    })
+    .await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
