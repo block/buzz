@@ -94,17 +94,24 @@ export function WorkflowsView({
   const [deleteTarget, setDeleteTarget] = React.useState<Workflow | null>(null);
   const queryClient = useQueryClient();
 
+  // `channels` (from WorkflowsRouteScreen) already includes open channels
+  // the owner hasn't joined — those are readable without membership, so a
+  // workflow living there must still surface in this aggregate view rather
+  // than being silently dropped (see WorkflowsRouteScreen.tsx). Membership
+  // is still required to create/edit a workflow, so the create-dialog
+  // channel picker stays scoped to memberChannels below.
   const memberChannels = channels.filter((c) => c.isMember);
-  const channelIds = memberChannels.map((c) => c.id).sort();
+  const channelIds = channels.map((c) => c.id).sort();
   const channelIdKey = channelIds.join(",");
 
   const allWorkflowsQuery = useQuery({
     queryKey: allWorkflowsQueryKey(channelIdKey),
     queryFn: async () => {
-      // Single batched relay query for all member channels, then group by the
-      // channel_id each workflow carries — replaces the per-channel fanout.
+      // Single batched relay query for every visible channel (member + open,
+      // non-member), then group by the channel_id each workflow carries —
+      // replaces the per-channel fanout.
       const channelNameById = new Map(
-        memberChannels.map((channel) => [channel.id, channel.name]),
+        channels.map((channel) => [channel.id, channel.name]),
       );
       const workflows = await getChannelsWorkflows(channelIds);
       const results: WorkflowWithChannel[] = [];
@@ -118,7 +125,7 @@ export function WorkflowsView({
       }
       return results;
     },
-    enabled: memberChannels.length > 0,
+    enabled: channelIds.length > 0,
     ...workflowListFocusRefetchPolicy,
   });
 
