@@ -67,8 +67,14 @@ the sibling worktrees — not against notes)
 
   PR 86 is same-repository: `isCrossRepository` is false and
   `headRepositoryOwner.login` is `launchpad-26`. That matches how the cohort
-  works — branches are pushed to the fork, not forked from it — which is what
-  makes the fork-skip answer above cheap in practice rather than a real gap.
+  works — branches are pushed to the fork, not forked from it. An earlier
+  revision read that as making the fork-skip cheap in practice rather than a
+  real gap; it is the opposite. Same-repository is exactly the case a fork skip
+  does nothing to protect, and it is the case this cohort actually produces: a
+  same-repo PR's own diff can modify the code STEP 8's job executes, and under
+  plain `pull_request` that code runs with the write token this job holds. STEP
+  8's move to `pull_request_target` with an unoverridden base-ref checkout is
+  the fix that closes the gap this observation actually describes.
 
   #120's work exists, is substantial, and is committed nowhere. The worktree
   /home/serina/Launchpad/buzz__worktrees/feat-review-agent-untrusted-input is at
@@ -329,11 +335,12 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
             normal import and left `main`'s import site unstated. Assert the edge
             that matters, not both. Passing the marker in also makes STEP 4 testable
             on its own with a sentinel value.
-          find_existing(pr, repo) -> int | None — lists reviews and returns the id
-            of the NEWEST review that carries MARKER **and was written by the
-            agent's own identity**. Both conditions, and the author one is checked
-            FIRST. Reviews carrying the marker under any other author are counted
-            and reported as foreign, never treated as candidates.
+          find_existing(pr, repo, login) -> (int | None, int) — lists reviews and
+            returns (the id of the NEWEST review that carries MARKER **and was
+            written by `login`**, the COUNT of marked reviews under any OTHER
+            author). Both identity conditions on the first element, and the
+            author one is checked FIRST. The count is not a log line —
+            `post_or_update` below reads it to decide whether a POST is even safe.
             THE MARKER IS ATTACKER-WRITABLE AND THE AUTHOR FIELD IS NOT. A review
             body is not agent-controlled territory: any GitHub user with read access
             can submit a COMMENT review on a pull request in this public fork and
@@ -421,26 +428,43 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
             STEP 10 receives the actual argv and serves STEP 1's page two ONLY
             when `--paginate` is present in it. That is what makes "drop
             --paginate" a mutation that fails rather than one that passes.
-          post_or_update(pr, repo, body) -> (id, "created"|"updated") — PUT when
-            find_existing returns an id, POST otherwise. The event is the literal
-            "COMMENT", hardcoded at the single call site, and the function takes
-            no event parameter at all. A parameter that could hold "APPROVE" is a
-            parameter that one day will.
+          post_or_update(pr, repo, body, login) -> (id, "created"|"updated",
+            author_login) — PUT when find_existing's first element is an id, POST
+            otherwise, UNLESS THE FOREIGN COUNT IS NONZERO, in which case
+            post_or_update raises rather than posting — see below. The event is
+            the literal "COMMENT", hardcoded at the single call site, and the
+            function takes no event parameter at all. A parameter that could hold
+            "APPROVE" is a parameter that one day will. `author_login` is
+            `user.login` read off the POST/PUT response body — the only place the
+            live identity actually exists, and STEP 9's identity control needs it.
             A FAILED PUT IS A HARD FAILURE AND NEVER FALLS BACK TO POST. If the
             PUT returns any non-2xx — 403, 404, 410 — post_or_update raises with
             the review id and the status in the message, and the workflow fails
             loudly with no review updated. A fallback POST would create the second
             review this entire issue exists to prevent, and it would do so on
-            exactly the run where something is already wrong. This is not
-            hypothetical: PUT on a review requires being its author, and #110
-            commits to revisiting the credential, so the identity move the
-            marker-over-author choice was designed to survive is precisely when
-            find_existing matches a review the new identity cannot edit. A human
-            retires the stale review by hand at that point; the tool does not
-            paper over it by posting another.
+            exactly the run where something is already wrong.
+            A NONZERO FOREIGN COUNT ALSO REFUSES TO POST, and this is the fix for
+            a gap an earlier revision left open. If `--as`'s configured value ever
+            changes — #110 commits to revisiting the credential — a review this
+            agent posted under the OLD login is now authored by someone
+            `find_existing` calls foreign under the NEW login: it is excluded as a
+            candidate, the first element comes back None, and nothing before this
+            revision distinguished that from "no marker has ever been posted
+            here". post_or_update POSTed a second review in that case, silently
+            creating exactly the duplicate #119 exists to prevent while reading as
+            a normal first publish. It is also indistinguishable, from the data
+            alone, from an outside party planting one throwaway marked review to
+            see what happens — and the plan does not need to tell those two cases
+            apart to know that POSTing blind in EITHER case is wrong. So: first
+            element None and foreign count zero POSTs normally; first element None
+            and foreign count nonzero RAISES, naming the count, and posts nothing.
+            A human looks at the PR's existing reviews before this can proceed —
+            retiring a stale review by hand, or confirming a planted decoy is
+            exactly that — rather than the tool guessing which case it is.
         Immediately before a POST, find_existing is called a second time. Two
         pushes seconds apart produce two workflow runs, and a check performed at
-        the start of a run is stale by the time the run posts.
+        the start of a run is stale by the time the run posts. The foreign-count
+        refusal above applies to this second call too, not only the first.
         done when: `python3 -c "import publish"` run from launchpad/review-agent/
         succeeds — not `py_compile`, which compiles without resolving imports and
         so would pass on the circular import the MARKER rule above exists to
@@ -453,28 +477,41 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
         step does not depend on it, so a grep against that file here would pass by
         the file's absence rather than by its contents;
         against STEP 1's recorded listing with no marker find_existing returns
-        None, with one marker under the agent's own login returns that id, and with
-        two of its own markers returns the NEWER id AND prints the duplicate count;
-        a listing whose ONLY marked review carries a different `user.login` returns
-        None and reports one FOREIGN marked review — the load-bearing case, since
-        returning that id is the denial-of-publication vector; a listing carrying a
-        foreign marked review submitted AFTER the agent's own returns the agent's
-        own id, not the newer foreign one, so the author filter is proven to run
-        before the newest-wins rule rather than after it; the SAME listing passed a
-        DIFFERENT expected login returns None, so the parameter is honoured rather
-        than ignored in favour of a constant baked into the comparison; find_existing
-        called with an empty or missing login RAISES rather than matching anything,
-        so an unresolved identity cannot degrade to marker-only; `grep -n "GET
-        /user\|api user" publish.py` returns nothing, so no runtime identity call
-        exists to fail under an installation token; with the injected transport
-        serving page two only on `--paginate`, find_existing returns the marked id
-        from page two, and the same transport with `--paginate` absent from the
-        argv returns None — so the two cases differ and the assertion can fail;
-        `--paginate` is present in the default transport's argv, asserted on the
-        argv itself; a recorded listing whose second page returns an error causes a
-        raise, not a None; and a stubbed PUT returning 403 makes post_or_update
-        raise with the id and status in the message and issue NO POST, asserted on
-        the recorded transport calls.
+        (None, 0); with one marker under the agent's own login returns (that id,
+        0), and with two of its own markers returns (the NEWER id, 0) AND prints
+        the duplicate count; a listing whose ONLY marked review carries a
+        different `user.login` returns (None, 1) — the load-bearing case, since
+        returning that id as a PUT target is the denial-of-publication vector;
+        a listing carrying a foreign marked review submitted AFTER the agent's own
+        returns (the agent's own id, 1), not the newer foreign one as the first
+        element, so the author filter is proven to run before the newest-wins rule
+        rather than after it; the SAME listing passed a DIFFERENT expected login
+        returns (None, 1) with the roles of "own" and "foreign" swapped, so the
+        parameter is honoured rather than ignored in favour of a constant baked
+        into the comparison; find_existing called with an empty or missing login
+        RAISES rather than matching anything, so an unresolved identity cannot
+        degrade to marker-only; `grep -n "GET /user\|api user" publish.py` returns
+        nothing, so no runtime identity call exists to fail under an installation
+        token; with the injected transport serving page two only on `--paginate`,
+        find_existing returns the marked id from page two, and the same transport
+        with `--paginate` absent from the argv returns (None, 0) — so the two cases
+        differ and the assertion can fail; `--paginate` is present in the default
+        transport's argv, asserted on the argv itself; a recorded listing whose
+        second page returns an error causes a raise, not a (None, 0); a stubbed PUT
+        returning 403 makes post_or_update raise with the id and status in the
+        message and issue NO POST, asserted on the recorded transport calls;
+        AGAINST A LISTING WITH ONLY A FOREIGN MARKER AND NO MATCH UNDER THE
+        CONFIGURED LOGIN, post_or_update RAISES naming the foreign count and
+        issues no POST and no PUT, asserted on the recorded transport calls — the
+        control for the fix above, since a POST here is exactly the silent
+        duplicate that fix exists to prevent; the SAME listing with the foreign
+        count reset to zero (a fresh PR, nothing posted yet) DOES POST, so the
+        refusal is proven to key on the count and not merely on the listing being
+        non-empty; and a stubbed successful POST/PUT response carrying
+        `user.login: "some-login"` makes post_or_update's third return element
+        equal `"some-login"`, asserted by value rather than by presence, so a
+        function that returns the CONFIGURED login instead of reading the
+        response would still pass a presence-only check.
 
 STEP 3  End to end on a throwaway pull request, with a stub body. [needs 2]  <- RUNS HERE
         The lifecycle is demonstrable before a single finding is rendered. Post a
@@ -851,12 +888,13 @@ STEP 7  Wire the renderer into the CLI.                                  [needs 
         unimplementable from this input — which is why it was raised upstream rather
         than worked around locally.
         `--as <login>` IS WIRED HERE, defaulting to `github-actions[bot]`, and passed
-        into find_existing as the expected-login parameter STEP 2 defined. The flag
-        lives in this step because argument parsing lives in `main`; the comparison
-        lives in STEP 2 because that is where the listing is read. STEP 9's identity
-        control is what proves the default is still the truth under the live
-        credential — this step only has to pass the value through, and to fail
-        non-zero rather than defaulting to nothing if the flag is given empty.
+        into post_or_update as the `login` parameter STEP 2 defined, which forwards
+        it into find_existing internally. The flag lives in this step because
+        argument parsing lives in `main`; the comparison lives in STEP 2 because
+        that is where the listing is read. STEP 9's identity control is what
+        proves the default is still the truth under the live credential — this
+        step only has to pass the value through, and to fail non-zero rather than
+        defaulting to nothing if the flag is given empty.
         `repo` IS NOT ONE OF THEM, and it has to come from somewhere. `find_existing`
         and `post_or_update` both take it, #117's merged document does not carry it,
         and adding it to the stdin document would break the shape #117 documents. So
@@ -882,8 +920,34 @@ STEP 8  .github/workflows/launchpad-review-agent-publish.yml.                [ne
         A separate file from #120's controls workflow, for the reason in ALREADY
         TRUE: this job needs pull-requests write and that one must not have it.
         Named `launchpad-*` per AGENTS.md §3.
-          on: pull_request, types [opened, synchronize, reopened] — `synchronize`
-            is what makes "re-review on push" happen at all.
+        `pull_request_target`, NOT `pull_request` — reversed from an earlier
+        revision, and the reversal is the point. #120's own comment block, which
+        an earlier draft of this file quoted directly, is correct for #120's OWN
+        workflow: a job with no write scope has nothing an attacker gains by
+        borrowing its token, so running PR-controlled code under it is safe. That
+        reasoning does not transfer here, because this job HOLDS
+        pull-requests: write. Under plain `pull_request`, a SAME-REPOSITORY pull
+        request — no fork required — gets that same write-capable token while
+        its own diff can modify `publish.py` or `check_publish_scope.py`, the
+        exact code this job then executes. A PR could rewrite either to submit
+        an APPROVE under the bot's identity: a hard violation of
+        `launchpad/AGENTS.md` rule 1, "Draft everything. Approve nothing." Copying
+        #120's comment into a job that carries a real privilege was the actual
+        defect; citing #120 was a symptom of it.
+        `pull_request_target` closes this the standard way, not by avoiding it:
+        it grants the base repository's token to every pull request, fork or not,
+        but `actions/checkout` defaults to the BASE ref when no `ref:` is given —
+        so the code that runs is always what is committed on `launchpad`,
+        regardless of what the PR changed. THE CHECKOUT STEP MUST NOT PASS
+        `ref: github.event.pull_request.head.sha` OR ANY EQUIVALENT: doing so
+        recreates the exact vulnerability this trigger change exists to close,
+        now with a base-repository token instead of a fork's. The untrusted PR
+        content this job ever reads is the seven-key document `main` takes on
+        stdin — DATA, fetched by #116/#117/#118 over the API exactly as
+        CONTAINMENT.md requires — never code checked out and executed, so this
+        trigger costs the job nothing #120's threat model warns against.
+          on: pull_request_target, types [opened, synchronize, reopened] —
+            `synchronize` is what makes "re-review on push" happen at all.
           permissions: contents: read, pull-requests: write. Nothing else. Set at
             the workflow level with no job-level override.
           concurrency: group per pull request — the group string INTERPOLATES
@@ -894,9 +958,44 @@ STEP 8  .github/workflows/launchpad-review-agent-publish.yml.                [ne
             worse than none: every pull request would then cancel every other
             one's publish run, and the pull request that lost the race would
             silently keep a review describing a commit it no longer has.
-          A first step that exits 0 without posting when
-            `github.event.pull_request.head.repo.full_name` differs from
-            `github.repository`, printing the reason.
+          TWO JOBS, NOT A FIRST STEP THAT EXITS 0. An earlier revision's fork
+            guard was a shell step doing `exit 0` when
+            `github.event.pull_request.head.repo.full_name` differed from
+            `github.repository` — but exiting 0 marks only THAT STEP successful;
+            every later step in the same job still runs regardless. The
+            publisher and the scope probe would still execute on a cross-repo
+            pull request and fail, rather than performing the promised loud,
+            clean skip. A JOB-LEVEL `if:` is what actually skips every
+            subsequent step at once: a `guard` job computes and outputs whether
+            the PR is cross-repository; the `publish` job declares
+            `needs: guard` and `if: needs.guard.outputs.is-fork != 'true'`. The
+            whole `publish` job — the pipeline invocation and the scope control
+            both — is skipped, visibly, in the job list, rather than one green
+            step sitting above others that ran anyway.
+            CROSS-REPOSITORY PULL REQUESTS ARE STILL SKIPPED, FOR A DIFFERENT
+            REASON THAN BEFORE. `pull_request_target` closes the permission gap
+            that motivated the original guard — a fork PR could technically be
+            published on now — but no cross-repository publication path is
+            designed or built (see LEFT OUT), and this issue's own scope is
+            `launchpad-26/buzz` pull requests. The guard stays; only its
+            mechanism and its stated reason change.
+          A STEP THAT BUILDS THE SEVEN-KEY DOCUMENT AND PIPES IT INTO publish.py,
+            which an earlier revision of this file omitted entirely — every other
+            step (permissions, triggers, the guard, the scope control) could be
+            present and correct while the workflow still never published or
+            updated a single review, on any run, because nothing produced the
+            input `main` reads on stdin. #116, #117 and #118 are unmerged plans,
+            not code, as of this revision, so this step is specified against the
+            CLI shape each names for itself rather than built and run today:
+              preflight.py --pr ${{ github.event.pull_request.number }} |
+              run_dimensions.py --list secrets-and-access,claim-vs-evidence,
+                correctness-and-failure-modes |
+              run_adjudication.py |
+              publish.py --as github-actions[bot]
+            That chain is the recipe this step becomes once its three inputs
+            exist as code; it is named here so a re-check happens at the point
+            each upstream stage merges, per BUDGET, rather than this file being
+            silently correct on its own four corners while wiring nothing.
           NO `--repo` FLAG IS NEEDED HERE. STEP 7 requires either `--repo` or
             `GITHUB_REPOSITORY` and exits non-zero without both; Actions sets
             `GITHUB_REPOSITORY` for every run, so the default covers this workflow
@@ -904,54 +1003,68 @@ STEP 8  .github/workflows/launchpad-review-agent-publish.yml.                [ne
             from STEP 7's hard failure will otherwise look for a flag that should
             not be here — and hardcoding one into the workflow would reintroduce
             exactly the wrong-the-day-the-fork-is-renamed problem STEP 7 rejects.
-          A STEP that runs `check_publish_scope.py`, in THIS workflow. The live
-            half of that control must execute under the credential it claims to
-            measure, and this is the only workflow whose token is that credential.
-            The script does not exist until STEP 9 writes it; declaring the step
-            here is what makes STEP 9's live half reachable at all, and this file's
-            done-when checks the step's presence rather than the script's behaviour.
-          NOT `pull_request_target`. The suite this job runs lives in this
-            repository, so a pull request can modify the code the job executes;
-            `pull_request_target` would hand that modified code the base
-            repository's token. #120 established this and the comment block in
-            that workflow says so — this file carries the same note rather than
-            leaving a reader to infer it.
+          A STEP that runs `check_publish_scope.py`, in THIS workflow, in the
+            `publish` job. The live half of that control must execute under the
+            credential it claims to measure, and this is the only workflow whose
+            token is that credential. The script does not exist until STEP 9
+            writes it; declaring the step here is what makes STEP 9's live half
+            reachable at all, and this file's done-when checks the step's
+            presence rather than the script's behaviour.
         done when: `python3 -c "import yaml,sys;
         d=yaml.safe_load(open('.github/workflows/launchpad-review-agent-publish.yml'));
         print(d['permissions'])"` prints exactly {'contents': 'read',
-        'pull-requests': 'write'}; `grep -c pull_request_target` on the file is 0;
-        the `on.pull_request.types` list contains `synchronize`; a `concurrency`
-        key is present with `cancel-in-progress: true` AND its `group` value
-        contains `${{` and either `pull_request.number` or `github.ref`, so a
-        fixed group name fails this check rather than passing it; no job in
-        the file declares its own `permissions`; and the file contains a step
-        invoking `check_publish_scope.py`, asserted on the parsed YAML rather than by
-        eye, because a live credential control that no workflow runs is a control
-        that never executes.
+        'pull-requests': 'write'}; `grep -c pull_request_target` on the file is 1,
+        not 0 — the earlier revision's absence check is inverted, because the
+        trigger this file now uses is the string this check used to forbid;
+        `grep -c '\bpull_request:' ` on the `on:` block is 0, so the old trigger
+        is fully replaced rather than left alongside the new one; the
+        `on.pull_request_target.types` list contains `synchronize`; a
+        `concurrency` key is present with `cancel-in-progress: true` AND its
+        `group` value contains `${{` and either `pull_request.number` or
+        `github.ref`, so a fixed group name fails this check rather than passing
+        it; no job in the file declares its own `permissions`; the `publish` job
+        declares `needs: [guard]` and an `if:` referencing
+        `needs.guard.outputs` — asserted on the parsed YAML's job dependency and
+        condition fields, not by grepping the word "guard" anywhere in the file;
+        no step anywhere in the file sets `ref:` on a checkout action, so the
+        default base-ref checkout is never overridden toward the PR head; the
+        `publish` job contains, in order, a step whose `run` contains a pipe
+        (`|`) and the literal substring `publish.py`, and a step invoking
+        `check_publish_scope.py` — both asserted on the parsed YAML rather than by
+        eye, because a live credential control (or a publish invocation) that no
+        workflow runs is a control that never executes.
 
 STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control. [needs 8]
         Three assertions, because each alone is weak.
           STATIC — parse the workflow YAML and assert the permissions mapping
             equals exactly {contents: read, pull-requests: write}, that no job
-            overrides it, and that the file does not mention
-            pull_request_target. This runs anywhere, needs no token, and catches
-            a later widening in review.
+            overrides it, that the trigger IS `pull_request_target` (never plain
+            `pull_request`, which would hand a same-repository PR's own diff the
+            write token that executes it — see STEP 8), and that no checkout
+            step in the file sets `ref:` to anything derived from
+            `pull_request.head` — the one override that would undo
+            `pull_request_target`'s safety by checking out the PR's own code
+            under the base repository's token. This runs anywhere, needs no
+            token, and catches a later widening OR a later checkout change in
+            review, before either reaches a live credential.
           IDENTITY — inside the publish workflow, assert that the login STEP 2 was
             configured with is the login the credential actually posts as. This is
             the ONLY place in the plan where that can be checked: the configured
             value is a flag default, the real identity exists only under the
             workflow token, and STEP 1's measurement is of a human token and proves
-            nothing about this one. Read it from the review the run just published —
-            `user.login` on the POST or PUT response — and FAIL when it differs from
-            the configured value, naming both.
+            nothing about this one. Read it from `post_or_update`'s third return
+            element — `author_login`, `user.login` off the POST/PUT response — and
+            FAIL when it differs from the configured value, naming both.
             This is what catches a stale default when #110 moves the credential.
-            Without it the author filter degrades quietly rather than loudly: a
-            configured login that no longer matches means find_existing matches
-            nothing, every run POSTs, and the pull request accumulates one review per
-            push — the exact failure #119 exists to prevent, arriving through the fix
-            for a different one. A control that only asserts the flag was READ, as
-            STEP 2's offline assertions do, cannot see this; it needs the live
-            identity.
+            Without it the author filter degrades quietly rather than loudly: STEP
+            2's foreign-count refusal turns a configured-login mismatch into a
+            RAISE rather than a silent extra POST, but "the workflow fails loudly
+            once, on the first push after the credential moves" is not the same
+            guarantee as "the mismatch is caught before it ever reaches a pull
+            request" — this control is what catches it in review, before #110's
+            change merges, rather than in a failed run afterward. A control that
+            only asserts the flag was READ, as STEP 2's offline assertions do,
+            cannot see this; it needs the live identity.
             Outside the publish workflow it reports SKIP with a reason and never
             PASS, on the same `GITHUB_WORKFLOW` guard as the live half below.
           LIVE — with the workflow's own token, attempt one contents write:
@@ -996,7 +1109,13 @@ STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control
         criterion, it can only do so inside a real run of the PUBLISH workflow, and
         STEP 3's local evidence does not substitute for it.
         done when: the static half fails when handed a copy of the workflow with
-        `contents: write` and passes on the real one; the live half reports SKIP
+        `contents: write` and passes on the real one; the static half fails when
+        handed a copy of the workflow with `pull_request` in place of
+        `pull_request_target`, and passes on the real one — the check this
+        control exists to run BEFORE a same-repo PR's modified publish.py ever
+        executes under a write token; the static half fails when handed a copy
+        whose checkout step sets `ref: ${{ github.event.pull_request.head.sha }}`
+        and passes on the real one, which has no `ref:` override at all; the live half reports SKIP
         with a stated reason when GITHUB_TOKEN is absent; the live half reports SKIP
         with a stated reason when `GITHUB_WORKFLOW` names any workflow other than the
         publish one — asserted by setting it to the controls workflow's name, which is
@@ -1013,7 +1132,7 @@ STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control
         only one taken under the credential that ships.
 
 STEP 10 launchpad/review-agent/check_publish_single.py — the behaviour controls. [needs 7]
-        Recorded inputs, no network, no model. SEVEN assertions covering #119's
+        Recorded inputs, no network, no model. TEN assertions covering #119's
         done-criteria, and EVERY one of them carries a stated mutation that must
         break it. A control never observed failing has not been shown to test
         anything, and the temptation is to prove that only for the assertions
@@ -1080,16 +1199,30 @@ STEP 10 launchpad/review-agent/check_publish_single.py — the behaviour control
                 requests where it found nothing, which is #119's criterion verbatim:
                 "A run that produced no confirmed findings still posts... Silence is
                 indistinguishable from a crashed agent."
-          (ix)  A FOREIGN MARKED REVIEW IS NOT A CANDIDATE. Over a listing whose
-                only marked review carries another `user.login`, `main` POSTs a new
-                review and issues no PUT against the foreign id.
+          (ix)  A FOREIGN MARKED REVIEW IS NOT A PUT CANDIDATE, AND IS NOT A POST
+                LICENCE EITHER. Over a listing whose only marked review carries
+                another `user.login`, `main` issues NEITHER a PUT against the
+                foreign id NOR a POST — it raises, naming the foreign count, and
+                the transport records zero write calls.
                 Mutation: drop the author comparison from find_existing. The
                 assertion then sees a PUT against a review the agent does not own,
                 which is the denial-of-publication vector an outside party can
                 trigger deliberately, so it gets a control rather than only prose.
-        done when: all NINE assertions run offline and pass; each of the nine
+          (x)   A CLEAN LISTING STILL POSTS. Over a listing with no marker at all
+                — zero foreign count, not merely "no match" — `main` POSTs a new
+                review. Paired with (ix) so the refusal is proven to key on the
+                foreign COUNT and not on the listing being non-empty, or on
+                `find_existing`'s first element being None: both (ix) and (x)
+                return None as their first element, and only one of them may post.
+                Mutation: make post_or_update raise whenever find_existing's first
+                element is None, regardless of the foreign count. This is the
+                over-broad version of the (ix) fix, and it is wrong in the
+                opposite direction — refusing to publish on every pull request's
+                first run, which is silence indistinguishable from a crashed
+                agent on the majority case, not only the attacked one.
+        done when: all TEN assertions run offline and pass; each of the ten
         stated mutations, applied one at a time, makes exactly its own assertion
-        fail and is then reverted; the recorded output of all nine mutation runs is
+        fail and is then reverted; the recorded output of all ten mutation runs is
         saved for the PR body; and each assertion prints what it compared rather
         than only PASS.
 
@@ -1121,10 +1254,22 @@ STEP 12 launchpad/review-agent/PUBLISHING.md, and the cross-references.     [nee
         because `GET /user` is an OAuth-and-PAT endpoint that an installation token
         cannot be assumed to reach and a login frozen into the source breaks when
         #110 moves the credential; that an unresolved identity aborts and never
-        degrades to matching on the marker alone; and that a marked review under any
+        degrades to matching on the marker alone; that a marked review under any
         other login is counted as foreign and never updated, because a review body is
         attacker-writable and marker-only matching hands an outsider a way to silence
-        the agent on a pull request of their choosing; that the live credential
+        the agent on a pull request of their choosing; that a NONZERO foreign count
+        also refuses a fresh POST rather than silently creating a second review,
+        because that count cannot be told apart, from the data alone, from a
+        planted decoy or from this agent's own review orphaned by a changed `--as`
+        value, and a human must look at either case rather than the tool guessing;
+        that publishing runs under `pull_request_target`, not `pull_request`,
+        because this job holds pull-requests write and a same-repository PR's own
+        diff could otherwise modify the code that job executes, and that the
+        checkout step must never set `ref:` to the pull request's head or that
+        protection is undone; that the fork skip is a job-level `if:` on a
+        separate guard job's output, never a step that exits 0 — a step exiting 0
+        marks only itself successful and does not stop the steps after it; that
+        the live credential
         control PASSes only from the
         publish workflow and SKIPs everywhere else, so a PASS from the read-only
         controls runner is not evidence about the publish token; and that
@@ -1156,10 +1301,15 @@ STEP 12 launchpad/review-agent/PUBLISHING.md, and the cross-references.     [nee
         the marker string, the TEN incomplete triggers, the two keys of the
         `containment` block it consumes from #117 — `findings` and a seven-entry
         `states` map, and no `unreadable` key — and both controls by filename;
-        CONTAINMENT.md's contract table has a row pointing at it; and it records
-        that #117's contract is SETTLED and names which revision, together with the
-        one thing #119 cannot verify from it (the marker nonce, see OPEN), so a
-        reader is not left to infer that everything upstream is checkable here.
+        it states that a nonzero foreign count refuses a POST rather than
+        silently duplicating the review; it states `pull_request_target` as the
+        trigger and that the checkout step must never override `ref:` toward the
+        pull request's head; it states that the fork skip is a job-level `if:`,
+        never a step that exits 0; CONTAINMENT.md's contract table has a row
+        pointing at it; and it records that #117's contract is SETTLED and names
+        which revision, together with the one thing #119 cannot verify from it
+        (the marker nonce, see OPEN), so a reader is not left to infer that
+        everything upstream is checkable here.
 
 PARALLEL
   STEP 1 and STEP 4 may run as concurrent subagents. They share no file — STEP 1
@@ -1203,6 +1353,29 @@ GATES
   serina:review-a11y — not applicable and not claimed. See LEFT OUT.
   The plan gate script: `~/.claude/skills/plan-issue/check-plan.sh` on this file.
   It checks form, not substance, and a clean run is not a review.
+  Codex (`codex review --base origin/launchpad`) — HAS RUN ONCE, independent of
+  every serina:review-plan pass above and of the model that wrote this plan.
+  Five findings, three P1 and two P2, all applied in this revision. The most
+  consequential: this plan's own `pull_request`-not-`pull_request_target` choice,
+  copied from #120's comment block, was safe for #120's read-only job and unsafe
+  for this one, which holds pull-requests: write — a same-repository PR (the
+  norm this cohort actually produces, per ALREADY TRUE) could rewrite publish.py
+  or check_publish_scope.py and have that modified code execute with the write
+  token, violating AGENTS.md rule 1. STEP 8 now uses `pull_request_target` with
+  an explicitly-never-overridden base-ref checkout instead. Also fixed: the fork
+  guard was a step exiting 0, which marks only that step successful and does not
+  skip the job's later steps — now a job-level `if:` on a separate `guard` job's
+  output; no step anywhere in the workflow actually produced the seven-key
+  document and piped it into publish.py, so the workflow as specified could
+  never publish on any run — now named as an explicit step, against the CLI
+  shape #116/#117/#118 each state for themselves since none exist as code yet;
+  `post_or_update` had no way to surface `user.login` for STEP 9's identity
+  control — now a third return element; and a changed `--as` login orphaned the
+  prior review as merely "foreign" and silently POSTed a second one, breaking the
+  exactly-one-review invariant the whole issue exists to hold — `post_or_update`
+  now refuses to POST when `find_existing`'s foreign count is nonzero, requiring
+  a human to look rather than guessing whether it is a stale identity or a
+  planted decoy.
 
 BUDGET
   STEP 9's live half is the step most likely to overrun. It is the only assertion
@@ -1361,11 +1534,14 @@ LEFT OUT  Deliberately excluded.
   and stale ones would accumulate on lines that no longer exist. #119's criterion
   is satisfied by rendering `file:line` as text in the body, which survives an
   update and survives a force-push.
-  `pull_request_target`, per #120 and repeated in STEP 8's own comment block.
-  Fork pull requests get a loud skip. No cross-repository publication path is
-  built, and none is designed. If an outside contributor ever opens one, the job
-  log says why there is no review; the first fork PR is when someone decides
-  whether that is good enough.
+  Publishing on cross-repository (fork) pull requests. `pull_request_target` (see
+  STEP 8) removes the PERMISSION reason an earlier revision had for skipping
+  forks — the base repository's token is available either way now — but no
+  cross-repository publication path is built, and none is designed: this issue's
+  own scope is `launchpad-26/buzz` pull requests. Fork pull requests still get a
+  loud, job-level skip, for that scope reason rather than a permission one. If
+  an outside contributor ever opens one, the job log says why there is no
+  review; the first fork PR is when someone decides whether that is good enough.
   Any read of #116's pre-flight record. It is enumerated in a plan and built
   nowhere, and its schema version is its own OPEN question. STEP 5's stage
   manifest is what stands in for it, and swapping the manifest for the real
