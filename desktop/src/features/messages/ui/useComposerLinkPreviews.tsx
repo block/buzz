@@ -192,7 +192,75 @@ async function uploadSnapshotMedia(
   }
 }
 
-export function useComposerLinkPreviews(content: string, enabled = true) {
+export function extractComposerLinkPreviewHrefs(content: string): string[] {
+  return extractSupportedLinkPreviews(content)
+    .filter((preview) =>
+      preview.href.startsWith("buzz://")
+        ? true
+        : isValidLinkPreviewSnapshotCanonicalUrl(preview.href),
+    )
+    .map((preview) => preview.href);
+}
+
+export interface ComposerLinkPreviewInput {
+  content: string;
+  hrefs: Set<string>;
+  hrefVersions: Map<string, number>;
+  nextHrefVersion: number;
+}
+
+export function updateComposerLinkPreviewInput(
+  current: ComposerLinkPreviewInput,
+  content: string,
+): ComposerLinkPreviewInput {
+  const nextHrefs = new Set(extractComposerLinkPreviewHrefs(content));
+  const nextVersions = new Map<string, number>();
+  let nextHrefVersion = current.nextHrefVersion;
+  for (const href of nextHrefs) {
+    if (current.hrefs.has(href)) {
+      const version = current.hrefVersions.get(href);
+      if (version !== undefined) nextVersions.set(href, version);
+      continue;
+    }
+    nextHrefVersion += 1;
+    nextVersions.set(href, nextHrefVersion);
+  }
+  return {
+    content,
+    hrefs: nextHrefs,
+    hrefVersions: nextVersions,
+    nextHrefVersion,
+  };
+}
+
+export function useComposerLinkPreviewInput() {
+  const [input, setInput] = React.useState<ComposerLinkPreviewInput>(() => ({
+    content: "",
+    hrefs: new Set(),
+    hrefVersions: new Map(),
+    nextHrefVersion: 0,
+  }));
+  const update = React.useCallback(
+    (content: string) =>
+      setInput((current) => updateComposerLinkPreviewInput(current, content)),
+    [],
+  );
+  return [input, update] as const;
+}
+
+export function useManagedComposerLinkPreviews(enabled = true) {
+  const [input, updateContent] = useComposerLinkPreviewInput();
+  return {
+    ...useComposerLinkPreviews(input.content, enabled, input.hrefVersions),
+    updateContent,
+  };
+}
+
+export function useComposerLinkPreviews(
+  content: string,
+  enabled = true,
+  liveHrefVersions?: ReadonlyMap<string, number>,
+) {
   const [suppressed, setSuppressed] = React.useState(false);
   // Debounce the content that drives resolution so typing a URL character by
   // character does not churn a new candidate href (and a flickering card) per
@@ -201,16 +269,14 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // `hasUnresolvedLiveCandidates` below, which keeps Send disabled until the
   // live candidates resolve — so no synchronous flush is needed at submit.
   const [debounced, setDebounced] = React.useState(content);
-  const debouncedRef = React.useRef(debounced);
-  debouncedRef.current = debounced;
   React.useEffect(() => {
-    if (content === debouncedRef.current) return;
+    if (content === debounced) return;
     const timer = window.setTimeout(
       () => setDebounced(content),
       LINK_PREVIEW_DEBOUNCE_MS,
     );
     return () => window.clearTimeout(timer);
-  }, [content]);
+  }, [content, debounced]);
   const extractCandidates = React.useCallback(
     (source: string) =>
       enabled
@@ -230,12 +296,37 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // resolved (debounce not yet fired after a paste/keystroke), Send must still
   // treat the preview as pending so a fast Enter cannot ship a bare link ahead
   // of resolution.
-  const liveCandidatesRef = React.useRef<string[]>([]);
-  liveCandidatesRef.current = extractCandidates(content).map(
-    (preview) => preview.href,
+  const liveCandidates = React.useMemo(
+    () => extractCandidates(content).map((preview) => preview.href),
+    [extractCandidates, content],
   );
+  const liveCandidatesKey = liveCandidates.join("\n");
+  const liveHrefVersionsKey = liveCandidates
+    .map((href) => `${href}\0${liveHrefVersions?.get(href) ?? ""}`)
+    .join("\n");
+  // Submit and async-completion paths read only the last COMMITTED live set.
+  // Updating this during render would let an abandoned concurrent render leak
+  // uncommitted editor content into a later submit or upload completion.
+  const liveCandidatesRef = React.useRef<string[]>([]);
+  React.useLayoutEffect(() => {
+    liveCandidatesRef.current = liveCandidates;
+  }, [liveCandidates]);
+  // A URL freshly entering the composer (paste, or finishing typing one) should
+  // get a fresh fetch rather than a stale negative cache hit — the user is
+  // actively asking for this link's card now. useResolvedLinkPreviews handles
+  // the timing (invalidate a newly-present href's NEGATIVE cache entry before
+  // it reads the cache); healthy hits and passive message-list scroll are
+  // untouched, so the shared cache still does its job everywhere else. Pass the
+  // LIVE hrefs for newness tracking so a fast clear-then-repaste of the same URL
+  // within the debounce window (which never commits an empty `candidates`) is
+  // still seen as a re-entry and refetched — not served the stale negative.
   const resolvedPreviews = useResolvedLinkPreviews(
     suppressed ? [] : candidates,
+    {
+      refetchNewNegatives: true,
+      liveHrefs: liveCandidates,
+      liveHrefVersions,
+    },
   );
   // Entity links resolve to null metadata when the relay lookup has nothing
   // for them; keep their safe fallback cards rather than dropping them.
@@ -246,7 +337,7 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // Clear a "hide previews" suppression as soon as the LIVE draft has no
   // supported candidates — not the debounced set, whose lag would otherwise let
   // a clear-then-retype race keep suppression stuck on after the draft changed.
-  const liveCandidatesEmpty = liveCandidatesRef.current.length === 0;
+  const liveCandidatesEmpty = liveCandidates.length === 0;
   React.useEffect(() => {
     if (liveCandidatesEmpty) setSuppressed(false);
   }, [liveCandidatesEmpty]);
@@ -258,9 +349,17 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   readyTagsByHrefRef.current = readyTags;
   const suppressedRef = React.useRef(suppressed);
   suppressedRef.current = suppressed;
-  const uploadsRef = React.useRef(new Set<string>());
+  const uploadsRef = React.useRef(new Map<string, number>());
+  // Per-href upload generation. Bumped whenever a stale-negative href re-enters
+  // (below), so an upload started before a re-entry can be recognized as stale
+  // when it settles and dropped without publishing its pre-re-entry tag — the
+  // `reenteringHrefsRef` phase marker alone is not enough, since it is cleared
+  // the moment fresh metadata arrives, which can be before the OLD upload
+  // resolves. Keyed uploads also let a fresh upload start while a superseded one
+  // is still in flight (its generation no longer matches), so the composer is
+  // never left tagless waiting on a doomed upload.
+  const uploadGenerationRef = React.useRef(new Map<string, number>());
   const activeHrefsRef = React.useRef(new Set<string>());
-  activeHrefsRef.current = new Set(candidates.map((preview) => preview.href));
 
   React.useEffect(() => {
     if (getCachedRelayOrigin()) return;
@@ -279,15 +378,117 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
     );
   }, [candidates]);
 
+  // Compare live content with the LAST COMMITTED href set during render, but do
+  // not mutate anything here. This gives synchronous submit/pending selectors a
+  // pure fence for a stale fallback on the candidate render. The layout effect
+  // below commits the block, generation bump, and tag removal only if React
+  // actually commits this render; an abandoned concurrent render leaks nothing.
+  const committedLiveHrefsRef = React.useRef<Set<string>>(new Set());
+  const committedLiveHrefVersionsRef = React.useRef<Map<string, number>>(
+    new Map(),
+  );
+  // Hrefs that re-entered with a STALE negative fallback stay blocked until the
+  // resolver visibly cycles pending -> ready. Healthy image re-entries are not
+  // blocked because their cached metadata remains valid and does not refetch.
+  const reenteringHrefsRef = React.useRef<
+    Map<string, "blocked" | "refetching">
+  >(new Map());
+  const reenteredLiveHrefs = liveCandidates.filter((href) => {
+    const version = liveHrefVersions?.get(href);
+    return version === undefined
+      ? !committedLiveHrefsRef.current.has(href)
+      : committedLiveHrefVersionsRef.current.get(href) !== version;
+  });
+  const staleReenteredHrefs = reenteredLiveHrefs.filter(
+    (href) =>
+      !reenteringHrefsRef.current.has(href) &&
+      previews.some(
+        (preview) =>
+          preview.href === href &&
+          preview.snapshotReady &&
+          preview.imageState === "fallback",
+      ),
+  );
+  const staleReenteredKey = staleReenteredHrefs.join("\n");
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: stable href keys intentionally represent the live/stale sets; the arrays are rebuilt each render.
+  React.useLayoutEffect(() => {
+    const previousLiveHrefs = committedLiveHrefsRef.current;
+    const activeLiveHrefs = new Set(liveCandidates);
+    activeHrefsRef.current = activeLiveHrefs;
+    committedLiveHrefsRef.current = activeLiveHrefs;
+    committedLiveHrefVersionsRef.current = new Map(liveHrefVersions);
+
+    // Leaving the live draft ends the current re-entry cycle. Prune its phase so
+    // a later paste can consume healthy metadata that resolved while absent.
+    // Also advance the upload generation: an upload started before removal must
+    // never publish into a later incarnation of the same href.
+    for (const href of previousLiveHrefs) {
+      if (activeLiveHrefs.has(href)) continue;
+      reenteringHrefsRef.current.delete(href);
+      uploadGenerationRef.current.set(
+        href,
+        (uploadGenerationRef.current.get(href) ?? 0) + 1,
+      );
+    }
+
+    if (staleReenteredHrefs.length === 0) return;
+
+    for (const href of staleReenteredHrefs) {
+      reenteringHrefsRef.current.set(href, "blocked");
+      // Fence any upload built from pre-re-entry metadata. A fresh generation
+      // can start while the superseded upload is still in flight.
+      uploadGenerationRef.current.set(
+        href,
+        (uploadGenerationRef.current.get(href) ?? 0) + 1,
+      );
+    }
+    const drop = new Set(staleReenteredHrefs);
+    setReadyTags((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const href of drop)
+        if (href in next) {
+          delete next[href];
+          changed = true;
+        }
+      return changed ? next : current;
+    });
+  }, [liveCandidatesKey, liveHrefVersionsKey, staleReenteredKey]);
+
+  const isHrefReentering = (href: string) =>
+    reenteringHrefsRef.current.has(href) || staleReenteredHrefs.includes(href);
+
   React.useEffect(() => {
     for (const preview of previews) {
+      // A re-entering href stays blocked until the resolver's forced refetch has
+      // visibly cycled through pending: seeing `!snapshotReady` (pending) marks
+      // "refetching"; only once it is ready AGAIN after that is the block lifted
+      // and a tag built from the fresh metadata. The stale pre-clear fallback
+      // (still `snapshotReady` and never pending) can never rebuild the tag.
+      const phase = reenteringHrefsRef.current.get(preview.href);
+      if (phase !== undefined) {
+        if (!preview.snapshotReady) {
+          reenteringHrefsRef.current.set(preview.href, "refetching");
+          continue;
+        }
+        if (phase === "blocked") continue;
+        reenteringHrefsRef.current.delete(preview.href);
+      }
+      // The generation captured here fences this upload's completion: a live
+      // re-entry bumps `uploadGenerationRef` (above), so an in-flight upload
+      // started from stale pre-clear metadata carries an older generation and
+      // its `.then` (below) becomes a no-op. The dedup guard is generation-aware
+      // too, so a superseded in-flight upload does not block starting the fresh
+      // one at the new generation.
+      const generation = uploadGenerationRef.current.get(preview.href) ?? 0;
       if (
         !preview.snapshotReady ||
         readyTags[preview.href] ||
-        uploadsRef.current.has(preview.href)
+        uploadsRef.current.get(preview.href) === generation
       )
         continue;
-      uploadsRef.current.add(preview.href);
+      uploadsRef.current.set(preview.href, generation);
       // Upload image and favicon independently so one failure degrades to the
       // surviving media instead of dropping the whole preview. A snapshot tag
       // with empty media fields is valid (renders as text + favicon, or
@@ -307,6 +508,20 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
       ])
         .then(([image, favicon]) => {
           if (!activeHrefsRef.current.has(preview.href)) return;
+          // If this href re-entered while the upload was in flight, its metadata
+          // is stale (the resolver is refetching). Drop the result rather than
+          // writing back a snapshot tag built from the pre-re-entry metadata;
+          // the forced refetch's own upload will produce the fresh tag.
+          if (reenteringHrefsRef.current.has(preview.href)) return;
+          // Durable generation fence, independent of the phase marker: if this
+          // href re-entered while the upload was in flight, its generation was
+          // bumped, so this stale completion is dropped even if the marker has
+          // already been cleared (e.g. the forced refetch reached fresh ready
+          // and the effect deleted the marker before U1 settled).
+          if (
+            (uploadGenerationRef.current.get(preview.href) ?? 0) !== generation
+          )
+            return;
           const failedMedia = [image.failed, favicon.failed].filter(
             (label): label is "thumbnail" | "favicon" => label !== null,
           );
@@ -335,7 +550,12 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
           setReadyTags((current) => ({ ...current, [preview.href]: tag }));
         })
         .finally(() => {
-          uploadsRef.current.delete(preview.href);
+          // Only clear the slot if this upload is still the current one for the
+          // href. A superseded upload (older generation) must not delete the
+          // entry belonging to the fresh upload (U2) that replaced it, or the
+          // dedup guard would let a third upload start and race again.
+          if (uploadsRef.current.get(preview.href) === generation)
+            uploadsRef.current.delete(preview.href);
         });
       void uploadPromise;
     }
@@ -344,7 +564,9 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   readyTagsRef.current = suppressed
     ? [["link-preview", "none"]]
     : candidates.flatMap((candidate) =>
-        readyTags[candidate.href] ? [readyTags[candidate.href]] : [],
+        readyTags[candidate.href] && !isHrefReentering(candidate.href)
+          ? [readyTags[candidate.href]]
+          : [],
       );
   // A preview is "settling" from paste until its sendable tag exists: metadata
   // is still resolving, or it resolved and the snapshot media is uploading.
@@ -358,6 +580,7 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
       (preview) =>
         !preview.href.startsWith("buzz://") &&
         (preview.imageState === "pending" ||
+          isHrefReentering(preview.href) ||
           (preview.snapshotReady && !readyTags[preview.href])),
     );
   // A supported link in the LIVE content that resolution has not caught up to
@@ -366,7 +589,7 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // before resolution even starts. buzz:// links never snapshot, so ignore them.
   const hasUnresolvedLiveCandidates =
     !suppressed &&
-    liveCandidatesRef.current.some(
+    liveCandidates.some(
       (href) =>
         !href.startsWith("buzz://") &&
         !readyTags[href] &&
@@ -378,7 +601,6 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // settling, so a link whose metadata or upload stalls never traps the
   // composer. Resets whenever settling ends or the live candidate set changes.
   const [settleDisableExpired, setSettleDisableExpired] = React.useState(false);
-  const liveCandidatesKey = liveCandidatesRef.current.join("\n");
   // biome-ignore lint/correctness/useExhaustiveDependencies: liveCandidatesKey intentionally restarts the anti-trap cap when the link set changes while still settling, so a replaced/added link gets a fresh disable window rather than inheriting the prior link's near-expired timer.
   React.useEffect(() => {
     if (!hasSettlingSnapshots) {
@@ -433,18 +655,20 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   // Snapshot tags for a submit, read synchronously at submit start from the
   // LIVE candidate set (liveCandidatesRef) via `selectSubmitTags` — so the tags
   // always correspond to the content actually being sent, never a debounced set
-  // that still holds a just-removed URL. No await: Send is disabled until every
-  // settling preview has its tag (or the anti-trap cap fires), so at submit time
-  // the tags that will ever exist already exist.
-  const getReadyTags = React.useCallback(
-    () =>
-      selectSubmitTags(
-        liveCandidatesRef.current,
-        readyTagsByHrefRef.current,
-        suppressedRef.current,
+  // that still holds a just-removed URL. Re-entering hrefs are excluded: their
+  // retained tag was built from stale metadata the resolver is refetching, and
+  // it must not ship until a fresh tag replaces it. No await: Send is disabled
+  // until every settling preview has its tag (or the anti-trap cap fires), so at
+  // submit time the tags that will ever exist already exist.
+  const getReadyTags = React.useCallback(() => {
+    return selectSubmitTags(
+      liveCandidatesRef.current.filter(
+        (href) => !reenteringHrefsRef.current.has(href),
       ),
-    [],
-  );
+      readyTagsByHrefRef.current,
+      suppressedRef.current,
+    );
+  }, []);
   return {
     previewList,
     getReadyTags,
