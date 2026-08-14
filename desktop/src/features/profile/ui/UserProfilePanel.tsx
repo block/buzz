@@ -373,13 +373,13 @@ export function UserProfilePanel({
     }
     return map;
   }, [channelsQuery.data]);
-
   const targetKey = profilePanelTargetKey(pubkey, persona?.id);
   const prevTargetKeyRef = React.useRef(targetKey);
   React.useEffect(() => {
     if (prevTargetKeyRef.current === targetKey) return;
     prevTargetKeyRef.current = targetKey;
     if (preserveRequestedInstance) return;
+    setRequestedInstancePubkey(null);
     setView("summary", { replace: true });
     setTab("info", { replace: true });
   }, [preserveRequestedInstance, setTab, setView, targetKey]);
