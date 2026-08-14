@@ -1,5 +1,22 @@
 part of '../compose_bar.dart';
 
+void _useComposerChannelNames(
+  _MarkdownEditingController controller,
+  AsyncValue<List<Channel>> channelsAsync,
+) {
+  final channelNames = {
+    for (final channel in channelsAsync.asData?.value ?? const <Channel>[])
+      channel.name.toLowerCase(): channel.id,
+  };
+  final channelNamesKey = channelNames.entries
+      .map((entry) => '${entry.key}\u0000${entry.value}')
+      .join('\u0001');
+  useEffect(() {
+    controller.setChannelNames(channelNames);
+    return null;
+  }, [controller, channelNamesKey]);
+}
+
 const _typingThrottleMs = 3000;
 
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {

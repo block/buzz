@@ -199,6 +199,7 @@ class ComposeBar extends HookConsumerWidget {
     final channelQuery = useState<String?>(null);
     final channelStartIdx = useState(-1);
     final channelsAsync = ref.watch(channelsProvider);
+    _useComposerChannelNames(controller, channelsAsync);
 
     final membersAsync = ref.watch(channelMembersProvider(channelId));
     final sessionStatus = ref.watch(relaySessionProvider).status;

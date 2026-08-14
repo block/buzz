@@ -50,6 +50,26 @@ class InviteDeepLink extends BuzzDeepLink {
       'InviteDeepLink(relay: $relayUrl, code: $code, policyReceipt: $policyReceipt)';
 }
 
+/// A parsed channel-only deep link.
+///
+/// Canonical form: `buzz://channel/<channel-uuid>`.
+class ChannelDeepLink extends BuzzDeepLink {
+  /// Channel UUID from the sole path segment.
+  final String channelId;
+
+  const ChannelDeepLink({required this.channelId});
+
+  @override
+  bool operator ==(Object other) =>
+      other is ChannelDeepLink && other.channelId == channelId;
+
+  @override
+  int get hashCode => channelId.hashCode;
+
+  @override
+  String toString() => 'ChannelDeepLink(channel: $channelId)';
+}
+
 /// A parsed `buzz://message` deep link.
 class MessageDeepLink extends BuzzDeepLink {
   /// Channel UUID from the `channel` query param.
@@ -115,25 +135,72 @@ String buildMessageLink({
   ).toString();
 }
 
+/// Parse a canonical `buzz://channel/<channel-uuid>` URI.
+///
+/// The channel ID must be the URI's sole non-empty path segment. Query
+/// parameters and fragments are rejected so malformed or ambiguous links never
+/// become navigation targets.
+ChannelDeepLink? parseChannelDeepLink(Uri uri) {
+  if (uri.scheme != 'buzz' || uri.host != 'channel') return null;
+  if (uri.hasQuery ||
+      uri.hasFragment ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort) {
+    return null;
+  }
+  if (uri.pathSegments.length != 1 || uri.pathSegments.single.isEmpty) {
+    return null;
+  }
+  final channelId = uri.pathSegments.single;
+  if (!RegExp(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+    caseSensitive: false,
+  ).hasMatch(channelId)) {
+    return null;
+  }
+  return ChannelDeepLink(channelId: channelId.toLowerCase());
+}
+
 /// Parse a `buzz://message?…` URI into a [MessageDeepLink].
 ///
-/// Returns `null` for non-`buzz` schemes, non-`message` hosts (e.g.
-/// `buzz://connect` which is desktop-only), or links missing a non-empty
-/// `channel` or `id` param.
+/// Returns `null` unless the URI exactly matches the canonical message-link
+/// shape: no path, fragment, credentials, duplicate or unknown parameters; a
+/// UUID channel; and 64-character hexadecimal message/thread event IDs.
 MessageDeepLink? parseMessageDeepLink(Uri uri) {
   if (uri.scheme != 'buzz' || uri.host != 'message') return null;
-
-  final channel = uri.queryParameters['channel'];
-  final id = uri.queryParameters['id'];
-  if (channel == null || channel.isEmpty || id == null || id.isEmpty) {
+  if (uri.path.isNotEmpty ||
+      uri.hasFragment ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort) {
     return null;
   }
 
+  const allowedParams = {'channel', 'id', 'thread'};
+  if (uri.queryParametersAll.keys.any((key) => !allowedParams.contains(key)) ||
+      uri.queryParametersAll.values.any((values) => values.length != 1)) {
+    return null;
+  }
+
+  final channel = uri.queryParameters['channel'];
+  final id = uri.queryParameters['id'];
   final thread = uri.queryParameters['thread'];
+  final uuid = RegExp(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+    caseSensitive: false,
+  );
+  final eventId = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+  if (channel == null ||
+      !uuid.hasMatch(channel) ||
+      id == null ||
+      !eventId.hasMatch(id) ||
+      (thread != null && !eventId.hasMatch(thread))) {
+    return null;
+  }
+
   return MessageDeepLink(
-    channelId: channel,
-    messageId: id,
-    threadRootId: (thread == null || thread.isEmpty) ? null : thread,
+    channelId: channel.toLowerCase(),
+    messageId: id.toLowerCase(),
+    threadRootId: thread?.toLowerCase(),
   );
 }
 
@@ -218,4 +285,63 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
 
 /// Parse any supported Buzz deep link.
 BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
-    parseInviteDeepLink(uri) ?? parseMessageDeepLink(uri);
+    parseInviteDeepLink(uri) ??
+    parseChannelDeepLink(uri) ??
+    parseMessageDeepLink(uri);
+
+/// A validated Buzz repository, pull request, or issue permalink.
+class EntityDeepLink extends BuzzDeepLink {
+  final String type;
+  final String owner;
+  final String repository;
+  final String? eventId;
+
+  const EntityDeepLink({
+    required this.type,
+    required this.owner,
+    required this.repository,
+    this.eventId,
+  });
+}
+
+/// Parse canonical `buzz://repo|pr|issue` permalinks for inline presentation.
+EntityDeepLink? parseEntityDeepLink(Uri uri) {
+  if (uri.scheme != 'buzz' || !{'repo', 'pr', 'issue'}.contains(uri.host)) {
+    return null;
+  }
+  if (uri.path.isNotEmpty ||
+      uri.hasFragment ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort) {
+    return null;
+  }
+  final allowed = uri.host == 'repo' ? {'owner', 'd'} : {'id', 'owner', 'd'};
+  final queryParameters = uri.queryParametersAll;
+  final parameterKeys = queryParameters.keys.toSet();
+  if (parameterKeys.difference(allowed).isNotEmpty ||
+      allowed.difference(parameterKeys).isNotEmpty ||
+      allowed.any((key) => queryParameters[key]?.length != 1)) {
+    return null;
+  }
+  final owner = uri.queryParameters['owner'];
+  final repository = uri.queryParameters['d'];
+  final eventId = uri.queryParameters['id'];
+  final hex = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+  final repositoryName = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$');
+  if (owner == null ||
+      !hex.hasMatch(owner) ||
+      repository == null ||
+      !repositoryName.hasMatch(repository) ||
+      repository.contains('..')) {
+    return null;
+  }
+  if (uri.host != 'repo' && (eventId == null || !hex.hasMatch(eventId))) {
+    return null;
+  }
+  return EntityDeepLink(
+    type: uri.host,
+    owner: owner.toLowerCase(),
+    repository: repository,
+    eventId: eventId?.toLowerCase(),
+  );
+}
