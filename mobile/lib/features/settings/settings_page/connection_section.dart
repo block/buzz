@@ -28,11 +28,12 @@ class _ConnectionSection extends ConsumerWidget {
             subtitle: 'Scan a recovery code shown by Buzz Desktop',
             trailing: const _RowChevron(),
             onTap: () async {
-              final authorized = await ref
-                  .read(pairingProvider.notifier)
-                  .authorizeIdentityExport(community: community);
-              if (!context.mounted) return;
+              final pairing = ref.read(pairingProvider.notifier);
+              final authorized = await pairing.authorizeIdentityExport(
+                community: community,
+              );
               if (!authorized) {
+                if (!context.mounted) return;
                 final message = ref.read(pairingProvider).errorMessage;
                 if (message != null) {
                   ScaffoldMessenger.of(
@@ -41,23 +42,29 @@ class _ConnectionSection extends ConsumerWidget {
                 }
                 return;
               }
-              final resumed = await _waitForResumedFrame();
-              if (!context.mounted) return;
-              if (!resumed) {
-                ref.read(pairingProvider.notifier).reset();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'Buzz did not return to the foreground. Try again.',
-                    ),
-                  ),
+
+              try {
+                if (!context.mounted) return;
+                final resumed = await _waitForResumedFrame();
+                if (!resumed) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Buzz did not return to the foreground. Try again.',
+                        ),
+                      ),
+                    );
+                  }
+                  return;
+                }
+                if (!context.mounted) return;
+                await Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
                 );
-                return;
+              } finally {
+                pairing.reset();
               }
-              await Navigator.of(context).push(
-                MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
-              );
-              ref.read(pairingProvider.notifier).reset();
             },
           ),
         ],
@@ -72,7 +79,11 @@ Future<bool> _waitForResumedFrame() async {
   final binding = WidgetsBinding.instance;
   if (binding.lifecycleState != AppLifecycleState.resumed) {
     final resumed = Completer<void>();
-    final listener = AppLifecycleListener(onResume: resumed.complete);
+    final listener = AppLifecycleListener(
+      onResume: () {
+        if (!resumed.isCompleted) resumed.complete();
+      },
+    );
     try {
       await resumed.future.timeout(_resumeWaitTimeout);
     } on TimeoutException {

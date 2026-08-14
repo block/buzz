@@ -91,6 +91,94 @@ void main() {
     );
   });
 
+  testWidgets('clears authorization when disposed during authentication', (
+    tester,
+  ) async {
+    final authorization = Completer<bool>();
+    final pairing = _PairingNotifier(authorization.future);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(() => pairing),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          invitePageBuilder: (_) => const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) =>
+              const Scaffold(body: Text('Identity recovery')),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final settingsContext = tester.element(
+      find.text('Send identity to desktop'),
+    );
+    await tester.tap(find.text('Send identity to desktop'));
+    await tester.pump();
+    unawaited(
+      Navigator.of(settingsContext).pushReplacement(
+        MaterialPageRoute<void>(builder: (_) => const SizedBox.shrink()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    authorization.complete(true);
+    await tester.pump();
+
+    expect(pairing.resetCalls, 1);
+    expect(find.text('Identity recovery'), findsNothing);
+  });
+
+  testWidgets('clears authorization when disposed during resume wait', (
+    tester,
+  ) async {
+    final pairing = _PairingNotifier(Future<bool>.value(true));
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(() => pairing),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          invitePageBuilder: (_) => const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) =>
+              const Scaffold(body: Text('Identity recovery')),
+        ),
+      ),
+    );
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+
+    final settingsContext = tester.element(
+      find.text('Send identity to desktop'),
+    );
+    await tester.tap(find.text('Send identity to desktop'));
+    await tester.pump();
+    unawaited(
+      Navigator.of(settingsContext).pushReplacement(
+        MaterialPageRoute<void>(builder: (_) => const SizedBox.shrink()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+
+    expect(pairing.resetCalls, 1);
+    expect(find.text('Identity recovery'), findsNothing);
+  });
+
   testWidgets('denied authentication does not open identity recovery', (
     tester,
   ) async {
