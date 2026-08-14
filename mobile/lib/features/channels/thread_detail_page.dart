@@ -43,6 +43,7 @@ part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
+part 'thread_detail_page/avatar.dart';
 
 /// Full-screen thread detail page.
 ///

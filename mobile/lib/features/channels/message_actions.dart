@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
@@ -37,6 +39,7 @@ import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
 
 part 'message_actions/reaction_popover.dart';
+part 'message_actions/message_action_popover.dart';
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
@@ -53,6 +56,9 @@ void showMessageActions({
   bool isMember = false,
   bool isArchived = false,
   Rect? anchorRect,
+  Future<ui.Image> Function()? captureAnchorSnapshot,
+  VoidCallback? onPopoverPresented,
+  VoidCallback? onPopoverDismissed,
   EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
 }) {
   final hasReactionOnlyActions = message.isSystem && !canManageMessage;
@@ -64,6 +70,24 @@ void showMessageActions({
       anchorRect: anchorRect,
       spotlightPadding: popoverSpotlightPadding,
     );
+    return;
+  }
+
+  if (_tryShowMessageActionsPopover(
+    context: context,
+    ref: ref,
+    message: message,
+    channelId: channelId,
+    canManageMessage: canManageMessage,
+    allMessages: allMessages,
+    currentPubkey: currentPubkey,
+    isMember: isMember,
+    isArchived: isArchived,
+    anchorRect: anchorRect,
+    captureAnchorSnapshot: captureAnchorSnapshot,
+    onPopoverPresented: onPopoverPresented,
+    onPopoverDismissed: onPopoverDismissed,
+  )) {
     return;
   }
 

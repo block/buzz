@@ -403,6 +403,85 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  func testNativeMessageActionsPreserveRequestedGroupsAndHeight() throws {
+    let actionArguments: [[String: Any]] = [
+      [
+        "id": "reply", "title": "Reply",
+        "symbol": "arrowshape.turn.up.left", "group": "primary",
+      ],
+      [
+        "id": "copyText", "title": "Copy text",
+        "symbol": "doc.on.doc", "group": "utility",
+      ],
+      [
+        "id": "delete", "title": "Delete message",
+        "symbol": "trash", "group": "destructive", "destructive": true,
+      ],
+    ]
+    let definitions = try actionArguments.map { arguments in
+      try XCTUnwrap(NativeMessageActionDefinition(arguments: arguments))
+    }
+
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.populatedGroups(actions: definitions),
+      [.primary, .utility, .destructive]
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.separatorCount(actions: definitions),
+      2
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.preferredHeight(actions: definitions),
+      153
+    )
+  }
+
+  @MainActor
+  func testNativeMessageActionRowUsesUIKitTypographyAndSelection() throws {
+    let definition = try XCTUnwrap(
+      NativeMessageActionDefinition(
+        arguments: [
+          "id": "reply", "title": "Reply",
+          "symbol": "arrowshape.turn.up.left", "group": "primary",
+        ]
+      )
+    )
+    var selected = false
+    let row = NativeMessageActionRowControl(
+      definition: definition,
+      foregroundColor: .label,
+      destructiveColor: .systemRed,
+      onSelected: { selected = true }
+    )
+
+    XCTAssertEqual(
+      row.actionTitleLabel.font.fontDescriptor.object(forKey: .textStyle) as? String,
+      UIFont.TextStyle.body.rawValue
+    )
+    XCTAssertNotNil(row.actionImageView.image)
+    row.sendActions(for: .touchUpInside)
+    XCTAssertTrue(selected)
+  }
+
+  @MainActor
+  func testNativeMessageActionSurfaceUsesSystemMaterial() {
+    let effect = NativeMessageActionSurfaceAppearance.backdropEffect(
+      reduceTransparency: false
+    )
+    if #available(iOS 26.0, *) {
+      XCTAssertTrue(effect is UIGlassEffect)
+      XCTAssertEqual(NativeMessageActionSurfaceLayout.cornerRadius, 33)
+    } else {
+      XCTAssertTrue(effect is UIBlurEffect)
+      XCTAssertEqual(NativeMessageActionSurfaceLayout.cornerRadius, 12)
+    }
+    XCTAssertNil(
+      NativeMessageActionSurfaceAppearance.backdropEffect(
+        reduceTransparency: true
+      )
+    )
+  }
+
   private func displayP3Image(red: CGFloat, green: CGFloat, blue: CGFloat) throws -> UIImage {
     let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
     let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)

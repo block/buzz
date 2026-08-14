@@ -1,10 +1,14 @@
+import 'dart:ui' as ui;
+
 import 'package:buzz/features/channels/message_actions.dart';
+import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/reminders/reminder_service.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -180,8 +184,483 @@ Future<void> _pumpImageSheet(
   await tester.pumpAndSettle();
 }
 
+Future<ui.Image> _testMessageSnapshot() async {
+  final recorder = ui.PictureRecorder();
+  final canvas = ui.Canvas(recorder);
+  canvas.drawRect(
+    const Rect.fromLTWH(0, 0, 300, 72),
+    ui.Paint()..color = const Color(0xffeeeeee),
+  );
+  return recorder.endRecording().toImage(300, 72);
+}
+
+class _MessageActionsPopoverHarness {
+  final ProviderContainer container;
+  final ValueNotifier<bool> sourceHidden;
+
+  const _MessageActionsPopoverHarness({
+    required this.container,
+    required this.sourceHidden,
+  });
+}
+
+Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
+  WidgetTester tester, {
+  required TimelineMessage message,
+  required SharedPreferences prefs,
+  ReadStateNotifier Function()? readStateOverride,
+  bool canManageMessage = false,
+  List<TimelineMessage>? allMessages,
+  ReminderService? reminderService,
+  bool disableAnimations = false,
+}) async {
+  final sourceHidden = ValueNotifier(false);
+
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        myPubkeyProvider.overrideWithValue('self'),
+        readStateProvider.overrideWith(
+          readStateOverride ??
+              () => _FakeReadStateNotifier(
+                _readState(const {_channelId: 100000}),
+              ),
+        ),
+        reminderServiceProvider.overrideWithValue(reminderService),
+      ],
+      child: MaterialApp(
+        theme: AppTheme.light(),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(disableAnimations: disableAnimations),
+          child: child!,
+        ),
+        home: Scaffold(
+          body: Consumer(
+            builder: (context, ref, _) => TextButton(
+              key: const ValueKey('open-message-actions-popover'),
+              onPressed: () => showMessageActions(
+                context: context,
+                ref: ref,
+                message: message,
+                channelId: _channelId,
+                canManageMessage: canManageMessage,
+                allMessages: allMessages,
+                currentPubkey: 'self',
+                isMember: true,
+                anchorRect: const Rect.fromLTWH(32, 260, 300, 72),
+                captureAnchorSnapshot: _testMessageSnapshot,
+                onPopoverPresented: () => sourceHidden.value = true,
+                onPopoverDismissed: () => sourceHidden.value = false,
+              ),
+              child: const Text('open message actions'),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.tap(find.byKey(const ValueKey('open-message-actions-popover')));
+  await tester.pumpAndSettle();
+  final container = ProviderScope.containerOf(
+    tester.element(find.byKey(const ValueKey('open-message-actions-popover'))),
+  );
+  return _MessageActionsPopoverHarness(
+    container: container,
+    sourceHidden: sourceHidden,
+  );
+}
+
+Future<void> _dismissMessageActionsPopover(WidgetTester tester) async {
+  Navigator.of(
+    tester.element(find.byKey(const ValueKey('message-action-surface'))),
+  ).pop();
+  await tester.pumpAndSettle();
+}
+
 void main() {
+  testWidgets(
+    'message long press keeps taps and scrolling while repeated holds win',
+    (tester) async {
+      var parentTaps = 0;
+      var nestedTaps = 0;
+      var longPresses = 0;
+      final scrollController = ScrollController();
+      addTearDown(scrollController.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              controller: scrollController,
+              child: Column(
+                children: [
+                  Material(
+                    child: MessageLongPressInkWell(
+                      key: const ValueKey('parent-gesture-target'),
+                      onTap: () => parentTaps += 1,
+                      onLongPress: (_) => longPresses += 1,
+                      child: const SizedBox(height: 80, width: 300),
+                    ),
+                  ),
+                  Material(
+                    child: MessageLongPressInkWell(
+                      onLongPress: (_) => longPresses += 1,
+                      child: GestureDetector(
+                        key: const ValueKey('nested-gesture-target'),
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => nestedTaps += 1,
+                        child: const SizedBox(height: 80, width: 300),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 900),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('parent-gesture-target')));
+      await tester.tap(find.byKey(const ValueKey('nested-gesture-target')));
+      await tester.pump();
+      expect(parentTaps, 1);
+      expect(nestedTaps, 1);
+
+      for (var index = 0; index < 5; index++) {
+        await tester.longPress(
+          find.byKey(const ValueKey('nested-gesture-target')),
+        );
+        await tester.pump();
+        expect(longPresses, index + 1);
+        expect(nestedTaps, 1);
+      }
+
+      final drag = await tester.startGesture(
+        tester.getCenter(find.byKey(const ValueKey('parent-gesture-target'))),
+      );
+      await drag.moveBy(const Offset(0, -30));
+      await tester.pump();
+      await drag.moveBy(const Offset(0, -70));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await drag.up();
+      await tester.pumpAndSettle();
+
+      expect(longPresses, 5);
+      expect(scrollController.offset, greaterThan(0));
+    },
+  );
+
+  testWidgets('iOS message long press recognizes at 200 ms', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    try {
+      var longPresses = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Material(
+              child: MessageLongPressInkWell(
+                key: const ValueKey('ios-long-press-target'),
+                onLongPress: (_) => longPresses += 1,
+                child: const SizedBox(width: 240, height: 80),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(const ValueKey('ios-long-press-target'))),
+      );
+      await tester.pump(const Duration(milliseconds: 199));
+      expect(longPresses, 0);
+      await tester.pump(const Duration(milliseconds: 2));
+      expect(longPresses, 1);
+      await gesture.up();
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets(
+    'message long press captures the content inside the ink surface',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      MessageLongPressDetails? longPressDetails;
+      ui.Image? snapshot;
+      addTearDown(() => snapshot?.dispose());
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Material(
+              child: MessageLongPressInkWell(
+                key: const ValueKey('snapshot-gesture-target'),
+                onLongPressDetails: (details) => longPressDetails = details,
+                child: const SizedBox(width: 240, height: 80),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.longPress(
+        find.byKey(const ValueKey('snapshot-gesture-target')),
+      );
+      expect(longPressDetails, isNotNull);
+
+      final capture = longPressDetails!.captureSnapshot();
+      await tester.pump();
+      snapshot = await capture;
+
+      expect(snapshot.width, 240);
+      expect(snapshot.height, 80);
+    },
+  );
+
+  testWidgets('message snapshot can exclude attached reaction content', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final snapshotKey = GlobalKey();
+    MessageLongPressDetails? longPressDetails;
+    ui.Image? snapshot;
+    addTearDown(() => snapshot?.dispose());
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Material(
+            child: MessageLongPressInkWell(
+              key: const ValueKey('separate-snapshot-gesture-target'),
+              snapshotKey: snapshotKey,
+              onLongPressDetails: (details) => longPressDetails = details,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  RepaintBoundary(
+                    key: snapshotKey,
+                    child: const SizedBox(width: 240, height: 80),
+                  ),
+                  Listener(
+                    key: const ValueKey('attached-reactions'),
+                    behavior: HitTestBehavior.opaque,
+                    child: const SizedBox(width: 240, height: 32),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.longPress(find.byKey(const ValueKey('attached-reactions')));
+    expect(longPressDetails, isNotNull);
+    expect(longPressDetails!.anchorRect.height, 80);
+
+    final capture = longPressDetails!.captureSnapshot();
+    await tester.pump();
+    snapshot = await capture;
+
+    expect(snapshot.width, 240);
+    expect(snapshot.height, 80);
+  });
+
   group('showMessageActions', () {
+    testWidgets('composes the tray, lifted preview, and compact actions', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      final harness = await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        allMessages: [_message()],
+        reminderService: _stubReminderService(),
+      );
+
+      expect(harness.sourceHidden.value, isTrue);
+      expect(
+        find.byKey(const ValueKey('message-action-reaction-tray')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-preview')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-surface')),
+        findsOneWidget,
+      );
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.text('Reply'), findsOneWidget);
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Remind me'), findsOneWidget);
+      expect(find.text('Follow thread'), findsOneWidget);
+
+      final trayRect = tester.getRect(
+        find.byKey(const ValueKey('message-action-reaction-tray')),
+      );
+      final previewRect = tester.getRect(
+        find.byKey(const ValueKey('message-action-preview')),
+      );
+      final actionRect = tester.getRect(
+        find.byKey(const ValueKey('message-action-surface')),
+      );
+      final trayMaterial = tester.widget<Material>(
+        find.byKey(const ValueKey('message-action-reaction-tray')),
+      );
+      final actionMaterial = tester.widget<Material>(
+        find.byKey(const ValueKey('message-action-surface')),
+      );
+      expect(previewRect.top, greaterThan(trayRect.bottom));
+      expect(actionRect.top, greaterThan(previewRect.bottom));
+      expect(previewRect.left, trayRect.left);
+      expect(actionRect.left, trayRect.left);
+      expect(actionRect.width, 288);
+      expect(actionMaterial.color, trayMaterial.color);
+
+      await _dismissMessageActionsPopover(tester);
+      expect(harness.sourceHidden.value, isFalse);
+    });
+
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+      testWidgets(
+        '${platform.name} composition keeps the action menu near the safe bottom',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = platform;
+          try {
+            final prefs = await _mockPrefs();
+            await _pumpMessageActionsPopover(
+              tester,
+              message: _message(),
+              prefs: prefs,
+              allMessages: [_message()],
+              reminderService: _stubReminderService(),
+            );
+
+            final actionRect = tester.getRect(
+              find.byKey(const ValueKey('message-action-surface')),
+            );
+            final logicalHeight =
+                tester.view.physicalSize.height / tester.view.devicePixelRatio;
+            expect(actionRect.bottom, closeTo(logicalHeight - Grid.xxs, 0.1));
+
+            await _dismissMessageActionsPopover(tester);
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        },
+      );
+    }
+
+    testWidgets('runs an action after dismissal and can reopen', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      final harness = await _pumpMessageActionsPopover(
+        tester,
+        message: _message(rootId: 'root-9'),
+        prefs: prefs,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('message-action-followThread')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(harness.sourceHidden.value, isFalse);
+      expect(harness.container.read(threadFollowsProvider).followedRootIds, {
+        'root-9',
+      });
+
+      await tester.tap(
+        find.byKey(const ValueKey('open-message-actions-popover')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('message-action-surface')),
+        findsOneWidget,
+      );
+      await _dismissMessageActionsPopover(tester);
+    });
+
+    testWidgets('orders primary, utility, and destructive action groups', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        canManageMessage: true,
+        allMessages: [_message()],
+        reminderService: _stubReminderService(),
+      );
+
+      const actionIds = [
+        'reply',
+        'markUnread',
+        'edit',
+        'copyText',
+        'copyLink',
+        'remind',
+        'followThread',
+        'delete',
+      ];
+      final actionTops = [
+        for (final actionId in actionIds)
+          tester
+              .getTopLeft(find.byKey(ValueKey('message-action-$actionId')))
+              .dy,
+      ];
+      expect(actionTops, orderedEquals([...actionTops]..sort()));
+      expect(
+        find.byKey(const ValueKey('message-action-divider-utility')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-divider-destructive')),
+        findsOneWidget,
+      );
+
+      await _dismissMessageActionsPopover(tester);
+    });
+
+    testWidgets('reduced motion presents the complete surface immediately', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        disableAnimations: true,
+      );
+
+      expect(
+        find.byKey(const ValueKey('message-action-reaction-tray')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-preview')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-surface')),
+        findsOneWidget,
+      );
+      await _dismissMessageActionsPopover(tester);
+    });
+
     testWidgets('shows parity actions for a regular message', (tester) async {
       final prefs = await _mockPrefs();
       await _pumpSheet(tester, message: _message(), prefs: prefs);

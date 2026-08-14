@@ -10,6 +10,7 @@ import UserNotifications
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
+  private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
 
   override func application(
     _ application: UIApplication,
@@ -113,6 +114,27 @@ import UserNotifications
       messenger: messenger,
       parentViewController: nativeAttachmentRegistrar?.viewController
     )
+
+    if #available(iOS 16.0, *),
+      let nativeMessageActionsRegistrar = engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeMessageActionSurface"
+      ) {
+      nativeMessageActionsRegistrar.register(
+        NativeMessageActionSurfaceFactory(messenger: messenger),
+        withId: "buzz/native_message_action_surface"
+      )
+      nativeMessageActionSurfaceSupportChannel = FlutterMethodChannel(
+        name: "buzz/native_message_action_surface",
+        binaryMessenger: messenger
+      )
+      nativeMessageActionSurfaceSupportChannel?.setMethodCallHandler { call, result in
+        guard call.method == "isSupported" else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        result(true)
+      }
+    }
   }
 
   private static func handleQrScannerMethodCall(

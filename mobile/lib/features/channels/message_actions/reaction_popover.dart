@@ -133,76 +133,104 @@ class _MessageReactionPopover extends StatelessWidget {
               left: left,
               width: trayWidth + _reactionTraySpringAllowance,
               height: _reactionTrayMaxHeight,
-              child: AnimatedBuilder(
+              child: _AnimatedReactionTray(
+                trayKey: const ValueKey('reaction-popover-tray'),
                 animation: animation,
-                child: SizedBox(
-                  width: trayWidth,
-                  height: _reactionTrayMaxHeight,
-                  child: Padding(
-                    padding: const EdgeInsets.all(Grid.xxs),
-                    child: _QuickReactionRow(
-                      message: message,
-                      sheetContext: context,
-                      pageContext: pageContext,
-                      pageRef: pageRef,
-                      presentationAnimation: animation,
-                    ),
-                  ),
-                ),
-                builder: (context, child) {
-                  final appearance = const Interval(
-                    0.04,
-                    0.23,
-                    curve: Curves.easeOutCubic,
-                  ).transform(animation.value);
-                  final expansion = const Interval(
-                    0.16,
-                    0.92,
-                  ).transform(animation.value);
-                  final springExpansion = _reactionSpringCurve.transform(
-                    expansion,
-                  );
-                  final width = lerpDouble(
-                    _reactionTrayMaxHeight,
-                    trayWidth,
-                    springExpansion,
-                  )!;
-
-                  return Opacity(
-                    opacity: appearance,
-                    child: Transform.scale(
-                      alignment: trayScaleAlignment,
-                      scale: lerpDouble(0.95, 1, appearance)!,
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: SizedBox(
-                          key: const ValueKey('reaction-popover-tray'),
-                          width: width,
-                          height: _reactionTrayMaxHeight,
-                          child: Material(
-                            color: context.colors.surface,
-                            surfaceTintColor: Colors.transparent,
-                            elevation: 8,
-                            shadowColor: Colors.black.withValues(alpha: 0.2),
-                            shape: const StadiumBorder(),
-                            clipBehavior: Clip.antiAlias,
-                            child: OverflowBox(
-                              alignment: Alignment.centerLeft,
-                              minWidth: trayWidth,
-                              maxWidth: trayWidth,
-                              minHeight: _reactionTrayMaxHeight,
-                              maxHeight: _reactionTrayMaxHeight,
-                              child: child,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                },
+                trayWidth: trayWidth,
+                scaleAlignment: trayScaleAlignment,
+                message: message,
+                pageContext: pageContext,
+                pageRef: pageRef,
               ),
             ),
           ],
+        );
+      },
+    );
+  }
+}
+
+class _AnimatedReactionTray extends StatelessWidget {
+  final Key trayKey;
+  final Animation<double> animation;
+  final double trayWidth;
+  final AlignmentGeometry scaleAlignment;
+  final TimelineMessage message;
+  final BuildContext pageContext;
+  final WidgetRef pageRef;
+
+  const _AnimatedReactionTray({
+    required this.trayKey,
+    required this.animation,
+    required this.trayWidth,
+    required this.scaleAlignment,
+    required this.message,
+    required this.pageContext,
+    required this.pageRef,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: animation,
+      child: SizedBox(
+        width: trayWidth,
+        height: _reactionTrayMaxHeight,
+        child: Padding(
+          padding: const EdgeInsets.all(Grid.xxs),
+          child: _QuickReactionRow(
+            message: message,
+            sheetContext: context,
+            pageContext: pageContext,
+            pageRef: pageRef,
+            presentationAnimation: animation,
+          ),
+        ),
+      ),
+      builder: (context, child) {
+        final appearance = const Interval(
+          0.04,
+          0.23,
+          curve: Curves.easeOutCubic,
+        ).transform(animation.value);
+        final expansion = const Interval(0.16, 0.92).transform(animation.value);
+        final springExpansion = _reactionSpringCurve.transform(expansion);
+        final width = lerpDouble(
+          _reactionTrayMaxHeight,
+          trayWidth,
+          springExpansion,
+        )!;
+
+        return Opacity(
+          opacity: appearance,
+          child: Transform.scale(
+            alignment: scaleAlignment,
+            scale: lerpDouble(0.95, 1, appearance)!,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: width,
+                height: _reactionTrayMaxHeight,
+                child: Material(
+                  key: trayKey,
+                  color: context.colors.surface,
+                  surfaceTintColor: Colors.transparent,
+                  elevation: 8,
+                  shadowColor: Colors.black.withValues(alpha: 0.2),
+                  shape: const StadiumBorder(),
+                  clipBehavior: Clip.antiAlias,
+                  child: OverflowBox(
+                    alignment: Alignment.centerLeft,
+                    minWidth: trayWidth,
+                    maxWidth: trayWidth,
+                    minHeight: _reactionTrayMaxHeight,
+                    maxHeight: _reactionTrayMaxHeight,
+                    child: child,
+                  ),
+                ),
+              ),
+            ),
+          ),
         );
       },
     );
