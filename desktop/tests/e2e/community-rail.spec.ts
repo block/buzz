@@ -505,6 +505,67 @@ test.describe("community rail", () => {
     expect(uploadCalls).toHaveLength(0);
   });
 
+  test("community switch cancellation wins before native upload registration", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        deferLinkPreviewUploadRegistration: true,
+        linkPreviewMetadata: {
+          title: "Old community preview",
+          siteName: "GitHub",
+          description: "Cancellation must survive native registration.",
+          imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          imageDomain: "github.com",
+          faviconDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("https://github.com/block/buzz/pull/5697?native=reset");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "upload_media_bytes",
+            ).length,
+        ),
+      )
+      .toBe(2);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "cancel_media_upload",
+            ).length,
+        ),
+      )
+      .toBe(2);
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_UPLOADS__?.() ?? 0,
+      ),
+    ).toBe(2);
+    await page.waitForTimeout(250);
+
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ ?? 0,
+      ),
+    ).toBe(0);
+  });
+
   test("restores the last Home or channel destination per community", async ({
     page,
   }) => {

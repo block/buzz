@@ -13,18 +13,21 @@ static MEDIA_UPLOAD_CANCELLATIONS: LazyLock<Mutex<HashMap<String, CancellationTo
 
 pub(super) fn begin_media_upload(progress_id: Option<&str>) -> Option<CancellationToken> {
     let progress_id = progress_id?;
-    let cancel = CancellationToken::new();
-    if let Ok(mut uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
-        uploads.insert(progress_id.to_string(), cancel.clone());
+    let mut uploads = MEDIA_UPLOAD_CANCELLATIONS.lock().ok()?;
+    if let Some(cancel) = uploads.get(progress_id) {
+        return Some(cancel.clone());
     }
+    let cancel = CancellationToken::new();
+    uploads.insert(progress_id.to_string(), cancel.clone());
     Some(cancel)
 }
 
 pub(super) fn cancel_media_upload(progress_id: &str) {
-    if let Ok(uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
-        if let Some(cancel) = uploads.get(progress_id) {
-            cancel.cancel();
-        }
+    if let Ok(mut uploads) = MEDIA_UPLOAD_CANCELLATIONS.lock() {
+        let cancel = uploads
+            .entry(progress_id.to_string())
+            .or_insert_with(CancellationToken::new);
+        cancel.cancel();
     }
 }
 
@@ -123,4 +126,31 @@ pub(super) fn emit_media_upload_phase(
         "media-upload-phase",
         serde_json::json!({ "id": id, "phase": phase }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_before_begin_is_retained() {
+        let progress_id = format!("cancel-before-begin-{}", uuid::Uuid::new_v4());
+
+        cancel_media_upload(&progress_id);
+        let cancellation = begin_media_upload(Some(&progress_id)).expect("cancellation token");
+
+        assert!(cancellation.is_cancelled());
+        finish_media_upload(Some(&progress_id));
+    }
+
+    #[test]
+    fn cancellation_after_begin_reaches_registered_token() {
+        let progress_id = format!("cancel-after-begin-{}", uuid::Uuid::new_v4());
+        let cancellation = begin_media_upload(Some(&progress_id)).expect("cancellation token");
+
+        cancel_media_upload(&progress_id);
+
+        assert!(cancellation.is_cancelled());
+        finish_media_upload(Some(&progress_id));
+    }
 }

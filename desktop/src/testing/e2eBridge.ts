@@ -382,6 +382,8 @@ type E2eConfig = {
     /** Delays link-preview snapshot media uploads so specs can exercise the
      *  composer's settle-gated disabled state before the snapshot tag is ready. */
     linkPreviewUploadDelayMs?: number;
+    /** Hold link-preview uploads before mock-native cancellation registration. */
+    deferLinkPreviewUploadRegistration?: boolean;
     /** Substrings of `link-preview-*` upload filenames whose `upload_media_bytes`
      *  call should reject, so specs can drive a per-media snapshot upload failure
      *  (e.g. `["link-preview-image"]` fails only the thumbnail, favicon survives). */
@@ -1383,6 +1385,10 @@ declare global {
     __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
     /** Release all link-preview metadata commands held by the mock bridge. */
     __BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__?: () => number;
+    /** Release link-preview uploads held before mock-native registration. */
+    __BUZZ_E2E_RELEASE_LINK_PREVIEW_UPLOADS__?: () => number;
+    /** Uploads that passed mock-native registration and began relay work. */
+    __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
   }
 }
 
@@ -1488,6 +1494,8 @@ type DeferredGetEvent = {
 };
 let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
+let deferredLinkPreviewUploadQueue: Array<() => void> = [];
+let cancelledMediaUploadIds = new Set<string>();
 let deferNextChannelsRead = false;
 let deferredChannelsReadResolve: (() => void) | null = null;
 
@@ -10167,8 +10175,16 @@ export function maybeInstallE2eTauriMocks() {
   relayWebsocketConnectAttemptStarts.length = 0;
   deferredSendMessageLiveEchoes.length = 0;
   deferredLinkPreviewMetadataQueue = [];
+  deferredLinkPreviewUploadQueue = [];
+  cancelledMediaUploadIds = new Set<string>();
+  window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ = 0;
   window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__ = () => {
     const queued = deferredLinkPreviewMetadataQueue.splice(0);
+    for (const release of queued) release();
+    return queued.length;
+  };
+  window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_UPLOADS__ = () => {
+    const queued = deferredLinkPreviewUploadQueue.splice(0);
     for (const release of queued) release();
     return queued.length;
   };
@@ -12779,13 +12795,34 @@ export function maybeInstallE2eTauriMocks() {
         return await resolveMockUploadDescriptors(activeConfig);
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
-      case "upload_media_bytes":
-        return resolveMockUploadDescriptorForBytes(
-          payload as { data: number[]; filename?: string | null },
-          activeConfig,
-        );
-      case "cancel_media_upload":
+      case "upload_media_bytes": {
+        const input = payload as {
+          data: number[];
+          filename?: string | null;
+          progressId?: string | null;
+        };
+        if (
+          activeConfig?.mock?.deferLinkPreviewUploadRegistration &&
+          input.filename?.startsWith("link-preview-")
+        ) {
+          await new Promise<void>((resolve) => {
+            deferredLinkPreviewUploadQueue.push(resolve);
+          });
+        }
+        if (input.progressId && cancelledMediaUploadIds.has(input.progressId)) {
+          throw new Error("upload cancelled");
+        }
+        if (input.filename?.startsWith("link-preview-")) {
+          window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ =
+            (window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ ?? 0) + 1;
+        }
+        return resolveMockUploadDescriptorForBytes(input, activeConfig);
+      }
+      case "cancel_media_upload": {
+        const progressId = (payload as { progressId?: string }).progressId;
+        if (progressId) cancelledMediaUploadIds.add(progressId);
         return null;
+      }
       case "upload_media_bytes_raw":
         return resolveMockUploadDescriptorForBytes(
           {
