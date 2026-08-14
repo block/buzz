@@ -357,7 +357,9 @@ class _MessageList extends HookConsumerWidget {
       if (threadHead == null) return null;
       didOpenInitialThread.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted) return;
+        if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) {
+          return;
+        }
         final route = MaterialPageRoute<void>(
           builder: (_) => ThreadDetailPage(
             threadHead: threadHead,

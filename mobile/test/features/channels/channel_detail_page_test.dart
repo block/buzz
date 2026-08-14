@@ -4565,6 +4565,42 @@ void main() {
       expect(dismissedDecoration.color, Colors.transparent);
     });
 
+    testWidgets('does not replace a newer route after delayed hydration', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+      );
+      final messagesNotifier = _FakeMessagesNotifier(const []);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          initialThreadRootId: 'root',
+          initialThreadRouteBehavior:
+              InitialThreadRouteBehavior.replaceCurrentRoute,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final navigator = Navigator.of(
+        tester.element(find.byType(ChannelDetailPage)),
+      );
+      messagesNotifier.setMessages([root]);
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('New destination')),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('New destination'), findsOneWidget);
+      expect(find.byType(ThreadDetailPage), findsNothing);
+    });
+
     testWidgets('replaces a temporary channel route for an initial thread', (
       tester,
     ) async {
