@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.5.12
+
+### Desktop and shared changes
+
+- perf(desktop): update active turns incrementally ([#5897](https://github.com/block/buzz/pull/5897)) ([`757779bb1ef22cc4a1c233344baa0946d907e5a6`](https://github.com/block/buzz/commit/757779bb1ef22cc4a1c233344baa0946d907e5a6))
+- fix(link-previews): send while previews finish in background ([#5697](https://github.com/block/buzz/pull/5697)) ([`f086eb6544fd9f450832ea22de74b5418d1f85a1`](https://github.com/block/buzz/commit/f086eb6544fd9f450832ea22de74b5418d1f85a1))
+- fix(desktop): cut steady-state relay traffic from polls and read-state echo ([#5879](https://github.com/block/buzz/pull/5879)) ([`01f76ec9719ebdacce3f6e67d545692a90e10b06`](https://github.com/block/buzz/commit/01f76ec9719ebdacce3f6e67d545692a90e10b06))
+- fix(desktop): support channel message path links ([#5889](https://github.com/block/buzz/pull/5889)) ([`207154706c87cbf207f2a2abbc096d17737b091a`](https://github.com/block/buzz/commit/207154706c87cbf207f2a2abbc096d17737b091a))
+- test(desktop): await channel E2E bridge readiness ([#5886](https://github.com/block/buzz/pull/5886)) ([`dbee2914ad806c7f038389eb95c7513f5df4e0d2`](https://github.com/block/buzz/commit/dbee2914ad806c7f038389eb95c7513f5df4e0d2))
+- fix(link-preview): refetch a link when it re-enters the composer ([#5510](https://github.com/block/buzz/pull/5510)) ([`fd0ab47a1b5526d7496b5a6d731f3c8d7e4dbe9f`](https://github.com/block/buzz/commit/fd0ab47a1b5526d7496b5a6d731f3c8d7e4dbe9f))
+- feat(desktop-messages): render compact Buzz permalink chips ([#5638](https://github.com/block/buzz/pull/5638)) ([`5acb930821ba56b5f4d1b487bffd237dd3ebe76a`](https://github.com/block/buzz/commit/5acb930821ba56b5f4d1b487bffd237dd3ebe76a))
+- Fix video comment effect wrapping ([#5748](https://github.com/block/buzz/pull/5748)) ([`17d2147ecadaef5891da598cf8f5257f7787992b`](https://github.com/block/buzz/commit/17d2147ecadaef5891da598cf8f5257f7787992b))
+- feat(desktop): one relative date ladder across chat and the Inbox ([#3769](https://github.com/block/buzz/pull/3769)) ([`caa64b5e8f584a740e331887a5dd1cda32bcb958`](https://github.com/block/buzz/commit/caa64b5e8f584a740e331887a5dd1cda32bcb958))
+- fix(desktop): amortize observer journal eviction with a low-water mark ([#5808](https://github.com/block/buzz/pull/5808)) ([`17977814d38a841ed475b318a5dfd4bc8405d049`](https://github.com/block/buzz/commit/17977814d38a841ed475b318a5dfd4bc8405d049))
+- Unify agent profile content ([#5788](https://github.com/block/buzz/pull/5788)) ([`34a7f2fb917cff8afd86bb59f6abcfa4cb8981d5`](https://github.com/block/buzz/commit/34a7f2fb917cff8afd86bb59f6abcfa4cb8981d5))
+- Standardize settings section layout ([#5855](https://github.com/block/buzz/pull/5855)) ([`43e53fc3491ecbd1def14ede3fb8c9e2d44e84d8`](https://github.com/block/buzz/commit/43e53fc3491ecbd1def14ede3fb8c9e2d44e84d8))
+- fix(desktop): share one timer across same-interval useNow consumers ([#5861](https://github.com/block/buzz/pull/5861)) ([`8b8445f5ef3338c58825194ebc008b98111a0962`](https://github.com/block/buzz/commit/8b8445f5ef3338c58825194ebc008b98111a0962))
+- Clarify immediate spoken huddle replies ([#5863](https://github.com/block/buzz/pull/5863)) ([`ea0960f8d0221de18d7d3504607594035519f33f`](https://github.com/block/buzz/commit/ea0960f8d0221de18d7d3504607594035519f33f))
+- Scope desktop presence subscriptions to active demand ([#5830](https://github.com/block/buzz/pull/5830)) ([`df9e773a13f17a270fd6531fc74948b8059d58c3`](https://github.com/block/buzz/commit/df9e773a13f17a270fd6531fc74948b8059d58c3))
+- fix(huddle): stop 20 Hz speaker-level churn from re-rendering the whole app ([#5825](https://github.com/block/buzz/pull/5825)) ([`57435628961d25bd24689cee82f1373e7a074040`](https://github.com/block/buzz/commit/57435628961d25bd24689cee82f1373e7a074040))
+- fix(desktop): match compact link preview thumbnail corners to card shell ([#5711](https://github.com/block/buzz/pull/5711)) ([`eedcd886a04833a78c18f49931abe68792518f97`](https://github.com/block/buzz/commit/eedcd886a04833a78c18f49931abe68792518f97))
+- feat(huddle): cut voice-turn time-to-first-audio from ~1.0 s to ~0.35 s (env-gated latency levers) ([#5671](https://github.com/block/buzz/pull/5671)) ([`068a83b09712703c71923fb22601dffd96554c91`](https://github.com/block/buzz/commit/068a83b09712703c71923fb22601dffd96554c91))
+- Speed up initial direct messages ([#5658](https://github.com/block/buzz/pull/5658)) ([`c8da06c5e9e92b2441927cdb4619318b4328c2bd`](https://github.com/block/buzz/commit/c8da06c5e9e92b2441927cdb4619318b4328c2bd))
+- Polish glass Huddle tray behavior ([#5590](https://github.com/block/buzz/pull/5590)) ([`0571f5455b1b2aeea7334082f0df9d1f19b22f7d`](https://github.com/block/buzz/commit/0571f5455b1b2aeea7334082f0df9d1f19b22f7d))
+- test: add deterministic desktop release smoke ([#5699](https://github.com/block/buzz/pull/5699)) ([`76f114a252866f17003520db0a11a8b6f5b3da0c`](https://github.com/block/buzz/commit/76f114a252866f17003520db0a11a8b6f5b3da0c))
+- feat(desktop): add Inbox message delete action ([#5779](https://github.com/block/buzz/pull/5779)) ([`514195b1d58d1a8679bfc8c63a2b410b6a227489`](https://github.com/block/buzz/commit/514195b1d58d1a8679bfc8c63a2b410b6a227489))
+- fix(desktop): enforce agent mention authorization at send boundaries ([#5681](https://github.com/block/buzz/pull/5681)) ([`bcf353c969b91991c22d0715aa2d7a618d630e1d`](https://github.com/block/buzz/commit/bcf353c969b91991c22d0715aa2d7a618d630e1d))
+- fix(desktop): route compact preview geometry fixture through media proxy ([#5799](https://github.com/block/buzz/pull/5799)) ([`b269e8df7e6ed3e1910b6f6eeef08fa4b89778bd`](https://github.com/block/buzz/commit/b269e8df7e6ed3e1910b6f6eeef08fa4b89778bd))
+- Make workflow run history authoritative in Desktop ([#5780](https://github.com/block/buzz/pull/5780)) ([`2693e0db1fc4980a551c2492031812dc4bad985f`](https://github.com/block/buzz/commit/2693e0db1fc4980a551c2492031812dc4bad985f))
+- fix(desktop): more compact "compact" link previews ([#5629](https://github.com/block/buzz/pull/5629)) ([`45f4b91a36145f2ce642548c34f699f1b529bcf5`](https://github.com/block/buzz/commit/45f4b91a36145f2ce642548c34f699f1b529bcf5))
+- Harden shared agent instruction review ([#4220](https://github.com/block/buzz/pull/4220)) ([`a96af89526f7181543e7651100a944aa8e21812b`](https://github.com/block/buzz/commit/a96af89526f7181543e7651100a944aa8e21812b))
+
+### Other repository changes
+
+- feat(mobile-messages): render compact Buzz permalink chips ([#5639](https://github.com/block/buzz/pull/5639)) ([`5ddf23d700abdd96622de2d39750c56509a7561f`](https://github.com/block/buzz/commit/5ddf23d700abdd96622de2d39750c56509a7561f))
+- Teach agents to inherit Buzz product intent ([#5875](https://github.com/block/buzz/pull/5875)) ([`1d51081b8abf4d3f9ec7fc676207f967a843e860`](https://github.com/block/buzz/commit/1d51081b8abf4d3f9ec7fc676207f967a843e860))
+- Polish mobile profiles, DMs, and sheets ([#5401](https://github.com/block/buzz/pull/5401)) ([`b30f1f61299f6f559777f797be27f193a6a4f0b3`](https://github.com/block/buzz/commit/b30f1f61299f6f559777f797be27f193a6a4f0b3))
+- Fix channel list scroll interruption ([#5815](https://github.com/block/buzz/pull/5815)) ([`0f61f24ad659abf44a7a4fcde6a0a2cbcf78f13b`](https://github.com/block/buzz/commit/0f61f24ad659abf44a7a4fcde6a0a2cbcf78f13b))
+- fix(channels): return complete member rosters ([#5765](https://github.com/block/buzz/pull/5765)) ([`e0940927ff381f6a353c637732c7a81886f9639d`](https://github.com/block/buzz/commit/e0940927ff381f6a353c637732c7a81886f9639d))
+- Fix mobile composer input regressions ([#5594](https://github.com/block/buzz/pull/5594)) ([`98d3d77b426f1107c98b7826d0224624ea774385`](https://github.com/block/buzz/commit/98d3d77b426f1107c98b7826d0224624ea774385))
+- Add mobile community invites ([#5641](https://github.com/block/buzz/pull/5641)) ([`8abc2baf0b71844fc4ff7222aab5027c862b7d1f`](https://github.com/block/buzz/commit/8abc2baf0b71844fc4ff7222aab5027c862b7d1f))
+
+[Compare desktop-v0.5.11...desktop-v0.5.12](https://github.com/block/buzz/compare/desktop-v0.5.11...desktop-v0.5.12)
+
 ## v0.5.11
 
 ### Desktop and shared changes
