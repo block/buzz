@@ -13,6 +13,7 @@ export type PendingSnapshotImport = {
   fileBytes: number[];
   fileName: string;
   snapshotKind: "agent" | "team";
+  desktopControlRequestId?: string;
 };
 
 const OPEN_SNAPSHOT_IMPORT_EVENT = "buzz:open-snapshot-import";
@@ -29,6 +30,7 @@ export function requestOpenSnapshotImport(payload: PendingSnapshotImport) {
     fileBytes: payload.fileBytes,
     fileName: payload.fileName,
     snapshotKind: payload.snapshotKind,
+    desktopControlRequestId: payload.desktopControlRequestId,
   };
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(OPEN_SNAPSHOT_IMPORT_EVENT));

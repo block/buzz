@@ -5,7 +5,7 @@
 //! optionally includes member memory at the requested level.
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::{
@@ -220,6 +220,10 @@ pub struct TeamSnapshotImportConfirm {
     pub file_bytes: Vec<u8>,
     /// Applied uniformly to every member in v1.
     pub keep_allowlist: bool,
+    /// Present only for a request received through the local Desktop control
+    /// socket. Recorded after the all-or-none store phase succeeds.
+    #[serde(default)]
+    pub desktop_control_request_id: Option<String>,
 }
 
 /// Per-member outcome reported after a confirmed team snapshot import.
@@ -504,6 +508,14 @@ pub async fn confirm_team_snapshot_import(
 ) -> Result<TeamSnapshotImportResult, String> {
     // ── Phase 1: validate (no I/O) ───────────────────────────────────────────
     let snapshot = decode_team_snapshot_from_bytes(&input.file_bytes)?;
+    if let Some(request_id) = input.desktop_control_request_id.as_deref() {
+        let control_state = app.state::<crate::desktop_control::DesktopControlState>();
+        crate::desktop_control::validate_pending_import(
+            &control_state,
+            request_id,
+            &input.file_bytes,
+        )?;
+    }
     let now = now_iso();
 
     // Resolve behavioral defaults for every member before any key generation.
@@ -753,6 +765,15 @@ pub async fn confirm_team_snapshot_import(
 
         imported_team
     };
+
+    if let Some(request_id) = input.desktop_control_request_id.as_deref() {
+        let control_state = app.state::<crate::desktop_control::DesktopControlState>();
+        if let Err(error) =
+            crate::desktop_control::mark_import_applied(&app, &control_state, request_id)
+        {
+            eprintln!("buzz-desktop: could not finalize Desktop control request: {error}");
+        }
+    }
 
     // ── Phase 4 & 5: profile sync + memory restore (async, outside lock) ────
     let relay_ws = relay_ws_url_with_override(&state);

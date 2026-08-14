@@ -5,6 +5,7 @@ mod archive;
 mod builderlab;
 mod commands;
 mod deep_link;
+mod desktop_control;
 mod egress_guard;
 mod event_sync;
 mod events;
@@ -303,6 +304,7 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(desktop_control::DesktopControlState::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
@@ -373,6 +375,8 @@ pub fn run() {
                 .keyring_locked
                 .load(std::sync::atomic::Ordering::Acquire);
             let recovery_mode = identity_lost || keyring_locked;
+
+            desktop_control::start_unless_recovery(&app_handle, recovery_mode);
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
@@ -615,6 +619,8 @@ pub fn run() {
             terminal_runtime::terminal_focus,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            desktop_control::take_pending_desktop_control_import,
+            desktop_control::cancel_pending_desktop_control_import,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,

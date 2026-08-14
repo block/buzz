@@ -8,7 +8,7 @@ import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
 import { AppHuddleShell } from "@/app/AppHuddleShell";
 import { AppTopChrome } from "@/app/AppTopChrome";
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useAppNavigationWithDesktopControl } from "@/app/useAppNavigationWithDesktopControl";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
 import { useCommunityNavigationTransitions } from "@/app/useCommunityNavigationTransitions";
 import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
@@ -146,7 +146,7 @@ export function AppShell() {
     goWorkflows,
     closeSettings,
     openSearchHit,
-  } = useAppNavigation();
+  } = useAppNavigationWithDesktopControl();
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
   const { selectedChannelId, selectedView } = React.useMemo(

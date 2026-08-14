@@ -237,6 +237,9 @@ enum Cmd {
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
+    /// Control the running Buzz Desktop through its owner-reviewed local API
+    #[command(subcommand)]
+    Desktop(DesktopCmd),
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
@@ -365,6 +368,34 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+}
+
+#[derive(Subcommand)]
+pub enum DesktopCmd {
+    /// Report whether the local Desktop control API is ready
+    Status {
+        /// Override the Desktop Unix socket path
+        #[arg(long, env = "BUZZ_DESKTOP_SOCKET")]
+        socket: Option<std::path::PathBuf>,
+    },
+    /// Submit owner-reviewed managed-agent drafts
+    #[command(subcommand)]
+    Agents(DesktopAgentsCmd),
+}
+
+#[derive(Subcommand)]
+pub enum DesktopAgentsCmd {
+    /// Open one team snapshot as an exact Desktop preview before creating agents
+    ImportTeamDraft {
+        /// Portable .team.json snapshot containing one or more agents
+        path: std::path::PathBuf,
+        /// Override the Desktop Unix socket path
+        #[arg(long, env = "BUZZ_DESKTOP_SOCKET")]
+        socket: Option<std::path::PathBuf>,
+        /// Retry-safe request identity (defaults to the snapshot SHA-256)
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1951,12 +1982,15 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
+    // Pack and Desktop commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
+    }
+    if let Cmd::Desktop(ref sub) = cli.command {
+        return commands::desktop::dispatch(sub).await;
     }
 
     // Auth: private key is required for all relay operations.
@@ -2019,6 +2053,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Desktop(_) => unreachable!("handled above"),
     }
 }
 
@@ -2108,6 +2143,7 @@ mod tests {
             "agents",
             "canvas",
             "channels",
+            "desktop",
             "dms",
             "emoji",
             "feed",
@@ -2213,6 +2249,7 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(names(&cmd, "desktop"), vec!["agents", "status"]);
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),

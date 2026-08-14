@@ -27,6 +27,7 @@ import type {
   CreateTeamInput,
   UpdateTeamInput,
 } from "@/shared/api/types";
+import { cancelPendingDesktopControlImport } from "@/shared/desktop-control";
 import { deriveImportToast } from "./teamSnapshotImport.lib";
 
 type TeamDialogState = {
@@ -71,6 +72,7 @@ export function useTeamActions(
     fileBytes: number[];
     fileName: string;
     preview: TeamSnapshotImportPreview;
+    desktopControlRequestId?: string;
   } | null>(null);
   const [teamSnapshotImportResult, setTeamSnapshotImportResult] =
     React.useState<TeamSnapshotImportResult | null>(null);
@@ -98,8 +100,11 @@ export function useTeamActions(
     }) => previewTeamSnapshotImport(fileBytes, fileName),
   });
   const confirmTeamSnapshotImportMutation = useMutation({
-    mutationFn: (input: { fileBytes: number[]; keepAllowlist: boolean }) =>
-      confirmTeamSnapshotImport(input),
+    mutationFn: (input: {
+      fileBytes: number[];
+      keepAllowlist: boolean;
+      desktopControlRequestId?: string;
+    }) => confirmTeamSnapshotImport(input),
   });
 
   const teams = teamsQuery.data ?? [];
@@ -261,6 +266,7 @@ export function useTeamActions(
   async function handleImportTeamSnapshotFile(
     fileBytes: number[],
     fileName: string,
+    desktopControlRequestId?: string,
   ) {
     actions.setActionNoticeMessage(null);
     actions.setActionErrorMessage(null);
@@ -269,10 +275,18 @@ export function useTeamActions(
         fileBytes,
         fileName,
       });
-      setTeamSnapshotImportState({ fileBytes, fileName, preview });
+      setTeamSnapshotImportState({
+        fileBytes,
+        fileName,
+        preview,
+        desktopControlRequestId,
+      });
       setTeamSnapshotImportResult(null);
       setTeamSnapshotImportConfirmError(null);
     } catch (err) {
+      if (desktopControlRequestId) {
+        void cancelPendingDesktopControlImport(desktopControlRequestId);
+      }
       actions.setActionErrorMessage(
         err instanceof Error
           ? err.message
@@ -290,6 +304,8 @@ export function useTeamActions(
       const result = await confirmTeamSnapshotImportMutation.mutateAsync({
         fileBytes: teamSnapshotImportState.fileBytes,
         keepAllowlist,
+        desktopControlRequestId:
+          teamSnapshotImportState.desktopControlRequestId,
       });
       setTeamSnapshotImportResult(result);
       void queryClient.invalidateQueries({ queryKey: personasQueryKey });
@@ -309,6 +325,14 @@ export function useTeamActions(
   }
 
   function closeTeamSnapshotImportDialog() {
+    if (
+      teamSnapshotImportState?.desktopControlRequestId &&
+      !teamSnapshotImportResult
+    ) {
+      void cancelPendingDesktopControlImport(
+        teamSnapshotImportState.desktopControlRequestId,
+      );
+    }
     setTeamSnapshotImportState(null);
     setTeamSnapshotImportResult(null);
     setTeamSnapshotImportConfirmError(null);
