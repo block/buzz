@@ -1,3 +1,4 @@
+export const KIND_PROFILE = 0;
 export const KIND_DELETION = 5;
 export const KIND_REACTION = 7;
 export const KIND_TEXT_NOTE = 1;
@@ -53,6 +54,8 @@ export const KIND_COMMUNITY_THEME = 30078;
 export const KIND_PERSONA = 30175;
 export const KIND_TEAM = 30176;
 export const KIND_MANAGED_AGENT = 30177;
+// Replaceable public agent directory profile.
+export const KIND_AGENT_PROFILE = 10100;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_AGENT_TURN_METRIC = 44200;

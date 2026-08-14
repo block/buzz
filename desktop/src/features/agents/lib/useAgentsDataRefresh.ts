@@ -9,6 +9,12 @@ import {
   teamsQueryKey,
 } from "@/features/agents/hooks";
 import { managedAgentRuntimesQueryKey } from "@/features/agents/managedAgentRuntimeHooks";
+import { relayClient } from "@/shared/api/relayClient";
+import {
+  KIND_AGENT_PROFILE,
+  KIND_MANAGED_AGENT,
+  KIND_PROFILE,
+} from "@/shared/constants/kinds";
 
 // Trailing-coalesce window: a backfill burst (up to 500 inbound events fed
 // one-by-one through reconcile) fires one `agents-data-changed` per event.
@@ -27,6 +33,46 @@ export function useAgentsDataRefresh(): void {
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let relayAgentTimer: ReturnType<typeof setTimeout> | undefined;
+    let relayAgentRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    let relayAgentUnsubscribe: (() => Promise<void>) | undefined;
+    let cancelled = false;
+
+    const refreshRelayAgents = () => {
+      if (relayAgentTimer !== undefined) clearTimeout(relayAgentTimer);
+      relayAgentTimer = setTimeout(() => {
+        void queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
+      }, COALESCE_MS);
+    };
+
+    const subscribeToRelayAgentProfiles = (attempt = 0) => {
+      if (cancelled) return;
+      void relayClient
+        .subscribeLive(
+          {
+            kinds: [KIND_PROFILE, KIND_AGENT_PROFILE, KIND_MANAGED_AGENT],
+            limit: 0,
+          },
+          () => {
+            refreshRelayAgents();
+          },
+        )
+        .then((unsubscribe) => {
+          if (cancelled) {
+            void unsubscribe();
+            return;
+          }
+          relayAgentUnsubscribe = unsubscribe;
+        })
+        .catch(() => {
+          if (cancelled) return;
+          const delay = Math.min(1_000 * 2 ** attempt, 30_000);
+          relayAgentRetryTimer = setTimeout(
+            () => subscribeToRelayAgentProfiles(attempt + 1),
+            delay,
+          );
+        });
+    };
 
     const unlistenRuntime = listen("managed-agent-runtime-status", () => {
       void queryClient.invalidateQueries({
@@ -47,8 +93,19 @@ export function useAgentsDataRefresh(): void {
       }, COALESCE_MS);
     });
 
+    subscribeToRelayAgentProfiles();
+    const unsubscribeReconnect = relayClient.subscribeToReconnects(() => {
+      refreshRelayAgents();
+    });
+
     return () => {
+      cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
+      if (relayAgentTimer !== undefined) clearTimeout(relayAgentTimer);
+      if (relayAgentRetryTimer !== undefined)
+        clearTimeout(relayAgentRetryTimer);
+      unsubscribeReconnect();
+      if (relayAgentUnsubscribe) void relayAgentUnsubscribe();
       void unlisten.then((fn) => fn());
       void unlistenRuntime.then((fn) => fn());
     };

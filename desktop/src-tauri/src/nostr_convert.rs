@@ -13,7 +13,7 @@ use nostr::{Event, ToBech32};
 use serde_json::{json, Value};
 
 use crate::models::*;
-
+pub(crate) mod relay_agents;
 mod user_search;
 pub use user_search::{
     list_user_search_results, rank_user_search_results, search_users_from_events,

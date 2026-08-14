@@ -112,6 +112,7 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
 
 test("relayAgentCanRespondInChannel: requires exact channel membership and viewer access", () => {
   const agent = {
+    pubkey: PUB_B,
     respondTo: "allowlist",
     respondToAllowlist: [CURRENT_PUBKEY],
     channelIds: ["general"],
@@ -127,6 +128,29 @@ test("relayAgentCanRespondInChannel: requires exact channel membership and viewe
   );
   assert.equal(
     relayAgentCanRespondInChannel(agent, "general", OTHER_OWNER_PUBKEY),
+    false,
+  );
+});
+
+test("relayAgentCanRespondInChannel: current channel membership overrides a sparse directory profile", () => {
+  const agent = {
+    pubkey: PUB_B,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: [],
+  };
+
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "general",
+      CURRENT_PUBKEY,
+      new Set([PUB_B]),
+    ),
+    true,
+  );
+  assert.equal(
+    relayAgentCanRespondInChannel(agent, "general", CURRENT_PUBKEY, new Set()),
     false,
   );
 });
@@ -199,6 +223,26 @@ test("getMentionableAgentPubkeys: scopes channel composers and fails closed with
     }),
     new Set([PUB_A]),
   );
+});
+
+test("getMentionableAgentPubkeys: admits an external managed agent from current channel membership", () => {
+  const result = getMentionableAgentPubkeys({
+    eligibilityScope: { type: "channel", channelId: "general" },
+    managedAgentPubkeys: [],
+    currentPubkey: CURRENT_PUBKEY,
+    relayAgents: [
+      {
+        pubkey: PUB_B,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: [],
+      },
+    ],
+    sharedChannelIds: new Set(["general"]),
+    channelMemberPubkeys: new Set([PUB_B]),
+  });
+
+  assert.deepEqual(result, new Set([PUB_B]));
 });
 
 test("autocomplete helper extraction preserves safe filtering and labels", () => {

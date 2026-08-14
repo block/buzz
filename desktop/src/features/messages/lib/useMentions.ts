@@ -190,6 +190,11 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
+  const memberPubkeys = React.useMemo(
+    () =>
+      new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
+    [members],
+  );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
@@ -207,11 +212,13 @@ export function useMentions(
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
+        channelMemberPubkeys: memberPubkeys,
       }),
     [
       currentPubkey,
       managedAgentPubkeys,
       mentionChannelId,
+      memberPubkeys,
       relayAgentsQuery.data,
       sharedChannelIds,
     ],
@@ -229,7 +236,6 @@ export function useMentions(
     }
     return lookup;
   }, [managedAgentsQuery.data, personasQuery.data]);
-  const knownAgentPubkeys = mentionableAgentPubkeys;
   const activePersonas = React.useMemo(
     () => (personasQuery.data ?? []).filter((persona) => persona.isActive),
     [personasQuery.data],
@@ -242,14 +248,8 @@ export function useMentions(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
   );
-  const memberPubkeys = React.useMemo(
-    () =>
-      new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
-    [members],
-  );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
-
     const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
       const pubkey = normalizePubkey(candidate.pubkey);
       if (isArchivedDiscovery(pubkey)) {
@@ -274,7 +274,6 @@ export function useMentions(
         candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
         return;
       }
-
       candidatesByPubkey.set(pubkey, {
         ...current,
         avatarUrl: current.avatarUrl ?? candidate.avatarUrl ?? null,
@@ -647,7 +646,7 @@ export function useMentions(
         suggestion.kind === "team" ||
         suggestion.isAgent === true ||
         (suggestion.pubkey
-          ? knownAgentPubkeys.has(normalizePubkey(suggestion.pubkey))
+          ? mentionableAgentPubkeys.has(normalizePubkey(suggestion.pubkey))
           : false);
       if (isAgentMention) {
         setSelectedAgentMentionNames((current) => {
@@ -676,7 +675,7 @@ export function useMentions(
         insertText,
       };
     },
-    [knownAgentPubkeys, mentionStartIndex],
+    [mentionableAgentPubkeys, mentionStartIndex],
   );
 
   const registerMentionPubkey = React.useCallback(
@@ -750,8 +749,9 @@ export function useMentions(
   );
 
   const isAgentPubkey = React.useCallback(
-    (pubkey: string): boolean => knownAgentPubkeys.has(normalizePubkey(pubkey)),
-    [knownAgentPubkeys],
+    (pubkey: string): boolean =>
+      mentionableAgentPubkeys.has(normalizePubkey(pubkey)),
+    [mentionableAgentPubkeys],
   );
   const isManagedAgentPubkey = React.useCallback(
     (pubkey: string): boolean =>
