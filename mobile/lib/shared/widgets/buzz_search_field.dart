@@ -120,7 +120,7 @@ class BuzzSearchField extends StatelessWidget {
                   hintStyle: searchInputTextStyle.copyWith(
                     color: placeholderColor,
                     fontSize: buzzSearchIdleTextSize,
-                    height: 20 / buzzSearchIdleTextSize,
+                    height: 22 / buzzSearchIdleTextSize,
                   ),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,

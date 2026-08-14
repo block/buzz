@@ -199,7 +199,7 @@ void main() {
         matching: find.byType(Text),
       ),
     );
-    expect(prompt.style?.fontSize, 15);
+    expect(prompt.style?.fontSize, 17);
     expect(prompt.maxLines, 1);
     expect(prompt.overflow, TextOverflow.ellipsis);
     expect(

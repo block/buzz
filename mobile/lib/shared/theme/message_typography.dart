@@ -16,51 +16,51 @@ const compactMessageAvatarSize = messageAvatarSize;
 /// Horizontal space between a message avatar and its content.
 const messageAvatarContentGap = Grid.twelve;
 
-/// Primary message copy: 15sp regular on a 20sp line height.
+/// Primary message copy: 17sp regular on a 22sp line height.
 const messageBodyTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 15,
+  fontSize: 17,
   fontWeight: FontWeight.w400,
-  height: 20 / 15,
+  height: 22 / 17,
   letterSpacing: 0,
 );
 
-/// Message author names: 15sp semibold on a 17sp line height.
+/// Message author names: 17sp semibold on a 19sp line height.
 const messageUsernameTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 15,
+  fontSize: 17,
   fontWeight: FontWeight.w600,
-  height: 17 / 15,
+  height: 19 / 17,
   letterSpacing: 0,
 );
 
-/// Secondary author metadata: 15sp regular on a tight 17sp line height.
+/// Secondary author metadata: 17sp regular on a tight 19sp line height.
 const messageMetadataTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 15,
+  fontSize: 17,
   fontWeight: FontWeight.w400,
-  height: 17 / 15,
+  height: 19 / 17,
   letterSpacing: 0,
 );
 
 /// Message timestamps share the secondary author metadata style.
 const messageTimestampTextStyle = messageMetadataTextStyle;
 
-/// Compact reply previews: 13.1sp regular on a 17sp line height.
+/// Compact reply previews: 14sp regular on an 18sp line height.
 const replyPreviewTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 13.1,
+  fontSize: 14,
   fontWeight: FontWeight.w400,
-  height: 17 / 13.1,
+  height: 18 / 14,
   letterSpacing: 0,
 );
 
-/// Reaction counts: 13.1sp medium on a 17sp line height.
+/// Reaction counts: 14sp medium on an 18sp line height.
 const reactionCountTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 13.1,
+  fontSize: 14,
   fontWeight: FontWeight.w500,
-  height: 17 / 13.1,
+  height: 18 / 14,
   letterSpacing: 0,
 );
 
@@ -79,42 +79,42 @@ const contentListTitleTextStyle = messageUsernameTextStyle;
 /// Secondary copy in compact content lists.
 const contentListBodyTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 13.1,
+  fontSize: 14,
   fontWeight: FontWeight.w400,
-  height: 17 / 13.1,
+  height: 18 / 14,
   letterSpacing: 0,
 );
 
 /// Timestamps in compact content lists.
 const contentListTimestampTextStyle = messageMetadataTextStyle;
 
-/// Filter chip labels use a tighter 15sp Inter treatment.
+/// Filter chip labels use a tighter 17sp Inter treatment.
 const filterChipTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 15,
+  fontSize: 17,
   fontWeight: FontWeight.w400,
   height: 1,
   letterSpacing: 0,
 );
 
-/// Search fields use the primary 15sp body treatment.
+/// Search fields use the primary 17sp body treatment.
 const searchInputTextStyle = messageBodyTextStyle;
 
-/// System message actor names: 15sp semibold on a 17sp line height.
+/// System message actor names: 17sp semibold on a 19sp line height.
 const systemMessageHeadingTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 15,
+  fontSize: 17,
   fontWeight: FontWeight.w600,
-  height: 17 / 15,
+  height: 19 / 17,
   letterSpacing: 0,
 );
 
-/// System message copy: 15sp regular on a 20sp line height.
+/// System message copy: 17sp regular on a 22sp line height.
 const systemMessageBodyTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 15,
+  fontSize: 17,
   fontWeight: FontWeight.w400,
-  height: 20 / 15,
+  height: 22 / 17,
   letterSpacing: 0,
 );
 
@@ -124,12 +124,12 @@ const activityUsernameTextStyle = messageUsernameTextStyle;
 /// Activity timestamps share the secondary author metadata style.
 const activityTimestampTextStyle = messageMetadataTextStyle;
 
-/// Activity context labels: 13.1sp medium on a 17sp line height.
+/// Activity context labels: 14sp medium on an 18sp line height.
 const activityContextTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 13.1,
+  fontSize: 14,
   fontWeight: FontWeight.w500,
-  height: 17 / 13.1,
+  height: 18 / 14,
   letterSpacing: 0,
 );
 

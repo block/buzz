@@ -20,38 +20,38 @@ void main() {
   test('message typography matches the shared mobile scale', () {
     expectStyle(
       messageBodyTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 20,
+      lineHeight: 22,
       letterSpacing: 0,
     );
     expectStyle(
       messageUsernameTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w600,
-      lineHeight: 17,
+      lineHeight: 19,
       letterSpacing: 0,
     );
     expectStyle(
       messageTimestampTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 17,
+      lineHeight: 19,
       letterSpacing: 0,
     );
     expect(messageTimestampTextStyle, messageMetadataTextStyle);
     expectStyle(
       replyPreviewTextStyle,
-      fontSize: 13.1,
+      fontSize: 14,
       fontWeight: FontWeight.w400,
-      lineHeight: 17,
+      lineHeight: 18,
       letterSpacing: 0,
     );
     expectStyle(
       reactionCountTextStyle,
-      fontSize: 13.1,
+      fontSize: 14,
       fontWeight: FontWeight.w500,
-      lineHeight: 17,
+      lineHeight: 18,
       letterSpacing: 0,
     );
     expectStyle(
@@ -63,16 +63,16 @@ void main() {
     );
     expectStyle(
       systemMessageHeadingTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w600,
-      lineHeight: 17,
+      lineHeight: 19,
       letterSpacing: 0,
     );
     expectStyle(
       systemMessageBodyTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 20,
+      lineHeight: 22,
       letterSpacing: 0,
     );
   });
@@ -80,30 +80,30 @@ void main() {
   test('activity typography matches the conversation row scale', () {
     expectStyle(
       activityUsernameTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w600,
-      lineHeight: 17,
+      lineHeight: 19,
       letterSpacing: 0,
     );
     expectStyle(
       activityTimestampTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 17,
+      lineHeight: 19,
       letterSpacing: 0,
     );
     expectStyle(
       activityContextTextStyle,
-      fontSize: 13.1,
+      fontSize: 14,
       fontWeight: FontWeight.w500,
-      lineHeight: 17,
+      lineHeight: 18,
       letterSpacing: 0,
     );
     expectStyle(
       activityPreviewTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 20,
+      lineHeight: 22,
       letterSpacing: 0,
     );
   });
@@ -111,30 +111,30 @@ void main() {
   test('content list typography matches the compact list scale', () {
     expectStyle(
       contentListTitleTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w600,
-      lineHeight: 17,
+      lineHeight: 19,
       letterSpacing: 0,
     );
     expectStyle(
       contentListBodyTextStyle,
-      fontSize: 13.1,
+      fontSize: 14,
       fontWeight: FontWeight.w400,
-      lineHeight: 17,
+      lineHeight: 18,
       letterSpacing: 0,
     );
     expectStyle(
       contentListTimestampTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 17,
+      lineHeight: 19,
       letterSpacing: 0,
     );
     expectStyle(
       filterChipTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 15,
+      lineHeight: 17,
       letterSpacing: 0,
     );
   });
