@@ -24,10 +24,18 @@ export function ChannelDeepLinkAnchor({
   href,
   interactive,
 }: React.ComponentPropsWithoutRef<"a"> & { interactive: boolean }) {
-  const { channels, onOpenChannel } = useMarkdownRuntime();
+  const { channels, onOpenChannel, onOpenMessageLink } = useMarkdownRuntime();
   if (!href) return <>{children}</>;
   const parsed = parseChannelLink(href);
   if (!parsed.ok) return <>{children}</>;
+  const openLink = () =>
+    parsed.value.messageId
+      ? onOpenMessageLink({
+          channelId: parsed.value.channelId,
+          messageId: parsed.value.messageId,
+          threadRootId: null,
+        })
+      : onOpenChannel(parsed.value.channelId);
   const authoredLabel = getReactNodeText(children);
   if (authoredLabel !== href) {
     return (
@@ -36,7 +44,7 @@ export function ChannelDeepLinkAnchor({
         title={href}
         aria-label={`Open channel: ${authoredLabel}`}
         interactive={interactive}
-        onOpenLink={() => onOpenChannel(parsed.value.channelId)}
+        onOpenLink={openLink}
       >
         {children}
       </BuzzInlineLink>
@@ -50,7 +58,7 @@ export function ChannelDeepLinkAnchor({
       title={href}
       aria-label={`Open channel ${label}`}
       interactive={interactive}
-      onOpenLink={() => onOpenChannel(parsed.value.channelId)}
+      onOpenLink={openLink}
     >
       {label}
     </BuzzLinkChip>
@@ -64,10 +72,18 @@ export function MarkdownChannelDeepLink({
   children?: React.ReactNode;
   interactive: boolean;
 }) {
-  const { channels, onOpenChannel } = useMarkdownRuntime();
+  const { channels, onOpenChannel, onOpenMessageLink } = useMarkdownRuntime();
   const href = String(children ?? "");
   const parsed = parseChannelLink(href);
   if (!parsed.ok) return <span data-channel-deep-link="">{href}</span>;
+  const openLink = () =>
+    parsed.value.messageId
+      ? onOpenMessageLink({
+          channelId: parsed.value.channelId,
+          messageId: parsed.value.messageId,
+          threadRootId: null,
+        })
+      : onOpenChannel(parsed.value.channelId);
   const label = channelPermalinkLabel(channels, parsed.value.channelId);
   return (
     <BuzzLinkChip
@@ -77,7 +93,7 @@ export function MarkdownChannelDeepLink({
       title={href}
       aria-label={`Open channel ${label}`}
       interactive={interactive}
-      onOpenLink={() => onOpenChannel(parsed.value.channelId)}
+      onOpenLink={openLink}
     >
       {label}
     </BuzzLinkChip>

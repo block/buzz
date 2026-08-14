@@ -66,7 +66,12 @@ export function resolveComposerMessageLinkAttributes(
   if (channel.ok) {
     return {
       channelName: resolveChannelName(channel.value.channelId) ?? "",
-      href: buildChannelLink(channel.value.channelId),
+      href: channel.value.messageId
+        ? buildMessageLink({
+            channelId: channel.value.channelId,
+            messageId: channel.value.messageId,
+          })
+        : buildChannelLink(channel.value.channelId),
     };
   }
 
