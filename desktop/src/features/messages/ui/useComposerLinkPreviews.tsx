@@ -4,7 +4,10 @@ import { ImageOff, X } from "lucide-react";
 import { getRelayHttpUrl } from "@/shared/api/tauri";
 import { extractSupportedLinkPreviews } from "@/shared/lib/linkPreview";
 import { isValidLinkPreviewSnapshotCanonicalUrl } from "@/shared/lib/linkPreviewSnapshot";
-import { prepareLinkPreview } from "@/features/messages/lib/linkPreviewPreparationStore";
+import {
+  invalidateLinkPreviewPreparation,
+  prepareLinkPreview,
+} from "@/features/messages/lib/linkPreviewPreparationStore";
 import {
   beginRelayOriginFetch,
   getCachedRelayOrigin,
@@ -285,15 +288,20 @@ export function useComposerLinkPreviews(
     () => extractCandidates(debounced),
     [extractCandidates, debounced],
   );
-  // Supported candidates in the LIVE content. The submit handoff reads this
-  // exact set rather than the lagging debounce generation.
+  const liveCandidates = React.useMemo(
+    () => extractCandidates(content).map((preview) => preview.href),
+    [content, extractCandidates],
+  );
+  const liveCandidatesKey = liveCandidates.join("\n");
+  const liveHrefVersionsKey = liveCandidates
+    .map((href) => `${href}\0${liveHrefVersions?.get(href) ?? ""}`)
+    .join("\n");
+  // Async completion and submit paths may only observe committed editor state.
+  // A render-time ref write can leak an abandoned concurrent render.
   const liveCandidatesRef = React.useRef<string[]>([]);
-  liveCandidatesRef.current = extractCandidates(content).map(
-    (preview) => preview.href,
-  );
-  const liveCandidates = extractCandidates(content).map(
-    (preview) => preview.href,
-  );
+  React.useLayoutEffect(() => {
+    liveCandidatesRef.current = liveCandidates;
+  }, [liveCandidates]);
   const resolvedPreviews = useResolvedLinkPreviews(
     suppressed ? [] : candidates,
     {
@@ -311,7 +319,7 @@ export function useComposerLinkPreviews(
   // Clear a "hide previews" suppression as soon as the LIVE draft has no
   // supported candidates — not the debounced set, whose lag would otherwise let
   // a clear-then-retype race keep suppression stuck on after the draft changed.
-  const liveCandidatesEmpty = liveCandidatesRef.current.length === 0;
+  const liveCandidatesEmpty = liveCandidates.length === 0;
   React.useEffect(() => {
     if (liveCandidatesEmpty) setSuppressed(false);
   }, [liveCandidatesEmpty]);
@@ -323,8 +331,77 @@ export function useComposerLinkPreviews(
   readyTagsByHrefRef.current = readyTags;
   const suppressedRef = React.useRef(suppressed);
   suppressedRef.current = suppressed;
+  // Track composer incarnations independently from the shared preparation
+  // store. Re-entry must supersede work built from the previous incarnation,
+  // even if React batched leave+enter into one commit.
+  const preparationGenerationRef = React.useRef(new Map<string, number>());
+  const committedLiveHrefsRef = React.useRef<Set<string>>(new Set());
+  const committedLiveHrefVersionsRef = React.useRef<Map<string, number>>(
+    new Map(),
+  );
+  const reenteringHrefsRef = React.useRef<
+    Map<string, "blocked" | "refetching">
+  >(new Map());
   const activeHrefsRef = React.useRef(new Set<string>());
-  activeHrefsRef.current = new Set(candidates.map((preview) => preview.href));
+  const reenteredLiveHrefs = liveCandidates.filter((href) => {
+    const version = liveHrefVersions?.get(href);
+    return version === undefined
+      ? !committedLiveHrefsRef.current.has(href)
+      : committedLiveHrefVersionsRef.current.get(href) !== version;
+  });
+  const staleReenteredHrefs = reenteredLiveHrefs.filter(
+    (href) =>
+      !reenteringHrefsRef.current.has(href) &&
+      previews.some(
+        (preview) =>
+          preview.href === href &&
+          preview.snapshotReady &&
+          preview.imageState === "fallback",
+      ),
+  );
+  const staleReenteredKey = staleReenteredHrefs.join("\n");
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: stable keys represent the committed live/version/stale sets.
+  React.useLayoutEffect(() => {
+    const previous = committedLiveHrefsRef.current;
+    const active = new Set(liveCandidates);
+    activeHrefsRef.current = active;
+    committedLiveHrefsRef.current = active;
+    committedLiveHrefVersionsRef.current = new Map(liveHrefVersions);
+
+    for (const href of previous) {
+      if (active.has(href)) continue;
+      reenteringHrefsRef.current.delete(href);
+      preparationGenerationRef.current.set(
+        href,
+        (preparationGenerationRef.current.get(href) ?? 0) + 1,
+      );
+    }
+
+    if (staleReenteredHrefs.length === 0) return;
+    for (const href of staleReenteredHrefs) {
+      reenteringHrefsRef.current.set(href, "blocked");
+      preparationGenerationRef.current.set(
+        href,
+        (preparationGenerationRef.current.get(href) ?? 0) + 1,
+      );
+      invalidateLinkPreviewPreparation(href);
+    }
+    const drop = new Set(staleReenteredHrefs);
+    setReadyTags((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const href of drop) {
+        if (!(href in next)) continue;
+        delete next[href];
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [liveCandidatesKey, liveHrefVersionsKey, staleReenteredKey]);
+
+  const isHrefReentering = (href: string) =>
+    reenteringHrefsRef.current.has(href) || staleReenteredHrefs.includes(href);
 
   React.useEffect(() => {
     if (getCachedRelayOrigin()) return;
@@ -345,12 +422,26 @@ export function useComposerLinkPreviews(
 
   React.useEffect(() => {
     for (const preview of previews) {
+      const phase = reenteringHrefsRef.current.get(preview.href);
+      if (phase !== undefined) {
+        if (!preview.snapshotReady) {
+          reenteringHrefsRef.current.set(preview.href, "refetching");
+          continue;
+        }
+        if (phase === "blocked") continue;
+        reenteringHrefsRef.current.delete(preview.href);
+      }
       if (!preview.snapshotReady || readyTags[preview.href]) continue;
+      const generation =
+        preparationGenerationRef.current.get(preview.href) ?? 0;
       void prepareLinkPreview(preview).then((tag) => {
         if (
           !tag ||
           suppressedRef.current ||
-          !activeHrefsRef.current.has(preview.href)
+          !activeHrefsRef.current.has(preview.href) ||
+          reenteringHrefsRef.current.has(preview.href) ||
+          (preparationGenerationRef.current.get(preview.href) ?? 0) !==
+            generation
         ) {
           return;
         }
@@ -366,7 +457,9 @@ export function useComposerLinkPreviews(
   readyTagsRef.current = suppressed
     ? [["link-preview", "none"]]
     : candidates.flatMap((candidate) =>
-        readyTags[candidate.href] ? [readyTags[candidate.href]] : [],
+        readyTags[candidate.href] && !isHrefReentering(candidate.href)
+          ? [readyTags[candidate.href]]
+          : [],
       );
   // Expose speculative preparation state for card treatment and tests. It no
   // longer gates Submit: the send flow promotes unfinished work into the
@@ -377,13 +470,14 @@ export function useComposerLinkPreviews(
       (preview) =>
         !preview.href.startsWith("buzz://") &&
         (preview.imageState === "pending" ||
+          isHrefReentering(preview.href) ||
           (preview.snapshotReady && !readyTags[preview.href])),
     );
   // Include live candidates not reached by the debounce yet so the composer
   // accurately reports whether its visible generation is still catching up.
   const hasUnresolvedLiveCandidates =
     !suppressed &&
-    liveCandidatesRef.current.some(
+    liveCandidates.some(
       (href) =>
         !href.startsWith("buzz://") &&
         !readyTags[href] &&
@@ -422,7 +516,9 @@ export function useComposerLinkPreviews(
   const getReadyTags = React.useCallback(
     () =>
       selectSubmitTags(
-        liveCandidatesRef.current,
+        liveCandidatesRef.current.filter(
+          (href) => !reenteringHrefsRef.current.has(href),
+        ),
         readyTagsByHrefRef.current,
         suppressedRef.current,
       ),

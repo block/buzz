@@ -18,6 +18,7 @@ const SETTLED_PREVIEW_JOB_TTL_MS = 5 * 60_000;
 type PreviewJob = {
   controller: AbortController;
   promise: Promise<string[] | null>;
+  fingerprint: string | null;
   fallbackTag: string[] | null;
   resolvedTag: string[] | null;
   settled: boolean;
@@ -155,6 +156,30 @@ function isReusableJob(job: PreviewJob, now = Date.now()): boolean {
   );
 }
 
+/**
+ * Supersede preparation derived from an older composer incarnation. Deleting
+ * before aborting lets a fresh job for the same URL start immediately while
+ * the old upload unwinds; the old job's identity check prevents it from
+ * deleting or publishing over its replacement.
+ */
+export function invalidateLinkPreviewPreparation(href: string): void {
+  const job = jobs.get(href);
+  if (!job) return;
+  jobs.delete(href);
+  job.controller.abort();
+}
+
+function previewFingerprint(candidate: SupportedLinkPreview): string | null {
+  if (!("snapshotReady" in candidate) || !candidate.snapshotReady) return null;
+  return JSON.stringify([
+    candidate.title,
+    candidate.provider,
+    "description" in candidate ? candidate.description : null,
+    "imageDataUrl" in candidate ? candidate.imageDataUrl : null,
+    "faviconDataUrl" in candidate ? candidate.faviconDataUrl : null,
+  ]);
+}
+
 /** Start or adopt the one preparation job for this exact canonical URL. */
 export function prepareLinkPreview(
   candidate: SupportedLinkPreview,
@@ -165,16 +190,22 @@ export function prepareLinkPreview(
   ) {
     return Promise.resolve(null);
   }
+  const fingerprint = previewFingerprint(candidate);
   const existing = jobs.get(candidate.href);
-  if (existing && isReusableJob(existing)) {
+  if (
+    existing &&
+    isReusableJob(existing) &&
+    (fingerprint === null || existing.fingerprint === fingerprint)
+  ) {
     return existing.promise;
   }
-  if (existing) jobs.delete(candidate.href);
+  if (existing) invalidateLinkPreviewPreparation(candidate.href);
 
   const controller = new AbortController();
   const job: PreviewJob = {
     controller,
     promise: Promise.resolve(null),
+    fingerprint,
     fallbackTag: null,
     resolvedTag: null,
     settled: false,
