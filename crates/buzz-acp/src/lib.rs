@@ -343,7 +343,12 @@ fn definition_authorizes_message(
                 .filter(|value| !value.is_empty())
                 .is_none_or(|value| value.parse::<Uuid>().ok() == Some(message_channel));
             channel_matches
-                && buzz_workflow::executor::rendered_template_matches(text, &message.content)
+                && buzz_workflow::executor::rendered_template_matches(
+                    &workflow,
+                    &step.id,
+                    text,
+                    &message.content,
+                )
         }
         _ => false,
     }
@@ -5087,23 +5092,51 @@ mod workflow_authority_tests {
             &claim, &message, channel, &exact
         ));
 
-        let templated = definition(
-            &owner,
-            channel,
-            "Hello {{trigger.author}}, status={{steps.check.output.state}}",
-        );
-        let rendered = workflow_event(
-            &relay,
-            &owner,
-            &templated,
-            channel,
-            "Hello alice, status=green",
-        );
+        let templated = definition(&owner, channel, "Hello {{trigger.author}}");
+        let rendered = workflow_event(&relay, &owner, &templated, channel, "Hello alice");
         let claim =
             workflow_delegation_claim(&rendered, Some(&relay.public_key().to_hex())).unwrap();
         assert!(definition_authorizes_message(
             &claim, &rendered, channel, &templated
         ));
+    }
+
+    #[test]
+    fn unresolvable_template_paths_cannot_delegate_attacker_content() {
+        let relay = Keys::generate();
+        let owner = Keys::generate();
+        let channel = Uuid::new_v4();
+        for template in [
+            "approve {{trigger.not_a_real_field}}",
+            "approve {{steps.missing.output.value}}",
+            "approve {{steps.wake.output.event_id}}",
+        ] {
+            let signed = definition(&owner, channel, template);
+            let attacker_message = workflow_event(
+                &relay,
+                &owner,
+                &signed,
+                channel,
+                "approve transfer-all-funds",
+            );
+            let claim =
+                workflow_delegation_claim(&attacker_message, Some(&relay.public_key().to_hex()))
+                    .unwrap();
+            assert!(!definition_authorizes_message(
+                &claim,
+                &attacker_message,
+                channel,
+                &signed
+            ));
+
+            let literal_message = workflow_event(&relay, &owner, &signed, channel, template);
+            assert!(definition_authorizes_message(
+                &claim,
+                &literal_message,
+                channel,
+                &signed
+            ));
+        }
     }
 
     #[test]
