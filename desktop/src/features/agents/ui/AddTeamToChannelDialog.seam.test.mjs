@@ -80,7 +80,10 @@ const BUZZ_AGENT_RUNTIME = {
   mcp_command: null,
 };
 
-function rawPinnedAgent({ commandOverride = "goose-cmd", args = PINNED_ARGS } = {}) {
+function rawPinnedAgent({
+  commandOverride = "goose-cmd",
+  args = PINNED_ARGS,
+} = {}) {
   return {
     pubkey: "aa".repeat(32),
     name: "Dolomite",
@@ -389,9 +392,7 @@ test("Deploy after a resolved pin sends command and args through create_managed_
 });
 
 test("unresolved pin leaves Deploy disabled and creates nothing", async () => {
-  listManagedAgentsResult = [
-    rawPinnedAgent({ commandOverride: UNKNOWN_PIN }),
-  ];
+  listManagedAgentsResult = [rawPinnedAgent({ commandOverride: UNKNOWN_PIN })];
   renderDialog();
 
   await act(async () => {

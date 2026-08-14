@@ -58,9 +58,10 @@ export function sourceAgentForPersona(
   );
 }
 
-export function isTeamDeploySourceReady(
-  query: TeamDeploySourceQuery,
-): { ready: boolean; blockReason: "loading" | "error" | null } {
+export function isTeamDeploySourceReady(query: TeamDeploySourceQuery): {
+  ready: boolean;
+  blockReason: "loading" | "error" | null;
+} {
   if (query.isPending || !query.isFetched) {
     return { ready: false, blockReason: "loading" };
   }
@@ -79,7 +80,7 @@ export function isTeamDeploySourceReady(
 export function runtimeForTeamPersonaDeploy(input: {
   persona: AgentPersona;
   runtimes: readonly AcpRuntime[];
-  defaultProvider: AcpRuntime | undefined;
+  defaultProvider: AcpRuntime | null;
   managedAgents: readonly ManagedAgent[];
 }): TeamPersonaDeployPlan {
   const source = sourceAgentForPersona(input.managedAgents, input.persona.id);
@@ -87,8 +88,7 @@ export function runtimeForTeamPersonaDeploy(input: {
   if (override) {
     const matching = input.runtimes.find(
       (runtime) =>
-        (runtime.command != null &&
-          commandsMatch(runtime.command, override)) ||
+        (runtime.command != null && commandsMatch(runtime.command, override)) ||
         runtime.id === override,
     );
     if (!matching) {
@@ -184,6 +184,6 @@ export function runtimeLabelForTeamDeployPlan(
 export function defaultTeamDeployRuntime(
   runtimes: readonly AcpRuntime[],
   preferredRuntimeId?: string | null,
-): AcpRuntime | undefined {
+): AcpRuntime | null {
   return getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
 }

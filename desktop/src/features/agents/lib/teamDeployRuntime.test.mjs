@@ -183,7 +183,9 @@ test("team deploy without override falls back to persona runtime with empty args
     persona: persona(),
     runtimes: [gooseRuntime, buzzAgentRuntime],
     defaultProvider: buzzAgentRuntime,
-    managedAgents: [managedAgent({ agentCommandOverride: null, agentArgs: [] })],
+    managedAgents: [
+      managedAgent({ agentCommandOverride: null, agentArgs: [] }),
+    ],
   });
   assert.equal(plan.status, "ready");
   if (plan.status !== "ready") {
