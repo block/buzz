@@ -1,12 +1,12 @@
 ---
-status: Accepted
+status: Proposed
 date: 2026-08-13
 issue: launchpad-26/buzz#63
 decided_in: launchpad-26/buzz#63
 supersedes: none
 ---
 
-# ADR-0063 — Secret-scanning engine for the fork, and where its allowlist lives
+# ADR-0006 — Secret-scanning engine for the fork, and where its allowlist lives
 
 ## Decision
 
@@ -83,7 +83,7 @@ being decided:
 **On GitHub's native secret scanning + push protection**: #63 as filed rejected this as
 the sole answer because it "needs repository admin, which this work does not have."
 That's true of the account doing this work, but the cohort's PM does hold admin on this
-repo. That reopens a door #63 and ADR-0065 (a sibling decision, about the *audit
+repo. That reopens a door #63 and #65 (a related, still-open ADR, about the *audit
 workflow's own CI token* — a different question, still admin-less either way) both treated
 as closed. Push protection is the only *preventive* control available anywhere in this
 PRD — everything gitleaks does here is detective, catching material after it's already
@@ -119,8 +119,8 @@ than a launch-day checkbox.
 
 ## Provenance
 
-Unlike ADR-0065, which was made while working its own issue directly, this decision was
-also made directly while working #63 — `issue` and `decided_in` point to the same place.
+This decision was made directly while working #63 — `issue` and `decided_in` point to the
+same place.
 
 Verified live, on this machine, against this repository, rather than assumed from #63's
 filed text:

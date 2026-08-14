@@ -1,12 +1,12 @@
 ---
-status: Accepted
+status: Proposed
 date: 2026-08-13
 issue: launchpad-26/buzz#64
 decided_in: launchpad-26/buzz#64
 supersedes: none
 ---
 
-# ADR-0064 — Dependency update path for this fork
+# ADR-0007 — Dependency update path for this fork
 
 ## Decision
 
@@ -57,18 +57,19 @@ $ gh api orgs/launchpad-26/members?role=admin
 ```
 
 Installing a GitHub App at the org level needs org **owner**, not repository admin — a
-stricter bar than anything else this PRD has needed so far (compare ADR-0063's push
+stricter bar than anything else this PRD has needed so far (compare ADR-0006's push
 protection, which only needs repo admin). This account holds org role `member`, the same
-constraint ADR-0065 already hit for GitHub App creation, applying here to GitHub App
-*installation* instead.
+constraint issue #65 (a related, still-open ADR) already names for GitHub App creation,
+applying here to GitHub App *installation* instead.
 
 Critically, this was checked against the actual person available to this cohort: the
 project's PM holds **repository admin on `buzz` only, not organization owner**. The three
 accounts holding org owner are unrelated to this cohort's chain of contacts, with one
 exception — one of them is this cohort's course instructor, a materially different, heavier
 ask than a routine dependency-tooling decision. Option 1 is therefore not "harder" than
-option 2, it is **closed to this cohort as currently staffed**, the same way ADR-0065 found
-a GitHub App unreachable for a different reason (org role, not admin-read scope). This ADR
+option 2, it is **closed to this cohort as currently staffed**, the same way issue #65 (a
+related, still-open ADR) names a GitHub App as unreachable for a different reason (org
+role, not admin-read scope). This ADR
 does not rule out revisiting Renovate if that staffing changes; it rules it out as a choice
 available today.
 
@@ -114,7 +115,7 @@ automatically; #71 inherits the job of deciding which of it still matters.
 
 ## Provenance
 
-Like ADR-0063, made directly while working #64 — `issue` and `decided_in` point to the
+Like ADR-0006, made directly while working #64 — `issue` and `decided_in` point to the
 same place.
 
 Verified live against this repository and this GitHub org, not assumed from #64 as filed:
