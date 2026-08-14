@@ -66,7 +66,7 @@ import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelD
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
 import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
 import {
-  type CardMintTarget,
+  useCardMint,
   UserProfilePersonaDialogs,
 } from "@/features/profile/ui/UserProfilePersonaDialogs";
 import {
@@ -179,8 +179,6 @@ export function UserProfilePanel({
     React.useState<AgentPersona | null>(null);
   const [personaToExportSnapshot, setPersonaToExportSnapshot] =
     React.useState<AgentPersona | null>(null);
-  const [cardMintTarget, setCardMintTarget] =
-    React.useState<CardMintTarget | null>(null);
   const [requestedInstancePubkey, setRequestedInstancePubkey] = React.useState<
     string | null
   >(null);
@@ -712,6 +710,7 @@ export function UserProfilePanel({
     resolvedPersona,
   );
   const canManagePersona = isOwner === true && resolvedPersona !== undefined;
+  const cardMint = useCardMint(resolvedPersona, managedAgent);
   const canDeletePersona = canManagePersona && !resolvedPersona?.sourceTeam;
   const canDeleteProfileAgent =
     isBot &&
@@ -822,6 +821,7 @@ export function UserProfilePanel({
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
           onAddToChannel={() => setAddToChannelOpen(true)}
+          onCreateCard={isBot && canManagePersona ? cardMint.create : undefined}
           onDeleteAgent={handleDeleteProfileAgent}
           onDuplicateAgent={
             isBot && canManagePersona ? handleDuplicatePersona : undefined
@@ -935,7 +935,7 @@ export function UserProfilePanel({
   const personaDialogs = (
     <>
       <UserProfilePersonaDialogs
-        cardMintTarget={cardMintTarget}
+        cardMintTarget={cardMint.target}
         createError={
           createPersonaMutation.error instanceof Error
             ? createPersonaMutation.error
@@ -961,7 +961,7 @@ export function UserProfilePanel({
             ? updatePersonaMutation.error
             : null
         }
-        onCloseCardMint={() => setCardMintTarget(null)}
+        onCloseCardMint={cardMint.close}
         onCloseDelete={() => setPersonaToDelete(null)}
         onCloseDialog={() => setPersonaDialogState(null)}
         onCloseExportSnapshot={() => setPersonaToExportSnapshot(null)}

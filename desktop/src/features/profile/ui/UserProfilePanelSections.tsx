@@ -94,6 +94,8 @@ export type ProfileSummaryViewProps = {
   agentSettingsFields: ProfileField[];
   diagnosticsFields: ProfileField[];
   onAddToChannel: () => void;
+  /** Mint an agent trading card. Present only for owner-managed personas. */
+  onCreateCard?: () => void;
   onDeleteAgent: () => void;
   onDuplicateAgent?: () => void;
   onExportAgent?: () => void;
@@ -168,6 +170,7 @@ export function ProfileSummaryView({
   agentSettingsFields,
   diagnosticsFields,
   onAddToChannel,
+  onCreateCard,
   onDeleteAgent,
   onDuplicateAgent,
   onExportAgent,
@@ -512,6 +515,7 @@ export function ProfileSummaryView({
                 isDeleteAgentPending={isAgentActionPending}
                 managedAgent={managedAgent}
                 onEditAgent={handleEditAgent}
+                onCreateCard={onCreateCard}
                 onDeleteAgent={onDeleteAgent}
                 onDuplicateAgent={onDuplicateAgent}
                 onExportAgent={onExportAgent}

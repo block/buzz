@@ -206,6 +206,7 @@ export function ProfileInfoTabContent({
   isArchived,
   isDeleteAgentPending,
   managedAgent,
+  onCreateCard,
   onDeleteAgent,
   onDuplicateAgent,
   onExportAgent,
@@ -225,6 +226,8 @@ export function ProfileInfoTabContent({
   isArchived: boolean;
   isDeleteAgentPending: boolean;
   managedAgent?: ManagedAgent;
+  /** Mint an agent trading card. Present only for owner-managed personas. */
+  onCreateCard?: () => void;
   onDeleteAgent: () => void;
   onDuplicateAgent?: () => void;
   onExportAgent?: () => void;
@@ -257,6 +260,7 @@ export function ProfileInfoTabContent({
     !hasInfoFields &&
     !showArchiveAction &&
     !canDeleteAgent &&
+    !onCreateCard &&
     !onDuplicateAgent &&
     !onExportAgent &&
     !showActivityIngress &&
@@ -306,6 +310,7 @@ export function ProfileInfoTabContent({
         canDeleteAgent={canDeleteAgent}
         isDeletePending={isDeleteAgentPending}
         managedAgent={managedAgent}
+        onCreateCard={onCreateCard}
         onDeleteAgent={onDeleteAgent}
         onDuplicateAgent={onDuplicateAgent}
         onExportAgent={onExportAgent}
