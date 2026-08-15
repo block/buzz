@@ -204,6 +204,9 @@ enum Cmd {
     /// Read the activity feed
     #[command(subcommand)]
     Feed(FeedCmd),
+    /// Request, update, resolve, and list agent-to-owner tasks (Buzz Tasks v1)
+    #[command(subcommand)]
+    Tasks(TasksCmd),
     /// Publish notes and manage the social graph (NIP-01/02)
     #[command(subcommand)]
     Social(SocialCmd),
@@ -980,6 +983,112 @@ pub enum FeedCmd {
         /// Comma-separated feed types to include: mentions, needs_action, activity, agent_activity
         #[arg(long)]
         types: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TasksCmd {
+    /// Ask your owner to act on a source message (kind 44300)
+    Request {
+        /// Channel UUID containing the source message
+        #[arg(long)]
+        channel: String,
+        /// Source Buzz message event ID (64-char hex)
+        #[arg(long)]
+        source: String,
+        /// Owner pubkey (hex or npub); defaults to the owner in BUZZ_AUTH_TAG
+        #[arg(long)]
+        owner: Option<String>,
+        /// Action required: reply, approval, choice, or review
+        #[arg(long = "type")]
+        task_type: String,
+        /// Short action-oriented title (max 200 bytes)
+        #[arg(long)]
+        title: String,
+        /// Optional privacy-conscious context snapshot (max 500 bytes)
+        #[arg(long)]
+        context: Option<String>,
+        /// Priority: low, medium, or high
+        #[arg(long, default_value = "medium")]
+        priority: String,
+        /// Optional RFC 3339 due timestamp in UTC
+        #[arg(long)]
+        due: Option<String>,
+        /// Agent display name snapshot; defaults to your profile name
+        #[arg(long = "agent-name")]
+        agent_name: Option<String>,
+        /// Task UUID; generated when omitted
+        #[arg(long = "task-id")]
+        task_id: Option<String>,
+    },
+    /// Update the mutable fields of your open task (kind 44301)
+    Update {
+        /// Task UUID from the original request
+        #[arg(long)]
+        task: String,
+        /// Channel UUID from the original request
+        #[arg(long)]
+        channel: String,
+        /// Source message event ID from the original request (64-char hex)
+        #[arg(long)]
+        source: String,
+        /// Owner pubkey (hex or npub); defaults to the owner in BUZZ_AUTH_TAG
+        #[arg(long)]
+        owner: Option<String>,
+        /// New monotonic source version (previous version + 1, minimum 2)
+        #[arg(long)]
+        version: i64,
+        /// Action required: reply, approval, choice, or review
+        #[arg(long = "type")]
+        task_type: String,
+        /// Short action-oriented title (max 200 bytes)
+        #[arg(long)]
+        title: String,
+        /// Optional privacy-conscious context snapshot (max 500 bytes)
+        #[arg(long)]
+        context: Option<String>,
+        /// Priority: low, medium, or high
+        #[arg(long)]
+        priority: String,
+        /// Optional RFC 3339 due timestamp in UTC
+        #[arg(long)]
+        due: Option<String>,
+        /// Agent display name snapshot; defaults to your profile name
+        #[arg(long = "agent-name")]
+        agent_name: Option<String>,
+    },
+    /// Resolve or withdraw your open task (kind 44302)
+    Resolve {
+        /// Task UUID from the original request
+        #[arg(long)]
+        task: String,
+        /// Channel UUID from the original request
+        #[arg(long)]
+        channel: String,
+        /// Source message event ID from the original request (64-char hex)
+        #[arg(long)]
+        source: String,
+        /// Owner pubkey (hex or npub); defaults to the owner in BUZZ_AUTH_TAG
+        #[arg(long)]
+        owner: Option<String>,
+        /// New monotonic source version (previous version + 1, minimum 2)
+        #[arg(long)]
+        version: i64,
+        /// Outcome: resolved or withdrawn
+        #[arg(long)]
+        resolution: String,
+    },
+    /// List task events addressed to you as owner (task reads are owner-gated)
+    List {
+        /// Filter to one task UUID
+        #[arg(long)]
+        task: Option<String>,
+        /// Filter to a channel UUID
+        #[arg(long)]
+        channel: Option<String>,
+        /// Maximum number of events to return (default 100)
+        #[arg(long)]
+        limit: Option<u64>,
     },
 }
 
@@ -2007,6 +2116,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
+        Cmd::Tasks(sub) => commands::tasks::dispatch(sub, &client).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
@@ -2124,6 +2234,7 @@ mod tests {
             "reactions",
             "repos",
             "social",
+            "tasks",
             "upload",
             "users",
             "workflows",
@@ -2238,6 +2349,10 @@ mod tests {
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
+            names(&cmd, "tasks"),
+            vec!["list", "request", "resolve", "update"]
+        );
+        assert_eq!(
             names(&cmd, "social"),
             vec![
                 "contacts",
@@ -2329,6 +2444,7 @@ mod tests {
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
+            ("tasks", 4),
             ("upload", 1),
             ("users", 5),
             ("workflows", 8),

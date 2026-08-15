@@ -1346,6 +1346,7 @@ name = "buzz-sdk"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "chrono",
  "nostr 0.44.7",
  "serde",
  "serde_json",

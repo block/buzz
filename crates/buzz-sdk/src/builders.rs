@@ -12,18 +12,21 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_TASK_REQUESTED, KIND_TASK_RESOLVED, KIND_TASK_UPDATED, KIND_USER_STATUS,
+        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
         OBSERVER_FRAME_TELEMETRY,
     },
+    task::{TaskRequestedV1, TaskResolvedV1, TaskUpdatedV1},
 };
 use nostr::{EventBuilder, Kind, Tag};
 use uuid::Uuid;
 
 use crate::{
-    ChannelKind, CustomEmoji, DiffMeta, MemberRole, SdkError, ThreadRef, Visibility, VoteDirection,
+    ChannelKind, CustomEmoji, DiffMeta, MemberRole, SdkError, TaskRef, ThreadRef, Visibility,
+    VoteDirection,
 };
 
 /// Parse a tag slice, mapping errors to `SdkError::InvalidTag`.
@@ -2200,6 +2203,61 @@ pub fn build_delete_addressable(
     let coord = format!("{kind}:{pk}:{d}");
     let tags = vec![tag(&["a", &coord])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags(tags))
+}
+
+/// Serialize a Buzz Tasks v1 payload and attach the signed identity tags.
+fn build_task_event(
+    kind: u32,
+    task: &TaskRef,
+    payload: &impl serde::Serialize,
+) -> Result<EventBuilder, SdkError> {
+    let content = serde_json::to_string(payload)
+        .map_err(|e| SdkError::InvalidInput(format!("task payload serialization: {e}")))?;
+    Ok(EventBuilder::new(Kind::Custom(kind as u16), content).tags([
+        tag(&["d", &task.task_id.to_string()])?,
+        tag(&["p", &task.owner_pubkey.to_hex()])?,
+        tag(&["agent", &task.agent_pubkey.to_hex()])?,
+        tag(&["h", &task.channel_id.to_string()])?,
+        tag(&["e", &task.source_event_id.to_hex(), "", "source"])?,
+    ]))
+}
+
+/// Build a kind 44300 `task.requested.v1` event asking the owner to act.
+///
+/// `payload.source_version` must be 1. Sign with the key matching
+/// `task.agent_pubkey`, then validate with
+/// [`buzz_core::task::TaskEventV1::parse`] before publishing.
+pub fn build_task_requested(
+    task: &TaskRef,
+    payload: &TaskRequestedV1,
+) -> Result<EventBuilder, SdkError> {
+    build_task_event(KIND_TASK_REQUESTED, task, payload)
+}
+
+/// Build a kind 44301 `task.updated.v1` event changing an open task's
+/// mutable fields.
+///
+/// `payload.source_version` must be at least 2. Sign with the key matching
+/// `task.agent_pubkey`, then validate with
+/// [`buzz_core::task::TaskEventV1::parse`] before publishing.
+pub fn build_task_updated(
+    task: &TaskRef,
+    payload: &TaskUpdatedV1,
+) -> Result<EventBuilder, SdkError> {
+    build_task_event(KIND_TASK_UPDATED, task, payload)
+}
+
+/// Build a kind 44302 `task.resolved.v1` event resolving or withdrawing an
+/// open task.
+///
+/// `payload.source_version` must be at least 2. Sign with the key matching
+/// `task.agent_pubkey`, then validate with
+/// [`buzz_core::task::TaskEventV1::parse`] before publishing.
+pub fn build_task_resolved(
+    task: &TaskRef,
+    payload: &TaskResolvedV1,
+) -> Result<EventBuilder, SdkError> {
+    build_task_event(KIND_TASK_RESOLVED, task, payload)
 }
 
 #[cfg(test)]
@@ -4594,5 +4652,75 @@ mod tests {
 
         assert_eq!(accept_count, 11, "expected 11 accept cases");
         assert_eq!(reject_count, 20, "expected 20 reject cases");
+    }
+
+    #[test]
+    fn task_builders_round_trip_through_the_task_contract() {
+        use buzz_core::task::{
+            TaskEventPayloadV1, TaskEventV1, TaskPriority, TaskRequestedV1, TaskResolution,
+            TaskResolvedV1, TaskType, TaskUpdatedV1,
+        };
+
+        let agent = keys();
+        let owner = keys();
+        let now = chrono::Utc::now();
+        let task = TaskRef {
+            task_id: Uuid::new_v4(),
+            owner_pubkey: owner.public_key(),
+            agent_pubkey: agent.public_key(),
+            channel_id: Uuid::new_v4(),
+            source_event_id: EventId::all_zeros(),
+        };
+
+        let requested = TaskRequestedV1 {
+            task_type: TaskType::Review,
+            title: "Review the launch plan".into(),
+            context: Some("thread snapshot".into()),
+            priority: TaskPriority::High,
+            due_at: None,
+            agent_name: "Review Agent".into(),
+            source_version: 1,
+            source_updated_at: now,
+        };
+        let event = build_task_requested(&task, &requested)
+            .expect("build requested")
+            .sign_with_keys(&agent)
+            .expect("sign requested");
+        let parsed = TaskEventV1::parse(&event).expect("requested passes the contract");
+        assert_eq!(parsed.task_id, task.task_id);
+        assert_eq!(parsed.owner_pubkey, task.owner_pubkey);
+        assert_eq!(parsed.agent_pubkey, task.agent_pubkey);
+        assert_eq!(parsed.channel_id, task.channel_id);
+        assert_eq!(parsed.source_event_id, task.source_event_id);
+        assert_eq!(parsed.payload, TaskEventPayloadV1::Requested(requested));
+
+        let updated = TaskUpdatedV1 {
+            task_type: TaskType::Review,
+            title: "Review the revised launch plan".into(),
+            context: None,
+            priority: TaskPriority::Medium,
+            due_at: Some(now),
+            agent_name: "Review Agent".into(),
+            source_version: 2,
+            source_updated_at: now,
+        };
+        let event = build_task_updated(&task, &updated)
+            .expect("build updated")
+            .sign_with_keys(&agent)
+            .expect("sign updated");
+        let parsed = TaskEventV1::parse(&event).expect("updated passes the contract");
+        assert_eq!(parsed.payload, TaskEventPayloadV1::Updated(updated));
+
+        let resolved = TaskResolvedV1 {
+            resolution: TaskResolution::Resolved,
+            source_version: 3,
+            source_updated_at: now,
+        };
+        let event = build_task_resolved(&task, &resolved)
+            .expect("build resolved")
+            .sign_with_keys(&agent)
+            .expect("sign resolved");
+        let parsed = TaskEventV1::parse(&event).expect("resolved passes the contract");
+        assert_eq!(parsed.payload, TaskEventPayloadV1::Resolved(resolved));
     }
 }

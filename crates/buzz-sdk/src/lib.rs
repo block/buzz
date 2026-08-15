@@ -32,6 +32,24 @@ pub struct ThreadRef {
     pub parent_event_id: nostr::EventId,
 }
 
+/// Signed identity shared by every Buzz Tasks v1 event (kinds 44300–44302).
+///
+/// Sign the returned builder with the key matching `agent_pubkey`, then
+/// validate the full contract with [`buzz_core::task::TaskEventV1::parse`]
+/// before publishing — the relay enforces the same contract on ingest.
+pub struct TaskRef {
+    /// Stable task UUID carried in the signed `d` tag.
+    pub task_id: uuid::Uuid,
+    /// Owner who must act, carried in the signed `p` tag.
+    pub owner_pubkey: nostr::PublicKey,
+    /// Agent authoring the event (`agent` tag); must equal the signing key.
+    pub agent_pubkey: nostr::PublicKey,
+    /// Source channel UUID carried in the signed `h` tag.
+    pub channel_id: uuid::Uuid,
+    /// Source Buzz stream message, carried in the signed `e` tag marked `source`.
+    pub source_event_id: nostr::EventId,
+}
+
 /// Metadata for diff/patch messages (kind 40008).
 pub struct DiffMeta {
     /// Repository URL — required, must start with `http://` or `https://`.
