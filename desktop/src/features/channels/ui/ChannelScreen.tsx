@@ -464,13 +464,29 @@ export function ChannelScreen({
   // has already bottom-pinned. `visibleReplies` includes expanded nested
   // replies, so a submessage thread resumes on the same rule as a top-level
   // one.
+  // The latch must not fire while replies are still arriving. A thread reopened
+  // from cache renders one reply off the channel timeline first, and at that
+  // point the unread marker has not been recomputed — so the latch captures
+  // `null`, which the hook keeps as a deliberate decision. The real target
+  // arrives with the rest of the replies and is then ignored forever, leaving
+  // the reader bottom-pinned: exactly what this resume exists to replace.
+  //
+  // `fetchStatus` is the signal, not `isPending`. A refetch over cached data
+  // reports `isPending: false` while still in flight, so pending alone lets the
+  // early render through. `"idle"` means nothing is on the wire — true once the
+  // replies have landed, and true for a forum thread whose query is disabled
+  // and whose replies resolve from the channel timeline instead. Paired with
+  // the reply-count check below, a query that has not started yet is excluded
+  // as well, since it has no replies to latch onto.
+  const threadRepliesSettled = threadRepliesQuery.fetchStatus === "idle";
   const { threadResumeScrollTargetId, onThreadResumeTargetConsumed } =
     useThreadOpenResumeTarget({
       openThreadHeadId: effectiveOpenThreadHeadId,
       firstUnreadReplyId: threadFirstUnreadReplyId,
       externalScrollTargetId: threadScrollTargetId,
       routeTargetMessageId: targetMessageId ?? null,
-      hasReplies: threadPanelData.visibleReplies.length > 0,
+      hasReplies:
+        threadRepliesSettled && threadPanelData.visibleReplies.length > 0,
       isHuddleTranscript,
     });
   const editTargetMessage = React.useMemo(
