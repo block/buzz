@@ -153,12 +153,6 @@ impl ManagedAgentPairRuntime {
             .as_ref()
             .is_some_and(|process| process.setup_mode)
     }
-
-    pub fn adapter_availability(&self) -> Option<&super::AcpAvailabilityStatus> {
-        self.process
-            .as_ref()
-            .and_then(|process| process.adapter_availability.as_ref())
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]

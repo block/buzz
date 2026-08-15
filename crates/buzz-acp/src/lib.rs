@@ -3380,7 +3380,8 @@ async fn tokio_main(
                             None,
                         );
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await?
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                .await?
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }

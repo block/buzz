@@ -1780,6 +1780,7 @@ async fn recover_or_create_channel_session(
     agent_core: Option<&str>,
     agent_canvas: Option<&str>,
     channel_name: Option<&str>,
+    channel_type: Option<&str>,
 ) -> Result<(String, bool, Option<String>), AcpError> {
     let persisted = match &ctx.runtime_store {
         Some(store) => store
@@ -1840,6 +1841,7 @@ async fn recover_or_create_channel_session(
             agent_core,
             agent_canvas,
             channel_name,
+            channel_type,
         )
         .await?;
         let recovery = recovery_block(ctx, channel_id, true).await?;
@@ -1853,6 +1855,7 @@ async fn recover_or_create_channel_session(
         agent_core,
         agent_canvas,
         channel_name,
+        channel_type,
     )
     .await?;
     let recovery = recovery_block(ctx, channel_id, false).await?;
@@ -2428,7 +2431,6 @@ pub async fn run_prompt_task(
                     agent_core.as_deref(),
                     agent_canvas.as_deref(),
                     title_channel.as_deref(),
-                    Some(*cid),
                     origin_channel_type.as_deref(),
                 )
                 .await
@@ -5072,9 +5074,6 @@ mod tests {
                     .map(|record| record.assignment_id.as_str()),
                 Some(later.assignment_id.as_str())
             );
-    }
-
-    #[test]
         }
     }
 
@@ -5113,6 +5112,7 @@ mod tests {
             .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID"));
     }
 
+    #[test]
     fn fresh_recovery_block_contains_only_durable_assignment_job_progress_once() {
         let now = chrono::Utc::now();
         let channel_id = Uuid::new_v4();

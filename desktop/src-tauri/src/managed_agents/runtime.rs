@@ -268,9 +268,7 @@ pub fn build_managed_agent_summary(
             })
         }),
     );
-    // Active durable work defers configuration replacement until the runtime
-    // is idle: a restart would kill running jobs and abandon a live
-    // assignment. Availability drift is already folded into restart_diff.
+    // Active durable work defers restart until idle; availability drift is in restart_diff.
     let has_active_jobs = pair_runtime.is_some_and(|runtime| !runtime.active_jobs.is_empty());
     let active_assignment = pair_runtime
         .and_then(|runtime| runtime.active_assignment.as_ref())
@@ -355,10 +353,7 @@ pub fn build_managed_agent_summary(
     })
 }
 
-/// Pure predicate: should the "Restart required" badge fire?
-///
-/// Active durable work defers configuration replacement until the runtime is
-/// idle. An orphaned linked instance can never be restarted successfully.
+/// Pure predicate: should the "Restart required" badge fire? Active durable work defers replacement until idle; orphans can never restart successfully.
 fn restart_eligible(
     has_active_jobs: bool,
     active_assignment: Option<buzz_runtime_pkg::protocol::AssignmentState>,
@@ -650,9 +645,8 @@ pub fn spawn_agent_child(
             );
         }
     }
-    // Managed ACP controls are applied after user environment layering below.
-    // This prevents ambient or persisted legacy timeout values from defeating
-    // harness defaults and protects the pair-scoped exclusivity lock path.
+    // Runtime-owned ACP controls are reapplied after user env layering below so
+    // ambient/persisted legacy values cannot defeat harness defaults or the lock.
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {
             if std::env::var(key).is_err() {
@@ -774,7 +768,6 @@ pub fn spawn_agent_child(
     }
 
     // ── User env vars: definition floor + global + live persona + agent overrides ──
-    //
     // `descriptor.env` is the fully-layered result from `resolve_effective_harness_descriptor`:
     // baked floor → runtime metadata → definition env (harness author defaults) →
     // global → live persona → per-agent, with reserved-key and malformed-key filtering
@@ -831,9 +824,7 @@ pub fn spawn_agent_child(
 
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
-
-    // A durable harness is a separate session/process-group leader. Desktop
-    // may disconnect or exit without owning its lifetime.
+    // Durable harness: separate session leader; Desktop exit does not kill it.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

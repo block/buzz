@@ -1039,8 +1039,7 @@ fn restart_eligible_true_when_non_orphan_has_availability_drift() {
 
 #[test]
 fn restart_eligible_false_when_orphan_has_hash_drift() {
-    // An orphan can never be restarted successfully — spawn refuses it —
-    // so hash drift alone must not surface "Restart required".
+    // An orphan can never be restarted successfully — spawn refuses it — so hash drift alone must not surface "Restart required".
     assert!(!super::restart_eligible(false, None, true, true, false));
 }
 
@@ -1088,7 +1087,6 @@ fn restart_eligible_defers_all_drift_for_every_nonterminal_assignment() {
 #[test]
 fn terminal_assignment_does_not_fence_config_drift_restart() {
     use buzz_runtime_pkg::protocol::AssignmentState::{Cancelled, Completed, Failed};
-
     for state in [Completed, Failed, Cancelled] {
         assert!(super::restart_eligible(
             false,

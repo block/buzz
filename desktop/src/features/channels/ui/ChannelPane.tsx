@@ -50,7 +50,11 @@ import {
   WELCOME_PERSONA_ROTATION_MS,
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
-import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
+import {
+  channelTimelineEmptyDescription,
+  channelTimelineEmptyTitle,
+  mentionsKnownAgent,
+} from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
@@ -654,18 +658,8 @@ export const ChannelPane = React.memo(function ChannelPane({
             profiles={profiles}
             ownerProfiles={ownerProfiles}
             unfollowThreadById={unfollowThreadById}
-            emptyDescription={
-              activeChannel?.channelType === "forum"
-                ? "Select a stream or DM to load real message history in this first integration pass."
-                : "Messages and sub-replies will appear here once the relay has history for this channel."
-            }
-            emptyTitle={
-              activeChannel
-                ? activeChannel.channelType === "forum"
-                  ? "Forum channels are next"
-                  : "No messages yet"
-                : "No channel selected"
-            }
+            emptyDescription={channelTimelineEmptyDescription(activeChannel)}
+            emptyTitle={channelTimelineEmptyTitle(activeChannel)}
             isLoading={isHuddleTranscript ? false : isTimelineLoading}
             entranceMessageId={entranceMessageId}
             onEntranceMessageComplete={onEntranceMessageComplete}

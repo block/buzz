@@ -585,6 +585,8 @@ export function MessageThreadPanel({
                 channelId={channelId}
                 huddleMemberPubkeys={huddleMemberPubkeys}
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                isFollowingThread={isFollowingThread}
+                isUnread={isMessageUnreadById?.(threadHead.id)}
                 message={threadHead}
                 onCancelJob={onCancelJob}
                 layoutVariant="thread-reply"

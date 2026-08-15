@@ -13,11 +13,10 @@ use crate::{
                 RuntimeConfigSurface, SessionConfigCache,
             },
         },
-        current_instance_id, is_reserved_env_key, is_safe_to_reveal, is_well_formed_env_key,
-        known_acp_runtime, load_managed_agents, load_personas,
-        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
-        AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, MAX_ENV_VALUE_BYTES,
+        is_reserved_env_key, is_safe_to_reveal, is_well_formed_env_key, known_acp_runtime,
+        load_managed_agents, load_personas, save_managed_agents, AgentDefinition,
+        GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        MAX_ENV_VALUE_BYTES,
     },
 };
 
