@@ -3,22 +3,26 @@ import { expect, test } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
-const SHOT_DIR = "test-results/discovery-landing";
+const SHOT_DIR = "test-results/anonymous-shell";
 
 test.use({ viewport: { width: 1280, height: 960 } });
 
-test("discord-style discovery landing on first open", async ({ page }) => {
+test("anonymous app-shell home on first open", async ({ page }) => {
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
   });
   await page.goto("/");
 
-  // Fresh install → straight to the discovery landing. No identity ceremony.
+  // Fresh install → straight into the full-bleed app shell: ghost rail +
+  // sidebar on the left, community discovery in the main pane. No identity
+  // ceremony and no agent greeting.
   await expect(page.getByTestId("discovery-landing")).toBeVisible();
+  await expect(page.getByTestId("anon-shell-rail")).toBeVisible();
+  await expect(page.getByTestId("anon-shell-sidebar")).toBeVisible();
   await expect(page.getByTestId("discovery-join-buzz-hq")).toBeVisible();
   await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOT_DIR}/01-discovery-landing.png` });
+  await page.screenshot({ path: `${SHOT_DIR}/01-anonymous-shell-home.png` });
 
   // Advanced setup remains one click away (the classic corridor).
   await page.getByTestId("discovery-advanced-setup").click();

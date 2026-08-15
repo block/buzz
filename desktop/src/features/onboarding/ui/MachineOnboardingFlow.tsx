@@ -18,9 +18,9 @@ import {
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import type { FeaturedCommunity } from "@/features/onboarding/featuredCommunities";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
+import { AnonymousShellLanding } from "./AnonymousShellLanding";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
-import { DiscoveryLanding } from "./DiscoveryLanding";
 import { DownloadKeyStep } from "./DownloadKeyStep";
 import {
   backupSessionToPasswordEntry,
@@ -327,12 +327,44 @@ export function MachineOnboardingFlow({
                   }
                 : undefined;
 
+  // EXPLORATION — the discover page escapes the onboarding shell entirely.
+  // A fresh install opens straight into a full-bleed mock of the app frame
+  // (rail + sidebar + main pane) instead of a centered onboarding corridor,
+  // so the first thing a user meets is the product, not a setup ceremony.
+  if (page === "discover") {
+    return (
+      <div
+        className="flex h-dvh w-full overflow-hidden bg-background text-foreground"
+        data-testid="machine-onboarding-gate"
+      >
+        <StartupWindowDragRegion />
+        <AnonymousShellLanding
+          error={error}
+          isPending={isPending}
+          onAdvancedSetup={() => {
+            setError(null);
+            setTransitionDirection("forward");
+            setPage("identity");
+          }}
+          onImportKey={() => {
+            setError(null);
+            setKeyImportDialog(null);
+            setKeyImportStage("key-entry");
+            setTransitionDirection("forward");
+            setPage("key-import");
+          }}
+          onJoin={(community) => void quickJoinCommunity(community)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-x-hidden overflow-y-auto px-4 text-foreground ${
         isSecuritySubview ? "buzz-onboarding-security-theme" : ""
       } ${
-        page === "discover" || page === "identity"
+        page === "identity"
           ? "buzz-onboarding-welcome py-8"
           : "pb-28 pt-[106px]"
       }`}
@@ -340,7 +372,7 @@ export function MachineOnboardingFlow({
     >
       <StartupWindowDragRegion />
       {page === "identity" ? <LandingBees /> : null}
-      {page !== "discover" && page !== "identity" && !isSecuritySubview ? (
+      {page !== "identity" && !isSecuritySubview ? (
         <OnboardingChrome
           current={page === "config" ? 4 : page === "setup" ? 3 : 2}
         />
@@ -348,36 +380,10 @@ export function MachineOnboardingFlow({
       <OnboardingFooterProvider backAction={chromeBackAction}>
         <div
           className={`relative flex w-full max-w-[1040px] flex-col items-center text-center ${
-            page === "discover" || page === "identity"
-              ? "my-auto"
-              : "buzz-onboarding-step-frame"
+            page === "identity" ? "my-auto" : "buzz-onboarding-step-frame"
           }`}
         >
-          {page === "discover" ? (
-            <OnboardingSlideTransition
-              className="flex w-full flex-col items-center text-center"
-              direction={transitionDirection}
-              transitionKey={`machine-discover-${transitionDirection}`}
-            >
-              <DiscoveryLanding
-                error={error}
-                isPending={isPending}
-                onAdvancedSetup={() => {
-                  setError(null);
-                  setTransitionDirection("forward");
-                  setPage("identity");
-                }}
-                onImportKey={() => {
-                  setError(null);
-                  setKeyImportDialog(null);
-                  setKeyImportStage("key-entry");
-                  setTransitionDirection("forward");
-                  setPage("key-import");
-                }}
-                onJoin={(community) => void quickJoinCommunity(community)}
-              />
-            </OnboardingSlideTransition>
-          ) : page === "identity" ? (
+          {page === "identity" ? (
             <OnboardingSlideTransition
               className="flex w-full max-w-[720px] flex-col items-center text-center"
               direction={transitionDirection}
