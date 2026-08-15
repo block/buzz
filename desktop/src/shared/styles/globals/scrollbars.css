@@ -97,3 +97,25 @@
 .buzz-content-scrollbar::-webkit-scrollbar-thumb:active {
   background-color: hsl(var(--border) / 0.9);
 }
+
+/*
+ * The file-viewer tab strip scrolls horizontally inside a 36px header row, so
+ * a default scrollbar would be nearly as tall as the tabs themselves. Keep the
+ * bar to a hairline: the active tab is scrolled into view programmatically, so
+ * this is an overflow hint rather than the primary way to reach a tab.
+ *
+ * Same reasoning as the note above — no `scrollbar-color`, or the engine drops
+ * these pseudo styles for overlay scrollbars.
+ */
+.buzz-file-viewer-tabs-scrollbar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.buzz-file-viewer-tabs-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.buzz-file-viewer-tabs-scrollbar::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--foreground) / 0.15);
+  border-radius: 9999px;
+}

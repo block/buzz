@@ -70,6 +70,7 @@ import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import { channelContentTopPaddingMeasurement } from "@/shared/layout/chromeLayout";
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
+import { useFileViewerAuxiliaryPanel } from "@/features/fileViewer/useFileViewerAuxiliaryPanel";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -668,11 +669,18 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
+  const fileViewerPanelOpen = useFileViewerAuxiliaryPanel({
+    agentSession: openAgentSessionPubkey,
+    channelManagement: channelManagementOpen,
+    profile: profilePanelPubkey,
+    thread: effectiveOpenThreadHeadId,
+  });
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
-      channelManagementOpen,
+      channelManagementOpen ||
+      fileViewerPanelOpen,
   );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
