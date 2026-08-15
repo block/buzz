@@ -70,13 +70,25 @@ class Community {
     addedAt: DateTime.parse(json['addedAt'] as String),
   );
 
+  /// Hostname labels that identify the Buzz service rather than the
+  /// organization hosting it (e.g. `buzz.nilor.cool` → "nilor").
+  static const _serviceLabels = {'buzz', 'relay'};
+
   /// Derive a human-friendly community name from a relay URL.
   static String nameFromUrl(String url) {
     try {
       final host = Uri.parse(url).host;
       if (host.contains('localhost') || host == '127.0.0.1') return 'Local Dev';
       final parts = host.split('.');
-      if (parts.length > 2) return parts.first;
+      if (parts.length > 2) {
+        // Skip leading service labels, but never walk past the registrable
+        // domain label (for `buzz.example.com` the org is "example").
+        var i = 0;
+        while (i < parts.length - 2 && _serviceLabels.contains(parts[i])) {
+          i++;
+        }
+        return parts[i];
+      }
       return host;
     } catch (_) {
       return 'Community';

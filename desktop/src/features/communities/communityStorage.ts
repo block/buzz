@@ -185,6 +185,10 @@ export function shouldAutoConnectDefaultRelay(relayUrl: string): boolean {
   }
 }
 
+// Hostname labels that identify the Buzz service rather than the organization
+// hosting it (e.g. buzz.nilor.cool → "nilor").
+const SERVICE_HOST_LABELS = new Set(["buzz", "relay"]);
+
 export function deriveCommunityName(relayUrl: string): string {
   try {
     const url = new URL(
@@ -199,9 +203,14 @@ export function deriveCommunityName(relayUrl: string): string {
     if (parts.some((p) => p === "stage" || p === "staging")) {
       return "Buzz (staging)";
     }
-    // Use the first subdomain segment or the domain itself
     if (parts.length >= 2) {
-      return parts[0] === "relay" ? parts[1] : parts[0];
+      // Skip leading service labels, but never walk past the registrable
+      // domain label (for buzz.example.com the org is "example").
+      let i = 0;
+      while (i < parts.length - 2 && SERVICE_HOST_LABELS.has(parts[i])) {
+        i++;
+      }
+      return parts[i];
     }
     return host;
   } catch {
