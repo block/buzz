@@ -97,6 +97,7 @@ class _PairingWelcomeView extends StatelessWidget {
                         ),
                         const SizedBox(height: Grid.xxs),
                         TextButton(
+                          key: const Key('pairing-code-toggle'),
                           style: _onboardingSecondaryButtonStyle,
                           onPressed: isBusy ? null : onTogglePairingCode,
                           child: Text(
@@ -125,6 +126,7 @@ class _PairingWelcomeView extends StatelessWidget {
                                   children: [
                                     const SizedBox(height: Grid.twelve),
                                     TextField(
+                                      key: const Key('pairing-code-input'),
                                       controller: codeController,
                                       style: context.textTheme.bodyMedium
                                           ?.copyWith(color: _onboardingInk),
@@ -168,6 +170,7 @@ class _PairingWelcomeView extends StatelessWidget {
                                     SizedBox(
                                       width: double.infinity,
                                       child: FilledButton(
+                                        key: const Key('pairing-connect'),
                                         style: _onboardingButtonStyle,
                                         onPressed: isBusy ? null : onConnect,
                                         child: isBusy

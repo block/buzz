@@ -990,3 +990,7 @@ native-review-benchmark JOURNEY="tools/native-review/desktop/tooltip-fresh-dwell
 # Pass BASELINE/CANDIDATE as repeated CLI args, e.g. "--baseline a --baseline b".
 native-review-compare BASELINE CANDIDATE BUDGET="tools/native-review/performance/tooltip-fresh-dwell.yaml":
     ./tools/native-review/bin/review-native compare {{BASELINE}} {{CANDIDATE}} --budget "{{BUDGET}}"
+
+# Run the native iOS Simulator pairing journey with MP4 and screenshot evidence.
+native-review-ios DEVICE="iPhone 17 Pro":
+    ./tools/native-review/bin/review-ios --device "{{DEVICE}}"

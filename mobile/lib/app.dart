@@ -94,7 +94,9 @@ class App extends HookConsumerWidget {
     // cold-start link survives until the authenticated UI can dispatch it.
     ref.watch(pendingDeepLinkProvider);
 
+    const nativeReview = bool.fromEnvironment('BUZZ_NATIVE_REVIEW');
     void applyBadge(UnreadBadgeState state) {
+      if (nativeReview) return;
       if (state.highPriorityCount > 0) {
         AppBadgePlus.updateBadge(state.highPriorityCount);
       } else if (state.generalUnreadCount > 0) {

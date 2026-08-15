@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+. "$ROOT/bin/activate-hermit"
+exec python3 "$ROOT/tools/native-review/ios_review.py" "$@"
