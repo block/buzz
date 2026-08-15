@@ -372,13 +372,9 @@ pub(super) async fn start_local_agent_with_preflight(
         return Err(format!("agent {pubkey} is not a local agent"));
     }
 
-    // Preflight against the same resolution spawn uses — `resolve_effective_config`
-    // (definition → global fallback). A linked instance's own `provider`/`model`/
-    // `relay_mesh` bytes never contribute: this reads the CURRENT definition
-    // directly, so a definition edit that flips `provider` to/from relay-mesh
-    // between saves is reflected here without needing a prospective re-snapshot;
-    // for a global-inherited blank definition, it also folds in the global
-    // default, which record-byte sniffing could never see.
+    // Preflight from the current definition plus global fallback, exactly as
+    // spawn resolves it. Stale linked-instance model/provider bytes do not
+    // contribute, so definition edits take effect without re-snapshotting.
     let personas = load_personas(app).unwrap_or_default();
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let mesh_model_id =
@@ -389,6 +385,13 @@ pub(super) async fn start_local_agent_with_preflight(
         );
     ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
 
+    // Close restore's check-to-spawn window to interactive starts; otherwise its
+    // later map insert can orphan one of two harnesses for the same pair. Keep
+    // the global transition -> store -> runtimes order.
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -402,13 +405,8 @@ pub(super) async fn start_local_agent_with_preflight(
     if record.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
-    // Re-snapshot the persona onto the record at every spawn so the agent always
-    // starts with the current persona config (system_prompt, model, provider,
-    // runtime). This clears the "out of date" drift badge without requiring a
-    // delete+recreate. See `apply_persona_snapshot` for the precedence and
-    // env-override self-heal rules.
-    // Load personas once: used for snapshot application below and summary build
-    // at the end — avoids a second disk read for the same file in the same call.
+    // Re-snapshot current persona config at every spawn, clearing drift without
+    // delete+recreate. Reuse this load for the summary below.
     let personas = load_personas(app).unwrap_or_default();
     if let Some(persona_id) = record.persona_id.clone() {
         match personas.iter().find(|p| p.id == persona_id) {

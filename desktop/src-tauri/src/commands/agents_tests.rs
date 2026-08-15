@@ -661,3 +661,41 @@ fn owner_only_access_deploy_payload_clamps_stale_access() {
         "owner-only-access deploy payload retained a stale allowlist"
     );
 }
+
+/// The local interactive/create start path must participate in the same
+/// transition boundary as launch restore and pair reconciliation. The Tauri
+/// unit harness cannot construct a real `AppHandle`, so pin the production
+/// lock order directly: after async preflight, the transition lock must be
+/// acquired before the store and runtime-map locks, and before spawning.
+#[test]
+fn local_start_serializes_spawn_with_restore_and_pair_reconcile() {
+    let source = include_str!("agents.rs");
+    let function_start = source
+        .find("pub(super) async fn start_local_agent_with_preflight(")
+        .expect("local start function exists");
+    let function_end = source[function_start..]
+        .find("/// Deploy an agent to a provider backend.")
+        .map(|offset| function_start + offset)
+        .expect("local start function boundary exists");
+    let function = &source[function_start..function_end];
+    let preflight_end = function
+        .find("ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;")
+        .expect("local start performs async preflight");
+    let transition = function[preflight_end..]
+        .find(".managed_agent_runtime_transition")
+        .expect("local start takes the runtime transition lock");
+    let store = function[preflight_end..]
+        .find(".managed_agents_store_lock")
+        .expect("local start takes the managed-agent store lock");
+    let runtimes = function[preflight_end..]
+        .find(".managed_agent_processes")
+        .expect("local start takes the runtime-map lock");
+    let spawn = function[preflight_end..]
+        .find("start_managed_agent_process(")
+        .expect("local start reaches the spawn/register helper");
+
+    assert!(
+        transition < store && store < runtimes && runtimes < spawn,
+        "local start lock order must remain transition -> store -> runtimes -> spawn"
+    );
+}

@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod instance_lease;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -1914,6 +1915,14 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let pubkey_hex = config.keys.public_key().to_hex();
+    let _instance_lease = instance_lease::InstanceLease::acquire(&pubkey_hex, &config.relay_url)
+        .map_err(|e| anyhow::anyhow!("runtime lease error: {e}"))?;
+    tracing::info!(
+        agent_pubkey = %pubkey_hex,
+        relay_url = %config.relay_url,
+        "buzz-acp runtime lease acquired"
+    );
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -1964,8 +1973,6 @@ async fn tokio_main() -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
-    let pubkey_hex = config.keys.public_key().to_hex();
 
     // Parse BUZZ_AUTH_TAG into a nostr::Tag for NIP-OA relay membership delegation.
     let relay_auth_tag: Option<nostr::Tag> = std::env::var("BUZZ_AUTH_TAG")
@@ -4462,6 +4469,20 @@ mod agent_draft_prompt_tests {
         assert!(prompt
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
+    }
+
+    #[test]
+    fn shared_base_prompt_teaches_one_human_reply_per_trigger_state() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains(
+            "Publish at most one human-facing reply for the same inbound trigger and state"
+        ));
+        assert!(prompt.contains(
+            "A machine appendix is the second layer of that one reply, not permission to send a second human summary"
+        ));
+        assert!(prompt.contains(
+            "read the thread first and stay silent if the current state was already published"
+        ));
     }
 }
 
