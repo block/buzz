@@ -2,7 +2,12 @@ use uuid::Uuid;
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
+use crate::limits::{effective_limit, truncation_notice};
 use crate::validate::{parse_uuid, sdk_err, validate_hex64};
+
+/// Default and maximum `--limit` for `dms list`.
+const LIST_LIMIT_DEFAULT: u32 = 50;
+const LIST_LIMIT_MAX: u32 = 200;
 
 /// Tag values named `name` on a relay event.
 fn tag_values<'a>(event: &'a serde_json::Value, name: &'a str) -> impl Iterator<Item = &'a str> {
@@ -22,9 +27,21 @@ fn tag_values<'a>(event: &'a serde_json::Value, name: &'a str) -> impl Iterator<
 /// List visible DM conversations: the viewer's DM group metadata (kind:39000
 /// `t=dm`, one `p` per participant), minus the DMs in the viewer's newest
 /// relay-signed visibility snapshot (kind:30622, one `h` per hidden DM).
-pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
-    let dms = list_dms(client, limit.unwrap_or(50).min(200)).await?;
-    println!("{}", serde_json::Value::Array(dms));
+pub async fn cmd_list_dms(
+    client: &BuzzClient,
+    requested_limit: Option<u32>,
+) -> Result<(), CliError> {
+    let limit = effective_limit(requested_limit, LIST_LIMIT_DEFAULT, LIST_LIMIT_MAX);
+    let dms = list_dms(client, limit).await?;
+    println!("{}", serde_json::Value::Array(dms.clone()));
+    if let Some(notice) = truncation_notice(
+        dms.len(),
+        requested_limit,
+        LIST_LIMIT_DEFAULT,
+        LIST_LIMIT_MAX,
+    ) {
+        eprintln!("{notice}");
+    }
     Ok(())
 }
 
