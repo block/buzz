@@ -8,7 +8,16 @@ type SegmentOption<Value extends string> = {
   Icon?: React.ComponentType<{ className?: string }>;
 };
 
-export function SettingsSegmentedControl<Value extends string>({
+type SegmentedControlSize = "compact" | "default" | "wide";
+
+const SIZE_CLASSES: Record<SegmentedControlSize, string> = {
+  compact: "w-48",
+  default: "w-60",
+  wide: "w-72",
+};
+
+/** A mutually exclusive control with equal-width, optionally scrubbable options. */
+export function SegmentedControl<Value extends string>({
   className,
   indicatorTestId,
   legend,
@@ -16,6 +25,7 @@ export function SettingsSegmentedControl<Value extends string>({
   onValueChange,
   optionTestIdPrefix,
   options,
+  size = "default",
   testId,
   value,
 }: {
@@ -26,10 +36,13 @@ export function SettingsSegmentedControl<Value extends string>({
   onValueChange: (value: Value) => void;
   optionTestIdPrefix: string;
   options: readonly SegmentOption<Value>[];
+  size?: SegmentedControlSize;
   testId: string;
   value: Value;
 }) {
   const [previewValue, setPreviewValue] = React.useState<Value | null>(null);
+  const controlRef = React.useRef<HTMLFieldSetElement | null>(null);
+  const activePointerIdRef = React.useRef<number | null>(null);
   const pointerStartXRef = React.useRef<number | null>(null);
   const pointerStartValueRef = React.useRef<Value | null>(null);
   const scrubValueRef = React.useRef<Value | null>(null);
@@ -65,18 +78,34 @@ export function SettingsSegmentedControl<Value extends string>({
     [onPreviewChange],
   );
 
-  React.useEffect(
-    () => () => {
-      onPreviewChange?.(null);
-    },
-    [onPreviewChange],
-  );
+  const cancelScrub = React.useCallback(() => {
+    const control = controlRef.current;
+    const pointerId = activePointerIdRef.current;
+    activePointerIdRef.current = null;
+    if (control && pointerId != null && control.hasPointerCapture(pointerId)) {
+      control.releasePointerCapture(pointerId);
+    }
+    pointerStartXRef.current = null;
+    pointerStartValueRef.current = null;
+    skipPointerClickRef.current = false;
+    preview(null);
+  }, [preview]);
+
+  React.useEffect(() => {
+    const handleWindowBlur = () => cancelScrub();
+    globalThis.addEventListener?.("blur", handleWindowBlur);
+    return () => {
+      globalThis.removeEventListener?.("blur", handleWindowBlur);
+      cancelScrub();
+    };
+  }, [cancelScrub]);
 
   const handlePointerDown = (
     event: React.PointerEvent<HTMLFieldSetElement>,
   ) => {
     if (!onPreviewChange || event.button !== 0) return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    activePointerIdRef.current = event.pointerId;
     pointerStartXRef.current = event.clientX;
     pointerStartValueRef.current = getValueAtPointer(
       event.currentTarget,
@@ -109,6 +138,7 @@ export function SettingsSegmentedControl<Value extends string>({
   const handlePointerUp = (event: React.PointerEvent<HTMLFieldSetElement>) => {
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
     const nextValue = getValueAtPointer(event.currentTarget, event.clientX);
+    activePointerIdRef.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
     pointerStartXRef.current = null;
     pointerStartValueRef.current = null;
@@ -119,29 +149,28 @@ export function SettingsSegmentedControl<Value extends string>({
     }, 0);
   };
 
-  const handlePointerCancel = (
-    event: React.PointerEvent<HTMLFieldSetElement>,
-  ) => {
-    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    event.currentTarget.releasePointerCapture(event.pointerId);
-    pointerStartXRef.current = null;
-    pointerStartValueRef.current = null;
-    skipPointerClickRef.current = false;
-    preview(null);
+  const handlePointerCancel = () => cancelScrub();
+
+  const handleLostPointerCapture = () => {
+    if (activePointerIdRef.current != null) cancelScrub();
   };
 
   return (
     <fieldset
       className={cn(
-        "relative isolate h-8 w-60 shrink-0 overflow-hidden rounded-md bg-muted/45 p-0.5",
+        "relative isolate h-8 max-w-full shrink-0 overflow-hidden rounded-md bg-muted/45 p-0.5",
+        SIZE_CLASSES[size],
         onPreviewChange && "touch-none select-none cursor-ew-resize",
         className,
       )}
+      data-slot="segmented-control"
       data-testid={testId}
+      onLostPointerCapture={handleLostPointerCapture}
       onPointerCancel={handlePointerCancel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      ref={controlRef}
     >
       <legend className="sr-only">{legend}</legend>
       <div

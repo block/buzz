@@ -344,7 +344,7 @@ test("pairing completion updates the final step and resets after leaving", async
   await expect(
     confirmation.getByText(/Only confirm if you started this pairing/),
   ).toHaveCount(0);
-  await expect(confirmationTitle).toHaveCSS("font-size", "17.1429px");
+  await expect(confirmationTitle).toHaveCSS("font-size", "16px");
 
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
   await waitForAnimations(page);

@@ -17,6 +17,7 @@ export function MessageHeaderRow({
         "flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0 leading-message-author",
         className,
       )}
+      data-testid="message-header"
     >
       {children}
     </div>

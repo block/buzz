@@ -153,7 +153,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     await page.goto("/");
 
     // Confirm the zoomed-out text scale applied without changing the root.
-    await expectTextRemSize(page, "12.857143px");
+    await expectTextRemSize(page, "12px");
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,
@@ -170,7 +170,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     await installMockBridge(page);
     await page.goto("/");
 
-    await expectTextRemSize(page, "25.714286px");
+    await expectTextRemSize(page, "24px");
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,

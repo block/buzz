@@ -888,17 +888,21 @@ export const MessageRow = React.memo(
           {isThreadReplyLayout ? (
             <>
               {avatarGutterNode}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <div className="flex min-w-0 flex-1 flex-col">
                 {headerNode}
-                <div className={bodyContainerClass}>{messageBodyNode}</div>
+                <div className={bodyContainerClass} data-testid="message-body">
+                  {messageBodyNode}
+                </div>
               </div>
             </>
           ) : (
             <>
               {avatarGutterNode}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <div className="flex min-w-0 flex-1 flex-col">
                 {headerNode}
-                <div className={bodyContainerClass}>{messageBodyNode}</div>
+                <div className={bodyContainerClass} data-testid="message-body">
+                  {messageBodyNode}
+                </div>
               </div>
             </>
           )}
