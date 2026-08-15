@@ -746,7 +746,9 @@ fn snapshot_from_local_selection(
 
     let target_ref =
         resolve_local_branch_ref(repo_dir, auth, selected_branch).ok_or_else(|| {
-            format!("Selected branch {selected_branch} is not available in the local checkout.")
+            format!(
+                "Selected branch '{selected_branch}' is not available in this local checkout. Fetch the branch, then try again."
+            )
         })?;
     Ok(snapshot_from_ref(
         repo_dir,
@@ -762,6 +764,16 @@ fn snapshot_from_local_selection(
 /// allowlist and flag-injection rejection before the value reaches git.
 pub(crate) fn normalize_branch_option(branch: Option<&str>) -> Option<String> {
     clean_branch(branch.map(str::to_string))
+}
+
+fn clean_selected_branch(value: Option<String>) -> Result<Option<String>, String> {
+    match value {
+        None => Ok(None),
+        Some(value) if value.trim().is_empty() => Ok(None),
+        Some(value) => clean_branch(Some(value))
+            .map(Some)
+            .ok_or_else(|| "The selected branch name is invalid.".to_string()),
+    }
 }
 
 pub(crate) fn compare_local_remote_status(
@@ -1070,7 +1082,7 @@ pub async fn get_project_local_repo_snapshot(
     state: State<'_, AppState>,
 ) -> Result<Option<ProjectLocalRepoSnapshotInfo>, String> {
     let auth = build_git_auth_config(&state)?;
-    let branch = clean_branch(default_branch);
+    let branch = clean_selected_branch(default_branch)?;
     let base_branch = clean_branch(base_branch);
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -1262,7 +1274,7 @@ pub async fn pull_project_local_repository(
 
 #[cfg(test)]
 mod tests {
-    use super::snapshot_from_local_selection;
+    use super::{clean_selected_branch, snapshot_from_local_selection};
     use crate::commands::project_git_exec::{build_test_git_auth_config, run_git, GitAuthConfig};
 
     fn commit_all(repo_dir: &std::path::Path, auth: &GitAuthConfig, message: &str) -> String {
@@ -1391,6 +1403,20 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("missing-branch"));
-        assert!(error.contains("not available in the local checkout"));
+        assert!(error.contains("not available in this local checkout"));
+        assert!(error.contains("Fetch the branch"));
+    }
+
+    #[test]
+    fn invalid_selected_branch_does_not_become_no_selection() {
+        assert_eq!(clean_selected_branch(None).expect("no selection"), None);
+        assert_eq!(
+            clean_selected_branch(Some("  ".to_string())).expect("blank selection"),
+            None
+        );
+
+        let error = clean_selected_branch(Some("feature+preview".to_string()))
+            .expect_err("invalid selection must not fall back to the worktree");
+        assert_eq!(error, "The selected branch name is invalid.");
     }
 }
