@@ -814,4 +814,66 @@ test.describe("observer feed screenshots", () => {
       path: `${SHOTS}/11-first-turn-ordering.png`,
     });
   });
+
+  test("12 — circuit_open and circuit_recovered lifecycle alerts", async ({
+    page,
+  }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    // Circuit breaker opened after a panic inside this channel (the real
+    // panicked-in-channel call site passes the triggering channel's id, see
+    // emit_circuit_open_alert's caller in buzz-acp/src/lib.rs), then
+    // recovered. Both events are seeded with this channel's id to prove the
+    // renderer works when a channel context is present. NOTE: the real
+    // circuit_recovered alert is always emitted with channel_id=None (a
+    // respawned agent slot isn't tied to any single channel) and every
+    // desktop surface that shows agent transcripts is channel-scoped
+    // (scopeByChannel drops non-matching events) — that alert has no visible
+    // surface in the app today. That is a pre-existing, separate gap this
+    // change does not address; this test only proves the render branch
+    // itself is correct.
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "circuit_open",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: null,
+        turnId: null,
+        payload: {
+          trigger: "panicked",
+          cooldown_secs: 300,
+          error:
+            "Agent slot 0 panicked repeatedly and its circuit breaker is now open " +
+            "— it will not respond until the 300s cooldown elapses and a health probe succeeds.",
+        },
+      },
+      {
+        seq: 2,
+        timestamp: NOW,
+        kind: "circuit_recovered",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: null,
+        turnId: null,
+        payload: {
+          error:
+            "Agent slot 0 recovered — its circuit breaker probe succeeded and it is responding again.",
+        },
+      },
+    ]);
+
+    await expect(
+      feedPanel.getByText("Agent suspended (repeated crashes)"),
+    ).toBeVisible({ timeout: 5_000 });
+    await expect(feedPanel.getByText("Agent recovered")).toBeVisible({
+      timeout: 5_000,
+    });
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/12-circuit-breaker-alerts.png`,
+    });
+  });
 });
