@@ -75,6 +75,7 @@
             glib
             gtk3
             libayatana-appindicator
+            libopus
             librsvg
             openssl
             webkitgtk_4_1

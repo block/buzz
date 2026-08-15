@@ -26,7 +26,9 @@ default:
 bootstrap:
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     # Hermit's bin/ symlinks auto-download pinned tool versions on first use.
     # Running each tool once triggers the download if not already cached.
     echo "Ensuring toolchain via Hermit..."
@@ -56,7 +58,9 @@ hooks:
     # Use the Hermit-pinned lefthook (bin/lefthook self-downloads on first use):
     # works with no pre-installed lefthook and guarantees the pinned version
     # rather than whatever happens to be on PATH.
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     # --path-format=absolute guarantees an absolute path from every invocation context:
     # without it, --git-common-dir returns ".git" from the main checkout and a
     # relative hooksPath would break linked-worktree dispatch just like .hooks did.
@@ -413,14 +417,18 @@ desktop-screenshot *ARGS:
 relay: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     cargo run -p buzz-relay
 
 # Start the relay with the built web UI served from it
 relay-web: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     [[ -d node_modules ]] || pnpm install
     pnpm -C web build
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
@@ -429,7 +437,9 @@ relay-web: bootstrap _ensure-migrations
 admin: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     [[ -d node_modules ]] || pnpm install
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
@@ -458,7 +468,9 @@ relay-release: _ensure-migrations
 dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
     relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
     health_port="${BUZZ_HEALTH_PORT:-8080}"
@@ -517,7 +529,9 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
 desktop-standalone *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
@@ -545,7 +559,9 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
 staging *ARGS: bootstrap _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     pnpm install  # unconditional: staging must always start with a clean dep tree
     cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
@@ -580,7 +596,9 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
 production *ARGS: bootstrap _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     pnpm install  # unconditional: production must always start with a clean dep tree
     cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
@@ -964,7 +982,9 @@ _release-pr lane version:
 goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
     exec env "${env_args[@]}" ./target/release/buzz-acp
 
@@ -972,7 +992,9 @@ goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_
 goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
     screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp"
     echo "Agent running in screen session 'goose-agent-{{agents}}'. Attach with: screen -r goose-agent-{{agents}}"
@@ -983,7 +1005,9 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
 benchmark *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     uv run --project benchmarks/harbor-buzz-orchestra/testbed \
         benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
 
