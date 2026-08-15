@@ -4,7 +4,7 @@ use nostr::EventId;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::parse_hex64;
 
 pub async fn cmd_add_reaction(
     client: &BuzzClient,
@@ -12,7 +12,7 @@ pub async fn cmd_add_reaction(
     emoji: &str,
     emoji_url: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
+    let event_id = &parse_hex64(event_id)?;
     let target_eid =
         EventId::parse(event_id).map_err(|e| CliError::Usage(format!("invalid event ID: {e}")))?;
 
@@ -36,7 +36,9 @@ pub async fn cmd_remove_reaction(
     event_id: &str,
     emoji: &str,
 ) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
+    // Reaches a `#e` generic tag filter below, matched as a raw string
+    // against a lowercase tag.
+    let event_id = &parse_hex64(event_id)?;
     // Find our reaction event by querying kind:7 reactions on this event from us
     let my_pk = client.public_key().to_hex();
     let filter = serde_json::json!({
@@ -76,7 +78,7 @@ pub async fn cmd_remove_reaction(
 }
 
 pub async fn cmd_get_reactions(client: &BuzzClient, event_id: &str) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
+    let event_id = &parse_hex64(event_id)?;
     let filter = serde_json::json!({
         "kinds": [7],
         "#e": [event_id]
