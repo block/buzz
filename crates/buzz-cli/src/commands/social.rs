@@ -7,7 +7,12 @@ use serde::Deserialize;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
+use crate::limits::{effective_limit, truncation_notice};
 use crate::validate::{parse_event_id, validate_hex64};
+
+/// Default and maximum `--limit` for `social notes`.
+const NOTES_LIMIT_DEFAULT: u32 = 50;
+const NOTES_LIMIT_MAX: u32 = 100;
 
 /// A single contact entry (CLI-local, not from buzz-sdk).
 #[derive(Debug, Deserialize)]
@@ -83,7 +88,7 @@ pub async fn cmd_get_event(client: &BuzzClient, event_id: &str) -> Result<(), Cl
 pub async fn cmd_get_user_notes(
     client: &BuzzClient,
     pubkey: &str,
-    limit: Option<u32>,
+    requested_limit: Option<u32>,
     before: Option<i64>,
     before_id: Option<&str>,
 ) -> Result<(), CliError> {
@@ -91,7 +96,7 @@ pub async fn cmd_get_user_notes(
     if let Some(bid) = before_id {
         validate_hex64(bid)?;
     }
-    let limit = limit.unwrap_or(50).min(100);
+    let limit = effective_limit(requested_limit, NOTES_LIMIT_DEFAULT, NOTES_LIMIT_MAX);
 
     let mut filter = serde_json::json!({
         "kinds": [1],
@@ -108,6 +113,17 @@ pub async fn cmd_get_user_notes(
 
     let resp = client.query(&filter).await?;
     println!("{resp}");
+    let returned = serde_json::from_str::<Vec<serde_json::Value>>(&resp)
+        .map(|events| events.len())
+        .unwrap_or(0);
+    if let Some(notice) = truncation_notice(
+        returned,
+        requested_limit,
+        NOTES_LIMIT_DEFAULT,
+        NOTES_LIMIT_MAX,
+    ) {
+        eprintln!("{notice}");
+    }
     Ok(())
 }
 
