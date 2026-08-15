@@ -50,6 +50,22 @@
         "type": "github"
       }
     },
+    "nixpkgs-flutter": {
+      "locked": {
+        "lastModified": 1778461020,
+        "narHash": "sha256-FM+OPMqbBG882JI1H5/kvN6/TXdhl5TAwMlTeq4eXQU=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "7fe56c8fe4e9cee3dbe797cae9e7b74def154567",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "7fe56c8fe4e9cee3dbe797cae9e7b74def154567",
+        "type": "github"
+      }
+    },
     "nixpkgs-lib": {
       "locked": {
         "lastModified": 1785031560,
@@ -70,6 +86,7 @@
         "flake-parts": "flake-parts",
         "nixpkgs": "nixpkgs",
         "nixpkgs-darwin": "nixpkgs-darwin",
+        "nixpkgs-flutter": "nixpkgs-flutter",
         "rust-overlay": "rust-overlay"
       }
     },

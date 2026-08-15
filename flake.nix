@@ -8,6 +8,10 @@
     # macOS builds. Keep that system on the supported 26.05 branch.
     nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
 
+    # Buzz pins Flutter 3.41.7 through Hermit. Nixpkgs skipped that patch
+    # release; 3.41.9 is the closest packaged release in the same stable line.
+    nixpkgs-flutter.url = "github:NixOS/nixpkgs/7fe56c8fe4e9cee3dbe797cae9e7b74def154567";
+
     flake-parts.url = "github:hercules-ci/flake-parts";
 
     rust-overlay = {
@@ -21,6 +25,7 @@
       flake-parts,
       nixpkgs,
       nixpkgs-darwin,
+      nixpkgs-flutter,
       rust-overlay,
       ...
     }:
@@ -42,18 +47,61 @@
             overlays = [ (import rust-overlay) ];
           };
 
+          flutterPkgs = import nixpkgs-flutter { inherit system; };
+
           toolchainChannel = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
 
           rustToolchain = pkgs.rust-bin.stable.${toolchainChannel}.default;
+
+          biomeTarget =
+            {
+              aarch64-darwin = "darwin-arm64";
+              aarch64-linux = "linux-arm64";
+              x86_64-darwin = "darwin-x64";
+              x86_64-linux = "linux-x64";
+            }
+            .${system};
+
+          biomeHash =
+            {
+              aarch64-darwin = "sha256-5K3KJbVulY/AuXtfU5tH060gzexeJxZglFAi9X2WbyM=";
+              aarch64-linux = "sha256-rTXsRcUV7i5UyLvO2dWv6rJuEE9O01gTM3YatbF5iGs=";
+              x86_64-darwin = "sha256-UlLAWG/6l5mOoErfMbSg/iK63sHoCXsWMmUWHZJ5Mzg=";
+              x86_64-linux = "sha256-7HYAu+gNJXqs1uvJ1+jnspwMWHccZ9z+njWDHATSwSw=";
+            }
+            .${system};
+
+          biomeTool = pkgs.stdenv.mkDerivation {
+            pname = "biome";
+            version = "2.4.16";
+            src = pkgs.fetchurl {
+              url = "https://registry.npmjs.org/@biomejs/cli-${biomeTarget}/-/cli-${biomeTarget}-2.4.16.tgz";
+              hash = biomeHash;
+            };
+            sourceRoot = "package";
+            nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.autoPatchelfHook
+            ];
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.stdenv.cc.cc
+            ];
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 biome "$out/bin/biome"
+              runHook postInstall
+            '';
+          };
 
           commonPackages = with pkgs; [
             cargo-deny
             cargo-nextest
             cmake
             curl
+            ffmpeg
             file
             git
             just
+            jq
             lefthook
             ninja
             nodejs_24
@@ -65,6 +113,13 @@
             rust-analyzer
             rustToolchain
             wget
+          ];
+
+          mobilePackages = [ flutterPkgs.flutter ];
+
+          occasionalPackages = with pkgs; [
+            gh
+            uv
           ];
 
           linuxLibraries = with pkgs; [
@@ -99,30 +154,60 @@
             ]
             ++ linuxLibraries
             ++ gstreamerPlugins;
+
+          # Just runs inside the caller's current environment; it cannot switch
+          # Nix shells per recipe. Keep the direnv/default shell focused on
+          # desktop, web, and Rust work, and opt into the larger closures with
+          # `nix develop .#mobile` or `nix develop .#full`.
+          mkBuzzShell =
+            {
+              label,
+              extraPackages ? [ ],
+            }:
+            pkgs.mkShell {
+              packages =
+                commonPackages
+                ++ extraPackages
+                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux linuxPackages;
+
+              CMAKE_POLICY_VERSION_MINIMUM = "3.5";
+              LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
+                pkgs.lib.makeLibraryPath linuxLibraries
+              );
+
+              GST_PLUGIN_SYSTEM_PATH_1_0 = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
+                pkgs.lib.makeSearchPath "lib/gstreamer-1.0" gstreamerPlugins
+              );
+
+              # The npm launcher honors this variable. Point it at Nix's patched
+              # executable so Biome works on NixOS without a global nix-ld setup.
+              BIOME_BINARY = "${biomeTool}/bin/biome";
+
+              FLUTTER_SUPPRESS_ANALYTICS = "true";
+
+              shellHook = ''
+                export PATH="$PWD/node_modules/.bin:$PATH"
+
+                echo "Buzz ${label} development shell"
+                echo "  Rust: $(rustc --version)"
+                echo "  Node: $(node --version)"
+                echo "  pnpm: $(pnpm --version)"
+              '';
+            };
         in
         {
           formatter = pkgs.nixfmt;
 
-          devShells.default = pkgs.mkShell {
-            packages = commonPackages ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux linuxPackages;
-
-            CMAKE_POLICY_VERSION_MINIMUM = "3.5";
-            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
-              pkgs.lib.makeLibraryPath linuxLibraries
-            );
-
-            GST_PLUGIN_SYSTEM_PATH_1_0 = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
-              pkgs.lib.makeSearchPath "lib/gstreamer-1.0" gstreamerPlugins
-            );
-
-            shellHook = ''
-              export PATH="$PWD/node_modules/.bin:$PATH"
-
-              echo "Buzz development shell"
-              echo "  Rust: $(rustc --version)"
-              echo "  Node: $(node --version)"
-              echo "  pnpm: $(pnpm --version)"
-            '';
+          devShells = {
+            default = mkBuzzShell { label = "desktop/web"; };
+            mobile = mkBuzzShell {
+              label = "mobile";
+              extraPackages = mobilePackages;
+            };
+            full = mkBuzzShell {
+              label = "full";
+              extraPackages = mobilePackages ++ occasionalPackages;
+            };
           };
         };
     };
