@@ -143,6 +143,27 @@ class JourneyTests(unittest.TestCase):
                     review_native.prepare_fixture(run_dir, isolation)
             self.assertFalse((run_dir / "state/identity.key").exists())
 
+    def test_run_scrubs_repository_controlled_commands_by_default(self):
+        safe = {"PATH": "/usr/bin", "HOME": "/tmp/home"}
+        with mock.patch.object(review_native, "scrubbed_environment", return_value=safe), \
+             mock.patch.object(review_native.subprocess, "run", return_value=mock.Mock()) as subprocess_run:
+            review_native.run(["/tmp/repository-tool"])
+        self.assertEqual(subprocess_run.call_args.kwargs["env"], safe)
+
+    def test_cleanup_uses_isolated_home_without_host_credentials(self):
+        sentinels = {"BUZZ_PRIVATE_KEY": "secret", "SSH_AUTH_SOCK": "/tmp/agent",
+                     "GITHUB_TOKEN": "secret", "AWS_SECRET_ACCESS_KEY": "secret"}
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = pathlib.Path(directory)
+            isolation = review_native.isolation_manifest("run", "ws://127.0.0.1:3030")
+            with mock.patch.dict(review_native.os.environ, sentinels, clear=False), \
+                 mock.patch.object(review_native, "run") as run:
+                review_native.cleanup_review_state(run_dir, isolation, None)
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["HOME"], str(run_dir / "home"))
+        for name in sentinels:
+            self.assertNotIn(name, environment)
+
     def test_repository_controlled_subprocesses_receive_scrubbed_environments(self):
         safe = {"PATH": "/usr/bin", "HOME": "/tmp/home"}
         with mock.patch.object(review_native, "scrubbed_environment", return_value=safe), \
