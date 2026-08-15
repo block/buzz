@@ -357,6 +357,29 @@ async function markerExists(channelId: string, marker: string) {
   });
 }
 
+/**
+ * Provision the built-in team only while the channel's first-run kickoff is
+ * incomplete. The closer marker is durable relay state; once it exists, a
+ * missing team member can be an intentional owner removal and must not be
+ * "repaired" on a later visit or a new device.
+ */
+export async function ensureWelcomeTeamForKickoff(
+  channelId: string,
+  relayUrl?: string | null,
+  options: {
+    hasCompleted?: (channelId: string) => Promise<boolean>;
+    ensureTeam?: typeof ensureWelcomeTeam;
+  } = {},
+) {
+  const hasCompleted =
+    options.hasCompleted ??
+    ((targetChannelId: string) => markerExists(targetChannelId, closerMarker));
+  if (await hasCompleted(channelId)) {
+    return null;
+  }
+  return (options.ensureTeam ?? ensureWelcomeTeam)(channelId, relayUrl);
+}
+
 export function welcomeTeammateNeedsRestart(
   agent: ManagedAgent,
   leadPubkey: string,
@@ -575,10 +598,11 @@ export function useWelcomeKickoff(
       focusedWelcomeChannelRef.current !== channelId;
     void (async () => {
       try {
-        const welcomeTeam = await ensureWelcomeTeam(
+        const welcomeTeam = await ensureWelcomeTeamForKickoff(
           channelId,
           activeCommunity?.relayUrl,
         );
+        if (!welcomeTeam) return;
         await queryClient.invalidateQueries({
           queryKey: managedAgentsQueryKey,
         });
@@ -586,10 +610,6 @@ export function useWelcomeKickoff(
           lead: welcomeTeam[0],
           teammates: [welcomeTeam[1], welcomeTeam[2]],
         };
-
-        if (await markerExists(channelId, closerMarker)) {
-          return;
-        }
         if (!readiness.ready) {
           await sendManagedAgentChannelMessage({
             agentPubkey: resolvedAgentSet.lead.pubkey,
