@@ -19,6 +19,7 @@ import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
+import { installNativeReviewSemanticProbe } from "@/testing/nativeReviewSemanticProbe";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -28,6 +29,54 @@ const E2E_DEFAULT_PUBKEY = "deadbeef".repeat(8);
 const E2E_COMMUNITY_ID = "e2e-default-community";
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 const DEV_STATE_RESET_PARAM = "resetDevState";
+const NATIVE_REVIEW_PARAM = "nativeReview";
+
+function configureNativeReviewFixtureFromUrl() {
+  const buildEnabled = import.meta.env.VITE_NATIVE_REVIEW === "1";
+  if (!import.meta.env.DEV && !buildEnabled) return;
+  const url = new URL(window.location.href);
+  const enabled =
+    url.searchParams.get(NATIVE_REVIEW_PARAM) === "1" || buildEnabled;
+  if (!enabled) return;
+
+  const relayUrl =
+    url.searchParams.get("reviewRelay") ??
+    import.meta.env.VITE_NATIVE_REVIEW_RELAY;
+  const pubkey =
+    url.searchParams.get("reviewPubkey") ??
+    import.meta.env.VITE_NATIVE_REVIEW_PUBKEY;
+  if (
+    !relayUrl ||
+    !pubkey ||
+    !/^(ws|http):\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\/?$/.test(
+      relayUrl,
+    )
+  ) {
+    throw new Error(
+      "native review bootstrap requires a loopback relay and pubkey",
+    );
+  }
+  const communityId = "native-review-local";
+  const community = {
+    addedAt: new Date().toISOString(),
+    id: communityId,
+    name: "Native Review",
+    pubkey,
+    relayUrl,
+  };
+  window.localStorage.setItem("buzz-communities", JSON.stringify([community]));
+  window.localStorage.setItem("buzz-active-community-id", communityId);
+  window.localStorage.setItem(
+    `buzz-machine-onboarding-complete.v2:${pubkey}`,
+    "true",
+  );
+  window.localStorage.setItem(`buzz-onboarding-complete.v1:${pubkey}`, "true");
+  window.localStorage.setItem(
+    `buzz-community-onboarding-complete.v1:${encodeURIComponent(relayUrl)}:${pubkey}`,
+    "true",
+  );
+  installNativeReviewSemanticProbe();
+}
 
 function resetDevWebviewStateFromUrl() {
   if (!import.meta.env.DEV) {
@@ -121,6 +170,7 @@ async function installE2eBridgeIfConfigured() {
 
 async function bootstrap() {
   resetDevWebviewStateFromUrl();
+  configureNativeReviewFixtureFromUrl();
   configureDevE2eBridgeFromUrl();
   recoverLocalStorageQuotaOnStartup();
   startLocalStorageSweep();
