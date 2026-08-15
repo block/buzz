@@ -8,6 +8,7 @@ import {
 import {
   respawnManagedAgentWithRules,
   isManagedAgentActive,
+  isManagedAgentLive,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -25,6 +26,7 @@ import type {
   ChannelMember,
   ManagedAgent,
   ManagedAgentRuntimeStatus,
+  PresenceStatus,
 } from "@/shared/api/types";
 
 type UseMembersSidebarActionsOptions = {
@@ -144,6 +146,7 @@ export function useMembersSidebarActions({
   async function handleLifecycleAction(
     agent: ManagedAgent,
     runtime?: ManagedAgentRuntimeStatus,
+    presence?: PresenceStatus | null,
   ) {
     clearActionFeedback();
     setActiveActionKey(`agent:${agent.pubkey}`);
@@ -170,7 +173,7 @@ export function useMembersSidebarActions({
         return;
       }
 
-      if (isManagedAgentActive(agent)) {
+      if (isManagedAgentLive(agent, presence)) {
         await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,

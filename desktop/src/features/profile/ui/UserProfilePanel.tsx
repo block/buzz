@@ -453,6 +453,7 @@ export function UserProfilePanel({
     useAgentLifecycleActions({
       channels: channelsQuery.data,
       managedAgent,
+      presenceStatus,
       relayAgents: relayAgentsQuery.data,
       startManagedAgent: startAgentMutation.mutateAsync,
       stopManagedAgent: stopAgentMutation.mutateAsync,

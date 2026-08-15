@@ -3,6 +3,7 @@ import type {
   Channel,
   ManagedAgent,
   PresenceLookup,
+  PresenceStatus,
   RelayAgent,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -31,13 +32,49 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
+/** Infrastructure axis — local process running or remote record still deployed. */
 export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
-export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
+/** Relay presence axis — agent appears live to peers. */
+export function isManagedAgentPresenceLive(
+  presence?: PresenceStatus | null,
+): boolean {
+  return presence === "online" || presence === "away";
+}
+
+/**
+ * Liveness for primary Deploy/Shutdown (and Stop/Start) affordances.
+ * Provider-backed agents use relay presence; local agents use infrastructure status.
+ */
+export function isManagedAgentLive(
+  agent: Pick<ManagedAgent, "backend" | "status">,
+  presence?: PresenceStatus | null,
+): boolean {
   if (agent.backend.type === "provider") {
-    return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
+    return isManagedAgentPresenceLive(presence);
+  }
+  return isManagedAgentActive(agent);
+}
+
+/**
+ * Avatar / presence-dot display for bots and managed agents.
+ * Prefer real relay presence; never map provider `deployed` → online.
+ */
+export function resolveManagedAgentDisplayPresence(
+  _agent: ManagedAgent | undefined,
+  presence?: PresenceStatus | null,
+): PresenceStatus {
+  return presence ?? "offline";
+}
+
+export function getManagedAgentPrimaryActionLabel(
+  agent: ManagedAgent,
+  presence?: PresenceStatus | null,
+) {
+  if (agent.backend.type === "provider") {
+    return isManagedAgentLive(agent, presence) ? "Shutdown" : "Deploy";
   }
 
   if (isManagedAgentActive(agent)) {

@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getManagedAgentPrimaryActionLabel,
+  isManagedAgentLive,
+  resolveManagedAgentDisplayPresence,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -165,4 +168,70 @@ test("test_respawn_onStopped_fires_before_start_resolves", async () => {
     ["stop", "onStopped", "start"],
     "onStopped must fire after stop resolves and before start is called",
   );
+});
+
+// --- presence-aware primary action / liveness ---------------------------------
+
+test("provider deployed + presence offline → Deploy, not live", () => {
+  const remote = agent({
+    backend: { type: "provider", id: "blox", config: {} },
+    backendAgentId: "remote-1",
+    status: "deployed",
+  });
+
+  assert.equal(isManagedAgentLive(remote, "offline"), false);
+  assert.equal(getManagedAgentPrimaryActionLabel(remote, "offline"), "Deploy");
+});
+
+test("provider deployed + presence online/away → Shutdown, live", () => {
+  const remote = agent({
+    backend: { type: "provider", id: "blox", config: {} },
+    backendAgentId: "remote-1",
+    status: "deployed",
+  });
+
+  assert.equal(isManagedAgentLive(remote, "online"), true);
+  assert.equal(getManagedAgentPrimaryActionLabel(remote, "online"), "Shutdown");
+  assert.equal(isManagedAgentLive(remote, "away"), true);
+  assert.equal(getManagedAgentPrimaryActionLabel(remote, "away"), "Shutdown");
+});
+
+test("provider stopped + presence online → Shutdown (presence wins)", () => {
+  const remote = agent({
+    backend: { type: "provider", id: "blox", config: {} },
+    backendAgentId: "remote-1",
+    status: "stopped",
+  });
+
+  assert.equal(isManagedAgentLive(remote, "online"), true);
+  assert.equal(getManagedAgentPrimaryActionLabel(remote, "online"), "Shutdown");
+});
+
+test("local running/stopped labels unchanged without presence", () => {
+  const running = agent({ status: "running" });
+  const stopped = agent({ status: "stopped" });
+
+  assert.equal(isManagedAgentLive(running), true);
+  assert.equal(getManagedAgentPrimaryActionLabel(running), "Stop");
+  assert.equal(isManagedAgentLive(stopped), false);
+  assert.equal(getManagedAgentPrimaryActionLabel(stopped), "Start agent");
+});
+
+test("missing presence on provider → not live / Deploy", () => {
+  const remote = agent({
+    backend: { type: "provider", id: "blox", config: {} },
+    backendAgentId: "remote-1",
+    status: "deployed",
+  });
+
+  assert.equal(isManagedAgentLive(remote), false);
+  assert.equal(isManagedAgentLive(remote, null), false);
+  assert.equal(isManagedAgentLive(remote, undefined), false);
+  assert.equal(getManagedAgentPrimaryActionLabel(remote), "Deploy");
+  assert.equal(getManagedAgentPrimaryActionLabel(remote, null), "Deploy");
+  assert.equal(
+    resolveManagedAgentDisplayPresence(remote, undefined),
+    "offline",
+  );
+  assert.equal(resolveManagedAgentDisplayPresence(remote, "online"), "online");
 });
