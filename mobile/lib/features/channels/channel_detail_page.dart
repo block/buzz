@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' show min;
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
@@ -27,6 +26,7 @@ import '../profile/profile_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
+import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_link_navigation.dart';
@@ -44,6 +44,8 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
+import 'ime_metrics_settle_observer.dart';
+import 'latest_message_button.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
@@ -298,6 +300,8 @@ class ChannelDetailPage extends HookConsumerWidget {
     }, [channel.id, readState.isReady, readTimestamp]);
 
     return FrostedScaffold(
+      resizeToAvoidBottomInset:
+          !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
@@ -492,46 +496,48 @@ class ChannelDetailPage extends HookConsumerWidget {
             ],
           ),
           if (showsComposer)
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: ComposerDockSizeReporter(
-                key: const ValueKey('channel-composer-dock'),
-                onHeightChanged: (height) {
-                  if ((composerDockHeight.value - height).abs() < 0.5) return;
-                  composerDockHeight.value = height;
-                },
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AnimatedSize(
-                      duration: MediaQuery.disableAnimationsOf(context)
-                          ? Duration.zero
-                          : const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      alignment: Alignment.bottomCenter,
-                      child: typingEntries.isEmpty
-                          ? const SizedBox.shrink()
-                          : ChannelTypingIndicator(entries: typingEntries),
-                    ),
-                    ComposeBar(
-                      channelId: channel.id,
-                      channelName: resolvedChannel.isDm
-                          ? ''
-                          : resolvedChannel.name,
-                      onSend:
-                          (
-                            content,
-                            mentionPubkeys, {
-                            mediaTags = const <List<String>>[],
-                          }) => sendMessage.call(
-                            channelId: channel.id,
-                            content: content,
-                            mentionPubkeys: mentionPubkeys,
-                            channel: resolvedChannel,
-                            mediaTags: mediaTags,
-                          ),
-                    ),
-                  ],
+            AndroidImeLift(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: ComposerDockSizeReporter(
+                  key: const ValueKey('channel-composer-dock'),
+                  onHeightChanged: (height) {
+                    if ((composerDockHeight.value - height).abs() < 0.5) return;
+                    composerDockHeight.value = height;
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AnimatedSize(
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : const Duration(milliseconds: 180),
+                        curve: Curves.easeOutCubic,
+                        alignment: Alignment.bottomCenter,
+                        child: typingEntries.isEmpty
+                            ? const SizedBox.shrink()
+                            : ChannelTypingIndicator(entries: typingEntries),
+                      ),
+                      ComposeBar(
+                        channelId: channel.id,
+                        channelName: resolvedChannel.isDm
+                            ? ''
+                            : resolvedChannel.name,
+                        onSend:
+                            (
+                              content,
+                              mentionPubkeys, {
+                              mediaTags = const <List<String>>[],
+                            }) => sendMessage.call(
+                              channelId: channel.id,
+                              content: content,
+                              mentionPubkeys: mentionPubkeys,
+                              channel: resolvedChannel,
+                              mediaTags: mediaTags,
+                            ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
