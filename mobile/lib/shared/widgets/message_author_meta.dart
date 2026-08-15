@@ -16,7 +16,7 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Color applied to [displayName].
   final Color nameColor;
 
-  /// Color applied to the username, separator, and [timestamp].
+  /// Color applied to the username and [timestamp].
   final Color metadataColor;
 
   /// Optional callback invoked when [displayName] is tapped.
@@ -37,6 +37,9 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Base text style for secondary metadata, with [metadataColor] applied.
   final TextStyle metadataStyle;
 
+  /// Base text style for [timestamp], with [metadataColor] applied.
+  final TextStyle timestampStyle;
+
   /// Creates an inline author row with optional username and tap handling.
   const MessageAuthorMeta({
     super.key,
@@ -51,6 +54,7 @@ class MessageAuthorMeta extends StatelessWidget {
     this.timestampKey,
     this.nameStyle = messageUsernameTextStyle,
     this.metadataStyle = messageMetadataTextStyle,
+    this.timestampStyle = messageTimestampTextStyle,
   });
 
   @override
@@ -62,6 +66,9 @@ class MessageAuthorMeta extends StatelessWidget {
         normalizedUsername != displayName.trim();
     final resolvedNameStyle = nameStyle.copyWith(color: nameColor);
     final resolvedMetadataStyle = metadataStyle.copyWith(color: metadataColor);
+    final resolvedTimestampStyle = timestampStyle.copyWith(
+      color: metadataColor,
+    );
 
     Widget authorName = Text(
       displayName,
@@ -97,9 +104,7 @@ class MessageAuthorMeta extends StatelessWidget {
                 ),
               ),
             ],
-            const SizedBox(width: Grid.half),
-            Text('·', style: resolvedMetadataStyle),
-            const SizedBox(width: Grid.half),
+            const SizedBox(width: Grid.xxs),
             ConstrainedBox(
               constraints: BoxConstraints(maxWidth: metadataMaxWidth),
               child: Text(
@@ -107,7 +112,7 @@ class MessageAuthorMeta extends StatelessWidget {
                 key: timestampKey,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: resolvedMetadataStyle,
+                style: resolvedTimestampStyle,
               ),
             ),
           ],

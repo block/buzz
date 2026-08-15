@@ -1,20 +1,14 @@
 part of '../compose_bar.dart';
 
-/// Rich compose bar with @mention autocomplete and a markdown formatting
-/// toolbar. Used in both channel and thread views — the caller provides an
-/// [onSend] callback that handles actual message submission.
-typedef ComposeBarOnSend =
-    Future<void> Function(
-      String content,
-      List<String> mentionPubkeys, {
-      List<List<String>> mediaTags,
-    });
-
 class ComposeBar extends HookConsumerWidget {
   final String channelId;
   final String channelName;
   final String? hintText;
   final ComposeBarOnSend onSend;
+
+  /// Runs immediately before the editor requests focus, allowing a parent to
+  /// prepare focus-dependent layout (for example, following a thread tail).
+  final VoidCallback? onFocusRequested;
 
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
@@ -26,6 +20,7 @@ class ComposeBar extends HookConsumerWidget {
     this.hintText,
     this.threadHeadId,
     this.rootId,
+    this.onFocusRequested,
     required this.onSend,
   });
   @override
@@ -50,13 +45,22 @@ class ComposeBar extends HookConsumerWidget {
     final draftIdentity =
         '${ref.watch(relayConfigProvider).baseUrl}'
         ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
+    final isComposerExpanded = useState(false);
+    final androidImeTransitionStarted = useState(
+      defaultTargetPlatform != TargetPlatform.android,
+    );
+    final androidImeFallbackTimer = useRef<Timer?>(null);
     final focusNode = useFocusNode();
+    useEffect(
+      () =>
+          () => androidImeFallbackTimer.value?.cancel(),
+      [androidImeFallbackTimer],
+    );
     useEffect(
       () =>
           () => _dismissComposerKeyboard(focusNode),
       [focusNode],
     );
-    final isComposerExpanded = useState(false);
     final isEmojiPickerOpen = useState(false);
     final attachmentSurface = useState(_AttachmentSurface.closed);
     final iosAttachmentPopover = useMemoized(
@@ -101,10 +105,6 @@ class ComposeBar extends HookConsumerWidget {
       initialValue: 0,
       upperBound: 1.05,
     );
-    final composerExpansionValue = useAnimation(composerExpansionController);
-    final composerExpansionProgress = composerExpansionValue
-        .clamp(0.0, 1.0)
-        .toDouble();
 
     void collapseComposer() {
       if (!isComposerExpanded.value) return;
@@ -127,7 +127,15 @@ class ComposeBar extends HookConsumerWidget {
     useEffect(() {
       final observer = _ComposerKeyboardMetricsObserver(
         view: appView,
+        onKeyboardShown: () {
+          androidImeFallbackTimer.value?.cancel();
+          androidImeTransitionStarted.value = true;
+        },
         onKeyboardHidden: () {
+          androidImeFallbackTimer.value?.cancel();
+          if (defaultTargetPlatform == TargetPlatform.android) {
+            androidImeTransitionStarted.value = false;
+          }
           collapseComposer();
           focusNode.unfocus();
         },
@@ -138,26 +146,36 @@ class ComposeBar extends HookConsumerWidget {
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
-    useEffect(() {
-      final target = isComposerExpanded.value ? 1.0 : 0.0;
-      if (reducedMotion) {
-        composerExpansionController.value = target;
-      } else if ((composerExpansionController.value - target).abs() > 0.001) {
-        composerExpansionController.animateWith(
-          SpringSimulation(
-            SpringDescription.withDurationAndBounce(
-              duration: const Duration(milliseconds: 220),
-              bounce: 0.08,
+    useEffect(
+      () {
+        final target =
+            isComposerExpanded.value && androidImeTransitionStarted.value
+            ? 1.0
+            : 0.0;
+        if (reducedMotion) {
+          composerExpansionController.value = target;
+        } else if ((composerExpansionController.value - target).abs() > 0.001) {
+          composerExpansionController.animateWith(
+            SpringSimulation(
+              SpringDescription.withDurationAndBounce(
+                duration: const Duration(milliseconds: 220),
+                bounce: 0.08,
+              ),
+              composerExpansionController.value,
+              target,
+              0,
+              snapToEnd: true,
             ),
-            composerExpansionController.value,
-            target,
-            0,
-            snapToEnd: true,
-          ),
-        );
-      }
-      return null;
-    }, [isComposerExpanded.value, reducedMotion]);
+          );
+        }
+        return null;
+      },
+      [
+        isComposerExpanded.value,
+        androidImeTransitionStarted.value,
+        reducedMotion,
+      ],
+    );
     useEffect(() {
       if (defaultTargetPlatform != TargetPlatform.iOS) return null;
 
@@ -816,15 +834,10 @@ class ComposeBar extends HookConsumerWidget {
       attachmentSurface.value = _AttachmentSurface.camera;
     }
 
-    final motionDuration = reducedMotion
-        ? Duration.zero
-        : Duration(
-            milliseconds:
-                attachmentSurface.value == _AttachmentSurface.camera ||
-                    attachmentSurface.value == _AttachmentSurface.photos
-                ? 320
-                : 250,
-          );
+    final motionDuration = _composerMotionDuration(
+      reducedMotion,
+      attachmentSurface.value,
+    );
     final resizeDuration = reducedMotion
         ? Duration.zero
         : const Duration(milliseconds: 140);
@@ -839,42 +852,28 @@ class ComposeBar extends HookConsumerWidget {
       return null;
     }, [suggestionOverlayController]);
 
-    void expandComposer() {
-      if (isComposerExpanded.value) return;
-      attachmentSurface.value = _AttachmentSurface.closed;
-      isComposerExpanded.value = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted) focusNode.requestFocus();
-      });
-    }
+    void expandComposer() => _expandComposer(
+      context: context,
+      isExpanded: isComposerExpanded,
+      attachmentSurface: attachmentSurface,
+      onFocusRequested: onFocusRequested,
+      focusNode: focusNode,
+      view: appView,
+      androidImeTransitionStarted: androidImeTransitionStarted,
+      androidImeFallbackTimer: androidImeFallbackTimer,
+    );
 
-    final suggestionPanel = channelSuggestions.isNotEmpty
-        ? KeyedSubtree(
-            key: const ValueKey('channel-suggestions'),
-            child: _ChannelSuggestions(
-              suggestions: channelSuggestions,
-              onSelect: insertChannel,
-            ),
-          )
-        : suggestions.isNotEmpty
-        ? KeyedSubtree(
-            key: const ValueKey('mention-suggestions'),
-            child: _MentionSuggestions(
-              suggestions: suggestions,
-              userCache: userCache,
-              currentPubkey: currentPubkey,
-              isDmChannel: isDmChannel,
-              onSelect: insertMention,
-            ),
-          )
-        : const SizedBox.shrink(key: ValueKey('no-suggestions'));
+    final suggestionPanel = _composerSuggestionPanel(
+      channelSuggestions: channelSuggestions,
+      mentionSuggestions: suggestions,
+      userCache: userCache,
+      currentPubkey: currentPubkey,
+      isDmChannel: isDmChannel,
+      onChannelSelect: insertChannel,
+      onMentionSelect: insertMention,
+    );
     Widget buildOverlayPanel(_AttachmentSurface surface) {
-      return _AttachmentSurfacePanel(
-        key: ValueKey(
-          surface == _AttachmentSurface.closed
-              ? 'composer-suggestions'
-              : 'attachment-surface',
-        ),
+      return _composerAttachmentPanel(
         surface: surface,
         suggestionPanel: suggestionPanel,
         onBack: () => attachmentSurface.value = _AttachmentSurface.menu,
@@ -913,12 +912,10 @@ class ComposeBar extends HookConsumerWidget {
       );
     }
 
-    // Suggestions and attachments live in the overlay so showing them cannot
-    // reflow the composer. Both stay anchored just above the capsule.
-    final composerWidthFactor = 0.85 + 0.15 * composerExpansionProgress;
+    // Suggestions and attachments live in the overlay.
     final hasPendingUploads = uploadingCount.value > 0;
     return _ComposerDockFrame(
-      widthFactor: composerWidthFactor,
+      expansionAnimation: composerExpansionController,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -955,8 +952,7 @@ class ComposeBar extends HookConsumerWidget {
               attachmentSurface: attachmentSurface.value,
               onAttachmentTap: handleAttachmentTap,
               onExpand: expandComposer,
-              expansionValue: composerExpansionValue,
-              expansionProgress: composerExpansionProgress,
+              expansionAnimation: composerExpansionController,
               formattingOpen: showFormatting.value,
               onCloseFormatting: () => showFormatting.value = false,
               motionDuration: motionDuration,
