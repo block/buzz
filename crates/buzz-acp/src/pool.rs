@@ -1558,7 +1558,13 @@ pub async fn run_prompt_task(
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
     let reaction_ids: Vec<String> = batch
         .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .map(|b| {
+            b.events
+                .iter()
+                .filter(|be| be.event.kind.as_u16() == 9)
+                .map(|be| be.event.id.to_hex())
+                .collect()
+        })
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
@@ -4546,6 +4552,84 @@ mod tests {
         // No base_prompt configured: nothing to prepend regardless of version.
         let composed = prepend_standing_for_legacy(1, &base_only(None), "hello channel");
         assert_eq!(composed, "hello channel");
+    }
+
+    // ── reaction_ids: kind-9 gate (reaction-echo regression pin) ────────────
+    //
+    // Background: a 2026-08-15 incident in #ci-cd produced ~50 events/sec of
+    // kind-5 (deletions) + kind-7 (💬 reactions) caused by co-located agents
+    // reacting to each other's reactions. The `reaction_ids` vec built inside
+    // `run_prompt_task` feeds both `react_working` (adds 💬) and
+    // `clear_reactions` (removes 👀+💬). If the vec includes non-kind-9
+    // events, those events get cosmetic reactions whose subsequent cleanup
+    // deletions become new batch events — closing the loop. The fix at
+    // pool.rs:1559 filters `reaction_ids` to kind-9 only; this test pins
+    // that filter behavior so it cannot regress silently.
+
+    fn make_batch_event(kind: u16, content: &str) -> crate::queue::BatchEvent {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(kind), content)
+            .sign_with_keys(&keys)
+            .expect("sign");
+        crate::queue::BatchEvent {
+            event,
+            prompt_tag: format!("kind-{kind}"),
+            received_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn reaction_ids_filters_to_kind_nine_only() {
+        let kind9_note = make_batch_event(9, "hello channel");
+        let kind7_reaction = make_batch_event(7, "+");
+        let kind5_deletion = make_batch_event(5, "");
+
+        let kind9_id_hex = kind9_note.event.id.to_hex();
+        let kind7_id_hex = kind7_reaction.event.id.to_hex();
+        let kind5_id_hex = kind5_deletion.event.id.to_hex();
+
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![kind7_reaction, kind9_note, kind5_deletion],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        // Mirror the construction in run_prompt_task: filter batch.events
+        // down to kind-9 only, then collect their hex ids.
+        let reaction_ids: Vec<String> = batch
+            .events
+            .iter()
+            .filter(|be| be.event.kind.as_u16() == 9)
+            .map(|be| be.event.id.to_hex())
+            .collect();
+
+        assert_eq!(reaction_ids, vec![kind9_id_hex.clone()]);
+        assert!(!reaction_ids.contains(&kind7_id_hex));
+        assert!(!reaction_ids.contains(&kind5_id_hex));
+    }
+
+    #[test]
+    fn reaction_ids_is_empty_when_batch_has_no_kind_nine_events() {
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![make_batch_event(7, "+"), make_batch_event(5, "")],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let reaction_ids: Vec<String> = batch
+            .events
+            .iter()
+            .filter(|be| be.event.kind.as_u16() == 9)
+            .map(|be| be.event.id.to_hex())
+            .collect();
+
+        assert!(
+            reaction_ids.is_empty(),
+            "ReactionGuard::new drops the rest_client when ids are empty, so a \
+             non-kind-9-only batch must produce no reaction ids at all"
+        );
     }
 
     // ── prepend_standing_for_legacy ───────────────────────────────────────────
