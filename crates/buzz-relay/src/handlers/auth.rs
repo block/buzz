@@ -376,6 +376,15 @@ mod tests {
     use crate::state::AppState;
     use buzz_core::tenant::TenantContext;
 
+    /// See the note on `require_infra` in `api::bridge::tests`: an `#[ignore]`d
+    /// test that was explicitly selected must never pass by skipping.
+    fn require_infra<T>(value: Option<T>) -> T {
+        value.expect(
+            "NIP-OA owner tests need Postgres and Redis (DATABASE_URL / REDIS_URL); \
+             refusing to pass without them",
+        )
+    }
+
     async fn ws_test_state() -> Option<(Arc<AppState>, sqlx::PgPool)> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.require_relay_membership = true;
@@ -500,9 +509,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn nip_oa_owner_ws_records_owner_and_sets_auth_context() {
-        let Some((state, pool)) = ws_test_state().await else {
-            return;
-        };
+        let (state, pool) = require_infra(ws_test_state().await);
         let tenant = ws_seed_community(&pool).await;
         let agent = Keys::generate();
         let owner = Keys::generate();
@@ -545,9 +552,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn nip_oa_owner_ws_refuses_an_expired_attestation() {
-        let Some((state, pool)) = ws_test_state().await else {
-            return;
-        };
+        let (state, pool) = require_infra(ws_test_state().await);
         let tenant = ws_seed_community(&pool).await;
         let agent = Keys::generate();
         let owner = Keys::generate();
@@ -595,9 +600,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn nip_oa_owner_ws_refuses_an_owner_that_is_not_a_relay_member() {
-        let Some((state, pool)) = ws_test_state().await else {
-            return;
-        };
+        let (state, pool) = require_infra(ws_test_state().await);
         let tenant = ws_seed_community(&pool).await;
         let agent = Keys::generate();
         let stranger = Keys::generate();

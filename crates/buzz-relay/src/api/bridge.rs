@@ -3908,6 +3908,17 @@ mod tests {
     // name (`test(/nip_oa_owner_/)`), since no job runs this crate's default
     // test set.
 
+    /// These tests are `#[ignore]`d and run only when explicitly selected, so a
+    /// silent skip is never what the caller wanted: it turns "the database was
+    /// missing" into a passing run. Fail loudly instead — this is the same
+    /// false-green shape the tests themselves exist to rule out.
+    fn require_infra<T>(value: Option<T>) -> T {
+        value.expect(
+            "NIP-OA owner tests need Postgres and Redis (DATABASE_URL / REDIS_URL); \
+             refusing to pass without them",
+        )
+    }
+
     async fn nip_oa_test_state() -> Option<(Arc<AppState>, sqlx::PgPool)> {
         let mut config = crate::config::Config::from_env().ok()?;
         // The regression is closed-relay-only: on an open relay the owner was
@@ -3988,6 +3999,12 @@ mod tests {
     }
 
     /// Run one `POST /events` submission as `agent`, presenting `tag_json`.
+    ///
+    /// Panics if the submit fails before reaching owner materialization.
+    /// Admission and the NIP-98 replay guard run first and both fail closed on
+    /// a Redis blip, which short-circuits the request; without this check that
+    /// shows up downstream as "the owner was not recorded" and reads exactly
+    /// like a product bug instead of the infrastructure failure it is.
     async fn submit_with_tag(
         state: &Arc<AppState>,
         tenant: &TenantContext,
@@ -3999,7 +4016,7 @@ mod tests {
             Some(tag) => auth_tag_headers(tag),
             None => HeaderMap::new(),
         };
-        submit_event_authed(
+        let outcome = submit_event_authed(
             state,
             tenant,
             &headers,
@@ -4009,6 +4026,12 @@ mod tests {
             Some(auth_event_created_at),
         )
         .await;
+        if let SubmitOutcome::Err { status, .. } = &outcome {
+            panic!(
+                "submit failed before owner materialization (status {status}) — \
+                 infrastructure, not the owner path"
+            );
+        }
     }
 
     /// The regression itself: a direct relay member on a closed relay presents
@@ -4018,9 +4041,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn nip_oa_owner_http_records_owner_for_direct_member() {
-        let Some((state, pool)) = nip_oa_test_state().await else {
-            return;
-        };
+        let (state, pool) = require_infra(nip_oa_test_state().await);
         let tenant = seed_community(&pool).await;
         let agent = Keys::generate();
         let owner = Keys::generate();
@@ -4050,9 +4071,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn nip_oa_owner_http_refuses_an_owner_that_is_not_a_relay_member() {
-        let Some((state, pool)) = nip_oa_test_state().await else {
-            return;
-        };
+        let (state, pool) = require_infra(nip_oa_test_state().await);
         let tenant = seed_community(&pool).await;
         let agent = Keys::generate();
         let stranger = Keys::generate();
@@ -4084,9 +4103,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn nip_oa_owner_http_refuses_an_expired_attestation() {
-        let Some((state, pool)) = nip_oa_test_state().await else {
-            return;
-        };
+        let (state, pool) = require_infra(nip_oa_test_state().await);
         let tenant = seed_community(&pool).await;
         let agent = Keys::generate();
         let owner = Keys::generate();
@@ -4125,9 +4142,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn nip_oa_owner_http_without_a_tag_records_nothing() {
-        let Some((state, pool)) = nip_oa_test_state().await else {
-            return;
-        };
+        let (state, pool) = require_infra(nip_oa_test_state().await);
         let tenant = seed_community(&pool).await;
         let agent = Keys::generate();
 
