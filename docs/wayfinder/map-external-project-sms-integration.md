@@ -347,3 +347,57 @@ through a shell, so the SQL must carry its *own* inner quotes to survive.
 - **Operator persona dispatch.** Requires a `buzz-acp` harness process
   subscribed to the inbox channel; none has been run.
 - **External-repo dispatch** (slices 4/5/11) — unchanged, still deferred.
+
+## 2026-08-15: FULL LOOP VERIFIED — inbound → agent dispatch → outbound sink
+
+Every stage this codebase owns now works against a live relay, a real agent
+process, and real Twilio credentials. Only carrier delivery fails, for reasons
+outside the code (see the A2P section).
+
+**The observed chain, in order, all from live evidence:**
+
+1. Twilio-signed `POST /hooks/sms/inbound` → `200 {"status":"accepted"}`.
+2. Signature validated and the sender matched an `allowed` `sms_identities`
+   row (proven earlier by the 403→200 before/after on the same signed request).
+3. Relay synthesized a `kind:9` event tagged `h`/`sms_from`/`sms_sid`.
+4. **The event fanned out to the live WebSocket subscriber** — the fix in
+   commit `1904500`; relay logged `Fan-out … match_count: 1`.
+5. `buzz-acp` woke, created an ACP session titled `SMS Operator · #sms-inbox`
+   and ran the `sms-operator` persona through `@zed-industries/claude-code-acp`.
+6. **The persona took the correct branch.** The sender's `default_project` is
+   NULL, so the event carried no `project` tag, and the agent posted exactly
+   the disambiguation reply the persona specifies:
+   `Which project? Reply 1 for bidcraft, 2 for construct-pro.`
+   It did *not* guess a project — the ambiguous-path behavior working as
+   designed.
+7. The reply was threaded correctly: `["e", <inbound event id>, "", "reply"]`,
+   resolving to the originating `sms_sid` — precisely the tag `sms_sink` keys
+   on to recover the destination number.
+8. `sms_sink` fired and Twilio **accepted** the API call:
+   `INFO buzz_relay::sms_sink: sms_sink: sent outbound SMS reply to=+1865…`.
+9. Twilio then marked the message `undelivered`, **error 30034** — the A2P
+   10DLC "unregistered number" block. Delivery, and only delivery, failed.
+
+This closes slice 10 (outbound sink — its code path is now exercised against
+the real Twilio API, not just a mock) and slice 11 (end-to-end), with the
+carrier leg explicitly excepted.
+
+### Test-methodology trap worth remembering
+
+An earlier run of this same test appeared to prove the fan-out fix had *not*
+worked: the SMS returned 200 and the agent stayed idle. The cause was a **race
+in the test, not the code** — the webhook landed at `17:17:33` while the
+harness only finished subscribing at `17:17:40`. Live fan-out reaches only
+*currently connected* subscribers, so the event was dispatched to nobody.
+Diagnosing this needed the relay's HTTP-access log to recover the exact
+request timestamp and compare it against the harness's subscribe timestamp.
+When an event "vanishes", check subscriber-connected-at vs event-arrived-at
+before suspecting the dispatch path.
+
+### Agent-side environment trap
+
+`claude-code-acp` refuses to start when the `CLAUDECODE` environment variable
+is inherited (`Claude Code cannot be launched inside another Claude Code
+session`). A harness launched from inside a Claude Code session must clear it,
+otherwise every `session/new` fails with a `-32603 Internal error` that looks
+like an ACP protocol fault rather than an environment guard.
