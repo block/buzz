@@ -482,6 +482,12 @@ class RunnerTests: XCTestCase {
     )
   }
 
+  func testNativeMessageActionListDoesNotHideDialogSiblings() {
+    XCTAssertFalse(
+      NativeMessageActionSurfaceAppearance.actionListAccessibilityViewIsModal
+    )
+  }
+
   func testNativeMessageActionSurfaceMatchesFlutterInterfaceStyle() {
     XCTAssertEqual(
       NativeMessageActionSurfaceAppearance.interfaceStyle(from: "dark"),

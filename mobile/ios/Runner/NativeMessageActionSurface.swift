@@ -73,6 +73,11 @@ enum NativeMessageActionSurfaceLayout {
 
 @available(iOS 16.0, *)
 enum NativeMessageActionSurfaceAppearance {
+  // The native list is only one sibling inside the Flutter-owned dialog.
+  // Keeping it non-modal leaves the reaction tray and dismiss barrier
+  // reachable to VoiceOver.
+  static let actionListAccessibilityViewIsModal = false
+
   static func interfaceStyle(from value: Any?) -> UIUserInterfaceStyle {
     switch value as? String {
     case "dark":
@@ -280,7 +285,8 @@ final class NativeMessageActionSurfacePlatformView: NSObject,
 
     surfaceView.backgroundColor = .clear
     surfaceView.clipsToBounds = false
-    surfaceView.accessibilityViewIsModal = true
+    surfaceView.accessibilityViewIsModal =
+      NativeMessageActionSurfaceAppearance.actionListAccessibilityViewIsModal
     surfaceView.overrideUserInterfaceStyle = interfaceStyle
 
     backdropView.translatesAutoresizingMaskIntoConstraints = false

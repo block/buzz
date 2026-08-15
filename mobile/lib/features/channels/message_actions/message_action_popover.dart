@@ -1,6 +1,7 @@
 part of '../message_actions.dart';
 
 const _messageActionRowHeight = 48.0;
+const _messageActionRowVerticalPadding = Grid.xxs;
 const _messageActionSeparatorHeight = 0.5;
 const _messageActionVerticalInset = Grid.half;
 const _messageActionMenuMaxWidth = 288.0;
@@ -524,11 +525,10 @@ class _MessageActionsPopover extends StatelessWidget {
         final availableHeight = math.max(1.0, safeBottom - safeTop);
         final trayWidth = math.min(_reactionTrayMaxWidth, availableWidth);
         final menuWidth = math.min(_messageActionMenuMaxWidth, availableWidth);
-        final preferredMenuHeight = _messageActionSurfacePreferredHeight(
-          actions,
-        );
+        final menuLayout = _MessageActionSurfaceLayout.from(context, actions);
+        final preferredMenuHeight = menuLayout.preferredHeight;
         final menuBudget = math.max(
-          _messageActionRowHeight,
+          menuLayout.rowHeight,
           availableHeight -
               _reactionTrayMaxHeight -
               (_messageActionGap * 2) -
@@ -805,6 +805,7 @@ class _MessageActionSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final menuLayout = _MessageActionSurfaceLayout.from(context, actions);
     return Material(
       key: const ValueKey('message-action-surface'),
       color: context.colors.surface,
@@ -841,6 +842,7 @@ class _MessageActionSurface extends StatelessWidget {
                   ),
                 _MessageActionRow(
                   action: actions[index],
+                  height: menuLayout.rowHeight,
                   onSelected: onSelected,
                 ),
               ],
@@ -854,9 +856,14 @@ class _MessageActionSurface extends StatelessWidget {
 
 class _MessageActionRow extends StatelessWidget {
   final _PopoverMessageAction action;
+  final double height;
   final ValueChanged<String> onSelected;
 
-  const _MessageActionRow({required this.action, required this.onSelected});
+  const _MessageActionRow({
+    required this.action,
+    required this.height,
+    required this.onSelected,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -874,7 +881,7 @@ class _MessageActionRow extends StatelessWidget {
           onSelected(action.id);
         },
         child: SizedBox(
-          height: _messageActionRowHeight,
+          height: height,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
             child: Row(
@@ -905,14 +912,45 @@ class _MessageActionRow extends StatelessWidget {
   }
 }
 
-double _messageActionSurfacePreferredHeight(
-  List<_PopoverMessageAction> actions,
-) {
-  var separatorCount = 0;
-  for (var index = 1; index < actions.length; index++) {
-    if (actions[index - 1].group != actions[index].group) separatorCount += 1;
+class _MessageActionSurfaceLayout {
+  final double rowHeight;
+  final double preferredHeight;
+
+  const _MessageActionSurfaceLayout({
+    required this.rowHeight,
+    required this.preferredHeight,
+  });
+
+  factory _MessageActionSurfaceLayout.from(
+    BuildContext context,
+    List<_PopoverMessageAction> actions,
+  ) {
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: 'Message action',
+        style: context.textTheme.bodyLarge,
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final rowHeight = math.max(
+      _messageActionRowHeight,
+      textPainter.height + (_messageActionRowVerticalPadding * 2),
+    );
+    textPainter.dispose();
+
+    var separatorCount = 0;
+    for (var index = 1; index < actions.length; index++) {
+      if (actions[index - 1].group != actions[index].group) separatorCount += 1;
+    }
+    final preferredHeight =
+        (_messageActionVerticalInset * 2) +
+        (actions.length * rowHeight) +
+        (separatorCount * _messageActionSeparatorHeight);
+    return _MessageActionSurfaceLayout(
+      rowHeight: rowHeight,
+      preferredHeight: preferredHeight,
+    );
   }
-  return (_messageActionVerticalInset * 2) +
-      (actions.length * _messageActionRowHeight) +
-      (separatorCount * _messageActionSeparatorHeight);
 }

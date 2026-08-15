@@ -214,6 +214,7 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   ReminderService? reminderService,
   bool disableAnimations = false,
   EdgeInsets viewInsets = EdgeInsets.zero,
+  TextScaler textScaler = TextScaler.noScaling,
   FocusNode? composerFocusNode,
   bool composerInitiallyFocused = false,
   Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
@@ -239,6 +240,7 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
           data: MediaQuery.of(context).copyWith(
             disableAnimations: disableAnimations,
             viewInsets: viewInsets,
+            textScaler: textScaler,
           ),
           child: child!,
         ),
@@ -789,6 +791,26 @@ void main() {
         find.byKey(const ValueKey('message-action-surface')),
         findsOneWidget,
       );
+      await _dismissMessageActionsPopover(tester);
+    });
+
+    testWidgets('fallback action rows grow with accessibility text', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(rootId: 'root-9'),
+        prefs: prefs,
+        textScaler: const TextScaler.linear(3),
+      );
+
+      final rowFinder = find.byKey(
+        const ValueKey('message-action-followThread'),
+      );
+      expect(tester.getSize(rowFinder).height, greaterThan(48));
+      expect(tester.takeException(), isNull);
+
       await _dismissMessageActionsPopover(tester);
     });
 
