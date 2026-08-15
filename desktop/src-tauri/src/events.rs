@@ -80,6 +80,94 @@ fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
     Ok(tags)
 }
 
+fn mention_reference_tags(mentions: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
+    for mention in mentions {
+        if mention.first().map(String::as_str) != Some("mention") {
+            return Err(format!(
+                "mention reference tags must use 'mention' prefix (got {:?})",
+                mention.first()
+            ));
+        }
+        let Some(pubkey) = mention.get(1) else {
+            return Err("mention reference tag missing pubkey".into());
+        };
+        check_pubkey(pubkey)?;
+        tags.push(tag(vec!["mention", &pubkey.to_ascii_lowercase()])?);
+    }
+    Ok(())
+}
+
+/// Validate and append imeta tags. Rejects any tag whose first element is not "imeta"
+/// to prevent injection of arbitrary tags (e.g., forged "h", "e", or "p" tags).
+fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
+    for mt in media_tags {
+        if mt.first().map(String::as_str) != Some("imeta") {
+            return Err(format!(
+                "media tags must use 'imeta' prefix (got {:?})",
+                mt.first()
+            ));
+        }
+        let parts: Vec<&str> = mt.iter().map(String::as_str).collect();
+        tags.push(Tag::parse(parts).map_err(|e| format!("invalid imeta tag: {e}"))?);
+    }
+    Ok(())
+}
+
+/// Validate and append NIP-30 custom-emoji tags. Mirrors `imeta_tags`: rejects
+/// any tag whose first element is not "emoji" so this path can't be used to
+/// smuggle forged "h"/"e"/"p" tags. Each tag is `["emoji", shortcode, url]`.
+fn emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
+    for et in emoji_tags {
+        if et.first().map(String::as_str) != Some("emoji") {
+            return Err(format!(
+                "emoji tags must use 'emoji' prefix (got {:?})",
+                et.first()
+            ));
+        }
+        let parts: Vec<&str> = et.iter().map(String::as_str).collect();
+        tags.push(Tag::parse(parts).map_err(|e| format!("invalid emoji tag: {e}"))?);
+    }
+    Ok(())
+}
+
+/// Validate and append `supersedes` reference tags: `["e", "<64-hex-id>", "",
+/// "supersedes"]`. Mirrors `imeta_tags`/`emoji_tags`: rejects any tag that
+/// isn't this exact shape so this path can't be used to smuggle forged
+/// "h"/"p"/reply "e" tags. The target event id is NOT verified to exist —
+/// that check (`validate_supersedes_tag`) was deliberately removed as dead
+/// code tied to a now-removed custom endpoint; this tag rides through like
+/// any other well-formed, unvalidated `e` tag.
+fn supersedes_tags(supersedes_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
+    for st in supersedes_tags {
+        if st.first().map(String::as_str) != Some("e") {
+            return Err(format!(
+                "supersedes tags must use 'e' prefix (got {:?})",
+                st.first()
+            ));
+        }
+        if st.len() != 4 || st[3] != "supersedes" {
+            return Err(
+                "supersedes tag must be exactly [\"e\", \"<id>\", \"\", \"supersedes\"]".into(),
+            );
+        }
+        check_event_id(&st[1])?;
+        let parts: Vec<&str> = st.iter().map(String::as_str).collect();
+        tags.push(Tag::parse(parts).map_err(|e| format!("invalid supersedes tag: {e}"))?);
+    }
+    Ok(())
+}
+
+/// Validate a hex event id is exactly 64 hex characters.
+fn check_event_id(event_id: &str) -> Result<(), String> {
+    if event_id.len() != 64 || !event_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "event id must be a 64-character hex string (got {} chars)",
+            event_id.len()
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a hex pubkey is exactly 64 hex characters.
 fn check_pubkey(pubkey: &str) -> Result<(), String> {
     if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -260,6 +348,7 @@ pub fn build_message(
     link_preview_tags: &[Vec<String>],
     sent_from_thread_tag: Option<&[String]>,
     relay_base: &str,
+    supersedes_ref_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
         channel_id,
@@ -272,6 +361,7 @@ pub fn build_message(
         link_preview_tags,
         sent_from_thread_tag,
         relay_base,
+        supersedes_ref_tags,
         &[],
     )
 }
@@ -293,6 +383,7 @@ pub fn build_message_with_client_tags(
     link_preview_tags: &[Vec<String>],
     sent_from_thread_tag: Option<&[String]>,
     relay_base: &str,
+    supersedes_ref_tags: &[Vec<String>],
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     if sent_from_thread_tag.is_some() && thread_ref.is_some() {
@@ -309,6 +400,7 @@ pub fn build_message_with_client_tags(
     mention_reference_tags(mention_ref_tags, &mut tags)?;
     crate::link_preview_tags::append(link_preview_tags, relay_base, &mut tags)?;
     append_sent_from_thread_tag(sent_from_thread_tag, &mut tags)?;
+    supersedes_tags(supersedes_ref_tags, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
@@ -394,6 +486,49 @@ pub fn build_delete_compat(
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
+/// Kind 9 — retroactive "file B supersedes file A" link declaration.
+///
+/// Nostr events are immutable, so retroactively linking two already-published
+/// file uploads can't add a tag to either original event. Instead this
+/// publishes a brand-new, empty-content kind:9 event carrying only the
+/// channel `h` tag and two `e` tags: `["e", newer_event_id, "",
+/// "supersedes-subject"]` and `["e", older_event_id, "", "supersedes"]`. It
+/// carries no `imeta` tag of its own, so it's never mistaken for a file
+/// upload — only for the *link* between two others.
+///
+/// `channelFiles.ts`'s `listChannelFiles` scans for this exact shape (an
+/// event with both markers and no imeta tag) and folds the declared link
+/// into the same `supersedes`/`supersededBy` graph it already builds from
+/// live-composer `supersedes` tags, so `FilesPanel.tsx` renders both cases
+/// identically without any changes.
+///
+/// Deliberately a dedicated builder + dedicated command (`link_channel_file_versions`,
+/// mirroring `build_reaction`/`add_reaction`) rather than threading a third
+/// tag marker through `supersedes_tags()`/`build_message`, which guards the
+/// main message-send path — this keeps that validator's contract (exactly
+/// `["e", "<id>", "", "supersedes"]`) unchanged for every existing caller,
+/// which is the lower-risk option.
+pub fn build_supersedes_link(
+    channel_id: Uuid,
+    newer_event_id: EventId,
+    older_event_id: EventId,
+) -> Result<EventBuilder, String> {
+    if newer_event_id == older_event_id {
+        return Err("a file cannot supersede itself".into());
+    }
+    let tags = vec![
+        tag(vec!["h", &channel_id.to_string()])?,
+        tag(vec![
+            "e",
+            &newer_event_id.to_hex(),
+            "",
+            "supersedes-subject",
+        ])?,
+        tag(vec!["e", &older_event_id.to_hex(), "", "supersedes"])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(9), "").tags(tags))
+}
+
 // ── Reactions ────────────────────────────────────────────────────────────────
 
 /// Kind 7 — NIP-25 reaction.
@@ -420,6 +555,24 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
     check_content(content)?;
     let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+}
+
+// ── Pinned messages ──────────────────────────────────────────────────────────
+
+/// Kind 40004 — the channel/DM-level pinned-message list. `content` is a
+/// small JSON payload `{"pinned": ["<eventId>", ...]}` (order = pin order,
+/// oldest-pinned first). "Latest wins" is enforced purely by the read-side
+/// query convention (`limit:1` + descending `created_at`), the same pattern
+/// `build_set_canvas`/`get_canvas` use for kind 40100 — this is a full
+/// replace of the list, not an incremental add/remove.
+pub fn build_set_pinned_messages(
+    channel_id: Uuid,
+    pinned_event_ids: &[String],
+) -> Result<EventBuilder, String> {
+    let content = serde_json::json!({ "pinned": pinned_event_ids }).to_string();
+    check_content(&content)?;
+    let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
+    Ok(EventBuilder::new(Kind::Custom(40004), content).tags(tags))
 }
 
 // ── Profile ──────────────────────────────────────────────────────────────────

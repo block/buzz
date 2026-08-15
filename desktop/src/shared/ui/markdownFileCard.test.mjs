@@ -47,7 +47,70 @@ test("resolveFileCard: builds a card for a generic file, preferring imeta filena
     href: PDF_URL,
     filename: "Q3-budget.pdf",
     size: 2048,
+    previewKind: "pdf",
   });
+});
+
+test("resolveFileCard: classifies previewKind by extension (markdown, docx, xlsx, pptx, code, unknown)", () => {
+  const url = (name) =>
+    `https://relay.example/media/${"c".repeat(64)}.${name.split(".").pop()}`;
+  assert.equal(
+    resolveFileCard(
+      { m: "text/markdown", filename: "notes.md" },
+      url("notes.md"),
+      "",
+    )?.previewKind,
+    "markdown",
+  );
+  assert.equal(
+    resolveFileCard(
+      {
+        m: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename: "spec.docx",
+      },
+      url("spec.docx"),
+      "",
+    )?.previewKind,
+    "docx",
+  );
+  assert.equal(
+    resolveFileCard(
+      {
+        m: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename: "budget.xlsx",
+      },
+      url("budget.xlsx"),
+      "",
+    )?.previewKind,
+    "xlsx",
+  );
+  assert.equal(
+    resolveFileCard(
+      {
+        m: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename: "deck.pptx",
+      },
+      url("deck.pptx"),
+      "",
+    )?.previewKind,
+    "pptx",
+  );
+  assert.equal(
+    resolveFileCard(
+      { m: "application/octet-stream", filename: "main.rs" },
+      url("main.rs"),
+      "",
+    )?.previewKind,
+    "text",
+  );
+  assert.equal(
+    resolveFileCard(
+      { m: "application/zip", filename: "archive.zip" },
+      url("archive.zip"),
+      "",
+    )?.previewKind,
+    null,
+  );
 });
 
 test("resolveFileCard: falls back to link child text when imeta has no filename", () => {

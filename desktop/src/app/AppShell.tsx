@@ -62,6 +62,7 @@ import { useObserverArchiveReconciliation } from "@/features/local-archive/useOb
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { SendFeedbackController } from "@/features/settings/ui/SendFeedbackController";
+import { WhatsNewModal } from "@/features/whatsNew/ui/WhatsNewModal";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSection,
@@ -946,6 +947,7 @@ export function AppShell() {
                   onOpenChange={setIsSendFeedbackOpen}
                   open={isSendFeedbackOpen}
                 />
+                {!isHuddleRoom ? <WhatsNewModal /> : null}
               </AppProfilePanelProvider>
             </SidebarProvider>
           </AppHuddleShell>

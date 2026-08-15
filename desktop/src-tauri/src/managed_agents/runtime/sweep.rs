@@ -8,6 +8,7 @@
 //! procargs, parent/PGID lookups, and live-descendant classification helpers
 //! collected here are also called directly by the periodic orphan sweeps.
 
+#![allow(dead_code, unused_imports)]
 use std::path::{Path, PathBuf};
 
 // Re-declare the macOS process-info FFI so sweep.rs can call it independently.

@@ -306,7 +306,7 @@ export function SettingsView({
               data-buzz-sidebar-secondary
               data-testid="settings-version"
             >
-              v{appVersion}
+              {appVersion}
             </p>
           ) : null}
         </SidebarFooter>

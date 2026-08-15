@@ -72,6 +72,40 @@ export async function fetchMediaBytes(
   return new Uint8Array(bytes);
 }
 
+/**
+ * Check whether a working LibreOffice install (`soffice`) is available on
+ * this machine. Used to decide whether `.pptx` preview can go through the
+ * high-fidelity `convertPptxToPdf` path instead of the client-side JS
+ * renderer.
+ *
+ * The Rust side caches a *found* result for the process lifetime but
+ * deliberately never caches a negative result, so calling this again after
+ * the user installs LibreOffice (e.g. from a "Retry" button) picks up the
+ * new install without an app restart.
+ */
+export async function checkLibreOfficeAvailable(): Promise<boolean> {
+  return invokeTauri<boolean>("check_libreoffice_available", {});
+}
+
+/**
+ * Convert `.pptx` bytes to PDF bytes via a local LibreOffice install, for
+ * rendering through the existing `PdfPreview` component instead of the
+ * lower-fidelity client-side `.pptx` renderer.
+ *
+ * Throws a human-readable error string if LibreOffice reported available but
+ * failed on this specific file (corrupted install, unsupported file, etc.) —
+ * callers should treat that the same as "LibreOffice not available" rather
+ * than crashing the preview.
+ */
+export async function convertPptxToPdf(
+  bytes: Uint8Array,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const pdfBytes = await invokeTauri<ArrayBuffer>("convert_pptx_to_pdf", {
+    bytes: Array.from(bytes),
+  });
+  return new Uint8Array(pdfBytes);
+}
+
 /** Read plain text without depending on embedded-webview clipboard grants. */
 export async function readTextFromSystemClipboard(): Promise<string> {
   // E2E installs Tauri's mocked IPC surface in a browser page, where the SDK's

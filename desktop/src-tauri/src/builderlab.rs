@@ -20,7 +20,10 @@ const BB_SESSION_CREDENTIAL_HEADER: &str = "X-BB-Session-Credential";
 // or challenge/verify fail with `invalid_origin`. It also seeds the challenge
 // body's `origin` field so both agree.
 const BUILDERLAB_ORIGIN: &str = "https://app.builderlab.xyz";
-const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
+// `pub(crate)` so other OAuth-style flows (e.g. `google_meet.rs`) that reuse
+// this same loopback-callback pattern can show the identical success page
+// instead of duplicating ~120 lines of markup for a second provider.
+pub(crate) const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">

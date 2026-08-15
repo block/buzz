@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use crate::managed_agents::discovery::{clear_resolve_cache, resolve_command};
 
 /// The legacy Goose Windows installer wrote `%USERPROFILE%\goose\goose.exe`,

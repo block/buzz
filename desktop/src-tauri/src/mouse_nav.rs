@@ -23,6 +23,7 @@
 
 /// Maps an `otherMouseUp` button number to a navigation direction.
 /// Buttons 3 and 4 are X1 (back) and X2 (forward).
+#[allow(dead_code)]
 fn direction_for_button(button: isize) -> Option<&'static str> {
     match button {
         3 => Some("back"),
@@ -35,6 +36,7 @@ fn direction_for_button(button: isize) -> Option<&'static str> {
 /// following the AppKit `swipeWithEvent:` convention: positive is back,
 /// negative is forward. A swipe arrives as a begin/end pair and only the
 /// end event carries the direction, so `deltaX == 0` maps to `None`.
+#[allow(dead_code)]
 fn direction_for_swipe(delta_x: f64) -> Option<&'static str> {
     if delta_x > 0.0 {
         Some("back")
@@ -45,6 +47,7 @@ fn direction_for_swipe(delta_x: f64) -> Option<&'static str> {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn init<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
     use block2::RcBlock;
     use objc2_app_kit::{NSEvent, NSEventMask, NSEventType};
@@ -101,6 +104,9 @@ pub fn init<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
         eprintln!("buzz-desktop: mouse-nav: failed to install NSEvent monitor");
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn init<R: tauri::Runtime>(_app_handle: &tauri::AppHandle<R>) {}
 
 #[cfg(test)]
 mod tests {

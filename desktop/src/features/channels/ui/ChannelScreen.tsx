@@ -19,6 +19,7 @@ import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader"
 import { ChannelPane } from "@/features/channels/ui/ChannelScreenLazyViews";
 import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
 import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
+import { FilesPanel } from "@/features/channels/ui/FilesPanel";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
   useManagedAgentsQuery,
@@ -53,7 +54,6 @@ import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
-import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import type { RelayEvent, RespondToMode } from "@/shared/api/types";
@@ -144,6 +144,7 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth(channelContentWidthPx || undefined);
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
+  const [isFilesPanelOpen, setIsFilesPanelOpen] = React.useState(false);
   const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
   const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
     () => new Set<string>(),
@@ -506,14 +507,6 @@ export function ChannelScreen({
         : undefined,
     [activeChannel, handleToggleReaction],
   );
-  const handleMessageMarkUnread = React.useCallback(
-    (message: TimelineMessage) => handleMarkMessageUnread(message.id),
-    [handleMarkMessageUnread],
-  );
-  const handleMessageMarkRead = React.useCallback(
-    (message: TimelineMessage) => handleMarkMessageRead(message.id),
-    [handleMarkMessageRead],
-  );
   const sendMessageMutateAsync = sendMessageMutation.mutateAsync;
   const handleSendVideoReviewComment = React.useCallback(
     async (
@@ -722,14 +715,10 @@ export function ChannelScreen({
     channelManagementOpen,
     openGlobalChannelManagement,
     setChannelManagementOpen,
-    setOpenThreadHeadId,
     handleCloseAgentSession,
+    setOpenThreadHeadId,
     setProfilePanelPubkey,
   ]);
-  const handleToggleMembers = React.useCallback(
-    () => setIsMembersSidebarOpen((prev) => !prev),
-    [],
-  );
   const channelHeader = React.useMemo(
     () => (
       <ChannelScreenHeader
@@ -747,7 +736,8 @@ export function ChannelScreen({
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
-        onToggleMembers={handleToggleMembers}
+        onToggleFiles={() => setIsFilesPanelOpen((prev) => !prev)}
+        onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
         showHeaderContent={!isSinglePanelView && !isHuddleTranscript}
         transparentChrome={activeChannel?.channelType !== "forum"}
       />
@@ -766,7 +756,6 @@ export function ChannelScreen({
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
-      handleToggleMembers,
       isSinglePanelView,
       isHuddleTranscript,
     ],
@@ -908,8 +897,10 @@ export function ChannelScreen({
                   onEditSave={
                     activeChannel?.archivedAt ? undefined : handleEditSave
                   }
-                  onMarkUnread={handleMessageMarkUnread}
-                  onMarkRead={handleMessageMarkRead}
+                  onMarkUnread={(message) =>
+                    handleMarkMessageUnread(message.id)
+                  }
+                  onMarkRead={(message) => handleMarkMessageRead(message.id)}
                   onExpandThreadReplies={handleExpandThreadReplies}
                   onOpenAgentSession={handleOpenAgentSession}
                   onOpenDm={handleOpenDm}
@@ -971,6 +962,11 @@ export function ChannelScreen({
           onOpenChange={setIsMembersSidebarOpen}
           onViewActivity={handleOpenAgentSession}
           relayUrl={activeCommunity?.relayUrl}
+        />
+        <FilesPanel
+          channel={activeChannel}
+          open={isFilesPanelOpen}
+          onOpenChange={setIsFilesPanelOpen}
         />
       </ProfilePanelProvider>
     </AgentSessionProvider>

@@ -11,10 +11,103 @@ export type FileCardImetaEntry = {
   thumb?: string;
 };
 
+/**
+ * How a generic file card should preview its content in-app, or `null` if it
+ * should only offer download (unrecognized or too risky to render inline).
+ *
+ * Classification is by filename extension, not the sender-supplied MIME type
+ * (`imeta.m` is attacker-controlled and often wrong/absent for non-media
+ * uploads) — extension is what every viewer library below actually keys off
+ * of anyway (pdf.js, mammoth, SheetJS, pptx-to-html all sniff their own
+ * format).
+ */
+export type FilePreviewKind =
+  | "pdf"
+  | "markdown"
+  | "text"
+  | "docx"
+  | "xlsx"
+  | "pptx"
+  | null;
+
+const TEXT_EXTENSIONS = new Set([
+  "txt",
+  "log",
+  "json",
+  "yaml",
+  "yml",
+  "toml",
+  "ini",
+  "cfg",
+  "conf",
+  "csv",
+  "tsv",
+  "xml",
+  "html",
+  "css",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "mjs",
+  "cjs",
+  "py",
+  "rb",
+  "go",
+  "rs",
+  "java",
+  "kt",
+  "swift",
+  "c",
+  "h",
+  "cpp",
+  "cc",
+  "hpp",
+  "cs",
+  "php",
+  "sh",
+  "bash",
+  "zsh",
+  "ps1",
+  "sql",
+  "diff",
+  "patch",
+  "env",
+  "gitignore",
+  "dockerfile",
+]);
+
+/**
+ * Cap on what the preview modal will fetch into memory for text/code display.
+ * Matches the Rust-side `fetch_media_bytes` cap loosely — files this large
+ * are unreadable as a single view anyway, so fall back to download.
+ */
+export const TEXT_PREVIEW_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Classify a generic file card's previewability from its filename.
+ *
+ * Returns `null` for anything without a matching in-app viewer — those cards
+ * keep today's download-only behavior.
+ */
+export function classifyFilePreviewKind(filename: string): FilePreviewKind {
+  const lower = filename.toLowerCase();
+  const ext = lower.includes(".") ? (lower.split(".").pop() ?? "") : "";
+
+  if (ext === "pdf") return "pdf";
+  if (ext === "md" || ext === "markdown") return "markdown";
+  if (ext === "docx") return "docx";
+  if (ext === "xlsx") return "xlsx";
+  if (ext === "pptx") return "pptx";
+  if (TEXT_EXTENSIONS.has(ext)) return "text";
+  return null;
+}
+
 export type ResolvedFileCard = {
   href: string;
   filename: string;
   size?: number;
+  previewKind: FilePreviewKind;
 };
 
 /**
@@ -142,5 +235,10 @@ export function resolveFileCard(
   }
   const filename =
     entry.filename || childText.trim() || href.split("/").pop() || "file";
-  return { href: rewriteRelayUrl(href), filename, size: entry.size };
+  return {
+    href: rewriteRelayUrl(href),
+    filename,
+    size: entry.size,
+    previewKind: classifyFilePreviewKind(filename),
+  };
 }

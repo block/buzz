@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 use super::*;
 
 /// Binary name fragments for all known agent/harness processes that Buzz

@@ -45,16 +45,15 @@ pub(crate) fn buzz_managed_node_bin_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn buzz_managed_npm_bin_dir() -> Option<PathBuf> {
-    buzz_managed_npm_prefix().map(|prefix| {
-        #[cfg(windows)]
-        {
-            prefix
-        }
-        #[cfg(not(windows))]
-        {
-            prefix.join("bin")
-        }
-    })
+    let prefix = buzz_managed_npm_prefix()?;
+    #[cfg(windows)]
+    {
+        Some(prefix)
+    }
+    #[cfg(not(windows))]
+    {
+        Some(prefix.join("bin"))
+    }
 }
 
 pub(crate) fn buzz_managed_command_path(command: &str, basename: &str) -> Option<PathBuf> {

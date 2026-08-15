@@ -1,7 +1,9 @@
+#[allow(unused_imports, dead_code)]
 use super::*;
 
 /// Binary names for the Buzz desktop/Tauri process. Used by dead-instance
 /// detection to confirm the owning desktop is still alive.
+#[allow(dead_code)]
 const DESKTOP_BINARY_NAMES: &[&str] = &[
     "Buzz",
     "buzz-desktop",
@@ -12,6 +14,7 @@ const DESKTOP_BINARY_NAMES: &[&str] = &[
 ];
 
 /// Check if a process name matches a known Buzz desktop binary.
+#[allow(dead_code)]
 pub(super) fn is_desktop_binary(name: &str) -> bool {
     DESKTOP_BINARY_NAMES.contains(&name)
 }
@@ -22,6 +25,7 @@ pub(super) fn is_desktop_binary(name: &str) -> bool {
 /// as `KEY=...app.dev\0`, so a valid match is followed by a non-identifier byte
 /// (not `[A-Za-z0-9._-]`) or sits at the end of the buffer. This prevents
 /// `xyz.block.buzz.app` from matching inside `xyz.block.buzz.app.dev`.
+#[allow(dead_code)]
 pub(super) fn buffer_contains_identifier(buf: &[u8], id: &[u8]) -> bool {
     if id.is_empty() {
         return false;
@@ -101,6 +105,7 @@ fn extract_buzz_marker_value(pid: u32) -> Option<String> {
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn extract_buzz_marker_value(_pid: u32) -> Option<String> {
     None
 }
@@ -218,6 +223,7 @@ fn desktop_is_alive_for_instance(instance_id: &str) -> bool {
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn desktop_is_alive_for_instance(_instance_id: &str) -> bool {
     false
 }

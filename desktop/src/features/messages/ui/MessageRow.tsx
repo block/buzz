@@ -13,6 +13,7 @@ import {
 } from "@/features/messages/lib/canSendToChannel";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { usePinnedMessagesActions } from "@/features/channels/ui/usePinnedMessagesActions";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
@@ -44,6 +45,7 @@ import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedB
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
+import { Checkbox } from "@/shared/ui/checkbox";
 import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
@@ -56,6 +58,7 @@ import {
 } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
+import { useMessageSelection } from "./MessageSelectionContext";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -214,6 +217,64 @@ export const MessageRow = React.memo(
       errorMessage: reactionErrorMessage,
       select: handleReactionSelect,
     } = useReactionHandler(message, onToggleReaction);
+    const canPin =
+      Boolean(channelId) &&
+      !message.pending &&
+      message.kind !== KIND_HUDDLE_STARTED;
+    const pinnedMessages = usePinnedMessagesActions(canPin ? channelId : null);
+    const isMessagePinned = canPin && pinnedMessages.isPinned(message.id);
+    const handlePin = React.useCallback(() => {
+      pinnedMessages.pin(message.id);
+    }, [message.id, pinnedMessages]);
+    const handleUnpin = React.useCallback(() => {
+      pinnedMessages.unpin(message.id);
+    }, [message.id, pinnedMessages]);
+
+    // Multi-select for the "Forward" feature. Read via context rather than
+    // threaded props (see MessageSelectionContext.tsx) so this doesn't
+    // require plumbing a new prop through TimelineMessageList/MessageTimeline/
+    // TimelineMessageRow. Bypasses this component's custom memo comparator by
+    // design — the same way usePinnedMessagesActions/useRemindLater state
+    // already does — so a selection toggle re-renders exactly the affected
+    // rows without needing to be part of the equality check below.
+    //
+    // Selection has no explicit "mode" — `messageSelection.active` is just
+    // "is the selected set non-empty" (see MessageSelectionContext). The
+    // checkbox renders on this row once selection is active anywhere in the
+    // channel, so the user can keep Ctrl+clicking other rows to extend the
+    // set, or click the checkbox itself.
+    const messageSelection = useMessageSelection();
+    const isSelectableForForwarding =
+      !message.pending && message.kind !== KIND_HUDDLE_STARTED;
+    const showSelectionCheckbox =
+      messageSelection.active && isSelectableForForwarding;
+    const isRowSelected = showSelectionCheckbox
+      ? messageSelection.isSelected(message.id)
+      : false;
+    const handleToggleSelection = React.useCallback(() => {
+      messageSelection.toggle(message);
+    }, [message, messageSelection]);
+    // Ctrl+Click (Cmd+Click on macOS) toggles this row's selection instead
+    // of whatever plain-click behavior the row would otherwise have. The
+    // row's root `<article>` has no plain-click behavior of its own today
+    // (interactive bits like the avatar button, links, and the collapse
+    // guides are separate elements with their own handlers), so this only
+    // needs to make sure a Ctrl/Cmd+click doesn't fall through to those.
+    const handleRowClick = React.useCallback(
+      (event: React.MouseEvent<HTMLElement>) => {
+        if (!isSelectableForForwarding) {
+          return;
+        }
+        if (!event.ctrlKey && !event.metaKey) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        messageSelection.toggle(message);
+      },
+      [isSelectableForForwarding, message, messageSelection],
+    );
+
     const { openReminder, activeReminderEventIds } = useRemindLater();
     const hasActiveReminder = activeReminderEventIds.has(message.id);
     const handleRemindLater = React.useCallback(
@@ -491,6 +552,17 @@ export const MessageRow = React.memo(
       </div>
     );
 
+    const selectionCheckboxNode = showSelectionCheckbox ? (
+      <div className="flex shrink-0 items-start pt-1.5">
+        <Checkbox
+          aria-label={isRowSelected ? "Deselect message" : "Select message"}
+          checked={isRowSelected}
+          data-testid={`select-message-checkbox-${message.id}`}
+          onCheckedChange={handleToggleSelection}
+        />
+      </div>
+    ) : null;
+
     const continuationTimestampGutter = (
       <div
         aria-hidden="true"
@@ -541,7 +613,16 @@ export const MessageRow = React.memo(
       />
     ) : null;
 
-    const actionBarNode = (
+    // While a multi-selection is active anywhere in the channel, the per-row
+    // action bar (reactions, Reply, the per-row Forward icon, the "..."
+    // menu) is suppressed for every row — not just selected ones. Showing
+    // the full single-message toolbar during selection is what let users
+    // click the per-row Forward icon (which, by design, only ever forwards
+    // that one row's message) while believing they were forwarding their
+    // whole multi-selection — the floating "Forward (N)" bar
+    // (MessageSelectionContext) is the only Forward affordance during an
+    // active selection.
+    const actionBarNode = messageSelection.active ? null : (
       <div
         className={cn(
           "absolute right-2 top-1 z-10 sm:pointer-events-none",
@@ -555,6 +636,7 @@ export const MessageRow = React.memo(
         <MessageActionBar
           channelId={channelId}
           isFollowingThread={isFollowingThread}
+          isPinned={isMessagePinned}
           isUnread={isUnread}
           message={message}
           onDelete={onDelete}
@@ -562,6 +644,7 @@ export const MessageRow = React.memo(
           onFollowThread={onFollowThread}
           onMarkUnread={onMarkUnread}
           onMarkRead={onMarkRead}
+          onPin={canPin ? handlePin : undefined}
           onReactionBadgeBurstRequest={
             reactionPending ? undefined : setBadgeBurstEmoji
           }
@@ -576,6 +659,7 @@ export const MessageRow = React.memo(
               : undefined
           }
           onUnfollowThread={onUnfollowThread}
+          onUnpin={canPin ? handleUnpin : undefined}
           reactionErrorMessage={reactionErrorMessage}
           reactions={reactions}
         />
@@ -884,9 +968,11 @@ export const MessageRow = React.memo(
           data-message-id={message.id}
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}
+          onClickCapture={handleRowClick}
         >
           {isThreadReplyLayout ? (
             <>
+              {selectionCheckboxNode}
               {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 {headerNode}
@@ -895,6 +981,7 @@ export const MessageRow = React.memo(
             </>
           ) : (
             <>
+              {selectionCheckboxNode}
               {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 {headerNode}

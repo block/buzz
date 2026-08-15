@@ -659,6 +659,7 @@ pub(crate) fn spawn_transcription_task(
                 &[],
                 None,
                 &crate::relay::relay_api_base_url(),
+                &[],
             ) {
                 Ok(b) => b,
                 Err(e) => {

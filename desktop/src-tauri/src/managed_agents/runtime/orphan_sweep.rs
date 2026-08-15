@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 use super::*;
 
 /// Kill orphaned agent processes using PID file receipts. Reads all files from

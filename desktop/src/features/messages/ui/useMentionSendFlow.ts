@@ -550,7 +550,11 @@ export function useMentionSendFlow({
           uploaded: ImetaMedia[],
           signal?: AbortSignal,
         ) => {
-          const { content: finalContent, mediaTags } = buildOutgoingMessage(
+          const {
+            content: finalContent,
+            mediaTags,
+            supersedesTags,
+          } = buildOutgoingMessage(
             draft.trimmed,
             [...draft.savedImeta, ...uploaded],
             new Set([
@@ -562,10 +566,16 @@ export function useMentionSendFlow({
               ),
             ]),
           );
+          // supersedesTags rides along in `outgoingTags` here rather than
+          // being merged in separately — it needs no async resolution
+          // (unlike link-preview tags), so folding it into the same
+          // `resolvePreviewTags` merge avoids a second pass over the tag
+          // list and keeps this a single source of truth for what "final"
+          // outgoing tags means.
           const finalOutgoingTags = await resolvePreviewTags(
             draft,
             mediaTags,
-            outgoingTags,
+            [...(outgoingTags ?? []), ...supersedesTags],
           );
           if (!finalOutgoingTags || signal?.aborted || isSendCancelled())
             return;

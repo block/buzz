@@ -78,6 +78,7 @@ import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { VoiceSettingsCard } from "./VoiceSettingsCard";
+import { GoogleMeetSettingsCard } from "@/features/googleMeet/ui/GoogleMeetSettingsCard";
 
 export type SettingsSection =
   | "profile"
@@ -846,7 +847,12 @@ export function renderSettingsSection(
         />
       );
     case "voice":
-      return <VoiceSettingsCard />;
+      return (
+        <div className="space-y-14">
+          <VoiceSettingsCard />
+          <GoogleMeetSettingsCard />
+        </div>
+      );
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":

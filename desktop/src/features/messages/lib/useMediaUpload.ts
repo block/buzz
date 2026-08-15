@@ -6,6 +6,7 @@ import {
   uploadMediaBytes,
 } from "@/shared/api/tauri";
 import { uploadMediaFile } from "@/shared/api/tauriMedia";
+import type { ImetaMedia } from "./imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
 import { useFilePicker } from "./useFilePicker";
@@ -247,10 +248,44 @@ export function useMediaUpload({
     [],
   );
 
-  const pendingImeta = React.useMemo(
-    () => compactImetaSlots(imetaSlots),
-    [imetaSlots],
+  /**
+   * Confirmed "this attachment is a new version of an earlier upload" links,
+   * keyed by attachment URL → the superseded file's event id. Composer-only
+   * state (opt-in, defaults to unset): populated when the user toggles on a
+   * filename-match suggestion, folded into `pendingImeta` below so send-time
+   * tag building (`buildOutgoingMessage`/`buildSupersedesTags`) sees it
+   * without every other consumer needing to know about a second map.
+   */
+  const [supersedesByUrl, setSupersedesByUrl] = React.useState<
+    Map<string, string>
+  >(() => new Map());
+
+  const setAttachmentSupersedesEventId = React.useCallback(
+    (url: string, eventId: string | null) => {
+      setSupersedesByUrl((prev) => {
+        if (eventId) {
+          if (prev.get(url) === eventId) return prev;
+          const next = new Map(prev);
+          next.set(url, eventId);
+          return next;
+        }
+        if (!prev.has(url)) return prev;
+        const next = new Map(prev);
+        next.delete(url);
+        return next;
+      });
+    },
+    [],
   );
+
+  const pendingImeta = React.useMemo<ImetaMedia[]>(() => {
+    const compact = compactImetaSlots(imetaSlots);
+    if (supersedesByUrl.size === 0) return compact;
+    return compact.map((d) => {
+      const supersedesEventId = supersedesByUrl.get(d.url);
+      return supersedesEventId ? { ...d, supersedesEventId } : d;
+    });
+  }, [imetaSlots, supersedesByUrl]);
 
   const pendingImetaRef = React.useRef(pendingImeta);
   pendingImetaRef.current = pendingImeta;
@@ -464,8 +499,18 @@ export function useMediaUpload({
    * Bump and retire are deliberately one operation: an epoch bump without the
    * retire is what left stale previews (and a stuck send gate) behind.
    */
+  // A wholesale attachment-set replacement (channel/draft switch, post-send
+  // clear, edit-target restore) means any confirmed supersedes link belongs
+  // to a draft no longer on screen — drop it so it can't leak into the next
+  // message (constraint: suggestion/confirmation state must not survive a
+  // send or a composer reset).
+  const clearSupersedesLinks = React.useCallback(() => {
+    setSupersedesByUrl((prev) => (prev.size === 0 ? prev : new Map()));
+  }, []);
+
   const beginNewDraftEpoch = React.useCallback(() => {
     uploadEpochRef.current += 1;
+    clearSupersedesLinks();
     const activeIds = activeUploadingPreviewIdsRef.current;
     if (activeIds.size === 0) return;
     // Snapshot before clearing the live set: the state updaters below run
@@ -483,7 +528,7 @@ export function useMediaUpload({
       prev.filter((preview) => !retiredIds.has(preview.id)),
     );
     setUploadingCount((count) => Math.max(0, count - retiredCount));
-  }, []);
+  }, [clearSupersedesLinks]);
 
   const cancelUpload = React.useCallback(
     (previewId: number) => {
@@ -854,9 +899,16 @@ export function useMediaUpload({
     [],
   );
 
-  const removeAttachment = React.useCallback((url: string) => {
-    setImetaSlots((prev) => prev.map((d) => (d?.url === url ? null : d)));
-  }, []);
+  const removeAttachment = React.useCallback(
+    (url: string) => {
+      setImetaSlots((prev) => prev.map((d) => (d?.url === url ? null : d)));
+      // Constraint: an attachment removed before send must not leave its
+      // suggestion/confirmation state behind for a future attachment that
+      // happens to reuse the same URL.
+      setAttachmentSupersedesEventId(url, null);
+    },
+    [setAttachmentSupersedesEventId],
+  );
 
   /** Public setter — replaces all slots (used by MessageComposer to clear/restore). */
   const setPendingImeta = React.useCallback(
@@ -928,8 +980,10 @@ export function useMediaUpload({
       removeQueuedAttachment,
       restoreQueuedAttachments,
       revertAttachment,
+      setAttachmentSupersedesEventId,
       setPendingImeta,
       setUploadState,
+      supersedesByUrl,
       toggleQueuedAttachmentSpoiler,
       uploadEditedAttachment,
       uploadFile,
@@ -956,7 +1010,9 @@ export function useMediaUpload({
       removeQueuedAttachment,
       restoreQueuedAttachments,
       revertAttachment,
+      setAttachmentSupersedesEventId,
       setPendingImeta,
+      supersedesByUrl,
       toggleQueuedAttachmentSpoiler,
       uploadEditedAttachment,
       uploadFile,

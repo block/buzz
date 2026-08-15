@@ -290,13 +290,26 @@ export function ChannelMenuButton({
     (hasSidebarUnreadProjections
       ? unreadThreadChannelIds.has(channel.id)
       : hasUnread);
-  const inactiveContentOpacity = cn(
-    !isActive && !hasTopLevelUnread && !isMuted && "opacity-80",
+  // Read vs. unread rows are told apart by an actual color change (not just
+  // an opacity toggle on the same base color) so bold/semibold text stays
+  // crisp instead of looking smudgy at 14px. This is applied directly to the
+  // icon + label span (not the button element) because the Buzz theme
+  // overrides the button's `color` via unlayered CSS
+  // (`--buzz-channel-fg`/`--buzz-dm-fg` in theme.css) that would otherwise
+  // beat a Tailwind text-color utility placed on the button itself; setting
+  // color on the button's children sidesteps that entirely, the same way the
+  // previous opacity-based approach did.
+  const inactiveContentColor = cn(
+    !isActive &&
+      !isMuted &&
+      (hasTopLevelUnread
+        ? "text-sidebar-foreground"
+        : "text-muted-foreground"),
     !isActive &&
       isMuted &&
-      !hasTopLevelUnread &&
-      !hasThreadUnread &&
-      "sidebar-muted-content opacity-50 dark:opacity-45",
+      (hasTopLevelUnread || hasThreadUnread
+        ? "text-sidebar-foreground"
+        : "text-muted-foreground/60"),
   );
 
   const button = (
@@ -307,7 +320,7 @@ export function ChannelMenuButton({
           ? "group-hover/menu-item:bg-sidebar-active group-hover/menu-item:text-sidebar-active-foreground"
           : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-foreground",
         hasTopLevelUnread &&
-          "font-bold text-sidebar-foreground hover:text-sidebar-foreground data-[active=true]:font-bold",
+          "font-semibold text-sidebar-foreground hover:text-sidebar-foreground data-[active=true]:font-semibold",
       )}
       data-channel-id={channel.id}
       data-testid={`channel-${channel.name}`}
@@ -319,13 +332,13 @@ export function ChannelMenuButton({
       <SidebarChannelIcon
         channel={channel}
         className={
-          channel.channelType === "dm" ? undefined : inactiveContentOpacity
+          channel.channelType === "dm" ? undefined : inactiveContentColor
         }
         dmParticipants={dmParticipants}
         presenceStatus={presenceStatus}
       />
       <span
-        className={cn("min-w-0 flex-1 truncate", inactiveContentOpacity)}
+        className={cn("min-w-0 flex-1 truncate", inactiveContentColor)}
         data-sidebar-row-label
       >
         {resolvedLabel}
@@ -354,7 +367,17 @@ export function ChannelMenuButton({
           )}
         />
       ) : null}
-      {hasThreadUnread ? (
+      {hasThreadUnread ||
+      (hasTopLevelUnread && channel.channelType !== "dm") ? (
+        // One dot covers both signals: `hasThreadUnread` (unread reply inside
+        // a thread) and top-level channel/DM unread. They aren't rendered as
+        // two stacked dots because to the user both mean the same thing —
+        // "this row needs attention" — and a second identical dot would just
+        // read as visual clutter/a bug, not extra information. DMs are
+        // excluded here because they already get a stronger, more specific
+        // signal: the numeric `UnreadCountBadge` rendered in
+        // `SidebarSection` (absolute-positioned top-right on the row); adding
+        // this dot too would duplicate that.
         <UnreadDotBadge channelName={channel.name} className="ml-auto" />
       ) : null}
     </SidebarMenuButton>

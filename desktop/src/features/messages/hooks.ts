@@ -504,6 +504,7 @@ export function useSendMessageMutation(
         emojiTags,
         mentionTags,
         linkPreviewTags,
+        supersedesTags,
       } = splitOutgoingTags(mediaTags);
       const recipientPubkeys = messageMentionPubkeys(
         effectiveChannel,
@@ -523,16 +524,18 @@ export function useSendMessageMutation(
           )
         : undefined;
 
-      // Messages carrying media OR custom-emoji tags MUST go through REST so
-      // the relay's tag validation runs. The WebSocket path emits no extra
-      // tags, so emoji-only messages would otherwise lose their emoji tag.
+      // Messages carrying media, custom-emoji, link-preview, OR supersedes
+      // tags MUST go through REST so the relay's tag validation runs. The
+      // WebSocket path emits no extra tags, so these would otherwise be
+      // silently dropped.
       if (
         forceRest ||
         transport === "http" ||
         parentEventId ||
         imetaTags.length > 0 ||
         emojiTags.length > 0 ||
-        linkPreviewTags.length > 0
+        linkPreviewTags.length > 0 ||
+        supersedesTags.length > 0
       ) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
@@ -549,6 +552,7 @@ export function useSendMessageMutation(
           mentionTags,
           linkPreviewTags,
           sentFromThreadTag,
+          supersedesTags,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -588,6 +592,7 @@ export function useSendMessageMutation(
             ...mentionTags,
             ...linkPreviewTags,
             ...(sentFromThreadTag ? [sentFromThreadTag] : []),
+            ...supersedesTags,
           ],
           content: content.trim(),
           sig: "",

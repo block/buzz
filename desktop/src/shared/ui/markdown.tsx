@@ -155,6 +155,21 @@ type WebKitGestureLikeEvent = Event & {
   scale?: number;
 };
 
+function getImageLightboxFocusableElements(
+  container: HTMLElement,
+): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      "a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex='-1'])",
+    ),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("disabled") &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      element.getClientRects().length > 0,
+  );
+}
+
 function ImageZoomOverlay({
   alt,
   galleryIndex = 0,
@@ -1330,7 +1345,12 @@ export function createMarkdownComponents(
     );
     if (card) {
       return (
-        <FileCard href={card.href} filename={card.filename} size={card.size} />
+        <FileCard
+          href={card.href}
+          filename={card.filename}
+          previewKind={card.previewKind}
+          size={card.size}
+        />
       );
     }
 

@@ -440,6 +440,7 @@ fn launch_visible_terminal(_argv: &[String]) -> Result<(), String> {
     Err("opening a terminal is not supported on this platform".to_string())
 }
 
+#[allow(dead_code)]
 fn shell_join(argv: &[String]) -> String {
     argv.iter()
         .map(|arg| shell_escape(arg))
@@ -447,6 +448,7 @@ fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
+#[allow(dead_code)]
 fn shell_escape(arg: &str) -> String {
     if !arg.is_empty()
         && arg
@@ -462,7 +464,7 @@ fn shell_escape(arg: &str) -> String {
 mod tests {
     use super::{
         adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
-        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
+        shell_escape, shell_join, uses_terminal_auth,
         windows_terminal_args, AcpAuthMethod,
     };
 

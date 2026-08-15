@@ -224,10 +224,7 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if let Err(error) = window.unminimize() {
-        eprintln!("buzz-desktop: failed to restore main window from tray: {error}");
-        return;
-    }
+    let _ = window.unminimize();
     if let Err(error) = window.show() {
         eprintln!("buzz-desktop: failed to show main window from tray: {error}");
         return;

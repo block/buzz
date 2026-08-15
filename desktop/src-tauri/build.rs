@@ -12,6 +12,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_RELAY_HTTP");
     println!("cargo:rerun-if-env-changed=BUZZ_UPDATER_PUBLIC_KEY");
     println!("cargo:rerun-if-env-changed=BUZZ_UPDATER_ENDPOINT");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_GOOGLE_MEET_CLIENT_ID");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_GOOGLE_MEET_CLIENT_SECRET");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_BUZZ_AGENT_PROVIDER");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_BUZZ_AGENT_MODEL");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ENV");
@@ -115,6 +117,20 @@ fn main() {
 
     if updater_public_key.is_some() && updater_endpoint.is_some() {
         println!("cargo:rustc-cfg=buzz_updater_enabled");
+    }
+
+    // Google Meet integration (google_meet.rs): the client ID/secret for the
+    // OAuth consent screen. Read via `option_env!` at call sites (not
+    // `env!`), so OSS/unconfigured builds still compile — the feature just
+    // reports "not configured" at runtime rather than failing to build.
+    // Unlike the updater's pubkey/endpoint pair, there's no cfg-gate here:
+    // the command handlers are always compiled in, they just refuse to run
+    // without a client ID.
+    if let Ok(client_id) = std::env::var("BUZZ_BUILD_GOOGLE_MEET_CLIENT_ID") {
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_GOOGLE_MEET_CLIENT_ID={client_id}");
+    }
+    if let Ok(client_secret) = std::env::var("BUZZ_BUILD_GOOGLE_MEET_CLIENT_SECRET") {
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_GOOGLE_MEET_CLIENT_SECRET={client_secret}");
     }
 
     // Cargo test executables get no embedded Windows manifest (tauri_build

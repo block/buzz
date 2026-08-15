@@ -19,6 +19,7 @@ import { TooltipProvider } from "@/shared/ui/tooltip";
 import { useCommittedEmptyTimeline } from "./useCommittedEmptyTimeline";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { ChannelIntroBlock, type ChannelIntro } from "./ChannelIntroBlock";
+import { MessageSelectionProvider } from "./MessageSelectionContext";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import type { TimelineVirtualizerApi } from "./TimelineMessageList";
@@ -34,6 +35,14 @@ import { useSettleGatedPrependMessages } from "./useSettleGatedPrependMessages";
 export type MessageTimelineHandle = {
   scrollToBottomOnNextUpdate: () => void;
   settleAtBottom: () => boolean;
+  /** Imperative jump-to-message for callers outside the prop-driven paths
+   *  (search match, unread pill, `targetMessageId`) — e.g. the pinned
+   *  messages bar's "jump to message" affordance. Returns false if the
+   *  message isn't currently mounted in the loaded window. */
+  scrollToMessage: (
+    messageId: string,
+    options?: { behavior?: ScrollBehavior },
+  ) => boolean;
 };
 
 type MessageTimelineProps = {
@@ -460,6 +469,15 @@ const MessageTimelineBase = React.forwardRef<
     scrollToBottomOnNextUpdate();
   }, [scrollToBottomOnNextUpdate]);
 
+  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
+  // `scrollToMessage` always finds the target row. No virtualizer convergence.
+  const jumpToMessage = React.useCallback(
+    (messageId: string, options?: { behavior?: ScrollBehavior }) => {
+      return scrollToMessage(messageId, { highlight: true, ...options });
+    },
+    [scrollToMessage],
+  );
+
   React.useImperativeHandle(
     ref,
     () => ({
@@ -469,17 +487,9 @@ const MessageTimelineBase = React.forwardRef<
         scrollToBottom("auto");
         return true;
       },
+      scrollToMessage: jumpToMessage,
     }),
-    [prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
-  );
-
-  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
-  // `scrollToMessage` always finds the target row. No virtualizer convergence.
-  const jumpToMessage = React.useCallback(
-    (messageId: string, options?: { behavior?: ScrollBehavior }) => {
-      return scrollToMessage(messageId, { highlight: true, ...options });
-    },
-    [scrollToMessage],
+    [jumpToMessage, prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
   );
 
   // The unread pill is a transient, per-open affordance: dismiss it once the
@@ -692,6 +702,7 @@ const MessageTimelineBase = React.forwardRef<
   ) : null;
 
   return (
+    <MessageSelectionProvider channelId={channelId}>
     <TooltipProvider delayDuration={200}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {showUnreadPill ? (
@@ -886,6 +897,7 @@ const MessageTimelineBase = React.forwardRef<
         ) : null}
       </div>
     </TooltipProvider>
+    </MessageSelectionProvider>
   );
 });
 

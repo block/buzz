@@ -30,6 +30,7 @@ import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelM
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ThreadViewModeToggle } from "@/features/channels/ui/ThreadViewModeToggle";
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
+import { PinnedMessagesBar } from "@/features/channels/ui/PinnedMessagesBar";
 import { THREAD_SURFACE_KEY } from "@/features/channels/lib/threadFocusLayout";
 import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout";
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
@@ -567,6 +568,30 @@ export const ChannelPane = React.memo(function ChannelPane({
           }
         >
           {isHuddleTranscript ? null : header}
+          {isHuddleTranscript ? null : (
+            <PinnedMessagesBar
+              channelId={activeChannelId}
+              messages={messages}
+              onJumpToMessage={(messageId) => {
+                messageTimelineRef.current?.scrollToMessage(messageId, {
+                  behavior: "smooth",
+                });
+              }}
+            />
+          )}
+          {channelFind.isOpen ? (
+            <div className={cn("absolute inset-x-0 z-40", channelChrome.top)}>
+              <ChannelFindBar
+                matchCount={channelFind.matchCount}
+                matchIndex={channelFind.activeIndex}
+                onClose={channelFind.close}
+                onNext={channelFind.goToNext}
+                onPrevious={channelFind.goToPrevious}
+                onQueryChange={channelFind.setQuery}
+                query={channelFind.query}
+              />
+            </div>
+          ) : null}
           <MessageTimeline
             ref={messageTimelineRef}
             channelId={activeChannel?.id}
