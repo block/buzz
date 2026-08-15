@@ -628,8 +628,16 @@ impl EventQueue {
         self.queues.len()
     }
 
-    /// Number of queued events for a specific channel. Test-only.
-    #[cfg(test)]
+    /// Whether `channel_id` is currently under an active `retry_after`
+    /// backoff throttle (a prior attempt was requeued and hasn't reached
+    /// its next-try deadline yet).
+    pub fn is_retry_throttled(&self, channel_id: &Uuid) -> bool {
+        self.retry_after
+            .get(channel_id)
+            .is_some_and(|&deadline| deadline > Instant::now())
+    }
+
+    /// Number of queued (not-yet-dispatched) events for a specific channel.
     pub fn queued_event_count(&self, channel_id: &Uuid) -> usize {
         self.queues.get(channel_id).map_or(0, |q| q.len())
     }

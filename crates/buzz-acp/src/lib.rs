@@ -11,6 +11,7 @@ mod queue;
 mod relay;
 mod setup_mode;
 mod usage;
+mod wake_ticket;
 
 pub use usage::TurnUsage;
 
@@ -46,6 +47,7 @@ use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+use wake_ticket::WakeTicketStore;
 
 /// Check if argv[1] matches a subcommand name, before any clap parsing.
 ///
@@ -282,6 +284,40 @@ pub(crate) async fn is_dm_channel(
                 "channel type unresolved — treating as DM for author gate (fail closed)"
             );
             true
+        }
+    }
+}
+
+/// Re-validate that this agent is still a member of `channel_id`, for
+/// wake-ticket boot replay (`PLANS/WAKE_TICKET_SPEC.md` §Gate: "Replay
+/// re-validates membership + author gate. Fail → drop.").
+///
+/// Queries kind:39002 (NIP-29 group members) scoped to both this pubkey and
+/// the one channel — the same shape as `HarnessRelay::discover_channels`'s
+/// Step 1, narrowed so replay doesn't refetch the whole membership set per
+/// ticket. Fail-closed: a query error means "not a member" rather than
+/// risking a stale mention replaying into a channel this unit lost access to.
+async fn is_still_member(channel_id: Uuid, pubkey_hex: &str, rest: &relay::RestClient) -> bool {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+        ))
+        .custom_tags(p_tag, [pubkey_hex.to_string()])
+        .custom_tags(d_tag, [channel_id.to_string()]);
+
+    match rest.query(&[filter]).await {
+        Ok(v) => v.as_array().is_some_and(|arr| !arr.is_empty()),
+        Err(e) => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                error = %e,
+                "wake-ticket replay: membership check failed — treating as not-a-member (fail closed)"
+            );
+            false
         }
     }
 }
@@ -1973,6 +2009,103 @@ async fn tokio_main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
+    // ── Wake-ticket store + boot replay ─────────────────────────────────────
+    //
+    // Must run before `HarnessRelay::connect()` / `set_startup_watermark()`
+    // below — see `PLANS/WAKE_TICKET_SPEC.md` §Gate ("Snapshot, not
+    // REQ-by-id"). Replayed events need to already be in `queue` before the
+    // relay subscribes, so the connect-time watermark can never treat them
+    // as pre-history; `seed_seen_ids` (sent right after connect, before any
+    // channel subscribe) needs their ids ready by then too. `queue` itself
+    // therefore also moves up from its old post-connect declaration.
+    let wake_tickets: Option<Arc<WakeTicketStore>> = match &config.wake_ticket_dir {
+        Some(dir) => match WakeTicketStore::open(dir) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(e) => {
+                // Lock-fail / unavailable dir is fatal: dual-run of the same
+                // identity against the same ticket dir is a crash, not a race.
+                anyhow::bail!("wake-ticket store at {} failed to open: {e}", dir.display());
+            }
+        },
+        None => None,
+    };
+
+    let dedup_mode = config.dedup_mode;
+    let mut queue =
+        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    let mut wake_ticket_replay_seen_ids: Vec<String> = Vec::new();
+
+    if let Some(store) = &wake_tickets {
+        let mut pending = store.pending_for_replay();
+        // Deterministic order: oldest mention first, so a crash-loop doesn't
+        // keep reshuffling replay order and starve an old ticket.
+        pending.sort_by_key(|t| t.created_at);
+
+        if !pending.is_empty() {
+            // Lightweight, pre-connect REST client sharing this run's HTTP
+            // credentials — mirrors `HarnessRelay::rest_client()`, but no
+            // `HarnessRelay` exists yet this early in boot.
+            let replay_rest_client = relay::RestClient {
+                http: reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .connect_timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .map_err(|e| {
+                        anyhow::anyhow!("wake-ticket replay: failed to build HTTP client: {e}")
+                    })?,
+                base_url: relay::relay_ws_to_http(&config.relay_url),
+                keys: config.keys.clone(),
+                auth_tag_json: relay_auth_tag
+                    .as_ref()
+                    .and_then(|t| serde_json::to_string(t.as_slice()).ok()),
+            };
+            let replay_owner_cache = OwnerCache::new(resolve_agent_owner(&config));
+            let replay_channel_info =
+                pool::ChannelInfoResolver::new(HashMap::new(), replay_rest_client.clone());
+
+            let mut replayed = 0usize;
+            let mut dropped = 0usize;
+            for ticket in pending {
+                let is_dm = is_dm_channel(ticket.channel_id, &replay_channel_info).await;
+                let author = ticket.event.pubkey.to_hex();
+                let allowed = author_allowed(
+                    &config.respond_to,
+                    &config.respond_to_allowlist,
+                    &author,
+                    is_dm,
+                    &replay_owner_cache,
+                    &replay_rest_client,
+                )
+                .await;
+                let still_member =
+                    is_still_member(ticket.channel_id, &pubkey_hex, &replay_rest_client).await;
+
+                if !allowed || !still_member {
+                    tracing::info!(
+                        event_id = %ticket.event_id,
+                        channel_id = %ticket.channel_id,
+                        allowed,
+                        still_member,
+                        "wake-ticket replay: re-validation failed — dropping"
+                    );
+                    store.drop_unvalidated(&ticket.event_id);
+                    dropped += 1;
+                    continue;
+                }
+
+                queue.push(QueuedEvent {
+                    channel_id: ticket.channel_id,
+                    event: ticket.event.clone(),
+                    received_at: std::time::Instant::now(),
+                    prompt_tag: ticket.prompt_tag.clone(),
+                });
+                wake_ticket_replay_seen_ids.push(ticket.event_id.clone());
+                replayed += 1;
+            }
+            tracing::info!(replayed, dropped, "wake-ticket boot replay complete");
+        }
+    }
+
     let mut relay =
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
@@ -1984,6 +2117,16 @@ async fn tokio_main() -> Result<()> {
     // protection, which is the same as the pre-fix behaviour).
     if let Err(e) = relay.set_startup_watermark(startup_watermark).await {
         tracing::warn!("failed to set startup watermark: {e}");
+    }
+
+    // Seed seen_ids for every wake-ticket event replayed above, before any
+    // channel subscription is sent — otherwise the 5s subscribe-window dedup
+    // cannot tell a replayed ticket apart from a genuine live re-delivery of
+    // the same event and would hand it to the agent twice.
+    if !wake_ticket_replay_seen_ids.is_empty() {
+        if let Err(e) = relay.seed_seen_ids(wake_ticket_replay_seen_ids).await {
+            tracing::warn!("failed to seed seen_ids from wake-ticket replay: {e}");
+        }
     }
 
     tracing::info!("connected to relay at {}", config.relay_url);
@@ -2134,9 +2277,6 @@ async fn tokio_main() -> Result<()> {
     }
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
-    let dedup_mode = config.dedup_mode;
-    let mut queue =
-        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -2194,6 +2334,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        wake_tickets: wake_tickets.clone(),
     });
 
     if !config.memory_enabled {
@@ -2680,6 +2821,12 @@ async fn tokio_main() -> Result<()> {
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
+                                    if let Some(store) = &ctx.wake_tickets {
+                                        // Channel-removed: drop, never replay
+                                        // (gate §Gate — dead-letter / auth-fail /
+                                        // channel-removed all drop, keep for audit).
+                                        store.mark_drop(&drained_ids);
+                                    }
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
                                     } else {
@@ -2893,6 +3040,26 @@ async fn tokio_main() -> Result<()> {
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
                             });
+                            // Wake ticket: durable `open` record, written only for
+                            // events the in-memory queue actually accepted (a
+                            // Drop-mode discard for an in-flight channel is not a
+                            // ticket — see `EventQueue::push`). Uses `event_for_steer`
+                            // (already cloned above) since `buzz_event.event` was
+                            // just moved into the queue push.
+                            if accepted {
+                                if let Some(store) = &ctx.wake_tickets {
+                                    store.write_open(
+                                        &event_for_steer,
+                                        buzz_event.channel_id,
+                                        &pubkey_hex,
+                                        &prompt_tag_for_steer,
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs(),
+                                    );
+                                }
+                            }
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
@@ -3130,6 +3297,7 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
+                    ctx.wake_tickets.as_deref(),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3719,6 +3887,11 @@ fn dispatch_pending(
         };
         tracing::debug!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
 
+        if let Some(store) = &ctx.wake_tickets {
+            let ids: Vec<String> = batch.events.iter().map(|e| e.event.id.to_hex()).collect();
+            store.mark_claimed(&ids);
+        }
+
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
             DedupMode::Drop => None,
@@ -3848,6 +4021,7 @@ fn handle_prompt_result(
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
+    wake_tickets: Option<&wake_ticket::WakeTicketStore>,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -3884,6 +4058,17 @@ fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    // Wake-ticket fate, decided alongside the batch's requeue/dead-letter
+    // fate below (same branches, same reasoning) rather than re-derived from
+    // `result.outcome` afterward — `result.batch` is `None` on `Ok` (nothing
+    // to requeue) and also `None` in `DedupMode::Drop` regardless of
+    // outcome, so "was this batch actually dead-lettered" can only be
+    // answered inside this match, not reconstructed from the outcome alone.
+    // `true` = every ticket still `claimed` for this channel becomes `drop`
+    // (dead-lettered / auth-failed / channel-removed — never replayed).
+    // `false` leaves tickets as-is (open/claimed) unless the `Ok` path below
+    // separately marks them `done`.
+    let mut should_drop_tickets = false;
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -3932,6 +4117,7 @@ fn handle_prompt_result(
                 );
                 spawn_failure_notice(rest_client, &batch, content);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
+                should_drop_tickets = true;
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -3950,6 +4136,7 @@ fn handle_prompt_result(
                     );
                     spawn_failure_notice(rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
+                    should_drop_tickets = true;
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
@@ -3968,6 +4155,7 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                should_drop_tickets = true;
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -3982,6 +4170,7 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+                should_drop_tickets = true;
             }
         } else {
             tracing::debug!(
@@ -3990,11 +4179,33 @@ fn handle_prompt_result(
                 "dropping failed batch for removed channel"
             );
             hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
+            should_drop_tickets = true;
         }
     }
 
     match &result.source {
-        PromptSource::Channel(ch) => queue.mark_complete(*ch),
+        PromptSource::Channel(ch) => {
+            queue.mark_complete(*ch);
+            // `done`/`drop` predicate — see `PLANS/WAKE_TICKET_SPEC.md` §Gate
+            // ("`mark_complete` is not `done`"). Looked up by channel rather
+            // than threaded from the dispatched batch: `result.batch` is
+            // `None` on the `Ok` path (nothing to requeue) and always `None`
+            // in `DedupMode::Drop`, so it cannot carry the completed event
+            // ids here.
+            if let Some(store) = wake_tickets {
+                if should_drop_tickets {
+                    store.mark_drop(&store.claimed_event_ids_for_channel(*ch));
+                } else if matches!(result.outcome, PromptOutcome::Ok(_))
+                    && queue.queued_event_count(ch) == 0
+                    && !queue.is_retry_throttled(ch)
+                {
+                    store.mark_done(&store.claimed_event_ids_for_channel(*ch));
+                }
+                // Cancelled/CancelDrainTimeout/requeued-with-budget-remaining/
+                // pool-exhausted/panic: leave tickets `open` or `claimed` —
+                // the work is still pending, not lost and not finished.
+            }
+        }
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
     }
 
@@ -6765,6 +6976,7 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            wake_ticket_dir: None,
         }
     }
 
@@ -6988,6 +7200,7 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            wake_ticket_dir: None,
         }
     }
 
@@ -7093,6 +7306,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
@@ -7163,6 +7377,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            None,
             None,
             None,
         );
@@ -7279,6 +7494,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
@@ -7341,6 +7557,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -7509,6 +7726,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
+                None,
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -7598,6 +7816,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                None,
                 None,
                 None,
             );
@@ -7706,6 +7925,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                None,
             );
             (
                 queue.pending_channels(),
@@ -7797,6 +8017,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -7891,6 +8112,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -8007,6 +8229,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -8140,6 +8363,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -8324,6 +8548,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -8408,6 +8633,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            None,
             None,
             None,
         );

@@ -606,6 +606,10 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Durable wake-ticket store, if `--wake-ticket-dir` / `BUZZ_ACP_WAKE_TICKET_DIR`
+    /// is set. `None` (the default) disables the feature entirely — no ticket
+    /// writes, no claim/done/drop transitions. See `PLANS/WAKE_TICKET_SPEC.md`.
+    pub wake_tickets: Option<Arc<crate::wake_ticket::WakeTicketStore>>,
 }
 
 impl AgentPool {
@@ -7600,6 +7604,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            wake_tickets: None,
         }
     }
 
