@@ -22,16 +22,16 @@ default:
 
 # ─── Dev Environment ─────────────────────────────────────────────────────────
 
-# Install required dev tools via Hermit and create .env (safe to re-run)
+# Prepare the selected development toolchain and create .env (safe to re-run)
 bootstrap:
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -z "${IN_NIX_SHELL:-}" ]]; then
         export PATH="{{justfile_directory()}}/bin:$PATH"
     fi
-    # Hermit's bin/ symlinks auto-download pinned tool versions on first use.
-    # Running each tool once triggers the download if not already cached.
-    echo "Ensuring toolchain via Hermit..."
+    # Outside Nix, Hermit's bin/ symlinks download pinned tools on first use.
+    # Inside Nix, these checks verify the tools supplied by the current shell.
+    echo "Ensuring project toolchain..."
     cargo --version &
     node --version &
     pnpm --version &
