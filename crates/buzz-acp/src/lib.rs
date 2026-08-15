@@ -376,7 +376,7 @@ async fn validate_ticket_for_replay(
     };
 
     let author = ticket.event.pubkey.to_hex();
-    let allowed = author_allowed(
+    match author_allowed_for_replay(
         respond_to,
         respond_to_allowlist,
         &author,
@@ -384,9 +384,11 @@ async fn validate_ticket_for_replay(
         owner_cache,
         rest,
     )
-    .await;
-    if !allowed {
-        return ReplayDecision::Drop;
+    .await
+    {
+        Some(true) => {}
+        Some(false) => return ReplayDecision::Drop,
+        None => return ReplayDecision::SkipThisBoot,
     }
 
     match is_still_member(ticket.channel_id, pubkey_hex, rest).await {
@@ -418,6 +420,18 @@ async fn check_sibling_via_profile(
         _ => return false, // timeout or error — fail closed
     };
 
+    extract_verified_sibling(&resp, author, expected_owner)
+}
+
+/// Extract and cryptographically verify a NIP-OA sibling attestation from an
+/// already-fetched kind:0 profile query response. Pure — no network, no
+/// error-vs-empty distinction to make. Shared by [`check_sibling_via_profile`]
+/// (live path, its caller fails closed to `false` on any non-match) and
+/// [`check_sibling_via_profile_for_replay`] (wake-ticket boot replay,
+/// tri-state) so the tag-parsing / signature-verification logic has exactly
+/// one implementation — the two callers differ only in how they got `resp`
+/// and what an *absence* of a valid tag means for their caller.
+fn extract_verified_sibling(resp: &serde_json::Value, author: &str, expected_owner: &str) -> bool {
     // Look for an "auth" tag in the profile event.
     let events = match resp.as_array() {
         Some(arr) => arr,
@@ -469,6 +483,111 @@ async fn check_sibling_via_profile(
     }
 
     false
+}
+
+/// Replay-only counterpart to [`check_sibling_via_profile`]: same query,
+/// same NIP-OA verification via [`extract_verified_sibling`], but
+/// distinguishes a transport/timeout failure (`None` — couldn't check, not a
+/// confirmed answer) from a completed query that simply found no valid
+/// sibling attestation (`Some(false)` — a real, confirmed no).
+///
+/// Per `PLANS/WAKE_TICKET_SPEC.md` §Gate (Oksana, 2026-08-15, second pass):
+/// this is the path Zar's actual traffic hits — sibling agents, not the
+/// owner directly — so a Railway blink landing on *this* query was deleting
+/// tickets just as surely as the membership/channel-type checks. The live
+/// [`check_sibling_via_profile`] intentionally keeps failing closed to
+/// `false` for the live turn-firing decision; that tradeoff is untouched.
+async fn check_sibling_via_profile_for_replay(
+    author: &str,
+    expected_owner: &str,
+    rest_client: &relay::RestClient,
+) -> Option<bool> {
+    let author_pk = match nostr::PublicKey::from_hex(author) {
+        Ok(pk) => pk,
+        // Malformed pubkey isn't a transport problem — it can never resolve
+        // to a valid sibling attestation no matter how many times we ask.
+        Err(_) => return Some(false),
+    };
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Metadata)
+        .author(author_pk)
+        .limit(1);
+
+    let resp = match tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter]))
+        .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(_)) | Err(_) => return None, // timeout or query error — unknown, not confirmed
+    };
+
+    Some(extract_verified_sibling(&resp, author, expected_owner))
+}
+
+/// Replay-only counterpart to [`is_owner_or_sibling`]. See
+/// [`check_sibling_via_profile_for_replay`] for why this distinguishes
+/// "couldn't check" from "confirmed no". A confirmed result (owner, cache
+/// hit, or a completed profile query) is cached the same way the live path
+/// caches it — `None` results are never cached, so the next ticket (or the
+/// next boot) gets a fresh attempt instead of a pinned unknown.
+async fn is_owner_or_sibling_for_replay(
+    author: &str,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> Option<bool> {
+    let my_owner = match owner_cache.get() {
+        Some(o) => o,
+        // No owner configured is a confirmed, static fact — not a transport
+        // problem — so this fails closed exactly like the live path.
+        None => return Some(false),
+    };
+
+    if author == my_owner {
+        return Some(true);
+    }
+
+    if let Some(cached) = owner_cache.is_known_sibling(author) {
+        return Some(cached);
+    }
+
+    let is_sibling = check_sibling_via_profile_for_replay(author, my_owner, rest_client).await;
+    if let Some(confirmed) = is_sibling {
+        owner_cache.cache_sibling(author.to_string(), confirmed);
+    }
+    is_sibling
+}
+
+/// Replay-only counterpart to [`author_allowed`] — same decision tree
+/// (owner ∪ allowlist ∪ siblings, DM hardening), but every network-backed
+/// leaf can return "unknown" instead of being forced to a boolean. See
+/// [`ReplayDecision`] for how callers use `None` here.
+async fn author_allowed_for_replay(
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    author: &str,
+    is_dm: bool,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> Option<bool> {
+    if is_dm {
+        return match respond_to {
+            RespondTo::Nobody => Some(false),
+            _ => is_owner_or_sibling_for_replay(author, owner_cache, rest_client).await,
+        };
+    }
+    match respond_to {
+        RespondTo::Anyone => Some(true),
+        RespondTo::Nobody => Some(false),
+        RespondTo::OwnerOnly => {
+            is_owner_or_sibling_for_replay(author, owner_cache, rest_client).await
+        }
+        RespondTo::Allowlist => {
+            if allowlist.contains(author) {
+                Some(true)
+            } else {
+                is_owner_or_sibling_for_replay(author, owner_cache, rest_client).await
+            }
+        }
+    }
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -9030,6 +9149,73 @@ mod wake_ticket_wiring_tests {
         assert_eq!(
             result, None,
             "a transport failure must not be reported as a confirmed non-member"
+        );
+    }
+
+    /// Oksana's second-pass finding: Zar's actual traffic is other agents
+    /// (siblings), not the owner directly, so a blink on the sibling
+    /// profile-lookup query — not just the membership/channel-type checks —
+    /// was silently deleting tickets. `is_owner_or_sibling_for_replay` must
+    /// distinguish "couldn't check" from "confirmed not a sibling", the same
+    /// way `is_still_member` already does for membership.
+    #[tokio::test]
+    async fn owner_only_author_skips_on_unreachable_relay_not_denied() {
+        // Must be syntactically valid hex — a malformed pubkey is a
+        // *confirmed* non-sibling (nothing to retry), not a transport
+        // failure, and would short-circuit before ever reaching the network.
+        let owner = Keys::generate().public_key().to_hex();
+        let other_agent = Keys::generate().public_key().to_hex();
+        let owner_cache = OwnerCache::new(Some(owner));
+        let result =
+            is_owner_or_sibling_for_replay(&other_agent, &owner_cache, &unreachable_rest_client())
+                .await;
+        assert_eq!(
+            result, None,
+            "a transport failure on the sibling-profile query must not be reported as a \
+             confirmed non-sibling — this is the exact path Zar's real traffic hits"
+        );
+
+        let decision = author_allowed_for_replay(
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            &other_agent,
+            false,
+            &owner_cache,
+            &unreachable_rest_client(),
+        )
+        .await;
+        assert_eq!(
+            decision, None,
+            "author_allowed_for_replay must propagate the sibling-lookup uncertainty, not \
+             collapse it to a deny"
+        );
+    }
+
+    /// Cached siblinghood never needs the network — pinning this documents
+    /// why the fix above doesn't cost every replayed ticket a fresh query.
+    #[tokio::test]
+    async fn cached_sibling_result_is_confirmed_without_network() {
+        let owner_cache = OwnerCache::new(Some("owner-pubkey".into()));
+        owner_cache.cache_sibling("known-sibling".into(), true);
+        owner_cache.cache_sibling("known-stranger".into(), false);
+
+        assert_eq!(
+            is_owner_or_sibling_for_replay(
+                "known-sibling",
+                &owner_cache,
+                &unreachable_rest_client()
+            )
+            .await,
+            Some(true)
+        );
+        assert_eq!(
+            is_owner_or_sibling_for_replay(
+                "known-stranger",
+                &owner_cache,
+                &unreachable_rest_client()
+            )
+            .await,
+            Some(false)
         );
     }
 
