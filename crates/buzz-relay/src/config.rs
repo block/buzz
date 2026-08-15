@@ -103,6 +103,9 @@ pub struct Config {
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
     pub pairing_relay_url: Option<String>,
+    /// Optional exact WebSocket origin accepted as a private/public alias for
+    /// the deployment community (for example a Tailscale proxy URL).
+    pub relay_url_alias: Option<String>,
     /// Maximum number of concurrent WebSocket connections.
     pub max_connections: usize,
     /// Maximum number of concurrently executing message handlers.
@@ -367,6 +370,34 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     Ok(raw.trim_end_matches('/').to_string())
 }
 
+fn parse_optional_websocket_origin(name: &str) -> Result<Option<String>, ConfigError> {
+    let Some(value) = std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let parsed = url::Url::parse(&value).map_err(|e| {
+        ConfigError::InvalidValue(format!(
+            "{name} must be a valid ws:// or wss:// origin: {e}"
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "ws" | "wss")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidValue(format!(
+            "{name} must be a bare ws:// or wss:// origin without credentials, path, query, or fragment"
+        )));
+    }
+    Ok(Some(value.trim_end_matches('/').to_string()))
+}
+
 const DEFAULT_PUSH_GATEWAY_DELIVERY_URL: &str = "https://push.buzz.xyz/v1/deliveries/apns";
 
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
@@ -552,6 +583,8 @@ impl Config {
                 Ok(value)
             })
             .transpose()?;
+
+        let relay_url_alias = parse_optional_websocket_origin("BUZZ_RELAY_URL_ALIAS")?;
 
         let max_connections = std::env::var("BUZZ_MAX_CONNECTIONS")
             .ok()
@@ -998,6 +1031,7 @@ impl Config {
             db_read_pool_size,
             relay_url,
             pairing_relay_url,
+            relay_url_alias,
             max_connections,
             max_concurrent_handlers,
             send_buffer_size,
@@ -1680,6 +1714,31 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_PAIRING_RELAY_URL")
         ));
+    }
+
+    #[test]
+    fn relay_url_alias_accepts_bare_websocket_origin_only() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_RELAY_URL_ALIAS", "wss://private-relay.example");
+        let config = Config::from_env().expect("config");
+        assert_eq!(
+            config.relay_url_alias.as_deref(),
+            Some("wss://private-relay.example")
+        );
+
+        for invalid in [
+            "https://private-relay.example",
+            "wss://private-relay.example/path",
+            "wss://user@private-relay.example",
+        ] {
+            std::env::set_var("BUZZ_RELAY_URL_ALIAS", invalid);
+            let result = Config::from_env();
+            assert!(
+                matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_RELAY_URL_ALIAS")),
+                "invalid alias unexpectedly accepted: {invalid}"
+            );
+        }
+        std::env::remove_var("BUZZ_RELAY_URL_ALIAS");
     }
 
     #[test]

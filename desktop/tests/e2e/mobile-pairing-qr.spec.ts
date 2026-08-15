@@ -35,6 +35,39 @@ async function emitPairingEvent(page: Page, event: string, payload?: unknown) {
   );
 }
 
+test("private iPhone relay is normalized, passed to pairing, and persisted", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-mobile").click();
+
+  const relayInput = page.getByTestId("private-mobile-relay-input");
+  await relayInput.fill("matthews-macbook-pro-1.tailf29f2c.ts.net");
+  await page.getByTestId("start-pairing-button").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).find(
+          (entry) => entry.command === "start_pairing",
+        ),
+      ),
+    )
+    .toEqual({
+      command: "start_pairing",
+      payload: {
+        advertisedRelayUrl: "https://matthews-macbook-pro-1.tailf29f2c.ts.net/",
+      },
+    });
+
+  await page.reload();
+  await expect(page.getByTestId("private-mobile-relay-input")).toHaveValue(
+    "https://matthews-macbook-pro-1.tailf29f2c.ts.net/",
+  );
+});
+
 test("mobile pairing starts on demand and reveals the QR code", async ({
   page,
 }) => {
@@ -141,32 +174,18 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
     page.getByText("Securely transfer your identity via NIP-AB protocol"),
   ).toHaveCount(0);
   await expect(qrCode).toHaveAttribute("data-qr-matrix-size", "57");
-  await expect(qrCode.locator("[data-qr-finder-pattern]")).toHaveCount(3);
-  expect(await qrCode.locator("circle").count()).toBeGreaterThan(100);
-  expect(await qrCode.locator(".buzz-qr-cell-reveal").count()).toBeGreaterThan(
+  await expect(qrCode).toHaveAttribute("data-qr-camera-safe", "true");
+  await expect(qrCode).toHaveAttribute("width", "256");
+  await expect(qrCode).toHaveAttribute("height", "256");
+  await expect(qrCode.locator("[data-qr-finder-pattern]")).toHaveCount(0);
+  await expect(qrCode.locator("circle")).toHaveCount(0);
+  expect(await qrCode.locator("[data-qr-cell-row]").count()).toBeGreaterThan(
     100,
   );
-  await expect(qrCode.locator(".buzz-qr-cell-reveal").first()).toHaveCSS(
-    "animation-name",
-    "buzz-qr-cell-reveal",
-  );
-  await expect(qrCode.locator(".buzz-qr-cell-reveal").first()).toHaveCSS(
-    "animation-duration",
-    "0.058s",
-  );
-  await expect(qrCode.locator(".buzz-qr-cell-reveal").first()).toHaveCSS(
-    "animation-timing-function",
-    "linear",
-  );
-  await expect(
-    qrCode.locator('[data-qr-cell-row="56"].buzz-qr-cell-reveal').first(),
-  ).toHaveCSS("animation-delay", "0.189s");
+  await expect(qrCode.locator(".buzz-qr-cell-reveal")).toHaveCount(0);
   await expect(copyButton).toHaveCSS("animation-name", "enter");
   await expect(copyButton).toHaveCSS("animation-duration", "0.25s");
-  await expect(qrCode.locator("image")).toHaveAttribute(
-    "href",
-    "/app-icon@2x.png",
-  );
+  await expect(qrCode.locator("image")).toHaveCount(0);
   await waitForAnimations(page);
   const qrBox = await qrContainer.boundingBox();
   const copyBox = await copyButton.boundingBox();
@@ -177,9 +196,9 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   expect(stepsBox).not.toBeNull();
   expect(qrCardBox).not.toBeNull();
   expect(qrBox?.x ?? 0).toBeLessThan(stepsBox?.x ?? 0);
-  expect(Math.abs((stepsBox?.y ?? 0) - (initialStepsBox?.y ?? 0))).toBeLessThan(
-    0.5,
-  );
+  const initialStepsOffset = (initialStepsBox?.y ?? 0) - (cardBox?.y ?? 0);
+  const qrStepsOffset = (stepsBox?.y ?? 0) - (qrCardBox?.y ?? 0);
+  expect(Math.abs(qrStepsOffset - initialStepsOffset)).toBeLessThan(0.5);
   expect(
     Math.abs((qrCardBox?.height ?? 0) - (cardBox?.height ?? 0)),
   ).toBeLessThan(0.5);

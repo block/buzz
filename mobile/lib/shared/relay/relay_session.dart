@@ -20,12 +20,19 @@ import 'relay_socket.dart';
 
 enum SessionStatus { disconnected, connecting, connected, reconnecting }
 
+enum SessionFailureKind { network, authentication }
+
 @immutable
 class SessionState {
   final SessionStatus status;
   final int reconnectAttempt;
+  final SessionFailureKind? failureKind;
 
-  const SessionState({required this.status, this.reconnectAttempt = 0});
+  const SessionState({
+    required this.status,
+    this.reconnectAttempt = 0,
+    this.failureKind,
+  });
 }
 
 class _HistorySubscription {
@@ -447,6 +454,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           ? SessionStatus.reconnecting
           : SessionStatus.connecting,
       reconnectAttempt: state.reconnectAttempt,
+      failureKind: state.failureKind,
     );
 
     _socket?.dispose();
@@ -484,7 +492,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _flushTimer = null;
     if (error is RelayAuthRejectedException) {
       _reconnectTimer?.cancel();
-      state = const SessionState(status: SessionStatus.disconnected);
+      state = const SessionState(
+        status: SessionStatus.disconnected,
+        failureKind: SessionFailureKind.authentication,
+      );
       return;
     }
     _scheduleReconnect();
@@ -496,6 +507,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     state = SessionState(
       status: SessionStatus.reconnecting,
       reconnectAttempt: attempt,
+      failureKind: SessionFailureKind.network,
     );
 
     _reconnectTimer?.cancel();

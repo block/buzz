@@ -648,6 +648,35 @@ void main() {
     expect(find.text('general'), findsOneWidget);
   });
 
+  testWidgets('explains a sustained private relay network failure', (
+    tester,
+  ) async {
+    final relaySession = _ReconnectingRelaySession(
+      initialFailureKind: SessionFailureKind.network,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          relayConfigProvider.overrideWith(() => _TailnetRelayConfigNotifier()),
+          relaySessionProvider.overrideWith(() => relaySession),
+        ],
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(find.text('Private relay unavailable'), findsOneWidget);
+    expect(find.text('Check Tailscale or VPN'), findsOneWidget);
+
+    relaySession.connect();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('general'), findsOneWidget);
+    expect(find.text('Private relay unavailable'), findsNothing);
+  });
+
   testWidgets('announces neutral loading outside connection transitions', (
     tester,
   ) async {
@@ -1961,11 +1990,16 @@ class _LoadingNotifier extends ChannelsNotifier {
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
   final SessionStatus initialStatus;
+  final SessionFailureKind? initialFailureKind;
 
-  _ReconnectingRelaySession({this.initialStatus = SessionStatus.reconnecting});
+  _ReconnectingRelaySession({
+    this.initialStatus = SessionStatus.reconnecting,
+    this.initialFailureKind,
+  });
 
   @override
-  SessionState build() => SessionState(status: initialStatus);
+  SessionState build() =>
+      SessionState(status: initialStatus, failureKind: initialFailureKind);
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -1987,6 +2021,13 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   void setReconnecting() {
     state = const SessionState(status: SessionStatus.reconnecting);
   }
+}
+
+class _TailnetRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(
+    baseUrl: 'https://matthews-macbook-pro-1.tailf29f2c.ts.net/',
+  );
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {

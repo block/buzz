@@ -324,6 +324,10 @@ void main() {
 
     expect(session.state.status, SessionStatus.reconnecting);
     expect(session.state.reconnectAttempt, 1);
+    expect(session.state.failureKind, SessionFailureKind.network);
+
+    session.debugHandleConnected();
+    expect(session.state.failureKind, isNull);
   });
 
   test('classifies relay internal auth errors as transient', () {
@@ -351,6 +355,7 @@ void main() {
         ],
       );
       addTearDown(container.dispose);
+      await container.read(authProvider.future);
       container.read(relaySessionProvider);
 
       session.debugHandleDisconnected(
@@ -359,6 +364,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(session.state.status, SessionStatus.disconnected);
+      expect(session.state.failureKind, SessionFailureKind.authentication);
       expect(auth.signOutCount, 0);
     },
   );

@@ -93,6 +93,42 @@ void main() {
       expect(fakeAuth.lastCommunity, isNull);
     });
 
+    test(
+      'does not report success when steady-state relay rejects auth',
+      () async {
+        final notifier = PairingNotifier(
+          relaySocketFactory:
+              ({
+                required wsUrl,
+                required nsec,
+                required onMessage,
+                required onConnected,
+                required onDisconnected,
+              }) =>
+                  _RejectingRelaySocket(onDisconnectedCallback: onDisconnected),
+        );
+        fakeAuth = FakeAuthNotifier();
+        container = ProviderContainer(
+          overrides: [
+            authProvider.overrideWith(() => fakeAuth),
+            pairingProvider.overrideWith(() => notifier),
+          ],
+        );
+        final nsec = nostr.Keys(
+          '2222222222222222222222222222222222222222222222222222222222222222',
+        ).nsec;
+
+        await container
+            .read(pairingProvider.notifier)
+            .pair(
+              _encodePairingCode(relayUrl: 'https://relay.test', nsec: nsec),
+            );
+
+        expect(container.read(pairingProvider).status, PairingStatus.error);
+        expect(fakeAuth.lastCommunity, isNull);
+      },
+    );
+
     test('accepts buzz scheme prefix', () async {
       container = createContainer();
 
@@ -354,6 +390,29 @@ class _DisconnectingSocket extends PairingSocket {
   Future<void> connect() async {
     disconnectCallback(Exception('Connection closed'));
   }
+}
+
+class _RejectingRelaySocket extends RelaySocket {
+  final void Function(Object? error) onDisconnectedCallback;
+
+  _RejectingRelaySocket({required this.onDisconnectedCallback})
+    : super(
+        wsUrl: 'ws://unused',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+
+  @override
+  Future<void> connect() async {
+    onDisconnectedCallback(
+      const RelayAuthRejectedException('relay url mismatch'),
+    );
+  }
+
+  @override
+  Future<void> disconnect() async {}
 }
 
 class _RecoveryRelayConfig extends RelayConfigNotifier {

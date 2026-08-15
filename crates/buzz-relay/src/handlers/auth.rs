@@ -18,6 +18,36 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
+pub(crate) async fn verify_auth_event_for_tenant(
+    auth_svc: &buzz_auth::AuthService,
+    event: nostr::Event,
+    challenge: &str,
+    config: &crate::config::Config,
+    tenant: &buzz_core::tenant::TenantContext,
+) -> Result<buzz_auth::AuthContext, buzz_auth::AuthError> {
+    let accepted = crate::api::bridge::nip42_accepted_relay_urls(
+        &config.relay_url,
+        config.relay_url_alias.as_deref(),
+        tenant,
+    );
+    let Some(canonical) = accepted.first() else {
+        return Err(buzz_auth::AuthError::Internal(
+            "no canonical NIP-42 relay URL".to_string(),
+        ));
+    };
+    match auth_svc
+        .verify_auth_event(event.clone(), challenge, canonical)
+        .await
+    {
+        Err(buzz_auth::AuthError::RelayUrlMismatch) if accepted.len() == 2 => {
+            auth_svc
+                .verify_auth_event(event, challenge, &accepted[1])
+                .await
+        }
+        result => result,
+    }
+}
+
 /// Extract a NIP-OA `auth` tag from a verified AUTH event and serialize it as
 /// the JSON-array string that [`buzz_sdk::nip_oa::verify_auth_tag`] expects.
 ///
@@ -77,15 +107,12 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     // tampered, NIP-42 verification will fail before we ever inspect it.
     let auth_tag_json = extract_auth_tag_json(&event);
 
-    let relay_url =
-        crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
     let auth_svc = Arc::clone(&state.auth);
 
     metrics::counter!("buzz_auth_attempts_total", "method" => "nip42").increment(1);
 
     // Pure NIP-42 verification — crypto only, no DB lookups.
-    match auth_svc
-        .verify_auth_event(event, &challenge, &relay_url)
+    match verify_auth_event_for_tenant(&auth_svc, event, &challenge, &state.config, &conn.tenant)
         .await
     {
         Ok(mut auth_ctx) => {

@@ -52,3 +52,24 @@ test("adds the row-based reveal motion when requested", () => {
   assert.match(html, /data-qr-cell-row="56"/);
   assert.match(html, /--buzz-qr-reveal-delay:189ms/);
 });
+
+test("renders camera-safe QR geometry without obscured or separated modules", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(StyledQrCode, {
+      animate: true,
+      cameraSafe: true,
+      centerImageSrc: "/app-icon@2x.png",
+      value: TEST_PAIRING_URI,
+    }),
+  );
+
+  assert.match(html, /data-qr-camera-safe="true"/);
+  assert.equal((html.match(/<circle /g) ?? []).length, 0);
+  assert.ok(
+    (html.match(/data-qr-cell-row=/g) ?? []).length > 100,
+    "expected the complete payload matrix to render as contiguous square modules",
+  );
+  assert.doesNotMatch(html, /data-qr-finder-pattern/);
+  assert.doesNotMatch(html, /buzz-qr-cell-reveal/);
+  assert.doesNotMatch(html, /<image/);
+});

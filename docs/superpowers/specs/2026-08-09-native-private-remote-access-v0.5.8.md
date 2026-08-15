@@ -1,7 +1,7 @@
 # Native private remote access — v0.5.8 compatibility specification
 
 Date: 9 August 2026
-Status: frozen for a later basic pilot after Keeper MVP
+Status: automated pilot implemented; physical iPhone acceptance pending
 
 ## Outcome
 
@@ -19,8 +19,9 @@ gateway or synchronization protocol.
 ## Basic pilot journey
 
 1. Tailscale is installed and authenticated on the MacBook and iPhone.
-2. The MacBook exposes the existing Buzz relay only on an address reachable
-   inside the tailnet. Public ingress and Tailscale Funnel remain disabled.
+2. Tailscale Serve terminates private TLS at the MacBook's stable `*.ts.net`
+   name and forwards to the existing loopback relay. Public ingress and
+   Tailscale Funnel remain disabled.
 3. The user pairs the native iPhone client using the existing QR/SAS flow and
    stores the MacBook relay as a community.
 4. From mobile data outside the home LAN, the phone loads channel/DM history,
@@ -55,14 +56,18 @@ gateway or synchronization protocol.
 
 ## Pilot implementation slices
 
-1. Document and validate a private relay bind/advertise configuration that is
-   reachable on the tailnet without public ingress.
-2. Add a focused mobile validation path for a private `ws://` or `wss://`
-   tailnet endpoint, preserving existing URL safety rules.
-3. Add clear connection-state copy for VPN-unreachable versus authentication or
-   relay errors where current mobile diagnostics are insufficient.
-4. Add a repeatable end-to-end acceptance runbook using the existing pairing
-   and message paths.
+1. Tailscale Serve exposes the loopback relay as tailnet-only WSS at
+   `matthews-macbook-pro-1.tailf29f2c.ts.net`.
+2. Desktop Settings persists an optional pairing-only HTTPS `*.ts.net` origin;
+   Rust independently validates it and derives WSS without changing the active
+   desktop workspace relay.
+3. Mobile session state classifies network and authentication failures and
+   presents private-VPN recovery copy without removing or switching community.
+4. `docs/testing/native-private-remote-pilot.md` defines the repeatable physical
+   acceptance and rollback journey.
+
+Automated unit, presentation, QR/SAS, and channel behavior gates are complete.
+The outside-LAN physical iPhone journey remains the acceptance boundary.
 
 ## Acceptance tests
 

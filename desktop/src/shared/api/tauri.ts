@@ -1126,8 +1126,12 @@ export async function nip44DecryptFromSelf(
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
 }
 
-export async function startPairing(): Promise<string> {
-  return invokeTauri<string>("start_pairing");
+export async function startPairing(
+  advertisedRelayUrl?: string,
+): Promise<string> {
+  return invokeTauri<string>("start_pairing", {
+    advertisedRelayUrl: advertisedRelayUrl || null,
+  });
 }
 
 export async function confirmPairingSas(): Promise<void> {

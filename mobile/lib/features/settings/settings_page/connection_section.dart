@@ -8,6 +8,11 @@ class _ConnectionSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final config = ref.watch(relayConfigProvider);
+    final sessionState = ref.watch(relaySessionProvider);
+    final connection = relayConnectionPresentation(
+      config.baseUrl,
+      sessionState,
+    );
     final nsec = config.nsec;
 
     return AppListCard(
@@ -15,8 +20,8 @@ class _ConnectionSection extends ConsumerWidget {
       children: [
         AppListRow(
           icon: LucideIcons.server,
-          title: 'Connected to',
-          subtitle: config.baseUrl,
+          title: connection.title,
+          subtitle: connection.detail,
         ),
         if (nsec != null && nsec.isNotEmpty) ...[
           _IdentityRow(nsec: nsec),

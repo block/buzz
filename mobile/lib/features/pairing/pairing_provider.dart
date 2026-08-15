@@ -70,13 +70,26 @@ typedef PairingSocketFactory =
       required void Function(Object? error) onDisconnected,
     });
 
+typedef RelaySocketFactory =
+    RelaySocket Function({
+      required String wsUrl,
+      required String? nsec,
+      required void Function(List<dynamic> message) onMessage,
+      required void Function() onConnected,
+      required void Function(Object? error) onDisconnected,
+    });
+
 class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
+  final RelaySocketFactory _relaySocketFactory;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
 
-  PairingNotifier({PairingSocketFactory? socketFactory})
-    : _socketFactory = socketFactory ?? _createPairingSocket;
+  PairingNotifier({
+    PairingSocketFactory? socketFactory,
+    RelaySocketFactory? relaySocketFactory,
+  }) : _socketFactory = socketFactory ?? _createPairingSocket,
+       _relaySocketFactory = relaySocketFactory ?? RelaySocket.new;
 
   static PairingSocket _createPairingSocket({
     required String wsUrl,
@@ -670,15 +683,29 @@ class PairingNotifier extends Notifier<PairingState> {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
-    final socket = RelaySocket(
+    final validated = Completer<void>();
+    final socket = _relaySocketFactory(
       wsUrl: wsUrl,
       nsec: nsec,
       onMessage: (_) {},
-      onConnected: () {},
-      onDisconnected: (_) {},
+      onConnected: () {
+        if (!validated.isCompleted) validated.complete();
+      },
+      onDisconnected: (error) {
+        if (!validated.isCompleted) {
+          validated.completeError(error ?? Exception('Connection closed'));
+        }
+      },
     );
     try {
-      await socket.connect().timeout(const Duration(seconds: 8));
+      unawaited(
+        socket.connect().catchError((Object error, StackTrace stackTrace) {
+          if (!validated.isCompleted) {
+            validated.completeError(error, stackTrace);
+          }
+        }),
+      );
+      await validated.future.timeout(const Duration(seconds: 8));
     } finally {
       await socket.disconnect();
     }

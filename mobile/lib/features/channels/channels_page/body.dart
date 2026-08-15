@@ -4,7 +4,8 @@ class _ChannelsBody extends StatelessWidget {
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
-  final SessionStatus sessionStatus;
+  final SessionState sessionState;
+  final String relayUrl;
   final bool showConnectionSkeleton;
   final String? currentPubkey;
   final double topSectionHeight;
@@ -17,7 +18,8 @@ class _ChannelsBody extends StatelessWidget {
     required this.channels,
     required this.channelsAsync,
     required this.showError,
-    required this.sessionStatus,
+    required this.sessionState,
+    required this.relayUrl,
     required this.showConnectionSkeleton,
     required this.currentPubkey,
     required this.topSectionHeight,
@@ -76,11 +78,12 @@ class _ChannelsBody extends StatelessWidget {
 
     return SkeletonReveal(
       loading: loading,
-      shimmerEnabled: sessionStatus != SessionStatus.disconnected,
+      shimmerEnabled: sessionState.status != SessionStatus.disconnected,
       skeleton: _ChannelsSkeleton(
         channels: loadedChannels,
+        relayUrl: relayUrl,
+        sessionState: sessionState,
         topInset: barHeight,
-        status: sessionStatus,
       ),
       content: content,
     );
