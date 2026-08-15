@@ -43,20 +43,30 @@ pub(crate) const AGENTS_MD: &str = include_str!("nest_agents.md");
 /// Written to ~/.buzz/.agents/skills/buzz-cli/SKILL.md on first init.
 const BUZZ_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 
+/// Default SKILL.md content for the explicit session wrap-up skill.
+const WRAPUP_SKILL_MD: &str = include_str!("nest_wrapup_skill.md");
+
 /// Template content version for AGENTS.md static content (above managed markers).
 /// Bump this when changing `nest_agents.md` to trigger refresh on existing installs.
 /// Version 1 is implicitly "before this mechanism existed" (no version file).
-const NEST_AGENTS_VERSION: u32 = 4;
+const NEST_AGENTS_VERSION: u32 = 5;
 
 /// Template content version for SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
 const NEST_SKILL_VERSION: u32 = 5;
+
+/// Template content version for the wrap-up SKILL.md.
+const WRAPUP_SKILL_VERSION: u32 = 2;
 
 const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
 const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
 
 /// Canonical skill directory path relative to the nest root.
 const CANONICAL_SKILL_DIR: &str = ".agents/skills/buzz-cli";
+const CANONICAL_WRAPUP_SKILL_DIR: &str = ".agents/skills/buzz-wrapup";
+
+const BEGIN_SKILL_MARKER: &str = "<!-- BEGIN BUZZ MANAGED SKILL -->";
+const END_SKILL_MARKER: &str = "<!-- END BUZZ MANAGED SKILL -->";
 
 /// Nest directory name for production builds.
 const NEST_DIR_PROD: &str = ".buzz";
@@ -209,14 +219,32 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         }
     }
 
-    // Create harness-specific symlinks for all known providers.
-    // Migration of the old .claude/skills/buzz-cli real dir is handled in
-    // refresh_skill_md_if_stale; ensure_skill_symlinks skips paths that already exist.
-    ensure_skill_symlinks(root)?;
+    let wrapup_skill_dir = root.join(CANONICAL_WRAPUP_SKILL_DIR);
+    fs::create_dir_all(&wrapup_skill_dir)
+        .map_err(|e| format!("create {}: {e}", wrapup_skill_dir.display()))?;
+    let wrapup_skill_md = wrapup_skill_dir.join("SKILL.md");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&wrapup_skill_md)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(WRAPUP_SKILL_MD.as_bytes())
+                .map_err(|e| format!("write {}: {e}", wrapup_skill_md.display()))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("create {}: {e}", wrapup_skill_md.display())),
+    }
 
     // Refresh static content if the embedded template version is newer.
     refresh_agents_md_if_stale(root)?;
     refresh_skill_md_if_stale(root)?;
+    refresh_wrapup_skill_md_if_stale(root)?;
+
+    // Install provider-specific skill entries after refreshing canonical content.
+    // Unix uses links; platforms without symlink support receive managed copies.
+    ensure_skill_symlinks(root)?;
 
     // Set owner-only permissions on root and all subdirectories.
     // Skip any path that is a symlink — chmod would affect the target.
@@ -259,6 +287,13 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
                 skill_perm_dirs.push(root.join(&accumulated));
             }
         }
+        {
+            let mut accumulated = std::path::PathBuf::new();
+            for component in std::path::Path::new(CANONICAL_WRAPUP_SKILL_DIR).components() {
+                accumulated.push(component);
+                skill_perm_dirs.push(root.join(&accumulated));
+            }
+        }
         for skill_dir in known_skill_dirs() {
             // Ensure every ancestor dir gets 700, not just the leaf.
             let mut accumulated = std::path::PathBuf::new();
@@ -290,21 +325,63 @@ fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
     for skill_dir in known_skill_dirs() {
         let parent = root.join(skill_dir);
         fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-        let link = parent.join("buzz-cli");
-        if link.symlink_metadata().is_ok() {
-            continue; // symlink or real path exists — skip
-        }
         let depth = std::path::Path::new(skill_dir).components().count();
         let prefix = "../".repeat(depth);
-        let target = format!("{prefix}{CANONICAL_SKILL_DIR}");
-        create_symlink(std::path::Path::new(&target), &link)
-            .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
+        for (name, canonical) in [
+            ("buzz-cli", CANONICAL_SKILL_DIR),
+            ("buzz-wrapup", CANONICAL_WRAPUP_SKILL_DIR),
+        ] {
+            let link = parent.join(name);
+            if link.symlink_metadata().is_ok() {
+                continue;
+            }
+            let target = format!("{prefix}{canonical}");
+            create_symlink(std::path::Path::new(&target), &link)
+                .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
+        }
     }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn ensure_skill_symlinks(_root: &Path) -> Result<(), String> {
+fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
+    for skill_dir in known_skill_dirs() {
+        let destination = root.join(skill_dir).join("buzz-wrapup").join("SKILL.md");
+        install_managed_skill_copy(&destination, WRAPUP_SKILL_MD)?;
+    }
+    Ok(())
+}
+
+/// Create or refresh a managed skill copy without overwriting an owner-created
+/// file. Files containing our explicit markers retain everything after the end
+/// marker; unmarked existing files are left untouched.
+fn install_managed_skill_copy(path: &Path, template: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let content = match fs::read_to_string(path) {
+        Ok(existing) => match existing.find(END_SKILL_MARKER) {
+            Some(end) if existing[..end].contains(BEGIN_SKILL_MARKER) => {
+                let after_end = end + END_SKILL_MARKER.len();
+                format!("{}{}", template.trim_end(), &existing[after_end..])
+            }
+            _ => return Ok(()),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => template.to_string(),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent", path.display()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("tempfile in {}: {e}", parent.display()))?;
+    {
+        use std::io::Write;
+        tmp.write_all(content.as_bytes())
+            .map_err(|e| format!("write tempfile: {e}"))?;
+    }
+    tmp.persist(path)
+        .map_err(|e| format!("persist {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -516,6 +593,22 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
     fs::write(&version_path, format!("{NEST_SKILL_VERSION}\n"))
         .map_err(|e| format!("write {}: {e}", version_path.display()))?;
 
+    Ok(())
+}
+
+/// Refresh the managed wrap-up skill when its embedded template changes.
+fn refresh_wrapup_skill_md_if_stale(root: &Path) -> Result<(), String> {
+    let skill_dir = root.join(CANONICAL_WRAPUP_SKILL_DIR);
+    let version_path = skill_dir.join(".skill-version");
+    if read_version_file(&version_path) >= WRAPUP_SKILL_VERSION {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&skill_dir).map_err(|e| format!("create {}: {e}", skill_dir.display()))?;
+    let skill_md = skill_dir.join("SKILL.md");
+    install_managed_skill_copy(&skill_md, WRAPUP_SKILL_MD)?;
+    fs::write(&version_path, format!("{WRAPUP_SKILL_VERSION}\n"))
+        .map_err(|e| format!("write {}: {e}", version_path.display()))?;
     Ok(())
 }
 

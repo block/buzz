@@ -18,6 +18,8 @@ Filenames: `ALL_CAPS_WITH_UNDERSCORES.md` (e.g., `OAUTH_FLOW_NOTES.md`).
 
 The bundled CLI is your primary tool interface — run its `--help` command for usage. The CLI skill file has the full reference.
 
+When the user explicitly says `done`, `wrap up`, or `end session`, run the bundled `buzz-wrapup` skill. It records only non-trivial sessions and queues any owner-authorized vault export without making the vault a runtime dependency.
+
 ## Knowledge File Conventions
 
 Files in `GUIDES/`, `PLANS/`, `RESEARCH/`, `WORK_LOGS/` should include YAML frontmatter:
