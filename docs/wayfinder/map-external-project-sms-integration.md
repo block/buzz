@@ -291,3 +291,59 @@ dispatching, and any live external-repo dispatch (slices 4/5/11).
    write-fence *triggers to every community-scoped table* and **drop** unique/check/FK
    constraints. Pointing this branch at that database would have schema-migrated a live
    production DB underneath a binary that predates the change. Isolated infra avoided it.
+
+## 2026-08-14: inbound path VERIFIED END-TO-END against the live relay
+
+The full inbound chain now works on the deployed test relay, with real Twilio
+credentials. This closes the "no live relay has been run" gap for Part B's
+inbound half.
+
+**What was proven, and how:**
+
+1. **Twilio signature validation accepts a genuine signature.** A request signed
+   with a real HMAC-SHA1 over `URL + sorted(key+value)` using the account's live
+   auth token was accepted. Previously only the *rejection* path had been
+   exercised.
+2. **The allow-list actually gates.** The decisive evidence is a before/after
+   pair on the *same signed request*: it returned `403 {"error":"request not
+   accepted"}` while `sms_identities` had no row for the sender, and
+   `200 {"status":"accepted"}` immediately after inserting one — the only
+   variable changed being the DB row. That rules out "the endpoint accepts
+   anything signed" and "the 403 was really a signature failure" in one shot.
+3. **Event synthesis is correct.** Reading the inbox channel back through
+   `buzz messages get` returns the synthesized event:
+
+   ```json
+   {"content":"Buzz SMS live test - summarize open work","kind":9,
+    "pubkey":"b07c536c…(relay)",
+    "tags":[["h","707fefeb-53ec-4e1e-8195-ace864cdbafe"],
+            ["sms_from","+18657192069"],["sms_sid","SMlivetest0002"]]}
+   ```
+
+   Note `kind: 9` — the corrected choice recorded in slice 7b (a
+   `KIND_STREAM_MESSAGE_V2` event would never wake a Mentions-mode agent).
+   No `project` tag appears, which is *correct*: this sender's
+   `default_project` is NULL, so this is the ambiguous case the operator
+   persona is written to handle.
+
+**Deployment shape:** service `buzz-relay-sms` on Railway at
+`https://buzz-relay-sms-production.up.railway.app`, isolated Postgres/Redis,
+private `sms-inbox` channel `707fefeb-53ec-4e1e-8195-ace864cdbafe`, Twilio
+number `+13173155284` webhook pointed at `/hooks/sms/inbound`.
+
+**Operational note for anyone reproducing this:** the allow-list row had to be
+inserted with `railway ssh --service <pg> -- psql …`, because no CLI or API
+surface writes `sms_identities` (the known slice-9 gap) and the service had no
+reachable public Postgres endpoint. `railway ssh` re-joins its COMMAND argv
+through a shell, so the SQL must carry its *own* inner quotes to survive.
+
+### Still NOT verified
+
+- **Outbound SMS.** The account's A2P 10DLC campaign is in `FAILED` state
+  (error 30909, CTA/message-flow rejection), so replies from this 10DLC number
+  to US handsets are likely to be carrier-filtered (error 30034) regardless of
+  `sms_sink` correctness. `sms_sink` has therefore still never run against
+  Twilio's live API.
+- **Operator persona dispatch.** Requires a `buzz-acp` harness process
+  subscribed to the inbox channel; none has been run.
+- **External-repo dispatch** (slices 4/5/11) — unchanged, still deferred.
