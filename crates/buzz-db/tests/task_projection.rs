@@ -253,6 +253,69 @@ async fn duplicate_requested_event_creates_one_projection_row() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn conflicting_duplicate_request_rolls_back_and_identical_retry_stays_stale() {
+    let fixture = Fixture::new().await;
+    let task_id = Uuid::new_v4();
+    let base = Utc::now().timestamp() as u64;
+    let requested = fixture.task_event(KIND_TASK_REQUESTED, task_id, 1, "Original ask", base);
+    assert_eq!(
+        fixture.apply(&requested).await.unwrap(),
+        TaskProjectionOutcome::Inserted
+    );
+
+    let conflicting =
+        fixture.task_event(KIND_TASK_REQUESTED, task_id, 1, "Different ask", base + 1);
+    let conflict = fixture.apply(&conflicting).await;
+    assert!(
+        conflict.is_err(),
+        "differing equal-version request must fail"
+    );
+    let conflict_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
+            .bind(fixture.community.as_uuid())
+            .bind(conflicting.id.as_bytes().as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        conflict_count, 0,
+        "conflicting duplicate request must roll back its signed event"
+    );
+
+    let identical_retry = EventBuilder::new(
+        Kind::Custom(KIND_TASK_REQUESTED as u16),
+        requested.content.clone(),
+    )
+    .tags([
+        Tag::parse(["d", &task_id.to_string()]).unwrap(),
+        Tag::parse(["p", &fixture.owner.public_key().to_hex()]).unwrap(),
+        Tag::parse(["agent", &fixture.agent.public_key().to_hex()]).unwrap(),
+        Tag::parse(["h", &fixture.channel_id.to_string()]).unwrap(),
+        Tag::parse(["e", &fixture.source.id.to_hex(), "", "source"]).unwrap(),
+    ])
+    .custom_created_at(Timestamp::from(base + 2))
+    .sign_with_keys(&fixture.agent)
+    .unwrap();
+    assert_eq!(
+        fixture.apply(&identical_retry).await.unwrap(),
+        TaskProjectionOutcome::Stale
+    );
+
+    let state: (i64, String, String) = sqlx::query_as(
+        "SELECT source_version, status, title FROM buzz_tasks WHERE community_id=$1 AND id=$2",
+    )
+    .bind(fixture.community.as_uuid())
+    .bind(task_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, (1, "open".into(), "Original ask".into()));
+
+    fixture.teardown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn newer_update_wins_and_older_replay_is_ignored() {
     let fixture = Fixture::new().await;
     let task_id = Uuid::new_v4();

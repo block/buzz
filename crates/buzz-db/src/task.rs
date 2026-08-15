@@ -5,7 +5,9 @@
 //! small internal read model for validation and efficient replay. Public reads
 //! stay on the relay's existing Nostr/bridge query surface.
 
-use buzz_core::task::{TaskEventPayloadV1, TaskEventV1, TaskPriority, TaskResolution, TaskType};
+use buzz_core::task::{
+    TaskEventPayloadV1, TaskEventV1, TaskPriority, TaskRequestedV1, TaskResolution, TaskType,
+};
 use buzz_core::{CommunityId, StoredEvent};
 use chrono::{DateTime, Utc};
 use nostr::Event;
@@ -264,9 +266,19 @@ async fn apply_projection(
             let existing = select_projection_identity(tx, community_id, task.task_id).await?;
             if let Some(existing) = existing {
                 validate_identity(&existing, task)?;
-                if existing.source_version >= payload.source_version {
+                // Requested payloads are always sourceVersion 1, so a second
+                // request for this task identity competes at an equal version.
+                // Only an identical payload folds deterministically; anything
+                // else must roll back so the conflicting signed event never
+                // enters the public stream.
+                if existing.source_version == payload.source_version
+                    && requested_payload_matches_projection(tx, community_id, task, payload).await?
+                {
                     return Ok(TaskProjectionOutcome::Stale);
                 }
+                return Err(DbError::InvalidData(
+                    "conflicting Buzz Task request reuses sourceVersion".into(),
+                ));
             }
             Err(DbError::InvalidData(
                 "task request conflicts with an existing task source identity".into(),
@@ -397,6 +409,42 @@ fn validate_identity(existing: &ProjectionIdentity, task: &TaskEventV1) -> Resul
         ));
     }
     Ok(())
+}
+
+/// Compare an incoming Requested payload against the stored projection row.
+///
+/// Postgres stores timestamps at microsecond precision, so timestamp fields
+/// compare through `timestamp_micros` to keep an identical re-request stale
+/// rather than conflicting.
+async fn requested_payload_matches_projection(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    task: &TaskEventV1,
+    payload: &TaskRequestedV1,
+) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT agent_name, task_type, title, context, priority, due_at, source_updated_at \
+         FROM buzz_tasks WHERE community_id=$1 AND id=$2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(task.task_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let agent_name: String = row.try_get("agent_name")?;
+    let task_type: String = row.try_get("task_type")?;
+    let title: String = row.try_get("title")?;
+    let context: Option<String> = row.try_get("context")?;
+    let priority: String = row.try_get("priority")?;
+    let due_at: Option<DateTime<Utc>> = row.try_get("due_at")?;
+    let source_updated_at: DateTime<Utc> = row.try_get("source_updated_at")?;
+    Ok(agent_name == payload.agent_name
+        && task_type == task_type_str(payload.task_type)
+        && title == payload.title
+        && context == payload.context
+        && priority == priority_str(payload.priority)
+        && due_at.map(|value| value.timestamp_micros())
+            == payload.due_at.map(|value| value.timestamp_micros())
+        && source_updated_at.timestamp_micros() == payload.source_updated_at.timestamp_micros())
 }
 
 async fn require_open_newer(
