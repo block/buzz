@@ -33,6 +33,7 @@ enum PairingStatus {
 
 class PairingState {
   final PairingStatus status;
+  final PairingStage? stage;
   final String? errorMessage;
   final String? sasCode;
   final bool userConfirmedSas;
@@ -40,6 +41,7 @@ class PairingState {
 
   const PairingState({
     this.status = PairingStatus.idle,
+    this.stage,
     this.errorMessage,
     this.sasCode,
     this.userConfirmedSas = false,
@@ -48,12 +50,14 @@ class PairingState {
 
   PairingState copyWith({
     PairingStatus? status,
+    PairingStage? stage,
     String? errorMessage,
     String? sasCode,
     bool? userConfirmedSas,
     bool? sendsIdentityToDesktop,
   }) => PairingState(
     status: status ?? this.status,
+    stage: stage ?? this.stage,
     errorMessage: errorMessage ?? this.errorMessage,
     sasCode: sasCode ?? this.sasCode,
     userConfirmedSas: userConfirmedSas ?? this.userConfirmedSas,
@@ -68,12 +72,14 @@ typedef PairingSocketFactory =
       required String ephemeralPrivkey,
       required void Function(List<dynamic> message) onMessage,
       required void Function(Object? error) onDisconnected,
+      required void Function(PairingStage stage) onStage,
     });
 
 class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
+  int _attemptGeneration = 0;
 
   PairingNotifier({PairingSocketFactory? socketFactory})
     : _socketFactory = socketFactory ?? _createPairingSocket;
@@ -83,11 +89,13 @@ class PairingNotifier extends Notifier<PairingState> {
     required String ephemeralPrivkey,
     required void Function(List<dynamic> message) onMessage,
     required void Function(Object? error) onDisconnected,
+    required void Function(PairingStage stage) onStage,
   }) => PairingSocket(
     wsUrl: wsUrl,
     ephemeralPrivkey: ephemeralPrivkey,
     onMessage: onMessage,
     onDisconnected: onDisconnected,
+    onStage: onStage,
   );
 
   @override
@@ -137,7 +145,7 @@ class PairingNotifier extends Notifier<PairingState> {
   /// Deny the SAS code. Send abort and terminate.
   void denySas() {
     _sendAbort('sas_mismatch');
-    _cleanup();
+    _finishAttempt();
     state = PairingState(
       status: PairingStatus.error,
       errorMessage: 'SAS code mismatch — pairing cancelled for security.',
@@ -145,8 +153,13 @@ class PairingNotifier extends Notifier<PairingState> {
   }
 
   void reset() {
-    _cleanup();
+    _finishAttempt();
     state = const PairingState();
+  }
+
+  void _finishAttempt() {
+    _attemptGeneration++;
+    _cleanup();
   }
 
   void _cleanup() {
@@ -178,6 +191,7 @@ class PairingNotifier extends Notifier<PairingState> {
   final Set<String> _processedEventIds = {}; // NIP-AB §Duplicate Event Handling
 
   Future<void> _pairNipAb(String uri) async {
+    final attempt = ++_attemptGeneration;
     state = const PairingState(status: PairingStatus.connecting);
 
     try {
@@ -211,11 +225,25 @@ class PairingNotifier extends Notifier<PairingState> {
       final socket = _socketFactory(
         wsUrl: relayWsUrl,
         ephemeralPrivkey: _ephemeralPrivkey!,
-        onMessage: _handleRelayMessage,
-        onDisconnected: _handleDisconnected,
+        onMessage: (message) {
+          if (_isCurrentAttempt(attempt)) {
+            _handleRelayMessage(message);
+          }
+        },
+        onDisconnected: (error) {
+          if (_isCurrentAttempt(attempt)) {
+            _handleDisconnected(error);
+          }
+        },
+        onStage: (stage) {
+          if (_isCurrentAttempt(attempt)) {
+            _reportStage(stage, relayWsUrl);
+          }
+        },
       );
       _socket = socket;
       await socket.connect();
+      if (!_isCurrentAttempt(attempt)) return;
 
       if (!socket.isConnected) {
         throw StateError('Pairing socket did not reach the connected state');
@@ -223,10 +251,12 @@ class PairingNotifier extends Notifier<PairingState> {
 
       // 5. Subscribe for kind:24134 events tagged to our ephemeral pubkey.
       socket.subscribe('pair', 24134, _ephemeralPubkey!);
+      _reportStage(PairingStage.subscribed, relayWsUrl);
 
       // 6. Wait briefly for EOSE, then send offer.
       // (In practice, we send the offer immediately — the relay will buffer it.)
       await Future.delayed(const Duration(milliseconds: 500));
+      if (!_isCurrentAttempt(attempt)) return;
 
       // 7. Build and send the offer event.
       final offerContent = _encryptMessage({
@@ -242,6 +272,7 @@ class PairingNotifier extends Notifier<PairingState> {
           ['p', qr.sourcePubkey],
         ],
       );
+      _reportStage(PairingStage.offerPublished, relayWsUrl);
 
       // 8. Display SAS code and wait for sas-confirm from source.
       state = PairingState(
@@ -252,9 +283,10 @@ class PairingNotifier extends Notifier<PairingState> {
 
       // 9. Start 120s session timeout.
       _sessionTimeout = Timer(const Duration(seconds: 120), () {
+        if (!_isCurrentAttempt(attempt)) return;
         if (state.status != PairingStatus.success &&
             state.status != PairingStatus.error) {
-          _cleanup();
+          _finishAttempt();
           state = const PairingState(
             status: PairingStatus.error,
             errorMessage: 'Pairing session timed out.',
@@ -262,14 +294,19 @@ class PairingNotifier extends Notifier<PairingState> {
         }
       });
     } on FormatException catch (e) {
-      _cleanup();
+      if (!_isCurrentAttempt(attempt)) return;
+      _finishAttempt();
       state = PairingState(
         status: PairingStatus.error,
         errorMessage: 'Invalid pairing code: ${e.message}',
       );
     } catch (e) {
-      debugPrint('Pairing connection error: $e');
-      _cleanup();
+      if (!_isCurrentAttempt(attempt)) return;
+      debugPrint(
+        'Buzz pairing failed stage=${state.stage?.name ?? 'unknown'} '
+        'errorType=${e.runtimeType}',
+      );
+      _finishAttempt();
       state = PairingState(
         status: PairingStatus.error,
         errorMessage: _friendlyErrorMessage(e),
@@ -278,6 +315,10 @@ class PairingNotifier extends Notifier<PairingState> {
   }
 
   static String _friendlyErrorMessage(Object error) {
+    if (error is PairingConnectionException) {
+      return 'The pairing relay did not open within 15 seconds '
+          '(stage: ${error.stage.name}). Check Tailscale and try again.';
+    }
     final message = error.toString();
     if (message.contains('SocketException') ||
         message.contains('Connection refused') ||
@@ -306,6 +347,15 @@ class PairingNotifier extends Notifier<PairingState> {
     }
     return 'Connection failed. Please check your internet connection '
         'and try again.';
+  }
+
+  void _reportStage(PairingStage stage, String relayUrl) {
+    final uri = Uri.parse(relayUrl);
+    final endpoint = '${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+    debugPrint('Buzz pairing stage=${stage.name} endpoint=$endpoint');
+    if (state.status == PairingStatus.connecting) {
+      state = state.copyWith(stage: stage);
+    }
   }
 
   void _handleRelayMessage(List<dynamic> data) {
@@ -401,7 +451,7 @@ class PairingNotifier extends Notifier<PairingState> {
     if (!constantTimeEquals(receivedBytes, expectedHash)) {
       // NIP-AB §Step 3: target MUST send abort with reason "sas_mismatch".
       _sendAbort('sas_mismatch');
-      _cleanup();
+      _finishAttempt();
       state = const PairingState(
         status: PairingStatus.error,
         errorMessage:
@@ -434,7 +484,7 @@ class PairingNotifier extends Notifier<PairingState> {
     final nsec = ref.read(relayConfigProvider).nsec;
     if (nsec == null || nsec.isEmpty) {
       _sendAbort('protocol_error');
-      _cleanup();
+      _finishAttempt();
       state = const PairingState(
         status: PairingStatus.error,
         errorMessage: 'No identity is available on this phone.',
@@ -472,6 +522,7 @@ class PairingNotifier extends Notifier<PairingState> {
     final payloadType = msg['payload_type'] as String?;
     final payload = msg['payload'] as String?;
     if (payload == null) {
+      _finishAttempt();
       state = const PairingState(
         status: PairingStatus.error,
         errorMessage: 'Received empty payload from source.',
@@ -479,7 +530,7 @@ class PairingNotifier extends Notifier<PairingState> {
       return;
     }
 
-    _processPayload(payloadType, payload);
+    unawaited(_processPayload(payloadType, payload));
   }
 
   void _handleComplete(Map<String, dynamic> msg) {
@@ -487,20 +538,20 @@ class PairingNotifier extends Notifier<PairingState> {
       return;
     }
     if (msg['success'] != true) {
-      _cleanup();
+      _finishAttempt();
       state = const PairingState(
         status: PairingStatus.error,
         errorMessage: 'Desktop could not store the identity.',
       );
       return;
     }
-    _cleanup();
+    _finishAttempt();
     state = const PairingState(status: PairingStatus.success);
   }
 
   void _handleAbort(Map<String, dynamic> msg) {
     final reason = msg['reason'] as String? ?? 'unknown';
-    _cleanup();
+    _finishAttempt();
     state = PairingState(
       status: PairingStatus.error,
       errorMessage: 'Source device aborted pairing: $reason',
@@ -613,12 +664,17 @@ class PairingNotifier extends Notifier<PairingState> {
         state.status == PairingStatus.error) {
       return;
     }
-    _cleanup();
+    final wasConnecting = state.status == PairingStatus.connecting;
+    _finishAttempt();
     state = PairingState(
       status: PairingStatus.error,
-      errorMessage: 'Lost connection to pairing relay.',
+      errorMessage: wasConnecting && error != null
+          ? _friendlyErrorMessage(error)
+          : 'Lost connection to pairing relay.',
     );
   }
+
+  bool _isCurrentAttempt(int attempt) => attempt == _attemptGeneration;
 
   // ── Legacy buzz:// flow ───────────────────────────────────────────────
 

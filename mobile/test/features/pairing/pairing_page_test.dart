@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'package:buzz/features/pairing/pairing_socket.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/tappable_flapping_bee.dart';
@@ -160,6 +161,25 @@ void main() {
       expect(find.text('Connect'), findsNothing);
     });
 
+    testWidgets('shows the current secret-free pairing stage', (tester) async {
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            pairingProvider.overrideWith(
+              () => _ConnectingPairingNotifier(
+                stage: PairingStage.openingWebSocket,
+              ),
+            ),
+          ],
+          child: const PairingPage(),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Opening secure connection...'), findsOneWidget);
+      expect(find.byKey(const Key('pairing-progress')), findsOneWidget);
+    });
+
     testWidgets('pairing actions are disabled when connecting', (tester) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(
@@ -274,8 +294,13 @@ class _ErrorPairingNotifier extends Notifier<PairingState>
 
 class _ConnectingPairingNotifier extends Notifier<PairingState>
     implements PairingNotifier {
+  _ConnectingPairingNotifier({this.stage});
+
+  final PairingStage? stage;
+
   @override
-  PairingState build() => const PairingState(status: PairingStatus.connecting);
+  PairingState build() =>
+      PairingState(status: PairingStatus.connecting, stage: stage);
 
   @override
   Future<void> pair(String rawInput) async {}

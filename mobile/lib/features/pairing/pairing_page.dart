@@ -11,6 +11,7 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/tappable_flapping_bee.dart';
 import 'pairing_provider.dart';
 import 'pairing_qr_scanner.dart';
+import 'pairing_socket.dart';
 
 part 'pairing_page/onboarding_background.dart';
 part 'pairing_page/pairing_welcome_view.dart';
@@ -148,6 +149,7 @@ class PairingPage extends HookConsumerWidget {
                   child: _PairingWelcomeView(
                     codeController: codeController,
                     isBusy: isBusy,
+                    progressMessage: pairingState.stage?.label,
                     pairingCodeExpanded: pairingCodeExpanded.value,
                     errorMessage: pairingState.status == PairingStatus.error
                         ? pairingState.errorMessage

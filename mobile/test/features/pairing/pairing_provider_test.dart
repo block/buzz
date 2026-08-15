@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/pairing/pairing_crypto.dart';
@@ -59,6 +60,7 @@ void main() {
                 required ephemeralPrivkey,
                 required onMessage,
                 required void Function(Object? error) onDisconnected,
+                required onStage,
               }) => _DisconnectingSocket(disconnectCallback: onDisconnected),
         );
         container = ProviderContainer(
@@ -74,7 +76,7 @@ void main() {
         expect(container.read(pairingProvider).status, PairingStatus.error);
         expect(
           container.read(pairingProvider).errorMessage,
-          contains('internal error'),
+          contains('Connection failed'),
         );
       },
     );
@@ -208,11 +210,13 @@ void main() {
                 required ephemeralPrivkey,
                 required onMessage,
                 required onDisconnected,
+                required onStage,
               }) {
                 socket = _ControllableSocket(
                   ephemeralPrivkey: ephemeralPrivkey,
                   onMessage: onMessage,
                   onDisconnected: onDisconnected,
+                  onStage: onStage,
                 );
                 return socket;
               },
@@ -228,12 +232,75 @@ void main() {
       });
 
       test('recovery URI enables phone-to-desktop transfer', () async {
+        final stages = <PairingStage>[];
+        final subscription = container.listen(pairingProvider, (_, next) {
+          if (next.stage case final stage?) {
+            stages.add(stage);
+          }
+        });
+        addTearDown(subscription.close);
         await notifier.pair(recoveryCode);
 
         final state = container.read(pairingProvider);
         expect(state.status, PairingStatus.confirmingSas);
         expect(state.sendsIdentityToDesktop, isTrue);
         expect(state.sasCode, hasLength(6));
+        expect(socket.subscription, ('pair', 24134));
+        final messages = socket.decryptedPublishedMessages(sourceSecret);
+        expect(messages.any((message) => message['type'] == 'offer'), isTrue);
+        expect(stages, [
+          PairingStage.openingWebSocket,
+          PairingStage.webSocketOpen,
+          PairingStage.waitingForAuth,
+          PairingStage.connected,
+          PairingStage.subscribed,
+          PairingStage.offerPublished,
+        ]);
+      });
+
+      test('reset and retry ignore the previous socket callbacks', () async {
+        await notifier.pair(recoveryCode);
+        final previousSocket = socket;
+
+        notifier.reset();
+        await notifier.pair(recoveryCode);
+        previousSocket.emitDisconnected();
+
+        expect(
+          container.read(pairingProvider).status,
+          PairingStatus.confirmingSas,
+        );
+        expect(socket.isConnected, isTrue);
+      });
+
+      test('disconnect during offer delay remains terminal', () async {
+        final pairFuture = notifier.pair(recoveryCode);
+        await Future<void>.delayed(Duration.zero);
+
+        socket.emitDisconnected();
+        await pairFuture;
+
+        final state = container.read(pairingProvider);
+        expect(state.status, PairingStatus.error);
+        expect(state.errorMessage, contains('Connection failed'));
+      });
+
+      test('stage logs omit token-bearing relay paths', () async {
+        final messages = <String>[];
+        final previousDebugPrint = debugPrint;
+        debugPrint = (message, {wrapWidth}) {
+          if (message != null) messages.add(message);
+        };
+        addTearDown(() => debugPrint = previousDebugPrint);
+        final tokenCode = recoveryCode.replaceFirst(
+          'wss%3A%2F%2Fpairing.buzz.xyz',
+          'wss%3A%2F%2Fpairing.buzz.xyz%2Fpair%2Fsecret-token',
+        );
+
+        await notifier.pair(tokenCode);
+
+        expect(messages.join('\n'), contains('endpoint=pairing.buzz.xyz'));
+        expect(messages.join('\n'), isNot(contains('secret-token')));
       });
 
       test(
@@ -368,7 +435,10 @@ class _RecoveryRelayConfig extends RelayConfigNotifier {
 class _ControllableSocket extends PairingSocket {
   final String ephemeralPrivkey;
   final void Function(List<dynamic> message) relayMessageCallback;
+  final void Function(Object? error) disconnectCallback;
+  final void Function(PairingStage stage) stageCallback;
   final List<Map<String, dynamic>> published = [];
+  (String, int)? subscription;
   bool _connected = false;
   int _eventSequence = 0;
 
@@ -376,23 +446,40 @@ class _ControllableSocket extends PairingSocket {
     required this.ephemeralPrivkey,
     required super.onMessage,
     required super.onDisconnected,
+    required void Function(PairingStage stage) onStage,
   }) : relayMessageCallback = onMessage,
-       super(wsUrl: 'ws://unused', ephemeralPrivkey: ephemeralPrivkey);
+       disconnectCallback = onDisconnected,
+       stageCallback = onStage,
+       super(
+         wsUrl: 'ws://unused',
+         ephemeralPrivkey: ephemeralPrivkey,
+         onStage: onStage,
+       );
 
   @override
   bool get isConnected => _connected;
 
   @override
-  Future<void> connect() async => _connected = true;
+  Future<void> connect() async {
+    stageCallback(PairingStage.openingWebSocket);
+    stageCallback(PairingStage.webSocketOpen);
+    stageCallback(PairingStage.waitingForAuth);
+    _connected = true;
+    stageCallback(PairingStage.connected);
+  }
 
   @override
-  void subscribe(String subId, int kind, String pubkeyHex) {}
+  void subscribe(String subId, int kind, String pubkeyHex) {
+    subscription = (subId, kind);
+  }
 
   @override
   void publishEvent(Map<String, dynamic> event) => published.add(event);
 
   @override
   void dispose() => _connected = false;
+
+  void emitDisconnected() => disconnectCallback(Exception('stale socket'));
 
   List<Map<String, dynamic>> decryptedPublishedMessages(String sourceSecret) {
     final key = getConversationKey(

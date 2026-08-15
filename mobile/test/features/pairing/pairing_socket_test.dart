@@ -25,8 +25,91 @@ void main() {
       expect(socket.isConnected, isTrue);
     });
 
+    test('reports the open-relay connection stages in order', () async {
+      final server = await _TestRelay.start((_) {});
+      addTearDown(server.close);
+      final stages = <PairingStage>[];
+      final socket = _socket(
+        server.url,
+        authChallengeTimeout: const Duration(milliseconds: 30),
+        onStage: stages.add,
+      );
+      addTearDown(socket.disconnect);
+
+      await socket.connect();
+
+      expect(stages, [
+        PairingStage.openingWebSocket,
+        PairingStage.webSocketOpen,
+        PairingStage.waitingForAuth,
+        PairingStage.connected,
+      ]);
+    });
+
+    test('fails closed when the WebSocket open deadline expires', () async {
+      final channel = _NeverReadyWebSocketChannel();
+      final stages = <PairingStage>[];
+      var disconnectCount = 0;
+      final socket = _socket(
+        'wss://pairing.example.test/pair',
+        connectionTimeout: const Duration(milliseconds: 20),
+        channelFactory: (_) => channel,
+        onDisconnected: (_) => disconnectCount++,
+        onStage: stages.add,
+      );
+
+      await expectLater(
+        socket.connect(),
+        throwsA(
+          isA<PairingConnectionException>().having(
+            (error) => error.stage,
+            'stage',
+            PairingStage.openingWebSocket,
+          ),
+        ),
+      );
+
+      expect(stages, [PairingStage.openingWebSocket]);
+      expect(disconnectCount, 1);
+      expect(channel.closed, isTrue);
+    });
+
+    test('reports timeout even when pre-ready close never completes', () async {
+      final channel = _NeverReadyWebSocketChannel(closeCompletes: false);
+      final socket = _socket(
+        'wss://pairing.example.test/pair',
+        connectionTimeout: const Duration(milliseconds: 20),
+        channelFactory: (_) => channel,
+      );
+
+      await expectLater(
+        socket.connect().timeout(const Duration(seconds: 2)),
+        throwsA(isA<PairingConnectionException>()),
+      );
+    });
+
+    test('dispose settles a pending authentication wait', () async {
+      final channel = _ControlledWebSocketChannel();
+      final socket = _socket(
+        'wss://pairing.example.test/pair',
+        authChallengeTimeout: const Duration(seconds: 30),
+        channelFactory: (_) => channel,
+      );
+
+      final connect = socket.connect();
+      final expectation = expectLater(
+        connect.timeout(const Duration(seconds: 1)),
+        throwsA(isA<PairingCanceledException>()),
+      );
+      await Future<void>.delayed(Duration.zero);
+      socket.dispose();
+
+      await expectation;
+    });
+
     test('answers an AUTH challenge and requires an accepted OK', () async {
       final authReceived = Completer<List<dynamic>>();
+      final stages = <PairingStage>[];
       final server = await _TestRelay.start((webSocket) async {
         webSocket.add(jsonEncode(['AUTH', 'challenge']));
         final auth =
@@ -36,13 +119,20 @@ void main() {
         webSocket.add(jsonEncode(['OK', event['id'], true, 'authenticated']));
       });
       addTearDown(server.close);
-      final socket = _socket(server.url);
+      final socket = _socket(server.url, onStage: stages.add);
       addTearDown(socket.disconnect);
 
       await socket.connect();
 
       expect(socket.isConnected, isTrue);
       expect((await authReceived.future).first, 'AUTH');
+      expect(stages, [
+        PairingStage.openingWebSocket,
+        PairingStage.webSocketOpen,
+        PairingStage.waitingForAuth,
+        PairingStage.authenticating,
+        PairingStage.connected,
+      ]);
     });
 
     test('fails when the pairing relay rejects AUTH', () async {
@@ -180,19 +270,70 @@ void main() {
 
 PairingSocket _socket(
   String url, {
+  Duration connectionTimeout = const Duration(seconds: 10),
   Duration authChallengeTimeout = const Duration(milliseconds: 500),
   Duration authResponseTimeout = const Duration(seconds: 10),
   void Function(Object? error)? onDisconnected,
+  void Function(PairingStage stage)? onStage,
   WebSocketChannel Function(Uri uri)? channelFactory,
 }) => PairingSocket(
   wsUrl: url,
   ephemeralPrivkey: _privateKey,
   onMessage: (_) {},
   onDisconnected: onDisconnected ?? (_) {},
+  onStage: onStage,
+  connectionTimeout: connectionTimeout,
   authChallengeTimeout: authChallengeTimeout,
   authResponseTimeout: authResponseTimeout,
   channelFactory: channelFactory ?? WebSocketChannel.connect,
 );
+
+class _NeverReadyWebSocketChannel implements WebSocketChannel {
+  _NeverReadyWebSocketChannel({bool closeCompletes = true})
+    : _sink = _TrackingWebSocketSink(closeCompletes: closeCompletes);
+
+  final Completer<void> _ready = Completer<void>();
+  final StreamController<dynamic> _streamController = StreamController();
+  final _TrackingWebSocketSink _sink;
+
+  bool get closed => _sink.closed;
+
+  @override
+  Future<void> get ready => _ready.future;
+
+  @override
+  Stream<dynamic> get stream => _streamController.stream;
+
+  @override
+  WebSocketSink get sink => _sink;
+
+  @override
+  int? get closeCode => null;
+
+  @override
+  String? get closeReason => null;
+
+  @override
+  String? get protocol => null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _TrackingWebSocketSink extends _ControlledWebSocketSink {
+  _TrackingWebSocketSink({required this.closeCompletes});
+
+  final bool closeCompletes;
+  bool closed = false;
+
+  @override
+  Future<void> close([int? closeCode, String? closeReason]) async {
+    closed = true;
+    if (!closeCompletes) {
+      await Completer<void>().future;
+    }
+  }
+}
 
 class _ControlledWebSocketChannel implements WebSocketChannel {
   final StreamController<dynamic> _streamController = StreamController();

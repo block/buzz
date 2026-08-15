@@ -3,6 +3,7 @@ part of '../pairing_page.dart';
 class _PairingWelcomeView extends StatelessWidget {
   final TextEditingController codeController;
   final bool isBusy;
+  final String? progressMessage;
   final bool pairingCodeExpanded;
   final String? errorMessage;
   final VoidCallback onScan;
@@ -12,6 +13,7 @@ class _PairingWelcomeView extends StatelessWidget {
   const _PairingWelcomeView({
     required this.codeController,
     required this.isBusy,
+    required this.progressMessage,
     required this.pairingCodeExpanded,
     required this.errorMessage,
     required this.onScan,
@@ -189,6 +191,17 @@ class _PairingWelcomeView extends StatelessWidget {
                                   key: ValueKey('pairing-code-fields-hidden'),
                                 ),
                         ),
+                        if (isBusy && progressMessage != null) ...[
+                          const SizedBox(height: Grid.xxs),
+                          Text(
+                            progressMessage!,
+                            key: const Key('pairing-progress'),
+                            textAlign: TextAlign.center,
+                            style: context.textTheme.bodySmall?.copyWith(
+                              color: _onboardingMutedInk,
+                            ),
+                          ),
+                        ],
                         if (errorMessage != null) ...[
                           const SizedBox(height: Grid.twelve),
                           Container(
