@@ -257,11 +257,30 @@ def provenance() -> dict[str, Any]:
     }
 
 
-def scrubbed_environment() -> dict[str, str]:
-    keep = {"PATH", "TMPDIR", "LANG", "LC_ALL", "SHELL", "USER", "LOGNAME", "TERM", "SSH_AUTH_SOCK", "__CF_USER_TEXT_ENCODING"}
+def scrubbed_environment(*, include_home: bool = False) -> dict[str, str]:
+    keep = {"PATH", "TMPDIR", "LANG", "LC_ALL", "SHELL", "USER", "LOGNAME", "TERM", "__CF_USER_TEXT_ENCODING"}
     env = {key: value for key, value in os.environ.items() if key in keep and not SECRET_NAME.search(key)}
-    env["HOME"] = ""  # filled per run
+    env["HOME"] = os.environ.get("HOME", "") if include_home else ""  # isolated per run unless tooling needs host caches
     return env
+
+
+def fixture_environment(isolation: dict[str, str], review_pubkey: str) -> dict[str, str]:
+    """Return fixed local fixture coordinates without inheriting host credentials."""
+    parsed = urllib.parse.urlparse(isolation["relay_url"])
+    port = parsed.port or 80
+    if port != 3030:
+        raise HarnessError("fixture seeding requires the isolated relay at loopback port 3030")
+    return {
+        **scrubbed_environment(include_home=True),
+        "BUZZ_REVIEW_PUBKEY": review_pubkey,
+        "BUZZ_COMMUNITY_HOST": f"{parsed.hostname}:{port}",
+        "BUZZ_DB_HOST": "localhost",
+        "BUZZ_DB_PORT": "5471",
+        "BUZZ_DB_USER": "buzz",
+        "BUZZ_DB_PASS": "buzz_dev",
+        "BUZZ_DB_NAME": "buzz",
+        "BUZZ_DB_DOCKER_CONTAINER": "buzz-harness-postgres-1",
+    }
 
 
 def driver_binary() -> pathlib.Path:
@@ -277,7 +296,8 @@ def build_driver() -> pathlib.Path:
         if not binary.is_file():
             raise HarnessError(f"configured driver does not exist: {binary}")
         return binary
-    run(["swift", "build", "-c", "release", "--package-path", str(TOOL_ROOT / "swift")], capture=False)
+    run(["swift", "build", "-c", "release", "--package-path", str(TOOL_ROOT / "swift")],
+        env=scrubbed_environment(include_home=True), capture=False)
     if not binary.is_file():
         raise HarnessError(f"Swift build succeeded without driver binary: {binary}")
     return binary
@@ -287,7 +307,8 @@ class Driver:
     def __init__(self, binary: pathlib.Path, pid: int, semantic_snapshot: pathlib.Path):
         self.process = subprocess.Popen([str(binary), "serve", "--pid", str(pid),
                                          "--semantic-snapshot", str(semantic_snapshot)], stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        env=scrubbed_environment(include_home=True), text=True, bufsize=1)
 
     def request(self, command: str, **payload: Any) -> dict[str, Any]:
         assert self.process.stdin and self.process.stdout
@@ -349,8 +370,8 @@ def doctor(require_permissions: bool = False) -> dict[str, Any]:
 def prepare_fixture(run_dir: pathlib.Path, isolation: dict[str, str]) -> dict[str, Any]:
     admin = ROOT / "target" / "debug" / "buzz-admin"
     if not admin.is_file():
-        run(["cargo", "build", "-p", "buzz-admin"], capture=False)
-    generated = run([str(admin), "generate-key"]).stdout
+        run(["cargo", "build", "-p", "buzz-admin"], env=scrubbed_environment(include_home=True), capture=False)
+    generated = run([str(admin), "generate-key"], env=scrubbed_environment(include_home=True)).stdout
     secret_match = re.search(r"Secret key:\s+(\S+)", generated)
     public_match = re.search(r"Public key:\s+(\S+)", generated)
     if not secret_match or not public_match:
@@ -364,15 +385,12 @@ def prepare_fixture(run_dir: pathlib.Path, isolation: dict[str, str]) -> dict[st
         "secret_path": str(secret_path), "relay_url": isolation["relay_url"],
         "seed": "scripts/setup-desktop-test-data.sh", "cleanup_scope": "run-local app state and keyring only",
     }
-    parsed = urllib.parse.urlparse(isolation["relay_url"])
-    port = parsed.port or 80
-    seed_env = {**os.environ, "BUZZ_REVIEW_PUBKEY": fixture["identity_pubkey"],
-                "BUZZ_COMMUNITY_HOST": f"{parsed.hostname}:{port}"}
-    if port == 3030:
-        seed_env.update({"BUZZ_DB_HOST": "localhost", "BUZZ_DB_PORT": "5471", "BUZZ_DB_USER": "buzz",
-                         "BUZZ_DB_PASS": "buzz_dev", "BUZZ_DB_NAME": "buzz",
-                         "BUZZ_DB_DOCKER_CONTAINER": "buzz-harness-postgres-1"})
-    run([str(ROOT / "scripts/setup-desktop-test-data.sh")], env=seed_env, capture=False)
+    try:
+        run([str(ROOT / "scripts/setup-desktop-test-data.sh")],
+            env=fixture_environment(isolation, fixture["identity_pubkey"]), capture=False)
+    except Exception:
+        secret_path.unlink(missing_ok=True)
+        raise
     (run_dir / "manifest" / "fixture.json").write_text(json.dumps({k: v for k, v in fixture.items() if k != "secret_path"}, indent=2))
     return fixture
 
@@ -428,8 +446,7 @@ def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: 
         "identifier": isolation["bundle_id"], "productName": "Buzz Native Review",
         "bundle": {"externalBin": []},
     }, separators=(",", ":"))
-    build_env = scrubbed_environment()
-    build_env["HOME"] = os.environ["HOME"]
+    build_env = scrubbed_environment(include_home=True)
     build_env["VITE_NATIVE_REVIEW"] = "1"
     build_env["VITE_NATIVE_REVIEW_RELAY"] = isolation["relay_url"]
     build_env["VITE_NATIVE_REVIEW_PUBKEY"] = fixture["identity_pubkey"]
