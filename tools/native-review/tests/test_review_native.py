@@ -107,15 +107,48 @@ class JourneyTests(unittest.TestCase):
         self.assertNotIn(safe["bundle_id"], review_native.PRODUCTION_BUNDLE_IDS)
 
     def test_secret_environment_is_scrubbed(self):
-        old = review_native.os.environ.get("BUZZ_PRIVATE_KEY")
-        review_native.os.environ["BUZZ_PRIVATE_KEY"] = "must-not-survive"
-        try:
-            self.assertNotIn("BUZZ_PRIVATE_KEY", review_native.scrubbed_environment())
-        finally:
-            if old is None:
-                review_native.os.environ.pop("BUZZ_PRIVATE_KEY", None)
-            else:
-                review_native.os.environ["BUZZ_PRIVATE_KEY"] = old
+        sentinels = {
+            "BUZZ_PRIVATE_KEY": "must-not-survive",
+            "SSH_AUTH_SOCK": "/tmp/credential-agent",
+            "GITHUB_TOKEN": "github-secret",
+            "AWS_SECRET_ACCESS_KEY": "cloud-secret",
+        }
+        with mock.patch.dict(review_native.os.environ, sentinels, clear=False):
+            environment = review_native.scrubbed_environment()
+        for name in sentinels:
+            self.assertNotIn(name, environment)
+
+    def test_fixture_environment_is_fixed_local_and_scrubbed(self):
+        sentinels = {"BUZZ_DB_HOST": "production-db", "BUZZ_DB_PASS": "production-secret",
+                     "SSH_AUTH_SOCK": "/tmp/credential-agent"}
+        isolation = review_native.isolation_manifest("run", "ws://127.0.0.1:3030")
+        with mock.patch.dict(review_native.os.environ, sentinels, clear=False):
+            environment = review_native.fixture_environment(isolation, "a" * 64)
+        self.assertEqual(environment["BUZZ_DB_HOST"], "localhost")
+        self.assertEqual(environment["BUZZ_DB_PORT"], "5471")
+        self.assertEqual(environment["BUZZ_DB_PASS"], "buzz_dev")
+        self.assertNotIn("SSH_AUTH_SOCK", environment)
+        with self.assertRaisesRegex(review_native.HarnessError, "port 3030"):
+            review_native.fixture_environment(
+                review_native.isolation_manifest("run", "ws://127.0.0.1:3001"), "a" * 64)
+
+    def test_fixture_seed_failure_removes_generated_identity(self):
+        generated = mock.Mock(stdout=f"Secret key: {'1' * 64}\nPublic key: {'2' * 64}\n")
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = pathlib.Path(directory)
+            (run_dir / "manifest").mkdir()
+            isolation = review_native.isolation_manifest("run", "ws://127.0.0.1:3030")
+            with mock.patch.object(review_native, "run", side_effect=[generated, RuntimeError("seed failed")]):
+                with self.assertRaisesRegex(RuntimeError, "seed failed"):
+                    review_native.prepare_fixture(run_dir, isolation)
+            self.assertFalse((run_dir / "state/identity.key").exists())
+
+    def test_repository_controlled_subprocesses_receive_scrubbed_environments(self):
+        safe = {"PATH": "/usr/bin", "HOME": "/tmp/home"}
+        with mock.patch.object(review_native, "scrubbed_environment", return_value=safe), \
+             mock.patch.object(review_native.subprocess, "Popen") as popen:
+            review_native.Driver(pathlib.Path("/tmp/driver"), 42, pathlib.Path("/tmp/snapshot"))
+        self.assertEqual(popen.call_args.kwargs["env"], safe)
 
     def test_visible_window_waits_for_reveal(self):
         driver = mock.Mock()
