@@ -1506,16 +1506,30 @@ impl<'a> Iterator for PktLineIter<'a> {
 /// never mutate published state, so there is no fence to preserve — contrast
 /// `receive_pack`, which must buffer into [`PackOutput`] so [`finalize_push`]
 /// can sequence the pointer CAS *before* any 2xx byte exists.
+/// In-flight `child.wait()` started at stdout EOF. Boxed because it owns the
+/// [`tokio::process::Child`], which lets the wait be polled from `poll_next`
+/// without borrowing `self`.
+type ReapFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Send>,
+>;
+
 struct StreamingGit {
     inner: TimedByteStream<tokio_util::io::ReaderStream<tokio::process::ChildStdout>>,
-    /// Held purely to extend lifetime. `kill_on_drop(true)` means dropping
-    /// this after the stream completes reaps any lingering process; on the
-    /// happy path the child has already exited by then.
-    child: tokio::process::Child,
+    /// Held to extend lifetime and to reap the exit status at stdout EOF.
+    /// `kill_on_drop(true)` means dropping this after the stream completes
+    /// reaps any lingering process; on the happy path the child has already
+    /// exited by then. Moved into [`StreamingGit::reap`] when the wait starts.
+    child: Option<tokio::process::Child>,
+    /// The pending exit-status wait. `None` until stdout reaches EOF.
+    reap: Option<ReapFuture>,
+    /// Set once the exit status has been decided, so a body polled again
+    /// after it ends does not try to reap a second time.
+    reaped: bool,
     /// The ephemeral bare repo the subprocess reads objects from. Must not be
     /// removed from disk until the subprocess is done — i.e. until the stream
-    /// ends.
-    _repo: HydratedRepo,
+    /// ends. Held only to own that lifetime, so tests that drive the stream
+    /// against a plain subprocess pass `None`.
+    _repo: Option<HydratedRepo>,
     /// Pumping the request body is detached from response polling. Abort it
     /// when the response is dropped or the subprocess times out.
     stdin_task: tokio::task::JoinHandle<()>,
@@ -1563,18 +1577,74 @@ impl futures_util::Stream for StreamingGit {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let poll = std::pin::Pin::new(&mut self.inner).poll_next(cx);
-        if matches!(
-            &poll,
-            std::task::Poll::Ready(Some(Err(error)))
-                if error.kind() == std::io::ErrorKind::TimedOut
-        ) {
-            self.stdin_task.abort();
-            if let Err(error) = self.child.start_kill() {
-                warn!(error = %error, "timed-out git upload-pack could not be killed");
+        if self.reaped {
+            return std::task::Poll::Ready(None);
+        }
+
+        // Still draining stdout: pass bytes through untouched. Only EOF falls
+        // out of this block, because EOF is the point where a clean end and a
+        // failed subprocess become indistinguishable to the client.
+        if self.reap.is_none() {
+            match std::pin::Pin::new(&mut self.inner).poll_next(cx) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Some(Ok(chunk))) => {
+                    return std::task::Poll::Ready(Some(Ok(chunk)));
+                }
+                std::task::Poll::Ready(Some(Err(error))) => {
+                    if error.kind() == std::io::ErrorKind::TimedOut {
+                        self.stdin_task.abort();
+                        if let Some(child) = self.child.as_mut() {
+                            if let Err(error) = child.start_kill() {
+                                warn!(error = %error, "timed-out git upload-pack could not be killed");
+                            }
+                        }
+                    }
+                    self.reaped = true;
+                    return std::task::Poll::Ready(Some(Err(error)));
+                }
+                std::task::Poll::Ready(None) => match self.child.take() {
+                    Some(mut child) => {
+                        self.reap = Some(Box::pin(async move { child.wait().await }));
+                    }
+                    None => {
+                        self.reaped = true;
+                        return std::task::Poll::Ready(None);
+                    }
+                },
             }
         }
-        poll
+
+        // stdout is at EOF. The status line is already 200 and cannot be
+        // retracted, so a failed upload-pack is reported as an in-band body
+        // error — the same channel the timeout path uses. Ending the stream
+        // cleanly here would hand the client a well-formed short pack and let
+        // it record a successful clone of an incomplete repository.
+        let status = match self.reap.as_mut() {
+            Some(reap) => match std::future::Future::poll(reap.as_mut(), cx) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(status) => status,
+            },
+            None => {
+                self.reaped = true;
+                return std::task::Poll::Ready(None);
+            }
+        };
+        self.reap = None;
+        self.reaped = true;
+
+        match status {
+            Ok(status) if status.success() => std::task::Poll::Ready(None),
+            Ok(status) => {
+                error!(status = %status, "git upload-pack exited non-zero after streaming");
+                std::task::Poll::Ready(Some(Err(std::io::Error::other(format!(
+                    "git subprocess failed: {status}"
+                )))))
+            }
+            Err(error) => {
+                error!(error = %error, "could not determine git upload-pack exit status");
+                std::task::Poll::Ready(Some(Err(error)))
+            }
+        }
     }
 }
 
@@ -1716,8 +1786,10 @@ fn stream_git_read(
     let stdout = child.stdout.take().expect("stdout piped");
     let git_stream = StreamingGit {
         inner: TimedByteStream::new(tokio_util::io::ReaderStream::new(stdout), PACK_OPS_TIMEOUT),
-        child,
-        _repo: repo,
+        child: Some(child),
+        reap: None,
+        reaped: false,
+        _repo: Some(repo),
         stdin_task,
     };
 
@@ -2739,6 +2811,75 @@ mod track_c_tests {
             .expect_err("timeout error");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(stream.next().await.is_none());
+    }
+
+    /// Drive [`StreamingGit`] over a plain subprocess. `_repo` is `None`
+    /// because it exists only to own a tempdir lifetime, which a shell
+    /// command does not need.
+    fn streaming_git_over_shell(script: &str) -> StreamingGit {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn test subprocess");
+        let stdout = child.stdout.take().expect("stdout piped");
+        StreamingGit {
+            inner: TimedByteStream::new(
+                tokio_util::io::ReaderStream::new(stdout),
+                Duration::from_secs(5),
+            ),
+            child: Some(child),
+            reap: None,
+            reaped: false,
+            _repo: None,
+            stdin_task: tokio::spawn(async {}),
+        }
+    }
+
+    /// The status line is already 200 by the time the body streams, so a
+    /// subprocess that dies mid-pack must break the body. Ending cleanly
+    /// would let the client record a successful clone of a short pack.
+    #[tokio::test]
+    async fn upload_pack_stream_fails_closed_when_subprocess_exits_non_zero() {
+        use futures_util::StreamExt;
+
+        let mut stream = streaming_git_over_shell("printf partial; exit 1");
+        let mut body = Vec::new();
+        let mut failure = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => body.extend_from_slice(&chunk),
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(body, b"partial");
+        let failure =
+            failure.expect("non-zero upload-pack must end the body with an error, not cleanly");
+        assert!(
+            failure.to_string().contains("git subprocess failed"),
+            "unexpected error: {failure}"
+        );
+    }
+
+    /// Positive control for the test above: without this, a stream that
+    /// always errored would pass it.
+    #[tokio::test]
+    async fn upload_pack_stream_ends_cleanly_when_subprocess_succeeds() {
+        use futures_util::StreamExt;
+
+        let mut stream = streaming_git_over_shell("printf ok; exit 0");
+        let mut body = Vec::new();
+        while let Some(item) = stream.next().await {
+            body.extend_from_slice(&item.expect("healthy upload-pack must not error"));
+        }
+
+        assert_eq!(body, b"ok");
     }
 
     #[tokio::test]
