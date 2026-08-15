@@ -24,8 +24,10 @@ allowlisted before the ephemeral key is added; inherited tokens and production
 keys never enter the reviewed process. Production bundle IDs, keyring services,
 and remote relays fail closed.
 
-iOS runs erase the selected simulator before and after the journey. Do not point
-the runner at a simulator containing state you need. The Flutter child receives
+iOS runs create a uniquely named disposable simulator from the selected device
+type and runtime, record its run-owned UDID, and delete only that simulator during
+cleanup. Pre-existing simulators are never selected, erased, or deleted. The
+Flutter child receives
 only an allowlist of host tool settings plus review-only flags; inherited tokens,
 production keys, and cloud credentials do not enter the reviewed process. The
 review-only environment suppresses the launch notification prompt because
