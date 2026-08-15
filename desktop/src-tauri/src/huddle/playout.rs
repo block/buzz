@@ -192,14 +192,35 @@ pub(crate) async fn run_playout_recv_loop(
     let mut speaker_level_tick =
         tokio::time::interval(std::time::Duration::from_millis(SPEAKER_LEVEL_TICK_MS));
     speaker_level_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Windows timers default to a 15.6 ms resolution, and tokio intervals
+    // fire ~14.6 ms late there on average (tokio-rs/tokio#5021). At that
+    // resolution the 10 ms playout tick below manages only ~62 of the 100
+    // required pulls per second (measured on Windows 11: 62.4 ticks/s
+    // without the raised resolution, 100.2 with it). Raise the resolution
+    // to 1 ms for the lifetime of the playout loop and hand it back on exit.
+    #[cfg(windows)]
+    let _timer_resolution = {
+        struct TimerResolutionGuard;
+        impl Drop for TimerResolutionGuard {
+            fn drop(&mut self) {
+                unsafe { windows_sys::Win32::Media::timeEndPeriod(1) };
+            }
+        }
+        unsafe { windows_sys::Win32::Media::timeBeginPeriod(1) };
+        TimerResolutionGuard
+    };
+
     let mut playout_tick = tokio::time::interval(std::time::Duration::from_millis(PLAYOUT_TICK_MS));
-    // `Delay` (not `Skip`) so a brief stall in another select arm — e.g. the
-    // ws_tx_for_pongs mutex contending with the encode-side task on a Ping —
-    // doesn't drop a playout tick outright. Dropped ticks would leave the
-    // per-peer Player queues empty for 10 ms and the device mixer would
-    // produce audible silence. `Delay` catches up immediately when the loop
-    // returns to the select.
-    playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // `Burst` rather than `Delay` or `Skip`. `Delay` never shortens the
+    // ticks that follow a missed one ("ticks are not shortened"), so once
+    // the timer resolves coarsely or the WebView loads the core, the mean
+    // pull rate stays below 100/s for good: the per-peer Player queues
+    // starve (audible gaps, dropped words) while NetEq stays full and
+    // time-compresses playback indefinitely (metallic, sped-up voices).
+    // `Burst` makes up missed ticks immediately and holds the mean rate;
+    // the short catch-up bursts are absorbed by the existing queue
+    // recovery (hysteresis 10→4, emergency trim at 30).
+    playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
 
     loop {
         tokio::select! {
