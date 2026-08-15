@@ -46,3 +46,51 @@ pub fn truncation_notice(
         "showing {returned} results — {bound} was reached, so more may exist; {advice}"
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_limit, truncation_notice};
+
+    #[test]
+    fn effective_limit_applies_the_default_then_the_cap() {
+        assert_eq!(effective_limit(None, 50, 200), 50);
+        assert_eq!(effective_limit(Some(10), 50, 200), 10);
+        assert_eq!(effective_limit(Some(1_000), 50, 200), 200);
+    }
+
+    #[test]
+    fn a_short_read_is_silent() {
+        // The only provably complete case.
+        assert_eq!(truncation_notice(19, None, 20, 50), None);
+        assert_eq!(truncation_notice(0, Some(10), 20, 50), None);
+    }
+
+    #[test]
+    fn a_full_default_read_names_the_default() {
+        let notice = truncation_notice(20, None, 20, 50).expect("full read must warn");
+        assert!(notice.contains("the default limit of 20"), "{notice}");
+        assert!(notice.contains("max 50"), "{notice}");
+    }
+
+    #[test]
+    fn a_clamped_limit_says_it_was_clamped() {
+        let notice = truncation_notice(50, Some(500), 20, 50).expect("full read must warn");
+        assert!(notice.contains("--limit 500, capped at 50"), "{notice}");
+        // At the cap there is no larger limit to suggest.
+        assert!(notice.contains("--since"), "{notice}");
+    }
+
+    #[test]
+    fn a_read_at_the_requested_limit_names_that_limit() {
+        let notice = truncation_notice(30, Some(30), 20, 50).expect("full read must warn");
+        assert!(notice.contains("--limit 30"), "{notice}");
+        assert!(!notice.contains("capped"), "{notice}");
+    }
+
+    #[test]
+    fn an_overlong_read_still_warns() {
+        // A relay that ignores the limit and returns more must not read as
+        // complete just because the count is above the bound.
+        assert!(truncation_notice(60, None, 20, 50).is_some());
+    }
+}
