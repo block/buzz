@@ -1,4 +1,5 @@
 import {
+  BookOpenText,
   Braces,
   ChevronRight,
   CodeXml,
@@ -32,7 +33,8 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
+import { Button } from "@/shared/ui/button";
+import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   PROJECT_DETAIL_PANEL_CLASS,
@@ -548,7 +550,9 @@ function FileContentPanel({
   file: ProjectRepoFile;
   onOpenPath: (path: string) => void;
 }) {
+  const [showMarkdownSource, setShowMarkdownSource] = React.useState(false);
   const language = languageForPath(file.path);
+  const isMarkdown = /\.(?:md|markdown|mdx)$/i.test(file.path);
   const pathSegments = file.path.split("/").filter(Boolean);
   const fileName = pathSegments[pathSegments.length - 1] ?? file.path;
   const directorySegments = pathSegments.slice(0, -1);
@@ -575,6 +579,27 @@ function FileContentPanel({
         <span className="min-w-0 flex-1 truncate px-1.5 py-1 font-mono text-xs text-foreground">
           {fileName}
         </span>
+        {isMarkdown && file.previewContent ? (
+          <Button
+            aria-pressed={showMarkdownSource}
+            onClick={() => setShowMarkdownSource((current) => !current)}
+            size="xs"
+            type="button"
+            variant="ghost"
+          >
+            {showMarkdownSource ? (
+              <>
+                <BookOpenText />
+                View rendered
+              </>
+            ) : (
+              <>
+                <FileCode2 />
+                View source
+              </>
+            )}
+          </Button>
+        ) : null}
         <div className="hidden shrink-0 items-center gap-3 text-2xs text-muted-foreground sm:flex">
           <span>Last changed {formatLastChangedAt(file.lastChangedAt)}</span>
           <span>{formatFileSize(file.size)}</span>
@@ -586,7 +611,15 @@ function FileContentPanel({
       <div className="border-border/50 border-b bg-muted/10 px-4 py-2 text-2xs text-muted-foreground sm:hidden">
         Last changed {formatLastChangedAt(file.lastChangedAt)}
       </div>
-      {file.previewContent ? (
+      {file.previewContent && isMarkdown && !showMarkdownSource ? (
+        <div className="max-h-[36rem] overflow-auto bg-background/60 p-6">
+          <Markdown
+            className="text-sm"
+            content={file.previewContent}
+            interactive={false}
+          />
+        </div>
+      ) : file.previewContent ? (
         <pre className="max-h-[36rem] overflow-auto bg-background/60 p-4">
           {language ? (
             <SyntaxHighlightedCode

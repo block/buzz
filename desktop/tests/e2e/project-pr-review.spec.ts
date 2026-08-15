@@ -1122,6 +1122,37 @@ test("project detail content areas do not paint background fills", async ({
   await expectVisiblePanelsToBeTransparent();
 });
 
+test("project Markdown files render by default and retain a source view", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Files", exact: true }).click();
+  await page.getByText("docs", { exact: true }).click();
+  await page.getByText("TEAM_GUIDE.md", { exact: true }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Team guide", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Project Markdown", { exact: true }),
+  ).toHaveJSProperty("tagName", "STRONG");
+  await expect(page.getByText("# Team guide", { exact: true })).toHaveCount(0);
+  await waitForAnimations(page);
+  await page.screenshot({
+    fullPage: false,
+    path: `${SHOTS}/markdown-file-rendered.png`,
+  });
+
+  await page.getByRole("button", { name: "View source" }).click();
+  await expect(page.getByText("# Team guide", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "View rendered" }),
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
 test("project without a checkout offers fetch feedback and dropdown cloning", async ({
   page,
 }) => {

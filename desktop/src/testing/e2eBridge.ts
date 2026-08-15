@@ -11442,6 +11442,20 @@ export function maybeInstallE2eTauriMocks() {
           ],
           files: [
             {
+              path: "docs/TEAM_GUIDE.md",
+              kind: "blob",
+              size: 142,
+              preview_content: [
+                "# Team guide",
+                "",
+                "Use **Project Markdown** for durable team knowledge.",
+                "",
+                "```bash",
+                "buzz repos get --id team-wiki",
+                "```",
+              ].join("\n"),
+            },
+            {
               path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
               kind: "blob",
               size: 18420,
