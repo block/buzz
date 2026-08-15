@@ -137,6 +137,25 @@ Controls which authors' events the harness forwards to the agent. Events from di
 |------|---------|---------|-------------|
 | `--respond-to` | `BUZZ_ACP_RESPOND_TO` | `owner-only` | Author gate mode: `owner-only`, `allowlist`, `anyone`, `nobody`. |
 | `--respond-to-allowlist` | `BUZZ_ACP_RESPOND_TO_ALLOWLIST` | — | Comma-separated 64-char hex pubkeys (required when mode is `allowlist`). Owner is always implicitly included. |
+| `--channel-add-policy` | `BUZZ_ACP_CHANNEL_ADD_POLICY` | — | Current relay policy: `anyone`, `owner_only`, or `nobody`. Required only for the first kind `10100` directory reconciliation when no existing profile supplies it. |
+
+### Agent Directory Reconciliation
+
+After channel discovery and subscription, the harness reconciles its public,
+replaceable kind `10100` directory profile. It publishes the current channel
+IDs and names plus the effective `respond_to` mode and allowlist, while
+preserving unknown fields from the existing profile. Desktop clients use this
+directory event to admit remote/headless agents to mention autocomplete and to
+the final send boundary. The runtime owner is added to the public directory
+allowlist because `buzz-acp` admits that owner implicitly; `owner-only` is
+projected to the equivalent one-owner allowlist for clients that cannot resolve
+the harness's private owner configuration.
+
+The harness never guesses `channel_add_policy`. If no kind `10100` profile
+exists yet, set `BUZZ_ACP_CHANNEL_ADD_POLICY` to the identity's current relay
+policy for the first start. Later starts retain the published value when the
+setting is omitted. Reconciliation failures are logged and do not prevent the
+harness from receiving already-authorized traffic.
 
 **Modes:**
 
