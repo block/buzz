@@ -222,6 +222,15 @@ metrics:
             self.assertEqual(result["status"], "passed")
             self.assertEqual(result["baseline"]["metrics"]["tooltip_open_latency"]["median"], 101)
 
+    def test_comparison_fails_when_one_sample_exceeds_absolute_maximum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", value)
+                         for i, value in enumerate((100, 100, 10000))]
+            with self.assertRaisesRegex(review_native.HarnessError, "maximum 10000.000 exceeds absolute maximum 1000"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
     def test_comparison_fails_on_relative_regression(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

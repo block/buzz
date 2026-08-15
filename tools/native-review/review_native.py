@@ -773,12 +773,13 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     for name, limits in metrics.items():
         baseline_median = baseline_summary["metrics"][name]["median"]
         candidate_median = candidate_summary["metrics"][name]["median"]
+        candidate_maximum = candidate_summary["metrics"][name]["maximum"]
         regression = None if baseline_median == 0 and candidate_median > 0 else (
             0.0 if baseline_median == 0 else (candidate_median - baseline_median) / baseline_median * 100
         )
         reasons = []
-        if "max" in limits and candidate_median > limits["max"]:
-            reasons.append(f"median {candidate_median:.3f} exceeds absolute maximum {limits['max']}")
+        if "max" in limits and candidate_maximum > limits["max"]:
+            reasons.append(f"maximum {candidate_maximum:.3f} exceeds absolute maximum {limits['max']}")
         if "max_regression_percent" in limits:
             if regression is None:
                 reasons.append("relative regression is undefined because the baseline median is zero")
