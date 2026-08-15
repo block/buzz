@@ -1,4 +1,22 @@
 //! Named Windows Job Object identity for detached durable jobs.
+//!
+//! # Safety
+//!
+//! This module is exempted from the crate's `#![deny(unsafe_code)]` policy
+//! because Win32 Job Object management has no safe Rust wrapper. Every
+//! `unsafe` block is a direct FFI call with three invariants, each held by
+//! construction:
+//!
+//! * Handles returned by `CreateJobObjectW`/`OpenJobObjectW`/`OpenProcess`
+//!   are owned solely by this module and closed exactly once on every path
+//!   (including errors) via `CloseHandle`.
+//! * Structs passed to query/set calls (`JOBOBJECT_*`) are stack-allocated
+//!   with `size_of::<T>()` as the byte length, matching the ABI layout
+//!   `windows_sys` re-declares.
+//! * Pointer arguments to FFI calls are derived from initialized locals or
+//!   NUL-terminated wide strings; no pointer arithmetic is performed.
+//!
+//! Windows-only (`#[cfg(windows)]`); not compiled on other targets.
 
 use std::io;
 use std::mem::{size_of, zeroed};

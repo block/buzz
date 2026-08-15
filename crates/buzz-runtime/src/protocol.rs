@@ -6,41 +6,41 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Current loopback control protocol version.
+/// Control protocol version: 1, selected by loopback frame validation.
 pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
-/// Current runtime receipt schema version.
+/// Runtime receipt schema version: 2, selected by receipt validation.
 pub const RUNTIME_RECEIPT_SCHEMA_VERSION: u8 = 2;
-/// Phase-0 receipt schema written by a lock-owning legacy harness.
+/// Legacy runtime receipt schema version: 1, used for phase-0 handoff compatibility.
 pub const LEGACY_RUNTIME_RECEIPT_SCHEMA_VERSION: u8 = 1;
-/// Maximum encoded control request size.
+/// Maximum encoded control request: 64 KiB, bounding one loopback frame.
 pub const MAX_CONTROL_REQUEST_BYTES: usize = 64 * 1024;
-/// Maximum encoded control response size.
+/// Maximum encoded control response: 1 MiB, bounding one loopback frame.
 pub const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
-/// Control connect/read/write deadline in seconds.
+/// Control deadline: 5 seconds for connect, read, and write operations.
 pub const CONTROL_DEADLINE_SECS: u64 = 5;
-/// Only supported job driver.
+/// Supported job driver: `lh`, limiting execution to the managed harness.
 pub const SUPPORTED_JOB_DRIVER: &str = "lh";
-/// Maximum driver length in UTF-8 bytes.
+/// Maximum driver length: 64 UTF-8 bytes, bounding request metadata.
 pub const MAX_DRIVER_BYTES: usize = 64;
-/// Maximum number of argv entries.
+/// Maximum argv entries: 256, bounding runner input cardinality.
 pub const MAX_ARGV_ELEMENTS: usize = 256;
-/// Maximum length of one argv entry in UTF-8 bytes.
+/// Maximum argv-entry length: 8 KiB, bounding one runner argument.
 pub const MAX_ARG_BYTES: usize = 8 * 1024;
-/// Maximum serialized argv length.
+/// Maximum serialized argv length: 64 KiB, bounding encoded runner input.
 pub const MAX_JOB_ARGV_JSON_BYTES: usize = 64 * 1024;
-/// Maximum cwd length in UTF-8 bytes.
+/// Maximum cwd length: 4 KiB, bounding workspace metadata.
 pub const MAX_CWD_BYTES: usize = 4 * 1024;
-/// Maximum summary or cancellation-reason length in UTF-8 bytes.
+/// Maximum summary or cancellation-reason length: 4 KiB, bounding user-facing text.
 pub const MAX_SUMMARY_BYTES: usize = 4 * 1024;
-/// Maximum number of artifact references.
+/// Maximum artifact references: 32, bounding response metadata.
 pub const MAX_ARTIFACTS: usize = 32;
-/// Maximum artifact name length in UTF-8 bytes.
+/// Maximum artifact-name length: 256 UTF-8 bytes, bounding reference metadata.
 pub const MAX_ARTIFACT_NAME_BYTES: usize = 256;
-/// Maximum artifact URI length in UTF-8 bytes.
+/// Maximum artifact-URI length: 2 KiB, bounding reference metadata.
 pub const MAX_ARTIFACT_URI_BYTES: usize = 2 * 1024;
-/// Default number of local log lines returned.
+/// Default local log-tail length: 100 lines when the caller omits a value.
 pub const DEFAULT_LOG_TAIL_LINES: u16 = 100;
-/// Maximum number of local log lines returned.
+/// Maximum local log-tail length: 1,000 lines returned to a caller.
 pub const MAX_LOG_TAIL_LINES: u16 = 1_000;
 /// Applies default and maximum bounds to a requested local log tail.
 pub fn bounded_log_tail_lines(requested: Option<u16>) -> u16 {
@@ -48,7 +48,7 @@ pub fn bounded_log_tail_lines(requested: Option<u16>) -> u16 {
         .unwrap_or(DEFAULT_LOG_TAIL_LINES)
         .min(MAX_LOG_TAIL_LINES)
 }
-/// Maximum assignment identifier, summary, or state-detail length.
+/// Maximum assignment identifier, summary, or state-detail length: 4 KiB.
 pub const MAX_ASSIGNMENT_TEXT_BYTES: usize = 4 * 1024;
 
 /// Stable identifier for a managed runtime pair.
@@ -666,6 +666,7 @@ pub struct ControlResponse {
     pub error: Option<ControlError>,
 }
 impl ControlResponse {
+    /// Builds a successful response frame with the current protocol version.
     pub fn success(payload: ControlPayload) -> Self {
         Self {
             protocol_version: CONTROL_PROTOCOL_VERSION,
@@ -673,6 +674,7 @@ impl ControlResponse {
             error: None,
         }
     }
+    /// Builds a failure response frame with the current protocol version.
     pub fn failure(error: ControlError) -> Self {
         Self {
             protocol_version: CONTROL_PROTOCOL_VERSION,

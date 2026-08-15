@@ -435,6 +435,8 @@ pub(crate) fn process_group_has_live_members(
         ) -> libc::c_int;
     }
 
+    // SAFETY: sizing call. libproc documents that passing a NULL buffer makes
+    // `proc_listpids` return the required byte count instead of writing.
     let required_bytes =
         unsafe { proc_listpids(PROC_PGRP_ONLY, process_group, std::ptr::null_mut(), 0) };
     if required_bytes < 0 {
@@ -450,6 +452,10 @@ pub(crate) fn process_group_has_live_members(
         .context("process-group inventory size overflow")?
         / pid_size;
     let mut pids = vec![0 as libc::pid_t; capacity];
+    // SAFETY: `pids` is a buffer of `capacity` initialized `pid_t` slots and
+    // its exact byte length is passed as `buffer_size`, so the FFI write stays
+    // in bounds; the 32-slot headroom tolerates pids appearing between the
+    // sizing and read calls.
     let read_bytes = unsafe {
         proc_listpids(
             PROC_PGRP_ONLY,

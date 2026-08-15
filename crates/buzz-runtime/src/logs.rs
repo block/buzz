@@ -6,8 +6,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Maximum active log size: 10 MiB before rotation.
 pub const MAX_LOG_FILE_BYTES: u64 = 10 * 1024 * 1024;
+/// Retained log-file count: 3, including the active file.
 pub const RETAINED_LOG_FILES: usize = 3;
+/// Maximum log-tail size: 1 MiB returned to a caller.
 pub const MAX_LOG_TAIL_BYTES: usize = 1024 * 1024;
 
 const REDACTION_MARKER: &[u8] = b"[REDACTED]";
@@ -26,6 +29,7 @@ pub struct RedactingWriter<W> {
 }
 
 impl<W: Write> RedactingWriter<W> {
+    /// Creates a redacting writer and removes empty or duplicate secrets.
     pub fn new(inner: W, mut secrets: Vec<Vec<u8>>) -> Self {
         secrets.retain(|secret| !secret.is_empty());
         secrets.sort_unstable_by(|left, right| {
@@ -95,6 +99,7 @@ impl<W: Write> Write for RedactingWriter<W> {
     }
 }
 
+/// Bounded owner-only writer that rotates process output across retained files.
 pub struct RotatingLogWriter {
     base: PathBuf,
     file: Option<File>,
@@ -110,6 +115,7 @@ impl std::fmt::Debug for RotatingLogWriter {
     }
 }
 impl RotatingLogWriter {
+    /// Opens the active log file and rotates it immediately when already full.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let base = path.as_ref().to_owned();
         if let Some(parent) = base.parent() {
@@ -180,6 +186,7 @@ impl Write for RotatingLogWriter {
     }
 }
 
+/// Returns the newest bounded tail across the active and rotated log files.
 pub fn tail_rotating_log(
     path: impl AsRef<Path>,
     lines: u16,

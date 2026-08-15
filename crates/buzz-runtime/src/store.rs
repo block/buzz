@@ -14,16 +14,25 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
+/// Capacity of the store command channel: 256 requests, preventing unbounded producer memory.
 pub const STORE_COMMAND_CAPACITY: usize = 256;
+/// Maximum serialized inbox event size: 512 KiB, bounding durable event payloads.
 pub const MAX_EVENT_JSON_BYTES: usize = 512 * 1024;
+/// Maximum serialized job argv size: 64 KiB, matching the protocol persistence bound.
 pub const MAX_ARGV_JSON_BYTES: usize = 64 * 1024;
+/// Maximum queued inbox events per channel: 500, preventing one channel from monopolizing storage.
 pub const MAX_PENDING_PER_CHANNEL: usize = 500;
+/// Maximum remote-cancel tombstones per request: 4096, bounding idempotency state.
 pub const MAX_REMOTE_CANCEL_TOMBSTONES: usize = 4096;
+/// Maximum inbox retries: 10 attempts before an event is dead-lettered.
 pub const MAX_INBOX_RETRIES: u32 = 10;
+/// Initial inbox retry delay: 5 seconds before the first retry.
 pub const BASE_RETRY_DELAY_SECS: u64 = 5;
+/// Maximum inbox retry delay: 300 seconds, capping exponential backoff.
 pub const MAX_RETRY_DELAY_SECS: u64 = 300;
+/// Replay-skew allowance: 5 seconds for near-boundary event timestamps.
 pub const REPLAY_SKEW_SECS: u64 = 5;
-/// Current durable runtime-store schema.
+/// Current durable runtime-store schema version: 4, used to select migrations.
 pub const STORE_SCHEMA_VERSION: u32 = 4;
 /// Store-owned operational diagnostics safe for owner-facing status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,6 +40,7 @@ pub struct StoreDiagnostics {
     pub schema_version: u32,
     pub last_relay_progress_published_at: Option<DateTime<Utc>>,
 }
+/// Errors returned by durable runtime-store operations.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("failed to open runtime store {path}: {source}")]
@@ -80,12 +90,14 @@ pub enum StoreError {
     #[error("invalid assignment: {0}")]
     InvalidAssignment(String),
 }
+/// Result of attempting to enqueue an inbox event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueOutcome {
     Enqueued,
     Duplicate,
     CapacityRejected,
 }
+/// Durable state of an inbox event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboxState {
     Queued,
@@ -93,12 +105,14 @@ pub enum InboxState {
     Completed,
     DeadLetter,
 }
+/// Event accepted for durable inbox processing.
 #[derive(Debug, Clone)]
 pub struct InboxEvent {
     pub channel_id: Uuid,
     pub event: Event,
     pub received_at: DateTime<Utc>,
 }
+/// Durable inbox row with dispatch and retry state.
 #[derive(Debug, Clone)]
 pub struct InboxRecord {
     pub event_id: String,
@@ -113,12 +127,14 @@ pub struct InboxRecord {
     pub turn_id: Option<String>,
     pub last_error: Option<String>,
 }
+/// Claimed inbox rows sharing one channel and turn identifier.
 #[derive(Debug, Clone)]
 pub struct InboxBatch {
     pub channel_id: Uuid,
     pub turn_id: String,
     pub events: Vec<InboxRecord>,
 }
+/// Result of requeueing a claimed inbox turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequeueOutcome {
     Requeued {
@@ -129,6 +145,7 @@ pub enum RequeueOutcome {
         attempt: u32,
     },
 }
+/// Counts produced while recovering interrupted inbox turns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecoveryOutcome {
     pub requeued: u64,
@@ -170,6 +187,7 @@ pub struct StartupRecoverySnapshot {
     /// Persisted channel session mappings requiring validation or later resume.
     pub channel_sessions: Vec<Uuid>,
 }
+/// Counts of inbox rows by durable state and rejected capacity attempts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueueDepths {
     pub queued: u64,
@@ -178,6 +196,7 @@ pub struct QueueDepths {
     pub dead_letter: u64,
     pub capacity_rejections: u64,
 }
+/// Session loading strategy persisted with a channel session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeMode {
@@ -202,6 +221,7 @@ impl ResumeMode {
         }
     }
 }
+/// Persisted ACP session mapping for one channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub channel_id: Uuid,
@@ -213,6 +233,7 @@ pub struct SessionRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Transactional projection of assignment, job, inbox, and recovery state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignmentSnapshot {
     pub queue_depths: QueueDepths,
@@ -307,6 +328,7 @@ pub fn project_work_state(
     }
     WorkState::Idle
 }
+/// Inputs required to create a durable job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJob {
     pub job_id: JobId,
@@ -317,6 +339,7 @@ pub struct NewJob {
     pub attempt: u32,
     pub created_at: DateTime<Utc>,
 }
+/// Durable tombstone recording an authorized remote cancellation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteCancelTombstone {
     pub job_id: JobId,
@@ -328,12 +351,14 @@ pub struct RemoteCancelTombstone {
     pub created_at: DateTime<Utc>,
 }
 
+/// Result of recording a remote cancellation tombstone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordCancelOutcome {
     Recorded,
     Duplicate,
 }
 
+/// Remote job materialized in a cancelled terminal state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelledRemoteJob {
     pub job: NewJob,
@@ -342,12 +367,14 @@ pub struct CancelledRemoteJob {
     pub terminal_event: OutboxEvent,
 }
 
+/// Identity data used to prove which runner owns a job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerIdentity {
     pub pid: u32,
     pub start_marker: String,
     pub process_group: String,
 }
+/// Durable job row and its runner, publication, and terminal state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobRecord {
     pub job_id: JobId,
@@ -397,6 +424,7 @@ impl JobRecord {
         }
     }
 }
+/// Requested durable transition for one job attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobTransition {
     pub job_id: JobId,
@@ -412,6 +440,7 @@ pub struct JobTransition {
     pub publication_error: Option<String>,
     pub occurred_at: DateTime<Utc>,
 }
+/// Relay event emitted for a durable job transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEvent {
     pub event_id: String,
@@ -424,17 +453,20 @@ pub struct OutboxEvent {
     pub event_json: String,
     pub created_at: DateTime<Utc>,
 }
+/// Pending relay event with its publication attempt count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxRecord {
     pub id: i64,
     pub event: OutboxEvent,
     pub attempt: u32,
 }
+/// Result of creating a durable job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateJobOutcome {
     Created(JobRecord),
     Duplicate(JobRecord),
 }
+/// Handle for the single-threaded durable runtime store.
 #[derive(Clone)]
 pub struct StoreHandle {
     tx: mpsc::Sender<Command>,
@@ -477,9 +509,11 @@ impl StoreHandle {
             .map_err(|_| StoreError::Unavailable)?;
         rx.await.map_err(|_| StoreError::Unavailable)?
     }
+    /// Persists an inbox event unless its identifier is already present or capacity is full.
     pub async fn enqueue_inbox(&self, v: InboxEvent) -> Result<EnqueueOutcome, StoreError> {
         self.request(|r| Command::Enqueue(v, r)).await
     }
+    /// Claims up to `max` available events for one channel turn.
     pub async fn claim_inbox_batch(
         &self,
         max: usize,
@@ -488,9 +522,11 @@ impl StoreHandle {
     ) -> Result<Option<InboxBatch>, StoreError> {
         self.request(|r| Command::Claim(max, turn_id, now, r)).await
     }
+    /// Marks all events owned by a turn as completed.
     pub async fn complete_inbox(&self, turn_id: String) -> Result<usize, StoreError> {
         self.request(|r| Command::Complete(turn_id, r)).await
     }
+    /// Requeues a turn with bounded backoff or dead-letters it after retry exhaustion.
     pub async fn requeue_inbox(
         &self,
         turn_id: String,
@@ -500,6 +536,7 @@ impl StoreHandle {
         self.request(|r| Command::Requeue(turn_id, error, now, r))
             .await
     }
+    /// Permanently dead-letters all events owned by a turn.
     pub async fn dead_letter_inbox(
         &self,
         turn_id: String,
@@ -507,18 +544,23 @@ impl StoreHandle {
     ) -> Result<usize, StoreError> {
         self.request(|r| Command::Dead(turn_id, error, r)).await
     }
+    /// Recovers turns left in progress after an interrupted store operation.
     pub async fn recover_in_turn(&self, now: DateTime<Utc>) -> Result<RecoveryOutcome, StoreError> {
         self.request(|r| Command::Recover(now, r)).await
     }
+    /// Returns the latest created-event watermark for one channel.
     pub async fn channel_watermark(&self, id: Uuid) -> Result<Option<u64>, StoreError> {
         self.request(|r| Command::Watermark(Some(id), r)).await
     }
+    /// Returns the latest created-event watermark across all channels.
     pub async fn replay_watermark(&self) -> Result<Option<u64>, StoreError> {
         self.request(|r| Command::Watermark(None, r)).await
     }
+    /// Returns queue counts and capacity-rejection totals.
     pub async fn queue_depths(&self) -> Result<QueueDepths, StoreError> {
         self.request(Command::Depths).await
     }
+    /// Returns the persisted session mapping for one channel.
     pub async fn get_channel_session(&self, id: Uuid) -> Result<Option<SessionRecord>, StoreError> {
         self.request(|r| Command::GetSession(id, r)).await
     }
@@ -526,18 +568,23 @@ impl StoreHandle {
     pub async fn channel_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
         self.request(Command::ListSessions).await
     }
+    /// Inserts or replaces a persisted channel session mapping.
     pub async fn upsert_channel_session(&self, v: SessionRecord) -> Result<(), StoreError> {
         self.request(|r| Command::UpsertSession(v, r)).await
     }
+    /// Deletes a persisted channel session mapping.
     pub async fn delete_channel_session(&self, id: Uuid) -> Result<bool, StoreError> {
         self.request(|r| Command::DeleteSession(id, r)).await
     }
+    /// Releases all events owned by a turn back to the queue.
     pub async fn release_inbox(&self, turn_id: String) -> Result<usize, StoreError> {
         self.request(|r| Command::Release(turn_id, r)).await
     }
+    /// Completes one queued or in-turn event by identifier.
     pub async fn complete_inbox_event(&self, event_id: String) -> Result<bool, StoreError> {
         self.request(|r| Command::CompleteEvent(event_id, r)).await
     }
+    /// Dead-letters pending events for one channel and returns their identifiers.
     pub async fn dead_letter_channel(
         &self,
         channel_id: Uuid,
@@ -546,6 +593,7 @@ impl StoreHandle {
         self.request(|r| Command::DeadChannel(channel_id, error, r))
             .await
     }
+    /// Creates a local job and its request outbox event atomically.
     pub async fn create_local_job(
         &self,
         job: NewJob,
@@ -566,9 +614,11 @@ impl StoreHandle {
         })
         .await
     }
+    /// Creates a remote job without linking it to a local assignment.
     pub async fn create_remote_job(&self, job: NewJob) -> Result<CreateJobOutcome, StoreError> {
         self.request(|r| Command::CreateRemoteJob(job, r)).await
     }
+    /// Records an authorized remote cancellation idempotently.
     pub async fn record_remote_cancel(
         &self,
         tombstone: RemoteCancelTombstone,
@@ -576,6 +626,7 @@ impl StoreHandle {
         self.request(|r| Command::RecordRemoteCancel(tombstone, r))
             .await
     }
+    /// Returns cancellation tombstones for one remote job request.
     pub async fn remote_cancels(
         &self,
         job_id: JobId,
@@ -584,6 +635,7 @@ impl StoreHandle {
         self.request(|r| Command::RemoteCancels(job_id, request_event_id, r))
             .await
     }
+    /// Deletes cancellation tombstones after the remote request is finalized.
     pub async fn discard_remote_cancels(
         &self,
         job_id: JobId,
@@ -592,6 +644,7 @@ impl StoreHandle {
         self.request(|r| Command::DiscardRemoteCancels(job_id, request_event_id, r))
             .await
     }
+    /// Creates a remote job whose terminal state is already cancelled.
     pub async fn create_cancelled_remote_job(
         &self,
         cancelled: CancelledRemoteJob,
@@ -599,6 +652,7 @@ impl StoreHandle {
         self.request(|r| Command::CreateCancelledRemoteJob(cancelled, r))
             .await
     }
+    /// Applies a validated job transition and optional relay event atomically.
     pub async fn transition_job(
         &self,
         transition: JobTransition,
@@ -607,12 +661,15 @@ impl StoreHandle {
         self.request(|r| Command::TransitionJob(transition, outbox, r))
             .await
     }
+    /// Returns one durable job by identifier.
     pub async fn get_job(&self, id: JobId) -> Result<Option<JobRecord>, StoreError> {
         self.request(|r| Command::GetJob(id, r)).await
     }
+    /// Returns durable jobs matching the supplied filter.
     pub async fn list_jobs(&self, filter: JobListFilter) -> Result<Vec<JobRecord>, StoreError> {
         self.request(|r| Command::ListJobs(filter, r)).await
     }
+    /// Returns pending outbox rows eligible at the supplied time.
     pub async fn pending_outbox(
         &self,
         limit: usize,
@@ -687,6 +744,7 @@ impl StoreHandle {
         })
         .await
     }
+    /// Returns the current nonterminal assignment, if one exists.
     pub async fn active_assignment(&self) -> Result<Option<AssignmentRecord>, StoreError> {
         self.request(Command::ActiveAssignment).await
     }

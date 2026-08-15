@@ -15,10 +15,14 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Runner-receipt schema version: 1, used to validate persisted runner artifacts.
 pub const RUNNER_RECEIPT_SCHEMA_VERSION: u8 = 1;
+/// Job-spec filename: `spec.json`, used beneath each attempt directory.
 pub const JOB_SPEC_FILE: &str = "spec.json";
+/// Runner-receipt filename: `runner-receipt.json`, used beneath each attempt directory.
 pub const RUNNER_RECEIPT_FILE: &str = "runner-receipt.json";
 
+/// Immutable runner inputs persisted for one job attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobSpec {
@@ -31,6 +35,7 @@ pub struct JobSpec {
     pub created_at: DateTime<Utc>,
 }
 impl JobSpec {
+    /// Validates the request, executable path, attempt number, and argv digest.
     pub fn validate(&self) -> Result<(), ArtifactError> {
         self.request
             .validate()
@@ -47,6 +52,7 @@ impl JobSpec {
     }
 }
 
+/// Terminal state recorded by a runner receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerReceiptState {
@@ -56,6 +62,7 @@ pub enum RunnerReceiptState {
     Cancelled,
 }
 
+/// Owner-only receipt proving runner identity and attempt outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunnerReceipt {
@@ -73,6 +80,7 @@ pub struct RunnerReceipt {
     pub error_code: Option<String>,
 }
 impl RunnerReceipt {
+    /// Validates schema, identity, digest, and terminal-field invariants.
     pub fn validate(
         &self,
         expected_job: JobId,
@@ -95,6 +103,7 @@ impl RunnerReceipt {
     }
 }
 
+/// Errors returned while validating or persisting runtime artifacts.
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
     #[error("artifact IO failed: {0}")]
@@ -107,6 +116,7 @@ pub enum ArtifactError {
     ProcessUnavailable(u32),
 }
 
+/// Returns the normalized artifact directory for one positive job attempt.
 pub fn job_attempt_dir(
     runtime_dir: &Path,
     job_id: JobId,
@@ -191,6 +201,7 @@ pub fn canonicalize_executable(path: &Path) -> Result<PathBuf, ArtifactError> {
     }
     Ok(canonical)
 }
+/// Validates and atomically writes a legacy runtime receipt.
 pub fn write_legacy_runtime_receipt(
     path: &Path,
     receipt: &LegacyRuntimeReceipt,
@@ -201,6 +212,7 @@ pub fn write_legacy_runtime_receipt(
     write_owner_only_json(path, receipt)
 }
 
+/// Reads and validates a legacy runtime receipt from an owner-only file.
 pub fn read_legacy_runtime_receipt(path: &Path) -> Result<LegacyRuntimeReceipt, ArtifactError> {
     let receipt: LegacyRuntimeReceipt = read_owner_only_json(path)?;
     receipt
@@ -209,12 +221,14 @@ pub fn read_legacy_runtime_receipt(path: &Path) -> Result<LegacyRuntimeReceipt, 
     Ok(receipt)
 }
 
+/// Validates and atomically writes a schema-v2 runtime receipt.
 pub fn write_runtime_receipt(path: &Path, receipt: &RuntimeReceipt) -> Result<(), ArtifactError> {
     receipt
         .validate()
         .map_err(|error| ArtifactError::Invalid(error.to_string()))?;
     write_owner_only_json(path, receipt)
 }
+/// Reads and validates a schema-v2 runtime receipt from an owner-only file.
 pub fn read_runtime_receipt(path: &Path) -> Result<RuntimeReceipt, ArtifactError> {
     let receipt: RuntimeReceipt = read_owner_only_json(path)?;
     receipt
@@ -222,17 +236,20 @@ pub fn read_runtime_receipt(path: &Path) -> Result<RuntimeReceipt, ArtifactError
         .map_err(|error| ArtifactError::Invalid(error.to_string()))?;
     Ok(receipt)
 }
+/// Validates and writes a job specification beneath its attempt directory.
 pub fn write_job_spec(runtime_dir: &Path, spec: &JobSpec) -> Result<PathBuf, ArtifactError> {
     spec.validate()?;
     let path = job_attempt_dir(runtime_dir, spec.job_id, spec.attempt)?.join(JOB_SPEC_FILE);
     write_owner_only_json(&path, spec)?;
     Ok(fs::canonicalize(path)?)
 }
+/// Reads and validates a persisted job specification.
 pub fn read_job_spec(path: &Path) -> Result<JobSpec, ArtifactError> {
     let spec: JobSpec = read_owner_only_json(path)?;
     spec.validate()?;
     Ok(spec)
 }
+/// Validates and writes a runner receipt beneath its attempt directory.
 pub fn write_runner_receipt(
     runtime_dir: &Path,
     receipt: &RunnerReceipt,
@@ -243,6 +260,7 @@ pub fn write_runner_receipt(
     write_owner_only_json(&path, receipt)?;
     Ok(path)
 }
+/// Reads and validates a runner receipt for the requested job attempt.
 pub fn read_runner_receipt(
     runtime_dir: &Path,
     job_id: JobId,
@@ -274,11 +292,13 @@ pub fn runner_receipt_health(
         Err(_) => RunnerReceiptHealth::Invalid,
     }
 }
+/// Returns the lowercase SHA-256 digest of the serialized argument vector.
 pub fn argv_sha256(argv: &[String]) -> Result<String, ArtifactError> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(argv)?)))
 }
 // Each platform arm ends in an explicit `return` so that adding an arm can never
 // silently change which one is the function tail after `cfg` stripping.
+/// Returns a process start marker suitable for anti-reuse identity checks.
 #[allow(clippy::needless_return)]
 pub fn process_start_marker(pid: u32) -> Result<String, ArtifactError> {
     #[cfg(target_os = "linux")]
@@ -386,6 +406,7 @@ fn linux_proc_start_ticks(pid: u32, stat: &str) -> Option<u64> {
     fields.split_ascii_whitespace().nth(19)?.parse().ok()
 }
 
+/// Returns the current process's anti-reuse start marker.
 pub fn current_process_start_marker() -> Result<String, ArtifactError> {
     process_start_marker(std::process::id())
 }
