@@ -446,10 +446,13 @@ function unwrapObserverBatch(parsed: ObserverEvent): ObserverEvent[] {
 
 // Per-event processing shared by every event a live frame carries (one for a
 // plain frame, many for a batch envelope).
-function processLiveObserverEvents(
+async function processLiveObserverEvents(
   agentPubkey: string,
   events: readonly ObserverEvent[],
+  activeGeneration: number,
 ) {
+  if (activeGeneration !== generation) return;
+
   // Commit the full envelope before dispatching synchronous specialized
   // callbacks. Those callbacks historically observed their triggering frame
   // in the raw/transcript stores; batching must preserve that visibility while
@@ -457,6 +460,8 @@ function processLiveObserverEvents(
   const addedEvents = appendAgentEvents(agentPubkey, events);
 
   for (const parsed of events) {
+    if (activeGeneration !== generation) return;
+
     // Track the latest-live-session-id per (agent, channel) on the live path.
     // Only set when the parsed event carries both a sessionId and channelId,
     // so we never attribute a session to the wrong channel.
@@ -488,17 +493,19 @@ function processLiveObserverEvents(
     } else if (parsed.kind === "control_result") {
       dispatchControlResult(agentPubkey, parsed.payload);
     } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
-      void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
-        (error) => {
-          console.debug("Late/untracked lifecycle frame dropped:", error);
-        },
-      );
+      try {
+        await putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload);
+        if (activeGeneration !== generation) return;
+      } catch (error) {
+        if (activeGeneration !== generation) return;
+        console.debug("Late/untracked lifecycle frame dropped:", error);
+      }
     }
   }
 
   // Preserve the harness's envelope backpressure: retained state was committed
   // before specialized callbacks, but external-store subscribers publish once.
-  if (addedEvents) {
+  if (addedEvents && activeGeneration === generation) {
     notifyListeners({ agentPubkey, events: addedEvents });
   }
 }
@@ -537,7 +544,11 @@ async function handleRelayObserverEvent(
     if (activeGeneration !== generation) {
       return;
     }
-    processLiveObserverEvents(agentPubkey, unwrapObserverBatch(parsed));
+    await processLiveObserverEvents(
+      agentPubkey,
+      unwrapObserverBatch(parsed),
+      activeGeneration,
+    );
   } catch (error) {
     if (activeGeneration !== generation) {
       return;
@@ -907,8 +918,8 @@ export function _testRegisterKnownAgents(
 export function _testProcessLiveObserverEvents(
   agentPubkey: string,
   events: readonly ObserverEvent[],
-): void {
-  processLiveObserverEvents(agentPubkey, events);
+): Promise<void> {
+  return processLiveObserverEvents(agentPubkey, events, generation);
 }
 
 /**
