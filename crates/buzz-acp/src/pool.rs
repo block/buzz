@@ -21,6 +21,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -77,6 +78,14 @@ pub struct TaskMeta {
     /// live session. The session ID prevents a late ack from contaminating a
     /// replacement session after task return.
     pub successful_steer_deliveries: HashSet<SuccessfulSteerDelivery>,
+    /// Free-standing watchdog (block/buzz#4860): set true by the watchdog
+    /// task before it aborts the in-flight turn. `None` when the knob is
+    /// disabled (default). `recover_panicked_agent` reads this to distinguish
+    /// a watchdog abort from a genuine panic.
+    pub watchdog_fired: Option<Arc<AtomicBool>>,
+    /// Handle to the watchdog sleep task. Disarmed (`.abort()`) on normal
+    /// completion or on recovery so the sleep doesn't wake into a no-op.
+    pub watchdog_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -597,6 +606,10 @@ pub struct PromptContext {
     /// disables emission. This is the desktop crash-backstop signal — distinct
     /// from `heartbeat_prompt` (agent self-prompting).
     pub turn_liveness_interval: Duration,
+    /// Free-standing wall-clock watchdog for the entire `run_prompt_task`
+    /// future. `Duration::ZERO` disables it. Unlike the in-loop timers, this can
+    /// terminate a turn parked in relay/tool output (block/buzz#4860).
+    pub turn_output_timeout: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
     /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
@@ -7970,6 +7983,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             idle_timeout: Duration::from_secs(60),
             max_turn_duration: Duration::from_secs(120),
             turn_liveness_interval: Duration::ZERO,
+            turn_output_timeout: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
             session_title: None,

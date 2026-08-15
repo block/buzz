@@ -276,6 +276,22 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
     pub max_turn_duration: u64,
 
+    /// Per-turn watchdog: maximum wall-clock duration before the harness
+    /// forcibly aborts a hung turn and respawns the agent. 0 = disabled.
+    ///
+    /// Distinct from `idle_timeout` (which only fires when an agent in the
+    /// read loop goes silent) and `max_turn_duration` (which only fires
+    /// when the in-loop hard-deadline pre-check runs). This watchdog fires
+    /// regardless of where the turn future is parked — including relay
+    /// REST posts and stdin writes between selects (block/buzz#4860),
+    /// where neither in-loop timer is structurally reachable.
+    ///
+    /// Must be ≥ 5 when set. Defaults to 0 so upstream deployments are
+    /// unchanged; operators opt in via
+    /// `--turn-output-timeout` / `BUZZ_ACP_TURN_OUTPUT_TIMEOUT`.
+    #[arg(long, env = "BUZZ_ACP_TURN_OUTPUT_TIMEOUT", default_value_t = 0)]
+    pub turn_output_timeout: u64,
+
     /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
     #[arg(long, env = "BUZZ_ACP_TURN_TIMEOUT", hide = true)]
     pub turn_timeout: Option<u64>,
@@ -523,6 +539,9 @@ pub struct Config {
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
+    /// Per-turn wall-clock watchdog in seconds. 0 = disabled. Fires
+    /// `block/buzz#4860` independently of the in-loop idle/hard timers.
+    pub turn_output_timeout_secs: u64,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
@@ -1031,6 +1050,33 @@ impl Config {
             )));
         }
 
+        // turn_output_timeout: 0 = disabled (default), otherwise >= 5 and at or
+        // below the same ceiling as max_turn_duration. Independent of the idle/max
+        // invariant — the watchdog runs in a free-standing task and is
+        // trigger-agnostic (block/buzz#4860), so it is allowed to fire earlier than
+        // either in-loop timer. The ceiling match is deliberate: an unbounded knob
+        // would accept u64::MAX, an effectively-infinite sleep.
+        //
+        // Below 5 is hard-errored, not silently clamped: a 1s timeout is most
+        // often a typo or unit mismatch (someone wrote `1` meaning "1 minute")
+        // and clamping would run the watchdog on every legitimate turn,
+        // signing operators into a degraded mode they never asked for.
+        let turn_output_timeout_secs = if args.turn_output_timeout == 0 {
+            0
+        } else if args.turn_output_timeout < 5 {
+            return Err(ConfigError::ConfigFile(format!(
+                "turn_output_timeout ({}s) is invalid: must be 0 (disabled) or >= 5 seconds",
+                args.turn_output_timeout
+            )));
+        } else if args.turn_output_timeout > MAX_TURN_DURATION_CEILING_SECS {
+            return Err(ConfigError::ConfigFile(format!(
+                "turn_output_timeout ({}s) exceeds ceiling ({}s / 7 days)",
+                args.turn_output_timeout, MAX_TURN_DURATION_CEILING_SECS
+            )));
+        } else {
+            args.turn_output_timeout
+        };
+
         let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
             let raw = args.respond_to_allowlist.unwrap_or_default();
             if raw.is_empty() {
@@ -1099,6 +1145,7 @@ impl Config {
             mcp_command: args.mcp_command,
             idle_timeout_secs,
             max_turn_duration_secs,
+            turn_output_timeout_secs,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
@@ -1164,7 +1211,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s turn_output_timeout={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1172,6 +1219,7 @@ impl Config {
             self.mcp_command,
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
+            self.turn_output_timeout_secs,
             self.agents,
             self.heartbeat_interval_secs,
             self.subscribe_mode,
@@ -1480,6 +1528,7 @@ mod tests {
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
+            turn_output_timeout_secs: 0,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -2255,6 +2304,96 @@ channels = "ALL"
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
+    fn turn_output_timeout_defaults_disabled_and_cli_value_is_visible() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.turn_output_timeout, 0);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--turn-output-timeout",
+            "45",
+        ]);
+        assert_eq!(configured.turn_output_timeout, 45);
+    }
+
+    #[test]
+    fn turn_output_timeout_config_preserves_zero_and_clamps_small_values() {
+        let key = format!("{}1", "0".repeat(63));
+        for raw in [0, 5, 45] {
+            let args = CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--turn-output-timeout",
+                &raw.to_string(),
+            ]);
+            let config = Config::from_args(args).expect("valid watchdog configuration");
+            assert_eq!(
+                config.turn_output_timeout_secs, raw,
+                "unexpected normalized value for {raw}s"
+            );
+        }
+    }
+
+    #[test]
+    fn turn_output_timeout_config_rejects_sub_floor_values() {
+        let key = format!("{}1", "0".repeat(63));
+        for raw in [1, 2, 4] {
+            let args = CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--turn-output-timeout",
+                &raw.to_string(),
+            ]);
+            let error = Config::from_args(args)
+                .err()
+                .unwrap_or_else(|| panic!("expected {raw}s to be rejected"));
+            assert!(
+                error.to_string().contains("turn_output_timeout"),
+                "unexpected error for {raw}s: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn turn_output_timeout_config_enforces_seven_day_ceiling() {
+        let key = format!("{}1", "0".repeat(63));
+        let at_ceiling = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--turn-output-timeout",
+            &MAX_TURN_DURATION_CEILING_SECS.to_string(),
+        ]);
+        assert_eq!(
+            Config::from_args(at_ceiling)
+                .expect("ceiling value should be accepted")
+                .turn_output_timeout_secs,
+            MAX_TURN_DURATION_CEILING_SECS
+        );
+
+        let above_ceiling = MAX_TURN_DURATION_CEILING_SECS + 1;
+        let too_large = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--turn-output-timeout",
+            &above_ceiling.to_string(),
+        ]);
+        let error = Config::from_args(too_large).expect_err("value above ceiling should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("turn_output_timeout (604801s) exceeds ceiling (604800s / 7 days)"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

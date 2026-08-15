@@ -164,3 +164,119 @@ pub fn context_for_turn(
         started_at: Some(started_at),
     }
 }
+
+#[cfg(test)]
+mod sequence_buffer_tests {
+    //! Sequence numbering and replay-buffer rotation invariants.
+    use super::*;
+
+    #[test]
+    fn seq_is_monotonic_across_repeated_emit_calls() {
+        let observer = ObserverHandle::in_process();
+        observer.emit(
+            "first",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+        observer.emit(
+            "second",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+        observer.emit(
+            "third",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+
+        let snapshot = observer.snapshot();
+        let kinds: Vec<&str> = snapshot.iter().map(|event| event.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["first", "second", "third"],
+            "replay buffer must preserve emit order"
+        );
+        let seqs: Vec<u64> = snapshot.iter().map(|event| event.seq).collect();
+        assert!(
+            seqs.windows(2).all(|pair| pair[0] < pair[1]),
+            "seq numbers must increase monotonically: {seqs:?}"
+        );
+    }
+
+    #[test]
+    fn cloned_handles_share_one_monotonic_sequence() {
+        let observer = ObserverHandle::in_process();
+        let clone = observer.clone();
+        observer.emit(
+            "original",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+        clone.emit(
+            "clone",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+        observer.emit(
+            "original-again",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+
+        let snapshot = observer.snapshot();
+        let seqs: Vec<u64> = snapshot.iter().map(|event| event.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn dropped_subscribers_do_not_break_subsequent_emits() {
+        let observer = ObserverHandle::in_process();
+        let receiver = observer.subscribe();
+        drop(receiver);
+        observer.emit(
+            "after-drop",
+            None,
+            &ObserverContext::default(),
+            serde_json::json!({}),
+        );
+        let snapshot = observer.snapshot();
+        assert_eq!(
+            snapshot.last().map(|event| event.kind.as_str()),
+            Some("after-drop")
+        );
+    }
+
+    #[test]
+    fn buffer_evicts_oldest_when_at_capacity() {
+        let observer = ObserverHandle::in_process();
+        for i in 0..(OBSERVER_BUFFER_CAP as u64) + 1 {
+            observer.emit(
+                "frame",
+                None,
+                &ObserverContext::default(),
+                serde_json::json!({ "i": i }),
+            );
+        }
+
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.len(), OBSERVER_BUFFER_CAP);
+        assert_eq!(snapshot.first().map(|event| event.seq), Some(2));
+        assert_eq!(
+            snapshot
+                .first()
+                .and_then(|event| event.payload["i"].as_u64()),
+            Some(1),
+            "the first-emitted frame must be evicted"
+        );
+        assert_eq!(
+            snapshot.last().map(|event| event.seq),
+            Some((OBSERVER_BUFFER_CAP as u64) + 1)
+        );
+    }
+}
