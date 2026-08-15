@@ -82,6 +82,12 @@
             xdotool
           ];
 
+          gstreamerPlugins = with pkgs.gst_all_1; [
+            gst-plugins-base
+            gst-plugins-good
+            gstreamer
+          ];
+
           linuxPackages =
             with pkgs;
             [
@@ -89,7 +95,8 @@
               mold
               patchelf
             ]
-            ++ linuxLibraries;
+            ++ linuxLibraries
+            ++ gstreamerPlugins;
         in
         {
           formatter = pkgs.nixfmt;
@@ -100,6 +107,10 @@
             CMAKE_POLICY_VERSION_MINIMUM = "3.5";
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
               pkgs.lib.makeLibraryPath linuxLibraries
+            );
+
+            GST_PLUGIN_SYSTEM_PATH_1_0 = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
+              pkgs.lib.makeSearchPath "lib/gstreamer-1.0" gstreamerPlugins
             );
 
             shellHook = ''
