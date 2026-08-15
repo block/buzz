@@ -998,3 +998,8 @@ native-review-ios DEVICE="iPhone 17 Pro":
 # Emit a redacted, relay-compatible clip + receipt + focused log excerpt.
 native-review-finding RECEIPT OUTPUT MATCH="":
     ./tools/native-review/bin/review-native finding-bundle "{{RECEIPT}}" --output "{{OUTPUT}}" {{ if MATCH == "" { "" } else { "--match " + quote(MATCH) } }}
+
+# Publish the review report with its exact-SHA video and optional timecoded highlights.
+# MENTION is the delegator pubkey; pass an empty string only when no callback is required.
+native-review-publish RECEIPT SUMMARY CHANNEL REPLY_TO HIGHLIGHTS="" MENTION="":
+    ./tools/native-review/bin/review-native publish-review "{{RECEIPT}}" --summary "{{SUMMARY}}" --channel "{{CHANNEL}}" --reply-to "{{REPLY_TO}}" {{ if HIGHLIGHTS == "" { "" } else { "--highlights " + quote(HIGHLIGHTS) } }} {{ if MENTION == "" { "" } else { "--mention " + quote(MENTION) } }}

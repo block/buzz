@@ -3,6 +3,7 @@ import json
 import pathlib
 import re
 import tempfile
+import subprocess
 import unittest
 from unittest import mock
 
@@ -224,6 +225,65 @@ metrics:
             candidate[0].write_text(json.dumps(payload))
             with self.assertRaisesRegex(review_native.HarnessError, "mixes source revisions"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+
+class PublishReviewTests(unittest.TestCase):
+    def inputs(self, root):
+        video = root / "video-share.mp4"
+        video.write_bytes(b"video")
+        receipt = root / "receipt.json"
+        receipt.write_text(json.dumps({
+            "flow": "journey", "status": "failed",
+            "provenance": {"dirty": False, "head_sha": "a" * 40},
+            "cleanup": {"status": "passed"},
+            "artifacts": {"share_video": video.name},
+        }))
+        summary = root / "summary.md"
+        summary.write_text("Found a regression.")
+        return receipt, summary
+
+    @mock.patch.object(review_native.review_publish.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
+    @mock.patch.object(review_native.review_publish, "_video_duration", return_value=12.5)
+    @mock.patch.object(review_native.review_publish, "_run")
+    def test_publishes_video_root_then_timecoded_highlights(self, run, _duration, _which):
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, json.dumps({"accepted": True, "event_id": "b" * 64}), ""),
+            subprocess.CompletedProcess([], 0, json.dumps({"accepted": True, "event_id": "c" * 64}), ""),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            receipt, summary = self.inputs(root)
+            highlights = root / "highlights.json"
+            highlights.write_text(json.dumps([{"seconds": 3.25, "text": "The broken state appears."}]))
+            result = review_native.publish_review(receipt, summary, "channel", "thread", highlights, ["d" * 64])
+        first, second = [call.args[0] for call in run.call_args_list]
+        self.assertIn("--file", first)
+        self.assertIn("--mention", first)
+        self.assertEqual(second[-1], "[00:03.250] The broken state appears.")
+        self.assertEqual(second[second.index("--reply-to") + 1], "b" * 64)
+        self.assertEqual(result["highlight_event_ids"], ["c" * 64])
+
+    @mock.patch.object(review_native.review_publish.shutil, "which", return_value="/usr/bin/tool")
+    @mock.patch.object(review_native.review_publish, "_video_duration", return_value=10.0)
+    def test_rejects_highlight_outside_video_before_publish(self, _duration, _which):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            receipt, summary = self.inputs(root)
+            highlights = root / "highlights.json"
+            highlights.write_text(json.dumps([{"seconds": 11, "text": "impossible"}]))
+            with self.assertRaisesRegex(review_native.PublishError, "within the video"):
+                review_native.publish_review(receipt, summary, "channel", "thread", highlights)
+
+    @mock.patch.object(review_native.review_publish.shutil, "which", return_value="/usr/bin/tool")
+    def test_rejects_dirty_receipt_before_upload(self, _which):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            receipt, summary = self.inputs(root)
+            payload = json.loads(receipt.read_text())
+            payload["provenance"]["dirty"] = True
+            receipt.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(review_native.PublishError, "clean source"):
+                review_native.publish_review(receipt, summary, "channel", "thread")
 
 
 if __name__ == "__main__":

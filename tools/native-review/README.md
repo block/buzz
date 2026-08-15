@@ -298,3 +298,34 @@ rules still apply. `buzz upload file --file /tmp/finding/finding.mp4` is the
 live smoke check for Buzz delivery. PR screenshots still use
 `scripts/post-screenshots.sh` as required by `AGENTS.md`; GitHub video should be
 attached through GitHub's supported upload UI/API rather than a relay URL.
+
+
+## Publish the review report to Buzz
+
+A review that exercised Desktop or iOS natively is not complete until its report
+and canonical recording are published together in the originating Buzz thread.
+Use the receipt-bound publisher rather than a separate `buzz upload`: it rejects
+dirty receipts, failed cleanup, missing share video, invalid relay responses, and
+highlights outside the recording.
+
+```bash
+just native-review-publish \
+  test-results/native-review/<sha>/<flow>/<run>/receipt.json \
+  /tmp/review-summary.md <channel-uuid> <thread-event-id> \
+  /tmp/highlights.json <delegator-pubkey>
+```
+
+`highlights.json` is a JSON array of `{"seconds": number, "text": string}`.
+The command first posts the review summary with `video-share.mp4`, then publishes
+each highlight as a direct reply to that video message using Buzz's leading
+`[MM:SS.mmm]` video-review timecode syntax. Those chips seek to the highlighted
+frame in Desktop. Every material visual finding needs at least one highlight; a
+no-finding run may omit the file, but the report must briefly index the journey
+that was exercised. The callback mention belongs on the video/report root, not
+on every highlight—notifications are not confetti.
+
+Publication is intentionally fail-closed and non-transactional. If a highlight
+send fails after the video root was accepted, the command exits nonzero and
+prints the relay error; rerun only after checking the thread to avoid duplicating
+the already-published root. Future CLI support for idempotent event publication
+can remove that sharp edge.

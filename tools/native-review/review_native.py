@@ -29,6 +29,8 @@ import urllib.parse
 from typing import Any
 
 from evidence_bundle import EvidenceError, finding_bundle, relay_safe_video
+import review_publish
+from review_publish import PublishError, publish_review
 
 try:
     import yaml
@@ -810,6 +812,13 @@ def main() -> int:
     bundle_parser.add_argument("--context", type=int, default=8)
     bundle_parser.add_argument("--start", type=float, help="clip start in seconds")
     bundle_parser.add_argument("--duration", type=float, help="clip duration in seconds")
+    publish_parser = sub.add_parser("publish-review")
+    publish_parser.add_argument("receipt", type=pathlib.Path)
+    publish_parser.add_argument("--summary", type=pathlib.Path, required=True)
+    publish_parser.add_argument("--channel", required=True)
+    publish_parser.add_argument("--reply-to", required=True)
+    publish_parser.add_argument("--highlights", type=pathlib.Path)
+    publish_parser.add_argument("--mention", action="append", default=[])
     args = parser.parse_args()
     try:
         if args.command == "doctor":
@@ -818,6 +827,11 @@ def main() -> int:
             load_journey(args.journey); print(f"valid: {args.journey}"); return 0
         if args.command == "compare":
             compare_performance(args.baseline, args.candidate, args.budget, args.output); return 0
+        if args.command == "publish-review":
+            result = publish_review(args.receipt.resolve(), args.summary.resolve(), args.channel,
+                                    args.reply_to, args.highlights.resolve() if args.highlights else None,
+                                    args.mention)
+            print(json.dumps(result, indent=2)); return 0
         if args.command == "finding-bundle":
             result = finding_bundle(args.receipt.resolve(), args.output.resolve(), match=args.match, context=args.context,
                                     start=args.start, duration=args.duration)
@@ -828,7 +842,7 @@ def main() -> int:
             receipts = [run_journey(args.journey, args.relay, args.output) / "receipt.json" for _ in range(args.runs)]
             print(json.dumps({"receipts": [str(path) for path in receipts]}, indent=2)); return 0
         run_journey(args.journey, args.relay, args.output); return 0
-    except (HarnessError, EvidenceError) as exc:
+    except (HarnessError, EvidenceError, PublishError) as exc:
         print(f"native-review: {exc}", file=sys.stderr)
         return 1
 
