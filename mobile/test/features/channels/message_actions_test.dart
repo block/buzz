@@ -216,6 +216,7 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   EdgeInsets viewInsets = EdgeInsets.zero,
   FocusNode? composerFocusNode,
   bool composerInitiallyFocused = false,
+  Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
 }) async {
   final sourceHidden = ValueNotifier(false);
 
@@ -258,7 +259,7 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
                     allMessages: allMessages,
                     currentPubkey: 'self',
                     isMember: true,
-                    anchorRect: const Rect.fromLTWH(32, 260, 300, 72),
+                    anchorRect: anchorRect,
                     captureAnchorSnapshot: _testMessageSnapshot,
                     onPopoverPresented: () => sourceHidden.value = true,
                     onPopoverDismissed: () => sourceHidden.value = false,
@@ -605,6 +606,41 @@ void main() {
       await _dismissMessageActionsPopover(tester);
     });
 
+    testWidgets('keeps tall message previews within the visible viewport', (
+      tester,
+    ) async {
+      const keyboardInset = 300.0;
+      final prefs = await _mockPrefs();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(pubkey: 'self'),
+        prefs: prefs,
+        canManageMessage: true,
+        allMessages: [_message(pubkey: 'self')],
+        reminderService: _stubReminderService(),
+        viewInsets: const EdgeInsets.only(bottom: keyboardInset),
+        anchorRect: const Rect.fromLTWH(32, 40, 300, 2000),
+      );
+
+      final logicalHeight =
+          tester.view.physicalSize.height / tester.view.devicePixelRatio;
+      final visibleBottom = logicalHeight - keyboardInset - Grid.xxs;
+      expect(
+        tester
+            .getRect(find.byKey(const ValueKey('message-action-preview')))
+            .top,
+        greaterThanOrEqualTo(Grid.xxs),
+      );
+      expect(
+        tester
+            .getRect(find.byKey(const ValueKey('message-action-surface')))
+            .bottom,
+        lessThanOrEqualTo(visibleBottom),
+      );
+
+      await _dismissMessageActionsPopover(tester);
+    });
+
     testWidgets('restores composer focus only after a dismissed popover', (
       tester,
     ) async {
@@ -641,6 +677,27 @@ void main() {
 
       expect(focusNode.hasFocus, isFalse);
       await _dismissMessageActionsPopover(tester);
+      expect(focusNode.hasFocus, isFalse);
+    });
+
+    testWidgets('does not restore composer focus after opening reactions', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      final prefs = await _mockPrefs();
+
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        composerFocusNode: focusNode,
+        composerInitiallyFocused: true,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('quick-reaction-more')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       expect(focusNode.hasFocus, isFalse);
     });
 

@@ -158,6 +158,7 @@ class _AnimatedReactionTray extends StatelessWidget {
   final TimelineMessage message;
   final BuildContext pageContext;
   final WidgetRef pageRef;
+  final Object? popResult;
 
   const _AnimatedReactionTray({
     required this.trayKey,
@@ -167,6 +168,7 @@ class _AnimatedReactionTray extends StatelessWidget {
     required this.message,
     required this.pageContext,
     required this.pageRef,
+    this.popResult,
   });
 
   @override
@@ -184,6 +186,7 @@ class _AnimatedReactionTray extends StatelessWidget {
             pageContext: pageContext,
             pageRef: pageRef,
             presentationAnimation: animation,
+            popResult: popResult,
           ),
         ),
       ),

@@ -7,6 +7,7 @@ const _messageActionMenuMaxWidth = 288.0;
 const _messageActionPreviewMaxWidth = 358.0;
 const _messageActionPreviewInset = Grid.xxs;
 const _messageActionGap = Grid.twelve;
+const _messageActionReactionSelection = '__reaction__';
 const _messageActionTransitionDuration = _reactionPopoverDuration;
 const _iosMessageActionTransitionDuration = Duration(milliseconds: 220);
 const _iosNativeMessageActionSurfaceChannel = MethodChannel(
@@ -551,7 +552,7 @@ class _MessageActionsPopover extends StatelessWidget {
             math.max(anchorRect.height, 1);
         final previewScale = math.min(
           1.0,
-          math.max(0.1, math.min(previewWidthRatio, previewHeightRatio)),
+          math.max(0.0, math.min(previewWidthRatio, previewHeightRatio)),
         );
         final previewSize = Size(
           (anchorRect.width * previewScale) + previewInsetExtent,
@@ -679,6 +680,7 @@ class _MessageActionsPopover extends StatelessWidget {
                 message: message,
                 pageContext: pageContext,
                 pageRef: pageRef,
+                popResult: _messageActionReactionSelection,
               ),
             ),
             Positioned.fromRect(
@@ -766,6 +768,7 @@ class _MessageReactionTray extends StatelessWidget {
   final TimelineMessage message;
   final BuildContext pageContext;
   final WidgetRef pageRef;
+  final Object popResult;
 
   const _MessageReactionTray({
     required this.animation,
@@ -773,6 +776,7 @@ class _MessageReactionTray extends StatelessWidget {
     required this.message,
     required this.pageContext,
     required this.pageRef,
+    required this.popResult,
   });
 
   @override
@@ -785,6 +789,7 @@ class _MessageReactionTray extends StatelessWidget {
       message: message,
       pageContext: pageContext,
       pageRef: pageRef,
+      popResult: popResult,
     );
   }
 }
