@@ -299,6 +299,24 @@ pub enum IngestError {
     Internal(String),
 }
 
+/// Map the durable community write-fence lookup onto the ingest error taxonomy.
+///
+/// An inactive community is an authorization decision and keeps the exact
+/// `restricted:` wire text the ephemeral path uses. A lookup outage is a
+/// server fault and fails closed as `error:`/500 — a Postgres blip can
+/// neither admit a write past the fence nor read as a client mistake.
+fn map_serving_fence_state(active: Result<bool, buzz_db::DbError>) -> Result<(), IngestError> {
+    match active {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(IngestError::Rejected(
+            "restricted: community writes are fenced".into(),
+        )),
+        Err(error) => Err(IngestError::Internal(format!(
+            "error: checking community write fence: {error}"
+        ))),
+    }
+}
+
 fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestError {
     use super::relay_admin::RelayAdminError;
     match error {
@@ -1931,6 +1949,17 @@ async fn ingest_event_inner(
     let kind_u32 = event_kind_u32(&event);
     debug!(event_id = %event_id_hex, kind = kind_u32, "ingest_event");
 
+    // Durable community write fence: persistent ingest is a DB write the
+    // deletion engine cannot exclude via serving-write leases (those cover
+    // external side effects only), so the shared WS/HTTP seam must refuse
+    // writes once the community leaves the active lifecycle state. Row churn
+    // inside the remaining race window is swept by the destructive DB stage.
+    map_serving_fence_state(
+        buzz_deletion::store(&state.db)
+            .is_serving_active(tenant.community())
+            .await,
+    )?;
+
     if kind_u32 == KIND_AUTH {
         return Err(IngestError::Rejected(
             "invalid: AUTH events cannot be submitted".into(),
@@ -2837,24 +2866,29 @@ async fn ingest_event_inner(
         };
 
         let pubkey_hex = auth.pubkey().to_hex();
-        // Spec WriteInsert (line 514) / WriteDuplicate (line 606): emit
-        // the abstract write action. The persist API returns
-        // `was_inserted` (true → Insert, false → Duplicate). This branch
-        // is the reaction path; channel_id is always Some here, so
-        // WriteInsertGlobal does not apply.
+        // Spec WriteInsert (line 514) / WriteDuplicate (line 606) /
+        // WriteInsertGlobal (line 559): emit the abstract write action. The
+        // persist API returns `was_inserted` (true → Insert/Global, false →
+        // Duplicate). Reactions on project events (issue/PR roots and their
+        // comments) carry no `h` tag, so `channel_id` can be `None` here —
+        // mirror the message write's three-way split instead of asserting a
+        // channel, which panicked the ingest worker on those events.
         let claimed = claimed_community_from_event(&event);
-        let action = if was_inserted {
-            TraceAction::WriteInsert {
+        let action = match (channel_id, was_inserted) {
+            (Some(ch), true) => TraceAction::WriteInsert {
                 msg_id: msg_id_label(event.id.as_bytes()),
-                channel: channel_label(channel_id.expect("reaction path has channel")),
+                channel: channel_label(ch),
                 claimed_community: claimed,
-            }
-        } else {
-            TraceAction::WriteDuplicate {
+            },
+            (Some(ch), false) => TraceAction::WriteDuplicate {
                 msg_id: msg_id_label(event.id.as_bytes()),
-                channel: channel_label(channel_id.expect("reaction path has channel")),
+                channel: channel_label(ch),
                 claimed_community: claimed,
-            }
+            },
+            (None, _) => TraceAction::WriteInsertGlobal {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                claimed_community: claimed,
+            },
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
         dispatch_persistent_event(
@@ -3163,6 +3197,123 @@ mod tests {
             other => {
                 panic!("restriction DB failure must map to Internal (HTTP 500), got {other:?}")
             }
+        }
+    }
+
+    /// An active community passes the durable write fence untouched.
+    #[test]
+    fn serving_fence_active_community_admits_write() {
+        assert!(map_serving_fence_state(Ok(true)).is_ok());
+    }
+
+    /// A fenced/tombstoned/archived community is an authorization decision:
+    /// `restricted:` and (via `bridge.rs`) HTTP 400 — with the exact wire text
+    /// the ephemeral WS path uses, so clients see one refusal vocabulary.
+    #[test]
+    fn serving_fence_inactive_community_maps_to_restricted() {
+        match map_serving_fence_state(Ok(false)) {
+            Err(IngestError::Rejected(msg)) => {
+                assert_eq!(msg, "restricted: community writes are fenced");
+            }
+            other => panic!("fenced community must map to Rejected, got {other:?}"),
+        }
+    }
+
+    /// A fence-lookup outage is a server fault and must fail closed as
+    /// `error:`/500 — a Postgres blip can neither admit a write past the
+    /// fence nor be reported to an innocent client as a bad request.
+    #[test]
+    fn serving_fence_lookup_outage_fails_closed_as_internal() {
+        let outage = buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut);
+        match map_serving_fence_state(Err(outage)) {
+            Err(IngestError::Internal(msg)) => {
+                assert!(
+                    msg.starts_with("error: "),
+                    "fence outages need the `error:` NIP-01 prefix, got {msg:?}"
+                );
+            }
+            other => panic!("fence lookup failure must map to Internal, got {other:?}"),
+        }
+    }
+
+    /// Production-path regression: the exact predicate `ingest_event_inner`
+    /// consults must admit writes while a community is active and refuse them
+    /// once the community deletion lifecycle fences it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ingest_write_fence_follows_community_deletion_lifecycle() {
+        use buzz_db::deletion::{
+            FrozenInventory, KeyStreamDigest, PrefixManifest, StorageManifest,
+            DEFAULT_LEASE_DURATION,
+        };
+
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool);
+        db.migrate().await.expect("migrate test DB");
+        let store = buzz_deletion::store(&db);
+
+        let host = format!("lane3-fence-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+
+        assert!(
+            map_serving_fence_state(store.is_serving_active(community).await).is_ok(),
+            "active community must admit persistent ingest"
+        );
+
+        let submitted = store
+            .submit(
+                &host,
+                "test-operator",
+                Some("lane3 ingest fence regression"),
+            )
+            .await
+            .expect("submit");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: StorageManifest {
+                version: 4,
+                prefixes: buzz_media::tenant_prefixes(*community.as_uuid())
+                    .into_iter()
+                    .map(|prefix| PrefixManifest {
+                        prefix,
+                        object_count: 0,
+                        total_bytes: 0,
+                        keys_digest: KeyStreamDigest::new().finish().0,
+                    })
+                    .collect(),
+            },
+        };
+        let request = store
+            .freeze_inventory(submitted.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        store.fence(&claim.lease).await.expect("fence");
+
+        match map_serving_fence_state(store.is_serving_active(community).await) {
+            Err(IngestError::Rejected(msg)) => {
+                assert_eq!(msg, "restricted: community writes are fenced");
+            }
+            other => panic!("fenced community must refuse persistent ingest, got {other:?}"),
         }
     }
 

@@ -349,7 +349,7 @@ test("passive relay watchdog does not write while the websocket is half-open", a
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   await setMockWebsocketSendsStalled(page, true);

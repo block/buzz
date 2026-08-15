@@ -140,14 +140,24 @@ function maskMarkdownCode(text: string): string {
  *
  * Exported separately so it can be unit-tested without importing React.
  */
-export function getMentionOffset(text: string, name: string): number | null {
+export function getMentionOffsets(text: string, name: string): number[] {
   const escaped = escapeRegExp(name);
   const pattern = new RegExp(
     `(^|\\s|\\(|[*_]{1,3}|\\|\\|)(@${escaped})(?=\\|\\||[\\s,;.!?:)\\]}*_]|$)`,
-    "i",
+    "gi",
   );
-  const match = pattern.exec(maskMarkdownCode(text));
-  return match ? match.index + match[1].length : null;
+  const maskedText = maskMarkdownCode(text);
+  const offsets: number[] = [];
+  let match = pattern.exec(maskedText);
+  while (match !== null) {
+    offsets.push(match.index + match[1].length);
+    match = pattern.exec(maskedText);
+  }
+  return offsets;
+}
+
+export function getMentionOffset(text: string, name: string): number | null {
+  return getMentionOffsets(text, name)[0] ?? null;
 }
 
 export function hasMention(text: string, name: string): boolean {

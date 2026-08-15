@@ -189,21 +189,41 @@ fn workflow_wire_serializes_with_snake_case_keys() {
 }
 
 #[test]
-fn runs_and_approvals_serialize_to_bare_empty_array() {
-    // Regression guard for the crash class this fix closed. The frontend
-    // wrappers `getWorkflowRuns` / `getRunApprovals` do `raw.map(...)`, so the
-    // Rust side MUST return a bare JSON array. A wrapped `{ runs: [...] }` /
-    // `{ approvals: [...] }` shape would make `.map()` throw and crash the
-    // detail panel — the same TypeError class as the original page bug.
-    //
-    // The commands take `State<AppState>`, so we can't invoke them directly in
-    // a unit test; instead we pin the exact value they return (`Vec::new()` of
-    // their `Vec<Value>` element type) and assert its serialized shape.
-    let runs: Vec<Value> = Vec::new();
-    let approvals: Vec<Value> = Vec::new();
-    assert_eq!(serde_json::to_string(&runs).expect("serialize runs"), "[]");
+fn trigger_response_uses_persisted_run_id_contract() {
+    let wire = trigger_wire_from_message(
+        WF.to_string(),
+        "response:{\"run_id\":\"33333333-3333-3333-3333-333333333333\"}",
+    )
+    .expect("parse trigger response");
+
+    assert_eq!(wire.run_id, "33333333-3333-3333-3333-333333333333");
+    assert_eq!(wire.workflow_id, WF);
+    assert_eq!(wire.status, "pending");
+    let value = serde_json::to_value(wire).expect("serialize trigger response");
+    assert!(value.get("event_id").is_none());
+}
+
+#[test]
+fn trigger_response_rejects_missing_or_empty_run_id() {
+    assert!(trigger_wire_from_message(WF.to_string(), "response:{}").is_err());
+    assert!(trigger_wire_from_message(WF.to_string(), "response:{\"run_id\":\"   \"}",).is_err());
+}
+
+#[test]
+fn run_reads_serialize_to_backend_envelopes() {
+    let runs = WorkflowRunsWire {
+        runs: Vec::new(),
+        next: None,
+    };
+    let approvals = WorkflowApprovalsWire {
+        approvals: Vec::new(),
+    };
     assert_eq!(
-        serde_json::to_string(&approvals).expect("serialize approvals"),
-        "[]"
+        serde_json::to_value(runs).expect("serialize runs"),
+        serde_json::json!({ "runs": [], "next": null })
+    );
+    assert_eq!(
+        serde_json::to_value(approvals).expect("serialize approvals"),
+        serde_json::json!({ "approvals": [] })
     );
 }

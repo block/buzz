@@ -251,8 +251,8 @@ export function MembersSidebar({
     visibility: channel?.visibility,
     selfRole: selfMember?.role,
   });
-  // Distinguish "you can't add here" from "nothing to add" so a plain member of
-  // a private channel gets the reason instead of a silently missing affordance.
+  // Distinguish "you can't add here" from "nothing to add" so a non-member
+  // viewing a private channel gets the reason instead of a silently missing affordance.
   const showPrivateAddDeniedNotice =
     !canAddMembers &&
     selfMember !== null &&

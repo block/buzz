@@ -371,9 +371,9 @@ async fn acquire_channel_membership_lock(
 /// Role enforcement:
 /// - Open channels: `invited_by` is optional; role is forced to `Member` regardless of
 ///   what the caller passes — callers cannot self-assign elevated roles.
-/// - Private channels: requires an `invited_by` who is an active owner/admin, the channel
-///   creator bootstrapping their own first membership, or the target adding themselves
-///   (idempotent re-add — an active member's *role* still cannot change this way).
+/// - Private channels: requires an `invited_by` who is an active member, or the channel
+///   creator bootstrapping their own first membership. Any active member may add an
+///   ordinary member, guest, or bot; only owners/admins may grant elevated roles.
 /// - Elevated roles (`Owner`, `Admin`) may only be granted by an existing owner/admin,
 ///   even on open channels.
 ///
@@ -421,14 +421,12 @@ pub async fn add_member(
                 DbError::InvalidData(format!("invalid role in database: {inviter_role_str}"))
             })?;
 
-            // Only owners/admins may extend private-channel access to another
-            // identity. `inviter == pubkey` keeps a member's own idempotent
-            // re-add working; it is not a role-escalation hole, because the
-            // active-role-change guard below still rejects a self-targeted
-            // promotion from any non-elevated caller.
-            if !inviter_role.is_elevated() && inviter != pubkey {
+            // Any active member may extend private-channel access with an
+            // ordinary role. Granting owner/admin remains reserved for an
+            // existing owner/admin.
+            if role.is_elevated() && !inviter_role.is_elevated() {
                 return Err(DbError::AccessDenied(
-                    "only owners/admins may add private-channel members".to_string(),
+                    "only owners/admins may grant elevated roles".to_string(),
                 ));
             }
         }
@@ -689,7 +687,12 @@ pub async fn membership_pairs(
         .collect()
 }
 
-/// Returns all active members of the given channel.
+/// Returns all active members of the given channel, ordered by `joined_at`.
+///
+/// The roster is returned in full and is never truncated: callers use it to
+/// build the kind 39002 (NIP-29 group members) snapshot and to resolve actor
+/// roles for admin-event authorization, so a partial list silently hides late
+/// joiners from channel discovery and makes them read as non-members.
 ///
 /// Returns an empty list if the channel has been soft-deleted.
 pub async fn get_members(
@@ -704,7 +707,6 @@ pub async fn get_members(
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
         ORDER BY cm.joined_at ASC
-        LIMIT 1000
         "#,
     )
     .bind(community_id.as_uuid())
@@ -1508,6 +1510,7 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
            AND ch.archived_at IS NULL \
            AND ch.deleted_at IS NULL \
            AND c.archived_at IS NULL \
+           AND community_write_allowed(ch.community_id) \
          RETURNING ch.community_id, c.host, ch.id",
     )
     .fetch_all(pool)
@@ -1533,7 +1536,7 @@ mod tests {
     use crate::user::{ensure_user, set_agent_owner};
     use nostr::Keys;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 
     async fn setup_pool() -> PgPool {
         PgPool::connect(TEST_DB_URL)
@@ -1932,6 +1935,85 @@ mod tests {
             .await
             .expect("load accessible channel ids");
         assert_eq!(channel_ids.len(), channel_count as usize);
+    }
+
+    /// `get_members` must return the complete roster, not a truncated prefix.
+    ///
+    /// The relay builds the kind 39002 (NIP-29 group members) snapshot and every
+    /// admin role lookup from this list, so a cap silently hides late joiners:
+    /// their clients never discover the channel, and an owner past the cutoff
+    /// reads as a non-member.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_members_returns_full_roster_beyond_1000() {
+        let database_url =
+            std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB");
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+
+        // create_test_channel also inserts the creator as the first (owner) member.
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "high-volume-roster",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create test channel");
+
+        // Bulk-insert additional members with strictly increasing `joined_at`, so
+        // member N lands at roster position N (the creator holds position 0).
+        // The final member is an owner joining well past the old 1000-row cutoff.
+        let extra_members = 1_500;
+        sqlx::query(
+            r#"
+            INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at)
+            SELECT
+                $1,
+                $2,
+                decode(lpad(to_hex(n), 64, '0'), 'hex'),
+                (CASE WHEN n = $3 THEN 'owner' ELSE 'member' END)::member_role,
+                NOW() + (n || ' seconds')::interval
+            FROM generate_series(1, $3) n
+            "#,
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(extra_members)
+        .execute(&pool)
+        .await
+        .expect("insert high-volume channel members");
+
+        let members = get_members(&pool, community, channel.id)
+            .await
+            .expect("load channel members");
+
+        assert_eq!(
+            members.len(),
+            extra_members as usize + 1,
+            "get_members truncated the roster"
+        );
+
+        // The last joiner sits at the final roster position — past any
+        // 1000-row cap — which also pins the documented `joined_at` ordering.
+        let late_owner = hex::decode(format!("{:064x}", extra_members)).expect("hex pubkey");
+        let late = members.last().expect("roster is non-empty");
+        assert_eq!(
+            late.pubkey, late_owner,
+            "member who joined after the 1000th must be present and ordered last"
+        );
+        assert_eq!(
+            late.role, "owner",
+            "role of a late-joining owner must resolve correctly"
+        );
     }
 
     /// A random non-admin, non-owner user cannot remove someone else's bot.

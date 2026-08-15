@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  boundMuteStore,
   DEFAULT_STORE,
   mergeStores,
   mutedChannelIdsFromStore,
@@ -163,10 +164,13 @@ export function useChannelMutes(
         updatedAt: Math.floor(Date.now() / 1000),
       };
       setStore((prev) => {
-        const next: ChannelMuteStore = {
-          version: 1,
-          channels: { ...prev.channels, [channelId]: entry },
-        };
+        const next = boundMuteStore(
+          {
+            version: 1,
+            channels: { ...prev.channels, [channelId]: entry },
+          },
+          channelId,
+        );
         if (!writeChannelMutesStore(pubkey, next)) return prev;
         managerRef.current?.publishMutes(next);
         return next;

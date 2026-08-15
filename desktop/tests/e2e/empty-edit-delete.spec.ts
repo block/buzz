@@ -7,6 +7,7 @@ import { installMockBridge } from "../helpers/bridge";
 // message is exactly Sam's workflow: "delete a message by clearing its edit."
 const OWN_MESSAGE_ID = "mock-general-welcome";
 const ORIGINAL_CONTENT = "Welcome to #general";
+const RENDERED_ORIGINAL_CONTENT = "Welcome to general";
 
 // Open the more-actions menu for a message row and wait for the menu to mount.
 async function openMoreActionsMenu(
@@ -87,8 +88,9 @@ test("cancelling the empty-edit delete keeps the message", async ({ page }) => {
   await expect(page.getByTestId("edit-target")).toBeVisible();
   await expect(row).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
-    ORIGINAL_CONTENT,
+    RENDERED_ORIGINAL_CONTENT,
   );
+  await expect(row.getByLabel("Open channel general")).toBeVisible();
 });
 
 test("a non-empty edit still edits and never deletes", async ({ page }) => {
@@ -115,6 +117,6 @@ test("a non-empty edit still edits and never deletes", async ({ page }) => {
     editedContent,
   );
   await expect(page.getByTestId("message-timeline")).not.toContainText(
-    ORIGINAL_CONTENT,
+    RENDERED_ORIGINAL_CONTENT,
   );
 });

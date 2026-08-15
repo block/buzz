@@ -9,11 +9,11 @@ import {
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { SectionHeader } from "@/shared/ui/PageHeader";
 
 import { HarnessCatalogDialog } from "./HarnessCatalogDialog";
 import { HarnessRow } from "./HarnessRow";
 import { stableRowOrder, yourHarnessEntries } from "./harnessCatalogLogic";
+import { SettingsOptionGroup } from "./SettingsOptionGroup";
 
 function GitBashCard({
   prerequisite,
@@ -25,10 +25,8 @@ function GitBashCard({
   return (
     <div
       className={cn(
-        "min-h-16 rounded-2xl border px-4 py-4 text-sm",
-        prerequisite.available
-          ? "border-border/60 bg-muted/20"
-          : "border-amber-500/20 bg-amber-500/5",
+        "min-h-16 px-4 py-4 text-sm",
+        !prerequisite.available && "bg-amber-500/5",
       )}
       data-testid="doctor-git-bash"
     >
@@ -61,7 +59,10 @@ function GitBashCard({
           ) : null}
         </div>
         {!prerequisite.available ? (
-          <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+          <div
+            className="mt-3 space-y-1 text-sm text-muted-foreground/70"
+            data-settings-subcopy
+          >
             <p>Required for buzz-agent shell tools on Windows.</p>
             <p>{prerequisite.installHint}</p>
           </div>
@@ -110,39 +111,40 @@ export function HarnessesSettingsPanel() {
   const isRefreshing = runtimesQuery.isFetching;
 
   return (
-    <section className="min-w-0 space-y-4" data-testid="settings-harnesses">
-      <SectionHeader
-        className="items-center"
-        title="Agent runtimes"
-        description="Choose which agent tools Buzz can use on this device."
-        action={
-          <Button
-            disabled={isRefreshing}
-            onClick={() => {
-              setResetEpoch((e) => e + 1);
-              void runtimesQuery.refetch();
-              void gitBashQuery.refetch();
-            }}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            <RefreshCw
-              className={cn("h-4 w-4", isRefreshing && "animate-spin")}
-            />
-            Check again
-          </Button>
-        }
-      />
-
-      <div className="space-y-8">
+    <SettingsOptionGroup
+      data-testid="settings-harnesses"
+      description="Choose which agent tools Buzz can use on this device."
+      headerAction={
+        <Button
+          disabled={isRefreshing}
+          onClick={() => {
+            setResetEpoch((e) => e + 1);
+            void runtimesQuery.refetch();
+            void gitBashQuery.refetch();
+          }}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          <RefreshCw
+            className={cn("h-4 w-4", isRefreshing && "animate-spin")}
+          />
+          Check again
+        </Button>
+      }
+      title="Agent runtimes"
+    >
+      <div className="divide-y divide-border/55">
         {gitBashQuery.data ? (
           <section>
-            <div className="mb-3 text-sm">
+            <div className="px-4 py-3 text-sm">
               <h2 className="text-lg font-semibold tracking-tight">
                 System prerequisites
               </h2>
-              <p className="mt-1 text-sm font-normal text-muted-foreground">
+              <p
+                className="mt-1 text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Windows tools required by supported agents.
               </p>
             </div>
@@ -155,24 +157,31 @@ export function HarnessesSettingsPanel() {
               prerequisites, Windows-only) shares the page; otherwise it just
               restates the page header. */}
           {gitBashQuery.data ? (
-            <div className="mb-3 text-sm">
+            <div className="border-b border-border/55 px-4 py-3 text-sm">
               <h2 className="text-lg font-semibold tracking-tight">
                 Your runtimes
               </h2>
-              <p className="mt-1 text-sm font-normal text-muted-foreground">
+              <p
+                className="mt-1 text-sm font-normal text-muted-foreground/70"
+                data-settings-subcopy
+              >
                 Ready to use, or one click from installed.
               </p>
             </div>
           ) : null}
 
           {runtimesQuery.isLoading ? (
-            <div className="rounded-2xl bg-muted/20 px-4 py-4 text-sm font-normal text-muted-foreground">
+            <div className="px-4 py-4 text-sm font-normal text-muted-foreground">
               Checking agent runtimes...
             </div>
           ) : rows.length > 0 ? (
-            <div className="space-y-3" data-testid="doctor-runtime-list">
+            <div
+              className="divide-y divide-border/55"
+              data-testid="doctor-runtime-list"
+            >
               {rows.map((runtime) => (
                 <HarnessRow
+                  embedded
                   key={runtime.id}
                   resetEpoch={resetEpoch}
                   runtime={runtime}
@@ -180,32 +189,34 @@ export function HarnessesSettingsPanel() {
               ))}
             </div>
           ) : (
-            <div className="rounded-2xl bg-amber-500/10 px-4 py-4 text-sm text-warning">
+            <div className="bg-amber-500/10 px-4 py-4 text-sm text-warning">
               No agent runtimes ready yet — add one below.
             </div>
           )}
 
           {runtimesQuery.error instanceof Error ? (
-            <p className="mt-3 rounded-2xl bg-destructive/10 px-4 py-4 text-sm text-destructive">
+            <p className="border-t border-border/55 bg-destructive/10 px-4 py-4 text-sm text-destructive">
               {runtimesQuery.error.message}
             </p>
           ) : null}
 
-          <Button
-            className="mt-3 gap-2"
-            data-testid="harness-add-button"
-            onClick={() => setCatalogOpen(true)}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            <Plus className="h-4 w-4" />
-            Add runtimes
-          </Button>
+          <div className="border-t border-border/55 px-4 py-3">
+            <Button
+              className="gap-2"
+              data-testid="harness-add-button"
+              onClick={() => setCatalogOpen(true)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Plus className="h-4 w-4" />
+              Add runtimes
+            </Button>
+          </div>
         </section>
       </div>
 
       <HarnessCatalogDialog onOpenChange={setCatalogOpen} open={catalogOpen} />
-    </section>
+    </SettingsOptionGroup>
   );
 }

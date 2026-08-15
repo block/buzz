@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/animated_avatar.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
@@ -63,6 +64,7 @@ class ProfileAvatar extends ConsumerWidget {
     UserProfile? profile,
     String presence,
   ) {
+    final animatedAvatar = parseAnimatedAvatarUrl(profile?.avatarUrl);
     return GestureDetector(
       onTap: onTap,
       child: MaskedAvatarBadge(
@@ -70,9 +72,12 @@ class ProfileAvatar extends ConsumerWidget {
         geometry: AvatarBadgeMaskGeometry.presenceDot,
         avatar: ClipOval(
           child: ColoredBox(
-            color: context.colors.primaryContainer,
+            key: const ValueKey('profile-avatar-background'),
+            color: animatedAvatar == null
+                ? context.colors.primaryContainer
+                : Colors.transparent,
             child: AvatarImageContent(
-              imageUrl: profile?.avatarUrl,
+              imageUrl: animatedAvatar?.posterUrl ?? profile?.avatarUrl,
               fallback: Text(
                 profile?.initial ?? '?',
                 style: context.textTheme.labelMedium?.copyWith(

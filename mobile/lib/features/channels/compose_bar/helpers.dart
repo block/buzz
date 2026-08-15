@@ -1,5 +1,22 @@
 part of '../compose_bar.dart';
 
+void _useComposerChannelNames(
+  _MarkdownEditingController controller,
+  AsyncValue<List<Channel>> channelsAsync,
+) {
+  final channelNames = {
+    for (final channel in channelsAsync.asData?.value ?? const <Channel>[])
+      channel.name.toLowerCase(): channel.id,
+  };
+  final channelNamesKey = channelNames.entries
+      .map((entry) => '${entry.key}\u0000${entry.value}')
+      .join('\u0001');
+  useEffect(() {
+    controller.setChannelNames(channelNames);
+    return null;
+  }, [controller, channelNamesKey]);
+}
+
 const _typingThrottleMs = 3000;
 
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
@@ -100,9 +117,9 @@ void spliceAndMoveCursor(
 
   final before = text.substring(0, start);
   final after = text.substring(cursor);
-  controller.text = '$before$replacement$after';
-  controller.selection = TextSelection.collapsed(
-    offset: start + replacement.length,
+  controller.value = TextEditingValue(
+    text: '$before$replacement$after',
+    selection: TextSelection.collapsed(offset: start + replacement.length),
   );
   focusNode.requestFocus();
 }
@@ -124,9 +141,9 @@ void _insertTriggerAtCursor(
   final insert = needsSpace ? ' $trigger' : trigger;
   final before = text.substring(0, cursor);
   final after = text.substring(cursor);
-  controller.text = '$before$insert$after';
-  controller.selection = TextSelection.collapsed(
-    offset: cursor + insert.length,
+  controller.value = TextEditingValue(
+    text: '$before$insert$after',
+    selection: TextSelection.collapsed(offset: cursor + insert.length),
   );
   focusNode.requestFocus();
 }
@@ -279,7 +296,7 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   ];
   if (pending.isEmpty) return _NonMemberAddOutcome.empty;
 
-  // A plain member of a private channel cannot add anyone: skip the doomed
+  // A non-member cannot add anyone to a private channel: skip the doomed
   // kind:9000 rather than trading it for a relay rejection.
   if (!canAddMembers) {
     return _NonMemberAddOutcome(

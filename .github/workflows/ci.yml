@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 2
-      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           token: ''
@@ -78,6 +78,10 @@ jobs:
         run: scripts/test-release-ref-contract.sh
       - name: Desktop release candidate contract
         run: scripts/test-desktop-release-candidate.sh
+      - name: OSS desktop promotion contract
+        run: |
+          scripts/test-oss-desktop-promotion.sh
+          scripts/test-oss-desktop-promotion-behavior.sh
       - name: Mobile release contract
         run: |
           scripts/test-mobile-release-contract.sh
@@ -317,6 +321,9 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.number == 5224)) && 'READ_WRITE' || 'READ_ONLY' }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
@@ -341,6 +348,13 @@ jobs:
             .
             desktop/src-tauri
           save-if: ${{ github.event_name != 'pull_request' }}
+      # Cache rustc outputs for unchanged workspace crates. Trusted pushes write;
+      # the bounded PR 5224 trial writes only to its isolated merge-ref scope.
+      - name: Set up sccache
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11 # zizmor: ignore[cache-poisoning] Bounded trial: only PR 5224 writes to its isolated merge-ref scope; trusted pushes retain production writes.
+        with:
+          version: v0.16.0
       - name: Install cargo-nextest
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
@@ -348,6 +362,8 @@ jobs:
           tool: cargo-nextest@0.9.136
       - name: Build relay artifacts
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        env:
+          RUSTC_WRAPPER: sccache
         run: |
           cargo build --profile ci -p buzz-relay -p git-credential-nostr
           cargo nextest archive \
@@ -359,7 +375,9 @@ jobs:
             --test e2e_event_reminder \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Save relay artifacts cache
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        # PR-scoped exact-source entries cannot warm main or other PRs and churn
+        # the shared cache pool. sccache provides read-only PR reuse instead.
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |

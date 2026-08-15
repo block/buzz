@@ -14,7 +14,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
-use crate::usage::{TurnUsage, UsageTracker};
+use crate::usage::{
+    PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
+};
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -206,11 +208,12 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
-    /// Usage tracker — accumulates cumulative token counts from
-    /// `_goose/unstable/session/update` notifications and computes per-turn
-    /// deltas. Both goose and buzz-agent emit this notification; goose gates
-    /// on client capability advertisement, buzz-agent emits unconditionally.
+    /// Usage tracker for goose/buzz-agent's cumulative notification format.
     goose_usage: UsageTracker,
+    /// Per-turn prompt-response usage and Claude's optional cumulative cost.
+    standard_usage: StandardUsageTracker,
+    /// Known adapter identity for prompt-response usage mapping.
+    standard_adapter: Option<StandardAdapterKind>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -523,6 +526,14 @@ impl AcpClient {
         // console-subsystem child process spawned from a GUI/non-console parent.
         configure_no_window(&mut cmd);
 
+        let standard_adapter =
+            match crate::config::normalize_agent_command_identity(command).as_str() {
+                "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+                    Some(StandardAdapterKind::Claude)
+                }
+                "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
+                _ => None,
+            };
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -550,6 +561,8 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            standard_usage: StandardUsageTracker::default(),
+            standard_adapter,
         })
     }
 
@@ -776,6 +789,7 @@ impl AcpClient {
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
+        self.standard_usage.begin_turn(session_id);
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -821,7 +835,7 @@ impl AcpClient {
                 self.current_hard_deadline = None;
             }
         }
-        self.parse_stop_reason(&result?)
+        self.parse_prompt_response(session_id, &result?)
     }
 
     /// Send a `session/cancel` **notification** (no `id` field, no response expected).
@@ -867,18 +881,24 @@ impl AcpClient {
         self.steering_supported
     }
 
-    /// Consume and return the per-turn usage record computed from the most
-    /// recent `_goose/unstable/session/update` notification.
-    ///
-    /// Returns `None` if no usage update arrived since the last call (i.e.
-    /// the harness did not emit one for this turn, or this is not a goose
-    /// agent). Must be called at most once per turn; subsequent calls return
-    /// `None` until the next `usage_update` notification is recorded.
-    ///
-    /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
-    /// publish a kind 44200 NIP-AM event.
+    /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
+    /// exclusive cumulative path; standard ACP prompt usage is used only when
+    /// goose emitted nothing for this turn.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
-        self.goose_usage.take()
+        let goose_usage = self.goose_usage.take();
+        let standard_usage = self.standard_usage.take();
+        goose_usage.or(standard_usage)
+    }
+
+    /// Notify the usage tracker that buzz-acp just spawned a new session.
+    ///
+    /// Seeds a zero baseline so the first usage notification for `session_id`
+    /// produces `delta_reliable: true` (turn delta == cumulative from zero).
+    /// Must be called only when buzz-acp created the session via `session/new`;
+    /// never when attaching to a pre-existing session.
+    pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
+        self.goose_usage.seed_zero_baseline(session_id);
+        self.standard_usage.seed_zero_baseline(session_id);
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1038,7 +1058,7 @@ impl AcpClient {
                 remaining,
             )
             .await?;
-        self.parse_stop_reason(&result)
+        self.parse_prompt_response(session_id, &result)
     }
 
     /// Serialize `value` as a single NDJSON line and flush to the agent's stdin.
@@ -1607,7 +1627,9 @@ impl AcpClient {
                                                     "steer accepted as {STEER_OUTCOME_STARTED_NEW_TURN}: \
                                                      awaited turn had ended — hard deadline not renewed"
                                                 );
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             Some(_) => {
                                                 let renew_now = Instant::now();
@@ -1619,7 +1641,9 @@ impl AcpClient {
                                                         "steer success: renewed hard deadline ({max_duration:?} from now)"
                                                     );
                                                 }
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             None => {
                                                 // Report the raw string when
@@ -1817,12 +1841,40 @@ impl AcpClient {
                 }
                 false
             }
+            "usage_update" => {
+                self.handle_standard_usage_update(msg);
+                false
+            }
             "keepalive" => false,
             other => {
                 tracing::debug!(target: "acp::update", "session/update: {other}");
                 false
             }
         }
+    }
+
+    /// Record the standard ACP cumulative cost notification when emitted by
+    /// Claude. Unlike Goose's payload, `used`/`size` are context occupancy and
+    /// are intentionally not mapped to token accounting.
+    fn handle_standard_usage_update(&mut self, msg: &serde_json::Value) {
+        if self.standard_adapter != Some(StandardAdapterKind::Claude) {
+            return;
+        }
+        let session_id = match msg
+            .pointer("/params/sessionId")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(session_id) => session_id,
+            None => return,
+        };
+        let cost = match msg
+            .pointer("/params/update/cost/amount")
+            .and_then(serde_json::Value::as_f64)
+        {
+            Some(cost) => cost,
+            None => return,
+        };
+        self.standard_usage.record_cost(session_id, cost);
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the
@@ -1849,8 +1901,8 @@ impl AcpClient {
                     tracing::debug!(
                         target: "acp::usage",
                         session_id = %notif.session_id,
-                        input = payload.accumulated_input_tokens,
-                        output = payload.accumulated_output_tokens,
+                        input = ?payload.accumulated_input_tokens,
+                        output = ?payload.accumulated_output_tokens,
                         // A subset of `input`, logged so downstream accounting can
                         // price it at the provider's cached rate. Always emitted,
                         // including as 0, so a parser can tell "no cache hits"
@@ -1954,6 +2006,28 @@ impl AcpClient {
         self.permission_responded = true;
         self.pending_permission_id = None;
         Ok(())
+    }
+
+    /// Parse a completed prompt response and retain its optional per-turn usage.
+    fn parse_prompt_response(
+        &mut self,
+        session_id: &str,
+        result: &serde_json::Value,
+    ) -> Result<StopReason, AcpError> {
+        let stop_reason = self.parse_stop_reason(result)?;
+        if let Some(adapter) = self.standard_adapter {
+            match serde_json::from_value::<PromptResponseUsage>(result["usage"].clone()) {
+                Ok(usage) => self
+                    .standard_usage
+                    .record_prompt_usage(session_id, usage, adapter),
+                Err(_) if result.get("usage").is_some() => tracing::debug!(
+                    target: "acp::usage",
+                    "session/prompt response contained malformed standard usage"
+                ),
+                Err(_) => {}
+            }
+        }
+        Ok(stop_reason)
     }
 
     /// Parse `stopReason` from a `session/prompt` result value.
@@ -2885,6 +2959,30 @@ mod tests {
             .expect("failed to spawn test script")
     }
 
+    #[cfg(unix)]
+    async fn spawn_named_script(name: &str, script: &str) -> (AcpClient, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp adapter dir");
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/usr/bin/env bash\n{script}\n"))
+            .expect("write fake adapter");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("adapter metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod fake adapter");
+        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false)
+            .await
+            .expect("spawn named fake adapter");
+        (client, dir)
+    }
+
     /// Spawn a probe script whose file name carries a runtime identity (e.g.
     /// `hermes-acp`) and return the value of `var` as the child observed it.
     /// `<unset>` means the child did not receive the var.
@@ -3789,7 +3887,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -3850,7 +3948,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -4034,7 +4132,7 @@ mod tests {
             "_session/steering must not carry expectedRunId; wrote: {written}"
         );
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected outcome must ack Success, got {ack:?}"
         );
     }
@@ -4066,7 +4164,7 @@ mod tests {
         // no `outcome`) — the OutcomeRejected guard applies only to
         // `_session/steering`.
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "goose success result must ack Success, got {ack:?}"
         );
     }
@@ -4171,7 +4269,7 @@ mod tests {
         assert_eq!(result.unwrap()["done"], serde_json::json!(true));
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected must ack Success, got {ack:?}"
         );
     }
@@ -4228,7 +4326,7 @@ mod tests {
         // rather than released — hence Success, not an Err.
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "startedNewTurn is a delivery success, got {ack:?}"
         );
     }
@@ -4259,6 +4357,254 @@ mod tests {
             crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
             other => panic!("expected Err(ExpectedRunIdMissing), got {other:?}"),
         }
+    }
+
+    // ── Standard ACP prompt-response usage ─────────────────────────────────
+
+    fn prompt_response_usage(
+        input: u64,
+        output: u64,
+        total: u64,
+        cached_read: Option<u64>,
+        cached_write: Option<u64>,
+    ) -> serde_json::Value {
+        let mut usage = serde_json::json!({
+            "inputTokens": input,
+            "outputTokens": output,
+            "totalTokens": total,
+        });
+        if let Some(cached_read) = cached_read {
+            usage["cachedReadTokens"] = serde_json::json!(cached_read);
+        }
+        if let Some(cached_write) = cached_write {
+            usage["cachedWriteTokens"] = serde_json::json!(cached_write);
+        }
+        serde_json::json!({"stopReason": "end_turn", "usage": usage})
+    }
+
+    fn standard_cost_update(session_id: &str, cost: f64) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "cost": {"amount": cost, "currency": "USD"}
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn claude_prompt_response_usage_merges_with_cumulative_cost() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("claude-session");
+        client.standard_usage.begin_turn("claude-session");
+        client.handle_session_update(&standard_cost_update("claude-session", 0.042));
+        assert_eq!(
+            client
+                .parse_prompt_response(
+                    "claude-session",
+                    &prompt_response_usage(100, 20, 175, Some(30), Some(25)),
+                )
+                .unwrap(),
+            StopReason::EndTurn
+        );
+
+        let usage = client.take_turn_usage().expect("prompt usage");
+        assert!(usage.delta_reliable, "response tokens need no baseline");
+        assert_eq!(usage.turn_input_tokens, Some(155));
+        assert_eq!(usage.turn_output_tokens, Some(20));
+        assert_eq!(
+            usage.turn_total_tokens, None,
+            "Claude total is adapter-derived"
+        );
+        assert_eq!(usage.turn_cache_read_tokens, Some(30));
+        assert_eq!(usage.turn_cache_write_tokens, Some(25));
+        assert_eq!(usage.turn_cost_usd, Some(0.042));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.042));
+        assert_eq!(usage.cumulative_input_tokens, None);
+        assert_eq!(usage.cumulative_output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn codex_prompt_response_usage_preserves_provider_total_without_cost() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Codex);
+        client.standard_usage.begin_turn("codex-session");
+        client.handle_session_update(&standard_cost_update("codex-session", 0.042));
+        client
+            .parse_prompt_response(
+                "codex-session",
+                &prompt_response_usage(90, 10, 140, Some(40), None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("prompt usage");
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(130));
+        assert_eq!(usage.turn_output_tokens, Some(10));
+        assert_eq!(usage.turn_total_tokens, Some(140));
+        assert_eq!(usage.turn_cache_read_tokens, Some(40));
+        assert_eq!(usage.turn_cache_write_tokens, None);
+        assert_eq!(
+            usage.cumulative_cost_usd, None,
+            "Codex cost update is ignored"
+        );
+        assert_eq!(usage.cumulative_input_tokens, None);
+        assert_eq!(usage.cumulative_output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn standard_prompt_input_overflow_fails_closed() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.standard_usage.begin_turn("overflow-session");
+        client
+            .parse_prompt_response(
+                "overflow-session",
+                &prompt_response_usage(u64::MAX, 10, u64::MAX, Some(1), None),
+            )
+            .unwrap();
+
+        assert!(
+            client.take_turn_usage().is_none(),
+            "overflow without another valid signal must not emit all-null usage"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_named_adapter_wire_lifecycle_records_prompt_and_cost() {
+        let script = r#"
+            read -r REQ
+            ID=$(printf '%s' "$REQ" | sed -E 's/.*"id":([0-9]+).*/\1/')
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"wire-session","update":{"sessionUpdate":"usage_update","cost":{"amount":0.5,"currency":"USD"}}}}'
+            echo '{"jsonrpc":"2.0","id":'"$ID"',"result":{"stopReason":"end_turn","usage":{"inputTokens":7,"outputTokens":3,"totalTokens":10,"cachedReadTokens":2}}}'
+            sleep 1
+        "#;
+        let (mut client, dir) = spawn_named_script("claude-code", script).await;
+        assert_eq!(client.standard_adapter, Some(StandardAdapterKind::Claude));
+        client.notify_session_spawned("wire-session");
+
+        let stop = client
+            .session_prompt_with_idle_timeout(
+                "wire-session",
+                "hello",
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("wire prompt");
+        assert_eq!(stop, StopReason::EndTurn);
+
+        let usage = client.take_turn_usage().expect("wire usage");
+        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_input_tokens, Some(9));
+        assert_eq!(usage.turn_output_tokens, Some(3));
+        assert_eq!(usage.turn_cost_usd, Some(0.5));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.5));
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claude_cost_only_record_survives_missing_prompt_usage() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("cost-only-session");
+        client.standard_usage.begin_turn("cost-only-session");
+        client.handle_session_update(&standard_cost_update("cost-only-session", 0.125));
+
+        let usage = client.take_turn_usage().expect("cost-only usage");
+        assert_eq!(usage.turn_seq, 1);
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, None);
+        assert_eq!(usage.turn_cost_usd, Some(0.125));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.125));
+    }
+
+    #[tokio::test]
+    async fn attached_claude_session_does_not_invent_first_cost_delta() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.standard_usage.begin_turn("attached-session");
+        client.handle_session_update(&standard_cost_update("attached-session", 1.25));
+        client
+            .parse_prompt_response(
+                "attached-session",
+                &prompt_response_usage(10, 2, 12, None, None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("attached usage");
+        assert_eq!(usage.turn_cost_usd, None);
+        assert_eq!(usage.cumulative_cost_usd, Some(1.25));
+    }
+
+    #[tokio::test]
+    async fn standard_usage_two_prompts_preserve_both_monotonic_sequences() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("two-prompt-session");
+
+        client.standard_usage.begin_turn("two-prompt-session");
+        client.handle_session_update(&standard_cost_update("two-prompt-session", 0.1));
+        client
+            .parse_prompt_response(
+                "two-prompt-session",
+                &prompt_response_usage(10, 2, 12, None, None),
+            )
+            .unwrap();
+        let initial = client.take_turn_usage().expect("initial prompt usage");
+
+        client.standard_usage.begin_turn("two-prompt-session");
+        client.handle_session_update(&standard_cost_update("two-prompt-session", 0.25));
+        client
+            .parse_prompt_response(
+                "two-prompt-session",
+                &prompt_response_usage(20, 3, 23, None, None),
+            )
+            .unwrap();
+        let user = client.take_turn_usage().expect("user prompt usage");
+
+        assert_eq!((initial.turn_seq, user.turn_seq), (1, 2));
+        assert_eq!(
+            (initial.turn_input_tokens, user.turn_input_tokens),
+            (Some(10), Some(20))
+        );
+        assert_eq!(
+            (initial.turn_cost_usd, user.turn_cost_usd),
+            (Some(0.1), Some(0.15))
+        );
+    }
+
+    #[tokio::test]
+    async fn goose_usage_stays_exclusive_and_drains_standard_usage() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.goose_usage.begin_turn("goose-session");
+        client.standard_usage.begin_turn("goose-session");
+        client.handle_goose_usage_update(&goose_usage_update_msg("goose-session", 1000, 200, None));
+        client
+            .parse_prompt_response(
+                "goose-session",
+                &prompt_response_usage(100, 20, 120, None, None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("goose usage");
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(
+            usage.turn_input_tokens, None,
+            "goose first delta remains exclusive"
+        );
+        assert!(
+            client.take_turn_usage().is_none(),
+            "standard usage was drained"
+        );
     }
 
     // ── Goose usage notification integration ──────────────────────────────
@@ -4306,8 +4652,8 @@ mod tests {
         assert_eq!(usage.session_id, "s1");
         assert_eq!(usage.turn_seq, 1);
         assert!(!usage.delta_reliable, "first turn must be unreliable");
-        assert_eq!(usage.cumulative_input_tokens, 1000);
-        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(usage.cumulative_output_tokens, Some(200));
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
 
         // Second take must be None.

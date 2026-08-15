@@ -1,5 +1,10 @@
 import { useEffect, useEffectEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -27,6 +32,7 @@ import {
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
+import { buildSentFromThreadTag } from "@/features/messages/lib/sentFromThread";
 import {
   clearTimeoutState,
   recordTimeoutFromRejection,
@@ -87,6 +93,8 @@ export function createOptimisticMessage(
   mentionPubkeys: string[] = [],
   parentEventId: string | null = null,
   mediaTags: string[][] = [],
+  sentFromThreadRootId: string | null = null,
+  sentFromThreadRootExcerpt: string | null = null,
 ): RelayEvent {
   const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
@@ -114,6 +122,11 @@ export function createOptimisticMessage(
 
   for (const tag of mediaTags) {
     tags.push(tag);
+  }
+  if (sentFromThreadRootId) {
+    tags.push(
+      buildSentFromThreadTag(sentFromThreadRootId, sentFromThreadRootExcerpt),
+    );
   }
 
   return {
@@ -226,26 +239,46 @@ export function useChannelWindowQuery(channel: Channel | null) {
   });
 }
 
+export function reconcileFetchedChannelWindow(
+  queryClient: QueryClient,
+  channelId: string,
+  events: Awaited<ReturnType<typeof getChannelWindowEvents>>,
+  previousMessages: RelayEvent[],
+  signal: AbortSignal,
+): RelayEvent[] {
+  // Tauri invokes cannot be canceled after dispatch. A replacement refetch can
+  // therefore win while this older request is still in flight. Never let that
+  // canceled request commit its stale page into the authoritative window.
+  signal.throwIfAborted();
+  const windowKey = channelWindowKey(channelId);
+  const page = parseChannelWindowResponse(events, channelId, null);
+  const current =
+    queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+    emptyChannelWindowStore();
+  const next = replaceNewestChannelWindow(current, page);
+  queryClient.setQueryData(windowKey, next);
+  return reconcileChannelWindowMessages(next, previousMessages);
+}
+
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
-  const windowKey = channelWindowKey(channel?.id ?? "none");
 
   return useQuery({
     enabled: channel !== null && channel.channelType !== "forum",
     queryKey,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!channel) throw new Error("No channel selected.");
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const events = await getChannelWindowEvents(channel.id);
-      const page = parseChannelWindowResponse(events, channel.id, null);
-      const current =
-        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
-        emptyChannelWindowStore();
-      const next = replaceNewestChannelWindow(current, page);
-      queryClient.setQueryData(windowKey, next);
-      return reconcileChannelWindowMessages(next, previousMessages);
+      return reconcileFetchedChannelWindow(
+        queryClient,
+        channel.id,
+        events,
+        previousMessages,
+        signal,
+      );
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
@@ -373,6 +406,10 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
+        // The live subscription starts at "now", so it cannot close the gap
+        // between the last page snapshot and subscription establishment. Always
+        // refresh after the subscription is active; freshness alone is not a
+        // proof that no relay events landed in that interval.
         void refreshNewestWindow().catch((error) => {
           if (!isDisposed) {
             console.error(
@@ -413,6 +450,10 @@ export function useSendMessageMutation(
       mentionPubkeys?: string[];
       parentEventId?: string | null;
       mediaTags?: string[][];
+      forceRest?: boolean;
+      sentFromThreadRootId?: string | null;
+      sentFromThreadRootExcerpt?: string | null;
+      transport?: "auto" | "http";
     },
     MessageQueryContext | undefined
   >({
@@ -423,6 +464,10 @@ export function useSendMessageMutation(
       mentionPubkeys,
       parentEventId,
       mediaTags,
+      forceRest,
+      sentFromThreadRootId,
+      sentFromThreadRootExcerpt,
+      transport = "auto",
     }) => {
       // Prefer a channel captured by the caller at compose time. Otherwise,
       // resolve a captured id from the shared channel cache so navigation
@@ -465,11 +510,25 @@ export function useSendMessageMutation(
         identity.pubkey,
         mentionPubkeys,
       );
+      if (sentFromThreadRootId && parentEventId) {
+        throw new Error(
+          "A thread message can only be sent as a top-level message.",
+        );
+      }
+
+      const sentFromThreadTag = sentFromThreadRootId
+        ? buildSentFromThreadTag(
+            sentFromThreadRootId,
+            sentFromThreadRootExcerpt,
+          )
+        : undefined;
 
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
       if (
+        forceRest ||
+        transport === "http" ||
         parentEventId ||
         imetaTags.length > 0 ||
         emojiTags.length > 0 ||
@@ -489,6 +548,7 @@ export function useSendMessageMutation(
           emojiTags,
           mentionTags,
           linkPreviewTags,
+          sentFromThreadTag,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -527,6 +587,7 @@ export function useSendMessageMutation(
             ...emojiTags,
             ...mentionTags,
             ...linkPreviewTags,
+            ...(sentFromThreadTag ? [sentFromThreadTag] : []),
           ],
           content: content.trim(),
           sig: "",
@@ -537,7 +598,7 @@ export function useSendMessageMutation(
         effectiveChannel.id,
         content,
         recipientPubkeys,
-        mentionTags,
+        [...mentionTags, ...(sentFromThreadTag ? [sentFromThreadTag] : [])],
       );
     },
     onMutate: async ({
@@ -547,6 +608,8 @@ export function useSendMessageMutation(
       mentionPubkeys,
       parentEventId,
       mediaTags,
+      sentFromThreadRootId,
+      sentFromThreadRootExcerpt,
     }) => {
       // Mirror mutationFn's target resolution so the optimistic message lands
       // in the cache for the same channel as the real send. A caller-supplied
@@ -582,6 +645,8 @@ export function useSendMessageMutation(
         mentionPubkeys ?? [],
         parentEventId ?? null,
         mediaTags ?? [],
+        sentFromThreadRootId ?? null,
+        sentFromThreadRootExcerpt ?? null,
       );
 
       const nextWindow = mergeLiveChannelWindowEvent(
@@ -718,7 +783,11 @@ export function useEditMessageMutation(channel: Channel | null) {
       // Split so each rides its own validated Tauri arg — emoji tags must NOT
       // go through the imeta-only `mediaTags` channel (the Rust `imeta_tags`
       // guard rejects any non-imeta prefix), mirroring the send path.
-      const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
+      const {
+        mediaTags: imetaTags,
+        emojiTags,
+        mentionTags,
+      } = splitOutgoingTags(mediaTags);
 
       await editMessage(
         channel.id,
@@ -727,9 +796,11 @@ export function useEditMessageMutation(channel: Channel | null) {
         imetaTags,
         emojiTags,
         mentionPubkeys,
+        false,
+        mentionTags,
       );
     },
-    onSuccess: (_data, { eventId, content, mediaTags }) => {
+    onSuccess: (_data, { eventId, content, mediaTags, mentionPubkeys }) => {
       if (!channel) {
         return;
       }
@@ -742,9 +813,15 @@ export function useEditMessageMutation(channel: Channel | null) {
       // only because the edit event round-trip can lag perceptibly.)
       const applyEdit = (message: RelayEvent): RelayEvent => {
         if (message.id !== eventId) return message;
-        const nextTags = mediaTags
-          ? applyEditTagOverlay(message.tags, mediaTags)
-          : message.tags;
+        const editTags = [
+          ...(mediaTags ?? []),
+          ...(mentionPubkeys ?? []).map((pubkey) => ["p", pubkey]),
+          ["buzz:mention-snapshot"],
+        ];
+        const nextTags =
+          mediaTags !== undefined || editTags.length > 0
+            ? applyEditTagOverlay(message.tags, editTags)
+            : message.tags;
         return { ...message, content, tags: nextTags };
       };
 
