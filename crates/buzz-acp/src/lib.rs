@@ -3951,6 +3951,15 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// The retry-exhausted notice. Single source for the sentence so the
+/// retries-exhausted and panic dead-letter paths cannot drift apart.
+fn retry_exhausted_notice(reason: &str) -> String {
+    format!(
+        "⚠️ I couldn't process the last request after multiple retries ({reason}). \
+         Please re-send if it's still needed."
+    )
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -4117,9 +4126,7 @@ fn handle_prompt_result(
                     PromptOutcome::Error(e) => format!("{e}"),
                     _ => "repeated failures".to_string(),
                 };
-                let content = format!(
-                    "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
-                );
+                let content = retry_exhausted_notice(&reason);
                 spawn_failure_notice(rest_client, &dead, content);
             }
         } else {
@@ -4398,9 +4405,7 @@ fn recover_panicked_agent(
                         events = dead.events.len(),
                         "dead-lettered batch for panicked agent {i}"
                     );
-                    let content = "⚠️ I couldn't process the last request after multiple retries \
-                        (the agent crashed). Please re-send if it's still needed."
-                        .to_string();
+                    let content = retry_exhausted_notice("the agent crashed");
                     spawn_failure_notice(rest_client, &dead, content);
                 } else {
                     tracing::warn!("requeued batch for panicked agent {i}");
@@ -7367,6 +7372,14 @@ mod error_outcome_emission_tests {
     use crate::queue::{BatchEvent, FlushBatch};
     use nostr::{Event, EventBuilder, Keys, Kind, Tag};
     use std::collections::HashSet;
+
+    #[test]
+    fn retry_exhausted_notice_matches_existing_template() {
+        assert_eq!(
+            retry_exhausted_notice("the agent crashed"),
+            "⚠️ I couldn't process the last request after multiple retries (the agent crashed). Please re-send if it's still needed."
+        );
+    }
 
     fn test_config() -> Config {
         Config {
