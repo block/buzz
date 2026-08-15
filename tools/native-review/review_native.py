@@ -566,12 +566,21 @@ def capture_step(driver: Driver, run_dir: pathlib.Path, slug: str, record: dict[
 
 def cleanup_review_state(run_dir: pathlib.Path, isolation: dict[str, str],
                          fixture: dict[str, Any] | None) -> None:
+    errors = []
     env = scrubbed_environment()
     env["HOME"] = str(run_dir / "home")
-    run([str(ROOT / "scripts/reset-desktop-standalone-state.sh"),
-         isolation["bundle_id"], isolation["keyring_service"]], env=env)
+    try:
+        run([str(ROOT / "scripts/reset-desktop-standalone-state.sh"),
+             isolation["bundle_id"], isolation["keyring_service"]], env=env)
+    except Exception as exc:
+        errors.append(f"desktop state reset failed: {exc}")
     if fixture:
-        pathlib.Path(fixture["secret_path"]).unlink(missing_ok=True)
+        try:
+            pathlib.Path(fixture["secret_path"]).unlink(missing_ok=True)
+        except Exception as exc:
+            errors.append(f"review identity removal failed: {exc}")
+    if errors:
+        raise HarnessError("; ".join(errors))
 
 
 def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -> pathlib.Path:

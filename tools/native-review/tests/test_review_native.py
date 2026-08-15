@@ -164,6 +164,35 @@ class JourneyTests(unittest.TestCase):
         for name in sentinels:
             self.assertNotIn(name, environment)
 
+    def test_cleanup_removes_identity_when_state_reset_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = pathlib.Path(directory)
+            secret_path = run_dir / "state/identity.key"
+            secret_path.parent.mkdir()
+            secret_path.write_text("review-secret")
+            isolation = review_native.isolation_manifest("run", "ws://127.0.0.1:3030")
+            fixture = {"secret_path": str(secret_path)}
+            with mock.patch.object(review_native, "run", side_effect=RuntimeError("reset failed")):
+                with self.assertRaisesRegex(
+                        review_native.HarnessError,
+                        "desktop state reset failed: reset failed"):
+                    review_native.cleanup_review_state(run_dir, isolation, fixture)
+            self.assertFalse(secret_path.exists())
+
+    def test_cleanup_aggregates_reset_and_identity_removal_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = pathlib.Path(directory)
+            secret_path = run_dir / "state/identity.key"
+            isolation = review_native.isolation_manifest("run", "ws://127.0.0.1:3030")
+            fixture = {"secret_path": str(secret_path)}
+            with mock.patch.object(review_native, "run", side_effect=RuntimeError("reset failed")), \
+                 mock.patch.object(pathlib.Path, "unlink", side_effect=OSError("unlink failed")):
+                with self.assertRaisesRegex(
+                        review_native.HarnessError,
+                        "desktop state reset failed: reset failed; "
+                        "review identity removal failed: unlink failed"):
+                    review_native.cleanup_review_state(run_dir, isolation, fixture)
+
     def test_repository_controlled_subprocesses_receive_scrubbed_environments(self):
         safe = {"PATH": "/usr/bin", "HOME": "/tmp/home"}
         with mock.patch.object(review_native, "scrubbed_environment", return_value=safe), \
