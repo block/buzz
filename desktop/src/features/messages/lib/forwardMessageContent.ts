@@ -94,7 +94,9 @@ export function buildForwardedContent(messages: readonly TimelineMessage[]): {
   mediaTags: string[][] | undefined;
 } {
   const header =
-    messages.length <= 1 ? "Forwarded message" : `Forwarded ${messages.length} messages`;
+    messages.length <= 1
+      ? "Forwarded message"
+      : `Forwarded ${messages.length} messages`;
 
   const allMedia: ImetaMedia[] = [];
   const seenUrls = new Set<string>();

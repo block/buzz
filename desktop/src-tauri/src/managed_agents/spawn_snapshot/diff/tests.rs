@@ -428,7 +428,7 @@ fn no_sentinel_reaches_the_owning_process_debug_output() {
     #[cfg(unix)]
     let program = "/usr/bin/true";
     #[cfg(windows)]
-    let program = "true";
+    let program = "cmd";
     let child = std::process::Command::new(program)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

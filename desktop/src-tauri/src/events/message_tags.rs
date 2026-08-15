@@ -1,32 +1,9 @@
 use nostr::{EventId, Tag};
 
-use super::check_pubkey;
-
 const MAX_THREAD_ROOT_EXCERPT_CHARS: usize = 64;
 const SENT_FROM_THREAD_TAG: &str = "buzz:sent-from-thread";
 
-pub(super) fn mention_reference_tags(
-    mentions: &[Vec<String>],
-    tags: &mut Vec<Tag>,
-) -> Result<(), String> {
-    for mention in mentions {
-        if mention.first().map(String::as_str) != Some("mention") {
-            return Err(format!(
-                "mention reference tags must use 'mention' prefix (got {:?})",
-                mention.first()
-            ));
-        }
-        let Some(pubkey) = mention.get(1) else {
-            return Err("mention reference tag missing pubkey".into());
-        };
-        check_pubkey(pubkey)?;
-        tags.push(
-            Tag::parse(vec!["mention", &pubkey.to_ascii_lowercase()])
-                .map_err(|error| format!("invalid mention reference tag: {error}"))?,
-        );
-    }
-    Ok(())
-}
+
 
 pub(super) fn append_sent_from_thread_tag(
     source_tag: Option<&[String]>,
@@ -55,39 +32,6 @@ pub(super) fn append_sent_from_thread_tag(
 
     let parts: Vec<&str> = source_tag.iter().map(String::as_str).collect();
     tags.push(Tag::parse(parts).map_err(|e| format!("invalid sent-from-thread tag: {e}"))?);
-    Ok(())
-}
-
-/// Validate and append imeta tags. Rejects any tag whose first element is not "imeta"
-/// to prevent injection of arbitrary tags (e.g., forged "h", "e", or "p" tags).
-pub(super) fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for media_tag in media_tags {
-        if media_tag.first().map(String::as_str) != Some("imeta") {
-            return Err(format!(
-                "media tags must use 'imeta' prefix (got {:?})",
-                media_tag.first()
-            ));
-        }
-        let parts: Vec<&str> = media_tag.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid imeta tag: {e}"))?);
-    }
-    Ok(())
-}
-
-/// Validate and append NIP-30 custom-emoji tags. Mirrors `imeta_tags`: rejects
-/// any tag whose first element is not "emoji" so this path can't be used to
-/// smuggle forged "h"/"e"/"p" tags. Each tag is `["emoji", shortcode, url]`.
-pub(super) fn emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for emoji_tag in emoji_tags {
-        if emoji_tag.first().map(String::as_str) != Some("emoji") {
-            return Err(format!(
-                "emoji tags must use 'emoji' prefix (got {:?})",
-                emoji_tag.first()
-            ));
-        }
-        let parts: Vec<&str> = emoji_tag.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid emoji tag: {e}"))?);
-    }
     Ok(())
 }
 

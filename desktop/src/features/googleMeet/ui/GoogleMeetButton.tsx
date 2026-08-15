@@ -103,7 +103,10 @@ export function GoogleMeetButton({
   return (
     <Tooltip disableHoverableContent>
       <TooltipTrigger asChild>
-        <span className="inline-flex" data-testid="channel-google-meet-tooltip-trigger">
+        <span
+          className="inline-flex"
+          data-testid="channel-google-meet-tooltip-trigger"
+        >
           <Button
             aria-label="Start Google Meet"
             className={cn(className)}

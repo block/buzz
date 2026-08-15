@@ -264,10 +264,14 @@ describe("visibility-gated hooks", () => {
       configurable: true,
       value: "visible",
     });
+    dom.window.requestAnimationFrame = (cb) => dom.window.setTimeout(cb, 0);
+    dom.window.cancelAnimationFrame = (id) => dom.window.clearTimeout(id);
     Object.assign(globalThis, {
+      cancelAnimationFrame: dom.window.cancelAnimationFrame,
       document: dom.window.document,
       HTMLElement: dom.window.HTMLElement,
       IS_REACT_ACT_ENVIRONMENT: true,
+      requestAnimationFrame: dom.window.requestAnimationFrame,
       window: dom.window,
     });
     const observed = [];
@@ -287,12 +291,17 @@ describe("visibility-gated hooks", () => {
     focused = true;
     await act(async () => window.dispatchEvent(new window.Event("focus")));
     assert.deepEqual(observed, [1_000, false]);
-    await act(
-      async () => new Promise((resolve) => window.setTimeout(resolve, 10)),
-    );
+    await act(async () => {
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 50));
+    });
     assert.deepEqual(observed, [1_000, false, 1_000]);
 
     await act(async () => root.unmount());
+    delete globalThis.window;
+    delete globalThis.document;
+    delete globalThis.HTMLElement;
+    delete globalThis.requestAnimationFrame;
+    delete globalThis.cancelAnimationFrame;
     dom.window.close();
   });
 });

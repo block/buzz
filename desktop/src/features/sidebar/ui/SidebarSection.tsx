@@ -302,9 +302,7 @@ export function ChannelMenuButton({
   const inactiveContentColor = cn(
     !isActive &&
       !isMuted &&
-      (hasTopLevelUnread
-        ? "text-sidebar-foreground"
-        : "text-muted-foreground"),
+      (hasTopLevelUnread ? "text-sidebar-foreground" : "text-muted-foreground"),
     !isActive &&
       isMuted &&
       (hasTopLevelUnread || hasThreadUnread

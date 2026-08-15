@@ -106,7 +106,6 @@ import {
   imageLightboxCornerRadiiFromElement,
   imageLightboxCornerRadiiStyle,
   imageLightboxExpandedCornerRadii,
-  getImageLightboxFocusableElements,
   imageLightboxReturnTargetForItem,
   imageLightboxSourceScopeForTrigger,
   imageLightboxStyle,

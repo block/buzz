@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.5.14"
+version = "0.5.14-0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1157,6 +1157,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tauri-utils",
+ "tauri-winrt-notification",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -1168,6 +1169,7 @@ dependencies = [
  "uuid",
  "webkit2gtk",
  "window-vibrancy",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
  "zeroize",
  "zip 8.6.0",

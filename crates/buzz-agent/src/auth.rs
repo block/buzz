@@ -455,12 +455,17 @@ fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
 
     let dir = match &cfg.cache_dir_override {
         Some(p) => p.join(&cfg.cache_namespace),
-        None => dirs::home_dir()
-            .ok_or_else(|| AgentError::Llm("oauth cache: home directory not found".into()))?
-            .join(".config")
-            .join("buzz-agent")
-            .join("oauth")
-            .join(&cfg.cache_namespace),
+        None => {
+            let base = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(PathBuf::from)
+                .or_else(dirs::home_dir)
+                .ok_or_else(|| AgentError::Llm("oauth cache: home directory not found".into()))?;
+            base.join(".config")
+                .join("buzz-agent")
+                .join("oauth")
+                .join(&cfg.cache_namespace)
+        }
     };
     Ok(dir.join(format!("{hash}.json")))
 }

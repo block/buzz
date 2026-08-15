@@ -5,11 +5,7 @@ import { usePinnedMessagesActions } from "@/features/channels/ui/usePinnedMessag
 import type { TimelineMessage } from "@/features/messages/types";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/shared/ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 
 function truncateBody(body: string, max = 120): string {
   const singleLine = body.replace(/\s+/g, " ").trim();

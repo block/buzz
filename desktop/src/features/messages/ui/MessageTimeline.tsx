@@ -489,7 +489,12 @@ const MessageTimelineBase = React.forwardRef<
       },
       scrollToMessage: jumpToMessage,
     }),
-    [jumpToMessage, prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
+    [
+      jumpToMessage,
+      prepareForOwnMessage,
+      scrollToBottom,
+      timelineVirtualizerApi,
+    ],
   );
 
   // The unread pill is a transient, per-open affordance: dismiss it once the
@@ -703,200 +708,200 @@ const MessageTimelineBase = React.forwardRef<
 
   return (
     <MessageSelectionProvider channelId={channelId}>
-    <TooltipProvider delayDuration={200}>
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {showUnreadPill ? (
-          <div
-            className={cn(
-              "pointer-events-none absolute inset-x-0 z-30 flex justify-center px-4",
-              channelChrome.stickyTimelineTop,
-            )}
-          >
-            <UnreadPill
-              direction="up"
-              label={unreadCountLabel(unreadCount)}
-              onClick={handleJumpToOldestUnread}
-              testId="message-unread-pill"
-            />
-          </div>
-        ) : null}
-        {/* `isFetchingOlder` clears on fetch resolve, but rows paint a frame
-            later (deferred snapshot / settle-gate hold) — keep the spinner up
-            until the page actually renders. */}
-        {isFetchingOlder ||
-        isHoldingPrepend ||
-        isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
-          <div
-            className={cn(
-              "pointer-events-none absolute inset-x-0 z-30 flex justify-center px-4",
-              channelChrome.stickyTimelineTop,
-            )}
-            data-testid="message-timeline-fetching-older"
-          >
-            <span className="flex items-center rounded-full bg-background/80 p-1.5 shadow-sm ring-1 ring-border/40 backdrop-blur-sm">
-              <Spinner className="h-4 w-4 border-2 text-muted-foreground" />
-            </span>
-          </div>
-        ) : null}
-        <div
-          className={cn(
-            "absolute inset-0 overflow-hidden",
-            (!useTimelineVirtualizer || !showMessageList) &&
-              cn(
-                "overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1",
-                hasComposerOverlay
-                  ? "pb-[var(--composer-overlay-height,6rem)]"
-                  : "pb-4",
-              ),
-          )}
-          data-buzz-conversation-scroll={
-            useTimelineVirtualizer && showMessageList ? undefined : "true"
-          }
-          data-scroll-restoration-id={scrollRestorationId}
-          data-testid={
-            useTimelineVirtualizer && showMessageList
-              ? undefined
-              : "message-timeline"
-          }
-          key={scrollContainerDomKey}
-          onScroll={useTimelineVirtualizer ? undefined : onScroll}
-          ref={scrollContainerRef}
-        >
-          {useTimelineVirtualizer && timelineList ? (
-            <div
-              className="h-full min-h-0 w-full"
-              data-render-pending={isRenderPending ? "true" : undefined}
-            >
-              {timelineList}
-            </div>
-          ) : (
+      <TooltipProvider delayDuration={200}>
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {showUnreadPill ? (
             <div
               className={cn(
-                "flex w-full flex-col gap-2",
-                showChannelIntroOnly
-                  ? "pt-[var(--channel-top-chrome-height,4.5rem)]"
-                  : channelChrome.contentPadding,
-                (showIntro || showGenericEmpty || showMessageList) &&
-                  "min-h-full",
+                "pointer-events-none absolute inset-x-0 z-30 flex justify-center px-4",
+                channelChrome.stickyTimelineTop,
               )}
-              ref={contentRef}
             >
-              {omitHistoryLeadIn ? null : (
-                <div ref={topSentinelRef} aria-hidden className="h-px" />
+              <UnreadPill
+                direction="up"
+                label={unreadCountLabel(unreadCount)}
+                onClick={handleJumpToOldestUnread}
+                testId="message-unread-pill"
+              />
+            </div>
+          ) : null}
+          {/* `isFetchingOlder` clears on fetch resolve, but rows paint a frame
+            later (deferred snapshot / settle-gate hold) — keep the spinner up
+            until the page actually renders. */}
+          {isFetchingOlder ||
+          isHoldingPrepend ||
+          isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
+            <div
+              className={cn(
+                "pointer-events-none absolute inset-x-0 z-30 flex justify-center px-4",
+                channelChrome.stickyTimelineTop,
               )}
+              data-testid="message-timeline-fetching-older"
+            >
+              <span className="flex items-center rounded-full bg-background/80 p-1.5 shadow-sm ring-1 ring-border/40 backdrop-blur-sm">
+                <Spinner className="h-4 w-4 border-2 text-muted-foreground" />
+              </span>
+            </div>
+          ) : null}
+          <div
+            className={cn(
+              "absolute inset-0 overflow-hidden",
+              (!useTimelineVirtualizer || !showMessageList) &&
+                cn(
+                  "overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1",
+                  hasComposerOverlay
+                    ? "pb-[var(--composer-overlay-height,6rem)]"
+                    : "pb-4",
+                ),
+            )}
+            data-buzz-conversation-scroll={
+              useTimelineVirtualizer && showMessageList ? undefined : "true"
+            }
+            data-scroll-restoration-id={scrollRestorationId}
+            data-testid={
+              useTimelineVirtualizer && showMessageList
+                ? undefined
+                : "message-timeline"
+            }
+            key={scrollContainerDomKey}
+            onScroll={useTimelineVirtualizer ? undefined : onScroll}
+            ref={scrollContainerRef}
+          >
+            {useTimelineVirtualizer && timelineList ? (
+              <div
+                className="h-full min-h-0 w-full"
+                data-render-pending={isRenderPending ? "true" : undefined}
+              >
+                {timelineList}
+              </div>
+            ) : (
+              <div
+                className={cn(
+                  "flex w-full flex-col gap-2",
+                  showChannelIntroOnly
+                    ? "pt-[var(--channel-top-chrome-height,4.5rem)]"
+                    : channelChrome.contentPadding,
+                  (showIntro || showGenericEmpty || showMessageList) &&
+                    "min-h-full",
+                )}
+                ref={contentRef}
+              >
+                {omitHistoryLeadIn ? null : (
+                  <div ref={topSentinelRef} aria-hidden className="h-px" />
+                )}
 
-              {/* Fixed-height history slot keeps the virtual spacer's offset
+                {/* Fixed-height history slot keeps the virtual spacer's offset
                   stable across load-older fetches. The intro-only state has no
                   history to anchor, so omitting it matches the virtualized
                   leading row's top geometry when the first message arrives. */}
-              {omitHistoryLeadIn ? null : <div aria-hidden className="h-8" />}
+                {omitHistoryLeadIn ? null : <div aria-hidden className="h-8" />}
 
-              <div
-                className={cn(
-                  "flex min-h-[18rem] min-w-0 flex-col gap-2",
-                  useTimelineVirtualizer && "min-h-0 flex-1",
-                  (showIntro || showGenericEmpty) && "min-h-full",
-                  showMessageList &&
-                    !showIntro &&
-                    !useTimelineVirtualizer &&
-                    "mt-auto",
-                )}
-              >
-                {showTimelineSkeleton ? (
-                  <TimelineSkeleton rows={timelineSkeletonRows} />
-                ) : null}
-                {activeDirectMessageIntro ? (
-                  <div
-                    className="mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
-                    data-testid="message-dm-intro"
-                  >
-                    <DirectMessageIntroAvatarStack
-                      participants={activeDirectMessageIntro.participants}
-                    />
-                    <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
-                      {activeDirectMessageIntro.displayName}
-                    </p>
-                    <p className="mt-1 max-w-full truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
-                      This is the beginning of your direct message with{" "}
-                      <span className="font-medium text-foreground">
+                <div
+                  className={cn(
+                    "flex min-h-[18rem] min-w-0 flex-col gap-2",
+                    useTimelineVirtualizer && "min-h-0 flex-1",
+                    (showIntro || showGenericEmpty) && "min-h-full",
+                    showMessageList &&
+                      !showIntro &&
+                      !useTimelineVirtualizer &&
+                      "mt-auto",
+                  )}
+                >
+                  {showTimelineSkeleton ? (
+                    <TimelineSkeleton rows={timelineSkeletonRows} />
+                  ) : null}
+                  {activeDirectMessageIntro ? (
+                    <div
+                      className="mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
+                      data-testid="message-dm-intro"
+                    >
+                      <DirectMessageIntroAvatarStack
+                        participants={activeDirectMessageIntro.participants}
+                      />
+                      <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
                         {activeDirectMessageIntro.displayName}
-                      </span>
-                      .
-                    </p>
-                  </div>
-                ) : null}
+                      </p>
+                      <p className="mt-1 max-w-full truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
+                        This is the beginning of your direct message with{" "}
+                        <span className="font-medium text-foreground">
+                          {activeDirectMessageIntro.displayName}
+                        </span>
+                        .
+                      </p>
+                    </div>
+                  ) : null}
 
-                {activePinnedIntro ? (
-                  <div className="pt-3">{activePinnedIntro}</div>
-                ) : null}
+                  {activePinnedIntro ? (
+                    <div className="pt-3">{activePinnedIntro}</div>
+                  ) : null}
 
-                {activeChannelIntro ? (
-                  /* Top-anchored like the virtualized leading row, so the
+                  {activeChannelIntro ? (
+                    /* Top-anchored like the virtualized leading row, so the
                      first message arrives below with zero layout shift. */
-                  <ChannelIntroBlock
-                    className="py-2"
-                    intro={activeChannelIntro}
-                  />
-                ) : null}
+                    <ChannelIntroBlock
+                      className="py-2"
+                      intro={activeChannelIntro}
+                    />
+                  ) : null}
 
-                {showGenericEmpty ? (
-                  <div
-                    className="mt-auto rounded-2xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
-                    data-testid="message-empty"
-                  >
-                    <p className="text-base font-semibold tracking-tight">
-                      {emptyTitle}
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      {emptyDescription}
-                    </p>
-                  </div>
-                ) : null}
+                  {showGenericEmpty ? (
+                    <div
+                      className="mt-auto rounded-2xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
+                      data-testid="message-empty"
+                    >
+                      <p className="text-base font-semibold tracking-tight">
+                        {emptyTitle}
+                      </p>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        {emptyDescription}
+                      </p>
+                    </div>
+                  ) : null}
 
-                {showMessageList ? (
-                  <div
-                    className={cn(
-                      "flex flex-col gap-2",
-                      !showIntro && !useTimelineVirtualizer && "mt-auto",
-                      useTimelineVirtualizer && "min-h-0 flex-1",
-                    )}
-                    data-render-pending={isRenderPending ? "true" : undefined}
-                  >
-                    {timelineList}
-                  </div>
-                ) : null}
+                  {showMessageList ? (
+                    <div
+                      className={cn(
+                        "flex flex-col gap-2",
+                        !showIntro && !useTimelineVirtualizer && "mt-auto",
+                        useTimelineVirtualizer && "min-h-0 flex-1",
+                      )}
+                      data-render-pending={isRenderPending ? "true" : undefined}
+                    >
+                      {timelineList}
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          )}
-        </div>
-
-        {!isAtBottom ? (
-          <div
-            className={cn(
-              "pointer-events-none absolute inset-x-0 bottom-4 z-50 flex justify-center px-4",
-              hasComposerOverlay &&
-                "translate-y-[calc(-1*var(--composer-overlay-height,8rem))] transform-gpu transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
             )}
-          >
-            <UnreadPill
-              direction="down"
-              label={
-                bufferedTimeline.pendingCount > 0
-                  ? unreadCountLabel(bufferedTimeline.pendingCount)
-                  : newMessageCount > 0
-                    ? unreadCountLabel(newMessageCount)
-                    : "Jump to latest"
-              }
-              onClick={() => {
-                setIsSemanticallyAtBottom(true);
-                window.requestAnimationFrame(() => scrollToBottom("auto"));
-              }}
-              testId="message-scroll-to-latest"
-            />
           </div>
-        ) : null}
-      </div>
-    </TooltipProvider>
+
+          {!isAtBottom ? (
+            <div
+              className={cn(
+                "pointer-events-none absolute inset-x-0 bottom-4 z-50 flex justify-center px-4",
+                hasComposerOverlay &&
+                  "translate-y-[calc(-1*var(--composer-overlay-height,8rem))] transform-gpu transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
+              )}
+            >
+              <UnreadPill
+                direction="down"
+                label={
+                  bufferedTimeline.pendingCount > 0
+                    ? unreadCountLabel(bufferedTimeline.pendingCount)
+                    : newMessageCount > 0
+                      ? unreadCountLabel(newMessageCount)
+                      : "Jump to latest"
+                }
+                onClick={() => {
+                  setIsSemanticallyAtBottom(true);
+                  window.requestAnimationFrame(() => scrollToBottom("auto"));
+                }}
+                testId="message-scroll-to-latest"
+              />
+            </div>
+          ) : null}
+        </div>
+      </TooltipProvider>
     </MessageSelectionProvider>
   );
 });

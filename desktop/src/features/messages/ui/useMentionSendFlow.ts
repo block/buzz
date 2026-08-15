@@ -572,11 +572,10 @@ export function useMentionSendFlow({
           // `resolvePreviewTags` merge avoids a second pass over the tag
           // list and keeps this a single source of truth for what "final"
           // outgoing tags means.
-          const finalOutgoingTags = await resolvePreviewTags(
-            draft,
-            mediaTags,
-            [...(outgoingTags ?? []), ...supersedesTags],
-          );
+          const finalOutgoingTags = await resolvePreviewTags(draft, mediaTags, [
+            ...(outgoingTags ?? []),
+            ...supersedesTags,
+          ]);
           if (!finalOutgoingTags || signal?.aborted || isSendCancelled())
             return;
           const revalidatedMentionPubkeys =

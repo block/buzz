@@ -1247,7 +1247,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     #[cfg(unix)]
     let program = "/usr/bin/true";
     #[cfg(windows)]
-    let program = "true";
+    let program = "cmd";
     let child = Command::new(program)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

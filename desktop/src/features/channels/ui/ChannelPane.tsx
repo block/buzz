@@ -579,19 +579,6 @@ export const ChannelPane = React.memo(function ChannelPane({
               }}
             />
           )}
-          {channelFind.isOpen ? (
-            <div className={cn("absolute inset-x-0 z-40", channelChrome.top)}>
-              <ChannelFindBar
-                matchCount={channelFind.matchCount}
-                matchIndex={channelFind.activeIndex}
-                onClose={channelFind.close}
-                onNext={channelFind.goToNext}
-                onPrevious={channelFind.goToPrevious}
-                onQueryChange={channelFind.setQuery}
-                query={channelFind.query}
-              />
-            </div>
-          ) : null}
           <MessageTimeline
             ref={messageTimelineRef}
             channelId={activeChannel?.id}

@@ -14,9 +14,7 @@ export function readLastSeenChangelogVersion(): string | null {
   if (typeof window === "undefined") return null;
 
   try {
-    return window.localStorage.getItem(
-      LAST_SEEN_CHANGELOG_VERSION_STORAGE_KEY,
-    );
+    return window.localStorage.getItem(LAST_SEEN_CHANGELOG_VERSION_STORAGE_KEY);
   } catch {
     return null;
   }

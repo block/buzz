@@ -66,9 +66,9 @@ export function GoogleMeetSettingsCard() {
         title="Google Meet"
         description={
           <>
-            Connect your Google account to start instant Google Meet calls
-            from a channel or DM — an alternative to Huddle backed by
-            Google's own call infrastructure.
+            Connect your Google account to start instant Google Meet calls from
+            a channel or DM — an alternative to Huddle backed by Google's own
+            call infrastructure.
           </>
         }
       />

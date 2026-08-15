@@ -7011,11 +7011,20 @@ mod error_outcome_emission_tests {
     /// an `OwnedAgent` to move into respawn or return to the pool. The error
     /// branches never talk to the subprocess.
     async fn dummy_agent(index: usize) -> OwnedAgent {
+        #[cfg(windows)]
+        let bash_cmd = if std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe").exists() {
+            r"C:\Program Files\Git\bin\bash.exe"
+        } else {
+            "bash"
+        };
+        #[cfg(not(windows))]
+        let bash_cmd = "bash";
+
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            acp: AcpClient::spawn(bash_cmd, &["-c".into(), "cat".into()], &[], false)
                 .await
-                .expect("spawn cat as inert agent"),
+                .expect("spawn inert agent"),
             state: Default::default(),
             model_capabilities: None,
             desired_model: None,

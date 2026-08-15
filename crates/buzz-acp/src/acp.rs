@@ -2954,7 +2954,16 @@ mod tests {
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        #[cfg(windows)]
+        let bash_cmd = if std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe").exists() {
+            r"C:\Program Files\Git\bin\bash.exe"
+        } else {
+            "bash"
+        };
+        #[cfg(not(windows))]
+        let bash_cmd = "bash";
+
+        AcpClient::spawn(bash_cmd, &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
     }
@@ -3642,14 +3651,25 @@ mod tests {
 
     // ── Goose-native steer scaffold (PR follow-up to #1160) ──────────────
 
-    /// Helper: spawn an inert `cat` subprocess so we have a real AcpClient
-    /// to drive `handle_session_update` against. `cat` never writes back,
+
+
+    /// Helper: spawn an inert client subprocess so we have a real AcpClient
+    /// to drive `handle_session_update` against. The inert agent never writes back,
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
+        #[cfg(windows)]
+        let bash_cmd = if std::path::Path::new(r"C:\Program Files\Git\bin\bash.exe").exists() {
+            r"C:\Program Files\Git\bin\bash.exe"
+        } else {
+            "bash"
+        };
+        #[cfg(not(windows))]
+        let bash_cmd = "bash";
+
+        AcpClient::spawn(bash_cmd, &["-c".into(), "cat".into()], &[], false)
             .await
-            .expect("spawn cat as inert client")
+            .expect("spawn inert client")
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
@@ -3972,9 +3992,9 @@ mod tests {
         response: &str,
     ) -> AcpClient {
         let script = format!(
-            "read -r line; printf '%s' \"$line\" > {capture}; \
+            "read -r line; printf '%s' \"$line\" > '{capture}'; \
              printf '%s\\n' '{response}'; sleep 10",
-            capture = capture_path.display(),
+            capture = capture_path.to_string_lossy().replace('\\', "/").replace('\'', "'\\''"),
             response = response,
         );
         spawn_script(&script).await

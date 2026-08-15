@@ -14,9 +14,7 @@ use uuid::Uuid;
 
 mod message_tags;
 
-use message_tags::{
-    append_client_tags, append_sent_from_thread_tag, emoji_tags, imeta_tags, mention_reference_tags,
-};
+use message_tags::{append_client_tags, append_sent_from_thread_tag};
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).

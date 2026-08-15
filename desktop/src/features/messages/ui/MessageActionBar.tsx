@@ -348,7 +348,6 @@ function MoreActionsMenu({
           eventId={message.id}
         />
       ) : null}
-
     </>
   );
 }
