@@ -1,0 +1,11 @@
+schema_version: 1
+flow: broken_scroll
+platforms: [macos]
+fixture: local_review_channel
+record: {video: "off", screenshots: true, accessibility: true}
+steps:
+  - name: scroll_cannot_create_dialog
+    act: {type: scroll, delta_y: -240}
+    expect: {exists: {id: search-results}}
+    timeout_ms: 100
+cleanup: {terminate_app: true, remove_state: true}

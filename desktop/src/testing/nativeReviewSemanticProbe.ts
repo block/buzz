@@ -2,6 +2,7 @@ type SemanticNode = {
   id?: string;
   role?: string;
   name?: string;
+  value?: string;
   enabled: boolean;
   focused: boolean;
   frame: { x: number; y: number; width: number; height: number };
@@ -52,11 +53,19 @@ function snapshot(): SemanticNode[] {
     const role =
       candidate.getAttribute("role") ?? IMPLICIT_ROLES[candidate.tagName];
     const name = accessibleName(candidate);
+    const value =
+      candidate instanceof HTMLInputElement ||
+      candidate instanceof HTMLTextAreaElement
+        ? candidate.value
+        : candidate.isContentEditable
+          ? (candidate.textContent ?? "")
+          : undefined;
     if (!id && !role && !name) continue;
     nodes.push({
       ...(id ? { id } : {}),
       ...(role ? { role } : {}),
       ...(name ? { name } : {}),
+      ...(value !== undefined ? { value } : {}),
       enabled:
         !candidate.hasAttribute("disabled") &&
         candidate.getAttribute("aria-disabled") !== "true",
@@ -100,6 +109,8 @@ export function installNativeReviewSemanticProbe(): void {
     childList: true,
     subtree: true,
   });
+  window.addEventListener("input", schedule, true);
+  window.addEventListener("change", schedule, true);
   window.addEventListener("focusin", schedule);
   window.addEventListener("focusout", schedule);
   window.addEventListener("resize", schedule);

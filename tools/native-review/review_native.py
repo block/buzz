@@ -71,7 +71,7 @@ def validate_locator(locator: Any, where: str) -> None:
 
 
 def validate_expectation(expectation: Any, where: str) -> None:
-    allowed = {"exists", "not_exists", "focused", "enabled"}
+    allowed = {"exists", "not_exists", "focused", "enabled", "value"}
     if (
         not isinstance(expectation, dict)
         or len(expectation) != 1
@@ -86,6 +86,8 @@ def validate_expectation(expectation: Any, where: str) -> None:
         validate_locator(focused, f"{where}.focused")
     if "enabled" in expectation and not isinstance(expectation["enabled"], bool):
         raise HarnessError(f"{where}.enabled must be boolean")
+    if "value" in expectation and not isinstance(expectation["value"], str):
+        raise HarnessError(f"{where}.value must be a string")
 
 
 def load_journey(path: pathlib.Path) -> dict[str, Any]:
@@ -122,12 +124,23 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
             for locator in locators:
                 validate_locator(locator, f"{where}.locate")
         action = step["act"]
-        if not isinstance(action, dict) or action.get("type") not in {"activate", "click", "move_pointer", "press", "wait"}:
+        action_type = action.get("type") if isinstance(action, dict) else None
+        if action_type not in {"activate", "click", "move_pointer", "press", "scroll", "type_text", "wait"}:
             raise HarnessError(f"{where}.act has unsupported type")
-        if action["type"] in {"click", "move_pointer"} and locators is None:
-            raise HarnessError(f"{where}: {action['type']} requires locate")
-        if action["type"] == "press" and not isinstance(action.get("key"), str):
-            raise HarnessError(f"{where}: press requires key")
+        if set(action) - {"type", "duration_ms", "key", "modifiers", "text", "delta_y"}:
+            raise HarnessError(f"{where}.act contains an unsupported field")
+        if action_type in {"click", "move_pointer"} and locators is None:
+            raise HarnessError(f"{where}: {action_type} requires locate")
+        if action_type == "press":
+            if not isinstance(action.get("key"), str) or not action["key"]:
+                raise HarnessError(f"{where}: press requires key")
+            modifiers = action.get("modifiers", [])
+            if not isinstance(modifiers, list) or not all(isinstance(item, str) and item for item in modifiers):
+                raise HarnessError(f"{where}: press modifiers must be strings")
+        if action_type == "type_text" and not isinstance(action.get("text"), str):
+            raise HarnessError(f"{where}: type_text requires text")
+        if action_type == "scroll" and not isinstance(action.get("delta_y"), int):
+            raise HarnessError(f"{where}: scroll requires integer delta_y")
         validate_expectation(step["expect"], f"{where}.expect")
         if "expect_for" in step:
             sustained = step["expect_for"]
@@ -421,6 +434,8 @@ def expectation_holds(driver: Driver, expectation: dict[str, Any]) -> bool:
         return bool(driver.request("focused").get("focused")) == expectation["focused"]
     if "enabled" in expectation:
         return bool(driver.request("selected").get("element", {}).get("enabled")) == expectation["enabled"]
+    if "value" in expectation:
+        return driver.request("selected").get("element", {}).get("value") == expectation["value"]
     return False
 
 

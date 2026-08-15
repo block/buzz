@@ -37,7 +37,8 @@ mutation.
 
 ## MVP limits
 
-Only macOS desktop, the local review-channel fixture, role/name/identifier AX
-locators, click/hover/key/wait actions, window screenshots/video, and step AX
-snapshots are implemented. iOS Simulator and repeated base/head performance
-comparison remain later phases.
+Only macOS desktop and the local review-channel fixture are implemented. The
+schema covers role/name/identifier locators; native click, hover, text entry,
+keyboard shortcuts, scrolling, and waits; value/focus/existence assertions;
+window screenshots/video; and per-step semantic + AX snapshots. iOS Simulator
+and repeated base/head performance comparison remain later phases.
