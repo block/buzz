@@ -786,6 +786,26 @@ export function processTranscriptEvent(
       ctx,
       event.kind,
     );
+  } else if (
+    event.kind === "circuit_open" ||
+    event.kind === "circuit_recovered"
+  ) {
+    const payload = asRecord(event.payload);
+    const message = asString(payload.error) ?? "Unknown circuit breaker state";
+    const title =
+      event.kind === "circuit_open"
+        ? "Agent suspended (repeated crashes)"
+        : "Agent recovered";
+    upsertTextItem(
+      d,
+      `${event.kind}:${ch}:${event.agentIndex ?? event.seq}`,
+      "lifecycle",
+      title,
+      message,
+      event.timestamp,
+      ctx,
+      event.kind,
+    );
   } else if (event.kind === "acp_read" || event.kind === "acp_write") {
     const payload = asRecord(event.payload);
     const method = asString(payload.method);

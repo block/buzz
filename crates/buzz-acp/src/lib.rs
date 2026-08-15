@@ -3973,8 +3973,10 @@ fn spawn_failure_notice(
 /// invisible unless someone is watching server logs, so a permanently dark
 /// slot could go unnoticed indefinitely. This routes through the same
 /// owner-encrypted observer-frame pipeline already used for `agent_panic`
-/// and `turn_error`, which the desktop app already renders via
-/// `friendlyAgentLastError` — no new transport, no new client-side wiring.
+/// and `turn_error`; the desktop app renders it via a dedicated
+/// `circuit_open`/`circuit_recovered` branch in `processTranscriptEvent`
+/// (desktop/src/features/agents/ui/agentSessionTranscript.ts) — no new
+/// transport, but client-side rendering had to be added alongside this.
 fn emit_circuit_open_alert(
     observer: Option<&observer::ObserverHandle>,
     agent_index: usize,
