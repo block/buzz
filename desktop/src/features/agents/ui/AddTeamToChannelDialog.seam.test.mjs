@@ -296,6 +296,20 @@ function installTauriBridge() {
 
 beforeEach(() => {
   cleanup?.();
+  // The full desktop suite shares one process. Re-bind jsdom + Tauri so a
+  // prior file cannot leave Deploy stuck disabled (CI failed this waitFor
+  // at the default 1s timeout after 4912 other tests).
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: dom.window.document,
+  });
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: dom.window,
+  });
+  globalThis.isTauri = true;
+  dom.window.isTauri = true;
+  dom.window.document.hasFocus = () => true;
   dom.window.localStorage.clear();
   dom.window.localStorage.setItem("buzz-follow-system", "false");
   installTauriBridge();
@@ -339,12 +353,21 @@ function deployButton() {
   return screen.getByRole("button", { name: /Deploy 1 agent/i });
 }
 
+const SUITE_WAIT = { timeout: 5000 };
+
+async function resolveManagedAgents() {
+  await act(async () => {
+    listManagedAgentsDeferred.resolve();
+    await listManagedAgentsDeferred;
+  });
+}
+
 test("pending managed-agents query keeps Deploy disabled", async () => {
   renderDialog();
 
   await waitFor(() => {
     assert.equal(screen.getByText("Dolomite").textContent, "Dolomite");
-  });
+  }, SUITE_WAIT);
 
   assert.equal(deployButton().disabled, true);
   assert.equal(createManagedAgentCalls.length, 0);
@@ -361,22 +384,22 @@ test("Deploy after a resolved pin sends command and args through create_managed_
 
   await waitFor(() => {
     assert.equal(deployButton().disabled, true);
-  });
+  }, SUITE_WAIT);
 
-  await act(async () => {
-    listManagedAgentsDeferred.resolve();
-    await listManagedAgentsDeferred;
-  });
+  await resolveManagedAgents();
 
   await waitFor(() => {
+    const channelSelect = screen.getByLabelText(/^Channel$/);
+    assert.equal(channelSelect.value, "chan-1");
+    assert.ok(screen.getByText("Goose"));
     assert.equal(deployButton().disabled, false);
-  });
+  }, SUITE_WAIT);
 
   fireEvent.click(deployButton());
 
   await waitFor(() => {
     assert.equal(createManagedAgentCalls.length, 1);
-  });
+  }, SUITE_WAIT);
 
   const input = createManagedAgentCalls[0].input;
   assert.equal(input.agentCommand, "goose-cmd");
@@ -395,14 +418,11 @@ test("unresolved pin leaves Deploy disabled and creates nothing", async () => {
   listManagedAgentsResult = [rawPinnedAgent({ commandOverride: UNKNOWN_PIN })];
   renderDialog();
 
-  await act(async () => {
-    listManagedAgentsDeferred.resolve();
-    await listManagedAgentsDeferred;
-  });
+  await resolveManagedAgents();
 
   await waitFor(() => {
     assert.ok(screen.getAllByText(/Setup required/i).length > 0);
-  });
+  }, SUITE_WAIT);
 
   assert.equal(deployButton().disabled, true);
   fireEvent.click(deployButton());
