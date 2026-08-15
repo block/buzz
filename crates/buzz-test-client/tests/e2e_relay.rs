@@ -267,7 +267,7 @@ async fn test_channel_rename_emits_persistent_system_message() {
 
     let persisted_sid = sub_id("channel-rename-persisted");
     client
-        .subscribe(&persisted_sid, vec![filter])
+        .subscribe(&persisted_sid, vec![filter.clone()])
         .await
         .expect("subscribe for persisted system message");
     let persisted = client
@@ -281,6 +281,56 @@ async fn test_channel_rename_emits_persistent_system_message() {
             .count(),
         1,
         "rename system message should be persisted exactly once"
+    );
+
+    // A display-equivalent rename is accepted and stored canonically, but it
+    // must not emit another system message.
+    let equivalent_name = format!("  ###{new_name}  ");
+    let no_op_rename = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel]).expect("h tag"),
+            Tag::parse(["name", &equivalent_name]).expect("name tag"),
+        ])
+        .sign_with_keys(&owner_keys)
+        .expect("sign canonical no-op rename event");
+    let no_op = client
+        .send_event(no_op_rename)
+        .await
+        .expect("send canonical no-op rename event");
+    assert!(
+        no_op.accepted,
+        "canonical no-op rename rejected: {}",
+        no_op.message
+    );
+
+    match client.recv_event(Duration::from_millis(500)).await {
+        Err(TestClientError::Timeout) => {}
+        Ok(RelayMessage::Event { event, .. }) if event.kind == Kind::Custom(40099) => {
+            panic!("canonical no-op rename emitted system message {}", event.id)
+        }
+        Ok(other) => panic!("unexpected relay message after canonical no-op rename: {other:?}"),
+        Err(error) => panic!("unexpected receive error after canonical no-op rename: {error}"),
+    }
+
+    let no_op_persisted_sid = sub_id("channel-rename-no-op-persisted");
+    client
+        .subscribe(&no_op_persisted_sid, vec![filter])
+        .await
+        .expect("subscribe after canonical no-op rename");
+    let persisted_after_no_op = client
+        .collect_until_eose(&no_op_persisted_sid, Duration::from_secs(5))
+        .await
+        .expect("canonical no-op persistence EOSE");
+    let name_change_count = persisted_after_no_op
+        .iter()
+        .filter(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.content)
+                .is_ok_and(|content| content["type"] == "name_changed")
+        })
+        .count();
+    assert_eq!(
+        name_change_count, 1,
+        "canonical no-op rename should not persist another system message"
     );
 
     // Invalid names are rejected before the metadata side effect runs, so a
