@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, Copy, KeyRound, ShieldX, Ticket } from "lucide-react";
+import { Check, Clock, Copy, KeyRound, ShieldX, Ticket } from "lucide-react";
 
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { nsecToNpub, pubkeyToNpub } from "@/shared/lib/nostrUtils";
@@ -16,6 +16,14 @@ type MembershipDeniedProps = {
   activeRelayUrl: string;
   onBack: () => void;
   onChangeCommunity: () => void;
+  /**
+   * Leave setup and finish the profile after joining. Only supplied by
+   * first-run onboarding, where the user has no community yet and so cannot
+   * satisfy the membership gate at all — without an exit, that is a dead end
+   * (block/buzz#3544). The invite flow omits it: a user mid-claim has a
+   * community to get into, and the actions above are the way in.
+   */
+  onContinueWithoutProfile?: () => void;
   onImportKey: (nsec: string) => Promise<void>;
   onRetry: () => void;
   pubkey: string;
@@ -25,6 +33,7 @@ export function MembershipDenied({
   activeRelayUrl,
   onBack,
   onChangeCommunity,
+  onContinueWithoutProfile,
   onImportKey,
   onRetry,
   pubkey,
@@ -289,6 +298,17 @@ export function MembershipDenied({
                 <KeyRound className="h-4 w-4" />
                 Use a different key
               </button>
+              {onContinueWithoutProfile ? (
+                <button
+                  className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                  data-testid="membership-denied-continue"
+                  onClick={onContinueWithoutProfile}
+                  type="button"
+                >
+                  <Clock className="h-4 w-4" />
+                  Finish this after I join
+                </button>
+              ) : null}
             </>
           )}
         </div>

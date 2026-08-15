@@ -32,6 +32,10 @@ import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
+import {
+  flushPendingProfile,
+  resetPendingProfileSave,
+} from "@/features/profile/pendingProfileSave";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
@@ -68,6 +72,7 @@ async function resetCommunityState({
     resetAvatarProfileSync();
     resetAvatarPresentations();
   }
+  resetPendingProfileSave();
   resetSidebarRelayConnectionCardState();
   resetMediaCaches();
   resetLinkPreviewMetadataCache();
@@ -318,6 +323,12 @@ export function useCommunityInit(
         restoreActiveAgentTurnsForCommunity(activeCommunity.id);
         // Prime the ref so the NEXT switch saves this community's state.
         prevCommunityIdRef.current = activeCommunity.id;
+        // Replay a profile the user set up before they belonged to any relay.
+        // The write needs membership, which is exactly what this community
+        // just supplied — so this is the first moment it can succeed. No-op
+        // when nothing is parked, and it keeps waiting if membership still
+        // has not landed, so a failure here must never block readiness.
+        void flushPendingProfile().catch(() => {});
         setResult({
           isReady: true,
           needsSetup: false,

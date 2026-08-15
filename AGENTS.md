@@ -520,6 +520,8 @@ reconnects preserve pending avatar verification work):
 - `resetActiveAgentTurnsStore()` — active agent turn timers
 - `resetAgentWorkingSignal()` — agent working indicator signal
 - `resetAvatarProfileSync()` — pending verified-avatar profile writes
+- `resetPendingProfileSave()` — deferred first-run profile write (the persisted
+  value is identity-scoped and deliberately survives; only the instance resets)
 - `resetAvatarPresentations()` — avatar probes, previews, and Retry toasts
 - `resetSidebarRelayConnectionCardState()` — sidebar relay card dismiss state
 - `resetMediaCaches()` — proxy port and relay origin caches
