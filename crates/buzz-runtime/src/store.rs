@@ -1339,7 +1339,7 @@ fn enqueue(c: &mut Connection, v: InboxEvent) -> Result<EnqueueOutcome, StoreErr
         [v.channel_id.to_string()],
         |r| r.get(0),
     )?;
-    let (state, error, outcome) = if n >= 500 {
+    let (state, error, outcome) = if n >= MAX_PENDING_PER_CHANNEL as i64 {
         (
             "dead_letter",
             Some("queue_capacity"),
@@ -1448,7 +1448,7 @@ fn requeue(
         [t],
         |r| r.get::<_, i64>(0),
     )? as u32;
-    if a > 10 {
+    if a > MAX_INBOX_RETRIES {
         tx.execute("UPDATE inbox_events SET state='dead_letter',attempt=?1,turn_id=NULL,available_at=NULL,last_error=?2 WHERE turn_id=?3 AND state='in_turn'",params![a,e,t])?;
         tx.commit()?;
         return Ok(RequeueOutcome::DeadLettered { attempt: a });
@@ -1473,7 +1473,7 @@ fn recover(c: &mut Connection, now: DateTime<Utc>) -> Result<RecoveryOutcome, St
     let mut out = RecoveryOutcome::default();
     for (id, old) in rows {
         let a = old + 1;
-        if a > 10 {
+        if a > MAX_INBOX_RETRIES {
             tx.execute("UPDATE inbox_events SET state='dead_letter',attempt=?1,turn_id=NULL,available_at=NULL,last_error='recovery_retry_exhausted' WHERE event_id=?2",params![a,id])?;
             out.dead_lettered += 1
         } else {

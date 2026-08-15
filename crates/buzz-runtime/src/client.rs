@@ -160,10 +160,13 @@ impl RuntimeClient {
         }
     }
     /// Requests privileged runner reconciliation.
-    pub async fn reconcile(&self) -> Result<(), ClientError> {
+    ///
+    /// Returns the post-reconciliation job list; the server answers
+    /// `Reconcile` with `ControlPayload::Jobs`, not `Ack`.
+    pub async fn reconcile(&self) -> Result<Vec<JobStatus>, ClientError> {
         self.require_controller()?;
         match self.call(ControlOperation::Reconcile).await? {
-            ControlPayload::Ack => Ok(()),
+            ControlPayload::Jobs(jobs) => Ok(jobs),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }

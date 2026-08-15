@@ -468,9 +468,13 @@ async fn persist_lifecycle(
             {
                 return Err(reject("agent job progress seq must be strictly monotonic"));
             }
-            let state = match payload.state {
-                AgentJobProgressState::Running => "running",
-                AgentJobProgressState::Cancelling => "cancelling",
+            let state = if job.cancel_requested {
+                "cancelling"
+            } else {
+                match payload.state {
+                    AgentJobProgressState::Running => "running",
+                    AgentJobProgressState::Cancelling => "cancelling",
+                }
             };
             sqlx::query(
                 r#"
@@ -1343,5 +1347,62 @@ mod tests {
         assert_eq!(lookup.status.state, "requested");
         assert!(!lookup.status.cancel_requested);
         assert_eq!(lookup.chain.len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn late_running_progress_cannot_flip_cancelling_back_to_running() {
+        let (pool, db, community, channel, requester, target) = seed_job_test().await;
+        let job = Uuid::new_v4();
+        let request = request_event(&requester, &target, channel, job, "sticky cancelling");
+        persist_agent_job_event(&db, community, &request)
+            .await
+            .expect("request");
+        let accepted = signed_event(
+            &target,
+            KIND_JOB_ACCEPTED,
+            serde_json::json!({
+                "schema": 1, "job": job, "attempt": 1,
+                "state": "accepted", "accepted_at": Utc::now()
+            }),
+            lifecycle_tags(&requester, channel, job, &request),
+        );
+        persist_agent_job_event(&db, community, &accepted)
+            .await
+            .expect("accepted");
+        let cancel = signed_event(
+            &requester,
+            KIND_JOB_CANCEL,
+            serde_json::json!({"schema": 1, "job": job, "reason": "stop"}),
+            lifecycle_tags(&target, channel, job, &request),
+        );
+        persist_agent_job_event(&db, community, &cancel)
+            .await
+            .expect("cancel");
+
+        // Late runner progress claiming Running must not reopen the job.
+        let mut late_tags = lifecycle_tags(&requester, channel, job, &request);
+        late_tags.push(vec!["seq".into(), "1".into()]);
+        let late = signed_event(
+            &target,
+            KIND_JOB_PROGRESS,
+            serde_json::json!({
+                "schema": 1, "job": job, "attempt": 1, "seq": 1,
+                "state": "running", "summary": "late running", "artifacts": []
+            }),
+            late_tags,
+        );
+        persist_agent_job_event(&db, community, &late)
+            .await
+            .expect("late progress accepted");
+
+        let lookup = lookup_agent_job(&db, community, job)
+            .await
+            .expect("lookup")
+            .expect("job");
+        assert_eq!(lookup.status.state, "cancelling");
+        assert!(lookup.status.cancel_requested);
+
+        drop(pool);
     }
 }

@@ -884,17 +884,15 @@ impl JobSupervisor {
         let lines = lines.unwrap_or(100).min(MAX_LOG_TAIL_LINES);
         let attempt_dir = job_attempt_dir(&self.inner.runtime.state_dir, job.job_id, job.attempt)
             .map_err(|error| control("logs_unavailable", error.to_string()))?;
-        let stdout = tail_rotating_log(
-            attempt_dir.join("stdout.log"),
-            lines,
-            LOG_TAIL_STREAM_BUDGET,
-        )
-        .map_err(|error| control("logs_unavailable", error.to_string()))?;
-        let stderr = tail_rotating_log(
-            attempt_dir.join("stderr.log"),
-            lines,
-            LOG_TAIL_STREAM_BUDGET,
-        )
+        let stdout_path = attempt_dir.join("stdout.log");
+        let stderr_path = attempt_dir.join("stderr.log");
+        let (stdout, stderr) = tokio::task::spawn_blocking(move || {
+            let stdout = tail_rotating_log(stdout_path, lines, LOG_TAIL_STREAM_BUDGET)?;
+            let stderr = tail_rotating_log(stderr_path, lines, LOG_TAIL_STREAM_BUDGET)?;
+            Ok::<_, std::io::Error>((stdout, stderr))
+        })
+        .await
+        .map_err(|error| control("logs_unavailable", error.to_string()))?
         .map_err(|error| control("logs_unavailable", error.to_string()))?;
         let mut output = Vec::with_capacity(stdout.len() + stderr.len());
         output.extend(stdout.into_iter().map(|line| format!("stdout: {line}")));
