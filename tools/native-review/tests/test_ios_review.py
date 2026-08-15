@@ -35,60 +35,65 @@ class FakeRecorder:
 
 
 class IosReviewTests(unittest.TestCase):
-    def test_flutter_environment_allowlists_tool_settings_and_scrubs_secrets(self):
-        inherited = {
-            "PATH": "/repo/bin:/usr/bin",
-            "HOME": "/Users/reviewer",
-            "TMPDIR": "/tmp/review",
-            "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
-            "BUZZ_PRIVATE_KEY": "production-key",
-            "BUZZ_AUTH_TAG": "production-auth",
-            "AWS_SECRET_ACCESS_KEY": "cloud-secret",
-            "GOOGLE_APPLICATION_CREDENTIALS": "/secrets/google.json",
-            "GH_TOKEN": "github-token",
-        }
-        with mock.patch.dict(ios_review.os.environ, inherited, clear=True):
-            child = ios_review.flutter_environment()
+    DEVICE_PAYLOAD = {
+        "devicetypes": [{"name": "iPhone Test", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-Test"}],
+        "runtimes": [
+            {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-9-3", "version": "9.3",
+             "platform": "iOS", "isAvailable": True, "supportedDeviceTypes": [
+                 {"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-Test"},
+             ]},
+            {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-0", "version": "26.0",
+             "platform": "iOS", "isAvailable": True, "supportedDeviceTypes": [
+                 {"identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-Test"},
+             ]},
+        ],
+    }
 
-        self.assertEqual(child, {
-            "PATH": inherited["PATH"],
-            "HOME": inherited["HOME"],
-            "TMPDIR": inherited["TMPDIR"],
-            "DEVELOPER_DIR": inherited["DEVELOPER_DIR"],
-            "BUZZ_NATIVE_REVIEW": "1",
-            "SIMCTL_CHILD_BUZZ_NATIVE_REVIEW": "1",
-        })
+    def test_device_creation_uses_unique_owned_name_and_latest_runtime(self):
+        responses = [
+            subprocess.CompletedProcess([], 0, json.dumps(self.DEVICE_PAYLOAD), ""),
+            subprocess.CompletedProcess([], 0, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE\n", ""),
+        ]
+        with mock.patch.object(ios_review, "run", side_effect=responses) as run:
+            device = ios_review.create_review_device("iPhone Test", "ios-run-123")
+        create = run.call_args_list[1].args[0]
+        self.assertEqual(create[:3], ["xcrun", "simctl", "create"])
+        self.assertEqual(create[3], "Buzz Native Review ios-run-123")
+        self.assertEqual(create[-1], "com.apple.CoreSimulator.SimRuntime.iOS-26-0")
+        self.assertTrue(device["owned"])
+        self.assertEqual(device["udid"], "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
 
-    def test_device_selection_prefers_latest_runtime_and_records_it(self):
-        payload = {"devices": {
-            "com.apple.CoreSimulator.SimRuntime.iOS-18-5": [
-                {"name": "iPhone Test", "udid": "old", "isAvailable": True}
-            ],
-            "com.apple.CoreSimulator.SimRuntime.iOS-26-0": [
-                {"name": "iPhone Test", "udid": "new", "isAvailable": True}
-            ],
-        }}
-        completed = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
-        with mock.patch.object(ios_review, "run", return_value=completed):
-            device = ios_review.available_device("iPhone Test")
-        self.assertEqual(device["udid"], "new")
-        self.assertEqual(device["runtimeIdentifier"], "com.apple.CoreSimulator.SimRuntime.iOS-26-0")
+    def test_missing_device_type_fails_without_creating_or_erasing_any_device(self):
+        completed = subprocess.CompletedProcess([], 0, json.dumps({"devicetypes": [], "runtimes": []}), "")
+        with mock.patch.object(ios_review, "run", return_value=completed) as run:
+            with self.assertRaisesRegex(ios_review.ReviewError, "no iOS Simulator device type"):
+                ios_review.create_review_device("Absent", "run")
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertFalse(any("erase" in command or "delete" in command for command in commands))
 
-    def test_missing_device_fails_clearly(self):
-        completed = subprocess.CompletedProcess([], 0, '{"devices": {}}', "")
-        with mock.patch.object(ios_review, "run", return_value=completed):
-            with self.assertRaisesRegex(ios_review.ReviewError, "no available"):
-                ios_review.available_device("Absent")
+    def test_flutter_environment_scrubs_host_credentials(self):
+        sentinels = {"BUZZ_PRIVATE_KEY": "secret", "SSH_AUTH_SOCK": "/tmp/agent", "GITHUB_TOKEN": "secret"}
+        with mock.patch.dict(ios_review.os.environ, sentinels, clear=False):
+            environment = ios_review.flutter_environment()
+        for name in sentinels:
+            self.assertNotIn(name, environment)
+
+    def test_run_scrubs_host_credentials_by_default(self):
+        sentinels = {"BUZZ_PRIVATE_KEY": "secret", "SSH_AUTH_SOCK": "/tmp/agent", "GITHUB_TOKEN": "secret"}
+        with mock.patch.dict(ios_review.os.environ, sentinels, clear=False), \
+             mock.patch.object(ios_review.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            ios_review.run(["xcrun", "simctl", "list"])
+        environment = run.call_args.kwargs["env"]
+        for name in sentinels:
+            self.assertNotIn(name, environment)
 
     def test_flutter_failure_finalizes_recording_writes_receipt_and_cleans_device(self):
         recorder = FakeRecorder()
         commands = []
-        flutter_environments = []
 
         def fake_run(command, **kwargs):
             commands.append(command)
             if command[:2] == ["flutter", "drive"]:
-                flutter_environments.append(kwargs["env"])
                 return subprocess.CompletedProcess(command, 1, "journey failed", "diagnostic")
             if "screenshot" in command:
                 pathlib.Path(command[-1]).write_bytes(b"png")
@@ -99,7 +104,10 @@ class IosReviewTests(unittest.TestCase):
              mock.patch.object(ios_review.shutil, "which", return_value="/tool"), \
              mock.patch.object(ios_review, "provenance", return_value={"head_sha": "a" * 40, "dirty": False, "status": []}), \
              mock.patch.object(ios_review, "git", return_value="a" * 12), \
-             mock.patch.object(ios_review, "available_device", return_value={"name": "iPhone Test", "udid": "device", "runtimeIdentifier": "runtime"}), \
+             mock.patch.object(ios_review, "create_review_device", return_value={
+                 "name": "Buzz Native Review owned-run", "udid": "owned-device",
+                 "runtimeIdentifier": "runtime", "deviceType": "iPhone Test", "owned": True,
+             }), \
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
              mock.patch.object(ios_review, "wait_for_recording"), \
              mock.patch.object(ios_review.subprocess, "Popen", return_value=recorder):
@@ -115,11 +123,14 @@ class IosReviewTests(unittest.TestCase):
         self.assertEqual(receipt["artifacts"], {
             "video": "video.mp4", "log": "flutter.log", "screenshot": "final.png"
         })
-        self.assertEqual(len(flutter_environments), 1)
-        self.assertEqual(flutter_environments[0]["BUZZ_NATIVE_REVIEW"], "1")
-        self.assertEqual(flutter_environments[0]["SIMCTL_CHILD_BUZZ_NATIVE_REVIEW"], "1")
-        self.assertIn(["xcrun", "simctl", "shutdown", "device"], commands)
-        self.assertIn(["xcrun", "simctl", "erase", "device"], commands)
+        self.assertEqual(receipt["device"], {
+            "name": "Buzz Native Review owned-run", "device_type": "iPhone Test",
+            "udid": "owned-device", "runtime": "runtime", "owned": True,
+        })
+        self.assertIn(["xcrun", "simctl", "shutdown", "owned-device"], commands)
+        self.assertIn(["xcrun", "simctl", "delete", "owned-device"], commands)
+        self.assertFalse(any("erase" in command for command in commands))
+        self.assertTrue(all("pre-existing-device" not in command for command in commands))
 
     def test_recorder_timeout_is_reported_and_device_is_cleaned(self):
         recorder = FakeRecorder()
@@ -135,7 +146,10 @@ class IosReviewTests(unittest.TestCase):
              mock.patch.object(ios_review.shutil, "which", return_value="/tool"), \
              mock.patch.object(ios_review, "provenance", return_value={"head_sha": "a" * 40, "dirty": False, "status": []}), \
              mock.patch.object(ios_review, "git", return_value="a" * 12), \
-             mock.patch.object(ios_review, "available_device", return_value={"name": "iPhone Test", "udid": "device"}), \
+             mock.patch.object(ios_review, "create_review_device", return_value={
+                 "name": "Buzz Native Review timeout-run", "udid": "owned-device",
+                 "runtimeIdentifier": "runtime", "deviceType": "iPhone Test", "owned": True,
+             }), \
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
              mock.patch.object(ios_review, "wait_for_recording", side_effect=ios_review.ReviewError("timed out waiting for Simulator recording")), \
              mock.patch.object(ios_review.subprocess, "Popen", return_value=recorder):
@@ -145,7 +159,8 @@ class IosReviewTests(unittest.TestCase):
 
         self.assertTrue(recorder.finalized)
         self.assertEqual(receipt["cleanup"]["status"], "passed")
-        self.assertIn(["xcrun", "simctl", "erase", "device"], commands)
+        self.assertIn(["xcrun", "simctl", "delete", "owned-device"], commands)
+        self.assertFalse(any("erase" in command for command in commands))
 
 
 if __name__ == "__main__":
