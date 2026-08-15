@@ -213,6 +213,9 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   List<TimelineMessage>? allMessages,
   ReminderService? reminderService,
   bool disableAnimations = false,
+  EdgeInsets viewInsets = EdgeInsets.zero,
+  FocusNode? composerFocusNode,
+  bool composerInitiallyFocused = false,
 }) async {
   final sourceHidden = ValueNotifier(false);
 
@@ -232,36 +235,49 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
       child: MaterialApp(
         theme: AppTheme.light(),
         builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(disableAnimations: disableAnimations),
+          data: MediaQuery.of(context).copyWith(
+            disableAnimations: disableAnimations,
+            viewInsets: viewInsets,
+          ),
           child: child!,
         ),
         home: Scaffold(
           body: Consumer(
-            builder: (context, ref, _) => TextButton(
-              key: const ValueKey('open-message-actions-popover'),
-              onPressed: () => showMessageActions(
-                context: context,
-                ref: ref,
-                message: message,
-                channelId: _channelId,
-                canManageMessage: canManageMessage,
-                allMessages: allMessages,
-                currentPubkey: 'self',
-                isMember: true,
-                anchorRect: const Rect.fromLTWH(32, 260, 300, 72),
-                captureAnchorSnapshot: _testMessageSnapshot,
-                onPopoverPresented: () => sourceHidden.value = true,
-                onPopoverDismissed: () => sourceHidden.value = false,
-              ),
-              child: const Text('open message actions'),
+            builder: (context, ref, _) => Column(
+              children: [
+                if (composerFocusNode != null)
+                  TextField(focusNode: composerFocusNode),
+                TextButton(
+                  key: const ValueKey('open-message-actions-popover'),
+                  onPressed: () => showMessageActions(
+                    context: context,
+                    ref: ref,
+                    message: message,
+                    channelId: _channelId,
+                    canManageMessage: canManageMessage,
+                    allMessages: allMessages,
+                    currentPubkey: 'self',
+                    isMember: true,
+                    anchorRect: const Rect.fromLTWH(32, 260, 300, 72),
+                    captureAnchorSnapshot: _testMessageSnapshot,
+                    onPopoverPresented: () => sourceHidden.value = true,
+                    onPopoverDismissed: () => sourceHidden.value = false,
+                    composerFocusNode: composerFocusNode,
+                    restoreComposerFocus: composerFocusNode?.requestFocus,
+                  ),
+                  child: const Text('open message actions'),
+                ),
+              ],
             ),
           ),
         ),
       ),
     ),
   );
+  if (composerInitiallyFocused) {
+    composerFocusNode!.requestFocus();
+    await tester.pump();
+  }
   await tester.tap(find.byKey(const ValueKey('open-message-actions-popover')));
   await tester.pumpAndSettle();
   final container = ProviderScope.containerOf(
@@ -561,6 +577,94 @@ void main() {
         },
       );
     }
+
+    testWidgets('keeps the action menu above the software keyboard', (
+      tester,
+    ) async {
+      const keyboardInset = 300.0;
+      final prefs = await _mockPrefs();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        allMessages: [_message()],
+        reminderService: _stubReminderService(),
+        viewInsets: const EdgeInsets.only(bottom: keyboardInset),
+      );
+
+      final actionRect = tester.getRect(
+        find.byKey(const ValueKey('message-action-surface')),
+      );
+      final logicalHeight =
+          tester.view.physicalSize.height / tester.view.devicePixelRatio;
+      expect(
+        actionRect.bottom,
+        closeTo(logicalHeight - keyboardInset - Grid.xxs, 0.1),
+      );
+
+      await _dismissMessageActionsPopover(tester);
+    });
+
+    testWidgets('restores composer focus only after a dismissed popover', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      final prefs = await _mockPrefs();
+
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        composerFocusNode: focusNode,
+        composerInitiallyFocused: true,
+      );
+
+      expect(focusNode.hasFocus, isFalse);
+      await _dismissMessageActionsPopover(tester);
+      expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('leaves an initially unfocused composer unfocused', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      final prefs = await _mockPrefs();
+
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        composerFocusNode: focusNode,
+      );
+
+      expect(focusNode.hasFocus, isFalse);
+      await _dismissMessageActionsPopover(tester);
+      expect(focusNode.hasFocus, isFalse);
+    });
+
+    testWidgets('does not restore composer focus after selecting an action', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      final prefs = await _mockPrefs();
+
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(rootId: 'root-9'),
+        prefs: prefs,
+        composerFocusNode: focusNode,
+        composerInitiallyFocused: true,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('message-action-followThread')),
+      );
+      await tester.pumpAndSettle();
+      expect(focusNode.hasFocus, isFalse);
+    });
 
     testWidgets('runs an action after dismissal and can reopen', (
       tester,

@@ -138,6 +138,8 @@ class ChannelDetailPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final composerDockHeight = useState(0.0);
+    final composerFocusNode = useFocusNode();
+    final restoreComposerFocus = useRef<VoidCallback?>(null);
     final sendMessage = ref.read(sendMessageProvider);
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
@@ -473,6 +475,12 @@ class ChannelDetailPage extends HookConsumerWidget {
                               composerBottomInset: showsComposer
                                   ? composerDockHeight.value
                                   : 0,
+                              composerFocusNode: showsComposer
+                                  ? composerFocusNode
+                                  : null,
+                              restoreComposerFocus: showsComposer
+                                  ? () => restoreComposerFocus.value?.call()
+                                  : null,
                             );
                           },
                         ),
@@ -521,6 +529,9 @@ class ChannelDetailPage extends HookConsumerWidget {
                       ),
                       ComposeBar(
                         channelId: channel.id,
+                        focusNode: composerFocusNode,
+                        onFocusRestorerChanged: (restoreFocus) =>
+                            restoreComposerFocus.value = restoreFocus,
                         channelName: resolvedChannel.isDm
                             ? ''
                             : resolvedChannel.name,

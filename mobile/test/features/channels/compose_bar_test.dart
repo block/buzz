@@ -182,6 +182,8 @@ Widget _buildComposeBar({
   RelayConfigNotifier Function()? relayConfig,
   PhotoLibrary photoLibrary = const _EmptyPhotoLibrary(),
   VoidCallback? onFocusRequested,
+  FocusNode? focusNode,
+  ValueChanged<VoidCallback>? onFocusRestorerChanged,
 }) {
   return ProviderScope(
     overrides: [
@@ -230,6 +232,8 @@ Widget _buildComposeBar({
             alignment: Alignment.bottomCenter,
             child: ComposeBar(
               channelId: 'channel-1',
+              focusNode: focusNode,
+              onFocusRestorerChanged: onFocusRestorerChanged,
               onFocusRequested: onFocusRequested,
               onSend: onSend,
             ),
@@ -558,6 +562,69 @@ void main() {
         tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
         isTrue,
       );
+    });
+
+    testWidgets('uses a parent-owned focus node when provided', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(focusNode.hasFocus, isTrue);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode,
+        same(focusNode),
+      );
+    });
+
+    testWidgets('restores the collapsed editor before requesting focus', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      VoidCallback? restoreFocus;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onFocusRestorerChanged: (callback) => restoreFocus = callback,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+      focusNode.unfocus();
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+
+      restoreFocus!();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
     });
 
     testWidgets('starts Android composer motion with the first IME metrics', (

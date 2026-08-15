@@ -54,11 +54,13 @@ void showMessageActions({
   List<TimelineMessage>? allMessages,
   String? currentPubkey,
   bool isMember = false,
-  bool isArchived = false,
   Rect? anchorRect,
   Future<ui.Image> Function()? captureAnchorSnapshot,
   VoidCallback? onPopoverPresented,
   VoidCallback? onPopoverDismissed,
+  FocusNode? composerFocusNode,
+  VoidCallback? restoreComposerFocus,
+  bool isArchived = false,
   EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
 }) {
   final hasReactionOnlyActions = message.isSystem && !canManageMessage;
@@ -87,6 +89,8 @@ void showMessageActions({
     captureAnchorSnapshot: captureAnchorSnapshot,
     onPopoverPresented: onPopoverPresented,
     onPopoverDismissed: onPopoverDismissed,
+    composerFocusNode: composerFocusNode,
+    restoreComposerFocus: restoreComposerFocus,
   )) {
     return;
   }
@@ -509,9 +513,6 @@ class _FollowThreadTile extends ConsumerWidget {
   }
 }
 
-/// Promoted actions for the three dominant mobile jobs: respond now (Reply),
-/// hand off context (Copy link — the `buzz://message` link is the workspace's
-/// context-transfer primitive), and defer (Remind me).
 class _FastActionsRow extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;

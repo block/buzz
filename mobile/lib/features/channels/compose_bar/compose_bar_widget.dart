@@ -9,6 +9,8 @@ class ComposeBar extends HookConsumerWidget {
   /// Runs immediately before the editor requests focus, allowing a parent to
   /// prepare focus-dependent layout (for example, following a thread tail).
   final VoidCallback? onFocusRequested;
+  final FocusNode? focusNode;
+  final ValueChanged<VoidCallback>? onFocusRestorerChanged;
 
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
@@ -20,6 +22,8 @@ class ComposeBar extends HookConsumerWidget {
     this.hintText,
     this.threadHeadId,
     this.rootId,
+    this.focusNode,
+    this.onFocusRestorerChanged,
     this.onFocusRequested,
     required this.onSend,
   });
@@ -50,15 +54,12 @@ class ComposeBar extends HookConsumerWidget {
       defaultTargetPlatform != TargetPlatform.android,
     );
     final androidImeFallbackTimer = useRef<Timer?>(null);
-    final focusNode = useFocusNode();
+    final focusNode = this.focusNode ?? useFocusNode();
     useEffect(
-      () =>
-          () => androidImeFallbackTimer.value?.cancel(),
-      [androidImeFallbackTimer],
-    );
-    useEffect(
-      () =>
-          () => _dismissComposerKeyboard(focusNode),
+      () => () {
+        androidImeFallbackTimer.value?.cancel();
+        _dismissComposerKeyboard(focusNode);
+      },
       [focusNode],
     );
     final isEmojiPickerOpen = useState(false);
@@ -861,6 +862,13 @@ class ComposeBar extends HookConsumerWidget {
       view: appView,
       androidImeTransitionStarted: androidImeTransitionStarted,
       androidImeFallbackTimer: androidImeFallbackTimer,
+    );
+
+    _useComposerFocusRestorer(
+      onChanged: onFocusRestorerChanged,
+      isExpanded: isComposerExpanded,
+      focusNode: focusNode,
+      expand: expandComposer,
     );
 
     final suggestionPanel = _composerSuggestionPanel(

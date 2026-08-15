@@ -15,6 +15,8 @@ class _MessageList extends HookConsumerWidget {
   final bool isArchived;
   final double appBarTitleContentHeight;
   final double composerBottomInset;
+  final FocusNode? composerFocusNode;
+  final VoidCallback? restoreComposerFocus;
 
   const _MessageList({
     required this.entries,
@@ -31,6 +33,8 @@ class _MessageList extends HookConsumerWidget {
     required this.isArchived,
     required this.appBarTitleContentHeight,
     required this.composerBottomInset,
+    this.composerFocusNode,
+    this.restoreComposerFocus,
   });
 
   @override
@@ -804,6 +808,8 @@ class _MessageList extends HookConsumerWidget {
                           allMessages: allMessages,
                           isMember: isMember,
                           isArchived: isArchived,
+                          composerFocusNode: composerFocusNode,
+                          restoreComposerFocus: restoreComposerFocus,
                         ),
                         if (entry.summary != null)
                           _ThreadSummaryRow(

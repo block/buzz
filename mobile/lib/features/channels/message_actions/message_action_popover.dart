@@ -52,8 +52,11 @@ bool _tryShowMessageActionsPopover({
   required Future<ui.Image> Function()? captureAnchorSnapshot,
   required VoidCallback? onPopoverPresented,
   required VoidCallback? onPopoverDismissed,
+  required FocusNode? composerFocusNode,
+  required VoidCallback? restoreComposerFocus,
 }) {
   if (anchorRect == null || captureAnchorSnapshot == null) return false;
+  final shouldRestoreComposerFocus = composerFocusNode?.hasFocus ?? false;
   unawaited(
     _showMessageActionsPopover(
       context: context,
@@ -69,6 +72,9 @@ bool _tryShowMessageActionsPopover({
       captureAnchorSnapshot: captureAnchorSnapshot,
       onPopoverPresented: onPopoverPresented,
       onPopoverDismissed: onPopoverDismissed,
+      composerFocusNode: composerFocusNode,
+      restoreComposerFocus: restoreComposerFocus,
+      shouldRestoreComposerFocus: shouldRestoreComposerFocus,
     ).then((shown) {
       if (shown || !context.mounted) return;
       showMessageActions(
@@ -101,6 +107,9 @@ Future<bool> _showMessageActionsPopover({
   required Future<ui.Image> Function() captureAnchorSnapshot,
   required VoidCallback? onPopoverPresented,
   required VoidCallback? onPopoverDismissed,
+  required FocusNode? composerFocusNode,
+  required VoidCallback? restoreComposerFocus,
+  required bool shouldRestoreComposerFocus,
 }) async {
   if (_messageActionsPresentationInFlight) return true;
   _messageActionsPresentationInFlight = true;
@@ -141,6 +150,7 @@ Future<bool> _showMessageActionsPopover({
 
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     onPopoverPresented?.call();
+    if (shouldRestoreComposerFocus) composerFocusNode!.unfocus();
 
     String? selectedActionId;
     try {
@@ -177,6 +187,11 @@ Future<bool> _showMessageActionsPopover({
       if (action.id != selectedActionId) continue;
       await Future<void>.sync(action.onSelected);
       break;
+    }
+    if (selectedActionId == null &&
+        shouldRestoreComposerFocus &&
+        context.mounted) {
+      restoreComposerFocus?.call();
     }
     return true;
   } finally {
@@ -500,7 +515,10 @@ class _MessageActionsPopover extends StatelessWidget {
             constraints.maxWidth - mediaQuery.padding.right - Grid.xxs;
         final safeTop = mediaQuery.padding.top + Grid.xxs;
         final safeBottom =
-            constraints.maxHeight - mediaQuery.padding.bottom - Grid.xxs;
+            constraints.maxHeight -
+            mediaQuery.padding.bottom -
+            mediaQuery.viewInsets.bottom -
+            Grid.xxs;
         final availableWidth = math.max(1.0, safeRight - safeLeft);
         final availableHeight = math.max(1.0, safeBottom - safeTop);
         final trayWidth = math.min(_reactionTrayMaxWidth, availableWidth);

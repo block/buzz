@@ -9,6 +9,8 @@ class _MessageBubble extends HookConsumerWidget {
   final List<TimelineMessage>? allMessages;
   final bool isMember;
   final bool isArchived;
+  final FocusNode? composerFocusNode;
+  final VoidCallback? restoreComposerFocus;
 
   const _MessageBubble({
     required this.message,
@@ -19,6 +21,8 @@ class _MessageBubble extends HookConsumerWidget {
     this.allMessages,
     this.isMember = false,
     this.isArchived = false,
+    this.composerFocusNode,
+    this.restoreComposerFocus,
   });
 
   @override
@@ -88,6 +92,8 @@ class _MessageBubble extends HookConsumerWidget {
         captureAnchorSnapshot: details.captureSnapshot,
         onPopoverPresented: () => details.setSourceHidden(true),
         onPopoverDismissed: () => details.setSourceHidden(false),
+        composerFocusNode: composerFocusNode,
+        restoreComposerFocus: restoreComposerFocus,
       );
     }
 

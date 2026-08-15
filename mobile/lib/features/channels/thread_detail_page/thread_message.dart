@@ -10,6 +10,8 @@ class _ThreadMessage extends HookConsumerWidget {
   final List<TimelineMessage>? allMessages;
   final bool isMember;
   final bool isArchived;
+  final FocusNode? composerFocusNode;
+  final VoidCallback? restoreComposerFocus;
 
   /// Whether this is the message the thread hangs off, which keeps a standing
   /// "+" where replies only get one once they carry a reaction.
@@ -26,6 +28,8 @@ class _ThreadMessage extends HookConsumerWidget {
     this.isMember = false,
     this.isArchived = false,
     this.isThreadHead = false,
+    this.composerFocusNode,
+    this.restoreComposerFocus,
   });
 
   @override
@@ -83,6 +87,8 @@ class _ThreadMessage extends HookConsumerWidget {
         captureAnchorSnapshot: details.captureSnapshot,
         onPopoverPresented: () => details.setSourceHidden(true),
         onPopoverDismissed: () => details.setSourceHidden(false),
+        composerFocusNode: composerFocusNode,
+        restoreComposerFocus: restoreComposerFocus,
       );
     }
 
