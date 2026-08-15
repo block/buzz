@@ -7,6 +7,10 @@ use crate::managed_agents::{
 };
 use crate::{prevent_sleep, util};
 
+const MANAGED_AGENT_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const MANAGED_AGENT_SHUTDOWN_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
 #[cfg(unix)]
 fn managed_agent_leader_exited(pid: u32, owns_child: bool) -> bool {
     if owns_child && buzz_terminal::lifecycle::child_exited_without_reaping(pid) {
@@ -19,6 +23,27 @@ fn managed_agent_leader_exited(pid: u32, owns_child: bool) -> bool {
 #[cfg(not(unix))]
 fn managed_agent_leader_exited(pid: u32, _owns_child: bool) -> bool {
     !managed_agents::process_is_running(pid)
+}
+
+fn wait_for_managed_agent_shutdown_grace(mut all_leaders_exited: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + MANAGED_AGENT_SHUTDOWN_TIMEOUT;
+
+    loop {
+        if all_leaders_exited() {
+            #[cfg(unix)]
+            {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(buzz_terminal::lifecycle::TERM_GRACE.min(remaining));
+            }
+            break;
+        }
+
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(MANAGED_AGENT_SHUTDOWN_POLL_INTERVAL.min(remaining));
+    }
 }
 
 pub(crate) fn is_restart_request(code: Option<i32>) -> bool {
@@ -209,20 +234,14 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
         // detect an exited direct child: it continues to report a zombie as
         // present until that child is reaped. Observe owned children with
         // waitid(WNOWAIT) instead, keeping their PIDs reserved until the group
-        // sweep below has killed any surviving descendants.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if to_stop
+        // sweep below has killed any surviving descendants. Once every leader
+        // is out, retain those zombies for one short descendant drain window;
+        // the original two-second deadline remains the hard ceiling.
+        wait_for_managed_agent_shutdown_grace(|| {
+            to_stop
                 .iter()
                 .all(|agent| managed_agent_leader_exited(agent.pid, agent.runtime.is_some()))
-            {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        });
 
         // Fan-out: SIGKILL surviving groups even when their leaders exited
         // politely. A WNOWAIT-observed leader remains a zombie, so kill(0)
@@ -290,7 +309,44 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{is_restart_request, managed_agent_leader_exited};
+    use super::is_restart_request;
+
+    #[cfg(unix)]
+    use super::{managed_agent_leader_exited, wait_for_managed_agent_shutdown_grace};
+
+    #[cfg(unix)]
+    struct ProcessGroupGuard {
+        leader: std::process::Child,
+        pgid: i32,
+        group_killed: bool,
+    }
+
+    #[cfg(unix)]
+    impl ProcessGroupGuard {
+        fn signal(&self, signal: i32) -> i32 {
+            // SAFETY: the fixture leader was spawned with process_group(0), so
+            // its PID is the PGID and the negative target names only that group.
+            unsafe { libc::kill(-self.pgid, signal) }
+        }
+
+        fn kill_group(&mut self) -> i32 {
+            let result = self.signal(libc::SIGKILL);
+            if result == 0 {
+                self.group_killed = true;
+            }
+            result
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ProcessGroupGuard {
+        fn drop(&mut self) {
+            if !self.group_killed {
+                let _ = self.kill_group();
+            }
+            let _ = self.leader.wait();
+        }
+    }
 
     #[test]
     fn only_tauri_restart_exit_code_requests_a_relaunch() {
@@ -303,7 +359,6 @@ mod tests {
     #[test]
     fn exited_agent_leaders_are_observed_before_reaping() {
         use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
 
         let mut children: Vec<_> = (0..3)
             .map(|_| {
@@ -317,15 +372,11 @@ mod tests {
             })
             .collect();
         let pids: Vec<_> = children.iter().map(std::process::Child::id).collect();
-        let deadline = Instant::now() + Duration::from_millis(500);
 
-        while !pids
-            .iter()
-            .all(|pid| managed_agent_leader_exited(*pid, true))
-            && Instant::now() < deadline
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_for_managed_agent_shutdown_grace(|| {
+            pids.iter()
+                .all(|pid| managed_agent_leader_exited(*pid, true))
+        });
 
         assert!(
             pids.iter()
@@ -339,7 +390,106 @@ mod tests {
         );
 
         for child in &mut children {
-            child.wait().expect("reap cooperative agent fixture");
+            assert!(
+                child
+                    .try_wait()
+                    .expect("reap cooperative agent fixture")
+                    .is_some(),
+                "the production try_wait step must reap a WNOWAIT-observed child"
+            );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_leader_leaves_a_short_term_grace_for_group_descendants() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let temp = tempfile::tempdir().expect("create process-group fixture directory");
+        let descendant_ready = temp.path().join("descendant-ready");
+        let descendant_pid_path = temp.path().join("descendant-pid");
+        let leader_ready = temp.path().join("leader-ready");
+        let drained = temp.path().join("descendant-drained");
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                r#"
+trap 'exit 0' TERM
+(
+  trap '/bin/sleep 0.1; /usr/bin/touch "$BUZZ_TEST_DRAINED"; while :; do /bin/sleep 1; done' TERM
+  /usr/bin/touch "$BUZZ_TEST_DESCENDANT_READY"
+  while :; do /bin/sleep 1; done
+) &
+printf '%s\n' "$!" > "$BUZZ_TEST_DESCENDANT_PID"
+while [ ! -f "$BUZZ_TEST_DESCENDANT_READY" ]; do /bin/sleep 0.01; done
+/usr/bin/touch "$BUZZ_TEST_LEADER_READY"
+while :; do /bin/sleep 1; done
+"#,
+            ])
+            .env("BUZZ_TEST_DESCENDANT_READY", &descendant_ready)
+            .env("BUZZ_TEST_DESCENDANT_PID", &descendant_pid_path)
+            .env("BUZZ_TEST_LEADER_READY", &leader_ready)
+            .env("BUZZ_TEST_DRAINED", &drained)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+
+        let leader = command.spawn().expect("spawn process-group fixture");
+        let leader_pid = leader.id();
+        let mut group = ProcessGroupGuard {
+            leader,
+            pgid: leader_pid as i32,
+            group_killed: false,
+        };
+
+        let ready_deadline = Instant::now() + Duration::from_secs(2);
+        while !leader_ready.exists() && Instant::now() < ready_deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(leader_ready.exists(), "fixture did not arm its TERM traps");
+
+        let descendant_pid: i32 = std::fs::read_to_string(&descendant_pid_path)
+            .expect("read descendant PID")
+            .trim()
+            .parse()
+            .expect("parse descendant PID");
+        // SAFETY: getpgid only inspects the live fixture PID.
+        assert_eq!(
+            unsafe { libc::getpgid(descendant_pid) },
+            leader_pid as i32,
+            "fixture descendant must share the harness process group"
+        );
+
+        assert_eq!(group.signal(libc::SIGTERM), 0, "signal fixture group");
+        let started = Instant::now();
+        wait_for_managed_agent_shutdown_grace(|| managed_agent_leader_exited(leader_pid, true));
+        let elapsed = started.elapsed();
+
+        assert!(
+            crate::managed_agents::process_is_running(leader_pid),
+            "WNOWAIT must reserve the leader PID through descendant cleanup"
+        );
+        assert_eq!(group.kill_group(), 0, "sweep fixture group");
+        assert!(
+            group
+                .leader
+                .try_wait()
+                .expect("reap fixture leader")
+                .is_some(),
+            "the exited leader should be waitable after the group sweep"
+        );
+        assert!(
+            drained.exists(),
+            "same-group descendants should finish their TERM handler before SIGKILL"
+        );
+        assert!(
+            elapsed >= buzz_terminal::lifecycle::TERM_GRACE,
+            "the post-leader descendant grace must not be skipped"
+        );
     }
 }
