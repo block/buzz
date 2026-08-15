@@ -8,6 +8,7 @@ mod desktop_provider;
 mod error;
 mod federated_identity;
 mod help_tree;
+mod limits;
 mod links;
 mod validate;
 

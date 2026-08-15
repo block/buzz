@@ -8,6 +8,7 @@ use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::commands::event_output::{format_events, thread_markers};
 use crate::commands::sent_from_thread;
 use crate::error::CliError;
+use crate::limits::{effective_limit, truncation_notice};
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
@@ -25,47 +26,6 @@ const THREAD_LIMIT_MAX: u32 = 500;
 /// Default and maximum `--limit` for `messages search`.
 const SEARCH_LIMIT_DEFAULT: u32 = 20;
 const SEARCH_LIMIT_MAX: u32 = 100;
-
-/// Resolve a `--limit` against a command's default and cap.
-fn effective_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
-    requested.unwrap_or(default).min(max)
-}
-
-/// Build the stderr note for a read that came back full.
-///
-/// A read that returns exactly its limit is indistinguishable from a complete
-/// one on stdout, which is how an agent rebuilding context from `messages get`
-/// silently reconstructs a prefix of the conversation as if it were the whole
-/// thing. There is no total to report — the relay answers a filter, not a
-/// count — so the note states what bound was hit and how to raise it, and says
-/// "may" because a result set exactly the size of the limit is also possible.
-///
-/// Returns `None` for a short read, which is the only case that is provably
-/// complete.
-fn truncation_notice(
-    returned: usize,
-    requested: Option<u32>,
-    default: u32,
-    max: u32,
-) -> Option<String> {
-    let limit = effective_limit(requested, default, max);
-    if returned < limit as usize {
-        return None;
-    }
-    let bound = match requested {
-        None => format!("the default limit of {default}"),
-        Some(r) if r > max => format!("--limit {r}, capped at {max}"),
-        Some(r) => format!("--limit {r}"),
-    };
-    let advice = if limit < max {
-        format!("pass a larger --limit (max {max})")
-    } else {
-        "narrow the window with --since / --before to page through the rest".to_string()
-    };
-    Some(format!(
-        "showing {returned} results — {bound} was reached, so more may exist; {advice}"
-    ))
-}
 
 /// Extract the thread root event ID from a Nostr tag array.
 ///
