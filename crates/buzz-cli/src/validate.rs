@@ -76,6 +76,19 @@ pub fn validate_repo_id(s: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Build the `30617:<owner>:<id>` coordinate used as an `a` tag value.
+///
+/// Mirrors `buzz_sdk::GitRepoCoord::to_a_tag_value`, which is what every
+/// published event's `a` tag is built from: the owner pubkey is lowercased,
+/// the repo `d`-tag is left exactly as given (a `d` tag is case-sensitive).
+/// A query that builds this string differently matches nothing — `#a` is a
+/// generic tag filter, compared as a raw string.
+pub fn repo_coord_a_value(repo_owner: &str, repo_id: &str) -> Result<String, CliError> {
+    let owner = parse_hex64(repo_owner)?;
+    validate_repo_id(repo_id)?;
+    Ok(format!("30617:{owner}:{repo_id}"))
+}
+
 /// Validate content does not exceed MAX_CONTENT_BYTES (65,536).
 pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     if content.len() > MAX_CONTENT_BYTES {
@@ -292,6 +305,24 @@ mod tests {
         assert!(super::parse_hex64(&"a".repeat(63)).is_err());
         assert!(super::parse_hex64(&"a".repeat(65)).is_err());
         assert!(super::parse_hex64(&format!("{}z", "a".repeat(63))).is_err());
+    }
+
+    // --- repo_coord_a_value ---
+
+    #[test]
+    fn repo_coord_lowercases_the_owner_and_keeps_the_dtag() {
+        // `GitRepoCoord::to_a_tag_value` lowercases the owner and leaves the
+        // d-tag alone; a query has to agree byte for byte.
+        let owner = "ABCDEF0123456789".repeat(4);
+        let value = super::repo_coord_a_value(&owner, "My-Repo").unwrap();
+        assert_eq!(value, format!("30617:{}:My-Repo", owner.to_lowercase()));
+    }
+
+    #[test]
+    fn repo_coord_rejects_a_bad_owner_or_id() {
+        assert!(super::repo_coord_a_value("nope", "repo").is_err());
+        assert!(super::repo_coord_a_value(&"a".repeat(64), "").is_err());
+        assert!(super::repo_coord_a_value(&"a".repeat(64), "..").is_err());
     }
 
     // --- validate_content_size ---
