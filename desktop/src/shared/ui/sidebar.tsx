@@ -351,7 +351,7 @@ const Sidebar = React.forwardRef<
         data-variant={variant}
         data-side={side}
       >
-        {/* This is what handles the sidebar gap on desktop */}
+        {/* Sidebar gap on desktop; the offcanvas sibling below also goes invisible, else it paints over the community rail past the overflow-visible shell. */}
         <div
           className={cn(
             "relative w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear",
@@ -365,8 +365,8 @@ const Sidebar = React.forwardRef<
         />
         <div
           className={cn(
-            "absolute inset-y-0 z-10 hidden h-full w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear md:flex",
-            "group-data-[resizing=true]:transition-none",
+            "absolute inset-y-0 z-10 hidden h-full w-(--sidebar-width) transition-[left,right,width,visibility] duration-200 ease-linear md:flex",
+            "group-data-[resizing=true]:transition-none group-data-[collapsible=offcanvas]:pointer-events-none group-data-[collapsible=offcanvas]:invisible",
             side === "left"
               ? "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]"
               : "right-0 group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)]",
