@@ -206,4 +206,71 @@ if ! grep -qx 'compose up -d' "${docker_calls}"; then
   exit 1
 fi
 
+# `just setup` runs bootstrap in a separate recipe, so dev-setup itself must
+# add the repository's Hermit shims before validating URLs with node. Exercise
+# that boundary without a system node binary or a real Docker daemon.
+setup_probe_root="${TMP_DIR}/setup-probe"
+mkdir -p "${setup_probe_root}/scripts/lib" "${setup_probe_root}/bin" "${setup_probe_root}/mock-bin"
+cp "${REPO_ROOT}/scripts/dev-setup.sh" "${setup_probe_root}/scripts/dev-setup.sh"
+cp "${REPO_ROOT}/scripts/lib/dev-service-env.sh" "${setup_probe_root}/scripts/lib/dev-service-env.sh"
+cp "${REPO_ROOT}/bin/node" "${setup_probe_root}/bin/node"
+
+cat > "${setup_probe_root}/mock-hermit" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mimic the generated Hermit node shim closely enough for the URL parser used
+# by dev-service-env.sh. The probe only uses the three default local URLs.
+url="${7}"
+default_port="${8}"
+case "${url}" in
+  postgres://*@localhost:5432/*) printf 'local\t5432' ;;
+  redis://localhost:6379) printf 'local\t6379' ;;
+  http://localhost:9000) printf 'local\t9000' ;;
+  *) printf 'local\t%s' "${default_port}" ;;
+esac
+EOF
+chmod +x "${setup_probe_root}/mock-hermit"
+
+cat > "${setup_probe_root}/mock-bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$*" in
+  info) exit 0 ;;
+  "ps -a --format {{.Names}}") exit 0 ;;
+  *) echo "unexpected docker invocation: $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "${setup_probe_root}/mock-bin/docker"
+
+cat > "${setup_probe_root}/bin/just" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$1" == "_ensure-services" ]]; then
+  echo 'dev-setup reached Compose'
+  exit 42
+fi
+echo "unexpected just invocation: $*" >&2
+exit 1
+EOF
+chmod +x "${setup_probe_root}/bin/just"
+
+setup_probe_output="${TMP_DIR}/setup-probe-output"
+if (
+  cd "${setup_probe_root}"
+  PATH="${setup_probe_root}/mock-bin:/usr/bin:/bin" \
+    HERMIT_EXE="${setup_probe_root}/mock-hermit" \
+    ./scripts/dev-setup.sh
+) > "${setup_probe_output}" 2>&1; then
+  echo "dev-setup unexpectedly completed the no-system-node probe" >&2
+  exit 1
+fi
+if ! grep -Fqx 'dev-setup reached Compose' "${setup_probe_output}"; then
+  cat "${setup_probe_output}" >&2
+  echo "dev-setup did not use its Hermit node shim before validating service URLs" >&2
+  exit 1
+fi
+
 echo "Dev service port checks passed"

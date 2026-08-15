@@ -36,11 +36,13 @@ just setup                       # start Docker services, run migrations
 > **Already running Buzz Desktop?** Desktop uses the same Docker container
 > names (`buzz-postgres`, `buzz-redis`) and the same
 > default ports (`:5432`, `:6379`). Host ports can be overridden in `.env`;
-> keep `DATABASE_URL`/`PGPORT` and `REDIS_URL`/`REDIS_PORT` aligned. `just setup` will reuse those
-> services, so **your test relay writes into Desktop's database**. That's
-> fine for read/write smoke tests, but: `just reset` wipes Desktop's data
-> along with yours. If you need isolation, stop Desktop first or run the
-> dev stack on a different Compose project
+> keep `DATABASE_URL`/`PGPORT` and `REDIS_URL`/`REDIS_PORT` aligned. Changing
+> an override reconciles the shared Compose stack, so a running Desktop or
+> relay using the old ports will lose its service connections. `just setup`
+> will reuse those services, so **your test relay writes into Desktop's
+> database**. That's fine for read/write smoke tests, but: `just reset` wipes
+> Desktop's data along with yours. If you need isolation, stop Desktop first
+> or run the dev stack on a different Compose project
 > (`COMPOSE_PROJECT_NAME=buzz-dev docker compose …`).
 
 `just reset` wipes all local data and starts over — **including Buzz

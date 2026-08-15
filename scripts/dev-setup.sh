@@ -12,6 +12,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# `just setup` runs `bootstrap` in a separate recipe. Keep this script
+# self-contained when it validates URLs with the Hermit-provided node shim.
+export PATH="${REPO_ROOT}/bin:${PATH}"
+
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/dev-service-env.sh"
 
