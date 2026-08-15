@@ -994,3 +994,7 @@ native-review-compare BASELINE CANDIDATE BUDGET="tools/native-review/performance
 # Run the native iOS Simulator pairing journey with MP4 and screenshot evidence.
 native-review-ios DEVICE="iPhone 17 Pro":
     ./tools/native-review/bin/review-ios --device "{{DEVICE}}"
+
+# Emit a redacted, relay-compatible clip + receipt + focused log excerpt.
+native-review-finding RECEIPT OUTPUT MATCH="":
+    ./tools/native-review/bin/review-native finding-bundle "{{RECEIPT}}" --output "{{OUTPUT}}" {{ if MATCH == "" { "" } else { "--match " + quote(MATCH) } }}

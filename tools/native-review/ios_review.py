@@ -14,8 +14,14 @@ import shutil
 import signal
 import subprocess
 import sys
+
+_TOOL_ROOT = pathlib.Path(__file__).resolve().parent
+if str(_TOOL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TOOL_ROOT))
 import time
 from typing import Any
+
+from evidence_bundle import EvidenceError, relay_safe_video
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_TEST = ROOT / "mobile/integration_test/native_review_pairing_test.dart"
@@ -143,6 +149,13 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
             run(["xcrun", "simctl", "erase", udid])
         except Exception as exc:
             errors.append(str(exc))
+        video = run_dir / "video.mp4"
+        if video.is_file():
+            try:
+                relay_safe_video(video, run_dir / "video-share.mp4")
+                receipt["artifacts"]["share_video"] = "video-share.mp4"
+            except EvidenceError as exc:
+                errors.append(f"shareable video finalization failed: {exc}")
         receipt["cleanup"] = {"status": "failed" if errors else "passed", "errors": errors}
         if errors:
             receipt["status"] = "failed"

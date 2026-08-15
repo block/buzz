@@ -18,11 +18,17 @@ import shutil
 import statistics
 import subprocess
 import sys
+
+_TOOL_ROOT = pathlib.Path(__file__).resolve().parent
+if str(_TOOL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TOOL_ROOT))
 import tempfile
 import threading
 import time
 import urllib.parse
 from typing import Any
+
+from evidence_bundle import EvidenceError, finding_bundle, relay_safe_video
 
 try:
     import yaml
@@ -328,7 +334,7 @@ class Driver:
 def doctor(require_permissions: bool = False) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.append({"name": "platform", "ok": sys.platform == "darwin", "detail": sys.platform})
-    for command in ("swift", "xcrun", "git"):
+    for command in ("swift", "xcrun", "git", "ffmpeg"):
         path = shutil.which(command)
         checks.append({"name": command, "ok": path is not None, "detail": path or "not found"})
     checks.append({"name": "repository", "ok": (ROOT / "desktop/src-tauri/tauri.conf.json").is_file(), "detail": str(ROOT)})
@@ -339,7 +345,7 @@ def doctor(require_permissions: bool = False) -> dict[str, Any]:
         checks.extend(native.get("checks", []))
     except (HarnessError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
         checks.append({"name": "native-driver", "ok": False, "detail": str(exc)})
-    hard_names = {"platform", "swift", "xcrun", "git", "repository", "native-driver-build"}
+    hard_names = {"platform", "swift", "xcrun", "git", "ffmpeg", "repository", "native-driver-build"}
     failed = [c for c in checks if not c.get("ok") and (require_permissions or c.get("name") in hard_names)]
     result = {"ok": not failed, "checks": checks}
     print(json.dumps(result, indent=2))
@@ -617,6 +623,13 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
         cleanup_errors = []
         if sampler:
             receipt["performance"]["process"] = sampler.finish()
+        video = run_dir / "video.mp4"
+        if video.is_file():
+            try:
+                relay_safe_video(video, run_dir / "video-share.mp4")
+                receipt["artifacts"]["share_video"] = "video-share.mp4"
+            except EvidenceError as exc:
+                cleanup_errors.append(f"shareable video finalization failed: {exc}")
         if probe_server:
             probe_server.shutdown()
             probe_server.server_close()
@@ -790,6 +803,13 @@ def main() -> int:
     compare_parser.add_argument("--candidate", type=pathlib.Path, action="append", required=True)
     compare_parser.add_argument("--budget", type=pathlib.Path, required=True)
     compare_parser.add_argument("--output", type=pathlib.Path)
+    bundle_parser = sub.add_parser("finding-bundle")
+    bundle_parser.add_argument("receipt", type=pathlib.Path)
+    bundle_parser.add_argument("--output", type=pathlib.Path, required=True)
+    bundle_parser.add_argument("--match", help="case-insensitive regular expression selecting log lines")
+    bundle_parser.add_argument("--context", type=int, default=8)
+    bundle_parser.add_argument("--start", type=float, help="clip start in seconds")
+    bundle_parser.add_argument("--duration", type=float, help="clip duration in seconds")
     args = parser.parse_args()
     try:
         if args.command == "doctor":
@@ -798,13 +818,17 @@ def main() -> int:
             load_journey(args.journey); print(f"valid: {args.journey}"); return 0
         if args.command == "compare":
             compare_performance(args.baseline, args.candidate, args.budget, args.output); return 0
+        if args.command == "finding-bundle":
+            result = finding_bundle(args.receipt.resolve(), args.output.resolve(), match=args.match, context=args.context,
+                                    start=args.start, duration=args.duration)
+            print(json.dumps({"output": str(args.output.resolve()), "manifest": result}, indent=2)); return 0
         if args.command == "benchmark":
             if args.runs < PERFORMANCE_SAMPLE_MINIMUM:
                 raise HarnessError(f"benchmark requires at least {PERFORMANCE_SAMPLE_MINIMUM} runs")
             receipts = [run_journey(args.journey, args.relay, args.output) / "receipt.json" for _ in range(args.runs)]
             print(json.dumps({"receipts": [str(path) for path in receipts]}, indent=2)); return 0
         run_journey(args.journey, args.relay, args.output); return 0
-    except HarnessError as exc:
+    except (HarnessError, EvidenceError) as exc:
         print(f"native-review: {exc}", file=sys.stderr)
         return 1
 

@@ -264,3 +264,37 @@ guard them.
   recording and screenshot are part of the assertion surface, not decoration.
 - **Push hooks cannot find Flutter/Rust:** activate Hermit and ensure repository
   `bin` remains on `PATH`, for example `PATH="$PWD/bin:$PATH" git push ...`.
+
+## Share a finding
+
+Every recorded Desktop and iOS run now retains the original recording and also
+finalizes `video-share.mp4`: H.264/yuv420p, fast-start, metadata/chapter/audio
+stripped, and bounded to a 2160px longest edge. This is the canonical artifact
+for Buzz or GitHub attachment; the original remains the source recording.
+Finalization is part of cleanup, so a missing/broken share artifact makes the
+receipt fail rather than silently claiming complete evidence.
+
+To produce a small review bundle from any receipt (passed or failed):
+
+```bash
+just native-review-finding \
+  test-results/native-review/<sha>/<flow>/<run>/receipt.json \
+  /tmp/finding \
+  'disposed image|framework exception'
+```
+
+The output directory is created once and never overwritten. It contains:
+
+- `finding.mp4` — relay-compatible, metadata-free video;
+- `receipt.json` — a minimal copy containing status, source SHA/dirty state,
+  device/runtime, measurements, and cleanup (no isolation paths or device UDID);
+- `log-excerpt.txt` — only matching lines plus bounded context (or the final 200
+  lines without `MATCH`), with credential-shaped assignments redacted;
+- `manifest.json` — source run id plus SHA-256 and byte size for every file.
+
+Inspect the clip and excerpt before publishing. Redaction is defense in depth,
+not permission to run untrusted code with credentials; the harness isolation
+rules still apply. `buzz upload file --file /tmp/finding/finding.mp4` is the
+live smoke check for Buzz delivery. PR screenshots still use
+`scripts/post-screenshots.sh` as required by `AGENTS.md`; GitHub video should be
+attached through GitHub's supported upload UI/API rather than a relay URL.
