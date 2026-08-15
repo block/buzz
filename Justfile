@@ -981,3 +981,12 @@ native-review-doctor:
 # Run one declarative journey against the isolated local desktop fixture.
 native-review-desktop JOURNEY="tools/native-review/desktop/tooltip-fresh-dwell.yaml":
     ./tools/native-review/bin/review-native run "{{JOURNEY}}"
+
+# Capture a repeatable native performance cohort (minimum 3 runs).
+native-review-benchmark JOURNEY="tools/native-review/desktop/tooltip-fresh-dwell.yaml" RUNS="5":
+    ./tools/native-review/bin/review-native benchmark "{{JOURNEY}}" --runs "{{RUNS}}"
+
+# Compare baseline and candidate receipt cohorts with explicit budget policy.
+# Pass BASELINE/CANDIDATE as repeated CLI args, e.g. "--baseline a --baseline b".
+native-review-compare BASELINE CANDIDATE BUDGET="tools/native-review/performance/tooltip-fresh-dwell.yaml":
+    ./tools/native-review/bin/review-native compare {{BASELINE}} {{CANDIDATE}} --budget "{{BUDGET}}"

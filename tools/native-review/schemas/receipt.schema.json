@@ -4,12 +4,102 @@
   "title": "Buzz native review receipt",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "run_id", "flow", "status", "started_at", "finished_at", "provenance", "isolation", "artifacts", "steps", "cleanup"],
+  "required": [
+    "schema_version",
+    "run_id",
+    "flow",
+    "status",
+    "started_at",
+    "finished_at",
+    "provenance",
+    "isolation",
+    "artifacts",
+    "steps",
+    "cleanup",
+    "measurements",
+    "performance"
+  ],
   "properties": {
-    "schema_version": {"const": 1}, "run_id": {"type": "string"}, "flow": {"type": "string"},
-    "status": {"enum": ["passed", "failed"]}, "started_at": {"type": "string"}, "finished_at": {"type": "string"},
-    "failure": {"type": ["string", "null"]},
-    "provenance": {"type": "object"}, "isolation": {"type": "object"}, "artifacts": {"type": "object"},
-    "steps": {"type": "array", "items": {"type": "object"}}, "cleanup": {"type": "object"}
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "flow": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "finished_at": {
+      "type": "string"
+    },
+    "failure": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provenance": {
+      "type": "object"
+    },
+    "isolation": {
+      "type": "object"
+    },
+    "artifacts": {
+      "type": "object"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "cleanup": {
+      "type": "object"
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "value",
+          "unit",
+          "step"
+        ],
+        "properties": {
+          "value": {
+            "type": "number"
+          },
+          "unit": {
+            "const": "ms"
+          },
+          "step": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "required": [
+        "machine"
+      ],
+      "properties": {
+        "machine": {
+          "type": "object"
+        },
+        "process": {
+          "type": "object"
+        }
+      }
+    }
   }
 }

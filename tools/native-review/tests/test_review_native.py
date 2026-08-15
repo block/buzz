@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import re
 import tempfile
@@ -33,6 +34,15 @@ class JourneyTests(unittest.TestCase):
             with self.subTest(relative_path=relative_path):
                 journey = review_native.load_journey(MODULE_PATH.parent / relative_path)
                 self.assertEqual(journey["flow"], flow)
+
+    def test_duplicate_measurement_is_rejected(self):
+        source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
+        source = source.replace("  - name: leave_trigger\n", "  - name: duplicate_measure\n    act: {type: wait, duration_ms: 1}\n    expect: {exists: {role: window}}\n    measure: tooltip_open_latency\n  - name: leave_trigger\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "invalid.yaml"
+            path.write_text(source)
+            with self.assertRaisesRegex(review_native.HarnessError, "duplicate measurement"):
+                review_native.load_journey(path)
 
     def test_type_text_requires_text(self):
         source = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
@@ -137,6 +147,83 @@ class JourneyTests(unittest.TestCase):
         with self.assertRaisesRegex(review_native.HarnessError, "exited"):
             review_native.wait_for_visible_window(driver, process, timeout_seconds=1)
         driver.request.assert_not_called()
+
+
+class PerformanceTests(unittest.TestCase):
+    MACHINE = {"system": "Darwin", "release": "test", "machine": "arm64", "cpu": "test"}
+
+    def receipt(self, path, artifact, timing, cpu=10, memory=100, flow="tooltip_fresh_dwell"):
+        payload = {
+            "run_id": path.stem, "flow": flow, "status": "passed",
+            "cleanup": {"status": "passed"},
+            "provenance": {"dirty": False, "head_sha": artifact + "-sha", "artifact_sha256": artifact},
+            "measurements": {"tooltip_open_latency": {"value": timing, "unit": "ms", "step": "tooltip"}},
+            "performance": {"machine": self.MACHINE, "process": {
+                "cpu_percent_median": cpu, "resident_mb_peak": memory,
+            }},
+        }
+        path.write_text(json.dumps(payload))
+        return path
+
+    def budget(self, path, regression=20):
+        path.write_text(f"""schema_version: 1
+flow: tooltip_fresh_dwell
+minimum_samples: 3
+metrics:
+  tooltip_open_latency:
+    max: 1000
+    max_regression_percent: {regression}
+  process.resident_mb_peak:
+    max: 500
+    max_regression_percent: 20
+""")
+        return path
+
+    def test_comparison_uses_median_and_passes_with_noise(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", value) for i, value in enumerate((100, 101, 900))]
+            candidate = [self.receipt(root / f"c{i}.json", "head", value) for i, value in enumerate((110, 111, 5))]
+            result = review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["baseline"]["metrics"]["tooltip_open_latency"]["median"], 101)
+
+    def test_comparison_fails_on_relative_regression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 130) for i in range(3)]
+            with self.assertRaisesRegex(review_native.HarnessError, "regression"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_too_few_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            receipts = [self.receipt(root / f"r{i}.json", "same", 100) for i in range(2)]
+            with self.assertRaisesRegex(review_native.HarnessError, "at least 3"):
+                review_native.compare_performance(receipts, receipts, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_incompatible_machine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
+            payload = json.loads(candidate[0].read_text())
+            payload["performance"]["machine"]["machine"] = "x86_64"
+            candidate[0].write_text(json.dumps(payload))
+            with self.assertRaisesRegex(review_native.HarnessError, "incompatible machines"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_mixed_revisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
+            payload = json.loads(candidate[0].read_text())
+            payload["provenance"]["head_sha"] = "other"
+            candidate[0].write_text(json.dumps(payload))
+            with self.assertRaisesRegex(review_native.HarnessError, "mixes source revisions"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
 
 
 if __name__ == "__main__":

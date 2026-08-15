@@ -1,0 +1,13 @@
+schema_version: 1
+flow: tooltip_fresh_dwell
+minimum_samples: 3
+metrics:
+  tooltip_open_latency:
+    max: 1000
+    max_regression_percent: 20
+  process.cpu_percent_median:
+    max: 400
+    max_regression_percent: 30
+  process.resident_mb_peak:
+    max: 500
+    max_regression_percent: 20
