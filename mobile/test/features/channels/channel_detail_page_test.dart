@@ -7108,6 +7108,140 @@ void main() {
       );
     });
   });
+
+  group('nested thread resume at last read', () {
+    // Outer root -> `parent` (the nested thread head) -> `target`.
+    // Opening `parent` is exactly what tapping a nested thread summary row
+    // does: a fresh ThreadDetailPage with no initialMessageId.
+    final root = _textMsg(
+      id: 'root',
+      pubkey: 'alice',
+      content: 'Outer root',
+      createdAt: 1000,
+    );
+    final parent = _textMsg(
+      id: 'parent',
+      pubkey: 'bob',
+      content: 'Nested thread head',
+      createdAt: 1100,
+      extraTags: const [
+        ['e', 'root', '', 'reply'],
+      ],
+    );
+    final target = _textMsg(
+      id: 'target',
+      pubkey: 'carol',
+      content: 'Unread nested reply',
+      createdAt: 1200,
+      extraTags: const [
+        ['e', 'root', '', 'root'],
+        ['e', 'parent', '', 'reply'],
+      ],
+    );
+
+    Future<void> openNestedThread(
+      WidgetTester tester,
+      ReadStateNotifier readState,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, parent, target],
+          // The relay keys subtree queries by the OUTER root, so a nested
+          // head's query still returns the whole subtree.
+          threadReplies: {
+            'root': [parent, target],
+          },
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            'carol': UserProfile(pubkey: 'carol', displayName: 'Carol'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final formatted = formatTimeline([root, parent, target]);
+      final nestedHead = formatted.firstWhere((m) => m.id == 'parent');
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: nestedHead,
+            allMessages: const [],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('marks the first unread reply in a nested thread', (
+      tester,
+    ) async {
+      // No markers at all: the nested reply has never been read.
+      await openNestedThread(
+        tester,
+        _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        ),
+      );
+
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(find.text('Unread nested reply'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('thread-unread-divider')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a fully read nested thread shows no divider', (tester) async {
+      // The reply's own marker is at its createdAt; the predicate is strictly
+      // newer-than, so it counts as read.
+      await openNestedThread(
+        tester,
+        _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {'msg:target': 1200},
+            version: 0,
+          ),
+        ),
+      );
+
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(find.byKey(const ValueKey('thread-unread-divider')), findsNothing);
+    });
+
+    testWidgets('the channel marker alone can mark a nested reply read', (
+      tester,
+    ) async {
+      // Regression guard for the bare-msg: bug: reading the channel covers
+      // replies that never got their own msg: marker, so a first open must
+      // not report the whole nested thread unread.
+      await openNestedThread(
+        tester,
+        _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {_channelId: 1300},
+            version: 0,
+          ),
+        ),
+      );
+
+      expect(find.byKey(const ValueKey('thread-unread-divider')), findsNothing);
+    });
+  });
 }
 
 Channel _channel({required String id, required String name}) => Channel(

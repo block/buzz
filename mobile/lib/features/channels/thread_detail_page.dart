@@ -33,11 +33,14 @@ import 'message_actions.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
+import '../../shared/read_state/message_read_state.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
+import 'thread_unread_marker.dart';
 import 'timeline_message.dart';
+import 'unread_divider.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_helpers.dart';
@@ -319,6 +322,53 @@ class ThreadDetailPage extends HookConsumerWidget {
       settledImeLift,
       viewportHeight,
     );
+
+    final readState = ref.watch(readStateProvider);
+
+    // Freeze each reply's effective read timestamp the first time we see it.
+    // This has to happen during build, before the post-frame effect below
+    // marks everything read: markers are monotonic, so reading them after
+    // that pass would report the whole thread as already seen and there
+    // would be nothing left to resume to.
+    final openReadSnapshot = useRef(<String, int?>{});
+    if (readState.isReady) {
+      for (final reply in replies) {
+        openReadSnapshot.value.putIfAbsent(
+          reply.id,
+          () => effectiveMessageReadAt(
+            readState,
+            channelId: channelId,
+            messageId: reply.id,
+            threadRootId: queryRootId,
+          ),
+        );
+      }
+    }
+
+    final firstUnreadReplyId = readState.isReady
+        ? firstUnreadThreadReplyId(
+            replies: replies,
+            openReadSnapshot: openReadSnapshot.value,
+            isForcedUnread: (messageId) =>
+                readState.isForcedUnread(msgContextKey(messageId)),
+            currentPubkey: currentPubkey,
+          )
+        : null;
+
+    // Resuming is for *returning* to a thread. A reader with no marker over
+    // any reply — never opened this thread, never read the channel — has no
+    // place to return to, so an ordinary open still settles on the tail the
+    // way it always has. The divider still marks the replies as new; it just
+    // does not drag the reader to the top of a thread they have never seen.
+    // Once the channel marker alone covers the replies this turns back on,
+    // which is the case the resume exists for.
+    final hasThreadReadHistory = openReadSnapshot.value.values.any(
+      (readAt) => readAt != null,
+    );
+    final resumeReplyIndex = hasThreadReadHistory && firstUnreadReplyId != null
+        ? replies.indexWhere((reply) => reply.id == firstUnreadReplyId)
+        : -1;
+
     useEffect(() {
       if (!hasFetchedReplies || viewportHeight <= 0) return null;
       if (initialMessageId != null) {
@@ -336,9 +386,16 @@ class ThreadDetailPage extends HookConsumerWidget {
           context: context,
           controller: itemScrollController,
           positionsListener: itemPositionsListener,
+          // Resume at the oldest unread reply, falling back to the tail once
+          // the thread is fully read (or was never read at all). Markers can
+          // land after this first schedule; readState.isReady is a dependency
+          // below, so a later run replaces the target while the settle is
+          // still pending.
           targetIndex: replies.isEmpty
               ? null
-              : indexForReply(replies.length - 1),
+              : indexForReply(
+                  resumeReplyIndex >= 0 ? resumeReplyIndex : replies.length - 1,
+                ),
           hiddenTopFraction: topOverlayFraction,
           hiddenBottomFraction:
               (composerDockHeight.value + settledImeLift) / viewportHeight,
@@ -389,8 +446,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         action: correctThreadTailInstantly,
       );
       return null;
-    }, [hasFetchedReplies, replies.length, settleGeometry]);
-    final readState = ref.watch(readStateProvider);
+    }, [hasFetchedReplies, readState.isReady, replies.length, settleGeometry]);
     final visibleReplyReadKey = replies
         .map((reply) => '${reply.id}:${reply.createdAt}')
         .join(',');
@@ -703,6 +759,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                               if (showDayDivider)
                                 DayDivider(
                                   label: formatDayHeading(reply.createdAt),
+                                ),
+                              if (reply.id == firstUnreadReplyId)
+                                const UnreadDivider(
+                                  key: ValueKey('thread-unread-divider'),
                                 ),
                               _ThreadMessage(
                                 message: reply,

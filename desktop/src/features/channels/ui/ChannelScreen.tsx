@@ -81,6 +81,7 @@ import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { useThreadOpenResumeTarget } from "./useThreadOpenResumeTarget";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
@@ -457,6 +458,21 @@ export function ChannelScreen({
     isThreadMuted,
     readStateVersion,
   });
+  // Placement is load-bearing: below the unread hook so it reads the marker
+  // committed in this same render, and above the render so the target is
+  // present on the panel's very first commit — after that its layout effect
+  // has already bottom-pinned. `visibleReplies` includes expanded nested
+  // replies, so a submessage thread resumes on the same rule as a top-level
+  // one.
+  const { threadResumeScrollTargetId, onThreadResumeTargetConsumed } =
+    useThreadOpenResumeTarget({
+      openThreadHeadId: effectiveOpenThreadHeadId,
+      firstUnreadReplyId: threadFirstUnreadReplyId,
+      externalScrollTargetId: threadScrollTargetId,
+      routeTargetMessageId: targetMessageId ?? null,
+      hasReplies: threadPanelData.visibleReplies.length > 0,
+      isHuddleTranscript,
+    });
   const editTargetMessage = React.useMemo(
     () =>
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
@@ -950,7 +966,9 @@ export function ChannelScreen({
                   threadPanelWidthPx={threadPanelWidthPx}
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}
+                  threadResumeScrollTargetId={threadResumeScrollTargetId}
                   threadScrollTargetId={threadScrollTargetId}
+                  onThreadResumeTargetConsumed={onThreadResumeTargetConsumed}
                   threadUnreadCounts={threadUnreadCounts}
                   threadReplyUnreadCounts={threadReplyUnreadCounts}
                   threadFirstUnreadReplyId={displayedThreadFirstUnreadReplyId}

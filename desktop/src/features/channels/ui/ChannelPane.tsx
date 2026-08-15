@@ -153,6 +153,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   threadMessagesPending = false,
   threadPanelWidthPx,
   threadScrollTargetId,
+  threadResumeScrollTargetId,
+  onThreadResumeTargetConsumed,
   threadTypingPubkeys,
   threadReplyTargetMessage,
   threadUnreadCounts,
@@ -461,10 +463,15 @@ export const ChannelPane = React.memo(function ChannelPane({
     useFocusThreadDrawer,
     onCloseThread,
   );
+  // A deep link outranks the resume, so it takes the slot when present.
+  // Routing the resume through the same external slot reuses the existing
+  // resolve/clear path rather than adding a second one.
+  const externalThreadScrollTargetId =
+    threadScrollTargetId ?? threadResumeScrollTargetId;
   const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
     useThreadViewModeSwitch({
       activeThreadHeadId: threadHeadMessage?.id ?? null,
-      externalScrollTargetId: threadScrollTargetId,
+      externalScrollTargetId: externalThreadScrollTargetId,
       onExternalTargetResolved: onThreadScrollTargetResolved,
       onModeChange: markExitComplete,
     });
@@ -817,14 +824,34 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onSendToChannel={
                   isComposerDisabled ? undefined : onSendToChannel
                 }
-                onScrollTargetResolved={() => resolveScrollTarget()}
+                onScrollTargetResolved={() => {
+                  // Retire the latch here rather than only inside the
+                  // deep-link resolver: a layout-mode switch can own the
+                  // resolution, which would otherwise leave the resume armed
+                  // and jump the reader a second time.
+                  onThreadResumeTargetConsumed();
+                  resolveScrollTarget();
+                }}
                 onScrollTargetSettled={resolveScrollTarget}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={onUnfollowThread}
                 profiles={profiles}
                 replyTargetMessage={threadReplyTargetMessage}
-                scrollTargetHighlights={!layoutScrollTargetId}
-                scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
+                // A resume is a reading position, not a citation: it must not
+                // flash the row the way a deep link does. Written as an
+                // explicit resume test so the ordinary no-target steady state
+                // keeps highlights on, which keeps `pinTargetCentered` false
+                // and preserves the pinned-center safety release.
+                scrollTargetHighlights={
+                  !layoutScrollTargetId &&
+                  !(
+                    threadScrollTargetId === null &&
+                    threadResumeScrollTargetId !== null
+                  )
+                }
+                scrollTargetId={
+                  layoutScrollTargetId ?? externalThreadScrollTargetId
+                }
                 threadHead={threadHeadMessage}
                 videoReviewPresentation={threadVideoReviewPresentation}
                 widthPx={threadPanelWidthPx}
