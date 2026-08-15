@@ -6,7 +6,6 @@ import { cn } from "@/shared/lib/cn";
 import { Card, CardContent, CardHeader } from "@/shared/ui/card";
 
 import { SECTION_LABELS } from "./briefPresentation";
-import { SourceCitationLink } from "./SourceCitationLink";
 
 export function BriefSectionCard({
   findings,
@@ -48,10 +47,7 @@ export function BriefSectionCard({
                 className="border-b border-border/50 pb-3 last:border-0 last:pb-0"
                 key={`${finding.text}-${finding.sourceIds.join("-")}`}
               >
-                <span>{finding.text}</span>{" "}
-                {finding.sourceIds.map((sourceId) => (
-                  <SourceCitationLink key={sourceId} sourceId={sourceId} />
-                ))}
+                <span>{finding.text}</span>
               </li>
             ))}
           </ul>

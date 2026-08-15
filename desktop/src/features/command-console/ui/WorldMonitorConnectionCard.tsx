@@ -50,15 +50,17 @@ export function WorldMonitorConnectionCard() {
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button
-            disabled={worldMonitor.busy || connected}
-            onClick={() => void worldMonitor.connect()}
-            type="button"
-          >
-            {connection?.status === "reauthorise"
-              ? "Reconnect World Monitor"
-              : "Connect World Monitor"}
-          </Button>
+          {!connected ? (
+            <Button
+              disabled={worldMonitor.busy}
+              onClick={() => void worldMonitor.connect()}
+              type="button"
+            >
+              {connection?.status === "reauthorise"
+                ? "Reconnect World Monitor"
+                : "Connect World Monitor"}
+            </Button>
+          ) : null}
           <Button
             disabled={worldMonitor.busy || !connected}
             onClick={() => void worldMonitor.test()}

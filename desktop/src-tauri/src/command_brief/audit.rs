@@ -98,6 +98,11 @@ pub enum BriefAuditError {
     Failed,
 }
 
+fn persistence_failed(stage: &'static str) -> BriefAuditError {
+    eprintln!("command-adviser: command brief persistence failed at {stage}");
+    BriefAuditError::Failed
+}
+
 /// Strict owned terminal input for every lifecycle outcome.
 #[derive(Clone)]
 pub struct TerminalAuditInput {
@@ -309,9 +314,9 @@ impl EncryptedBriefAudit {
             let mut committed = self
                 .committed_runs
                 .lock()
-                .map_err(|_| BriefAuditError::Failed)?;
+                .map_err(|_| persistence_failed("commit-lock"))?;
             if committed.contains(&input.run_id) {
-                return Err(BriefAuditError::Failed);
+                return Err(persistence_failed("duplicate-run"));
             }
             let input = if cancellation.is_cancelled() {
                 input.cancelled()
@@ -319,17 +324,19 @@ impl EncryptedBriefAudit {
                 input
             };
             let owner = self.owner_keys.public_key().to_hex();
-            let conn = open_command_brief_store(&self.path).map_err(|_| BriefAuditError::Failed)?;
+            let conn = open_command_brief_store(&self.path)
+                .map_err(|_| persistence_failed("store-open"))?;
             let previous = latest_event_id(&conn, &owner, &input.run_id)
-                .map_err(|_| BriefAuditError::Failed)?;
+                .map_err(|_| persistence_failed("predecessor-read"))?;
             let final_brief_wire = input
                 .final_brief
                 .as_ref()
                 .map(|brief| {
                     serde_json::to_value(brief)
-                        .map_err(|_| BriefAuditError::Failed)
+                        .map_err(|_| persistence_failed("desktop-serialize"))
                         .and_then(|value| {
-                            CommandBriefWire::try_from(value).map_err(|_| BriefAuditError::Failed)
+                            CommandBriefWire::try_from(value)
+                                .map_err(|_| persistence_failed("core-contract"))
                         })
                 })
                 .transpose()?;
@@ -347,7 +354,7 @@ impl EncryptedBriefAudit {
             };
             let event =
                 buzz_core_pkg::command_brief::build_command_brief_event(&self.owner_keys, &payload)
-                    .map_err(|_| BriefAuditError::Failed)?;
+                    .map_err(|_| persistence_failed("sign-encrypt"))?;
             let event_id = event.id.to_hex();
             insert_spool_event(
                 &conn,
@@ -362,7 +369,7 @@ impl EncryptedBriefAudit {
                     created_at: event.created_at.as_secs() as i64,
                 },
             )
-            .map_err(|_| BriefAuditError::Failed)?;
+            .map_err(|_| persistence_failed("spool-insert"))?;
             committed.insert(input.run_id);
             (
                 event,

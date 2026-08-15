@@ -138,6 +138,17 @@ fn contribution_with_limitations(
     dissent: &str,
     limitations: Vec<String>,
 ) -> AdviserContribution {
+    let proposed_actions = if adviser == AdviserId::Operations {
+        json!([{
+            "classification": "OFFICIAL",
+            "actionId": "review-readiness",
+            "text": "Review the supported readiness constraint.",
+            "approvalState": "pending",
+            "sourceIds": [source_id]
+        }])
+    } else {
+        json!([])
+    };
     AdviserContribution::parse_for_adviser(
         json!({
             "classification": "OFFICIAL",
@@ -151,7 +162,7 @@ fn contribution_with_limitations(
             "confidence": 0.8,
             "limitations": limitations,
             "dissent": [dissent],
-            "proposedActions": []
+            "proposedActions": proposed_actions
         }),
         adviser,
         &std::collections::BTreeSet::from([source_id.to_string()]),
@@ -391,6 +402,25 @@ impl BriefAdviserProvider for FakeAdviserProvider {
                 .expect("chief override lock")
                 .clone()
                 .unwrap_or_else(|| chief_output(&contributions));
+            if let Some(source_id) = contributions
+                .first()
+                .and_then(|contribution| contribution.findings().first())
+                .and_then(|finding| finding.source_ids().first())
+            {
+                if let Some(findings) = output["findings"].as_array_mut() {
+                    for finding in findings {
+                        if finding["sourceIds"] == json!(["ledger-will-be-rebound"]) {
+                            finding["sourceIds"] = json!([source_id]);
+                        }
+                    }
+                }
+                if output["dissent"] == json!(["dissent-will-be-rebound"]) {
+                    output["dissent"] = json!(contributions
+                        .iter()
+                        .flat_map(|contribution| contribution.dissent().iter().cloned())
+                        .collect::<Vec<_>>());
+                }
+            }
             if let Some(limitations) = self
                 .chief_limitations
                 .lock()
@@ -516,6 +546,10 @@ async fn exact_seven_specialists_share_snapshot_then_tool_free_chief_builds_elev
     assert_eq!(value["runId"], run_id);
     assert_eq!(value["snapshotId"], SNAPSHOT_A);
     assert_eq!(value["sections"].as_object().map(|map| map.len()), Some(11));
+    assert_eq!(
+        value["sections"]["decisions"][0]["text"],
+        "Review the supported readiness constraint."
+    );
     assert_eq!(
         value["contributions"]
             .as_array()
@@ -674,7 +708,7 @@ async fn trusted_lan_recheck_failure_keeps_already_collected_evidence() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unsupported_chief_addition_is_discarded_and_uses_safe_fallback() {
+async fn chief_may_replace_repetition_with_concise_source_bound_synthesis() {
     let sources = Arc::new(FakeSourceProvider::with_snapshots([SNAPSHOT_A]));
     let advisers = Arc::new(FakeAdviserProvider::default());
     *advisers.chief_override.lock().expect("chief override lock") = Some(json!({
@@ -682,11 +716,11 @@ async fn unsupported_chief_addition_is_discarded_and_uses_safe_fallback() {
         "adviser": "chief_of_staff",
         "findings": [{
             "classification": "OFFICIAL",
-            "text": "Unsupported new claim",
+            "text": "Concise command-level synthesis",
             "sourceIds": ["ledger-will-be-rebound"]
         }],
         "limitations": [],
-        "dissent": []
+        "dissent": ["dissent-will-be-rebound"]
     }));
     let persistence = Arc::new(FakePersistence::default());
     let orchestrator = orchestrator(1, sources, advisers, persistence.clone());
@@ -694,11 +728,14 @@ async fn unsupported_chief_addition_is_discarded_and_uses_safe_fallback() {
     let run_id = orchestrator.start(request()).expect("run starts");
     assert_eq!(
         wait_terminal(&orchestrator, &run_id).await,
-        BriefRunState::Degraded
+        BriefRunState::Completed
     );
     let brief =
         serde_json::to_value(orchestrator.result(&run_id).expect("brief").brief()).expect("json");
-    assert!(!brief.to_string().contains("Unsupported new claim"));
+    assert_eq!(
+        brief["sections"]["today"][0]["text"],
+        "Concise command-level synthesis"
+    );
     assert_eq!(
         brief["contributions"]
             .as_array()
@@ -706,10 +743,9 @@ async fn unsupported_chief_addition_is_discarded_and_uses_safe_fallback() {
             .len(),
         7
     );
-    persistence.assert_one_terminal(CommandBriefLifecycleState::Degraded, None);
+    persistence.assert_one_terminal(CommandBriefLifecycleState::Completed, None);
     let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
-    assert_eq!(status["state"], "degraded");
-    assert!(!status.to_string().contains("Unsupported new claim"));
+    assert_eq!(status["state"], "completed");
 }
 
 #[tokio::test]

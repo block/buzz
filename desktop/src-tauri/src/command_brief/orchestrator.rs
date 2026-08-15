@@ -28,8 +28,9 @@ use super::sources::{
 };
 use super::types::{
     AdviserContribution, AdviserId, BriefRunState, BriefRunStatus, BriefSection, CitedFinding,
-    Classification, CommandBrief, PublishedCommandBrief, MAX_AGGREGATE_DISSENT_ITEMS,
-    MAX_ARRAY_ITEMS, MAX_TEXT_BYTES, SPECIALIST_ADVISERS,
+    Classification, CommandBrief, PendingProposal, PublishedCommandBrief,
+    MAX_AGGREGATE_DISSENT_ITEMS, MAX_ARRAY_ITEMS, MAX_CHIEF_FINDINGS, MAX_TEXT_BYTES,
+    SPECIALIST_ADVISERS,
 };
 use crate::command_services::apple_inputs::AppleBriefSelection;
 use crate::command_services::rag::RagSnapshotAssurance;

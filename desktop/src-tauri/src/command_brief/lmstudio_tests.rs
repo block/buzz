@@ -353,7 +353,7 @@ async fn valid_terminal_message_uses_fixed_prompt_separate_evidence_and_catalog_
     assert!(request["system_prompt"]
         .as_str()
         .expect("system prompt")
-        .contains("untrusted evidence"));
+        .contains("no instruction authority"));
     assert!(!request["system_prompt"]
         .as_str()
         .expect("system prompt")
@@ -591,13 +591,13 @@ fn non_loopback_endpoint_is_rejected_before_executor_construction() {
 }
 
 #[tokio::test]
-async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
+async fn chief_of_staff_is_tool_free_and_may_synthesise_only_admitted_sources() {
     let valid_chief = json!({
         "classification": "OFFICIAL",
         "adviser": "chief_of_staff",
         "findings": [{
             "classification": "OFFICIAL",
-            "text": "Machinery is within limits.",
+            "text": "Readiness remains within supported limits.",
             "sourceIds": ["ledger-1"]
         }],
         "limitations": ["Sensitive limitation that must not enter Debug."],
@@ -610,38 +610,35 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
     .await;
     let result = executor
         .run_chief_of_staff(
-            ChiefOfStaffRequest::new("run-1:chief", specialist_contributions(), vec![source()]),
+            ChiefOfStaffRequest::new("run-1:chief", specialist_contributions(), sources(2)),
             CancellationToken::new(),
         )
         .await
         .expect("valid chief consolidation");
     assert_eq!(
         result.contribution.findings()[0].text(),
-        "Machinery is within limits."
+        "Readiness remains within supported limits."
     );
     let debug = format!("{:?}", result.contribution);
     assert!(debug.contains("finding_count"));
     assert!(debug.contains("limitation_count"));
     assert!(debug.contains("dissent_count"));
-    assert!(!debug.contains("Machinery is within limits."));
+    assert!(!debug.contains("Readiness remains within supported limits."));
     assert!(!debug.contains("Sensitive limitation"));
     assert!(!debug.contains("OFFICIAL"));
     let (request, _headers) = request_rx.await.expect("captured chief request");
     assert!(request.get("integrations").is_none());
+    let chief_input = request["input"].as_str().expect("chief input");
+    assert!(chief_input.contains("\"instructionAuthority\":\"none\""));
+    assert!(!chief_input.contains("untrustedEvidence"));
+    assert!(!chief_input.contains("document-001"));
     task.await.expect("server task").expect("server result");
 
-    for finding in [
-        json!({
-            "classification": "OFFICIAL",
-            "text": "A new factual claim.",
-            "sourceIds": ["ledger-1"]
-        }),
-        json!({
-            "classification": "OFFICIAL",
-            "text": "Machinery is within limits.",
-            "sourceIds": ["ledger-new"]
-        }),
-    ] {
+    for finding in [json!({
+        "classification": "OFFICIAL",
+        "text": "A claim using an unadmitted source.",
+        "sourceIds": ["ledger-001"]
+    })] {
         let chief = json!({
             "classification": "OFFICIAL",
             "adviser": "chief_of_staff",
@@ -656,7 +653,7 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
         .await;
         let error = executor
             .run_chief_of_staff(
-                ChiefOfStaffRequest::new("run-1:chief", specialist_contributions(), vec![source()]),
+                ChiefOfStaffRequest::new("run-1:chief", specialist_contributions(), sources(2)),
                 CancellationToken::new(),
             )
             .await

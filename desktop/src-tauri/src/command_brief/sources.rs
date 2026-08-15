@@ -747,44 +747,57 @@ impl<B: SourceBackend> SourceCollector<B> {
                         }
                     }
                 }
-                let result = self.backend.collect_rag(
-                    &snapshot,
-                    intent,
-                    intent.context_query(),
-                    snapshot.logical_collections(),
-                    cancellation,
-                );
-                ensure_collection_active(cancellation)?;
-                match result {
-                    Ok(value) => {
-                        let records = extract_rag_records(
-                            &snapshot,
-                            intent.context_query(),
-                            &value,
-                            &self.observed_at,
-                            snapshot.logical_collections(),
-                        );
-                        match records {
-                            Ok(records) => {
-                                candidates.extend(records);
-                            }
-                            Err(_) => {
-                                rag_available = false;
-                                degrade_all(
-                                    &mut degraded,
-                                    &mut limitations,
-                                    "RAG evidence was malformed or bound to a different snapshot.",
-                                );
+                let context_collections = intent
+                    .context_collections()
+                    .iter()
+                    .filter(|candidate| {
+                        snapshot
+                            .logical_collections()
+                            .iter()
+                            .any(|available| available == **candidate)
+                    })
+                    .map(|collection| (*collection).to_string())
+                    .collect::<Vec<_>>();
+                if !context_collections.is_empty() {
+                    let result = self.backend.collect_rag(
+                        &snapshot,
+                        intent,
+                        intent.context_query(),
+                        &context_collections,
+                        cancellation,
+                    );
+                    ensure_collection_active(cancellation)?;
+                    match result {
+                        Ok(value) => {
+                            let records = extract_rag_records(
+                                &snapshot,
+                                intent.context_query(),
+                                &value,
+                                &self.observed_at,
+                                &context_collections,
+                            );
+                            match records {
+                                Ok(records) => {
+                                    candidates.extend(records);
+                                }
+                                Err(_) => {
+                                    rag_available = false;
+                                    degrade_all(
+                                        &mut degraded,
+                                        &mut limitations,
+                                        "RAG evidence was malformed or bound to a different snapshot.",
+                                    );
+                                }
                             }
                         }
-                    }
-                    Err(error) => {
-                        rag_available = false;
-                        degrade_all(
-                            &mut degraded,
-                            &mut limitations,
-                            &format!("RAG source unavailable: {}.", error.code()),
-                        );
+                        Err(error) => {
+                            rag_available = false;
+                            degrade_all(
+                                &mut degraded,
+                                &mut limitations,
+                                &format!("RAG source unavailable: {}.", error.code()),
+                            );
+                        }
                     }
                 }
             }

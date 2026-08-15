@@ -10,7 +10,7 @@ import { Badge } from "@/shared/ui/badge";
 import { Card, CardContent } from "@/shared/ui/card";
 
 import { AdviserContributionCard } from "./AdviserContributionCard";
-import { STATE_LABELS } from "./briefPresentation";
+import { presentMissingInformation, STATE_LABELS } from "./briefPresentation";
 import { BriefSectionCard } from "./BriefSectionCard";
 import { CommandSystemStatus } from "./CommandSystemStatus";
 import { SourceLedger } from "./SourceLedger";
@@ -84,8 +84,8 @@ function PublishedEvidence({
 }: {
   published: PublishedCommandBrief;
 }) {
-  const connectorNotices = published.brief.missingInformation.filter((item) =>
-    item.startsWith("World Monitor "),
+  const { connectorNotices, evidenceNotices } = presentMissingInformation(
+    published.brief.missingInformation,
   );
 
   return (
@@ -113,6 +113,19 @@ function PublishedEvidence({
             </ul>
           </AlertDescription>
         </Alert>
+      ) : null}
+
+      {evidenceNotices.length > 0 ? (
+        <details className="rounded-lg border p-4">
+          <summary className="cursor-pointer font-semibold">
+            Evidence collection notices ({evidenceNotices.length})
+          </summary>
+          <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+            {evidenceNotices.map((notice) => (
+              <li key={notice}>{notice}</li>
+            ))}
+          </ul>
+        </details>
       ) : null}
 
       <section aria-labelledby="adviser-contributions-heading">

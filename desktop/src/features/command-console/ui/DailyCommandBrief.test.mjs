@@ -11,6 +11,11 @@ const finding = {
   text: "Review the verified priority.",
   sourceIds: ["ledger-1"],
 };
+const decisionFinding = {
+  classification: "OFFICIAL",
+  text: "Prepare a workspace checklist proposal.",
+  sourceIds: ["ledger-1"],
+};
 const advisers = [
   ["operations", "operations"],
   ["intelligence", "intelligence"],
@@ -32,8 +37,18 @@ const advisers = [
     {
       classification: "OFFICIAL",
       actionId: `action-${index}`,
-      text: "Prepare a workspace checklist proposal.",
+      text:
+        index === 0
+          ? "Prepare a workspace checklist proposal."
+          : `Prepare adviser proposal ${index}.`,
+      ...(index === 0
+        ? {
+            alternativeText:
+              "Defer the checklist until tomorrow and retain the current posture.",
+          }
+        : {}),
       approvalState: "pending",
+      sourceIds: ["ledger-1"],
     },
   ],
 }));
@@ -52,6 +67,7 @@ const sectionKeys = [
   "sources",
 ];
 const sections = Object.fromEntries(sectionKeys.map((key) => [key, [finding]]));
+sections.decisions = [decisionFinding];
 const published = {
   classification: "OFFICIAL",
   lifecycleAuditEventId: "event-1",
@@ -229,6 +245,28 @@ test("renders no-brief and queued/running/failed lifecycle states with truthful 
   assert.match(failed, /source_unavailable/);
 });
 
+test("labels an older brief as the last successful brief when the current run fails", () => {
+  const html = render({
+    latest: published,
+    status: {
+      classification: "OFFICIAL",
+      runId: "run-failed",
+      scheduleId: "daily-command-brief",
+      sequence: 6,
+      state: "failed",
+      updatedAt: "2026-08-14T11:26:32Z",
+      degradedSections: [],
+      error: "brief_persistence_failed",
+    },
+  });
+
+  assert.match(html, />Failed</);
+  assert.match(html, /brief_persistence_failed/);
+  assert.match(html, /Last successful brief/);
+  assert.match(html, /2026-07-25T06:00:00Z/);
+  assert.doesNotMatch(html, /Current brief generated/);
+});
+
 test("renders the bounded native lifecycle history as metadata only", () => {
   const html = render({
     status: {
@@ -345,6 +383,23 @@ test("renders a decision-first brief with supporting evidence collapsed after co
   assert.doesNotMatch(html, /approve|execute action/i);
 });
 
+test("renders concise actionable decisions with two COAs and user direction", () => {
+  const html = render({ latest: published });
+  const disclosure = html.indexOf('data-testid="brief-evidence-disclosure"');
+  const commandContent = html.slice(0, disclosure);
+
+  assert.match(commandContent, /COA A — Recommended/);
+  assert.match(commandContent, /Prepare a workspace checklist proposal/);
+  assert.match(commandContent, /COA B — Alternative/);
+  assert.match(commandContent, /Defer the checklist until tomorrow/);
+  assert.match(commandContent, />Direct COA A</);
+  assert.match(commandContent, />Direct COA B</);
+  assert.match(commandContent, />Issue direction</);
+  assert.match(commandContent, /spellCheck="true"/);
+  assert.match(commandContent, /keyboard microphone or macOS Dictation/i);
+  assert.doesNotMatch(commandContent, /ledger-1|source-1|Source ledger/);
+});
+
 test("restart view derives prominent degraded status and exact section labels from the immutable brief", () => {
   const html = render({ latest: published, status: null, history: [] });
 
@@ -352,6 +407,36 @@ test("restart view derives prominent degraded status and exact section labels fr
   assert.match(html, />Watch items</);
   assert.match(html, />Complete with limitations</);
   assert.match(html, />Navigation considerations</);
+});
+
+test("keeps the main watch list concise while retaining technical evidence notices", () => {
+  const noisy = structuredClone(published);
+  noisy.brief.missingInformation = [
+    "Evidence contains doctrine and reference material only; no signed battle rhythm, command plan, current schedule, task status, deadlines, dependencies, or commander-approved planning state for today.",
+    "No signed Battle Rhythm or command plan records were provided, so there is no approved schedule, milestone, dependency, or deadline state to assess.",
+    "Source source-technical was truncated to the canonical source-size limit.",
+    "Chief of Staff model consolidation was unavailable; the brief was consolidated deterministically from validated specialist advice.",
+    "Reminders permission is denied.",
+  ];
+
+  const html = render({ latest: noisy });
+  const disclosure = html.indexOf('data-testid="brief-evidence-disclosure"');
+  const mainBrief = html.slice(0, disclosure);
+
+  assert.match(
+    mainBrief,
+    /Current operational evidence is incomplete; advisers lacked a fully current Battle Rhythm, command plan, task status, dependencies, or platform state\./,
+  );
+  assert.match(mainBrief, /Reminders permission is denied/);
+  assert.doesNotMatch(mainBrief, /Source source-technical was truncated/);
+  assert.doesNotMatch(mainBrief, /Chief of Staff model consolidation/);
+  assert.doesNotMatch(
+    mainBrief,
+    /Evidence contains doctrine and reference material/,
+  );
+  assert.match(html, /Evidence collection notices/);
+  assert.match(html, /Source source-technical was truncated/);
+  assert.match(html, /Chief of Staff model consolidation/);
 });
 
 test("renders accessible schedule enable, time, and capacity controls with timezone context", () => {

@@ -11,6 +11,12 @@ const finding = {
   sourceIds: ["ledger-1"],
 };
 
+const decisionFinding = {
+  classification: "OFFICIAL",
+  text: "Prepare a workspace checklist proposal.",
+  sourceIds: ["ledger-1"],
+};
+
 const sectionKeys = [
   "today",
   "operations",
@@ -25,7 +31,12 @@ const sectionKeys = [
   "sources",
 ] as const;
 
-const sections = Object.fromEntries(sectionKeys.map((key) => [key, [finding]]));
+const sections = Object.fromEntries(
+  sectionKeys.map((key) => [
+    key,
+    key === "decisions" ? [decisionFinding] : [finding],
+  ]),
+);
 
 const contributions = [
   ["operations", "operations"],
@@ -49,7 +60,9 @@ const contributions = [
       classification: "OFFICIAL",
       actionId: `action-${index}`,
       text: "Prepare a workspace checklist proposal.",
+      alternativeText: "Retain the current checklist and review it tomorrow.",
       approvalState: "pending",
+      sourceIds: ["ledger-1"],
     },
   ],
 }));
@@ -172,7 +185,6 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
 
   const headings = brief.locator("[data-testid='brief-main-sections'] h3");
   await expect(headings).toHaveText([
-    "Decisions and approvals required",
     "Today at a glance",
     "Operational priorities and risks",
     "Intelligence and operating environment",
@@ -202,12 +214,7 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
   await expect(brief.getByText("snapshot-verified").first()).toBeHidden();
   await expect(brief.getByTestId("command-status-rag")).toBeHidden();
 
-  const citation = brief
-    .locator('a[href="#command-brief-source-ledger-1"]')
-    .first();
-  await expect(citation).toBeVisible();
-  await citation.click();
-
+  await disclosure.getByText("Evidence and system status").click();
   await expect(disclosure).toHaveAttribute("open", "");
   await expect(
     brief.getByText("Relay publication queued — offline capable"),
@@ -238,7 +245,7 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
   await expect(brief.getByTestId("command-status-rag")).toBeVisible();
 
   const citedSource = brief.locator("#command-brief-source-ledger-1");
-  await expect(citedSource).toBeFocused();
+  await expect(citedSource).toBeVisible();
   await expect(
     citedSource.locator('time[datetime="2026-07-25T05:55:00Z"]'),
   ).toBeVisible();

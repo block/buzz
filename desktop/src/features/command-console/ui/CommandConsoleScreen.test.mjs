@@ -10,6 +10,13 @@ import { CommandTeamStripView } from "./CommandTeamStrip.tsx";
 function renderCommandConsole() {
   return renderToStaticMarkup(
     React.createElement(CommandConsoleScreen, {
+      decisionActions: {
+        executions: [],
+        pendingKeys: new Set(),
+        issue: () => {},
+        retry: () => {},
+        openConversation: () => {},
+      },
       commandTeam: React.createElement(CommandTeamStripView, {
         error: null,
         onMessage: () => {},

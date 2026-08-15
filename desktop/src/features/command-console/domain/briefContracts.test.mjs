@@ -169,14 +169,22 @@ test("requires explicit OFFICIAL classification on every nested wire object", ()
       actionId: "action-1",
       text: "This must remain a proposal.",
       approvalState: "pending",
+      sourceIds: ["ledger-1"],
     },
   ];
   assert.equal(parseCommandBrief(mismatchedAction), null);
 });
 
-test("requires final findings to exactly match specialist provenance", () => {
+test("allows concise Chief synthesis but only from specialist-admitted evidence", () => {
+  const concise = brief();
+  concise.sections.today[0].text = "Concise command-level synthesis.";
+  assert.ok(parseCommandBrief(concise));
+
   const unsupported = brief();
-  unsupported.sections.today[0].text = "A new claim with a valid citation.";
+  unsupported.sourceLedger.push(
+    source({ ledgerId: "ledger-2", sourceId: "source-2" }),
+  );
+  unsupported.sections.today[0].sourceIds = ["ledger-2"];
   assert.equal(parseCommandBrief(unsupported), null);
 
   assert.ok(parseCommandBrief(brief()));
@@ -213,9 +221,73 @@ test("requires exactly one contribution from every specialist, safe confidence, 
 
   const approved = brief();
   approved.contributions[0].proposedActions = [
-    { actionId: "a-1", text: "Must stay pending.", approvalState: "approved" },
+    {
+      classification: "OFFICIAL",
+      actionId: "a-1",
+      text: "Must stay pending.",
+      approvalState: "approved",
+      sourceIds: ["ledger-1"],
+    },
   ];
   assert.equal(parseCommandBrief(approved), null);
+});
+
+test("accepts source-bound decisions and derives citations for historical pending proposals", () => {
+  const current = brief();
+  current.contributions[0].proposedActions = [
+    {
+      classification: "OFFICIAL",
+      actionId: "review-readiness",
+      text: "Review the readiness constraint.",
+      alternativeText:
+        "Maintain the current readiness posture and review it tomorrow.",
+      approvalState: "pending",
+      sourceIds: ["ledger-1"],
+    },
+  ];
+  current.sections.decisions = [finding("Review the readiness constraint.")];
+  const parsedCurrent = parseCommandBrief(current);
+  assert.ok(parsedCurrent);
+  assert.equal(
+    parsedCurrent.contributions[0].proposedActions[0].alternativeText,
+    "Maintain the current readiness posture and review it tomorrow.",
+  );
+
+  const priorSourceBound = brief();
+  priorSourceBound.contributions[0].proposedActions = [
+    {
+      classification: "OFFICIAL",
+      actionId: "missing-alternative",
+      text: "Review the readiness constraint.",
+      approvalState: "pending",
+      sourceIds: ["ledger-1"],
+    },
+  ];
+  const parsedPrior = parseCommandBrief(priorSourceBound);
+  assert.ok(parsedPrior);
+  assert.equal(
+    parsedPrior.contributions[0].proposedActions[0].alternativeText,
+    undefined,
+  );
+
+  const historical = brief();
+  historical.contributions[0].proposedActions = [
+    {
+      classification: "OFFICIAL",
+      actionId: "legacy-action",
+      text: "Legacy pending action.",
+      approvalState: "pending",
+    },
+  ];
+  const parsed = parseCommandBrief(historical);
+  assert.ok(parsed);
+  assert.deepEqual(parsed.contributions[0].proposedActions[0].sourceIds, [
+    "ledger-1",
+  ]);
+  assert.equal(
+    parsed.contributions[0].proposedActions[0].alternativeText,
+    undefined,
+  );
 });
 
 test("navigation cannot encode orders or decisions and every brief retains the advisory limitation", () => {

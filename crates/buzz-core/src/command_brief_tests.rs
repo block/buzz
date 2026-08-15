@@ -95,6 +95,80 @@ fn strict_final_brief_accepts_seven_specialists_and_world_monitor() {
 }
 
 #[test]
+fn planning_source_kinds_round_trip_through_the_encrypted_brief_event() {
+    let owner = Keys::generate();
+    let mut brief = command_brief("run-planning-sources");
+    brief["sourceLedger"] = json!([
+        {
+            "classification": "OFFICIAL",
+            "ledgerId": "ledger-1",
+            "sourceId": "source-1",
+            "sourceKind": "rag",
+            "collection": "ADF Doctrine",
+            "documentId": "document-1",
+            "chunkId": "chunk-1",
+            "timestamp": "2026-07-25T06:00:00Z",
+            "snapshotId": "snapshot-1",
+            "quotedLocation": {"quote": "A supported quote.", "location": "section 1"},
+            "retrievedAt": "2026-07-25T06:00:00Z",
+            "observedAt": "2026-07-25T06:00:00Z"
+        },
+        {
+            "classification": "OFFICIAL",
+            "ledgerId": "ledger-battle-rhythm",
+            "sourceId": "source-battle-rhythm",
+            "sourceKind": "battle_rhythm",
+            "collection": "Battle Rhythm",
+            "documentId": "ship-program",
+            "chunkId": "activity-1",
+            "timestamp": "2026-07-25T06:00:00Z",
+            "snapshotId": "snapshot-1",
+            "quotedLocation": {"quote": "At sea.", "location": "25 July"},
+            "retrievedAt": "2026-07-25T06:00:00Z",
+            "observedAt": "2026-07-25T06:00:00Z"
+        },
+        {
+            "classification": "OFFICIAL",
+            "ledgerId": "ledger-plans",
+            "sourceId": "source-plans",
+            "sourceKind": "plans",
+            "collection": "Plans",
+            "documentId": "deployment-plan",
+            "chunkId": "milestone-1",
+            "timestamp": "2026-07-25T06:00:00Z",
+            "snapshotId": "snapshot-1",
+            "quotedLocation": {"quote": "Stores embark by Friday.", "location": "Milestone 1"},
+            "retrievedAt": "2026-07-25T06:00:00Z",
+            "observedAt": "2026-07-25T06:00:00Z"
+        }
+    ]);
+    brief["sections"]["today"] = json!([{
+        "classification": "OFFICIAL",
+        "text": "The ship is at sea and stores embarkation remains due.",
+        "sourceIds": ["ledger-battle-rhythm", "ledger-plans"]
+    }]);
+    brief["contributions"][0]["findings"] = brief["sections"]["today"].clone();
+
+    let wire = CommandBriefWire::try_from(brief).expect("planning sources must be admitted");
+    let payload = CommandBriefEventPayload {
+        version: COMMAND_BRIEF_PAYLOAD_VERSION,
+        classification: "OFFICIAL".into(),
+        run_id: "run-planning-sources".into(),
+        schedule_id: "daily".into(),
+        lifecycle_state: CommandBriefLifecycleState::Completed,
+        occurred_at: "2026-07-25T06:00:00Z".into(),
+        frozen_snapshot_id: "snapshot-1".into(),
+        final_brief: Some(wire),
+        failure: None,
+        previous_lifecycle_event_id: None,
+    };
+
+    let event = build_command_brief_event(&owner, &payload).expect("sign and encrypt");
+    let decrypted = decrypt_command_brief_event(&owner, &event).expect("decrypt");
+    assert!(decrypted == payload);
+}
+
+#[test]
 fn comprehensive_seven_adviser_brief_fits_the_encrypted_event_budget() {
     let owner = Keys::generate();
     let mut brief = command_brief("run-1");
@@ -273,6 +347,26 @@ fn strict_final_brief_rejects_extras_bad_citations_and_sensitive_fields() {
         "summary": "arbitrary JSON is not the authoritative contract"
     }))
     .is_err());
+}
+
+#[test]
+fn concise_chief_synthesis_and_source_bound_decisions_survive_the_wire_contract() {
+    let mut brief = command_brief("run-1");
+    brief["sections"]["today"][0]["text"] = json!("Concise command synthesis.");
+    brief["contributions"][0]["proposedActions"] = json!([{
+        "classification": "OFFICIAL",
+        "actionId": "review-readiness",
+        "text": "Review the readiness constraint.",
+        "alternativeText": "Maintain the current posture and review it tomorrow.",
+        "approvalState": "pending",
+        "sourceIds": ["ledger-1"]
+    }]);
+    brief["sections"]["decisions"] = json!([{
+        "classification": "OFFICIAL",
+        "text": "Review the readiness constraint.",
+        "sourceIds": ["ledger-1"]
+    }]);
+    assert!(CommandBriefWire::try_from(brief).is_ok());
 }
 
 #[test]

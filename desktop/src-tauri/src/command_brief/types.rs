@@ -4,8 +4,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+mod proposals;
 mod status;
 
+pub use proposals::PendingProposal;
+use proposals::{parse_raw_proposals, RawPendingProposal};
 pub use status::BriefRunStatus;
 
 /// The only permitted classification for Daily Command Brief material.
@@ -105,6 +108,8 @@ pub const SPECIALIST_ADVISERS: [AdviserId; SPECIALIST_COUNT] = [
 ];
 /// Maximum final dissent retained across all specialist contributions.
 pub const MAX_AGGREGATE_DISSENT_ITEMS: usize = SPECIALIST_COUNT * MAX_ARRAY_ITEMS;
+/// Maximum number of decision-relevant findings in the Chief of Staff summary.
+pub const MAX_CHIEF_FINDINGS: usize = 7;
 /// Maximum sources admitted to one frozen run ledger.
 pub const MAX_SOURCE_LEDGER_ITEMS: usize = 256;
 
@@ -222,22 +227,6 @@ pub struct CitedFinding {
     source_ids: Vec<String>,
 }
 
-/// A proposal which must remain pending until an explicit external approval flow.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingProposal {
-    classification: Classification,
-    action_id: String,
-    text: String,
-    approval_state: PendingApprovalState,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum PendingApprovalState {
-    Pending,
-}
-
 /// Validated structured output from one specialist adviser.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -284,7 +273,7 @@ impl AdviserContribution {
     ) -> Result<Self, ContractError> {
         let raw: RawAdviserContribution =
             serde_json::from_value(value).map_err(|_| ContractError)?;
-        parse_raw_contribution(raw, expected_adviser, run_ledger_ids)
+        parse_raw_contribution(raw, expected_adviser, run_ledger_ids, true)
     }
 
     /// Returns the validated specialist identity.
@@ -310,6 +299,11 @@ impl AdviserContribution {
     /// Returns bounded dissent preserved from the specialist.
     pub fn dissent(&self) -> &[String] {
         &self.dissent
+    }
+
+    /// Returns pending, source-bound actions proposed by this specialist.
+    pub fn proposed_actions(&self) -> &[PendingProposal] {
+        &self.proposed_actions
     }
 }
 
@@ -408,15 +402,6 @@ struct RawCitedFinding {
     classification: Classification,
     text: String,
     source_ids: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RawPendingProposal {
-    classification: Classification,
-    action_id: String,
-    text: String,
-    approval_state: PendingApprovalState,
 }
 
 #[derive(Deserialize)]
@@ -610,6 +595,7 @@ fn parse_raw_contribution(
     contribution: RawAdviserContribution,
     expected_adviser: AdviserId,
     ledger_ids: &BTreeSet<String>,
+    require_explicit_proposal_sources: bool,
 ) -> Result<AdviserContribution, ContractError> {
     if contribution.adviser != expected_adviser
         || expected_adviser == AdviserId::ChiefOfStaff
@@ -634,26 +620,18 @@ fn parse_raw_contribution(
     if contribution.section != expected_section {
         return Err(ContractError);
     }
-    let proposed_actions = contribution
-        .proposed_actions
-        .into_iter()
-        .map(|proposal| {
-            if !valid_text(&proposal.action_id) || !valid_text(&proposal.text) {
-                return Err(ContractError);
-            }
-            Ok(PendingProposal {
-                classification: proposal.classification,
-                action_id: proposal.action_id,
-                text: proposal.text,
-                approval_state: proposal.approval_state,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let findings = parse_raw_findings(contribution.findings, ledger_ids)?;
+    let proposed_actions = parse_raw_proposals(
+        contribution.proposed_actions,
+        &findings,
+        ledger_ids,
+        require_explicit_proposal_sources,
+    )?;
     Ok(AdviserContribution {
         classification: contribution.classification,
         adviser: contribution.adviser,
         section: contribution.section,
-        findings: parse_raw_findings(contribution.findings, ledger_ids)?,
+        findings,
         confidence: contribution.confidence,
         limitations: contribution.limitations,
         dissent: contribution.dissent,
@@ -725,7 +703,12 @@ impl TryFrom<Value> for CommandBrief {
                 return Err(ContractError);
             }
             let adviser = contribution.adviser;
-            contributions.push(parse_raw_contribution(contribution, adviser, &ledger_ids)?);
+            contributions.push(parse_raw_contribution(
+                contribution,
+                adviser,
+                &ledger_ids,
+                false,
+            )?);
         }
         if seen_specialists != expected_specialists {
             return Err(ContractError);
@@ -742,8 +725,41 @@ impl TryFrom<Value> for CommandBrief {
             .flat_map(|contribution| contribution.findings.iter())
             .map(|finding| (finding.text.as_str(), finding.source_ids.as_slice()))
             .collect::<BTreeSet<_>>();
+        let specialist_source_ids = contributions
+            .iter()
+            .flat_map(|contribution| contribution.findings.iter())
+            .flat_map(|finding| finding.source_ids.iter().map(String::as_str))
+            .collect::<BTreeSet<_>>();
+        let proposals = contributions
+            .iter()
+            .flat_map(|contribution| contribution.proposed_actions.iter())
+            .map(|proposal| (proposal.text(), proposal.source_ids()))
+            .collect::<BTreeSet<_>>();
+        if sections[&BriefSection::Today].len() > MAX_CHIEF_FINDINGS
+            || sections[&BriefSection::Today].iter().any(|finding| {
+                finding
+                    .source_ids
+                    .iter()
+                    .any(|source_id| !specialist_source_ids.contains(source_id.as_str()))
+            })
+            || sections[&BriefSection::Decisions].iter().any(|finding| {
+                !proposals.contains(&(finding.text.as_str(), finding.source_ids.as_slice()))
+            })
+            || sections.iter().any(|(section, findings)| {
+                !matches!(section, BriefSection::Today | BriefSection::Decisions)
+                    && findings.iter().any(|finding| {
+                        !specialist_findings
+                            .contains(&(finding.text.as_str(), finding.source_ids.as_slice()))
+                    })
+            })
+        {
+            return Err(ContractError);
+        }
         if sections.values().flatten().any(|finding| {
-            !specialist_findings.contains(&(finding.text.as_str(), finding.source_ids.as_slice()))
+            finding
+                .source_ids
+                .iter()
+                .any(|source_id| !ledger_ids.contains(source_id))
         }) {
             return Err(ContractError);
         }

@@ -291,15 +291,37 @@ fn requires_official_classification_on_every_nested_wire_object() {
         "classification": "PUBLIC",
         "actionId": "action-1",
         "text": "This must remain a proposal.",
-        "approvalState": "pending"
+        "approvalState": "pending",
+        "sourceIds": ["ledger-1"]
     }]);
     assert!(parse(mismatched_action).is_err());
 }
 
 #[test]
-fn final_findings_must_exactly_match_validated_specialist_provenance() {
+fn chief_may_concisely_synthesise_admitted_specialist_evidence() {
+    let mut concise = brief_value();
+    concise["sections"]["today"][0]["text"] = json!("One concise command-level synthesis.");
+    assert!(parse(concise).is_ok());
+
     let mut unsupported = brief_value();
-    unsupported["sections"]["today"][0]["text"] = json!("A new claim with a valid citation.");
+    unsupported["sourceLedger"]
+        .as_array_mut()
+        .expect("ledger")
+        .push(json!({
+            "classification": "OFFICIAL",
+            "ledgerId": "ledger-2",
+            "sourceId": "source-2",
+            "sourceKind": "rag",
+            "collection": "unadmitted",
+            "documentId": "document-2",
+            "chunkId": "chunk-2",
+            "timestamp": NOW,
+            "snapshotId": "snapshot-1",
+            "quotedLocation": { "quote": "Not admitted by a specialist.", "location": "section 2" },
+            "retrievedAt": NOW,
+            "observedAt": NOW
+        }));
+    unsupported["sections"]["today"][0]["sourceIds"] = json!(["ledger-2"]);
     assert!(parse(unsupported).is_err());
 
     let consolidated = brief_value();
@@ -352,11 +374,57 @@ fn rejects_invalid_freshness_confidence_and_non_pending_actions() {
 
     let mut action = brief_value();
     action["contributions"][0]["proposedActions"] = json!([{
+        "classification": "OFFICIAL",
         "actionId": "action-1",
         "text": "This must remain a proposal.",
-        "approvalState": "approved"
+        "approvalState": "approved",
+        "sourceIds": ["ledger-1"]
     }]);
     assert!(parse(action).is_err());
+}
+
+#[test]
+fn pending_proposals_populate_only_source_bound_decisions_and_old_briefs_remain_readable() {
+    let proposal = json!({
+        "classification": "OFFICIAL",
+        "actionId": "action-1",
+        "text": "Review the readiness constraint.",
+        "alternativeText": "Maintain the current readiness posture and review it tomorrow.",
+        "approvalState": "pending",
+        "sourceIds": ["ledger-1"]
+    });
+    let mut brief = brief_value();
+    brief["contributions"][0]["proposedActions"] = json!([proposal]);
+    brief["sections"]["decisions"] = json!([finding("Review the readiness constraint.")]);
+    assert!(parse(brief).is_ok());
+
+    let mut prior_source_bound = brief_value();
+    prior_source_bound["contributions"][0]["proposedActions"] = json!([{
+        "classification": "OFFICIAL",
+        "actionId": "action-without-alternative",
+        "text": "Review the readiness constraint.",
+        "approvalState": "pending",
+        "sourceIds": ["ledger-1"]
+    }]);
+    assert!(parse(prior_source_bound).is_ok());
+
+    let mut unsupported = brief_value();
+    unsupported["sections"]["decisions"] = json!([finding("Invented decision.")]);
+    assert!(parse(unsupported).is_err());
+
+    let mut historical = brief_value();
+    historical["contributions"][0]["proposedActions"] = json!([{
+        "classification": "OFFICIAL",
+        "actionId": "legacy-action",
+        "text": "Legacy pending action.",
+        "approvalState": "pending"
+    }]);
+    historical["sections"]["decisions"] = json!([]);
+    let historical = parse(historical).expect("historical brief remains readable");
+    let historical_value = serde_json::to_value(historical).expect("serialize historical brief");
+    assert!(historical_value["contributions"][0]["proposedActions"][0]
+        .get("alternativeText")
+        .is_none());
 }
 
 #[test]
@@ -491,9 +559,30 @@ fn standalone_contribution_parser_preserves_the_authoritative_contract() {
         "classification": "OFFICIAL",
         "actionId": "action-1",
         "text": "This must remain a proposal.",
-        "approvalState": "approved"
+        "approvalState": "approved",
+        "sourceIds": ["ledger-1"]
     }]);
     assert!(parse_contribution(approved).is_err());
+
+    let mut missing_evidence = contribution("operations");
+    missing_evidence["proposedActions"] = json!([{
+        "classification": "OFFICIAL",
+        "actionId": "action-1",
+        "text": "This must remain a proposal.",
+        "approvalState": "pending"
+    }]);
+    assert!(parse_contribution(missing_evidence).is_err());
+
+    let mut valid_proposal = contribution("operations");
+    valid_proposal["proposedActions"] = json!([{
+        "classification": "OFFICIAL",
+        "actionId": "action-1",
+        "text": "This must remain a proposal.",
+        "approvalState": "pending",
+        "sourceIds": ["ledger-1"]
+    }]);
+    let parsed = parse_contribution(valid_proposal).expect("source-bound proposal");
+    assert_eq!(parsed.proposed_actions()[0].source_ids(), &["ledger-1"]);
 
     let mut extra = contribution("operations");
     extra["prompt"] = json!("renderer override");

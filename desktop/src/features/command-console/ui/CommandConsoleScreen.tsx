@@ -1,11 +1,18 @@
 import { AlertTriangle } from "lucide-react";
+import * as React from "react";
 import type { CSSProperties, ReactNode } from "react";
 
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { usePersonaConversation } from "@/features/agents/usePersonaConversation";
+import { useCommandDecisionActions } from "@/features/command-console/hooks/useCommandDecisionActions";
+
+import { COMMAND_TEAM_PERSONAS } from "../domain/commandTeam";
 import { useCommandConsoleStatus } from "../hooks/useCommandConsoleStatus";
 import { useDailyCommandBrief } from "../hooks/useDailyCommandBrief";
 import { useModelRoutingPreference } from "../hooks/useModelRoutingPreference";
 import { CommandAdviserHero } from "./CommandAdviserHero";
 import { CommandTeamStrip } from "./CommandTeamStrip";
+import type { BriefDecisionActions } from "./BriefDecisionSection";
 import { DailyCommandBrief } from "./DailyCommandBrief";
 import { ModelRoutingControls } from "./ModelRoutingControls";
 import { WorldMonitorConnectionCard } from "./WorldMonitorConnectionCard";
@@ -38,15 +45,25 @@ const COMMAND_ADVISER_THEME = {
   "--secondary-foreground": "210 40% 96%",
 } as CSSProperties;
 
-export function CommandConsoleScreen({
-  commandTeam,
-}: {
-  commandTeam?: ReactNode;
-} = {}) {
-  const systemStatus = useCommandConsoleStatus();
-  const commandBrief = useDailyCommandBrief();
-  const modelRouting = useModelRoutingPreference();
+const CHIEF_PERSONA_ID =
+  COMMAND_TEAM_PERSONAS.find((persona) => persona.adviser === "chief_of_staff")
+    ?.personaId ?? "builtin:command-chief-of-staff";
 
+type CommandConsoleContentProps = {
+  commandTeam?: ReactNode;
+  decisionActions: BriefDecisionActions;
+  systemStatus: ReturnType<typeof useCommandConsoleStatus>;
+  commandBrief: ReturnType<typeof useDailyCommandBrief>;
+  modelRouting: ReturnType<typeof useModelRoutingPreference>;
+};
+
+function CommandConsoleContent({
+  commandTeam,
+  decisionActions,
+  systemStatus,
+  commandBrief,
+  modelRouting,
+}: CommandConsoleContentProps) {
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-[#031426] text-foreground"
@@ -94,6 +111,7 @@ export function CommandConsoleScreen({
 
         <DailyCommandBrief
           busy={commandBrief.busy}
+          decisionActions={decisionActions}
           error={commandBrief.error}
           history={commandBrief.history}
           latest={commandBrief.latest}
@@ -115,5 +133,50 @@ export function CommandConsoleScreen({
         {commandTeam ?? <CommandTeamStrip />}
       </main>
     </div>
+  );
+}
+
+function CommandDecisionRuntime(
+  props: Omit<CommandConsoleContentProps, "decisionActions">,
+) {
+  const conversation = usePersonaConversation();
+  const { goChannel } = useAppNavigation();
+  const openChief = React.useCallback(async () => {
+    const opened = await conversation.open(CHIEF_PERSONA_ID, {
+      navigate: false,
+    });
+    if (!opened) throw new Error("Chief of Staff is unavailable.");
+    return opened;
+  }, [conversation.open]);
+  const decisionActions = useCommandDecisionActions({
+    openChief,
+    navigate: goChannel,
+  });
+  return <CommandConsoleContent {...props} decisionActions={decisionActions} />;
+}
+
+export function CommandConsoleScreen({
+  commandTeam,
+  decisionActions,
+}: {
+  commandTeam?: ReactNode;
+  decisionActions?: BriefDecisionActions;
+} = {}) {
+  const systemStatus = useCommandConsoleStatus();
+  const commandBrief = useDailyCommandBrief();
+  const modelRouting = useModelRoutingPreference();
+  const contentProps = {
+    commandTeam,
+    systemStatus,
+    commandBrief,
+    modelRouting,
+  };
+  return decisionActions ? (
+    <CommandConsoleContent
+      {...contentProps}
+      decisionActions={decisionActions}
+    />
+  ) : (
+    <CommandDecisionRuntime {...contentProps} />
   );
 }

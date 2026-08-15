@@ -17,8 +17,8 @@ use super::personas::definition_for;
 use super::provenance::{build_evidence_prompt, ValidatedSource};
 use super::types::{
     AdviserContribution, AdviserId, CitedFinding, Classification, MAX_AGGREGATE_DISSENT_ITEMS,
-    MAX_ARRAY_ITEMS, MAX_SOURCE_LEDGER_ITEMS, MAX_TEXT_BYTES, SPECIALIST_ADVISERS,
-    SPECIALIST_COUNT,
+    MAX_ARRAY_ITEMS, MAX_CHIEF_FINDINGS, MAX_SOURCE_LEDGER_ITEMS, MAX_TEXT_BYTES,
+    SPECIALIST_ADVISERS, SPECIALIST_COUNT,
 };
 use crate::command_services::policy::{
     adviser_runtime_catalog, build_adviser_runtime_catalog, AdmissionError, AdviserRuntimeCatalog,
@@ -437,7 +437,8 @@ impl AdviserExecutor {
                 "adviser request rejected",
             ));
         }
-        let (input, ledger_ids, allowed_findings, expected_dissent) = build_chief_input(&request)?;
+        let (input, ledger_ids, allowed_source_ids, expected_dissent) =
+            build_chief_input(&request)?;
         let persona = definition_for(AdviserId::ChiefOfStaff);
         let native_request = LmStudioChatRequest::new(
             &self.model,
@@ -468,8 +469,12 @@ impl AdviserExecutor {
             ));
         }
         let terminal = terminal_message(&execution.response)?;
-        let consolidation =
-            parse_chief_output(terminal, &ledger_ids, &allowed_findings, &expected_dissent)?;
+        let consolidation = parse_chief_output(
+            terminal,
+            &ledger_ids,
+            &allowed_source_ids,
+            &expected_dissent,
+        )?;
         Ok(finish_execution(consolidation, execution))
     }
 }
@@ -524,8 +529,13 @@ pub(crate) fn parse_cloud_chief_output(
     request: &ChiefOfStaffRequest,
     terminal: &str,
 ) -> Result<ChiefOfStaffConsolidation, AdviserExecutionError> {
-    let (_, ledger_ids, allowed_findings, expected_dissent) = build_chief_input(request)?;
-    parse_chief_output(terminal, &ledger_ids, &allowed_findings, &expected_dissent)
+    let (_, ledger_ids, allowed_source_ids, expected_dissent) = build_chief_input(request)?;
+    parse_chief_output(
+        terminal,
+        &ledger_ids,
+        &allowed_source_ids,
+        &expected_dissent,
+    )
 }
 
 struct NativeExecution {
@@ -624,12 +634,7 @@ fn terminal_message(response: &LmStudioChatResponse) -> Result<&str, AdviserExec
     }
 }
 
-type ChiefInputValidation = (
-    String,
-    BTreeSet<String>,
-    BTreeSet<(String, Vec<String>)>,
-    Vec<String>,
-);
+type ChiefInputValidation = (String, BTreeSet<String>, BTreeSet<String>, Vec<String>);
 
 fn build_chief_input(
     request: &ChiefOfStaffRequest,
@@ -640,7 +645,7 @@ fn build_chief_input(
     }
     let expected_advisers = BTreeSet::from(SPECIALIST_ADVISERS);
     let mut advisers = BTreeSet::new();
-    let mut allowed_findings = BTreeSet::new();
+    let mut allowed_source_ids = BTreeSet::new();
     let mut expected_dissent = Vec::new();
     for contribution in &request.contributions {
         if !expected_advisers.contains(&contribution.adviser())
@@ -649,7 +654,7 @@ fn build_chief_input(
             return Err(invalid_request());
         }
         for finding in contribution.findings() {
-            allowed_findings.insert((finding.text().to_string(), finding.source_ids().to_vec()));
+            allowed_source_ids.extend(finding.source_ids().iter().cloned());
         }
         expected_dissent.extend(contribution.dissent().iter().cloned());
     }
@@ -662,17 +667,16 @@ fn build_chief_input(
         .map(|source| source.ledger_id().to_string())
         .collect::<BTreeSet<_>>();
     if ledger_ids.len() != request.source_ledger.len()
-        || allowed_findings.iter().any(|(_, source_ids)| {
-            source_ids
-                .iter()
-                .any(|source_id| !ledger_ids.contains(source_id))
-        })
+        || allowed_source_ids
+            .iter()
+            .any(|source_id| !ledger_ids.contains(source_id))
     {
         return Err(invalid_request());
     }
     let source_ledger = request
         .source_ledger
         .iter()
+        .filter(|source| allowed_source_ids.contains(source.ledger_id()))
         .map(|source| {
             json!({
                 "classification": "OFFICIAL",
@@ -689,7 +693,7 @@ fn build_chief_input(
                     "location": source.location(),
                     "quote": source.quote(),
                 },
-                "untrustedEvidence": true,
+                "instructionAuthority": "none",
             })
         })
         .collect::<Vec<_>>();
@@ -702,7 +706,7 @@ fn build_chief_input(
     if input.len() > MAX_CHIEF_INPUT_BYTES {
         return Err(invalid_request());
     }
-    Ok((input, ledger_ids, allowed_findings, expected_dissent))
+    Ok((input, ledger_ids, allowed_source_ids, expected_dissent))
 }
 
 fn validate_source_collection(sources: &[ValidatedSource]) -> Result<(), AdviserExecutionError> {
@@ -737,12 +741,12 @@ struct RawChiefOutput {
 fn parse_chief_output(
     terminal: &str,
     ledger_ids: &BTreeSet<String>,
-    allowed_findings: &BTreeSet<(String, Vec<String>)>,
+    allowed_source_ids: &BTreeSet<String>,
     expected_dissent: &[String],
 ) -> Result<ChiefOfStaffConsolidation, AdviserExecutionError> {
     let raw: RawChiefOutput = serde_json::from_str(terminal).map_err(|_| invalid_output())?;
     if raw.adviser != AdviserId::ChiefOfStaff
-        || raw.findings.len() > MAX_ARRAY_ITEMS
+        || raw.findings.len() > MAX_CHIEF_FINDINGS
         || !valid_text_array(&raw.limitations)
         || !valid_text_array_with_limit(&raw.dissent, MAX_AGGREGATE_DISSENT_ITEMS)
         || raw.dissent != expected_dissent
@@ -755,7 +759,12 @@ fn parse_chief_output(
         let finding =
             CitedFinding::parse_for_ledger(value, ledger_ids).map_err(|_| invalid_output())?;
         let identity = (finding.text().to_string(), finding.source_ids().to_vec());
-        if !allowed_findings.contains(&identity) || !seen.insert(identity) {
+        if finding
+            .source_ids()
+            .iter()
+            .any(|source_id| !allowed_source_ids.contains(source_id))
+            || !seen.insert(identity)
+        {
             return Err(invalid_output());
         }
         findings.push(finding);

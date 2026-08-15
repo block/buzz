@@ -26,7 +26,7 @@ pub(super) fn deterministic_chief(contributions: &[AdviserContribution]) -> Vali
         .iter()
         .flat_map(|contribution| contribution.findings().iter().cloned())
         .filter(|finding| seen.insert((finding.text().to_string(), finding.source_ids().to_vec())))
-        .take(MAX_ARRAY_ITEMS)
+        .take(MAX_CHIEF_FINDINGS)
         .collect();
     ValidatedChief { findings }
 }
@@ -40,7 +40,7 @@ pub(super) fn validate_chief_output(
     let raw: RawChiefOutput = serde_json::from_value(value).map_err(|_| ())?;
     if raw.classification != Classification::Official
         || raw.adviser != AdviserId::ChiefOfStaff
-        || raw.findings.len() > MAX_ARRAY_ITEMS
+        || raw.findings.len() > MAX_CHIEF_FINDINGS
         || !valid_text_array(&raw.limitations, MAX_ARRAY_ITEMS)
         || !valid_text_array(&raw.dissent, MAX_AGGREGATE_DISSENT_ITEMS)
     {
@@ -67,17 +67,22 @@ pub(super) fn validate_chief_output(
     }) {
         return Err(());
     }
-    let allowed = contributions
+    let allowed_source_ids = contributions
         .iter()
         .flat_map(|contribution| contribution.findings())
-        .map(|finding| (finding.text().to_string(), finding.source_ids().to_vec()))
+        .flat_map(|finding| finding.source_ids().iter().cloned())
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut findings = Vec::with_capacity(raw.findings.len());
     for value in raw.findings {
         let finding = CitedFinding::parse_for_ledger(value, ledger_ids).map_err(|_| ())?;
         let identity = (finding.text().to_string(), finding.source_ids().to_vec());
-        if !allowed.contains(&identity) || !seen.insert(identity) {
+        if finding
+            .source_ids()
+            .iter()
+            .any(|source_id| !allowed_source_ids.contains(source_id))
+            || !seen.insert(identity)
+        {
             return Err(());
         }
         findings.push(finding);
@@ -109,6 +114,19 @@ pub(super) fn assemble_brief(
     for contribution in &contributions {
         sections.insert(contribution.section(), contribution.findings().to_vec());
     }
+    let mut seen_decisions = BTreeSet::new();
+    sections.insert(
+        BriefSection::Decisions,
+        contributions
+            .iter()
+            .flat_map(|contribution| contribution.proposed_actions())
+            .filter(|proposal| {
+                seen_decisions.insert((proposal.text().to_string(), proposal.source_ids().to_vec()))
+            })
+            .map(PendingProposal::as_finding)
+            .take(MAX_ARRAY_ITEMS)
+            .collect(),
+    );
     let dissent = contributions
         .iter()
         .flat_map(|contribution| contribution.dissent().iter().cloned())

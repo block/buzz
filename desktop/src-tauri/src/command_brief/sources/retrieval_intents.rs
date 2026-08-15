@@ -9,6 +9,37 @@ const MEMORY_TOOL: &str = "command_memory_context";
 const COLLECTION_SCOPE: &str = "verified_catalogue";
 const OBSERVED_COLLECTION_SCOPE: &str = "observed_catalogue";
 const DOCTRINE_COLLECTIONS: &[&str] = &["ADF Doctrine"];
+const OPERATIONS_COLLECTIONS: &[&str] = &[
+    "HMAS Supply",
+    "Command",
+    "navy-publications",
+    "security-studies",
+];
+const INTELLIGENCE_COLLECTIONS: &[&str] = &[
+    "security-studies",
+    "international-law",
+    "navy-publications",
+    "HMAS Supply",
+];
+const LOGISTICS_COLLECTIONS: &[&str] = &["HMAS Supply", "navy-publications", "Command"];
+const NAVIGATION_COLLECTIONS: &[&str] = &[
+    "marine-navigation",
+    "maritime-navigation",
+    "geodesy-navigation",
+    "astronomy-navigation",
+    "Navigation-Weather",
+    "navy-publications",
+    "HMAS Supply",
+];
+const ROUTINE_COLLECTIONS: &[&str] = &["HMAS Supply", "navy-publications", "Command"];
+const PLANS_COLLECTIONS: &[&str] = &[
+    "HMAS Supply",
+    "Command",
+    "navy-publications",
+    "security-studies",
+    "NATO Doctrine",
+    "international-law",
+];
 
 /// One native-owned, bounded retrieval request for a fixed specialist.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -53,6 +84,21 @@ impl FixedRetrievalIntent {
 
     pub(crate) const fn doctrine_collections(&self) -> &'static [&'static str] {
         DOCTRINE_COLLECTIONS
+    }
+
+    /// Return the bounded knowledge collections relevant to this specialist.
+    /// The collector intersects this list with the live catalogue and never
+    /// widens a missing route to the complete RAG database.
+    pub(crate) const fn context_collections(&self) -> &'static [&'static str] {
+        match self.adviser {
+            AdviserId::Operations => OPERATIONS_COLLECTIONS,
+            AdviserId::Intelligence => INTELLIGENCE_COLLECTIONS,
+            AdviserId::Logistics => LOGISTICS_COLLECTIONS,
+            AdviserId::Navigation => NAVIGATION_COLLECTIONS,
+            AdviserId::DailyRoutine | AdviserId::Reporting => ROUTINE_COLLECTIONS,
+            AdviserId::Plans => PLANS_COLLECTIONS,
+            AdviserId::ChiefOfStaff => &[],
+        }
     }
 }
 

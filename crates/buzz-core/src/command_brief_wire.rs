@@ -10,6 +10,7 @@ const MAX_TEXT_BYTES: usize = 4096;
 const MAX_ARRAY_ITEMS: usize = 64;
 const MAX_SOURCE_LEDGER_ITEMS: usize = 256;
 const MAX_AGGREGATE_DISSENT_ITEMS: usize = 7 * MAX_ARRAY_ITEMS;
+const MAX_CHIEF_FINDINGS: usize = 7;
 const ADVISORY_LIMITATION: &str = "This Daily Command Brief is advisory only. Navigation content identifies considerations and source limitations; it does not generate executable navigation orders or make navigational decisions.";
 
 /// An exact, fully validated canonical `CommandBrief` JSON value.
@@ -101,6 +102,8 @@ enum SourceKind {
     Rag,
     Memory,
     WorldMonitor,
+    BattleRhythm,
+    Plans,
     Calendar,
     Reminders,
     Notes,
@@ -151,7 +154,11 @@ struct RawProposal {
     classification: OfficialClassification,
     action_id: String,
     text: String,
+    #[serde(default)]
+    alternative_text: Option<String>,
     approval_state: ApprovalState,
+    #[serde(default)]
+    source_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +286,8 @@ fn validate_command_brief(raw: &RawCommandBrief) -> Result<(), ()> {
     let mut seen_advisers = BTreeSet::new();
     let mut aggregate_dissent = Vec::new();
     let mut specialist_findings = BTreeSet::new();
+    let mut specialist_source_ids = BTreeSet::new();
+    let mut proposals = BTreeSet::new();
     for contribution in &raw.contributions {
         let _ = contribution.classification;
         if !seen_advisers.insert(contribution.adviser)
@@ -292,12 +301,36 @@ fn validate_command_brief(raw: &RawCommandBrief) -> Result<(), ()> {
             return Err(());
         }
         validate_findings(&contribution.findings, &ledger_ids)?;
+        let fallback_source_ids = contribution
+            .findings
+            .iter()
+            .flat_map(|finding| finding.source_ids.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         for proposal in &contribution.proposed_actions {
             let _ = proposal.classification;
             let _ = proposal.approval_state;
-            if !valid_text(&proposal.action_id) || !valid_text(&proposal.text) {
+            let proposal_source_ids = if proposal.source_ids.is_empty() {
+                fallback_source_ids.clone()
+            } else {
+                proposal.source_ids.clone()
+            };
+            if !valid_text(&proposal.action_id)
+                || !valid_text(&proposal.text)
+                || proposal
+                    .alternative_text
+                    .as_deref()
+                    .is_some_and(|alternative| !valid_text(alternative))
+                || proposal_source_ids.is_empty()
+                || !valid_unique_text_array(&proposal_source_ids, MAX_ARRAY_ITEMS)
+                || proposal_source_ids
+                    .iter()
+                    .any(|source_id| !ledger_ids.contains(source_id))
+            {
                 return Err(());
             }
+            proposals.insert((proposal.text.clone(), proposal_source_ids));
         }
         aggregate_dissent.extend(contribution.dissent.iter().map(String::as_str));
         specialist_findings.extend(
@@ -306,15 +339,36 @@ fn validate_command_brief(raw: &RawCommandBrief) -> Result<(), ()> {
                 .iter()
                 .map(|finding| (finding.text.as_str(), finding.source_ids.as_slice())),
         );
+        specialist_source_ids.extend(
+            contribution
+                .findings
+                .iter()
+                .flat_map(|finding| finding.source_ids.iter().cloned()),
+        );
     }
     if seen_advisers != expected_advisers
         || aggregate_dissent != raw.dissent.iter().map(String::as_str).collect::<Vec<_>>()
     {
         return Err(());
     }
-    if raw.sections.values().flatten().any(|finding| {
-        !specialist_findings.contains(&(finding.text.as_str(), finding.source_ids.as_slice()))
-    }) {
+    if raw.sections[&Section::Today].len() > MAX_CHIEF_FINDINGS
+        || raw.sections[&Section::Today].iter().any(|finding| {
+            finding
+                .source_ids
+                .iter()
+                .any(|source_id| !specialist_source_ids.contains(source_id))
+        })
+        || raw.sections[&Section::Decisions]
+            .iter()
+            .any(|finding| !proposals.contains(&(finding.text.clone(), finding.source_ids.clone())))
+        || raw.sections.iter().any(|(section, findings)| {
+            !matches!(section, Section::Today | Section::Decisions)
+                && findings.iter().any(|finding| {
+                    !specialist_findings
+                        .contains(&(finding.text.as_str(), finding.source_ids.as_slice()))
+                })
+        })
+    {
         return Err(());
     }
     Ok(())

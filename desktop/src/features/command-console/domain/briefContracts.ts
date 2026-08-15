@@ -6,6 +6,7 @@ export const MAX_ARRAY_ITEMS = 64;
 export const SPECIALIST_COUNT = 7;
 export const MAX_AGGREGATE_DISSENT_ITEMS = SPECIALIST_COUNT * MAX_ARRAY_ITEMS;
 export const MAX_SOURCE_LEDGER_ITEMS = 256;
+export const MAX_CHIEF_FINDINGS = 7;
 
 export const ADVISORY_LIMITATION =
   "This Daily Command Brief is advisory only. Navigation content identifies considerations and source limitations; it does not generate executable navigation orders or make navigational decisions.";
@@ -108,7 +109,9 @@ export type AdviserContribution = {
     readonly classification: "OFFICIAL";
     readonly actionId: string;
     readonly text: string;
+    readonly alternativeText?: string;
     readonly approvalState: "pending";
+    readonly sourceIds: readonly string[];
   }[];
 };
 
@@ -363,26 +366,70 @@ function parseContribution(
   const proposedActions =
     [] as AdviserContribution["proposedActions"][number][];
   for (const action of value.proposedActions) {
-    if (
-      !isRecord(action) ||
-      !hasExactKeys(action, [
+    const currentActionWithAlternative =
+      isRecord(action) &&
+      hasExactKeys(action, [
+        "classification",
+        "actionId",
+        "text",
+        "alternativeText",
+        "approvalState",
+        "sourceIds",
+      ]);
+    const priorSourceBoundAction =
+      isRecord(action) &&
+      hasExactKeys(action, [
         "classification",
         "actionId",
         "text",
         "approvalState",
-      ]) ||
+        "sourceIds",
+      ]);
+    const historicalAction =
+      isRecord(action) &&
+      hasExactKeys(action, [
+        "classification",
+        "actionId",
+        "text",
+        "approvalState",
+      ]);
+    if (
+      !isRecord(action) ||
+      (!currentActionWithAlternative &&
+        !priorSourceBoundAction &&
+        !historicalAction) ||
       action.classification !== "OFFICIAL" ||
       !isBoundedText(action.actionId) ||
       !isBoundedText(action.text) ||
+      (currentActionWithAlternative &&
+        !isBoundedText(action.alternativeText)) ||
       action.approvalState !== "pending"
     )
       return null;
+    const actionSourceIds =
+      currentActionWithAlternative || priorSourceBoundAction
+        ? parseTextArray(action.sourceIds, true)
+        : Object.freeze([
+            ...new Set(findings.flatMap((finding) => [...finding.sourceIds])),
+          ]);
+    if (
+      !actionSourceIds ||
+      actionSourceIds.length === 0 ||
+      actionSourceIds.some((id) => !sourceIds.has(id))
+    )
+      return null;
+    const alternativeText =
+      currentActionWithAlternative && typeof action.alternativeText === "string"
+        ? action.alternativeText
+        : undefined;
     proposedActions.push(
       Object.freeze({
         classification: action.classification,
         actionId: action.actionId,
         text: action.text,
+        ...(alternativeText ? { alternativeText } : {}),
         approvalState: "pending",
+        sourceIds: Object.freeze([...actionSourceIds].sort()),
       }),
     );
   }
@@ -510,15 +557,37 @@ export function parseCommandBrief(value: unknown): CommandBrief | null {
       ),
     ),
   );
+  const specialistSourceIds = new Set(
+    contributions.flatMap((contribution) =>
+      contribution.findings.flatMap((finding) => [...finding.sourceIds]),
+    ),
+  );
+  const proposals = new Set(
+    contributions.flatMap((contribution) =>
+      contribution.proposedActions.map((proposal) =>
+        JSON.stringify([proposal.text, proposal.sourceIds]),
+      ),
+    ),
+  );
   if (
-    Object.values(sections)
-      .flat()
-      .some(
+    sections.today.length > MAX_CHIEF_FINDINGS ||
+    sections.today.some((finding) =>
+      finding.sourceIds.some((sourceId) => !specialistSourceIds.has(sourceId)),
+    ) ||
+    sections.decisions.some(
+      (finding) =>
+        !proposals.has(JSON.stringify([finding.text, finding.sourceIds])),
+    ) ||
+    BRIEF_SECTIONS.filter(
+      (section) => section !== "today" && section !== "decisions",
+    ).some((section) =>
+      sections[section].some(
         (finding) =>
           !specialistFindings.has(
             JSON.stringify([finding.text, finding.sourceIds]),
           ),
-      )
+      ),
+    )
   )
     return null;
 

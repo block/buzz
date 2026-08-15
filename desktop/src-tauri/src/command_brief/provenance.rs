@@ -106,7 +106,7 @@ pub struct EvidenceEnvelope {
     pub retrieved_at: String,
     pub location: String,
     pub quote: String,
-    pub untrusted_evidence: bool,
+    pub instruction_authority: &'static str,
 }
 
 /// The fixed prompt and bounded evidence payload selected exclusively by native Rust.
@@ -129,23 +129,17 @@ pub fn build_evidence_prompt(
     ordered.sort_by(|left, right| source_order(persona.adviser, left, right));
 
     let mut envelopes = Vec::new();
-    let mut limitations = Vec::new();
+    let limitations = Vec::new();
     for source in ordered {
-        if !persona.permitted_source_kinds.contains(&source.source_kind) {
-            limitations.push(format!(
-                "Source {} was omitted because {:?} evidence is not permitted for this adviser.",
-                source.ledger_id, source.source_kind
-            ));
+        if !persona.permitted_source_kinds.contains(&source.source_kind)
+            || matches!(
+                source.collection.as_str(),
+                "verified_catalogue" | "observed_catalogue"
+            )
+        {
             continue;
         }
-        let (quote, quote_was_truncated) =
-            truncate_utf8(&source.quote, MAX_EVIDENCE_ENVELOPE_QUOTE_BYTES);
-        if quote_was_truncated {
-            limitations.push(format!(
-                "Source {} quote was truncated to the evidence-envelope limit.",
-                source.ledger_id
-            ));
-        }
+        let (quote, _) = truncate_utf8(&source.quote, MAX_EVIDENCE_ENVELOPE_QUOTE_BYTES);
         let candidate = EvidenceEnvelope {
             ledger_id: source.ledger_id,
             source_kind: source.source_kind,
@@ -158,24 +152,16 @@ pub fn build_evidence_prompt(
             retrieved_at: source.retrieved_at,
             location: source.location,
             quote,
-            untrusted_evidence: true,
+            instruction_authority: "none",
         };
         if serialize_envelopes(std::slice::from_ref(&candidate)).len() > MAX_EVIDENCE_ENVELOPE_BYTES
         {
-            limitations.push(format!(
-                "Source {} was omitted because its evidence envelope exceeded the envelope budget.",
-                candidate.ledger_id
-            ));
             continue;
         }
         let mut with_candidate = envelopes.clone();
         with_candidate.push(candidate.clone());
         let candidate_json = serialize_envelopes(&with_candidate);
         if candidate_json.len() > MAX_PROMPT_EVIDENCE_BYTES {
-            limitations.push(format!(
-                "Source {} was omitted because the total evidence prompt budget was reached.",
-                candidate.ledger_id
-            ));
             continue;
         }
         envelopes.push(candidate);

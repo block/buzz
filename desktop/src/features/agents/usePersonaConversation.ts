@@ -62,12 +62,12 @@ export function usePersonaConversation() {
   );
 
   const open = React.useCallback(
-    async (personaId: string) => {
+    async (personaId: string, options?: { navigate?: boolean }) => {
       if (pendingRef.current.has(personaId)) return;
       setPending(personaId, true);
       setError(null);
       try {
-        await openPersonaConversation(personaId, {
+        return await openPersonaConversation(personaId, {
           definitions,
           managedAgents,
           buildInput: async (definition) => {
@@ -95,7 +95,7 @@ export function usePersonaConversation() {
             });
           },
           openDm: (pubkeys) => openDm({ pubkeys }),
-          navigate: goChannel,
+          navigate: options?.navigate === false ? async () => false : goChannel,
           refetch: async () => {
             await Promise.all([refetchManagedAgents(), refetchRelayAgents()]);
           },
@@ -106,6 +106,7 @@ export function usePersonaConversation() {
             ? cause.message
             : "Could not open the adviser conversation.",
         );
+        return undefined;
       } finally {
         setPending(personaId, false);
       }

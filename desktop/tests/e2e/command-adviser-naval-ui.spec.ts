@@ -112,7 +112,20 @@ const publishedBrief = {
       confidence: 0.9 - index * 0.05,
       limitations: [],
       dissent: [],
-      proposedActions: [],
+      proposedActions:
+        adviser === "operations"
+          ? [
+              {
+                classification: "OFFICIAL",
+                actionId: "confirm-command-priorities",
+                text: "Confirm the command priorities for today's programme.",
+                alternativeText:
+                  "Retain the current programme and review priorities at the next command update.",
+                approvalState: "pending",
+                sourceIds: ["ledger-1"],
+              },
+            ]
+          : [],
     })),
     advisoryLimitation:
       "This Daily Command Brief is advisory only. Navigation content identifies considerations and source limitations; it does not generate executable navigation orders or make navigational decisions.",
