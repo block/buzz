@@ -27,9 +27,11 @@ use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 
 use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::tenant::TenantContext;
 use buzz_db::event::ThreadMetadataParams;
 use buzz_db::sms::SmsIdentity;
 
+use crate::handlers::event::dispatch_persistent_event;
 use crate::state::AppState;
 use crate::twilio_auth::validate_signature;
 
@@ -141,7 +143,7 @@ pub async fn twilio_inbound(
         broadcast: false,
     });
 
-    state
+    let (stored_event, was_inserted) = state
         .db
         .insert_event_with_thread_metadata(
             identity.community_id,
@@ -151,6 +153,52 @@ pub async fn twilio_inbound(
         )
         .await
         .map_err(|e| internal_error(&format!("sms event insert failed: {e}")))?;
+
+    // Persisting alone is NOT enough: without this, the event exists in the
+    // database (so `buzz messages get` and any other read path sees it) but is
+    // never fanned out to live WebSocket subscribers, never published to Redis,
+    // and never triggers workflows — so an ACP agent subscribed to the SMS
+    // inbox never wakes and the whole operator flow silently does nothing.
+    // `workflow_sink.rs` makes the same call after its own insert; this handler
+    // mirrors that path. Failure here is logged, not surfaced: the message is
+    // already durably accepted, exactly as the WebSocket/REST ingest paths treat
+    // post-commit delivery.
+    if was_inserted {
+        let host = match state.db.lookup_community_host(identity.community_id).await {
+            Ok(Some(host)) => host,
+            Ok(None) => {
+                tracing::error!(
+                    community = %identity.community_id,
+                    "inbound SMS community is not mapped to a host — event stored but not delivered"
+                );
+                return Ok((
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "status": "accepted" })),
+                ));
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "inbound SMS host lookup failed — event stored but not delivered"
+                );
+                return Ok((
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "status": "accepted" })),
+                ));
+            }
+        };
+        let tenant = TenantContext::resolved(identity.community_id, host);
+        let author_hex = event.pubkey.to_hex();
+        dispatch_persistent_event(
+            &tenant,
+            &state,
+            &stored_event,
+            KIND_STREAM_MESSAGE,
+            &author_hex,
+            None,
+        )
+        .await;
+    }
 
     Ok((
         StatusCode::OK,
