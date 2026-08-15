@@ -441,6 +441,44 @@ void main() {
     },
   );
 
+  testWidgets('message snapshot bounds very tall raster dimensions', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(800, 5000);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    MessageLongPressDetails? longPressDetails;
+    ui.Image? snapshot;
+    addTearDown(() => snapshot?.dispose());
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Material(
+            child: MessageLongPressInkWell(
+              key: const ValueKey('tall-snapshot-gesture-target'),
+              onLongPressDetails: (details) => longPressDetails = details,
+              child: const SizedBox(width: 240, height: 4096),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.longPress(
+      find.byKey(const ValueKey('tall-snapshot-gesture-target')),
+    );
+    expect(longPressDetails, isNotNull);
+
+    final capture = longPressDetails!.captureSnapshot();
+    await tester.pump();
+    snapshot = await capture;
+
+    expect(snapshot.width, 120);
+    expect(snapshot.height, 2048);
+  });
+
   testWidgets('message snapshot can exclude attached reaction content', (
     tester,
   ) async {

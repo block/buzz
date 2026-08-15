@@ -8,6 +8,13 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 const _iosMessageLongPressDuration = Duration(milliseconds: 200);
+const _maxMessageSnapshotDimension = 2048.0;
+
+double _messageSnapshotPixelRatio(Size size, double devicePixelRatio) {
+  final longestSide = size.longestSide;
+  if (!longestSide.isFinite || longestSide <= 0) return devicePixelRatio;
+  return math.min(devicePixelRatio, _maxMessageSnapshotDimension / longestSide);
+}
 
 /// Geometry and snapshot controls for a completed message long press.
 class MessageLongPressDetails {
@@ -99,7 +106,7 @@ class _MessageLongPressRegion extends HookWidget {
         onLongPress?.call(anchorRect);
         return;
       }
-      final snapshotPixelRatio = math.min(
+      final maxSnapshotPixelRatio = math.min(
         MediaQuery.devicePixelRatioOf(context),
         2.0,
       );
@@ -113,6 +120,10 @@ class _MessageLongPressRegion extends HookWidget {
         if (boundary == null) {
           throw StateError('Message snapshot is unavailable');
         }
+        final snapshotPixelRatio = _messageSnapshotPixelRatio(
+          boundary.size,
+          maxSnapshotPixelRatio,
+        );
         try {
           return await boundary.toImage(pixelRatio: snapshotPixelRatio);
         } catch (_) {
@@ -123,10 +134,17 @@ class _MessageLongPressRegion extends HookWidget {
             rethrow;
           }
           try {
-            return await retryBoundary.toImage(pixelRatio: snapshotPixelRatio);
+            return await retryBoundary.toImage(
+              pixelRatio: _messageSnapshotPixelRatio(
+                retryBoundary.size,
+                maxSnapshotPixelRatio,
+              ),
+            );
           } catch (_) {
             if (snapshotPixelRatio <= 1) rethrow;
-            return retryBoundary.toImage(pixelRatio: 1);
+            return retryBoundary.toImage(
+              pixelRatio: _messageSnapshotPixelRatio(retryBoundary.size, 1),
+            );
           }
         }
       }
