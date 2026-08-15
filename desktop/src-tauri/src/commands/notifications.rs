@@ -54,17 +54,51 @@ pub async fn show_native_notification(
 }
 
 #[cfg(target_os = "windows")]
-mod windows {
+pub(crate) mod windows {
     use std::sync::Once;
 
     static AUMID_REGISTERED: Once = Once::new();
+    static STARTUP_REGISTRATION_DONE: Once = Once::new();
+
+    /// Runs Buzz's full Windows toast-notification eligibility setup once,
+    /// early in app startup — call this from `lib.rs`'s `setup()`, not
+    /// lazily on first notification. See `ensure_start_menu_shortcut` for
+    /// why this needs to run regardless of whether the user has actually
+    /// triggered a notification yet: Windows' Settings > Notifications page
+    /// only lists an AUMID once it has a shell-visible identity (a Start
+    /// Menu shortcut carrying that AUMID), and users reasonably expect to
+    /// find Buzz there before the first notification would ever fire.
+    pub(crate) fn ensure_startup_registration(app: &tauri::AppHandle) {
+        STARTUP_REGISTRATION_DONE.call_once(|| {
+            let app = app.clone();
+            // Shell/COM calls can be slow (first-run disk I/O for the
+            // Start Menu folder) — do this off the main setup thread so
+            // it never delays window creation.
+            std::thread::spawn(move || {
+                let app_id = app.config().identifier.clone();
+                set_process_aumid(&app_id);
+                if let Err(error) = write_aumid_registry_entry(&app, &app_id) {
+                    eprintln!(
+                        "buzz-desktop: failed to register AUMID for Windows notifications: {error}"
+                    );
+                }
+                if let Err(error) = ensure_start_menu_shortcut(&app, &app_id) {
+                    eprintln!(
+                        "buzz-desktop: failed to repair Start Menu shortcut AUMID: {error}"
+                    );
+                }
+            });
+        });
+    }
 
     pub fn show(
         app: tauri::AppHandle,
         title: String,
         body: Option<String>,
-        _target: Option<serde_json::Value>,
+        target: Option<serde_json::Value>,
     ) {
+        use tauri::Emitter;
+
         let app_id = app.config().identifier.clone();
         ensure_aumid_registered(&app, &app_id);
 
@@ -73,6 +107,24 @@ mod windows {
             if let Some(body_text) = body.as_deref() {
                 toast = toast.text2(body_text);
             }
+
+            // Without this, clicking the toast does nothing — Linux and
+            // macOS both focus the window and route to `target` on click
+            // (see `linux::show`/`macos_notifications.rs`); Windows never
+            // did. `on_activated` fires with `None` for a plain click on
+            // the toast body (no button involved), which is the only case
+            // we handle today — the button-click `Some(action)` path is
+            // free for future per-notification actions (e.g. "Mark read").
+            let activation_app = app.clone();
+            toast = toast.on_activated(move |action| {
+                if action.is_none() {
+                    let _ = activation_app.emit(
+                        crate::commands::NATIVE_NOTIFICATION_ACTIVATED_EVENT,
+                        target.clone(),
+                    );
+                }
+                Ok(())
+            });
 
             match toast.show() {
                 Ok(_) => {}
@@ -210,6 +262,178 @@ mod windows {
         }
 
         Ok(())
+    }
+
+    /// Creates or repairs the per-user Start Menu shortcut so it carries a
+    /// `System.AppUserModel.ID` property matching `app_id`.
+    ///
+    /// This is the piece the registry/process-AUMID calls above cannot
+    /// substitute for. For an unpackaged (non-MSIX) Win32 app, Windows only
+    /// treats an AUMID as a real, notification-capable app identity once
+    /// the shell can resolve it back to a Start Menu shortcut carrying that
+    /// same AUMID as a shell-link property — that's what makes the app show
+    /// up under Settings > Notifications and what makes `ToastNotifier`
+    /// accept toasts at all, not just the registry DisplayName/IconUri
+    /// metadata written above.
+    ///
+    /// The installer's NSIS template already sets this property on the
+    /// shortcut it creates — but only for a *fresh* install. Tauri's
+    /// generated NSIS `CreateOrUpdateStartMenuShortcut` macro skips
+    /// recreating the shortcut on an in-place update (which is what every
+    /// silent auto-update via the Tauri updater is), so any install whose
+    /// shortcut predates this AUMID work — or was ever silently updated
+    /// before this fix — never gets it patched by the installer. Repairing
+    /// it here, unconditionally, on every app launch, makes this self-
+    /// healing regardless of install history or update path.
+    fn ensure_start_menu_shortcut(app: &tauri::AppHandle, app_id: &str) -> Result<(), String> {
+        // NOTE: `IPersistFile` and `STGM_READWRITE` live under
+        // `Win32::System::Com` (general COM persistence/storage types), not
+        // `Win32::UI::Shell`, even though we only use `IPersistFile` here to
+        // persist a shell link — double-check this against the actual crate
+        // docs for the pinned `windows` version if this module fails to
+        // resolve.
+        use windows::core::{Interface, PCWSTR};
+        // `PKEY_AppUserModel_ID` lives here, not under
+        // `Win32::UI::Shell::PropertiesSystem` — that module only carries
+        // `PKEY_PIDSTR_MAX`. Verified against the crate's own generated docs;
+        // the wrong path fails to compile rather than silently misbehaving.
+        use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READWRITE,
+        };
+        // No `InitPropVariantFromStringW` here — it doesn't exist in this
+        // crate (or in any windows-rs version): the Win32 API of that name
+        // is a header-only inline wrapper in propvarutil.h, not a real
+        // exported symbol, so win32metadata never carries it (see
+        // microsoft/windows-rs#976, still open). `PROPVARIANT: From<&str>`
+        // is the crate's own replacement, and `PROPVARIANT: Drop` already
+        // clears it — do not additionally call `PropVariantClear` on one of
+        // these or it double-frees the string it owns.
+        use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+        use windows::Win32::UI::Shell::{
+            PropertiesSystem::IPropertyStore, FOLDERID_Programs, SHGetKnownFolderPath,
+            IShellLinkW, ShellLink, KF_FLAG_CREATE,
+        };
+
+        let product_name = app
+            .config()
+            .product_name
+            .clone()
+            .unwrap_or_else(|| "Buzz".to_string());
+        let exe_path = std::env::current_exe()
+            .map_err(|error| format!("could not resolve current exe path: {error}"))?;
+
+        // SAFETY: this thread does not otherwise touch COM; the apartment
+        // is torn down before returning from this function on every path.
+        // `CoInitializeEx` returns `S_OK` on first init and `S_FALSE` if this
+        // thread already has an apartment (both non-negative, so `is_err()`
+        // is false for either) — only a genuinely negative HRESULT here
+        // means initialization failed.
+        let init_result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if init_result.is_err() {
+            return Err(format!("CoInitializeEx failed: {init_result:?}"));
+        }
+        let result = (|| -> Result<(), String> {
+            let programs_dir_pwstr = unsafe {
+                SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_CREATE, None)
+                    .map_err(|error| format!("SHGetKnownFolderPath failed: {error}"))?
+            };
+            // `SHGetKnownFolderPath` hands back a COM-allocated buffer the
+            // caller owns and must free — `windows-rs` does not do this
+            // automatically for a raw returned `PWSTR`.
+            let programs_dir_result = unsafe { programs_dir_pwstr.to_string() };
+            unsafe {
+                windows::Win32::System::Com::CoTaskMemFree(Some(
+                    programs_dir_pwstr.0 as *const std::ffi::c_void,
+                ));
+            }
+            let programs_dir =
+                programs_dir_result.map_err(|error| format!("invalid Start Menu path: {error}"))?;
+
+            // NSIS's `MUI_STARTMENU_GETFOLDER` (which Tauri's generated
+            // installer.nsi uses — see its `$AppStartMenuFolder` var)
+            // defaults to putting the shortcut in a subfolder named after
+            // the product, i.e. `$SMPROGRAMS\Buzz\Buzz.lnk`, NOT flat at
+            // `$SMPROGRAMS\Buzz.lnk`. Confirmed by reading the actual
+            // generated installer.nsi from a real local build — it only
+            // falls back to the flat path if the user explicitly cleared
+            // the Start Menu folder field during install (installer.nsi
+            // lines ~912-917). Try the subfolder path first, since it's the
+            // default nearly everyone gets; fall back to flat if that's not
+            // what's actually on disk; if neither exists yet, create at the
+            // subfolder path to match what a fresh install would produce.
+            let subfolder_path = format!("{programs_dir}\\{product_name}\\{product_name}.lnk");
+            let flat_path = format!("{programs_dir}\\{product_name}.lnk");
+            let shortcut_path = if std::path::Path::new(&subfolder_path).exists() {
+                subfolder_path
+            } else if std::path::Path::new(&flat_path).exists() {
+                flat_path
+            } else {
+                // Neither exists — this is a from-scratch repair (no prior
+                // install ever ran, or its shortcut was deleted). Ensure the
+                // subfolder exists, then create there, matching the
+                // installer's own default layout.
+                std::fs::create_dir_all(format!("{programs_dir}\\{product_name}"))
+                    .map_err(|error| format!("could not create Start Menu folder: {error}"))?;
+                subfolder_path
+            };
+            let shortcut_path_wide = to_wide(&shortcut_path);
+            let exe_path_wide = to_wide(&exe_path.to_string_lossy());
+
+            let shell_link: IShellLinkW = unsafe {
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|error| format!("CoCreateInstance(ShellLink) failed: {error}"))?
+            };
+            let persist_file: IPersistFile = shell_link
+                .cast()
+                .map_err(|error| format!("IShellLinkW -> IPersistFile cast failed: {error}"))?;
+
+            // If a shortcut already exists (the normal case — the installer
+            // made one), load it so we preserve whatever else it sets
+            // (working directory, description, etc.) and only touch the
+            // AUMID property. If it doesn't exist yet, fall through and
+            // build a fresh one below.
+            let existing = unsafe {
+                persist_file.Load(PCWSTR(shortcut_path_wide.as_ptr()), STGM_READWRITE)
+            };
+            if existing.is_err() {
+                unsafe {
+                    shell_link
+                        .SetPath(PCWSTR(exe_path_wide.as_ptr()))
+                        .map_err(|error| format!("IShellLinkW::SetPath failed: {error}"))?;
+                    shell_link
+                        .SetIconLocation(PCWSTR(exe_path_wide.as_ptr()), 0)
+                        .map_err(|error| format!("IShellLinkW::SetIconLocation failed: {error}"))?;
+                }
+            }
+
+            let props: IPropertyStore = shell_link
+                .cast()
+                .map_err(|error| format!("IShellLinkW -> IPropertyStore cast failed: {error}"))?;
+            // `prop_value` owns the wide-string copy `SetValue` reads; it is
+            // freed automatically (via `PROPVARIANT`'s `Drop`) when it goes
+            // out of scope below, after `Commit`/`Save` are done with it.
+            let prop_value = PROPVARIANT::from(app_id);
+            unsafe {
+                props
+                    .SetValue(&PKEY_AppUserModel_ID, &prop_value)
+                    .map_err(|error| format!("IPropertyStore::SetValue failed: {error}"))?;
+                props
+                    .Commit()
+                    .map_err(|error| format!("IPropertyStore::Commit failed: {error}"))?;
+                persist_file
+                    .Save(PCWSTR(shortcut_path_wide.as_ptr()), true)
+                    .map_err(|error| format!("IPersistFile::Save failed: {error}"))?;
+            }
+
+            Ok(())
+        })();
+
+        if init_result.is_ok() {
+            unsafe { CoUninitialize() };
+        }
+        result
     }
 }
 

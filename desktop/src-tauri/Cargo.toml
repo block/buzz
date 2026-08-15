@@ -67,6 +67,23 @@ windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_F
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
 user-idle = { version = "0.6", default-features = false }
 tauri-winrt-notification = "0.7.3"
+# Ergonomic (non-`_sys`) COM bindings, used only for the Start Menu shortcut
+# AUMID repair in `commands/notifications.rs`. `windows-sys` above is plain
+# FFI with no `Interface::cast`/vtable ergonomics, which makes hand-written
+# `IShellLinkW`/`IPropertyStore` COM interop (QueryInterface, PROPVARIANT)
+# meaningfully more error-prone to get right without a compiler in the loop.
+# The two crates coexist fine — independent, no version coupling required.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    # For `PKEY_AppUserModel_ID` (`Win32::Storage::EnhancedStorage`) — not
+    # under `Win32_UI_Shell_PropertiesSystem`, which is a different module
+    # despite both dealing with property keys.
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
 
 [dependencies]
 atomic-write-file = "0.3"

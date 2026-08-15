@@ -36,7 +36,7 @@ mod media_upload_progress;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_llm;
 mod messages;
-mod notifications;
+pub(crate) mod notifications;
 mod observer_archive;
 mod os_idle;
 pub mod pairing;
