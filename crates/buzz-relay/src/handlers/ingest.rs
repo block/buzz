@@ -2646,7 +2646,11 @@ async fn ingest_event_inner(
                         IngestError::Internal(format!("error: {reason}"))
                     }
                 })?;
-        let channel = channel_id.expect("job kinds require a validated h tag");
+        let Some(channel) = channel_id else {
+            return Err(IngestError::Rejected(
+                "invalid: job event is missing its channel tag".to_string(),
+            ));
+        };
         let (stored_event, was_inserted) = match outcome {
             super::agent_jobs::AgentJobPersistOutcome::Inserted(stored) => (Some(*stored), true),
             super::agent_jobs::AgentJobPersistOutcome::Replay => (None, false),

@@ -463,7 +463,8 @@ function parseArtifacts(value: unknown): AgentJobArtifact[] | null {
     if (
       !hasOnlyKeys(record, ["name", "uri", "sha256"]) ||
       typeof record.name !== "string" ||
-      typeof record.uri !== "string"
+      typeof record.uri !== "string" ||
+      !/^(https?:\/\/|nostr:)/.test(record.uri)
     ) {
       return null;
     }

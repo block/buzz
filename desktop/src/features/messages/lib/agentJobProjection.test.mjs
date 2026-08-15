@@ -112,7 +112,7 @@ function result() {
       artifacts: [
         {
           name: "receipt.json",
-          uri: "artifact://jac-575-receipt",
+          uri: "https://relay.example/artifacts/jac-575-receipt",
           sha256: "ab".repeat(32),
         },
       ],
