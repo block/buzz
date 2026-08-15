@@ -3,7 +3,7 @@
 Кожне значення тут виведене з вимірювання на конкретному залізі, а не взяте
 як розумний дефолт. Заміряно 2026-08-10.
 
-Залізо: RTX 4080 Laptop, **12 ГБ VRAM**. Ollama 0.32.6, Buzz desktop 0.5.5.
+Залізо: RTX 4080 Laptop, **12 ГБ VRAM**. Ollama 0.32.6, Buzz desktop 0.5.8.
 
 Ранбук: [DEBATE_GUIDE.md](DEBATE_GUIDE.md). Знахідки: [FINDINGS.md](FINDINGS.md).
 

@@ -5,7 +5,7 @@
 моделях через Ollama. Усе на власному релеї, піднятому в Docker.
 
 Перевірено 2026-08-10 на Windows 11, RTX 4080 Laptop (12 ГБ VRAM),
-Buzz desktop 0.5.5, Ollama 0.32.6.
+Buzz desktop 0.5.8, Ollama 0.32.6.
 
 Супутні документи:
 [DEBATE_SETUP.md](DEBATE_SETUP.md) — чому саме такі значення конфігу;
