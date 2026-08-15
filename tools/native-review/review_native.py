@@ -10,10 +10,12 @@ import http.server
 import json
 import os
 import pathlib
+import platform
 import re
 import secrets
 import select
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -27,13 +29,14 @@ try:
 except ImportError as exc:  # pragma: no cover - environment preflight
     raise SystemExit("PyYAML is required (activate the repository Hermit environment)") from exc
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(os.environ.get("BUZZ_NATIVE_REVIEW_ROOT", pathlib.Path(__file__).resolve().parents[2])).resolve()
 TOOL_ROOT = pathlib.Path(__file__).resolve().parent
 PRODUCTION_BUNDLE_IDS = {"xyz.block.buzz.app", "xyz.block.sprout.app"}
 PRODUCTION_KEYRINGS = {"buzz-desktop", "sprout-desktop"}
 SECRET_NAME = re.compile(r"(AUTH|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|COOKIE)", re.I)
 ALLOWED_TOP = {"schema_version", "flow", "platforms", "fixture", "record", "steps", "cleanup"}
 ALLOWED_STEP = {"name", "locate", "act", "expect", "expect_for", "timeout_ms", "measure"}
+PERFORMANCE_SAMPLE_MINIMUM = 3
 
 
 class HarnessError(RuntimeError):
@@ -61,6 +64,60 @@ def sha256(path: pathlib.Path) -> str:
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def machine_fingerprint() -> dict[str, str]:
+    """Return comparison-critical host attributes without user-specific data."""
+    cpu = run(["sysctl", "-n", "machdep.cpu.brand_string"], check=False).stdout.strip()
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "cpu": cpu or platform.processor() or "unknown",
+    }
+
+
+class ProcessSampler:
+    """Sample app CPU and resident memory while a native journey is active."""
+
+    def __init__(self, pid: int, interval_seconds: float = 0.1):
+        self.pid = pid
+        self.interval_seconds = interval_seconds
+        self.samples: list[dict[str, float]] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _sample(self) -> None:
+        while not self._stop.is_set():
+            result = run(["ps", "-p", str(self.pid), "-o", "%cpu=", "-o", "rss="], check=False)
+            fields = result.stdout.split()
+            if len(fields) == 2:
+                try:
+                    self.samples.append({
+                        "elapsed_ms": time.monotonic() * 1000,
+                        "cpu_percent": float(fields[0]),
+                        "resident_mb": int(fields[1]) / 1024,
+                    })
+                except ValueError:
+                    pass
+            self._stop.wait(self.interval_seconds)
+
+    def finish(self) -> dict[str, Any]:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        if not self.samples:
+            return {"sample_count": 0}
+        return {
+            "sample_count": len(self.samples),
+            "interval_ms": self.interval_seconds * 1000,
+            "cpu_percent_median": statistics.median(item["cpu_percent"] for item in self.samples),
+            "cpu_percent_peak": max(item["cpu_percent"] for item in self.samples),
+            "resident_mb_median": statistics.median(item["resident_mb"] for item in self.samples),
+            "resident_mb_peak": max(item["resident_mb"] for item in self.samples),
+        }
 
 
 def validate_locator(locator: Any, where: str) -> None:
@@ -114,6 +171,7 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
     steps = journey["steps"]
     if not isinstance(steps, list) or not steps:
         raise HarnessError("journey requires at least one step")
+    measurement_names: set[str] = set()
     for index, step in enumerate(steps):
         where = f"steps[{index}]"
         if not isinstance(step, dict) or set(step) - ALLOWED_STEP or not {"name", "act", "expect"} <= set(step):
@@ -153,6 +211,13 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
         timeout = step.get("timeout_ms", 5000)
         if not isinstance(timeout, int) or not 0 < timeout <= 60000:
             raise HarnessError(f"{where}.timeout_ms must be 1..60000")
+        if "measure" in step:
+            measurement = step["measure"]
+            if not isinstance(measurement, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", measurement):
+                raise HarnessError(f"{where}.measure must be a lowercase metric identifier")
+            if measurement in measurement_names:
+                raise HarnessError(f"duplicate measurement name: {measurement}")
+            measurement_names.add(measurement)
     cleanup = journey["cleanup"]
     if not isinstance(cleanup, dict) or set(cleanup) != {"terminate_app", "remove_state"} or not all(isinstance(v, bool) for v in cleanup.values()):
         raise HarnessError("cleanup requires boolean terminate_app and remove_state")
@@ -486,11 +551,13 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
     started = utc_now()
     receipt: dict[str, Any] = {"schema_version": 1, "run_id": run_id, "flow": journey["flow"], "status": "failed",
         "started_at": started, "finished_at": started, "failure": None, "provenance": prov, "isolation": isolation,
-        "artifacts": {}, "steps": [], "cleanup": {"status": "not_started"}}
+        "artifacts": {}, "steps": [], "measurements": {}, "performance": {"machine": machine_fingerprint()},
+        "cleanup": {"status": "not_started"}}
     process: subprocess.Popen[str] | None = None
     driver: Driver | None = None
     fixture: dict[str, Any] | None = None
     probe_server: http.server.ThreadingHTTPServer | None = None
+    sampler: ProcessSampler | None = None
     try:
         if not doctor(require_permissions=True)["ok"]:
             raise HarnessError("doctor failed; grant required permissions and rerun")
@@ -500,6 +567,8 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
         receipt["provenance"]["artifact_path"] = str(app_binary)
         receipt["provenance"]["artifact_sha256"] = sha256(app_binary)
         driver = Driver(build_driver(), app_pid, run_dir / "state" / "semantic.json")
+        sampler = ProcessSampler(app_pid)
+        sampler.start()
         receipt["provenance"]["initial_window"] = wait_for_visible_window(driver, process)
         if journey["record"]["video"] == "window":
             video = run_dir / "video.mp4"
@@ -527,6 +596,8 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
             finally:
                 step_receipt["finished_monotonic_ns"] = time.monotonic_ns()
                 step_receipt["duration_ms"] = (step_receipt["finished_monotonic_ns"] - step_start) / 1_000_000
+                if measurement := step.get("measure"):
+                    receipt["measurements"][measurement] = {"value": step_receipt["duration_ms"], "unit": "ms", "step": step["name"]}
                 step_receipt["artifacts"] = capture_step(driver, run_dir, slug, journey["record"])
         if journey["record"]["video"] == "window":
             driver.request("record_stop")
@@ -544,6 +615,8 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
                 pass
     finally:
         cleanup_errors = []
+        if sampler:
+            receipt["performance"]["process"] = sampler.finish()
         if probe_server:
             probe_server.shutdown()
             probe_server.server_close()
@@ -581,6 +654,121 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
     return run_dir
 
 
+def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]:
+    receipts = []
+    for path in paths:
+        try:
+            receipt = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HarnessError(f"cannot read {label} receipt {path}: {exc}") from exc
+        if receipt.get("status") != "passed" or receipt.get("cleanup", {}).get("status") != "passed":
+            raise HarnessError(f"{label} receipt is not a clean pass: {path}")
+        if receipt.get("provenance", {}).get("dirty"):
+            raise HarnessError(f"{label} receipt was captured from a dirty tree: {path}")
+        receipts.append(receipt)
+    return receipts
+
+
+def metric_value(receipt: dict[str, Any], metric: str) -> float:
+    if metric.startswith("process."):
+        value = receipt.get("performance", {}).get("process", {}).get(metric.removeprefix("process."))
+    else:
+        value = receipt.get("measurements", {}).get(metric, {}).get("value")
+    if not isinstance(value, (int, float)):
+        raise HarnessError(f"receipt {receipt.get('run_id')} has no numeric metric {metric}")
+    return float(value)
+
+
+def cohort_summary(receipts: list[dict[str, Any]], metrics: list[str]) -> dict[str, Any]:
+    return {
+        "sample_count": len(receipts),
+        "head_sha": receipts[0]["provenance"]["head_sha"],
+        "artifact_sha256": [receipt["provenance"]["artifact_sha256"] for receipt in receipts],
+        "metrics": {
+            metric: {
+                "median": statistics.median(values := [metric_value(receipt, metric) for receipt in receipts]),
+                "minimum": min(values),
+                "maximum": max(values),
+                "samples": values,
+            }
+            for metric in metrics
+        },
+    }
+
+
+def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: list[pathlib.Path],
+                        budget_path: pathlib.Path, output: pathlib.Path | None = None) -> dict[str, Any]:
+    try:
+        budget = yaml.safe_load(budget_path.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        raise HarnessError(f"cannot read performance budget {budget_path}: {exc}") from exc
+    if not isinstance(budget, dict) or set(budget) != {"schema_version", "flow", "minimum_samples", "metrics"}:
+        raise HarnessError("performance budget requires exactly schema_version, flow, minimum_samples, and metrics")
+    if budget["schema_version"] != 1 or not isinstance(budget["flow"], str):
+        raise HarnessError("unsupported performance budget schema")
+    minimum = budget["minimum_samples"]
+    if not isinstance(minimum, int) or minimum < PERFORMANCE_SAMPLE_MINIMUM:
+        raise HarnessError(f"minimum_samples must be at least {PERFORMANCE_SAMPLE_MINIMUM}")
+    metrics = budget["metrics"]
+    if not isinstance(metrics, dict) or not metrics:
+        raise HarnessError("performance budget requires at least one metric")
+    allowed_limits = {"max", "max_regression_percent"}
+    for name, limits in metrics.items():
+        if (not isinstance(name, str) or not name or not isinstance(limits, dict) or not limits
+                or set(limits) - allowed_limits
+                or not all(isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 for value in limits.values())):
+            raise HarnessError(f"invalid limits for performance metric {name}")
+
+    baseline = load_receipts(baseline_paths, "baseline")
+    candidate = load_receipts(candidate_paths, "candidate")
+    if len(baseline) < minimum or len(candidate) < minimum:
+        raise HarnessError(f"performance comparison requires at least {minimum} clean samples per cohort")
+    all_receipts = baseline + candidate
+    flows = {receipt.get("flow") for receipt in all_receipts}
+    machines = {json.dumps(receipt.get("performance", {}).get("machine"), sort_keys=True) for receipt in all_receipts}
+    if flows != {budget["flow"]}:
+        raise HarnessError(f"receipt flows {sorted(str(item) for item in flows)} do not match budget flow {budget['flow']}")
+    if len(machines) != 1:
+        raise HarnessError("baseline and candidate receipts were captured on incompatible machines")
+    for label, cohort in (("baseline", baseline), ("candidate", candidate)):
+        if len({receipt["provenance"].get("head_sha") for receipt in cohort}) != 1:
+            raise HarnessError(f"{label} cohort mixes source revisions")
+
+    baseline_summary = cohort_summary(baseline, list(metrics))
+    candidate_summary = cohort_summary(candidate, list(metrics))
+    verdicts = {}
+    failures = []
+    for name, limits in metrics.items():
+        baseline_median = baseline_summary["metrics"][name]["median"]
+        candidate_median = candidate_summary["metrics"][name]["median"]
+        regression = None if baseline_median == 0 and candidate_median > 0 else (
+            0.0 if baseline_median == 0 else (candidate_median - baseline_median) / baseline_median * 100
+        )
+        reasons = []
+        if "max" in limits and candidate_median > limits["max"]:
+            reasons.append(f"median {candidate_median:.3f} exceeds absolute maximum {limits['max']}")
+        if "max_regression_percent" in limits:
+            if regression is None:
+                reasons.append("relative regression is undefined because the baseline median is zero")
+            elif regression > limits["max_regression_percent"]:
+                reasons.append(f"regression {regression:.2f}% exceeds {limits['max_regression_percent']}%")
+        verdicts[name] = {"status": "failed" if reasons else "passed", "regression_percent": regression, "reasons": reasons}
+        failures.extend(f"{name}: {reason}" for reason in reasons)
+    result = {
+        "schema_version": 1, "status": "failed" if failures else "passed", "flow": budget["flow"],
+        "machine": all_receipts[0]["performance"]["machine"], "baseline": baseline_summary,
+        "candidate": candidate_summary, "verdicts": verdicts, "failures": failures,
+    }
+    serialized = json.dumps(result, indent=2, allow_nan=False)
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(serialized + "\n")
+    print(serialized)
+    if failures:
+        raise HarnessError("performance budget failed: " + "; ".join(failures))
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -592,12 +780,29 @@ def main() -> int:
     run_parser.add_argument("journey", type=pathlib.Path)
     run_parser.add_argument("--relay", default="ws://localhost:3030")
     run_parser.add_argument("--output", type=pathlib.Path, default=ROOT / "test-results/native-review")
+    benchmark_parser = sub.add_parser("benchmark")
+    benchmark_parser.add_argument("journey", type=pathlib.Path)
+    benchmark_parser.add_argument("--runs", type=int, default=5)
+    benchmark_parser.add_argument("--relay", default="ws://localhost:3030")
+    benchmark_parser.add_argument("--output", type=pathlib.Path, default=ROOT / "test-results/native-review")
+    compare_parser = sub.add_parser("compare")
+    compare_parser.add_argument("--baseline", type=pathlib.Path, action="append", required=True)
+    compare_parser.add_argument("--candidate", type=pathlib.Path, action="append", required=True)
+    compare_parser.add_argument("--budget", type=pathlib.Path, required=True)
+    compare_parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
     try:
         if args.command == "doctor":
             return 0 if doctor(args.require_permissions)["ok"] else 1
         if args.command == "validate":
             load_journey(args.journey); print(f"valid: {args.journey}"); return 0
+        if args.command == "compare":
+            compare_performance(args.baseline, args.candidate, args.budget, args.output); return 0
+        if args.command == "benchmark":
+            if args.runs < PERFORMANCE_SAMPLE_MINIMUM:
+                raise HarnessError(f"benchmark requires at least {PERFORMANCE_SAMPLE_MINIMUM} runs")
+            receipts = [run_journey(args.journey, args.relay, args.output) / "receipt.json" for _ in range(args.runs)]
+            print(json.dumps({"receipts": [str(path) for path in receipts]}, indent=2)); return 0
         run_journey(args.journey, args.relay, args.output); return 0
     except HarnessError as exc:
         print(f"native-review: {exc}", file=sys.stderr)

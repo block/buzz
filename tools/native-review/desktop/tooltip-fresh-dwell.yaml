@@ -43,7 +43,7 @@ steps:
     act: {type: move_pointer}
     expect: {enabled: true}
   - name: complete_dwell
-    act: {type: wait, duration_ms: 550}
+    act: {type: wait, duration_ms: 0}
     expect:
       exists: {role: tooltip, name: "Mention someone"}
     timeout_ms: 1000
