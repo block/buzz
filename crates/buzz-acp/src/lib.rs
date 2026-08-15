@@ -1522,8 +1522,9 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 /// Result of a background respawn task.
 struct RespawnResult {
     index: usize,
-    /// Tuple: (initialized client, protocol version, agent name).
-    result: Result<(AcpClient, u32, String)>,
+    /// Tuple: (initialized client, protocol version, agent name, whether the
+    /// agent accepts `session/close`).
+    result: Result<(AcpClient, u32, String, bool)>,
 }
 
 /// Outcome of a non-cancelling steer attempt, forwarded from a per-attempt
@@ -1567,7 +1568,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<(AcpClient, u32, String)>) {
+    fn send(mut self, result: Result<(AcpClient, u32, String, bool)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -2457,7 +2458,7 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version, agent_name)) => {
+                Ok((acp, protocol_version, agent_name, session_close_supported)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
@@ -2468,6 +2469,7 @@ async fn tokio_main() -> Result<()> {
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
+                        session_close_supported,
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
@@ -2681,7 +2683,7 @@ async fn tokio_main() -> Result<()> {
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
                                     let invalidated = if pool_ready {
-                                        pool.invalidate_channel_sessions(ch)
+                                        pool.invalidate_channel_sessions(ch).await
                                     } else {
                                         0
                                     };
@@ -2811,7 +2813,7 @@ async fn tokio_main() -> Result<()> {
                                                 "!rotate received — cancelling in-flight turn and rotating session"
                                             );
                                         } else {
-                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id).await;
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,
@@ -3467,7 +3469,7 @@ async fn tokio_main() -> Result<()> {
     // Drain any respawn results that completed before the abort. Explicitly
     // shut down returned agents instead of relying on AcpClient::Drop.
     while let Ok(rr) = respawn_rx.try_recv() {
-        if let Ok((mut acp, _, _)) = rr.result {
+        if let Ok((mut acp, _, _, _)) = rr.result {
             acp.shutdown().await;
             tracing::debug!(agent = rr.index, "reaped respawned agent on shutdown");
         }
@@ -4542,6 +4544,29 @@ fn spawn_respawn_task(
     true
 }
 
+/// Whether the agent will accept `session/close`.
+///
+/// The capability is authoritative, not the protocol version. The Claude adapter
+/// reports `protocolVersion: 1` while advertising
+/// `agentCapabilities.sessionCapabilities: {"close": {}, ...}` — gating on the
+/// version alone silently skips the close for exactly the agent that leaks a
+/// subprocess per session without it.
+///
+/// Per the ACP schema, supplying `sessionCapabilities` at all means the agent
+/// supports the baseline session methods, and `session/close` is one of them —
+/// so its presence is enough; an explicit `close` entry is merely the strongest
+/// form of the same signal. Agents that advertise nothing fall back to the
+/// version check.
+fn session_close_supported(init_result: &serde_json::Value, protocol_version: u32) -> bool {
+    let session_caps = init_result
+        .get("agentCapabilities")
+        .and_then(|c| c.get("sessionCapabilities"));
+    match session_caps {
+        Some(caps) if caps.is_object() => true,
+        _ => protocol_version >= 2,
+    }
+}
+
 fn normalized_agent_name(init_result: &serde_json::Value) -> String {
     init_result
         .get("agentInfo")
@@ -4652,6 +4677,8 @@ async fn initialize_agent_pool(
                             }),
                         );
                         let agent_name = normalized_agent_name(&init_result);
+                        let session_close_supported =
+                            session_close_supported(&init_result, protocol_version);
                         agent_slots.push(Some(OwnedAgent {
                             index: i,
                             acp,
@@ -4662,6 +4689,7 @@ async fn initialize_agent_pool(
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
+                            session_close_supported,
                         }));
                     }
                     Ok(Err(e)) => {
@@ -4712,7 +4740,7 @@ async fn spawn_and_init(
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
-) -> Result<(AcpClient, u32, String)> {
+) -> Result<(AcpClient, u32, String, bool)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
@@ -4730,7 +4758,8 @@ async fn spawn_and_init(
                 }),
             );
             let agent_name = normalized_agent_name(&init_result);
-            Ok((acp, protocol_version, agent_name))
+            let close_supported = session_close_supported(&init_result, protocol_version);
+            Ok((acp, protocol_version, agent_name, close_supported))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -7007,6 +7036,55 @@ mod error_outcome_emission_tests {
         );
     }
 
+    /// Regression: the Claude adapter reports `protocolVersion: 1` while
+    /// advertising `sessionCapabilities.close`. Gating the reap on the protocol
+    /// version skipped the close for exactly the agent that leaks a `claude`
+    /// subprocess per session without it.
+    ///
+    /// This is the adapter's real initialize response, trimmed to the fields the
+    /// gate reads (claude-agent-acp 0.66.0, captured from a live agent).
+    #[test]
+    fn session_close_supported_for_claude_adapter_despite_protocol_v1() {
+        let init = serde_json::json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": "@agentclientprotocol/claude-agent-acp", "version": "0.66.0"},
+            "agentCapabilities": {
+                "loadSession": true,
+                "sessionCapabilities": {
+                    "additionalDirectories": {}, "close": {}, "delete": {},
+                    "fork": {}, "list": {}, "resume": {}
+                }
+            }
+        });
+        assert!(
+            session_close_supported(&init, 1),
+            "must send session/close to an agent that advertises it, even at protocol v1"
+        );
+    }
+
+    #[test]
+    fn session_close_supported_falls_back_to_protocol_version() {
+        // Advertises nothing: trust the version.
+        let bare = serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}});
+        assert!(!session_close_supported(&bare, 1));
+        assert!(session_close_supported(&bare, 2));
+
+        // No agentCapabilities at all (older agents).
+        let empty = serde_json::json!({"protocolVersion": 1});
+        assert!(!session_close_supported(&empty, 1));
+    }
+
+    #[test]
+    fn session_close_supported_from_bare_session_capabilities() {
+        // Per the schema, an empty `sessionCapabilities` object still means the
+        // baseline methods - which include session/close - are supported.
+        let init = serde_json::json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {"sessionCapabilities": {}}
+        });
+        assert!(session_close_supported(&init, 1));
+    }
+
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
     /// an `OwnedAgent` to move into respawn or return to the pool. The error
     /// branches never talk to the subprocess.
@@ -7022,6 +7100,7 @@ mod error_outcome_emission_tests {
             model_overridden: false,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
+            session_close_supported: true,
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,

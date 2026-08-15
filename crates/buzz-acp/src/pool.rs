@@ -211,6 +211,11 @@ pub struct OwnedAgent {
     pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
     pub protocol_version: u32,
+    /// Whether the agent accepts `session/close`, from its advertised
+    /// `sessionCapabilities` (falling back to the protocol version when it
+    /// advertises none). Not the same as `protocol_version >= 2`: the Claude
+    /// adapter reports version 1 *and* advertises the capability.
+    pub session_close_supported: bool,
 }
 
 /// Package name reported by `claude-agent-acp` in its `initialize` response.
@@ -256,6 +261,57 @@ impl OwnedAgent {
             &self.agent_name,
             self.goose_system_prompt_supported,
         )
+    }
+
+    /// Close the session we are about to stop using, then drop our state for it.
+    ///
+    /// Invalidating alone only forgets the session ID on our side. Agents that
+    /// back each session with its own child process keep that child alive until
+    /// they are told the session is over, so a rotation that skips this leaks one
+    /// subprocess per rotation for the lifetime of the agent — the Claude adapter
+    /// leaks a ~190 MB `claude` per rotation this way.
+    ///
+    /// Gated on the agent's advertised `session/close` support rather than on the
+    /// protocol version: the Claude adapter reports `protocolVersion: 1` while
+    /// advertising `sessionCapabilities.close`, so a version gate would skip the
+    /// close for the very agent this fix exists for.
+    ///
+    /// Best-effort otherwise: a failure here must not stop the rotation. We log
+    /// and carry on, because a stale session on our side is worse than an
+    /// unreaped child.
+    pub(crate) async fn retire_session(&mut self, source: &PromptSource) {
+        let session_id = match source {
+            PromptSource::Channel(cid) => self.state.sessions.get(cid).cloned(),
+            PromptSource::Heartbeat => self.state.heartbeat_session.clone(),
+        };
+
+        if let Some(session_id) = session_id {
+            if self.session_close_supported {
+                match self.acp.session_close(&session_id).await {
+                    Ok(()) => tracing::debug!(
+                        target: "pool::session",
+                        "closed session {session_id} for {source:?} on agent {}",
+                        self.index
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "pool::session",
+                        "session/close failed for {session_id} on agent {} \
+                         (agent may leak the session's resources): {e}",
+                        self.index
+                    ),
+                }
+            } else {
+                tracing::debug!(
+                    target: "pool::session",
+                    "agent {} does not advertise session/close (protocol v{}); \
+                     skipping close for {session_id}",
+                    self.index,
+                    self.protocol_version
+                );
+            }
+        }
+
+        self.state.invalidate(source);
     }
 }
 
@@ -815,12 +871,22 @@ impl AgentPool {
     /// if the relay rejects the request.
     ///
     /// Returns the number of sessions invalidated.
-    pub fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
+    ///
+    /// Async because each live session is closed on the agent before it is
+    /// dropped — see [`OwnedAgent::retire_session`]. Skipping the close would
+    /// leak the session's subprocess on agents that spawn one per session.
+    pub async fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
         let mut count = 0;
         for slot in &mut self.agents {
             if let Some(agent) = slot.as_mut() {
-                if agent.state.invalidate_channel(&channel_id) {
+                if agent.state.sessions.contains_key(&channel_id) {
+                    agent
+                        .retire_session(&PromptSource::Channel(channel_id))
+                        .await;
                     count += 1;
+                } else {
+                    // No live session, but per-channel scratch state may linger.
+                    agent.state.invalidate_channel(&channel_id);
                 }
             }
         }
@@ -2403,7 +2469,7 @@ pub async fn run_prompt_task(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
-                agent.state.invalidate(&source);
+                agent.retire_session(&source).await;
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -5654,6 +5720,7 @@ done"#
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            session_close_supported: false,
         };
         agent.state.heartbeat_session = Some("live-session".into());
 
@@ -5748,6 +5815,7 @@ done"#
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            session_close_supported: false,
         };
         agent
             .state
@@ -5920,6 +5988,7 @@ done"#
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            session_close_supported: false,
         };
         agent
             .state
@@ -6070,6 +6139,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            session_close_supported: false,
         };
         agent
             .state
@@ -7057,6 +7127,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            session_close_supported: true,
         };
 
         // Simulate dispatch: install a steer receiver (normally done by
@@ -7115,6 +7186,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            session_close_supported: true,
         };
 
         // Simulate a completed turn: `steer_rx` was consumed by the read loop
@@ -8137,5 +8209,161 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+
+    /// Rotation must tell the agent to close the session it is retiring.
+    ///
+    /// Regression: `retire_session` previously only dropped the session ID from
+    /// our map. Agents that back each session with a child process (the Claude
+    /// adapter spawns one `claude` per session) never reaped that child, leaking
+    /// one subprocess — ~190 MB — per rotation.
+    #[tokio::test]
+    async fn test_retire_session_closes_the_session_on_the_agent() {
+        // The fake agent records the first request it receives so the test can
+        // assert on the actual wire message, not just on our own state.
+        let seen = std::env::temp_dir().join(format!("buzz-acp-close-{}", Uuid::new_v4()));
+        let script = format!(
+            r#"
+            read -t 5 req
+            printf '%s' "$req" > {path}
+            echo '{{"jsonrpc":"2.0","id":0,"result":{{}}}}'
+            sleep 5
+        "#,
+            path = seen.display()
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("failed to spawn test agent");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+            session_close_supported: true,
+        };
+        agent.state.heartbeat_session = Some("sess_hb_1".to_string());
+        agent.state.heartbeat_turn_count = 50;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            agent.retire_session(&PromptSource::Heartbeat),
+        )
+        .await
+        .expect("retire_session must not hang");
+
+        let sent = std::fs::read_to_string(&seen).expect("agent received no request at all");
+        let _ = std::fs::remove_file(&seen);
+        let sent: serde_json::Value =
+            serde_json::from_str(&sent).expect("request must be valid JSON-RPC");
+        assert_eq!(
+            sent["method"].as_str(),
+            Some("session/close"),
+            "rotation must send session/close, got {sent}"
+        );
+        assert_eq!(
+            sent["params"]["sessionId"].as_str(),
+            Some("sess_hb_1"),
+            "session/close must name the session being retired, got {sent}"
+        );
+        assert!(
+            sent.get("id").is_some(),
+            "session/close is a request, not a notification: {sent}"
+        );
+
+        assert!(
+            agent.state.heartbeat_session.is_none(),
+            "heartbeat session must be cleared after retirement"
+        );
+        assert_eq!(
+            agent.state.heartbeat_turn_count, 0,
+            "heartbeat turn counter must reset after retirement"
+        );
+    }
+
+    /// A close that the agent rejects must not block rotation: a stale session on
+    /// our side is worse than an unreaped child, so the state is cleared anyway.
+    #[tokio::test]
+    async fn test_retire_session_clears_state_when_close_fails() {
+        let script = r#"
+            read -t 5 _req
+            echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}}'
+            sleep 5
+        "#;
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script.to_string()], &[], false)
+            .await
+            .expect("failed to spawn test agent");
+        let channel = Uuid::new_v4();
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+            session_close_supported: true,
+        };
+        agent
+            .state
+            .sessions
+            .insert(channel, "sess_ch_1".to_string());
+        agent.state.turn_counts.insert(channel, 50);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            agent.retire_session(&PromptSource::Channel(channel)),
+        )
+        .await
+        .expect("retire_session must not hang when the agent rejects the close");
+
+        assert!(
+            !agent.state.has_channel_state(&channel),
+            "channel state must be cleared even when session/close fails"
+        );
+    }
+
+    /// An agent that does not advertise `session/close` must not be sent one —
+    /// and we must not stall waiting for a reply that will never come.
+    #[tokio::test]
+    async fn test_retire_session_skips_close_when_unsupported() {
+        // This agent never answers. If retire_session sent a request it would
+        // block for REQUEST_TIMEOUT (60s) and blow the timeout below.
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 30".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+            session_close_supported: false,
+        };
+        agent.state.heartbeat_session = Some("sess_hb_v1".to_string());
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            agent.retire_session(&PromptSource::Heartbeat),
+        )
+        .await
+        .expect("an agent without the capability must skip the close, not wait on it");
+
+        assert!(agent.state.heartbeat_session.is_none());
     }
 }
