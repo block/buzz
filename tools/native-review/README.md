@@ -25,9 +25,12 @@ keys never enter the reviewed process. Production bundle IDs, keyring services,
 and remote relays fail closed.
 
 iOS runs erase the selected simulator before and after the journey. Do not point
-the runner at a simulator containing state you need. The review-only environment
-suppresses the launch notification prompt because Flutter cannot actuate
-SpringBoard; normal app launches retain production permission behavior.
+the runner at a simulator containing state you need. The Flutter child receives
+only an allowlist of host tool settings plus review-only flags; inherited tokens,
+production keys, and cloud credentials do not enter the reviewed process. The
+review-only environment suppresses the launch notification prompt because
+Flutter cannot actuate SpringBoard; normal app launches retain production
+permission behavior.
 
 These controls protect reviewer state from accidents. They are **not**
 containment for hostile code. Use a dedicated macOS user, disposable simulator,

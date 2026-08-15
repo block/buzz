@@ -19,6 +19,10 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_TEST = ROOT / "mobile/integration_test/native_review_pairing_test.dart"
+FLUTTER_ENV_ALLOWLIST = {
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SHELL", "USER", "LOGNAME",
+    "TERM", "__CF_USER_TEXT_ENCODING", "DEVELOPER_DIR",
+}
 
 
 class ReviewError(RuntimeError):
@@ -52,6 +56,13 @@ def available_device(name: str) -> dict[str, Any]:
 def provenance() -> dict[str, Any]:
     status = git("status", "--porcelain=v1", "--untracked-files=all")
     return {"head_sha": git("rev-parse", "HEAD"), "dirty": bool(status), "status": status.splitlines()}
+
+
+def flutter_environment() -> dict[str, str]:
+    """Return only host settings required to launch Flutter and Xcode tooling."""
+    env = {key: value for key, value in os.environ.items() if key in FLUTTER_ENV_ALLOWLIST}
+    env.update({"BUZZ_NATIVE_REVIEW": "1", "SIMCTL_CHILD_BUZZ_NATIVE_REVIEW": "1"})
+    return env
 
 
 def wait_for_recording(recorder: subprocess.Popen[str], timeout_seconds: float = 15) -> None:
@@ -101,12 +112,10 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         wait_for_recording(recorder)
         receipt["artifacts"]["video"] = "video.mp4"
-        flutter_env = {**os.environ, "BUZZ_NATIVE_REVIEW": "1",
-                       "SIMCTL_CHILD_BUZZ_NATIVE_REVIEW": "1"}
         result = run(["flutter", "drive", "--driver", "test_driver/integration_test.dart",
                       "--target", str(test.relative_to(ROOT / "mobile")), "-d", udid,
                       "--keep-app-running", "--dart-define=BUZZ_NATIVE_REVIEW=true"],
-                     cwd=ROOT / "mobile", check=False, env=flutter_env)
+                     cwd=ROOT / "mobile", check=False, env=flutter_environment())
         (run_dir / "flutter.log").write_text(result.stdout + result.stderr)
         receipt["artifacts"]["log"] = "flutter.log"
         screenshot = run_dir / "final.png"

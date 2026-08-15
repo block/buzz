@@ -35,6 +35,30 @@ class FakeRecorder:
 
 
 class IosReviewTests(unittest.TestCase):
+    def test_flutter_environment_allowlists_tool_settings_and_scrubs_secrets(self):
+        inherited = {
+            "PATH": "/repo/bin:/usr/bin",
+            "HOME": "/Users/reviewer",
+            "TMPDIR": "/tmp/review",
+            "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+            "BUZZ_PRIVATE_KEY": "production-key",
+            "BUZZ_AUTH_TAG": "production-auth",
+            "AWS_SECRET_ACCESS_KEY": "cloud-secret",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/secrets/google.json",
+            "GH_TOKEN": "github-token",
+        }
+        with mock.patch.dict(ios_review.os.environ, inherited, clear=True):
+            child = ios_review.flutter_environment()
+
+        self.assertEqual(child, {
+            "PATH": inherited["PATH"],
+            "HOME": inherited["HOME"],
+            "TMPDIR": inherited["TMPDIR"],
+            "DEVELOPER_DIR": inherited["DEVELOPER_DIR"],
+            "BUZZ_NATIVE_REVIEW": "1",
+            "SIMCTL_CHILD_BUZZ_NATIVE_REVIEW": "1",
+        })
+
     def test_device_selection_prefers_latest_runtime_and_records_it(self):
         payload = {"devices": {
             "com.apple.CoreSimulator.SimRuntime.iOS-18-5": [
@@ -59,10 +83,12 @@ class IosReviewTests(unittest.TestCase):
     def test_flutter_failure_finalizes_recording_writes_receipt_and_cleans_device(self):
         recorder = FakeRecorder()
         commands = []
+        flutter_environments = []
 
         def fake_run(command, **kwargs):
             commands.append(command)
             if command[:2] == ["flutter", "drive"]:
+                flutter_environments.append(kwargs["env"])
                 return subprocess.CompletedProcess(command, 1, "journey failed", "diagnostic")
             if "screenshot" in command:
                 pathlib.Path(command[-1]).write_bytes(b"png")
@@ -89,6 +115,9 @@ class IosReviewTests(unittest.TestCase):
         self.assertEqual(receipt["artifacts"], {
             "video": "video.mp4", "log": "flutter.log", "screenshot": "final.png"
         })
+        self.assertEqual(len(flutter_environments), 1)
+        self.assertEqual(flutter_environments[0]["BUZZ_NATIVE_REVIEW"], "1")
+        self.assertEqual(flutter_environments[0]["SIMCTL_CHILD_BUZZ_NATIVE_REVIEW"], "1")
         self.assertIn(["xcrun", "simctl", "shutdown", "device"], commands)
         self.assertIn(["xcrun", "simctl", "erase", "device"], commands)
 
