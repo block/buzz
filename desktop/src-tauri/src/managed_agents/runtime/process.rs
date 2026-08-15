@@ -408,7 +408,16 @@ pub(crate) fn valid_agent_runtime_receipt_with(
     else {
         return false;
     };
+    // A stored connection URL must belong to this pair: canonicalizing it has
+    // to reproduce the receipt's own key. Absent is fine (pre-field receipts);
+    // present-but-foreign or unparseable is a corrupt receipt, not a fallback.
+    let connect_url_matches_key = match receipt.connect_relay_url.as_deref() {
+        None => true,
+        Some(connect_url) => ManagedAgentRuntimeKey::new(receipt.key.pubkey.clone(), connect_url)
+            .is_ok_and(|from_connect| from_connect == receipt.key),
+    };
     canonical == receipt.key
+        && connect_url_matches_key
         && path.file_name().and_then(|name| name.to_str())
             == Some(&format!("{}.json", receipt.key.runtime_id()))
         && receipt.desktop_instance_id == instance_id
@@ -436,9 +445,70 @@ pub(super) fn terminate_runtime_receipt_with(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     Err(format!(
-        "prior runtime {} for pair {} on {} did not exit",
-        receipt.pid, receipt.key.pubkey, receipt.key.relay_url
+        "prior runtime {} for agent {} did not exit",
+        receipt.pid, receipt.key.pubkey
     ))
+}
+
+fn receipt_connection_relay_url(receipt: &super::super::ManagedAgentRuntimeReceipt) -> &str {
+    receipt
+        .connect_relay_url
+        .as_deref()
+        // Before `connectRelayUrl` was persisted, children were spawned with
+        // the canonical key URL. That concrete historical target is the only
+        // safe fallback for a legacy receipt.
+        .unwrap_or(&receipt.key.relay_url)
+}
+
+fn valid_runtime_receipt_for_key(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+    instance_id: &str,
+) -> Option<(std::path::PathBuf, super::super::ManagedAgentRuntimeReceipt)> {
+    super::super::read_all_agent_runtime_receipts(app)
+        .into_iter()
+        .find(|(path, receipt)| {
+            receipt.key == *key && valid_agent_runtime_receipt(path, receipt, instance_id)
+        })
+}
+
+fn ensure_receipt_connection_matches(
+    receipt: &super::super::ManagedAgentRuntimeReceipt,
+    requested_relay_url: &str,
+) -> Result<(), String> {
+    ensure_connection_targets_match(receipt_connection_relay_url(receipt), requested_relay_url)
+}
+
+/// Validate any receipt occupying `key` before a tracked runtime or its
+/// receipt/cache is removed through a caller-supplied connection URL.
+pub(crate) fn ensure_pair_receipt_connection_matches(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+    requested_relay_url: &str,
+) -> Result<(), String> {
+    let instance_id = current_instance_id(app);
+    if let Some((_, receipt)) = valid_runtime_receipt_for_key(app, key, &instance_id) {
+        ensure_receipt_connection_matches(&receipt, requested_relay_url)?;
+    }
+    Ok(())
+}
+
+pub(super) fn terminate_runtime_receipt_for_target_with(
+    path: &std::path::Path,
+    receipt: &super::super::ManagedAgentRuntimeReceipt,
+    requested_relay_url: &str,
+    is_valid: impl FnOnce(&std::path::Path, &super::super::ManagedAgentRuntimeReceipt) -> bool,
+    terminate: impl FnOnce(u32) -> Result<(), String>,
+    is_running: impl FnMut(u32) -> bool,
+    remove: impl FnOnce(&std::path::Path),
+) -> Result<(), String> {
+    if !is_valid(path, receipt) {
+        return Ok(());
+    }
+    // Only a valid, owned receipt may select a process. Once selected, require
+    // its stamped target to match before termination.
+    ensure_receipt_connection_matches(receipt, requested_relay_url)?;
+    terminate_runtime_receipt_with(path, receipt, terminate, is_running, remove)
 }
 
 /// Replace a valid prior-session process before registering a new child for
@@ -448,22 +518,152 @@ pub(super) fn terminate_runtime_receipt_with(
 pub(crate) fn terminate_untracked_pair_runtime(
     app: &AppHandle,
     key: &ManagedAgentRuntimeKey,
+    requested_relay_url: &str,
 ) -> Result<(), String> {
     let instance_id = current_instance_id(app);
-    let Some((path, receipt)) = super::super::read_all_agent_runtime_receipts(app)
-        .into_iter()
-        .find(|(path, receipt)| {
-            receipt.key == *key && valid_agent_runtime_receipt(path, receipt, &instance_id)
-        })
-    else {
+    let Some((path, receipt)) = valid_runtime_receipt_for_key(app, key, &instance_id) else {
         return Ok(());
     };
 
-    terminate_runtime_receipt_with(
+    terminate_runtime_receipt_for_target_with(
         &path,
         &receipt,
+        requested_relay_url,
+        |_, _| true,
         terminate_process,
         process_is_running,
         super::super::remove_agent_runtime_receipt_path,
     )
+}
+
+/// The URL a child is dialed with: the configured spelling, trimmed. The
+/// canonical form is identity-only; connection code preserves the authority.
+pub(crate) fn connection_relay_url(configured_relay_url: &str) -> String {
+    configured_relay_url.trim().to_string()
+}
+
+/// Comparable connection target, parsed with `url::Url`: lowercased scheme,
+/// case-folded host with a single FQDN root dot stripped (mirroring the
+/// tenancy authority `tenant::normalize_host`), a port only when it is not
+/// the scheme's own default, a root-slash-folded path, and the query kept
+/// verbatim. Folds spellings that reach the same tenant while preserving
+/// tenancy-significant differences: `localhost`, `127.0.0.1`, and `[::1]`
+/// stay three distinct hosts, and `ws` vs `wss`, non-default ports (including
+/// the OTHER scheme's default), paths, and query strings stay distinct.
+/// `None` for unparsable URLs - the caller falls back to exact comparison.
+fn connection_target(raw: &str) -> Option<ConnectionTarget> {
+    let url = url::Url::parse(raw.trim()).ok()?;
+    let scheme = url.scheme().to_ascii_lowercase();
+    let host = {
+        let host = url.host_str()?.to_ascii_lowercase();
+        host.strip_suffix('.').map(str::to_string).unwrap_or(host)
+    };
+    let default_port = match scheme.as_str() {
+        "ws" | "http" => Some(80),
+        "wss" | "https" => Some(443),
+        _ => None,
+    };
+    let port = url
+        .port_or_known_default()
+        .filter(|port| Some(*port) != default_port);
+    let path = match url.path() {
+        "/" => String::new(),
+        path => path.to_string(),
+    };
+    let query = url.query().map(str::to_string);
+    Some(ConnectionTarget {
+        scheme,
+        host,
+        port,
+        path,
+        query,
+    })
+}
+
+/// See [`connection_target`].
+#[derive(PartialEq)]
+struct ConnectionTarget {
+    scheme: String,
+    host: String,
+    port: Option<u16>,
+    path: String,
+    query: Option<String>,
+}
+
+/// Compare the actual relay connection authorities without applying canonical
+/// runtime-key loopback folding. Unparsable inputs fail closed to exact,
+/// trimmed equality.
+pub(crate) fn connection_targets_match(live: &str, requested: &str) -> bool {
+    match (connection_target(live), connection_target(requested)) {
+        (Some(live), Some(requested)) => live == requested,
+        _ => connection_relay_url(live) == connection_relay_url(requested),
+    }
+}
+
+fn ensure_connection_targets_match(live: &str, requested: &str) -> Result<(), String> {
+    if connection_targets_match(live, requested) {
+        Ok(())
+    } else {
+        // Never include either URL: query strings may contain relay tokens and
+        // this error is persisted into `last_error` and rendered by the UI.
+        Err(concat!(
+            "connection-target conflict: a managed-agent runtime under this canonical identity ",
+            "belongs to a different connection target; manage it through its configured community"
+        )
+        .into())
+    }
+}
+
+/// A live pair may only be reused for a start request that dials the same
+/// connection target it already holds. Canonical keys fold host spellings,
+/// so two distinct tenants can share one key; silently reusing across
+/// spellings would report the requested tenant as started while the child
+/// stays connected to the old one, and reconciliation would stop retrying.
+/// Equivalence is by [`connection_target`], so harmless formatting drift
+/// (host case, default port, root slash, FQDN dot) never reads as a
+/// conflict. The error deliberately omits both URLs: they may carry query
+/// tokens, and this string lands in `last_error` and the UI.
+pub(crate) fn ensure_pair_connection_matches(
+    runtime: &ManagedAgentPairRuntime,
+    requested_relay_url: &str,
+) -> Result<(), String> {
+    ensure_connection_targets_match(&runtime.connect_relay_url, requested_relay_url)
+}
+
+/// Select a tracked canonical-key entry only when its stamped dial target is
+/// connection-equivalent to the caller's requested community.
+pub(crate) fn tracked_pair_runtime_for_target<'a>(
+    runtimes: &'a std::collections::HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    key: &ManagedAgentRuntimeKey,
+    requested_relay_url: &str,
+) -> Result<Option<&'a ManagedAgentPairRuntime>, String> {
+    let Some(runtime) = runtimes.get(key) else {
+        return Ok(None);
+    };
+    ensure_pair_connection_matches(runtime, requested_relay_url)?;
+    Ok(Some(runtime))
+}
+
+/// Hand-written so `connect_relay_url` never renders verbatim:
+/// `normalize_relay_url` rejects userinfo but deliberately preserves query
+/// strings, so `wss://relay.example/ws?token=...` is a valid value. Same
+/// masking policy as `SpawnConfigSnapshot`'s `relay_url` (its single
+/// redaction authority), pinned by the owning-process Debug sentinel test.
+impl std::fmt::Debug for crate::managed_agents::ManagedAgentProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("ManagedAgentProcess");
+        s.field("child", &self.child)
+            .field("log_path", &self.log_path)
+            .field(
+                "connect_relay_url",
+                &crate::managed_agents::spawn_snapshot::diff::MASK,
+            )
+            .field("spawn_config", &self.spawn_config)
+            .field("setup_mode", &self.setup_mode)
+            .field("adapter_availability", &self.adapter_availability)
+            .field("start_nonce", &self.start_nonce);
+        #[cfg(windows)]
+        s.field("job", &self.job);
+        s.finish()
+    }
 }

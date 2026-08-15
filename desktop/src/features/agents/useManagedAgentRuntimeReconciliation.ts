@@ -2,8 +2,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import {
-  canonicalCommunityRelays,
   classifyReconcileResult,
+  connectionTargetCommunityRelays,
   pendingReconcileRelays,
   reconcileRetryDelayMs,
 } from "@/features/agents/managedAgentReconciliationPlan";
@@ -11,7 +11,7 @@ import {
   cacheReconciledManagedAgentRuntimes,
   managedAgentRuntimesQueryKey,
 } from "@/features/agents/managedAgentRuntimeHooks";
-import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
+import { connectionTargetUrl } from "@/features/agents/managedAgentRuntimeStatus";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
 import { reconcileManagedAgentRuntimes } from "@/shared/api/tauriManagedAgents";
 
@@ -19,7 +19,7 @@ import { reconcileManagedAgentRuntimes } from "@/shared/api/tauriManagedAgents";
  * Bootstrap a lazy harness pair for every auto-start local agent in every
  * configured community, incrementally and with retry.
  *
- * Reconciliation is keyed by canonical relay URL: each configured relay is
+ * Reconciliation bookkeeping is keyed by connection target: each configured relay is
  * reconciled once it appears (so adding a community mid-session spawns pairs
  * there without needing the add flow to also switch communities), and a relay
  * whose reconcile fails is retried with a capped backoff (5s / 30s / 2m) rather
@@ -31,11 +31,11 @@ export function useManagedAgentRuntimeReconciliation(
   communities: readonly { relayUrl: string }[],
 ): void {
   const queryClient = useQueryClient();
-  // Canonical relay URLs that have reconciled cleanly — never re-hit.
+  // Connection targets that have reconciled cleanly — never re-hit.
   const reconciledRef = React.useRef<Set<string>>(new Set());
-  // Canonical relay URLs with a reconcile call in flight — not re-dispatched.
+  // Connection targets with a reconcile call in flight — not re-dispatched.
   const inFlightRef = React.useRef<Set<string>>(new Set());
-  // Consecutive failures per canonical relay URL, driving the retry backoff.
+  // Consecutive failures per connection target, driving the retry backoff.
   const failuresRef = React.useRef<Map<string, number>>(new Map());
   const retryTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -73,23 +73,23 @@ export function useManagedAgentRuntimeReconciliation(
     };
 
     const runReconcile = () => {
-      const canonicalToRequested = canonicalCommunityRelays(
+      const targetToRequested = connectionTargetCommunityRelays(
         communities,
-        canonicalRelayUrl,
+        connectionTargetUrl,
       );
       // Forget bookkeeping for relays that are no longer configured so the sets
       // stay bounded and re-adding a removed community reconciles it afresh.
       for (const done of [...reconciledRef.current]) {
-        if (!canonicalToRequested.has(done)) reconciledRef.current.delete(done);
+        if (!targetToRequested.has(done)) reconciledRef.current.delete(done);
       }
       for (const failing of [...failuresRef.current.keys()]) {
-        if (!canonicalToRequested.has(failing)) {
+        if (!targetToRequested.has(failing)) {
           failuresRef.current.delete(failing);
         }
       }
 
       const pending = pendingReconcileRelays(
-        canonicalToRequested,
+        targetToRequested,
         reconciledRef.current,
         inFlightRef.current,
       );
@@ -100,7 +100,7 @@ export function useManagedAgentRuntimeReconciliation(
 
       for (const relay of pending) inFlightRef.current.add(relay);
       const targets = pending.map((relay) => ({
-        relayUrl: canonicalToRequested.get(relay) as string,
+        relayUrl: targetToRequested.get(relay) as string,
       }));
       const baseline = queryClient.getQueryData<ManagedAgentRuntimeStatus[]>(
         managedAgentRuntimesQueryKey,
@@ -109,11 +109,15 @@ export function useManagedAgentRuntimeReconciliation(
       void reconcileManagedAgentRuntimes(targets)
         .then((runtimes) => {
           cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
-          return classifyReconcileResult(pending, runtimes, canonicalRelayUrl);
+          return classifyReconcileResult(
+            pending,
+            runtimes,
+            connectionTargetUrl,
+          );
         })
         .catch((error) => {
           console.warn("[managed-agent-runtimes] reconcile failed:", error);
-          return classifyReconcileResult(pending, null, canonicalRelayUrl);
+          return classifyReconcileResult(pending, null, connectionTargetUrl);
         })
         .then(({ succeeded, failed }) => {
           for (const relay of pending) inFlightRef.current.delete(relay);

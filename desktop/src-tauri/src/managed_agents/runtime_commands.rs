@@ -3,13 +3,14 @@ use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::{
-    agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
+    agent_readiness, append_log_marker, clear_inactive_legacy_scalar_pid, connection_relay_url,
+    current_instance_id, ensure_pair_receipt_connection_matches, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
     process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
     spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    tracked_pair_runtime_for_target, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -60,7 +61,12 @@ fn status_for_with(
     ManagedAgentRuntimeStatus {
         pubkey: key.pubkey.clone(),
         relay_url: key.relay_url.clone(),
-        requested_relay_url,
+        // Callers that know the exact descriptor URL (reconcile) pass it in;
+        // otherwise fall back to the live pair's stamped connection URL so
+        // frontend start/restart actions re-dial the configured spelling
+        // instead of the canonical form.
+        requested_relay_url: requested_relay_url
+            .or_else(|| runtime.map(|runtime| runtime.connect_relay_url.clone())),
         local_setup,
         lifecycle: runtime
             .map(|runtime| runtime.lifecycle.clone())
@@ -160,16 +166,17 @@ pub fn list_managed_agent_runtimes(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    let exited_keys: Vec<_> = runtimes
+    let exited_pairs: Vec<_> = runtimes
         .iter_mut()
         .filter_map(|(key, runtime)| match runtime.child.try_wait() {
-            Ok(Some(_)) | Err(_) => Some(key.clone()),
+            Ok(Some(_)) | Err(_) => Some((key.clone(), runtime.connect_relay_url.clone())),
             Ok(None) => None,
         })
         .collect();
-    let records_changed = !exited_keys.is_empty();
+    let records_changed = !exited_pairs.is_empty();
     let mut statuses = Vec::new();
-    for key in exited_keys {
+    for (key, requested_relay) in exited_pairs {
+        ensure_pair_receipt_connection_matches(&app, &key, &requested_relay)?;
         runtimes.remove(&key);
         super::remove_agent_runtime_receipt(&app, &key);
         state.clear_agent_session_cache(&key);
@@ -184,7 +191,7 @@ pub fn list_managed_agent_runtimes(
                 record,
                 &key,
                 None,
-                None,
+                Some(requested_relay),
                 StatusInputs {
                     personas: &personas,
                     global: &global,
@@ -268,28 +275,32 @@ fn start_pair(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    if runtimes
-        .get_mut(&key)
-        .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
-    {
-        let status = status_for(&app, record, &key, runtimes.get(&key), None);
-        return Ok(status);
+    if tracked_pair_runtime_for_target(&runtimes, &key, &relay_url)?.is_some() {
+        if runtimes
+            .get_mut(&key)
+            .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+        {
+            let status = status_for(&app, record, &key, runtimes.get(&key), None);
+            return Ok(status);
+        }
+        ensure_pair_receipt_connection_matches(&app, &key, &relay_url)?;
+        runtimes.remove(&key);
     }
-    runtimes.remove(&key);
-    terminate_untracked_pair_runtime(&app, &key)?;
+    terminate_untracked_pair_runtime(&app, &key, &relay_url)?;
 
     let owner = state
         .keys
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    let mut process = spawn_agent_child(&app, record, &relay_url, lazy, owner.as_deref())?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(&app),
         started_at: now.clone(),
+        connect_relay_url: Some(process.connect_relay_url.clone()),
     };
     if let Err(error) = write_agent_runtime_receipt(&app, &receipt) {
         let _ = terminate_process(process.child.id());
@@ -331,7 +342,12 @@ pub fn stop_managed_agent_runtime(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    if let Some(mut runtime) = runtimes.remove(&key) {
+    let tracked = tracked_pair_runtime_for_target(&runtimes, &key, &relay_url)?.is_some();
+    if tracked {
+        ensure_pair_receipt_connection_matches(&app, &key, &relay_url)?;
+        let Some(mut runtime) = runtimes.remove(&key) else {
+            return Err("managed-agent runtime changed during stop".into());
+        };
         let stop_result = if process_is_running(runtime.child.id()) {
             terminate_process(runtime.child.id())
         } else {
@@ -362,14 +378,20 @@ pub fn stop_managed_agent_runtime(
         // failure the receipt stays on disk (terminate_untracked_pair_runtime
         // only removes it after the child exits), mirroring the tracked
         // path's keep-until-success invariant.
-        terminate_untracked_pair_runtime(&app, &key)?;
+        terminate_untracked_pair_runtime(&app, &key, &relay_url)?;
+        clear_inactive_legacy_scalar_pid(&app, record)?;
     }
     super::remove_agent_runtime_receipt(&app, &key);
     state.clear_agent_session_cache(&key);
-    record.runtime_pid = None;
     record.updated_at = crate::util::now_iso();
     record.last_stopped_at = Some(record.updated_at.clone());
-    let status = status_for(&app, record, &key, None, None);
+    let status = status_for(
+        &app,
+        record,
+        &key,
+        None,
+        Some(connection_relay_url(&relay_url)),
+    );
     drop(runtimes);
     save_managed_agents(&app, &records)?;
     emit_status(&app, &status);
@@ -403,7 +425,10 @@ async fn probe_agent_relay_access(
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;
-    let api_base = crate::relay::relay_http_base_url(&key.relay_url);
+    // Probe the community the user actually configured: relay tenancy is
+    // host-derived, so the canonical key spelling can resolve to a different
+    // (or unmapped) community than the requested URL.
+    let api_base = crate::relay::relay_http_base_url(&requested_relay_url);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         crate::relay::query_relay_at_with_keys(
@@ -504,7 +529,10 @@ pub async fn reconcile_managed_agent_runtimes(
                 Ok((record, key, requested)) => {
                     match start_pair(
                         record.pubkey.clone(),
-                        key.relay_url.clone(),
+                        // Start with the requested spelling so the spawned
+                        // child connects to the community that was probed.
+                        // start_pair re-derives the same canonical key.
+                        requested.clone(),
                         true,
                         Some(&record.updated_at),
                         app.clone(),

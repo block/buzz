@@ -83,8 +83,10 @@ impl ManagedAgentPairRuntime {
 pub struct ManagedAgentRuntimeStatus {
     pub pubkey: String,
     pub relay_url: String,
-    /// Exact descriptor URL echoed only by reconcile result rows so callers can
-    /// correlate a canonical response without normalizing on the frontend.
+    /// The requested (non-canonical) URL when known: the exact submitted
+    /// descriptor on reconcile result rows, otherwise the live pair's actual
+    /// connection spelling. Lets callers correlate rows across spellings
+    /// without normalizing on the frontend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_relay_url: Option<String>,
     pub local_setup: bool,
@@ -117,4 +119,12 @@ pub struct ManagedAgentRuntimeReceipt {
     pub pid: u32,
     pub desktop_instance_id: String,
     pub started_at: String,
+    /// The exact relay URL the child was dialed with, persisted alongside the
+    /// pair identity. Optional so receipts written before this field existed
+    /// still deserialize; absent marks a valid legacy receipt whose connection
+    /// spelling is unknown. When present it must canonicalize back to
+    /// `key.relay_url` (see `valid_agent_runtime_receipt_with`), so a receipt
+    /// can never smuggle a connection URL belonging to a different pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_relay_url: Option<String>,
 }

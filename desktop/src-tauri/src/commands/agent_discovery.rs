@@ -562,9 +562,10 @@ async fn restart_single_agent_after_install(
         if record.backend != BackendKind::Local {
             return Err(format!("agent {pubkey_owned} is no longer a local agent"));
         }
-        let runtime_keys =
-            crate::managed_agents::managed_agent_runtime_keys(&runtimes, &pubkey_owned);
-        if runtime_keys.is_empty() {
+        // Dial targets (configured spellings) must be collected before the stop.
+        let restart_targets =
+            crate::managed_agents::managed_agent_restart_targets(&runtimes, &pubkey_owned);
+        if restart_targets.is_empty() {
             return Err(format!(
                 "agent {pubkey_owned} no longer has a live pair runtime after sync"
             ));
@@ -606,12 +607,12 @@ async fn restart_single_agent_after_install(
         stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
         save_managed_agents(&app_for_stop, &records)?;
 
-        Ok(runtime_keys)
+        Ok(restart_targets)
     })
     .await;
 
-    let runtime_keys = match stop_result {
-        Ok(Ok(runtime_keys)) => runtime_keys,
+    let relay_urls = match stop_result {
+        Ok(Ok(restart_targets)) => restart_targets,
         Ok(Err(e)) => {
             eprintln!("buzz-desktop: install_acp_runtime: skipping restart of {pubkey}: {e}");
             return InstallRestartOutcome::Skipped;
@@ -624,7 +625,6 @@ async fn restart_single_agent_after_install(
         }
     };
 
-    let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
     let state = app.state::<AppState>();
     match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
         .await

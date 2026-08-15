@@ -1,5 +1,13 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[test]
+fn agent_connection_preserves_loopback_authority() {
+    assert_eq!(
+        super::connection_relay_url(" ws://localhost:3200/ "),
+        "ws://localhost:3200/"
+    );
+}
+
 // ── desktop binary name tests ───────────────────────────────────────────
 
 #[test]
@@ -117,7 +125,9 @@ fn unknown_command_returns_none() {
 
 // ── build_respond_to_env tests ───────────────────────────────────────
 
-use super::test_fixtures::{expected_mode, expected_owner_only, fixture};
+use super::test_fixtures::{
+    expected_mode, expected_owner_only, fixture, minimal_record, receipt_fixture,
+};
 use super::{build_respond_to_env, build_respond_to_env_with_policy};
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
 
@@ -884,17 +894,6 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
 
 // ── pair receipt validation tests ───────────────────────────────────────
 
-fn receipt_fixture(
-    key: crate::managed_agents::ManagedAgentRuntimeKey,
-) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
-    crate::managed_agents::ManagedAgentRuntimeReceipt {
-        key,
-        pid: std::process::id(),
-        desktop_instance_id: "test-instance".into(),
-        started_at: "now".into(),
-    }
-}
-
 #[test]
 fn receipt_validation_rejects_noncanonical_identity() {
     let mut receipt = receipt_fixture(
@@ -987,12 +986,16 @@ fn unpinned_record_resolves_pair_key_per_workspace() {
     // read as running in workspace A and stopped in workspace B — the pair
     // key the summary looks up differs per workspace.
     let pubkey = "aa".repeat(32);
-    let key_a = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
-    let key_b = super::resolve_workspace_pair_key(&pubkey, "", "wss://two.example").unwrap();
+    let (key_a, target_a) =
+        super::resolve_workspace_pair_target(&pubkey, "", "wss://one.example").unwrap();
+    let (key_b, target_b) =
+        super::resolve_workspace_pair_target(&pubkey, "", "wss://two.example").unwrap();
 
     let runtimes = std::collections::HashMap::from([(key_a.clone(), ())]);
     assert!(runtimes.contains_key(&key_a));
     assert!(!runtimes.contains_key(&key_b));
+    assert_eq!(target_a, "wss://one.example");
+    assert_eq!(target_b, "wss://two.example");
 }
 
 #[test]
@@ -1001,32 +1004,48 @@ fn stored_relay_pin_is_ignored_in_pair_key_resolution() {
     // `relay_url` resolves the same per-workspace pair key an unpinned record
     // does, so summaries/stop act on the community being viewed.
     let pubkey = "aa".repeat(32);
-    let from_a =
-        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://one.example")
+    let (from_a, target_a) =
+        super::resolve_workspace_pair_target(&pubkey, "wss://pinned.example", "wss://one.example")
             .unwrap();
-    let from_b =
-        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://two.example")
+    let (from_b, target_b) =
+        super::resolve_workspace_pair_target(&pubkey, "wss://pinned.example", "wss://two.example")
             .unwrap();
     assert_ne!(from_a, from_b);
     assert_eq!(from_a.relay_url, "wss://one.example");
     assert_eq!(from_b.relay_url, "wss://two.example");
+    assert_eq!(target_a, "wss://one.example");
+    assert_eq!(target_b, "wss://two.example");
 }
 
 #[test]
-fn workspace_pair_key_is_canonical() {
-    // Spawn stamps the canonical key; lookup must hit the same entry even
-    // when the workspace relay is written in a non-canonical form.
+fn workspace_pair_target_keeps_canonical_key_and_exact_request() {
     let pubkey = "aa".repeat(32);
-    let stamped = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
-    let viewed = super::resolve_workspace_pair_key(&pubkey, "", "WSS://One.Example:443/").unwrap();
-    assert_eq!(stamped, viewed);
+    let (stamped_key, stamped_target) =
+        super::resolve_workspace_pair_target(&pubkey, "", "wss://one.example").unwrap();
+    let (viewed_key, viewed_target) =
+        super::resolve_workspace_pair_target(&pubkey, "", "WSS://One.Example:443/").unwrap();
+    assert_eq!(stamped_key, viewed_key);
+    assert!(super::connection_targets_match(
+        &stamped_target,
+        &viewed_target
+    ));
+
+    let (localhost_key, localhost_target) =
+        super::resolve_workspace_pair_target(&pubkey, "", "ws://localhost:3100").unwrap();
+    let (ipv4_key, ipv4_target) =
+        super::resolve_workspace_pair_target(&pubkey, "", "ws://127.0.0.1:3100").unwrap();
+    assert_eq!(localhost_key, ipv4_key);
+    assert!(!super::connection_targets_match(
+        &localhost_target,
+        &ipv4_target
+    ));
 }
 
 #[test]
 fn invalid_pubkey_resolves_no_pair_key() {
     // Key-less records (keys minted on first start) cannot form a pair key;
     // the summary must fall back to the stopped/legacy-pid path, not panic.
-    assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
+    assert!(super::resolve_workspace_pair_target("not-a-key", "", "wss://one.example").is_none());
 }
 
 // ── Custom-harness orphan sweep coverage ─────────────────────────────────────
@@ -1208,67 +1227,12 @@ fn receipt_invalid_when_process_not_running() {
 
 // ── Test helpers ────────────────────────────────────────────────────────────
 
-fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
-    serde_json::from_str(&format!(
-        r#"{{
-            "pubkey": "{pubkey}",
-            "name": "test",
-            "private_key_nsec": "nsec1fake",
-            "relay_url": "",
-            "acp_command": "buzz-acp",
-            "agent_command": "buzz-agent",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "system_prompt": null,
-            "model": null,
-            "provider": null,
-            "env_vars": {{}},
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }}"#
-    ))
-    .expect("minimal_record fixture")
+fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
+    make_pair_runtime_with_connect_url("wss://relay.example")
 }
 
-fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
-    use std::process::{Command, Stdio};
-    // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
-    // `true` exits immediately with 0 — just a handle we need for type purposes.
-    //
-    // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
-    // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
-    // bare `true` lookup during that window fails with NotFound (observed
-    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
-    #[cfg(unix)]
-    let program = "/usr/bin/true";
-    #[cfg(windows)]
-    let program = "true";
-    let child = Command::new(program)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn true for placeholder");
-    let process = crate::managed_agents::ManagedAgentProcess {
-        child,
-        log_path: std::path::PathBuf::new(),
-        spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
-            &minimal_record(&"cc".repeat(32)),
-            &[],
-            &[],
-            "wss://relay.example",
-            &Default::default(),
-        ),
-        setup_mode: false,
-        adapter_availability: None,
-        start_nonce: "test-nonce".to_string(),
-        #[cfg(windows)]
-        job: None,
-    };
-    crate::managed_agents::ManagedAgentPairRuntime::starting(process)
+fn make_pair_runtime_with_connect_url(
+    connect_relay_url: &str,
+) -> crate::managed_agents::ManagedAgentPairRuntime {
+    super::test_fixtures::make_pair_runtime_with_connect_url(connect_relay_url)
 }

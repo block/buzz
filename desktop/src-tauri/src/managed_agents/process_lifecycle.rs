@@ -133,6 +133,7 @@ pub fn taskkill_tree(pid: u32) -> Result<(), String> {
 pub fn finish_spawn(
     child: std::process::Child,
     log_path: std::path::PathBuf,
+    connect_relay_url: String,
     spawn_config: super::spawn_snapshot::SpawnConfigSnapshot,
     setup_mode: bool,
     adapter_availability: Option<super::AcpAvailabilityStatus>,
@@ -149,6 +150,7 @@ pub fn finish_spawn(
     super::ManagedAgentProcess {
         child,
         log_path,
+        connect_relay_url,
         spawn_config,
         setup_mode,
         adapter_availability,

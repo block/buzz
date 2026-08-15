@@ -458,10 +458,12 @@ pub struct RelayMeshConfig {
     pub model_ref: String,
 }
 
-#[derive(Debug)]
 pub struct ManagedAgentProcess {
     pub child: Child,
     pub log_path: PathBuf,
+    /// The exact URL this child dials (`BUZZ_RELAY_URL`); may differ from the
+    /// canonical key spelling. Restarts must reuse it; receipts persist it.
+    pub connect_relay_url: String,
     /// The effective spawn config this process was launched with (see
     /// `spawn_snapshot::SpawnConfigSnapshot`). Runtime-only — never persisted.
     /// The summary builder recomputes a prospective snapshot and reports

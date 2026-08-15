@@ -4,8 +4,9 @@ use tauri::AppHandle;
 
 use super::{
     append_log_marker, current_instance_id, now_iso, process_belongs_to_us,
-    process_has_buzz_marker, process_is_running, terminate_process, ManagedAgentPairRuntime,
-    ManagedAgentRecord, ManagedAgentRuntimeKey,
+    process_has_buzz_marker, process_is_running, terminate_process,
+    tracked_pair_runtime_for_target, ManagedAgentPairRuntime, ManagedAgentRecord,
+    ManagedAgentRuntimeKey,
 };
 
 pub(crate) fn managed_agent_runtime_keys<T>(
@@ -16,6 +17,23 @@ pub(crate) fn managed_agent_runtime_keys<T>(
         .keys()
         .filter(|key| key.pubkey.eq_ignore_ascii_case(pubkey))
         .cloned()
+        .collect()
+}
+
+/// The relay URLs to dial when restarting `pubkey`'s live pairs: each pair's
+/// stamped connection URL. Restart paths must use this instead of
+/// `key.relay_url` — the canonical spelling folds loopback hosts, and on a
+/// host-scoped multi-tenant relay that lands the child in the wrong (empty)
+/// community. Collect before stopping: stopping removes the pair, and with it
+/// the only in-memory copy of the configured spelling.
+pub(crate) fn managed_agent_restart_targets(
+    runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    pubkey: &str,
+) -> Vec<String> {
+    runtimes
+        .iter()
+        .filter(|(key, _)| key.pubkey.eq_ignore_ascii_case(pubkey))
+        .map(|(_, runtime)| runtime.connect_relay_url.clone())
         .collect()
 }
 
@@ -42,7 +60,12 @@ fn stop_managed_agent_pair(
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     key: &ManagedAgentRuntimeKey,
+    requested_relay_url: &str,
 ) -> Result<(), String> {
+    if tracked_pair_runtime_for_target(runtimes, key, requested_relay_url)?.is_none() {
+        return Ok(());
+    }
+    super::ensure_pair_receipt_connection_matches(app, key, requested_relay_url)?;
     let Some(mut runtime) = runtimes.remove(key) else {
         return Ok(());
     };
@@ -95,16 +118,54 @@ fn stop_managed_agent_pair(
 /// Terminate a legacy scalar-PID child (pre-pair records) and remove the
 /// agent-scoped pid file. Pair receipts are restored separately.
 fn stop_legacy_scalar_pid(app: &AppHandle, record: &mut ManagedAgentRecord) -> Result<(), String> {
-    if let Some(pid) = record.runtime_pid.take() {
+    if let Some(pid) = record.runtime_pid {
         if process_is_running(pid)
             && process_belongs_to_us(pid)
             && process_has_buzz_marker(pid, &current_instance_id(app))
         {
             terminate_process(pid)?;
         }
+        record.runtime_pid = None;
         record.updated_at = now_iso();
     }
     super::super::remove_agent_pid_file(app, &record.pubkey);
+    Ok(())
+}
+
+fn clear_inactive_legacy_scalar_pid_with(
+    record: &mut ManagedAgentRecord,
+    is_live_owned: impl FnOnce(u32) -> bool,
+) -> Result<bool, String> {
+    let Some(pid) = record.runtime_pid else {
+        return Ok(false);
+    };
+    if is_live_owned(pid) {
+        return Err(concat!(
+            "connection-target conflict: a live legacy managed-agent runtime has no ",
+            "connection-target receipt; stop all runtimes for this agent before managing ",
+            "one community"
+        )
+        .into());
+    }
+    record.runtime_pid = None;
+    record.updated_at = now_iso();
+    Ok(true)
+}
+
+/// Pair-scoped stop may clear stale scalar bookkeeping, but a live legacy PID
+/// has no tenant stamp and must be left to the explicit agent-wide stop path.
+pub(crate) fn clear_inactive_legacy_scalar_pid(
+    app: &AppHandle,
+    record: &mut ManagedAgentRecord,
+) -> Result<(), String> {
+    let cleared = clear_inactive_legacy_scalar_pid_with(record, |pid| {
+        process_is_running(pid)
+            && process_belongs_to_us(pid)
+            && process_has_buzz_marker(pid, &current_instance_id(app))
+    })?;
+    if cleared {
+        super::super::remove_agent_pid_file(app, &record.pubkey);
+    }
     Ok(())
 }
 
@@ -115,8 +176,8 @@ fn stop_legacy_scalar_pid(app: &AppHandle, record: &mut ManagedAgentRecord) -> R
 /// Community-scoped surfaces (profile panel, Agents tab, auto-restart) stop
 /// through here so stopping an agent in one community never tears down its
 /// pairs in other communities. Clears the matching agent session cache
-/// (pair-scoped when a pair key resolves). When no pair is tracked for this
-/// workspace, only legacy scalar-PID cleanup runs.
+/// (pair-scoped when a pair target resolves). A prior-session receipt must
+/// match that same target before any pair-scoped cleanup proceeds.
 pub fn stop_managed_agent_workspace_pair(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
@@ -124,22 +185,22 @@ pub fn stop_managed_agent_workspace_pair(
 ) -> Result<(), String> {
     use tauri::Manager;
     let state = app.state::<crate::app_state::AppState>();
-    match super::workspace_pair_key(app, record) {
-        Some(pair_key) if runtimes.contains_key(&pair_key) => {
-            stop_managed_agent_pair(app, record, runtimes, &pair_key)?;
+    match super::workspace_pair_target(app, record) {
+        Some((pair_key, requested_relay)) if runtimes.contains_key(&pair_key) => {
+            stop_managed_agent_pair(app, record, runtimes, &pair_key, &requested_relay)?;
             state.clear_agent_session_cache(&pair_key);
-            super::super::remove_agent_pid_file(app, &record.pubkey);
             let now = now_iso();
-            record.runtime_pid = None;
             record.updated_at = now.clone();
             record.last_stopped_at = Some(now);
             record.last_error = None;
             record.last_error_code = None;
         }
-        Some(pair_key) => {
+        Some((pair_key, requested_relay)) => {
             // No tracked pair here — a pubkey-wide cache clear would disturb
-            // live pairs in other communities, so stay pair-scoped.
-            stop_legacy_scalar_pid(app, record)?;
+            // live pairs in other communities, so validate any receipt and
+            // stay pair-scoped.
+            super::terminate_untracked_pair_runtime(app, &pair_key, &requested_relay)?;
+            clear_inactive_legacy_scalar_pid(app, record)?;
             state.clear_agent_session_cache(&pair_key);
         }
         None => {
@@ -162,27 +223,33 @@ pub fn stop_managed_agent_process(
 
     let mut errors = Vec::new();
     for key in keys {
-        if let Err(error) = stop_managed_agent_pair(app, record, runtimes, &key) {
-            errors.push(format!("{}: {error}", key.relay_url));
+        let Some(requested_relay) = runtimes
+            .get(&key)
+            .map(|runtime| runtime.connect_relay_url.clone())
+        else {
+            continue;
+        };
+        if let Err(error) = stop_managed_agent_pair(app, record, runtimes, &key, &requested_relay) {
+            errors.push(error);
         }
     }
 
+    if !errors.is_empty() {
+        return Err(format!(
+            "failed to stop one or more managed-agent runtimes: {}",
+            errors.join("; ")
+        ));
+    }
+
+    // This is the explicit agent-wide path, so it is also the safe migration
+    // escape hatch for a live scalar PID whose community cannot be proven.
+    stop_legacy_scalar_pid(app, record)?;
     let now = now_iso();
-    record.runtime_pid = None;
     record.updated_at = now.clone();
     record.last_stopped_at = Some(now);
     record.last_error = None;
     record.last_error_code = None;
-    super::super::remove_agent_pid_file(app, &record.pubkey);
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to stop one or more managed-agent runtimes: {}",
-            errors.join("; ")
-        ))
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -246,5 +313,26 @@ mod tests {
         let mut selected = managed_agent_runtime_keys(&runtimes, &agent);
         selected.sort_by(|left, right| left.relay_url.cmp(&right.relay_url));
         assert_eq!(selected, vec![first, second]);
+    }
+
+    #[test]
+    fn pair_scoped_stop_refuses_a_live_unscoped_legacy_pid() {
+        let mut record = super::super::test_fixtures::minimal_record(&"aa".repeat(32));
+        record.runtime_pid = Some(42);
+
+        let error = clear_inactive_legacy_scalar_pid_with(&mut record, |_| true).unwrap_err();
+
+        assert!(error.contains("connection-target conflict"));
+        assert!(!error.contains("ws://"));
+        assert_eq!(record.runtime_pid, Some(42));
+    }
+
+    #[test]
+    fn pair_scoped_stop_clears_only_inactive_legacy_bookkeeping() {
+        let mut record = super::super::test_fixtures::minimal_record(&"aa".repeat(32));
+        record.runtime_pid = Some(42);
+
+        assert!(clear_inactive_legacy_scalar_pid_with(&mut record, |_| false).unwrap());
+        assert_eq!(record.runtime_pid, None);
     }
 }

@@ -36,9 +36,16 @@ export function agentCommunityStatusDetail(
 }
 
 export function managedAgentRuntimeKey(
-  runtime: Pick<ManagedAgentRuntimeStatus, "pubkey" | "relayUrl">,
+  runtime: Pick<
+    ManagedAgentRuntimeStatus,
+    "pubkey" | "relayUrl" | "requestedRelayUrl"
+  >,
 ): string {
-  return JSON.stringify([runtime.pubkey, runtime.relayUrl]);
+  const requestedRelay = runtime.requestedRelayUrl ?? runtime.relayUrl;
+  return JSON.stringify([
+    runtime.pubkey.toLowerCase(),
+    connectionTargetUrl(requestedRelay) ?? requestedRelay,
+  ]);
 }
 
 export type ManagedAgentPairAction = "start" | "stop" | "restart";
@@ -92,22 +99,58 @@ export function canonicalRelayUrl(raw: string): string | null {
   );
 }
 
+/**
+ * Comparable connection target mirroring the backend's tenancy authority
+ * (buzz-core's `tenant::normalize_host`): lowercase host, strip an explicit
+ * default port and the FQDN root dot, fold the root-path slash - WITHOUT
+ * folding loopback spellings, which are distinct tenants on a host-scoped
+ * relay. Returns null when the URL cannot be parsed as ws/wss.
+ */
+export function connectionTargetUrl(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  const defaultPort = url.protocol === "ws:" ? "80" : "443";
+  const port = url.port && url.port !== defaultPort ? `:${url.port}` : "";
+  const path = url.pathname === "/" ? "" : url.pathname;
+  return `${url.protocol}//${host}${port}${path}${url.search}`;
+}
+
+/** Match relay connection authorities without canonical loopback folding. */
+export function connectionTargetsMatch(left: string, right: string): boolean {
+  const leftTarget = connectionTargetUrl(left);
+  const rightTarget = connectionTargetUrl(right);
+  if (leftTarget !== null && rightTarget !== null) {
+    return leftTarget === rightTarget;
+  }
+  return left.trim() === right.trim();
+}
+
 export function findManagedAgentRuntime(
   runtimes: readonly ManagedAgentRuntimeStatus[],
   pubkey: string,
   relayUrl: string,
 ): ManagedAgentRuntimeStatus | undefined {
   const normalizedPubkey = pubkey.toLowerCase();
-  // Backend rows carry the canonical pair URL; the caller passes the
-  // community's stored URL, which may differ in spelling (localhost vs
-  // 127.0.0.1, default port, trailing slash). Compare canonically, keeping
-  // the exact-string checks as a fallback for unparsable stored URLs.
   const canonical = canonicalRelayUrl(relayUrl);
-  return runtimes.find(
-    (runtime) =>
-      runtime.pubkey.toLowerCase() === normalizedPubkey &&
-      (runtime.relayUrl === relayUrl ||
-        runtime.requestedRelayUrl === relayUrl ||
-        (canonical !== null && runtime.relayUrl === canonical)),
-  );
+  return runtimes.find((runtime) => {
+    if (runtime.pubkey.toLowerCase() !== normalizedPubkey) return false;
+    // A row carrying the actual dial spelling is authoritative: canonical
+    // matching would alias distinct loopback tenants that share one runtime
+    // key, letting the wrong community's card claim - and stop - this child.
+    if (runtime.requestedRelayUrl != null) {
+      return connectionTargetsMatch(runtime.requestedRelayUrl, relayUrl);
+    }
+    // Legacy rows without the dial spelling keep the canonical fallback
+    // (exact-string check first, for unparsable stored URLs).
+    return (
+      runtime.relayUrl === relayUrl ||
+      (canonical !== null && runtime.relayUrl === canonical)
+    );
+  });
 }
