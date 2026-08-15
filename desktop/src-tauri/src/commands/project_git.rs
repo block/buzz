@@ -1,6 +1,6 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
-    GitAuthConfig,
+    build_git_auth_config, clean_branch, clean_target_ref, run_git, run_git_bytes_with_input,
+    validate_workspace_clone_url, GitAuthConfig,
 };
 use super::project_git_push::push_project_local_repository_blocking;
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
@@ -8,6 +8,9 @@ use crate::app_state::AppState;
 use serde::Serialize;
 use std::time::UNIX_EPOCH;
 use tauri::State;
+
+const MAX_PREVIEW_BYTES: u64 = 64 * 1024;
+
 #[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
     pub hash: String,
@@ -139,7 +142,6 @@ fn read_preview_content(
     path: &str,
     size: Option<u64>,
 ) -> Option<String> {
-    const MAX_PREVIEW_BYTES: u64 = 64 * 1024;
     if size.is_some_and(|value| value > MAX_PREVIEW_BYTES) {
         return None;
     }
@@ -287,6 +289,7 @@ fn branch_activity_range(
     auth: &GitAuthConfig,
     branch_name: Option<&str>,
     base_branch: Option<&str>,
+    target_ref: &str,
 ) -> Option<String> {
     let branch_name = branch_name.map(normalize_branch_name)?;
     let base_branch = base_branch.map(normalize_branch_name)?;
@@ -306,7 +309,7 @@ fn branch_activity_range(
         return None;
     }
 
-    Some(format!("origin/{base_branch}..HEAD"))
+    Some(format!("origin/{base_branch}..{target_ref}"))
 }
 
 fn parse_ls_tree(
@@ -343,6 +346,123 @@ fn parse_ls_tree(
         .collect()
 }
 
+struct RefTreeEntry {
+    path: String,
+    kind: String,
+    object: String,
+    size: Option<u64>,
+}
+
+fn parse_ref_tree_entries(output: &str) -> Vec<RefTreeEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (meta, path) = line.split_once('\t')?;
+            let mut parts = meta.split_whitespace();
+            let _mode = parts.next()?;
+            Some(RefTreeEntry {
+                kind: parts.next()?.to_string(),
+                object: parts.next()?.to_string(),
+                size: parts.next().and_then(|value| value.parse::<u64>().ok()),
+                path: path.to_string(),
+            })
+        })
+        .take(250)
+        .collect()
+}
+
+fn parse_cat_file_batch(
+    output: &[u8],
+    entries: &[&RefTreeEntry],
+) -> std::collections::HashMap<String, String> {
+    let mut previews = std::collections::HashMap::new();
+    let mut cursor = 0;
+
+    for entry in entries {
+        let Some(header_length) = output[cursor..].iter().position(|byte| *byte == b'\n') else {
+            break;
+        };
+        let header_end = cursor + header_length;
+        let header = String::from_utf8_lossy(&output[cursor..header_end]);
+        cursor = header_end + 1;
+        let Some(content_length) = header
+            .split_whitespace()
+            .nth(2)
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let Some(content_end) = cursor.checked_add(content_length) else {
+            break;
+        };
+        let Some(bytes) = output.get(cursor..content_end) else {
+            break;
+        };
+        cursor = content_end.saturating_add(1).min(output.len());
+        if bytes.contains(&0) {
+            continue;
+        }
+        if let Ok(content) = String::from_utf8(bytes.to_vec()) {
+            previews.insert(entry.path.clone(), content);
+        }
+    }
+
+    previews
+}
+
+fn ref_preview_contents(
+    repo_dir: &std::path::Path,
+    auth: &GitAuthConfig,
+    entries: &[RefTreeEntry],
+) -> std::collections::HashMap<String, String> {
+    let preview_entries = entries
+        .iter()
+        .filter(|entry| {
+            entry.kind == "blob" && entry.size.is_none_or(|size| size <= MAX_PREVIEW_BYTES)
+        })
+        .collect::<Vec<_>>();
+    if preview_entries.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let input = preview_entries
+        .iter()
+        .map(|entry| entry.object.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    run_git_bytes_with_input(
+        &["cat-file", "--batch"],
+        Some(repo_dir),
+        auth,
+        input.as_bytes(),
+    )
+    .map(|output| parse_cat_file_batch(&output, &preview_entries))
+    .unwrap_or_default()
+}
+
+fn project_files_from_ref(
+    repo_dir: &std::path::Path,
+    auth: &GitAuthConfig,
+    entries: Vec<RefTreeEntry>,
+    latest_commit_by_path: &std::collections::HashMap<String, ProjectRepoCommitInfo>,
+) -> Vec<ProjectRepoFileInfo> {
+    let previews = ref_preview_contents(repo_dir, auth, &entries);
+    entries
+        .into_iter()
+        .map(|entry| {
+            let latest_commit = latest_commit_by_path.get(&entry.path).cloned();
+            ProjectRepoFileInfo {
+                preview_content: previews.get(&entry.path).cloned(),
+                last_changed_at: latest_commit.as_ref().map(|commit| commit.timestamp),
+                latest_commit,
+                path: entry.path,
+                kind: entry.kind,
+                size: entry.size,
+            }
+        })
+        .collect()
+}
+
 fn snapshot_from_repo(
     repo_dir: &std::path::Path,
     auth: &GitAuthConfig,
@@ -356,7 +476,8 @@ fn snapshot_from_repo(
     )
     .ok()
     .and_then(|output| parse_latest_commit(&output));
-    let branch_activity_range = branch_activity_range(repo_dir, auth, branch_name, base_branch);
+    let branch_activity_range =
+        branch_activity_range(repo_dir, auth, branch_name, base_branch, "HEAD");
     let branch_activity_ref = branch_activity_range.as_deref().unwrap_or("HEAD");
     let (commits, contributors) = if latest_commit.is_some() {
         let commits = run_git(
@@ -426,7 +547,8 @@ fn snapshot_from_worktree(
     )
     .ok()
     .and_then(|output| parse_latest_commit(&output));
-    let branch_activity_range = branch_activity_range(repo_dir, auth, branch_name, base_branch);
+    let branch_activity_range =
+        branch_activity_range(repo_dir, auth, branch_name, base_branch, "HEAD");
     let branch_activity_ref = branch_activity_range.as_deref().unwrap_or("HEAD");
     let (commits, contributors, latest_commit_by_path) = if latest_commit.is_some() {
         let commits = run_git(
@@ -486,6 +608,153 @@ fn snapshot_from_worktree(
         files,
         contributors,
     }
+}
+
+fn resolve_local_branch_ref(
+    repo_dir: &std::path::Path,
+    auth: &GitAuthConfig,
+    branch_name: &str,
+) -> Option<String> {
+    [
+        format!("refs/heads/{branch_name}"),
+        format!("refs/remotes/origin/{branch_name}"),
+    ]
+    .into_iter()
+    .find(|candidate| {
+        let commit_ref = format!("{candidate}^{{commit}}");
+        run_git(
+            &["rev-parse", "--verify", "--quiet", commit_ref.as_str()],
+            Some(repo_dir),
+            auth,
+        )
+        .is_ok()
+    })
+}
+
+fn snapshot_from_ref(
+    repo_dir: &std::path::Path,
+    auth: &GitAuthConfig,
+    target_ref: &str,
+    branch_name: Option<&str>,
+    base_branch: Option<&str>,
+) -> ProjectRepoSnapshotInfo {
+    let latest_commit = run_git(
+        &[
+            "log",
+            "-1",
+            "--format=%H%x00%h%x00%an%x00%ae%x00%at%x00%s",
+            target_ref,
+        ],
+        Some(repo_dir),
+        auth,
+    )
+    .ok()
+    .and_then(|output| parse_latest_commit(&output));
+    let branch_activity_range =
+        branch_activity_range(repo_dir, auth, branch_name, base_branch, target_ref);
+    let branch_activity_ref = branch_activity_range.as_deref().unwrap_or(target_ref);
+    let (commits, contributors, latest_commit_by_path) = if latest_commit.is_some() {
+        let commits = run_git(
+            &[
+                "log",
+                "--max-count=50",
+                "--format=%H%x00%h%x00%an%x00%ae%x00%at%x00%s",
+                branch_activity_ref,
+            ],
+            Some(repo_dir),
+            auth,
+        )
+        .map(|output| parse_commits(&output))
+        .unwrap_or_default();
+        let contributors = run_git(
+            &["log", "--format=%an%x00%ae%x00%at", branch_activity_ref],
+            Some(repo_dir),
+            auth,
+        )
+        .map(|output| parse_contributors(&output))
+        .unwrap_or_default();
+        let latest_commit_by_path = run_git(
+            &[
+                "log",
+                "--format=%H%x00%h%x00%an%x00%ae%x00%at%x00%s",
+                "--name-only",
+                "--diff-filter=ACMRT",
+                target_ref,
+                "--",
+            ],
+            Some(repo_dir),
+            auth,
+        )
+        .map(|output| parse_latest_commit_by_path(&output))
+        .unwrap_or_default();
+        (commits, contributors, latest_commit_by_path)
+    } else {
+        (Vec::new(), Vec::new(), std::collections::HashMap::new())
+    };
+
+    let files = if latest_commit.is_some() {
+        run_git(
+            &["ls-tree", "-r", "--long", target_ref],
+            Some(repo_dir),
+            auth,
+        )
+        .map(|output| {
+            project_files_from_ref(
+                repo_dir,
+                auth,
+                parse_ref_tree_entries(&output),
+                &latest_commit_by_path,
+            )
+        })
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    ProjectRepoSnapshotInfo {
+        latest_commit,
+        commits,
+        files,
+        contributors,
+    }
+}
+
+fn snapshot_from_local_selection(
+    repo_dir: &std::path::Path,
+    auth: &GitAuthConfig,
+    branch_name: Option<&str>,
+    base_branch: Option<&str>,
+) -> Result<ProjectRepoSnapshotInfo, String> {
+    let active_branch = run_git(&["branch", "--show-current"], Some(repo_dir), auth)
+        .ok()
+        .and_then(|output| first_output_line(&output));
+    let Some(selected_branch) = branch_name
+        .map(normalize_branch_name)
+        .filter(|branch| !branch.is_empty())
+    else {
+        return Ok(snapshot_from_worktree(repo_dir, auth, None, base_branch));
+    };
+
+    if active_branch.as_deref() == Some(selected_branch) {
+        return Ok(snapshot_from_worktree(
+            repo_dir,
+            auth,
+            Some(selected_branch),
+            base_branch,
+        ));
+    }
+
+    let target_ref =
+        resolve_local_branch_ref(repo_dir, auth, selected_branch).ok_or_else(|| {
+            format!("Selected branch {selected_branch} is not available in the local checkout.")
+        })?;
+    Ok(snapshot_from_ref(
+        repo_dir,
+        auth,
+        &target_ref,
+        Some(selected_branch),
+        base_branch,
+    ))
 }
 
 /// Normalizes a relay-supplied branch option through the shared
@@ -810,8 +1079,12 @@ pub async fn get_project_local_repo_snapshot(
         else {
             return Ok(None);
         };
-        let snapshot =
-            snapshot_from_worktree(&repo_dir, &auth, branch.as_deref(), base_branch.as_deref());
+        let snapshot = snapshot_from_local_selection(
+            &repo_dir,
+            &auth,
+            branch.as_deref(),
+            base_branch.as_deref(),
+        )?;
         Ok(Some(ProjectLocalRepoSnapshotInfo {
             path: repo_dir.display().to_string(),
             snapshot,
@@ -985,4 +1258,139 @@ pub async fn pull_project_local_repository(
     })
     .await
     .map_err(|error| format!("repo pull task failed: {error}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_from_local_selection;
+    use crate::commands::project_git_exec::{build_test_git_auth_config, run_git, GitAuthConfig};
+
+    fn commit_all(repo_dir: &std::path::Path, auth: &GitAuthConfig, message: &str) -> String {
+        run_git(&["add", "--all"], Some(repo_dir), auth).expect("stage fixture");
+        run_git(
+            &[
+                "-c",
+                "user.name=Buzz Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                message,
+            ],
+            Some(repo_dir),
+            auth,
+        )
+        .expect("commit fixture");
+        run_git(&["rev-parse", "HEAD"], Some(repo_dir), auth)
+            .expect("resolve fixture commit")
+            .trim()
+            .to_string()
+    }
+
+    fn preview<'a>(snapshot: &'a super::ProjectRepoSnapshotInfo, path: &str) -> Option<&'a str> {
+        snapshot
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .and_then(|file| file.preview_content.as_deref())
+    }
+
+    #[test]
+    fn local_snapshot_honors_non_checkout_branch_without_mutating_worktree() {
+        let auth = build_test_git_auth_config().expect("build test git config");
+        let root = tempfile::tempdir().expect("create test directory");
+        let repo_dir = root.path().join("checkout");
+        let repo_path = repo_dir.to_str().expect("checkout path");
+
+        run_git(&["init", "--", repo_path], None, &auth).expect("initialize checkout");
+        std::fs::write(repo_dir.join("README.md"), "main branch\n").expect("write main file");
+        let main_commit = commit_all(&repo_dir, &auth, "Main commit");
+        run_git(&["branch", "-M", "main"], Some(&repo_dir), &auth).expect("rename main");
+
+        run_git(&["switch", "-c", "feature"], Some(&repo_dir), &auth)
+            .expect("create feature branch");
+        std::fs::write(repo_dir.join("README.md"), "feature committed\n")
+            .expect("write feature readme");
+        std::fs::write(repo_dir.join("FEATURE.md"), "feature only\n").expect("write feature file");
+        let feature_commit = commit_all(&repo_dir, &auth, "Feature commit");
+        std::fs::write(repo_dir.join("README.md"), "feature worktree draft\n")
+            .expect("write worktree change");
+        std::fs::write(repo_dir.join("DRAFT.md"), "untracked draft\n")
+            .expect("write untracked file");
+
+        let main_snapshot =
+            snapshot_from_local_selection(&repo_dir, &auth, Some("main"), Some("main"))
+                .expect("snapshot selected main");
+        assert_eq!(
+            main_snapshot
+                .latest_commit
+                .as_ref()
+                .map(|commit| &commit.hash),
+            Some(&main_commit)
+        );
+        assert_eq!(preview(&main_snapshot, "README.md"), Some("main branch\n"));
+        assert!(!main_snapshot
+            .files
+            .iter()
+            .any(|file| file.path == "FEATURE.md"));
+        assert!(!main_snapshot
+            .files
+            .iter()
+            .any(|file| file.path == "DRAFT.md"));
+
+        assert_eq!(
+            run_git(&["branch", "--show-current"], Some(&repo_dir), &auth)
+                .expect("read active branch")
+                .trim(),
+            "feature"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo_dir.join("README.md")).expect("read worktree file"),
+            "feature worktree draft\n"
+        );
+
+        let feature_snapshot =
+            snapshot_from_local_selection(&repo_dir, &auth, Some("feature"), Some("main"))
+                .expect("snapshot active feature");
+        assert_eq!(
+            feature_snapshot
+                .latest_commit
+                .as_ref()
+                .map(|commit| &commit.hash),
+            Some(&feature_commit)
+        );
+        assert_eq!(
+            preview(&feature_snapshot, "README.md"),
+            Some("feature worktree draft\n")
+        );
+        assert_eq!(
+            preview(&feature_snapshot, "DRAFT.md"),
+            Some("untracked draft\n")
+        );
+    }
+
+    #[test]
+    fn local_snapshot_does_not_fall_back_to_head_for_missing_selection() {
+        let auth = build_test_git_auth_config().expect("build test git config");
+        let root = tempfile::tempdir().expect("create test directory");
+        let repo_dir = root.path().join("checkout");
+        let repo_path = repo_dir.to_str().expect("checkout path");
+
+        run_git(&["init", "--", repo_path], None, &auth).expect("initialize checkout");
+        std::fs::write(repo_dir.join("README.md"), "main branch\n").expect("write fixture");
+        commit_all(&repo_dir, &auth, "Main commit");
+        run_git(&["branch", "-M", "main"], Some(&repo_dir), &auth).expect("rename main");
+
+        let error = match snapshot_from_local_selection(
+            &repo_dir,
+            &auth,
+            Some("missing-branch"),
+            Some("main"),
+        ) {
+            Ok(_) => panic!("missing branch must not render the active checkout"),
+            Err(error) => error,
+        };
+        assert!(error.contains("missing-branch"));
+        assert!(error.contains("not available in the local checkout"));
+    }
 }
