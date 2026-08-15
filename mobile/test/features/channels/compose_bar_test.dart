@@ -181,6 +181,7 @@ Widget _buildComposeBar({
   List<CustomEmoji> customEmoji = const <CustomEmoji>[],
   RelayConfigNotifier Function()? relayConfig,
   PhotoLibrary photoLibrary = const _EmptyPhotoLibrary(),
+  VoidCallback? onFocusRequested,
 }) {
   return ProviderScope(
     overrides: [
@@ -227,7 +228,11 @@ Widget _buildComposeBar({
         body: SafeArea(
           child: Align(
             alignment: Alignment.bottomCenter,
-            child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+            child: ComposeBar(
+              channelId: 'channel-1',
+              onFocusRequested: onFocusRequested,
+              onSend: onSend,
+            ),
           ),
         ),
       ),
@@ -526,6 +531,110 @@ void main() {
       expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
     });
 
+    testWidgets('notifies focus intent before attaching the focused field', (
+      tester,
+    ) async {
+      var focusRequested = false;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRequested: () => focusRequested = true,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      expect(focusRequested, isTrue);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('starts Android composer motion with the first IME metrics', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        final widthFinder = find.byKey(
+          const ValueKey('composer-width-transition'),
+        );
+        final compactWidth = tester.getSize(widthFinder).width;
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 80));
+
+        expect(tester.getSize(widthFinder).width, closeTo(compactWidth, 0.1));
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        addTearDown(tester.view.reset);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 40));
+
+        expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('expands Android composer when the IME is already visible', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(() {
+        tester.view.reset();
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      });
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        final widthFinder = find.byKey(
+          const ValueKey('composer-width-transition'),
+        );
+        final compactWidth = tester.getSize(widthFinder).width;
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pumpAndSettle();
+
+        expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('returns to the compact capsule when the keyboard drops', (
       tester,
     ) async {
@@ -704,6 +813,9 @@ void main() {
         );
 
         await tester.tap(find.text('Message\u2026'));
+        await tester.pump();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        addTearDown(tester.view.reset);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 80));
         await tester.tap(find.byTooltip('Add attachment').hitTestable());
