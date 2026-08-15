@@ -56,9 +56,12 @@
     "action": {
       "type": "object", "additionalProperties": false, "required": ["type"],
       "properties": {
-        "type": {"enum": ["activate", "click", "move_pointer", "press", "wait"]},
+        "type": {"enum": ["activate", "click", "move_pointer", "press", "scroll", "type_text", "wait"]},
         "duration_ms": {"type": "integer", "minimum": 0, "maximum": 30000},
-        "key": {"type": "string"}
+        "key": {"type": "string"},
+        "modifiers": {"type": "array", "uniqueItems": true, "items": {"enum": ["command", "control", "option", "shift"]}},
+        "text": {"type": "string"},
+        "delta_y": {"type": "integer", "minimum": -10000, "maximum": 10000}
       }
     },
     "expectation": {
@@ -67,7 +70,8 @@
         "exists": {"$ref": "#/$defs/locator"},
         "not_exists": {"$ref": "#/$defs/locator"},
         "focused": {"oneOf": [{"type": "boolean"}, {"$ref": "#/$defs/locator"}]},
-        "enabled": {"type": "boolean"}
+        "enabled": {"type": "boolean"},
+        "value": {"type": "string"}
       }
     }
   }

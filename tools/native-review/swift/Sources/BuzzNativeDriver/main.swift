@@ -19,6 +19,7 @@ struct SemanticNode: Codable {
     let id: String?
     let role: String?
     let name: String?
+    let value: String?
     let enabled: Bool
     let focused: Bool
     let frame: Rect
@@ -30,6 +31,7 @@ struct ElementDescription: Codable {
     let role: String?
     let name: String?
     let identifier: String?
+    let value: String?
     let enabled: Bool
     let focused: Bool
     let frame: Rect?
@@ -181,7 +183,8 @@ func find(_ roots: [AXUIElement], locator: Locator, maxNodes: Int = 20_000) -> A
 
 func describe(_ element: AXUIElement, locator: Locator) -> ElementDescription {
     ElementDescription(locator: locator, role: normalizedRole(elementRole(element)), name: elementName(element),
-                       identifier: elementIdentifier(element), enabled: boolAttribute(element, kAXEnabledAttribute, default: true),
+                       identifier: elementIdentifier(element), value: stringAttribute(element, [kAXValueAttribute]),
+                       enabled: boolAttribute(element, kAXEnabledAttribute, default: true),
                        focused: boolAttribute(element, kAXFocusedAttribute), frame: frameAttribute(element))
 }
 
@@ -197,6 +200,7 @@ func semanticNodes(path: String, pid: pid_t) -> [SemanticNode] {
             id: node.id,
             role: node.role,
             name: node.name,
+            value: node.value,
             enabled: node.enabled,
             focused: node.focused,
             frame: Rect(
@@ -219,7 +223,7 @@ func matches(_ element: SemanticNode, locator: Locator) -> Bool {
 
 func describe(_ element: SemanticNode, locator: Locator) -> ElementDescription {
     ElementDescription(locator: locator, role: normalizedRole(element.role), name: element.name,
-                       identifier: element.id, enabled: element.enabled, focused: element.focused,
+                       identifier: element.id, value: element.value, enabled: element.enabled, focused: element.focused,
                        frame: element.frame)
 }
 
@@ -397,7 +401,50 @@ func keyCode(_ key: String) throws -> CGKeyCode {
     case "return", "enter": return 36
     case "escape": return 53
     case "space": return 49
+    case "k": return 40
     default: throw DriverError.message("unsupported key: \(key)")
+    }
+}
+
+func modifierFlags(_ names: [String]) throws -> CGEventFlags {
+    try names.reduce(into: CGEventFlags()) { flags, name in
+        switch name.lowercased() {
+        case "command", "cmd": flags.insert(.maskCommand)
+        case "control", "ctrl": flags.insert(.maskControl)
+        case "option", "alt": flags.insert(.maskAlternate)
+        case "shift": flags.insert(.maskShift)
+        default: throw DriverError.message("unsupported modifier: \(name)")
+        }
+    }
+}
+
+func postKey(_ key: String, modifiers: [String] = []) throws {
+    let code = try keyCode(key)
+    let flags = try modifierFlags(modifiers)
+    for keyDown in [true, false] {
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: keyDown) else {
+            throw DriverError.message("could not create keyboard event")
+        }
+        event.flags = flags
+        event.post(tap: .cghidEventTap)
+    }
+}
+
+func postText(_ text: String) throws {
+    for scalar in text.unicodeScalars {
+        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+            throw DriverError.message("could not create text event")
+        }
+        let units = Array(String(scalar).utf16)
+        units.withUnsafeBufferPointer { buffer in
+            down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+            up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+        }
+        down.flags = []
+        up.flags = []
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 }
 
@@ -464,9 +511,16 @@ struct BuzzNativeDriver {
                         } else if type == "wait" {
                             try await Task.sleep(for: .milliseconds(action["duration_ms"] as? Int ?? 0))
                         } else if type == "press" {
-                            let code = try keyCode(action["key"] as? String ?? "")
-                            CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)?.post(tap: .cghidEventTap)
-                            CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap)
+                            try postKey(action["key"] as? String ?? "", modifiers: action["modifiers"] as? [String] ?? [])
+                        } else if type == "type_text" {
+                            try postText(action["text"] as? String ?? "")
+                        } else if type == "scroll" {
+                            let deltaY = Int32(action["delta_y"] as? Int ?? 0)
+                            guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                                      wheel1: deltaY, wheel2: 0, wheel3: 0) else {
+                                throw DriverError.message("could not create scroll event")
+                            }
+                            event.post(tap: .cghidEventTap)
                         } else {
                             guard let (_, used) = selected else {
                                 throw DriverError.message("action requires a freshly selected element with current bounds")
@@ -519,8 +573,23 @@ struct BuzzNativeDriver {
                     case "focused":
                         response(["ok": true, "focused": selected?.0.focused ?? false])
                     case "selected":
-                        if let (element, _) = selected { response(["ok": true, "element": try encoded(element)]) }
-                        else { response(["ok": true, "element": NSNull()]) }
+                        if let (_, used) = selected {
+                            var fresh: ElementDescription?
+                            if let path = semanticSnapshotPath,
+                               let element = semanticNodes(path: path, pid: pid).first(where: { matches($0, locator: used) }) {
+                                fresh = describe(element, locator: used)
+                            }
+                            if fresh == nil, let element = find(accessibilityRoots(app: app, pid: pid), locator: used) {
+                                fresh = describe(element, locator: used)
+                            }
+                            if let element = fresh {
+                                selected = (element, used)
+                                response(["ok": true, "element": try encoded(element)])
+                            } else {
+                                selected = nil
+                                response(["ok": true, "element": NSNull()])
+                            }
+                        } else { response(["ok": true, "element": NSNull()]) }
                     case "record_start":
                         guard let path = request["path"] as? String else { throw DriverError.message("record_start requires path") }
                         let value = WindowRecorder(); try value.start(pid: pid, path: path); recorder = value; response(["ok": true])
