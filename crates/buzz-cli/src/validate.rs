@@ -72,6 +72,29 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Reject content containing an embedded NUL byte (0x00).
+///
+/// Interior NULs can be silently truncated at C-string boundaries on some
+/// paths; fail closed rather than publish `accepted:true` with truncated data.
+pub fn validate_content_no_nul(content: &str) -> Result<(), CliError> {
+    if content.contains('\0') {
+        return Err(CliError::Usage(
+            "content contains a NUL byte (0x00); refusing to send truncated/binary content. \
+             If this came from PowerShell, use a literal here-string @'...'@ or pipe UTF-8 \
+             via --content - without `0 escapes."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate message body content: size limit and no interior NUL bytes.
+pub fn validate_message_content(content: &str) -> Result<(), CliError> {
+    validate_content_size(content)?;
+    validate_content_no_nul(content)?;
+    Ok(())
+}
+
 /// Percent-encode for URL path segments and query parameter values.
 /// Encodes all bytes except RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
 #[cfg(test)]
@@ -256,7 +279,7 @@ mod tests {
         assert!(matches!(err, CliError::Usage(_)));
     }
 
-    // --- validate_content_size ---
+    // --- validate_content_size / validate_content_no_nul / validate_message_content ---
 
     #[test]
     fn validate_content_size_at_limit() {
@@ -274,6 +297,45 @@ mod tests {
     #[test]
     fn validate_content_size_empty() {
         assert!(validate_content_size("").is_ok());
+    }
+
+    #[test]
+    fn validate_content_no_nul_rejects_interior_nul() {
+        let err = validate_content_no_nul("hello\0world").unwrap_err();
+        assert!(matches!(err, CliError::Usage(msg) if msg.contains("NUL byte")));
+    }
+
+    #[test]
+    fn validate_content_no_nul_accepts_normal_content() {
+        assert!(validate_content_no_nul("hello world").is_ok());
+    }
+
+    #[test]
+    fn validate_content_no_nul_accepts_empty() {
+        assert!(validate_content_no_nul("").is_ok());
+    }
+
+    #[test]
+    fn validate_message_content_rejects_nul() {
+        let err = validate_message_content("before\0after").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn validate_message_content_accepts_normal() {
+        assert!(validate_message_content("normal message").is_ok());
+    }
+
+    #[test]
+    fn validate_message_content_accepts_empty() {
+        assert!(validate_message_content("").is_ok());
+    }
+
+    #[test]
+    fn validate_message_content_size_limit_still_works() {
+        let content = "x".repeat(MAX_CONTENT_BYTES + 1);
+        let err = validate_message_content(&content).unwrap_err();
+        assert!(matches!(err, CliError::Usage(msg) if msg.contains("exceeds maximum size")));
     }
 
     // --- percent_encode ---

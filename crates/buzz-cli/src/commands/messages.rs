@@ -6,7 +6,8 @@ use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
-    validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
+    validate_content_no_nul, validate_hex64, validate_message_content, validate_uuid,
+    MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
@@ -580,7 +581,7 @@ pub async fn cmd_send_message(
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
-    validate_content_size(&p.content)?;
+    validate_message_content(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -726,6 +727,10 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
 
     // Read diff from stdin if "--diff -"
     let diff_content = read_or_stdin(&p.diff)?;
+    validate_content_no_nul(&diff_content)?;
+    if let Some(ref description) = p.description {
+        validate_content_no_nul(description)?;
+    }
 
     // Truncate at 60 KiB hunk boundary
     let (diff, truncated) = truncate_diff(&diff_content, MAX_DIFF_BYTES);
@@ -818,7 +823,7 @@ pub async fn cmd_edit_message(
     content: &str,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
-    validate_content_size(content)?;
+    validate_message_content(content)?;
 
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
