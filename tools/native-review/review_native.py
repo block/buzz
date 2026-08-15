@@ -45,7 +45,9 @@ class HarnessError(RuntimeError):
 
 def run(command: list[str], *, cwd: pathlib.Path = ROOT, env: dict[str, str] | None = None,
         check: bool = True, capture: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, env=env, check=check, text=True,
+    return subprocess.run(command, cwd=cwd,
+                          env=scrubbed_environment(include_home=True) if env is None else env,
+                          check=check, text=True,
                           stdout=subprocess.PIPE if capture else None,
                           stderr=subprocess.PIPE if capture else None)
 
@@ -554,6 +556,16 @@ def capture_step(driver: Driver, run_dir: pathlib.Path, slug: str, record: dict[
     return artifacts
 
 
+def cleanup_review_state(run_dir: pathlib.Path, isolation: dict[str, str],
+                         fixture: dict[str, Any] | None) -> None:
+    env = scrubbed_environment()
+    env["HOME"] = str(run_dir / "home")
+    run([str(ROOT / "scripts/reset-desktop-standalone-state.sh"),
+         isolation["bundle_id"], isolation["keyring_service"]], env=env)
+    if fixture:
+        pathlib.Path(fixture["secret_path"]).unlink(missing_ok=True)
+
+
 def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -> pathlib.Path:
     journey = load_journey(path)
     run_id = f"{journey['flow']}-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
@@ -650,10 +662,7 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
                 process.kill(); cleanup_errors.append("Tauri launcher required SIGKILL")
         if journey["cleanup"]["remove_state"]:
             try:
-                run([str(ROOT / "scripts/reset-desktop-standalone-state.sh"), isolation["bundle_id"], isolation["keyring_service"]],
-                    env={**os.environ, "HOME": str(run_dir / "home")})
-                if fixture:
-                    pathlib.Path(fixture["secret_path"]).unlink(missing_ok=True)
+                cleanup_review_state(run_dir, isolation, fixture)
             except Exception as exc:
                 cleanup_errors.append(str(exc))
         receipt["cleanup"] = {"status": "failed" if cleanup_errors else "passed", "errors": cleanup_errors}
