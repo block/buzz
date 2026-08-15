@@ -13,9 +13,12 @@ const SHOTS = "test-results/entity-link-recipient-cards";
 // the message carries no link-preview tags.
 
 const ALICE_PUBKEY = TEST_IDENTITIES.alice.pubkey;
+const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const REPO_ADDRESS = `30617:${ALICE_PUBKEY}:relay-tools`;
 const PR_ID = `e0${"ca4d".repeat(15)}ff`; // 64-hex event id
 const PR_SUBJECT = "Restore recipient-side entity cards";
+const ISSUE_ID = `f0${"1a2b".repeat(15)}ee`; // 64-hex event id
+const ISSUE_SUBJECT = "Reopen identical issue links";
 
 test("agent-style message with bare buzz:// links renders entity cards without snapshot tags", async ({
   page,
@@ -164,4 +167,137 @@ test("desktop composer shows entity card and send is not blocked by missing snap
     animations: "disabled",
     path: `${SHOTS}/03-sent-entity-card.png`,
   });
+});
+
+test("reopening the same entity link reapplies its workspace state", async ({
+  page,
+}) => {
+  const repoAddress = `30617:${DEFAULT_MOCK_PUBKEY}:buzz`;
+  await page.addInitScript(
+    ({ issueId, issueSubject, prId, prSubject, repoAddress, owner }) => {
+      const createdAt = Math.floor(Date.now() / 1000) - 60;
+      window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__ = [
+        {
+          id: prId,
+          kind: 1618, // KIND_GIT_PULL_REQUEST
+          pubkey: owner,
+          created_at: createdAt,
+          content: "PR body",
+          tags: [
+            ["a", repoAddress],
+            ["subject", prSubject],
+            ["c", "abc123".padEnd(40, "0")],
+            ["branch-name", "fix/reopen-entity-link"],
+          ],
+        },
+        {
+          id: issueId,
+          kind: 1621, // KIND_GIT_ISSUE
+          pubkey: owner,
+          created_at: createdAt,
+          content: "Issue body",
+          tags: [
+            ["a", repoAddress],
+            ["subject", issueSubject],
+          ],
+        },
+      ];
+    },
+    {
+      issueId: ISSUE_ID,
+      issueSubject: ISSUE_SUBJECT,
+      prId: PR_ID,
+      prSubject: PR_SUBJECT,
+      repoAddress,
+      owner: DEFAULT_MOCK_PUBKEY,
+    },
+  );
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("open-projects-view")).toBeVisible();
+  const repoLink = `buzz://repo?owner=${DEFAULT_MOCK_PUBKEY}&d=buzz&tab=prs`;
+  const prLink = `buzz://pr?id=${PR_ID}&owner=${DEFAULT_MOCK_PUBKEY}&d=buzz`;
+  const issueLink = `buzz://issue?id=${ISSUE_ID}&owner=${DEFAULT_MOCK_PUBKEY}&d=buzz`;
+  const emitEntityLink = async (link: string) => {
+    await page.waitForFunction(
+      () => typeof window.__TAURI_INTERNALS__?.invoke === "function",
+    );
+    await page.evaluate(
+      (href) =>
+        window.__TAURI_INTERNALS__?.invoke?.("plugin:event|emit", {
+          event: "deep-link-entity",
+          payload: href,
+        }),
+      link,
+    );
+  };
+
+  await emitEntityLink(repoLink);
+  const pullRequestsTab = page.getByRole("tab", {
+    name: "Pull Request",
+    exact: true,
+  });
+  await expect(pullRequestsTab).toHaveAttribute("aria-selected", "true");
+
+  const breadcrumb = page.getByRole("navigation", {
+    name: "Project breadcrumb",
+  });
+  await breadcrumb.getByRole("button").nth(1).click();
+  await expect(page.getByRole("tab", { name: "Overview" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+
+  await emitEntityLink(repoLink);
+  await expect(pullRequestsTab).toHaveAttribute("aria-selected", "true");
+
+  const filesTab = page.getByRole("tab", { name: "Files", exact: true });
+  await filesTab.click();
+  await expect(filesTab).toHaveAttribute("aria-selected", "true");
+
+  await emitEntityLink(repoLink);
+  await expect(pullRequestsTab).toHaveAttribute("aria-selected", "true");
+
+  await emitEntityLink(prLink);
+  const prHeading = page.getByRole("heading", { name: PR_SUBJECT });
+  await expect(prHeading).toBeVisible();
+  await breadcrumb
+    .getByRole("button", { name: "Pull Request", exact: true })
+    .click();
+  await expect(prHeading).toHaveCount(0);
+  await emitEntityLink(prLink);
+  await expect(prHeading).toBeVisible();
+
+  await emitEntityLink(issueLink);
+  const issueHeading = page.getByRole("heading", { name: ISSUE_SUBJECT });
+  await expect(issueHeading).toBeVisible();
+  await breadcrumb.getByRole("button", { name: "Issues", exact: true }).click();
+  await expect(issueHeading).toHaveCount(0);
+  await emitEntityLink(issueLink);
+  await expect(issueHeading).toBeVisible();
+});
+
+test("cold-start entity links drain after the React listener mounts", async ({
+  page,
+}) => {
+  const href = `buzz://repo?owner=${DEFAULT_MOCK_PUBKEY}&d=buzz&tab=prs`;
+  await installMockBridge(page, {
+    pendingEntityDeepLinks: [{ id: "cold-start-project", href }],
+  });
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  await expect(
+    page.getByRole("tab", { name: "Pull Request", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__TAURI_INTERNALS__?.invoke?.(
+          "take_pending_entity_deep_link",
+          {},
+        ),
+      ),
+    )
+    .toBeNull();
 });

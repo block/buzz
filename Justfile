@@ -276,6 +276,10 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Run the deterministic desktop correctness smoke against an isolated local relay
+desktop-release-smoke:
+    ./scripts/run-desktop-release-smoke.sh
+
 # Run only the e2e specs changed vs origin/main (both projects) before pushing
 desktop-e2e-pre-push: _ensure-migrations
     git fetch origin main

@@ -361,17 +361,20 @@ async function applyWindowGlass(enabled: boolean) {
   glassBackgroundPreferenceEnabled = enabled;
   const requestToken = ++glassVibrancyRequest;
 
+  if (!isTauri() || !isMacPlatform()) {
+    glassBackgroundPreferenceEnabled = false;
+    glassVibrancyEnabled = false;
+    glassVibrancyReady = false;
+    setGlassBackgroundActive(false);
+    return;
+  }
+
   if (enabled && glassVibrancyEnabled && glassVibrancyReady) {
     maybeEnableGlassBackground(requestToken);
     return;
   }
 
   glassVibrancyReady = false;
-
-  if (!isTauri()) {
-    setGlassBackgroundActive(false);
-    return;
-  }
 
   try {
     await invokeTauri<void>("set_window_vibrancy", {
@@ -478,6 +481,8 @@ export function ThemeProvider({
   children,
   defaultTheme = "buzz",
 }: ThemeProviderProps) {
+  const glassBackgroundSupported = isTauri() && isMacPlatform();
+
   // Apply cached vars synchronously before first render
   const [selectedTheme, setSelectedTheme] = useState<string>(() => {
     applyCachedVars();
@@ -499,8 +504,9 @@ export function ThemeProvider({
   const [glassBackground, setGlassBackgroundState] = useState<boolean>(() => {
     const stored = getStorageItem(GLASS_BACKGROUND_STORAGE_KEY);
     // Glass is opt-in. Explicitly saved preferences remain intact, while a
-    // fresh profile starts with the normal opaque window treatment.
-    const enabled = stored === "true";
+    // fresh profile starts with the normal opaque window treatment. Keep an
+    // unsupported platform opaque without erasing a preference saved on Mac.
+    const enabled = glassBackgroundSupported && stored === "true";
     glassBackgroundPreferenceEnabled = enabled;
     return enabled;
   });
@@ -668,17 +674,27 @@ export function ThemeProvider({
     [],
   );
 
-  const setGlassBackground = useCallback((enabled: boolean) => {
-    window.localStorage.setItem(
-      GLASS_BACKGROUND_STORAGE_KEY,
-      enabled ? "true" : "false",
-    );
-    glassBackgroundPreferenceEnabled = enabled;
-    if (!enabled) {
-      setGlassBackgroundActive(false);
-    }
-    setGlassBackgroundState(enabled);
-  }, []);
+  const setGlassBackground = useCallback(
+    (enabled: boolean) => {
+      if (!glassBackgroundSupported) {
+        glassBackgroundPreferenceEnabled = false;
+        setGlassBackgroundActive(false);
+        setGlassBackgroundState(false);
+        return;
+      }
+
+      window.localStorage.setItem(
+        GLASS_BACKGROUND_STORAGE_KEY,
+        enabled ? "true" : "false",
+      );
+      glassBackgroundPreferenceEnabled = enabled;
+      if (!enabled) {
+        setGlassBackgroundActive(false);
+      }
+      setGlassBackgroundState(enabled);
+    },
+    [glassBackgroundSupported],
+  );
 
   const setGlassOpacity = useCallback((opacity: number) => {
     const nextOpacity = clampGlassOpacity(opacity);
@@ -704,7 +720,7 @@ export function ThemeProvider({
     followSystem,
     glassBackground,
     glassOpacity,
-    glassBackgroundSupported: isTauri() && isMacPlatform(),
+    glassBackgroundSupported,
     prominentActiveTab,
     hasPair,
     terminalPalette,

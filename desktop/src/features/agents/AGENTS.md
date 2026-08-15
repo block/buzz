@@ -180,6 +180,23 @@ with a TypeScript lookup table or an id comparison in a component.
    import boundary. Do not silently strip them: rejection keeps the reviewed
    string identical to the executed string. New sharing paths must reuse the
    same validation before they persist or activate a definition.
+13. **Profile runtime sections render only reported agent data.** Missing
+   runtime, model, status, command, MCP, advanced, or diagnostics values stay
+   absent in every build mode. Do not fill profile or agent-panel gaps with
+   development/staging examples, preview controls, or synthetic configuration;
+   those values can be mistaken for the viewed agent's real configuration.
+   Configuration rows show the effective value regardless of whether it came
+   from an explicit choice, global default, config file, or runtime override.
+   Do not add provenance lines, shadowed/struck-through values, pre-start
+   placeholders, or whole-section dimming; use an em dash for an unknown value.
+   Info, activity, agent-configuration, and model-setting rows use the same bare
+   16px leading-icon treatment as agent management actions. Keep semantic icons
+   visible in profile variants and do not wrap them in background shapes. An
+   owned agent profile is entry-point invariant: opening the same deployed
+   agent from Agents, a DM, or a channel must expose the same actions, tabs,
+   fields, and profile-wide activity selection. Caller context may control the
+   panel shell or return navigation, but must not filter or replace profile
+   content.
 
 ## The tests that enforce this
 
@@ -203,6 +220,12 @@ with a TypeScript lookup table or an id comparison in a component.
 - `lib/personaCatalogRelay.test.mjs` and
   `ui/personaCatalogOwnerLabel.test.mjs` — reject invisible definition text
   and keep Markdown concealment syntax literal in the review surface.
+- `../profile/ui/UserProfileRuntimeContent.test.mjs` — profile runtime panels
+  cannot reintroduce build-mode previews or synthetic fallback controls.
+- `desktop/tests/e2e/profile.spec.ts` — the owned-agent parity flow compares
+  every profile tab when opened from Agents and from the agent's DM.
+- `ui/AgentConfigPanelPresentation.test.mjs` — shared profile/agent config rows
+  show only effective values, with an em dash for unknown values.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and

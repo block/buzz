@@ -22,7 +22,11 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Switch } from "@/shared/ui/switch";
-import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import {
+  SettingsOptionGroup,
+  SettingsOptionGroupList,
+  SettingsOptionRow,
+} from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import {
   selectedVoiceForBackend,
@@ -187,7 +191,7 @@ export function VoiceSettingsCard() {
         description="Choose whether Buzz reads new agent responses aloud during an active huddle."
       />
 
-      <div className="flex flex-col gap-4">
+      <SettingsOptionGroupList>
         <SettingsOptionGroup title="Playback">
           <SettingsOptionRow>
             <div className="min-w-0">
@@ -329,17 +333,16 @@ export function VoiceSettingsCard() {
             </SettingsOptionRow>
           </SettingsOptionGroup>
         </div>
-
-        {error && (
-          <p
-            className="text-sm text-destructive"
-            data-testid="voice-settings-error"
-            role="alert"
-          >
-            {error}
-          </p>
-        )}
-      </div>
+      </SettingsOptionGroupList>
+      {error && (
+        <p
+          className="mt-4 text-sm text-destructive"
+          data-testid="voice-settings-error"
+          role="alert"
+        >
+          {error}
+        </p>
+      )}
       <AlertDialog
         onOpenChange={(open) => {
           if (!open) setDeleteCandidate(null);

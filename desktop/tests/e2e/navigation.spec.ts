@@ -337,6 +337,61 @@ test("settings shortcut returns without opening search dialog", async ({
   await expect(page.getByTestId("search-results")).not.toBeVisible();
 });
 
+test("mixed Buzz permalinks render as chips in the composer", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+  const owner = "a".repeat(64);
+  const pullRequestId = "c".repeat(64);
+  const issueId = "b".repeat(64);
+  const links = [
+    `buzz://message?channel=${channelId}&id=mock-general-welcome`,
+    `buzz://channel/${channelId}`,
+    `buzz://repo?owner=${owner}&d=buzz-world`,
+    `buzz://pr?id=${pullRequestId}&owner=${owner}&d=buzz-world`,
+    `buzz://issue?id=${issueId}&owner=${owner}&d=buzz-world`,
+  ].join(" ");
+  const composerInput = page.getByTestId("message-input");
+  await composerInput.evaluate((element, text) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/plain", text);
+    element.dispatchEvent(
+      new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData,
+      }),
+    );
+  }, links);
+
+  const chips = composerInput.locator('[data-composer-buzz-link=""]');
+  await expect(chips).toHaveCount(5);
+  await expect(chips.nth(0)).toHaveText("general · mock-gen");
+  await expect(chips.nth(1)).toHaveText("general");
+  await expect(chips.nth(2)).toHaveText("buzz-world");
+  await expect(chips.nth(3)).toHaveText("buzz-world · cccccccc");
+  await expect(chips.nth(4)).toHaveText("buzz-world · bbbbbbbb");
+  await expect(chips.nth(1)).toHaveClass(/inline-chip-icon-channel/);
+  await expect(chips.nth(2)).toHaveClass(/inline-chip-icon-repo/);
+  await expect(chips.nth(3)).toHaveClass(/inline-chip-icon-pr/);
+  await expect(chips.nth(4)).toHaveClass(/inline-chip-icon-issue/);
+  for (const index of [0, 1, 2, 3, 4]) {
+    const iconMask = await chips
+      .nth(index)
+      .evaluate((element) =>
+        getComputedStyle(element, "::before").getPropertyValue(
+          "-webkit-mask-image",
+        ),
+      );
+    expect(iconMask).toContain("data:image/svg+xml");
+  }
+  await expect(composerInput).not.toContainText("buzz://");
+});
+
 test("message links to visible root messages open the thread panel", async ({
   page,
 }) => {
@@ -344,13 +399,13 @@ test("message links to visible root messages open the thread panel", async ({
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   const link =
     "buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=mock-general-welcome";
   const composerInput = page.getByTestId("message-input");
-  await composerInput.fill("Root link repro ");
+  await composerInput.fill("Root link repro #random ");
   await composerInput.focus();
   await composerInput.evaluate((element, href) => {
     const clipboardData = new DataTransfer();
@@ -364,11 +419,10 @@ test("message links to visible root messages open the thread panel", async ({
     );
   }, link);
   const composerLink = composerInput.locator('[data-composer-message-link=""]');
-  await expect(composerLink).toContainText("Thread in");
-  const composerChannelLink = composerLink.locator('[data-channel-link=""]');
-  await expect(composerChannelLink).toHaveText("#general");
-  await expect(composerChannelLink).toHaveClass(/mention-chip/);
-  await expect(composerLink).not.toHaveClass(/mention-chip/);
+  await expect(composerLink).toHaveText("general · mock-gen");
+  await expect(composerLink).toHaveClass(/mention-chip/);
+  await expect(composerLink).toHaveClass(/inline-chip-icon-message/);
+  await expect(composerLink).toHaveAttribute("data-buzz-link", "");
   await expect(composerLink).toHaveAttribute("title", "Thread in #general");
   await expect(composerInput).not.toContainText("buzz://message");
   await page.getByTestId("send-message").click();
@@ -379,20 +433,51 @@ test("message links to visible root messages open the thread panel", async ({
     .last();
   await expect(linkMessage).toBeVisible();
   const rootThreadLink = linkMessage.getByRole("button", {
-    name: "Open thread in general",
+    name: "Open message mock-gen in channel general",
   });
-  await expect(linkMessage.locator('[data-message-link=""]')).toContainText(
-    "Thread in",
-  );
-  await expect(rootThreadLink).toHaveText("#general");
+  await expect(rootThreadLink).toHaveText("general · mock-gen");
   await expect(rootThreadLink).toHaveClass(/mention-chip/);
-  await rootThreadLink.click();
+  const randomChannelLink = linkMessage.getByRole("button", {
+    name: "Open channel random",
+  });
+  await expect(randomChannelLink).toBeVisible();
+  await rootThreadLink.click({ button: "right" });
+
+  const linkMenu = page.locator("[data-buzz-link-context-menu]");
+  await expect(linkMenu).toBeVisible();
+  await randomChannelLink.click({ button: "right" });
+  await expect(linkMenu).toHaveCount(1);
+  await rootThreadLink.click({ button: "right" });
+  await expect(linkMenu).toHaveCount(1);
+  await expect(
+    linkMenu.getByRole("button", { name: "Open link" }),
+  ).toBeVisible();
+  await linkMenu.getByRole("button", { name: "Copy link" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        return (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{
+              command: string;
+              payload: { text?: string };
+            }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__?.findLast(
+          ({ command }) => command === "copy_text_to_clipboard",
+        )?.payload.text;
+      }),
+    )
+    .toBe(link);
+
+  await rootThreadLink.click({ button: "right" });
+  await linkMenu.getByRole("button", { name: "Open link" }).click();
 
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
   await expect(page).toHaveURL(/thread=mock-general-welcome/);
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 });
 
@@ -407,7 +492,7 @@ test("message links reopen a closed thread when the same messageId is already in
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   await threadPanel.getByRole("button", { name: "Close panel" }).click();
@@ -426,14 +511,14 @@ test("message links reopen a closed thread when the same messageId is already in
     .last();
   await expect(linkMessage).toBeVisible();
   const rootThreadLink = linkMessage.getByRole("button", {
-    name: "Open thread in general",
+    name: "Open message mock-gen in channel general",
   });
-  await expect(rootThreadLink).toHaveText("#general");
+  await expect(rootThreadLink).toHaveText("general · mock-gen");
   await rootThreadLink.click();
 
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 });
 
@@ -453,4 +538,64 @@ test("message deep links survive reload", async ({ page }) => {
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Engineering shipped the desktop build.",
   );
+});
+
+// Cold-start OS links are queued natively until AppShell mounts its router listener.
+
+test("cold-start channel deep link drains after the router mounts", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    pendingNavigationDeepLinks: [
+      {
+        id: "navigation-channel-1",
+        kind: "channel",
+        channelId: ENGINEERING_CHANNEL_ID,
+      },
+    ],
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+  await expect(page).toHaveURL(
+    new RegExp(`#/channels/${ENGINEERING_CHANNEL_ID}$`),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) =>
+            entry.command === "acknowledge_pending_navigation_deep_link",
+        ),
+      ),
+    )
+    .toEqual([
+      {
+        command: "acknowledge_pending_navigation_deep_link",
+        payload: { id: "navigation-channel-1" },
+      },
+    ]);
+});
+
+test("cold-start message deep link preserves its thread target", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    pendingNavigationDeepLinks: [
+      {
+        id: "navigation-message-1",
+        kind: "message",
+        channelId: WATERCOLOR_CHANNEL_ID,
+        messageId: "mock-forum-release-reply",
+        threadRootId: "mock-forum-release-thread",
+      },
+    ],
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
+  await expect(page).toHaveURL(/messageId=mock-forum-release-reply/);
+  await expect(page).toHaveURL(/threadRootId=mock-forum-release-thread/);
 });

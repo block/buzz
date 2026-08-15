@@ -378,6 +378,194 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("community switch cancels a send after its link preview settles", async ({
+    page,
+  }) => {
+    const agentPubkey =
+      "ee00000000000000000000000000000000000000000000000000000000000001";
+    await installMockBridge(
+      page,
+      {
+        addChannelMembersDelayMs: 10_000,
+        managedAgents: [
+          {
+            pubkey: agentPubkey,
+            name: "SlowBot",
+            status: "running",
+          },
+        ],
+        linkPreviewMetadata: {
+          title: "Ready preview",
+          siteName: "GitHub",
+          description: "Must not cross community boundaries.",
+          imageDataUrl: null,
+          imageDomain: null,
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    const previewUrl =
+      "https://github.com/block/buzz/pull/5697?community=reset";
+    await input.fill("@SlowBot");
+    await expect(page.getByTestId("mention-autocomplete")).toBeVisible();
+    await input.press("Enter");
+    await page.keyboard.type(` ${previewUrl}`);
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "add_channel_members",
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+    await page.waitForTimeout(250);
+
+    const publications = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ),
+    );
+    expect(publications).toHaveLength(0);
+    await expect(page.getByTestId("message-input")).toHaveText("");
+  });
+
+  test("community switch stops preview media before it reaches the new community", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        deferLinkPreviewMetadata: true,
+        linkPreviewMetadata: {
+          title: "Old community preview",
+          siteName: "GitHub",
+          description: "Must not upload after reset.",
+          imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          imageDomain: "github.com",
+          faviconDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("https://github.com/block/buzz/pull/5697?media=reset");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "fetch_link_preview_metadata",
+            ).length,
+        ),
+      )
+      .toBeGreaterThan(0);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__?.() ?? 0,
+      ),
+    ).toBeGreaterThan(0);
+    await page.waitForTimeout(250);
+
+    const uploadCalls = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "upload_media_bytes",
+      ),
+    );
+    expect(uploadCalls).toHaveLength(0);
+  });
+
+  test("community switch cancellation wins before native upload registration", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        deferLinkPreviewUploadRegistration: true,
+        linkPreviewMetadata: {
+          title: "Old community preview",
+          siteName: "GitHub",
+          description: "Cancellation must survive native registration.",
+          imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+          imageDomain: "github.com",
+          faviconDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+
+    const input = page.getByTestId("message-input");
+    await input.fill("https://github.com/block/buzz/pull/5697?native=reset");
+    await page.getByTestId("send-message").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "upload_media_bytes",
+            ).length,
+        ),
+      )
+      .toBe(2);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+              (command) => command === "cancel_media_upload",
+            ).length,
+        ),
+      )
+      .toBe(2);
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_UPLOADS__?.() ?? 0,
+      ),
+    ).toBe(2);
+    await page.waitForTimeout(250);
+
+    expect(
+      await page.evaluate(
+        () => window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ ?? 0,
+      ),
+    ).toBe(0);
+  });
+
   test("restores the last Home or channel destination per community", async ({
     page,
   }) => {
@@ -834,6 +1022,16 @@ test.describe("community rail", () => {
 
     // The app settles into the new community once apply completes.
     await expect(buttonB).toHaveAttribute("aria-current", "true");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            window.__BUZZ_E2E_COMMANDS__?.filter(
+              (command) => command === "clear_pending_navigation_deep_links",
+            ).length ?? 0,
+        ),
+      )
+      .toBe(1);
   });
 
   test("leaving the final community returns to setup without resetting identity", async ({
@@ -902,6 +1100,37 @@ test.describe("community rail", () => {
         ),
       )
       .toEqual(identityBefore);
+  });
+
+  test("shows a recoverable error when leaving the final community cannot clear navigation", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      { clearPendingNavigationDeepLinksError: "queue unavailable" },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
+
+    const error = page.getByTestId("community-apply-error");
+    await expect(error).toBeVisible();
+    await expect(error).toContainText(
+      "Could not safely leave community: queue unavailable",
+    );
+    await expect(page.getByText("Join or create a community")).toHaveCount(0);
+    await expect(page.getByTestId("community-switch-gate")).toHaveCount(0);
+    await expect(page.getByTestId("community-apply-error-retry")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Change community" }),
+    ).toBeVisible();
   });
 
   test("hides the rail with a single community", async ({ page }) => {

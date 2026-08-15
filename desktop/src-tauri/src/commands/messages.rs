@@ -215,7 +215,7 @@ pub async fn search_messages(
     until: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<SearchResponse, String> {
-    let cap = limit.unwrap_or(20).min(100);
+    let cap = search_messages_limit(limit);
     let filter = build_search_messages_filter(
         &q,
         cap,
@@ -227,6 +227,10 @@ pub async fn search_messages(
 
     let events = query_relay(&state, &[filter]).await?;
     Ok(nostr_convert::search_response_from_events(&events))
+}
+
+fn search_messages_limit(limit: Option<u32>) -> u32 {
+    limit.unwrap_or(20).min(500)
 }
 
 /// Fetch the full reply subtree under a thread root, server-side.

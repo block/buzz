@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../animated_avatar.dart';
 import '../relay/relay.dart';
 
 /// A circular avatar that supports both remote URLs and inline image data.
@@ -27,13 +28,21 @@ class AvatarImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final animatedAvatar = parseAnimatedAvatarUrl(imageUrl);
     return CircleAvatar(
       radius: radius,
-      backgroundColor: backgroundColor,
+      // Animated avatar posters carry their own backdrop disc; preserve their
+      // transparent surroundings on static/list surfaces, matching desktop.
+      backgroundColor: animatedAvatar == null
+          ? backgroundColor
+          : Colors.transparent,
       child: ClipOval(
         child: SizedBox.square(
           dimension: radius * 2,
-          child: AvatarImageContent(imageUrl: imageUrl, fallback: fallback),
+          child: AvatarImageContent(
+            imageUrl: animatedAvatar?.posterUrl ?? imageUrl,
+            fallback: fallback,
+          ),
         ),
       ),
     );

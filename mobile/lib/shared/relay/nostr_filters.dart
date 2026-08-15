@@ -203,7 +203,7 @@ abstract final class NostrFilters {
 
   /// Relay membership list (kind:13534).
   static NostrFilter relayMembers() =>
-      const NostrFilter(kinds: [13534], limit: 1);
+      const NostrFilter(kinds: [EventKind.relayMembership], limit: 1);
 
   /// Agent profiles (kind:10100).
   static NostrFilter agentProfiles() =>
