@@ -1387,7 +1387,7 @@ pub enum GifsCmd {
 pub enum DmsCmd {
     /// List direct message conversations
     List {
-        /// Maximum number of results to return
+        /// Maximum number of results to return (default 50, hard cap 200).
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -1549,7 +1549,7 @@ pub enum WorkflowsCmd {
         /// Workflow UUID
         #[arg(long)]
         workflow: String,
-        /// Maximum number of results to return
+        /// Maximum number of results to return (default 20, hard cap 100).
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -1602,7 +1602,7 @@ pub enum FeedCmd {
         /// Unix timestamp — return entries after this time
         #[arg(long)]
         since: Option<i64>,
-        /// Maximum number of results to return
+        /// Maximum number of results to return (default 20, hard cap 50).
         #[arg(long)]
         limit: Option<u32>,
         /// Comma-separated feed types to include: mentions, needs_action, activity, agent_activity
