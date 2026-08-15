@@ -97,7 +97,6 @@
             cargo-nextest
             cmake
             curl
-            ffmpeg
             file
             git
             just
@@ -108,6 +107,8 @@
             openssl
             perl
             pkg-config
+            # pnpm honors package.json's packageManager field and dispatches to
+            # the workspace-pinned release when commands run in the repo.
             pnpm_11
             python3
             rust-analyzer
@@ -115,9 +116,8 @@
             wget
           ];
 
-          mobilePackages = [ flutterPkgs.flutter ];
-
           occasionalPackages = with pkgs; [
+            ffmpeg
             gh
             uv
           ];
@@ -145,15 +145,7 @@
             gstreamer
           ];
 
-          linuxPackages =
-            with pkgs;
-            [
-              gcc
-              mold
-              patchelf
-            ]
-            ++ linuxLibraries
-            ++ gstreamerPlugins;
+          linuxPackages = with pkgs; [ patchelf ] ++ linuxLibraries ++ gstreamerPlugins;
 
           # Just runs inside the caller's current environment; it cannot switch
           # Nix shells per recipe. Keep the direnv/default shell focused on
@@ -163,50 +155,74 @@
             {
               label,
               extraPackages ? [ ],
+              withFlutter ? false,
             }:
-            pkgs.mkShell {
-              packages =
-                commonPackages
-                ++ extraPackages
-                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux linuxPackages;
+            pkgs.mkShell (
+              {
+                packages =
+                  commonPackages
+                  ++ pkgs.lib.optionals withFlutter [ flutterPkgs.flutter ]
+                  ++ extraPackages
+                  ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux linuxPackages;
 
-              CMAKE_POLICY_VERSION_MINIMUM = "3.5";
-              LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
-                pkgs.lib.makeLibraryPath linuxLibraries
-              );
+                CMAKE_POLICY_VERSION_MINIMUM = "3.5";
+                LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
+                  pkgs.lib.makeLibraryPath linuxLibraries
+                );
 
-              GST_PLUGIN_SYSTEM_PATH_1_0 = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
-                pkgs.lib.makeSearchPath "lib/gstreamer-1.0" gstreamerPlugins
-              );
+                GST_PLUGIN_SYSTEM_PATH_1_0 = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (
+                  pkgs.lib.makeSearchPath "lib/gstreamer-1.0" gstreamerPlugins
+                );
 
-              # The npm launcher honors this variable. Point it at Nix's patched
-              # executable so Biome works on NixOS without a global nix-ld setup.
-              BIOME_BINARY = "${biomeTool}/bin/biome";
+                # The npm launcher honors this variable. Point it at Nix's patched
+                # executable so Biome works on NixOS without a global nix-ld setup.
+                BIOME_BINARY = "${biomeTool}/bin/biome";
 
-              FLUTTER_SUPPRESS_ANALYTICS = "true";
+                shellHook = ''
+                  export PATH="$PWD/node_modules/.bin:$PATH"
 
-              shellHook = ''
-                export PATH="$PWD/node_modules/.bin:$PATH"
-
-                echo "Buzz ${label} development shell"
-                echo "  Rust: $(rustc --version)"
-                echo "  Node: $(node --version)"
-                echo "  pnpm: $(pnpm --version)"
-              '';
-            };
+                  echo "Buzz ${label} development shell"
+                  echo "  Rust: $(rustc --version)"
+                  echo "  Node: $(node --version)"
+                  echo "  pnpm: $(pnpm --version)"
+                '';
+              }
+              // pkgs.lib.optionalAttrs withFlutter {
+                FLUTTER_SUPPRESS_ANALYTICS = "true";
+              }
+            );
         in
         {
           formatter = pkgs.nixfmt;
+
+          checks.toolchain =
+            pkgs.runCommand "buzz-development-toolchain-check"
+              {
+                nativeBuildInputs = [
+                  biomeTool
+                  pkgs.nodejs_24
+                  pkgs.pnpm_11
+                  rustToolchain
+                ];
+              }
+              ''
+                rustc --version | grep -F "rustc ${toolchainChannel} "
+                node --version
+                pnpm --version
+                biome --version
+                touch "$out"
+              '';
 
           devShells = {
             default = mkBuzzShell { label = "desktop/web"; };
             mobile = mkBuzzShell {
               label = "mobile";
-              extraPackages = mobilePackages;
+              withFlutter = true;
             };
             full = mkBuzzShell {
               label = "full";
-              extraPackages = mobilePackages ++ occasionalPackages;
+              extraPackages = occasionalPackages;
+              withFlutter = true;
             };
           };
         };
