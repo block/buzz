@@ -26,14 +26,22 @@ pub const RUNNER_RECEIPT_FILE: &str = "runner-receipt.json";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobSpec {
+    /// Owning runtime identifier.
     pub runtime_id: String,
+    /// Job identity shared with the relay-side job record.
     pub job_id: JobId,
+    /// Positive attempt number; one spec per attempt.
     pub attempt: u32,
+    /// Canonical absolute driver executable path.
     pub executable: PathBuf,
+    /// Bounded launch request (driver, argv, cwd, summary).
     pub request: JobStartRequest,
+    /// SHA-256 over the canonical argv JSON.
     pub argv_sha256: String,
+    /// Creation timestamp used for audit ordering.
     pub created_at: DateTime<Utc>,
 }
+
 impl JobSpec {
     /// Validates the request, executable path, attempt number, and argv digest.
     pub fn validate(&self) -> Result<(), ArtifactError> {
@@ -56,9 +64,13 @@ impl JobSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerReceiptState {
+    /// Runner spawned and reporting ready.
     Ready,
+    /// Runner exited zero.
     Succeeded,
+    /// Runner exited nonzero or failed internally.
     Failed,
+    /// Runner was cancelled before a terminal exit.
     Cancelled,
 }
 
@@ -66,17 +78,29 @@ pub enum RunnerReceiptState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunnerReceipt {
+    /// Runner-receipt schema version: 1.
     pub schema_version: u8,
+    /// Job identity shared with the relay-side job record.
     pub job_id: JobId,
+    /// Positive attempt number this receipt terminates.
     pub attempt: u32,
+    /// Terminal state of the attempt.
     pub state: RunnerReceiptState,
+    /// Runner process id at start time.
     pub runner_pid: u32,
+    /// Process start marker binding the PID to one boot.
     pub runner_start_marker: String,
+    /// Process-group identity string for signal scoping.
     pub process_group: String,
+    /// SHA-256 over the canonical argv JSON.
     pub argv_sha256: String,
+    /// Attempt start timestamp.
     pub started_at: DateTime<Utc>,
+    /// Terminal timestamp; absent while nonterminal.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Process exit code; absent when not reaped or cancelled.
     pub exit_code: Option<i32>,
+    /// Stable machine-readable failure code; absent on clean exit.
     pub error_code: Option<String>,
 }
 impl RunnerReceipt {
@@ -107,12 +131,16 @@ impl RunnerReceipt {
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
     #[error("artifact IO failed: {0}")]
+    /// Underlying filesystem failure.
     Io(#[from] io::Error),
     #[error("artifact JSON failed: {0}")]
+    /// Underlying JSON (de)serialization failure.
     Json(#[from] serde_json::Error),
     #[error("invalid artifact: {0}")]
+    /// Artifact content failed validation.
     Invalid(String),
     #[error("process {0} is not running or has no start marker")]
+    /// Referenced process is gone or lacks a start marker.
     ProcessUnavailable(u32),
 }
 
@@ -625,5 +653,144 @@ mod process_marker_tests {
         let stat = "42 (worker name)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
         assert_eq!(super::linux_proc_start_ticks(42, stat), Some(987_654));
         assert_eq!(super::linux_proc_start_ticks(41, stat), None);
+    }
+}
+
+#[cfg(test)]
+mod artifact_contract_tests {
+    use super::{
+        argv_sha256, canonicalize_workspace, canonicalize_workspace_roots, job_attempt_dir,
+        read_job_spec, write_job_spec, JobSpec, RunnerReceipt, RunnerReceiptState,
+        RUNNER_RECEIPT_SCHEMA_VERSION,
+    };
+    use crate::protocol::{JobStartRequest, SUPPORTED_JOB_DRIVER};
+    use chrono::Utc;
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
+
+    fn request(cwd: &Path) -> JobStartRequest {
+        JobStartRequest {
+            channel_id: Uuid::new_v4(),
+            source_event_id: None,
+            driver: SUPPORTED_JOB_DRIVER.into(),
+            argv: vec!["run".into()],
+            cwd: cwd.to_string_lossy().into_owned(),
+            summary: "test job".into(),
+        }
+    }
+
+    fn spec(directory: &Path, executable: &Path, argv: Vec<String>) -> JobSpec {
+        let mut request = request(directory);
+        request.argv = argv;
+        JobSpec {
+            runtime_id: "artifacts-test".into(),
+            job_id: Uuid::new_v4(),
+            attempt: 1,
+            executable: executable.to_path_buf(),
+            argv_sha256: argv_sha256(&request.argv).unwrap(),
+            created_at: Utc::now(),
+            request,
+        }
+    }
+
+    #[test]
+    fn job_spec_round_trip_and_validate_rejects_tampering() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical root");
+        let executable = root.join("driver");
+        std::fs::write(&executable, b"#!/bin/sh\n").expect("driver");
+        let original = spec(&root, &executable, vec!["run".into()]);
+        original.validate().expect("valid spec");
+
+        let path = write_job_spec(&root, &original).expect("write spec");
+        assert!(path.is_absolute());
+        assert_eq!(path, std::fs::canonicalize(&path).expect("re-canonicalize"));
+        let loaded = read_job_spec(&path).expect("read spec");
+        assert_eq!(loaded, original);
+
+        let mut tampered = original.clone();
+        tampered.argv_sha256 = "0".repeat(64);
+        assert!(
+            tampered.validate().is_err(),
+            "argv digest mismatch rejected"
+        );
+        let mut zero_attempt = original.clone();
+        zero_attempt.attempt = 0;
+        assert!(zero_attempt.validate().is_err(), "attempt zero rejected");
+        let mut relative_driver = original.clone();
+        relative_driver.executable = PathBuf::from("driver");
+        assert!(
+            relative_driver.validate().is_err(),
+            "relative driver rejected"
+        );
+    }
+
+    #[test]
+    fn runner_receipt_validation_enforces_terminal_invariants() {
+        let job_id = Uuid::new_v4();
+        let base = RunnerReceipt {
+            schema_version: RUNNER_RECEIPT_SCHEMA_VERSION,
+            job_id,
+            attempt: 1,
+            state: RunnerReceiptState::Failed,
+            runner_pid: 42,
+            runner_start_marker: "42:1".into(),
+            process_group: "42".into(),
+            argv_sha256: "a".repeat(64),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            exit_code: Some(1),
+            error_code: None,
+        };
+        base.validate(job_id, 1).expect("valid terminal receipt");
+        assert!(
+            base.validate(job_id, 2).is_err(),
+            "attempt mismatch rejected"
+        );
+        let mut ready = base.clone();
+        ready.state = RunnerReceiptState::Ready;
+        assert!(
+            ready.validate(job_id, 1).is_err(),
+            "ready with finished_at rejected"
+        );
+        let mut unfinished = base.clone();
+        unfinished.finished_at = None;
+        assert!(
+            unfinished.validate(job_id, 1).is_err(),
+            "terminal state without finished_at rejected"
+        );
+    }
+
+    #[test]
+    fn attempt_dir_rejects_unnormalized_runtime_paths() {
+        let job_id = Uuid::new_v4();
+        assert!(job_attempt_dir(Path::new("/tmp/../runtime"), job_id, 1).is_err());
+        assert!(job_attempt_dir(Path::new("runtime"), job_id, 1).is_err());
+        assert!(job_attempt_dir(Path::new("/tmp/runtime"), job_id, 0).is_err());
+        let normalized = job_attempt_dir(Path::new("/tmp/runtime"), job_id, 2)
+            .expect("normalized absolute accepted");
+        assert_eq!(
+            normalized,
+            PathBuf::from(format!("/tmp/runtime/jobs/{}/2", job_id.hyphenated()))
+        );
+    }
+
+    #[test]
+    fn workspace_containment_rejects_escape_attempts() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical root");
+        let approved = canonicalize_workspace_roots([root.clone()]).expect("approve root");
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).expect("create nested dir");
+        let inside = canonicalize_workspace(&nested, &approved).expect("inside approved root");
+        assert!(inside.starts_with(&root));
+        assert!(
+            canonicalize_workspace(Path::new("/"), &approved).is_err(),
+            "filesystem root rejected"
+        );
+        assert!(
+            canonicalize_workspace_roots([PathBuf::from("relative")]).is_err(),
+            "relative root rejected"
+        );
     }
 }

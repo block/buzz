@@ -22,16 +22,7 @@ use super::{api_error, bridge, internal_error};
 
 const DEFAULT_JOB_LIST_LIMIT: u16 = 500;
 const MAX_JOB_LIST_LIMIT: u16 = 500;
-const JOB_STATES: [&str; 8] = [
-    "requested",
-    "accepted",
-    "running",
-    "cancelling",
-    "succeeded",
-    "failed",
-    "cancelled",
-    "lost",
-];
+const JOB_STATES: [&str; 8] = buzz_core::agent_job::AGENT_JOB_STATES;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

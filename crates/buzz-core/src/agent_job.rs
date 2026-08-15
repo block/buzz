@@ -434,6 +434,20 @@ impl AgentJobError {
         check_artifacts(&self.artifacts)
     }
 }
+/// Canonical agent-job lifecycle states in lifecycle order.
+///
+/// Single source of truth for the eight states; relay/CLI list filters and the
+/// `0028_agent_jobs.sql` CHECK constraint must stay in sync with this list.
+pub const AGENT_JOB_STATES: [&str; 8] = [
+    "requested",
+    "accepted",
+    "running",
+    "cancelling",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "lost",
+];
 
 /// Strict typed content carried by one of kinds 43001–43006.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -92,13 +92,21 @@ impl fmt::Debug for SecretToken {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LegacyRuntimeReceipt {
+    /// Legacy receipt schema version: 1.
     pub schema_version: u8,
+    /// Agent runtime-pair identity.
     pub key: ManagedAgentRuntimeKey,
+    /// Runtime process id at start time.
     pub pid: u32,
+    /// Process start marker binding the PID to one boot.
     pub process_start_marker: String,
+    /// Desktop instance identity that acquired the lock.
     pub desktop_instance_id: String,
+    /// Receipt creation timestamp.
     pub started_at: DateTime<Utc>,
+    /// Lock file-protocol version: 1.
     pub lock_protocol_version: u8,
+    /// SHA-256 over the lock path, lowercase hex.
     pub lock_path_hash: String,
 }
 
@@ -125,19 +133,33 @@ impl LegacyRuntimeReceipt {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeReceipt {
+    /// Runtime receipt schema version: 2.
     pub schema_version: u8,
+    /// Agent runtime-pair identity.
     pub key: ManagedAgentRuntimeKey,
+    /// Owning runtime identifier.
     pub runtime_id: String,
+    /// Runtime process id at start time.
     pub pid: u32,
+    /// Process start marker binding the PID to one boot.
     pub process_start_marker: String,
+    /// Runtime generation this receipt proves.
     pub generation: Uuid,
+    /// Loopback address of the control server.
     pub control_addr: SocketAddr,
+    /// Secret bearer token for controller capability.
     pub controller_token: SecretToken,
+    /// Secret bearer token for model capability.
     pub model_token: SecretToken,
+    /// Receipt creation timestamp.
     pub started_at: DateTime<Utc>,
+    /// Control protocol version the runtime speaks.
     pub protocol_version: u16,
+    /// Lock file-protocol version: 1.
     pub lock_protocol_version: u8,
+    /// SHA-256 over the lock path, lowercase hex.
     pub lock_path_hash: String,
+    /// Whether the runtime finished bringing up its control server.
     pub ready: bool,
 }
 
@@ -192,13 +214,17 @@ impl RuntimeReceipt {
 /// Capability selected by a same-host caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
+    /// Full-trust capability: may run every control operation.
     Controller,
+    /// Restricted capability: may run model-allowed operations only.
     Model,
 }
 /// Capability authenticated by the control server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizedCapability {
+    /// Controller capability verified by bearer token.
     Controller,
+    /// Model capability verified by bearer token.
     Model,
 }
 /// A durable job identifier.
@@ -207,14 +233,23 @@ pub type JobId = Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssignmentState {
+    /// Reading queued input before work starts.
     Reading,
+    /// Executing the assignment.
     Working,
+    /// Waiting on an external event or timer.
     Waiting,
+    /// Paused pending explicit user approval.
     NeedsApproval,
+    /// Blocked by a recorded blocker.
     Blocked,
+    /// Recovering after a crash or restart.
     Recovering,
+    /// Finished successfully; terminal.
     Completed,
+    /// Finished unsuccessfully; terminal.
     Failed,
+    /// Cancelled by the operator; terminal.
     Cancelled,
 }
 
@@ -229,13 +264,21 @@ impl AssignmentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkState {
+    /// No assignment active.
     Idle,
+    /// Reading queued input before work starts.
     Reading,
+    /// Executing the active assignment.
     Working,
+    /// Waiting on an external event or timer.
     Waiting,
+    /// Paused pending explicit user approval.
     NeedsApproval,
+    /// Blocked by a recorded blocker.
     Blocked,
+    /// Recovering after a crash or restart.
     Recovering,
+    /// Runtime unreachable; projected from staleness.
     Offline,
 }
 
@@ -243,19 +286,33 @@ pub enum WorkState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignmentRecord {
+    /// Stable assignment identifier.
     pub assignment_id: String,
+    /// Inbox event that created the assignment, if retained.
     pub source_event_id: Option<String>,
+    /// Channel the assignment serves.
     pub channel_id: Uuid,
+    /// Current lifecycle state.
     pub state: AssignmentState,
+    /// Bounded human-readable summary.
     pub summary: String,
+    /// Active job identifier, if any.
     pub active_job_id: Option<JobId>,
+    /// Private session identifier; never relayed.
     pub session_id: Option<String>,
+    /// Event id of the latest reply, if published.
     pub reply_event_id: Option<String>,
+    /// Last accepted progress timestamp.
     pub last_progress_at: DateTime<Utc>,
+    /// State-transition reason; required by some states.
     pub reason: Option<String>,
+    /// Human-readable blocker; required while blocked.
     pub blocker: Option<String>,
+    /// Approval gate identifier; required while awaiting approval.
     pub approval_gate_id: Option<String>,
+    /// Delivery evidence string; required to complete.
     pub delivery_evidence: Option<String>,
+    /// Last durable write timestamp.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -263,12 +320,19 @@ pub struct AssignmentRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignmentSetStateRequest {
+    /// Requested next lifecycle state.
     pub state: AssignmentState,
+    /// Replacement summary.
     pub summary: Option<String>,
+    /// State-transition reason.
     pub reason: Option<String>,
+    /// Blocker description.
     pub blocker: Option<String>,
+    /// Approval gate identifier.
     pub approval_gate_id: Option<String>,
+    /// Delivery evidence string.
     pub delivery_evidence: Option<String>,
+    /// Event id this update replies to, if any.
     pub reply_event_id: Option<String>,
 }
 
@@ -335,11 +399,17 @@ fn nonempty(value: Option<&str>) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobStartRequest {
+    /// Channel the job serves.
     pub channel_id: Uuid,
+    /// Inbox event that requested the job, if retained.
     pub source_event_id: Option<String>,
+    /// Job driver name; only `lh` is supported.
     pub driver: String,
+    /// Bounded argv vector; no shell string or stdin.
     pub argv: Vec<String>,
+    /// Working directory for the runner.
     pub cwd: String,
+    /// Bounded human-readable summary.
     pub summary: String,
 }
 
@@ -391,13 +461,21 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
+    /// Accepted but not yet started.
     Requested,
+    /// Runner spawned, awaiting start confirmation.
     Accepted,
+    /// Runner is executing.
     Running,
+    /// Cancel requested, awaiting termination.
     Cancelling,
+    /// Runner exited zero; terminal.
     Succeeded,
+    /// Runner exited nonzero; terminal.
     Failed,
+    /// Cancelled before terminal exit; terminal.
     Cancelled,
+    /// Runner vanished without a receipt; terminal.
     Lost,
 }
 impl JobState {
@@ -414,9 +492,13 @@ impl JobState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PublicationState {
+    /// Projection not yet queued for publication.
     NotStarted,
+    /// Queued for relay publication.
     Pending,
+    /// Published to the relay.
     Published,
+    /// Publication attempts failed; terminal.
     Failed,
 }
 
@@ -424,20 +506,35 @@ pub enum PublicationState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobStatus {
+    /// Durable job identifier.
     pub job_id: JobId,
+    /// Event id of the start request, if retained.
     pub request_event_id: Option<String>,
+    /// Inbox event that requested the job, if retained.
     pub source_event_id: Option<String>,
+    /// Channel the job serves.
     pub channel_id: Uuid,
+    /// Current lifecycle state.
     pub state: JobState,
+    /// Attempt number; positive, one spec per attempt.
     pub attempt: u32,
+    /// Monotonic progress sequence for this job.
     pub progress_seq: u64,
+    /// Bounded human-readable summary.
     pub summary: String,
+    /// First runner start timestamp, if started.
     pub started_at: Option<DateTime<Utc>>,
+    /// Terminal timestamp, if finished.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Relay publication state of this projection.
     pub exit_code: Option<i32>,
+    /// Runner process id, if a runner is recorded.
     pub error_code: Option<String>,
+    /// Runner process start marker, if recorded.
     pub publication_state: PublicationState,
+    /// Relay publication state of the latest projection.
     pub runner_pid: Option<u32>,
+    /// Runner process id at start time, if recorded.
     pub runner_start_marker: Option<String>,
 }
 
@@ -445,7 +542,9 @@ pub struct JobStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobListFilter {
+    /// Restrict results to one channel.
     pub channel_id: Option<Uuid>,
+    /// Restrict results to one lifecycle state.
     pub state: Option<JobState>,
 }
 
@@ -453,8 +552,11 @@ pub struct JobListFilter {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobLogs {
+    /// Job the lines belong to.
     pub job_id: JobId,
+    /// Whether the tail was served without relay fan-out.
     pub local_only: bool,
+    /// Bounded log lines, oldest first.
     pub lines: Vec<String>,
 }
 
@@ -462,10 +564,15 @@ pub struct JobLogs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerReceiptHealth {
+    /// Runner spawned and reporting ready.
     Ready,
+    /// Receipt records a terminal state.
     Terminal,
+    /// No receipt found for the attempt.
     Missing,
+    /// Receipt failed schema validation.
     Invalid,
+    /// Receipt identity does not match the job.
     IdentityMismatch,
 }
 
@@ -473,8 +580,11 @@ pub enum RunnerReceiptHealth {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobRunnerReceiptHealth {
+    /// Job the health describes.
     pub job_id: JobId,
+    /// Attempt number of the inspected receipt.
     pub attempt: u32,
+    /// Receipt health verdict.
     pub health: RunnerReceiptHealth,
 }
 
@@ -482,8 +592,11 @@ pub struct JobRunnerReceiptHealth {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeDiagnostics {
+    /// Store schema version the runtime manages.
     pub store_schema_version: u32,
+    /// Per-attempt receipt health for active jobs.
     pub runner_receipts: Vec<JobRunnerReceiptHealth>,
+    /// Last relay progress publication timestamp, if any.
     pub last_relay_progress_published_at: Option<DateTime<Utc>>,
 }
 
@@ -491,13 +604,21 @@ pub struct RuntimeDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignmentStatusSnapshot {
+    /// Stable assignment identifier.
     pub assignment_id: String,
+    /// Inbox event that created the assignment, if retained.
     pub source_event_id: Option<String>,
+    /// Channel the assignment serves.
     pub channel_id: Uuid,
+    /// Current lifecycle state.
     pub state: AssignmentState,
+    /// Bounded human-readable summary.
     pub summary: String,
+    /// Active job identifier, if any.
     pub active_job_id: Option<JobId>,
+    /// Last accepted progress timestamp.
     pub last_progress_at: DateTime<Utc>,
+    /// Whether a blocker is recorded.
     pub has_blocker: bool,
 }
 
@@ -520,18 +641,31 @@ impl From<&AssignmentRecord> for AssignmentStatusSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeStatusSnapshot {
+    /// Owning runtime identifier.
     pub runtime_id: String,
+    /// Runtime generation of this snapshot.
     pub generation: Uuid,
+    /// User-visible work state.
     pub work_state: WorkState,
+    /// Whether the runtime is in recovery.
     pub recovering: bool,
+    /// Machine-readable recovery cause, if recovering.
     pub recovery_reason: Option<String>,
+    /// Inbox depth of queued events.
     pub queued_inbox: u64,
+    /// Inbox depth of events in turn.
     pub in_turn_inbox: u64,
+    /// Inbox depth of dead-lettered events.
     pub dead_letter_inbox: u64,
+    /// Count of capacity admissions rejected.
     pub capacity_rejections: u64,
+    /// Active assignment projection, if any.
     pub active_assignment: Option<AssignmentStatusSnapshot>,
+    /// Single-job compatibility view of `active_jobs`.
     pub active_job: Option<JobId>,
+    /// Jobs currently owned by the runtime.
     pub active_jobs: Vec<JobId>,
+    /// Owner-safe diagnostic block.
     pub diagnostics: RuntimeDiagnostics,
 }
 
@@ -542,8 +676,11 @@ pub type RuntimeStatus = RuntimeStatusSnapshot;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HelloResponse {
+    /// Owning runtime identifier.
     pub runtime_id: String,
+    /// Runtime generation this proof covers.
     pub generation: Uuid,
+    /// Capability granted by the server.
     pub capability: String,
 }
 
@@ -551,9 +688,13 @@ pub struct HelloResponse {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ControlRequest {
+    /// Control protocol version: 1.
     pub protocol_version: u16,
+    /// Runtime generation being addressed.
     pub generation: Uuid,
+    /// Bearer token for the requested capability.
     pub control_token: SecretToken,
+    /// Operation to execute.
     pub operation: ControlOperation,
 }
 impl fmt::Debug for ControlRequest {
@@ -578,25 +719,41 @@ impl fmt::Debug for ControlRequest {
     deny_unknown_fields
 )]
 pub enum ControlOperation {
+    /// Exchange tokens for a capability proof.
     Hello,
+    /// Fetch the runtime status snapshot.
     Status,
+    /// List jobs matching a filter.
     JobsList(JobListFilter),
+    /// Start a local job from a strict request.
     JobsStart(JobStartRequest),
+    /// Fetch one job status by id.
     JobsStatus {
+        /// Job to inspect.
         job_id: JobId,
     },
+    /// Request cancellation of one job.
     JobsCancel {
+        /// Job to cancel.
         job_id: JobId,
     },
+    /// Fetch a bounded local log tail.
     JobsLogs {
+        /// Job whose logs are read.
         job_id: JobId,
+        /// Requested tail length; defaults and caps apply.
         tail_lines: Option<u16>,
     },
+    /// Update the current assignment state.
     AssignmentSetState {
+        /// Assignment to update.
         assignment_id: String,
+        /// Strict state-update request.
         request: AssignmentSetStateRequest,
     },
+    /// Reconcile projected state from durable facts.
     Reconcile,
+    /// Stop the runtime after current work drains.
     Shutdown,
 }
 impl ControlOperation {
@@ -624,12 +781,19 @@ impl ControlOperation {
     deny_unknown_fields
 )]
 pub enum ControlPayload {
+    /// Capability proof from a successful hello.
     Hello(HelloResponse),
+    /// Runtime status snapshot.
     Status(RuntimeStatusSnapshot),
+    /// Jobs matching a `jobs.list` filter.
     Jobs(Vec<JobStatus>),
+    /// One job status.
     Job(JobStatus),
+    /// Bounded local log tail.
     Logs(JobLogs),
+    /// Updated assignment record.
     Assignment(AssignmentRecord),
+    /// Success with no payload.
     Ack,
 }
 
@@ -637,7 +801,9 @@ pub enum ControlPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ControlError {
+    /// Stable machine-readable error code.
     pub code: String,
+    /// Human-readable error detail.
     pub message: String,
 }
 impl ControlError {
@@ -661,8 +827,11 @@ impl ControlError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ControlResponse {
+    /// Control protocol version: 1.
     pub protocol_version: u16,
+    /// Success payload, present unless failed.
     pub result: Option<ControlPayload>,
+    /// Error payload, present unless successful.
     pub error: Option<ControlError>,
 }
 impl ControlResponse {
@@ -688,14 +857,19 @@ impl ControlResponse {
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
     #[error("invalid runtime receipt")]
+    /// Runtime receipt failed validation.
     InvalidReceipt,
     #[error("{0} exceeds its protocol bound")]
+    /// A named field exceeded its protocol bound.
     BoundExceeded(&'static str),
     #[error("unsupported driver")]
+    /// Requested driver is not supported.
     UnsupportedDriver,
     #[error("invalid assignment: {0}")]
+    /// Assignment update failed state-specific validation.
     InvalidAssignment(&'static str),
     #[error("protocol serialization failed: {0}")]
+    /// Control payload failed serialization.
     Serialization(serde_json::Error),
 }
 

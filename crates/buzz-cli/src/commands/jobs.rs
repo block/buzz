@@ -18,16 +18,7 @@ use crate::error::CliError;
 use crate::validate::sdk_err;
 use crate::JobsCmd;
 
-const JOB_STATES: [&str; 8] = [
-    "requested",
-    "accepted",
-    "running",
-    "cancelling",
-    "succeeded",
-    "failed",
-    "cancelled",
-    "lost",
-];
+const JOB_STATES: [&str; 8] = buzz_core::agent_job::AGENT_JOB_STATES;
 
 #[derive(Debug, Serialize)]
 struct JobStartOutput {

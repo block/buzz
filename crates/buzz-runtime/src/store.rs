@@ -37,118 +37,180 @@ pub const STORE_SCHEMA_VERSION: u32 = 4;
 /// Store-owned operational diagnostics safe for owner-facing status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoreDiagnostics {
+    /// Store schema version the handle reports.
     pub schema_version: u32,
+    /// Last relay progress publication timestamp, if any.
     pub last_relay_progress_published_at: Option<DateTime<Utc>>,
 }
 /// Errors returned by durable runtime-store operations.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// Failed to open the store at the given path.
     #[error("failed to open runtime store {path}: {source}")]
     Open {
+        /// Store path that failed to open.
         path: PathBuf,
+        /// Underlying SQLite open failure.
         #[source]
         source: rusqlite::Error,
     },
+    /// Underlying SQLite failure.
     #[error("runtime store error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Underlying filesystem failure.
     #[error("runtime store IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// Underlying JSON (de)serialization failure.
     #[error("runtime store serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// Stored row content failed validation.
     #[error("invalid runtime store data: {0}")]
     InvalidData(String),
+    /// Serialized event exceeded 512 KiB.
     #[error("event_json exceeds 512 KiB")]
     EventTooLarge,
+    /// Serialized argv exceeded 64 KiB.
     #[error("argv_json exceeds 64 KiB")]
     ArgvTooLarge,
+    /// Requested job-state change is illegal.
     #[error("invalid job transition from {from:?} to {to:?}")]
-    InvalidJobTransition { from: JobState, to: JobState },
+    InvalidJobTransition {
+        /// State the job was in.
+        from: JobState,
+        /// Requested target state.
+        to: JobState,
+    },
+    /// A privileged job is already active.
     #[error("a privileged job is already active")]
     ActiveJobExists,
+    /// Job does not belong to the current assignment.
     #[error("model job does not match the current active assignment")]
     AssignmentJobMismatch,
+    /// Remote-cancel tombstone capacity is exhausted.
     #[error("remote cancel tombstone capacity reached")]
     CancelTombstoneCapacity,
+    /// Backing store thread is gone.
     #[error("runtime store thread is unavailable")]
     Unavailable,
+    /// No assignment with the given id.
     #[error("assignment {0} was not found")]
     AssignmentNotFound(String),
+    /// Assignment is no longer current.
     #[error("assignment {0} is not the current assignment")]
     AssignmentNotCurrent(String),
+    /// Assignment already reached a terminal state.
     #[error("assignment {assignment_id} is terminal in state {state:?}")]
     TerminalAssignment {
+        /// Assignment id of the terminal record.
         assignment_id: String,
+        /// Terminal state of the assignment.
         state: AssignmentState,
     },
+    /// Requested assignment-state change is illegal.
     #[error("invalid assignment transition from {from:?} to {to:?}")]
     InvalidAssignmentTransition {
+        /// State the assignment was in.
         from: AssignmentState,
+        /// Requested target state.
         to: AssignmentState,
     },
+    /// Completion lacks a succeeded job or delivery evidence.
     #[error("assignment completion requires a succeeded linked job or delivery evidence")]
     AssignmentCompletionUnverified,
+    /// Assignment update failed validation.
     #[error("invalid assignment: {0}")]
     InvalidAssignment(String),
 }
 /// Result of attempting to enqueue an inbox event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueOutcome {
+    /// Event accepted into the durable inbox.
     Enqueued,
+    /// Event id already present; nothing written.
     Duplicate,
+    /// Inbox depth limit reached; event refused.
     CapacityRejected,
 }
 /// Durable state of an inbox event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboxState {
+    /// Waiting to be claimed by a turn.
     Queued,
+    /// Claimed by an in-flight turn.
     InTurn,
+    /// Dispatch finished successfully.
     Completed,
+    /// Retries exhausted; parked for inspection.
     DeadLetter,
 }
 /// Event accepted for durable inbox processing.
 #[derive(Debug, Clone)]
 pub struct InboxEvent {
+    /// Channel the event arrived on.
     pub channel_id: Uuid,
+    /// The relay event payload.
     pub event: Event,
+    /// Time the runtime accepted the event.
     pub received_at: DateTime<Utc>,
 }
 /// Durable inbox row with dispatch and retry state.
 #[derive(Debug, Clone)]
 pub struct InboxRecord {
+    /// Stable event identifier.
     pub event_id: String,
+    /// Channel the event arrived on.
     pub channel_id: Uuid,
+    /// Sender public key, lowercase hex.
     pub sender_pubkey: String,
+    /// Unix-seconds creation time.
     pub created_at: u64,
+    /// Time the runtime accepted the event.
     pub received_at: DateTime<Utc>,
+    /// The relay event payload.
     pub event: Event,
+    /// Current durable inbox state.
     pub state: InboxState,
+    /// Dispatch attempt count.
     pub attempt: u32,
+    /// Earliest retry time while backed off.
     pub available_at: Option<DateTime<Utc>>,
+    /// Turn that claimed the row, if claimed.
     pub turn_id: Option<String>,
+    /// Last dispatch error, if failed.
     pub last_error: Option<String>,
 }
 /// Claimed inbox rows sharing one channel and turn identifier.
 #[derive(Debug, Clone)]
 pub struct InboxBatch {
+    /// Channel the batch was claimed from.
     pub channel_id: Uuid,
+    /// Turn identifier shared by the rows.
     pub turn_id: String,
+    /// Claimed rows in claim order.
     pub events: Vec<InboxRecord>,
 }
 /// Result of requeueing a claimed inbox turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequeueOutcome {
+    /// Rows returned to the queued state with backoff.
     Requeued {
+        /// Retry attempt number assigned.
         attempt: u32,
+        /// Earliest time the rows become claimable.
         available_at: DateTime<Utc>,
     },
+    /// Rows moved to the dead-letter state.
     DeadLettered {
+        /// Retry attempt number reached.
         attempt: u32,
     },
 }
 /// Counts produced while recovering interrupted inbox turns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecoveryOutcome {
+    /// Turns returned to the queued state.
     pub requeued: u64,
+    /// Turns moved to the dead-letter state.
     pub dead_lettered: u64,
 }
 
@@ -190,18 +252,26 @@ pub struct StartupRecoverySnapshot {
 /// Counts of inbox rows by durable state and rejected capacity attempts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueueDepths {
+    /// Rows waiting to be claimed.
     pub queued: u64,
+    /// Rows claimed by in-flight turns.
     pub in_turn: u64,
+    /// Rows dispatched successfully.
     pub completed: u64,
+    /// Rows in the dead-letter state.
     pub dead_letter: u64,
+    /// Enqueue attempts rejected by capacity.
     pub capacity_rejections: u64,
 }
 /// Session loading strategy persisted with a channel session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeMode {
+    /// Reuse the persisted session as-is.
     Resume,
+    /// Load the persisted session into the adapter.
     Load,
+    /// Start a fresh session, discarding persistence.
     Fresh,
 }
 impl ResumeMode {
@@ -224,23 +294,36 @@ impl ResumeMode {
 /// Persisted ACP session mapping for one channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
+    /// Channel the session belongs to.
     pub channel_id: Uuid,
+    /// ACP session identifier.
     pub session_id: String,
+    /// Adapter build identity for compatibility checks.
     pub adapter_fingerprint: String,
+    /// Working directory the session was started in.
     pub cwd: String,
+    /// Configuration hash for compatibility checks.
     pub config_hash: String,
+    /// Session loading strategy.
     pub resume_mode: ResumeMode,
+    /// Last session activity timestamp.
     pub updated_at: DateTime<Utc>,
 }
 
 /// Transactional projection of assignment, job, inbox, and recovery state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignmentSnapshot {
+    /// Current queue-depth counters.
     pub queue_depths: QueueDepths,
+    /// Current nonterminal assignment, if any.
     pub active_assignment: Option<AssignmentRecord>,
+    /// Most recent terminal assignment, if any.
     pub terminal_assignment: Option<AssignmentRecord>,
+    /// Nonterminal job identities.
     pub active_jobs: Vec<JobId>,
+    /// Whether startup recovery is still in progress.
     pub recovering: bool,
+    /// Machine-readable recovery cause, if recovering.
     pub recovery_reason: Option<String>,
 }
 impl AssignmentSnapshot {
@@ -331,75 +414,122 @@ pub fn project_work_state(
 /// Inputs required to create a durable job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJob {
+    /// Durable job identifier.
     pub job_id: JobId,
+    /// Event id of the start request.
     pub request_event_id: String,
+    /// Requester public key, lowercase hex.
     pub requester_pubkey: String,
+    /// Canonical absolute driver executable path.
     pub executable: PathBuf,
+    /// Strict bounded launch request.
     pub request: JobStartRequest,
+    /// Attempt number; positive, one spec per attempt.
     pub attempt: u32,
+    /// Job creation timestamp.
     pub created_at: DateTime<Utc>,
 }
 /// Durable tombstone recording an authorized remote cancellation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteCancelTombstone {
+    /// Cancelled job identifier.
     pub job_id: JobId,
+    /// Event id of the original start request.
     pub request_event_id: String,
+    /// Channel the job belonged to.
     pub channel_id: Uuid,
+    /// Event id of the cancellation.
     pub cancel_event_id: String,
+    /// Canceller public key, lowercase hex.
     pub canceller_pubkey: String,
+    /// Whether cancel was authorized without a stored request.
     pub authorized_without_request: bool,
+    /// Tombstone creation timestamp.
     pub created_at: DateTime<Utc>,
 }
 
 /// Result of recording a remote cancellation tombstone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordCancelOutcome {
+    /// Tombstone written; job recorded cancelled.
     Recorded,
+    /// Tombstone id already present; nothing written.
     Duplicate,
 }
 
 /// Remote job materialized in a cancelled terminal state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelledRemoteJob {
+    /// Synthesized cancelled job row.
     pub job: NewJob,
+    /// Event id of the cancellation.
     pub cancel_event_id: String,
+    /// Pre-baked terminal result JSON.
     pub result_json: String,
+    /// Pre-baked terminal outbox event.
     pub terminal_event: OutboxEvent,
 }
 
 /// Identity data used to prove which runner owns a job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerIdentity {
+    /// Runner process id at start time.
     pub pid: u32,
+    /// Process start marker binding the PID to one boot.
     pub start_marker: String,
+    /// Process-group identity string.
     pub process_group: String,
 }
 /// Durable job row and its runner, publication, and terminal state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobRecord {
+    /// Durable job identifier.
     pub job_id: JobId,
+    /// Event id of the start request, if retained.
     pub request_event_id: Option<String>,
+    /// Inbox event that requested the job, if retained.
     pub source_event_id: Option<String>,
+    /// Channel the job serves.
     pub channel_id: Uuid,
+    /// Requester public key, lowercase hex.
     pub requester_pubkey: String,
+    /// Job driver name.
     pub driver: String,
+    /// Driver executable path string.
     pub executable: String,
+    /// Bounded argv vector as persisted.
     pub argv: Vec<String>,
+    /// Working directory for the runner.
     pub cwd: String,
+    /// Bounded human-readable summary.
     pub summary: String,
+    /// Current lifecycle state.
     pub state: JobState,
+    /// Runner identity, if a runner is recorded.
     pub runner: Option<RunnerIdentity>,
+    /// Attempt number; positive, one spec per attempt.
     pub attempt: u32,
+    /// Monotonic progress sequence.
     pub progress_seq: u64,
+    /// Process exit code, if reaped.
     pub exit_code: Option<i32>,
+    /// Terminal result JSON, if terminal.
     pub result_json: Option<String>,
+    /// Stable machine-readable failure code, if failed.
     pub error_code: Option<String>,
+    /// Event id of the emitted terminal event, if any.
     pub terminal_event_id: Option<String>,
+    /// Relay publication state of the terminal event.
     pub publication_state: PublicationState,
+    /// Last relay publication error, if failed.
     pub publication_error: Option<String>,
+    /// Job creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// First runner start timestamp, if started.
     pub started_at: Option<DateTime<Utc>>,
+    /// Terminal timestamp, if finished.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Last durable write timestamp.
     pub updated_at: DateTime<Utc>,
 }
 impl JobRecord {
@@ -427,43 +557,69 @@ impl JobRecord {
 /// Requested durable transition for one job attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobTransition {
+    /// Durable job identifier.
     pub job_id: JobId,
+    /// Attempt the transition applies to.
     pub attempt: u32,
+    /// Requested next lifecycle state.
     pub next_state: JobState,
+    /// Runner identity binding, if this transition starts one.
     pub runner: Option<RunnerIdentity>,
+    /// New monotonic progress sequence, if updating.
     pub progress_seq: Option<u64>,
+    /// Process exit code, if terminal.
     pub exit_code: Option<i32>,
+    /// Terminal result JSON, if terminal.
     pub result_json: Option<String>,
+    /// Stable machine-readable failure code, if failed.
     pub error_code: Option<String>,
+    /// Event id of the emitted terminal event, if any.
     pub terminal_event_id: Option<String>,
+    /// New relay publication state, if updating.
     pub publication_state: Option<PublicationState>,
+    /// Relay publication error, if recording failure.
     pub publication_error: Option<String>,
+    /// Transition occurrence timestamp.
     pub occurred_at: DateTime<Utc>,
 }
 /// Relay event emitted for a durable job transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEvent {
+    /// Stable relay event identifier.
     pub event_id: String,
+    /// Job the event belongs to, if job-scoped.
     pub job_id: Option<JobId>,
+    /// Channel the event is addressed to.
     pub channel_id: Uuid,
+    /// Relay ordering key for the event.
     pub ordering_key: String,
+    /// Outbox kind discriminant.
     pub kind: u16,
+    /// Channel sequence number, if sequenced.
     pub seq: Option<u64>,
+    /// Whether this event closes its job.
     pub is_terminal: bool,
+    /// Serialized event payload.
     pub event_json: String,
+    /// Event creation timestamp.
     pub created_at: DateTime<Utc>,
 }
 /// Pending relay event with its publication attempt count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxRecord {
+    /// Durable outbox row id.
     pub id: i64,
+    /// Pending relay event.
     pub event: OutboxEvent,
+    /// Publication attempt count.
     pub attempt: u32,
 }
 /// Result of creating a durable job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateJobOutcome {
+    /// Job row created.
     Created(JobRecord),
+    /// Job id already present; existing row returned.
     Duplicate(JobRecord),
 }
 /// Handle for the single-threaded durable runtime store.

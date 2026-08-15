@@ -1,3 +1,10 @@
+//! Local managed-agent runtime: durable job store, artifact vault, and the
+//! same-host control protocol shared by desktop backends and ACP supervisors.
+//!
+//! The crate is deliberately relay-free: runtimes are per-agent processes and
+//! never link against relay code paths.
+
+#![warn(missing_docs)]
 #![deny(unsafe_code)]
 
 pub mod artifacts;

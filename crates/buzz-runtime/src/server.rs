@@ -61,10 +61,15 @@ where
 /// Immutable control listener configuration for one runtime generation.
 #[derive(Clone)]
 pub struct ControlServerConfig {
+    /// Loopback address the control socket binds.
     pub bind_addr: SocketAddr,
+    /// Owning runtime identifier.
     pub runtime_id: String,
+    /// Runtime generation this listener serves.
     pub generation: Uuid,
+    /// Secret bearer token for controller capability.
     pub controller_token: SecretToken,
+    /// Secret bearer token for model capability.
     pub model_token: SecretToken,
 }
 impl std::fmt::Debug for ControlServerConfig {
@@ -143,14 +148,24 @@ impl RuntimeServer {
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("control IO failed: {0}")]
+    /// Underlying control-socket IO failure.
     Io(#[from] io::Error),
     #[error("control frame length {announced} exceeds {maximum} bytes")]
-    FrameTooLarge { announced: usize, maximum: usize },
+    /// Announced frame length exceeded the fixed maximum.
+    FrameTooLarge {
+        /// Frame length the peer announced.
+        announced: usize,
+        /// Maximum accepted frame length in bytes.
+        maximum: usize,
+    },
     #[error("control JSON failed: {0}")]
+    /// Underlying control JSON failure.
     Json(#[from] serde_json::Error),
     #[error("control operation timed out")]
+    /// Peer did not complete framing within the deadline.
     Timeout,
     #[error("control server address is not loopback")]
+    /// Configured bind address was not loopback.
     NonLoopback,
 }
 
