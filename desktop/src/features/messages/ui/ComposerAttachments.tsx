@@ -216,7 +216,7 @@ function ManualSupersedesPickerRow({
             <Link2 className="h-3 w-3" />
             {isLinked
               ? `New version of ${linkedFilename ?? "another file"}`
-              : "Link to a different file…"}
+              : "New version of an existing file?"}
           </button>
         }
       />

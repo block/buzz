@@ -735,7 +735,6 @@ pub fn run() {
             get_feed,
             search_messages,
             send_channel_message,
-            link_channel_file_versions,
             send_managed_agent_channel_message,
             has_managed_agent_channel_message_marker,
             get_forum_posts,

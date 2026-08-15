@@ -597,25 +597,6 @@ export async function sendChannelMessage(
   };
 }
 
-/**
- * Retroactively declare that the file attached to `newerEventId` supersedes
- * the file attached to `olderEventId`, without editing either (immutable)
- * original message. Publishes a small standalone link-declaration event via
- * the Rust `link_channel_file_versions` command — see
- * `desktop-tauri/src/events.rs`'s `build_supersedes_link` for the tag shape.
- */
-export async function linkChannelFileVersions(
-  channelId: string,
-  newerEventId: string,
-  olderEventId: string,
-): Promise<void> {
-  await invokeTauri<void>("link_channel_file_versions", {
-    channelId,
-    newerEventId,
-    olderEventId,
-  });
-}
-
 export type BlobDescriptor = {
   url: string;
   sha256: string;

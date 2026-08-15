@@ -1,5 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
+import { ReleaseHistory } from "@/features/whatsNew/ui/ReleaseHistory";
 import { Button } from "@/shared/ui/button";
 import {
   SettingsOptionGroup,
@@ -168,6 +169,8 @@ export function UpdateChecker() {
           </SettingsOptionRow>
         )}
       </SettingsOptionGroup>
+
+      <ReleaseHistory />
     </section>
   );
 }

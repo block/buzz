@@ -10,19 +10,23 @@ import {
 } from "@/shared/ui/dialog";
 
 /**
- * First-run-per-version splash: shows a short changelog grouped by version
- * the first time this install launches a build whose real app version it
- * hasn't recorded as seen yet, then stays dismissed for that version. Fully
- * self-contained — mount once near the top of the authenticated app shell,
- * no props required.
+ * First-run-per-version splash: what shipped in *this* release, shown once the
+ * first time an install launches a version it hasn't recorded as seen.
+ *
+ * Deliberately scoped to the current version only. It previously rendered
+ * every changelog entry ever written, which grew by a section per release and
+ * meant a returning user was re-shown things they had already read several
+ * times — the reliable way to train people to dismiss the splash unread. The
+ * full history lives in Settings → Updates, which is somewhere people can go
+ * back to rather than somewhere they have to get past.
  *
  * Dismissal is explicit-only: the backdrop and Escape key are disabled here
  * (this is meant to actually be read), so "Got it" is the only way out.
  */
 export function WhatsNewModal() {
-  const { entries, isOpen, onDismiss } = useWhatsNewModal();
+  const { entry, isOpen, onDismiss } = useWhatsNewModal();
 
-  if (entries.length === 0) return null;
+  if (!entry) return null;
 
   return (
     <Dialog open={isOpen} onOpenChange={() => {}}>
@@ -33,27 +37,21 @@ export function WhatsNewModal() {
         showCloseButton={false}
       >
         <DialogHeader>
-          <DialogTitle>What's new</DialogTitle>
+          <DialogTitle>What's new in {entry.version}</DialogTitle>
           <DialogDescription className="sr-only">
-            A short changelog of recent features in this build, grouped by
-            version.
+            What shipped in this version of Buzz.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-4">
-          {entries.map((entry) => (
-            <div key={entry.version} className="flex flex-col gap-1.5">
-              <p className="text-sm font-medium text-muted-foreground">
-                0.5.5-{entry.version}
-              </p>
-              <ul className="list-disc space-y-1 pl-5 text-sm">
-                {entry.bullets.map((bullet) => (
-                  <li key={bullet}>{bullet}</li>
-                ))}
-              </ul>
-            </div>
+        <ul className="list-disc space-y-1.5 pl-5 text-sm">
+          {entry.bullets.map((bullet) => (
+            <li key={bullet}>{bullet}</li>
           ))}
-        </div>
+        </ul>
+
+        <p className="text-sm text-muted-foreground">
+          Earlier releases are listed under Settings → Updates.
+        </p>
 
         <DialogFooter>
           <Button onClick={onDismiss} variant="default">

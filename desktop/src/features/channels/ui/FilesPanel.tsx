@@ -1,25 +1,26 @@
 import * as React from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   AlertCircle,
+  ChevronRight,
   Download,
   File as FileIcon,
-  History,
-  Link2,
 } from "lucide-react";
 
 import {
   type ChannelFileEntry,
+  fileVersionStatus,
   isOutdatedFile,
-  linkChannelFileVersions,
   listChannelFiles,
 } from "@/shared/api/channelFiles";
-import { FileVersionPicker } from "@/features/messages/ui/FileVersionPicker";
+import { buildFileVersionChains } from "@/features/messages/lib/fileVersionChains.mjs";
+import { FileVersionBadge } from "@/shared/ui/FileVersionBadge";
 import { classifyFilePreviewKind } from "@/shared/ui/markdownFileCard";
 import { FilePreviewModal } from "@/shared/ui/filePreview/FilePreviewModal";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { formatItemTimestamp } from "@/shared/lib/datetime";
 import {
   Dialog,
   DialogContent,
@@ -47,38 +48,27 @@ function formatFileSize(bytes: number): string {
 }
 
 function FileRow({
-  channelId,
   file,
-  onLinked,
+  indented = false,
   onOpen,
+  versionLabel,
 }: {
-  channelId: string;
   file: ChannelFileEntry;
-  /** Called after a retroactive link publishes successfully, so the caller
-   * can invalidate the files query and refresh badges. */
-  onLinked: () => void;
+  /** Older versions render inset beneath the head of their chain. */
+  indented?: boolean;
   onOpen: (file: ChannelFileEntry) => void;
+  /** e.g. "Version 2 of 3" — position within the chain, when it has one. */
+  versionLabel?: string;
 }) {
   const outdated = isOutdatedFile(file);
   const filename = file.filename ?? "Untitled file";
-  const [pickerOpen, setPickerOpen] = React.useState(false);
-  const [linking, setLinking] = React.useState(false);
-
-  const handlePick = React.useCallback(
-    (target: ChannelFileEntry) => {
-      setLinking(true);
-      void linkChannelFileVersions(channelId, file.eventId, target.eventId)
-        .then(() => onLinked())
-        .finally(() => setLinking(false));
-    },
-    [channelId, file.eventId, onLinked],
-  );
 
   return (
     <div
       className={cn(
         "group flex items-start gap-3 rounded-lg border border-border/60 px-3 py-2.5 transition-colors hover:bg-muted/50",
         outdated && "opacity-70",
+        indented && "ml-6 border-dashed",
       )}
     >
       <button
@@ -92,32 +82,21 @@ function FileRow({
             <span className="truncate text-sm font-medium text-foreground">
               {filename}
             </span>
-            {outdated ? (
-              <span
-                className="flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-3xs font-medium text-amber-600 dark:text-amber-400"
-                title="A newer version of this file was shared later in this channel"
-              >
-                <AlertCircle className="h-3 w-3" />
-                Outdated
-              </span>
-            ) : file.supersedes ? (
-              <span
-                className="flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-3xs font-medium text-muted-foreground"
-                title="Tagged as a newer version of an earlier upload"
-              >
-                <History className="h-3 w-3" />
-                New version
-              </span>
-            ) : null}
+            <FileVersionBadge status={fileVersionStatus(file)} />
           </div>
           <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+            {versionLabel ? (
+              <>
+                <span>{versionLabel}</span>
+                <span>&middot;</span>
+              </>
+            ) : null}
             <span>{truncatePubkey(file.uploadedBy)}</span>
             <span>&middot;</span>
-            <span>
-              {new Date(file.uploadedAt * 1000).toLocaleDateString(undefined, {
-                month: "short",
-                day: "numeric",
-              })}
+            {/* `withTime` — several versions of the same file are routinely
+                uploaded on one day, and a date alone can't order them. */}
+            <span title={new Date(file.uploadedAt * 1000).toLocaleString()}>
+              {formatItemTimestamp(file.uploadedAt, { withTime: true })}
             </span>
             {file.size != null ? (
               <>
@@ -128,29 +107,73 @@ function FileRow({
           </div>
         </div>
       </button>
-      {!outdated ? (
-        <FileVersionPicker
-          channelId={channelId}
-          exclude={{ eventId: file.eventId, sha256: file.sha256 }}
-          onOpenChange={setPickerOpen}
-          onSelect={handlePick}
-          open={pickerOpen}
-          trigger={
-            <button
-              aria-label="Link to another file"
-              className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:pointer-events-none disabled:opacity-40"
-              data-testid="file-row-link-versions"
-              disabled={linking}
-              onClick={(event) => event.stopPropagation()}
-              title="Link to another file…"
-              type="button"
-            >
-              <Link2 className="h-3.5 w-3.5" />
-            </button>
-          }
-        />
-      ) : null}
       <Download className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/60" />
+    </div>
+  );
+}
+
+/**
+ * One version chain: the current file, with any older versions collapsed
+ * beneath it behind a disclosure.
+ *
+ * Only the head carries the disclosure. An older version inside it does not
+ * get its own — the chain is a property of the document, and rendering it at
+ * every level would show the same history nested inside itself. Each older row
+ * still says where it sits ("Version 2 of 3") so the position is not lost.
+ */
+function FileChainRow({
+  chain,
+  onOpen,
+}: {
+  chain: { latest: ChannelFileEntry; older: ChannelFileEntry[] };
+  onOpen: (file: ChannelFileEntry) => void;
+}) {
+  const [expanded, setExpanded] = React.useState(false);
+  const total = chain.older.length + 1;
+
+  if (chain.older.length === 0) {
+    return <FileRow file={chain.latest} onOpen={onOpen} />;
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <FileRow
+        file={chain.latest}
+        onOpen={onOpen}
+        versionLabel={`Version ${total} of ${total}`}
+      />
+      <button
+        aria-expanded={expanded}
+        className="ml-6 flex items-center gap-1 self-start rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        data-testid="file-chain-toggle"
+        onClick={() => setExpanded((value) => !value)}
+        type="button"
+      >
+        <ChevronRight
+          className={cn(
+            "h-3 w-3 transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
+        {expanded
+          ? "Hide earlier versions"
+          : `${chain.older.length} earlier version${
+              chain.older.length === 1 ? "" : "s"
+            }`}
+      </button>
+      {expanded
+        ? chain.older.map((older, index) => (
+            <FileRow
+              file={older}
+              indented
+              key={older.eventId}
+              onOpen={onOpen}
+              // `older` is newest-first, so the row just below the head is
+              // one version back from the top.
+              versionLabel={`Version ${total - 1 - index} of ${total}`}
+            />
+          ))
+        : null}
     </div>
   );
 }
@@ -176,7 +199,6 @@ export function FilesPanel({
   onOpenChange: (open: boolean) => void;
 }) {
   const channelId = channel?.id ?? null;
-  const queryClient = useQueryClient();
   const filesQuery = useQuery({
     queryKey: ["channel-files", channelId],
     queryFn: () => listChannelFiles(channelId as string),
@@ -186,11 +208,13 @@ export function FilesPanel({
     null,
   );
 
-  const handleLinked = React.useCallback(() => {
-    void queryClient.invalidateQueries({
-      queryKey: ["channel-files", channelId],
-    });
-  }, [queryClient, channelId]);
+  // One row per version chain rather than per file: older versions collapse
+  // under the current one. Unversioned files come back as single-entry chains,
+  // so there is still only one list to render.
+  const chains = React.useMemo(
+    () => buildFileVersionChains(filesQuery.data ?? []),
+    [filesQuery.data],
+  );
 
   const handleOpenFile = React.useCallback((file: ChannelFileEntry) => {
     if (!file.url) return; // no `url` imeta field — nothing to preview/download
@@ -225,16 +249,18 @@ export function FilesPanel({
                 <AlertCircle className="h-4 w-4" />
                 Couldn't load this channel's files.
               </div>
-            ) : filesQuery.data && filesQuery.data.length > 0 ? (
+            ) : chains.length > 0 ? (
               <div className="flex flex-col gap-1.5">
-                {filesQuery.data.map((file) => (
-                  <FileRow
+                {chains.map((chain) => (
+                  <FileChainRow
+                    chain={chain}
                     // A single message can carry more than one `imeta`
                     // attachment, so eventId alone isn't unique here.
-                    key={`${file.eventId}-${file.sha256 ?? file.url ?? file.filename}`}
-                    channelId={channelId as string}
-                    file={file}
-                    onLinked={handleLinked}
+                    key={`${chain.latest.eventId}-${
+                      chain.latest.sha256 ??
+                      chain.latest.url ??
+                      chain.latest.filename
+                    }`}
                     onOpen={handleOpenFile}
                   />
                 ))}
@@ -257,6 +283,7 @@ export function FilesPanel({
           }}
           previewKind={previewKind}
           size={previewFile.size ?? undefined}
+          versionStatus={fileVersionStatus(previewFile)}
         />
       ) : null}
     </>

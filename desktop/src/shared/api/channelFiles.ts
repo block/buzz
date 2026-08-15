@@ -1,6 +1,6 @@
 import { getChannelMessagesBefore } from "./tauriChannels";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
-import { linkChannelFileVersions as linkChannelFileVersionsTauri } from "./tauri";
+import { SUPERSEDES_MARKER, SUPERSEDES_SUBJECT_MARKER } from "./supersedesTags";
 import type { ChannelPageCursor, RelayEvent } from "./types";
 
 /** Nostr message kinds that carry channel content (mirrors `TIMELINE_KINDS` in
@@ -8,6 +8,38 @@ import type { ChannelPageCursor, RelayEvent } from "./types";
  * queries server-side). */
 const KIND_STREAM_MESSAGE = 9;
 const KIND_STREAM_MESSAGE_V2 = 40002;
+/** Relay-emitted system message; carries the deletion tombstone below. */
+const KIND_SYSTEM_MESSAGE = 40099;
+
+/**
+ * Event ids the relay has recorded as deleted, read from its kind:40099
+ * tombstones (`{"type":"message_deleted","target_event_id":"<hex>"}` — see
+ * `handle_delete_event` in `crates/buzz-relay/src/handlers/side_effects.rs`).
+ *
+ * This matters because the relay *soft*-deletes: a deleted message keeps
+ * coming back from `/query`, so without reading tombstones a deleted file
+ * stays in the Files tab forever and keeps asserting its version link —
+ * verified on 0.5.14-0, where deleting either side of a pair left both badges
+ * untouched.
+ *
+ * The tombstone kind is already in `TIMELINE_KINDS`, so these events arrive in
+ * the same pages the file scan already walks; no extra query is needed.
+ */
+function deletedEventIds(events: RelayEvent[]): Set<string> {
+  const deleted = new Set<string>();
+  for (const event of events) {
+    if (event.kind !== KIND_SYSTEM_MESSAGE) continue;
+    let payload: { type?: string; target_event_id?: string };
+    try {
+      payload = JSON.parse(event.content) as typeof payload;
+    } catch {
+      continue; // not JSON — some other system row
+    }
+    if (payload.type !== "message_deleted") continue;
+    if (payload.target_event_id) deleted.add(payload.target_event_id);
+  }
+  return deleted;
+}
 
 /** One keyset page's worth of events, capped at the relay's max (see
  * `get_channel_messages_before`'s `limit.unwrap_or(200).min(500)`). */
@@ -52,25 +84,23 @@ function supersedesTarget(tags: string[][]): string | null {
     if (tag[0] !== "e") continue;
     const id = tag[1];
     const marker = tag[3];
-    if (id && marker === "supersedes") return id;
+    if (id && marker === SUPERSEDES_MARKER) return id;
   }
   return null;
 }
-
-/** Marker on the "which file is newer" side of a retroactive link-declaration
- * event — see `supersedesLinkDeclaration`. */
-const SUPERSEDES_SUBJECT_MARKER = "supersedes-subject";
 
 /**
  * Detect a retroactive "file B supersedes file A" link-declaration event:
  * no `imeta` tag of its own, one `e` tag marked `supersedes-subject` (the
  * newer file's event id) and one `e` tag marked `supersedes` (the older
- * file's event id). Published by `linkChannelFileVersions` (via the Rust
- * `link_channel_file_versions` command / `build_supersedes_link` builder) for
- * two files that were already sent before either upload's message carried a
- * `supersedes` tag of its own — Nostr events are immutable, so a later link
- * can't be added to either original event and instead rides a brand-new,
- * otherwise-empty event.
+ * file's event id).
+ *
+ * READ-ONLY LEGACY PATH. Nothing publishes these any more: the builder and
+ * command were removed because the event had to be kind:9 (the ordinary
+ * message kind) to be discoverable here, which meant every version tag also
+ * posted a blank message to the channel. Version links are now set only at
+ * upload time, as a tag on the file's own message. This parser stays so links
+ * published by earlier builds keep resolving.
  *
  * Returns the `{subject, target}` event ids the caller merges into the same
  * `supersedes`/`supersededBy` graph built from own-message tags, or null if
@@ -87,7 +117,7 @@ function supersedesLinkDeclaration(
     const marker = tag[3];
     if (!id) continue;
     if (marker === SUPERSEDES_SUBJECT_MARKER) subject = id;
-    else if (marker === "supersedes") target = id;
+    else if (marker === SUPERSEDES_MARKER) target = id;
   }
   return subject && target ? { subject, target } : null;
 }
@@ -141,6 +171,11 @@ export async function listChannelFiles(
     cursor = response.nextCursor;
   }
 
+  // Collected first: a tombstone can appear anywhere in the paged stream
+  // relative to the message it deletes, so the file scan below needs the full
+  // set before it can decide what to skip.
+  const deleted = deletedEventIds(events);
+
   const files: ChannelFileEntry[] = [];
   // Retroactive links declared by a separate event (no imeta of its own) —
   // `subject` event id -> `target` (superseded) event id. Merged into the
@@ -153,6 +188,10 @@ export async function listChannelFiles(
     ) {
       continue;
     }
+    // A deleted message contributes neither its file nor any version link it
+    // asserted — deleting is the only way to undo a link, so it has to undo
+    // the link too, not just hide the row.
+    if (deleted.has(event.id)) continue;
     const imetaEntries = parseImetaTags(event.tags);
     if (imetaEntries.size === 0) {
       const declaration = supersedesLinkDeclaration(event.tags);
@@ -206,25 +245,48 @@ export async function listChannelFiles(
     }
   }
 
-  return files;
-}
+  // Drop links whose other end is gone. A `supersedes` pointing at a deleted
+  // (or never-fetched) file would otherwise render a "New version" badge for a
+  // predecessor nobody can see — the exact symptom observed on 0.5.14-0, where
+  // deleting the outdated file left the newer one still claiming to be a new
+  // version of it.
+  const presentEventIds = new Set(files.map((file) => file.eventId));
+  for (const file of files) {
+    if (file.supersedes && !presentEventIds.has(file.supersedes)) {
+      file.supersedes = null;
+    }
+    if (file.supersededBy && !presentEventIds.has(file.supersededBy)) {
+      file.supersededBy = null;
+    }
+  }
 
-/**
- * Retroactively declare that the file attached to `newerEventId` supersedes
- * the file attached to `olderEventId`. Thin wrapper around the Tauri
- * `link_channel_file_versions` command (`build_supersedes_link` on the Rust
- * side) — see `supersedesLinkDeclaration` above for the event shape this
- * produces and how `listChannelFiles` reads it back.
- */
-export async function linkChannelFileVersions(
-  channelId: string,
-  newerEventId: string,
-  olderEventId: string,
-): Promise<void> {
-  await linkChannelFileVersionsTauri(channelId, newerEventId, olderEventId);
+  return files;
 }
 
 /** True if `file` has since been superseded by a newer upload. */
 export function isOutdatedFile(file: ChannelFileEntry): boolean {
   return file.supersededBy != null;
+}
+
+/**
+ * Where a file sits in its channel's version chain.
+ *
+ * Lives here rather than beside the badge component so both consumers can
+ * derive it from the same place: the Files tab reads it straight off a
+ * `ChannelFileEntry`, while chat bubbles and the preview modal get it from
+ * `FileVersionContext`, which only knows a URL.
+ */
+export type FileVersionStatus = {
+  /** A later upload in this channel was tagged as superseding this file. */
+  outdated: boolean;
+  /** This file was itself tagged as a newer version of an earlier upload. */
+  isNewVersion: boolean;
+};
+
+/** Derive the two version flags a badge renders from a file entry. */
+export function fileVersionStatus(file: ChannelFileEntry): FileVersionStatus {
+  return {
+    outdated: isOutdatedFile(file),
+    isNewVersion: file.supersedes != null,
+  };
 }

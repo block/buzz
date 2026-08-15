@@ -36,6 +36,7 @@ import {
   KIND_STREAM_MESSAGE_DIFF,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
+import { isSupersedesLinkDeclaration } from "@/shared/api/supersedesTags";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
@@ -47,6 +48,14 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 const HEX_RE = /^[0-9a-f]+$/i;
 
 export function isTimelineContentEvent(event: RelayEvent) {
+  // A retroactive file-version link is kind:9 with empty content — an ordinary
+  // chat message as far as every kind check is concerned — so without this it
+  // renders as a blank message from the tagger every time two files are linked.
+  // It has to stay a timeline kind to remain discoverable by
+  // `listChannelFiles` (see `isSupersedesLinkDeclaration`), so it is excluded
+  // here at the point where events become rendered rows instead.
+  if (isSupersedesLinkDeclaration(event.tags)) return false;
+
   return (
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_V2 ||

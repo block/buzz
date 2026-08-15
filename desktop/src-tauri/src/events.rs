@@ -484,48 +484,21 @@ pub fn build_delete_compat(
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
-/// Kind 9 — retroactive "file B supersedes file A" link declaration.
-///
-/// Nostr events are immutable, so retroactively linking two already-published
-/// file uploads can't add a tag to either original event. Instead this
-/// publishes a brand-new, empty-content kind:9 event carrying only the
-/// channel `h` tag and two `e` tags: `["e", newer_event_id, "",
-/// "supersedes-subject"]` and `["e", older_event_id, "", "supersedes"]`. It
-/// carries no `imeta` tag of its own, so it's never mistaken for a file
-/// upload — only for the *link* between two others.
-///
-/// `channelFiles.ts`'s `listChannelFiles` scans for this exact shape (an
-/// event with both markers and no imeta tag) and folds the declared link
-/// into the same `supersedes`/`supersededBy` graph it already builds from
-/// live-composer `supersedes` tags, so `FilesPanel.tsx` renders both cases
-/// identically without any changes.
-///
-/// Deliberately a dedicated builder + dedicated command (`link_channel_file_versions`,
-/// mirroring `build_reaction`/`add_reaction`) rather than threading a third
-/// tag marker through `supersedes_tags()`/`build_message`, which guards the
-/// main message-send path — this keeps that validator's contract (exactly
-/// `["e", "<id>", "", "supersedes"]`) unchanged for every existing caller,
-/// which is the lower-risk option.
-pub fn build_supersedes_link(
-    channel_id: Uuid,
-    newer_event_id: EventId,
-    older_event_id: EventId,
-) -> Result<EventBuilder, String> {
-    if newer_event_id == older_event_id {
-        return Err("a file cannot supersede itself".into());
-    }
-    let tags = vec![
-        tag(vec!["h", &channel_id.to_string()])?,
-        tag(vec![
-            "e",
-            &newer_event_id.to_hex(),
-            "",
-            "supersedes-subject",
-        ])?,
-        tag(vec!["e", &older_event_id.to_hex(), "", "supersedes"])?,
-    ];
-    Ok(EventBuilder::new(Kind::Custom(9), "").tags(tags))
-}
+// Retroactive version linking (`build_supersedes_link` / the
+// `link_channel_file_versions` command) was removed deliberately. It published
+// the link as an empty-content kind:9 event — kind:9 being the ordinary
+// channel-message kind — because `listChannelFiles` can only discover events
+// the relay returns for `TIMELINE_KINDS`. Making the link discoverable
+// therefore also made it renderable, and every version tag posted a blank
+// message to the channel under the tagger's name.
+//
+// Version links are now only ever set at upload time, riding as a
+// `["e", "<id>", "", "supersedes"]` tag on the file's own message (see
+// `supersedes_tags`), which needs no event of its own. A mistake is undone by
+// deleting the message, which takes the link with it.
+//
+// The *read* path is intentionally still present in `channelFiles.ts`, so
+// links published by earlier builds keep resolving.
 
 // ── Reactions ────────────────────────────────────────────────────────────────
 

@@ -581,30 +581,6 @@ pub async fn send_channel_message(
     })
 }
 
-/// Retroactively declare that `newer_event_id`'s file supersedes
-/// `older_event_id`'s file, without mutating either original (immutable)
-/// event. Publishes a small standalone kind:9 event via `build_supersedes_link`
-/// — see that function's doc comment for why this is a dedicated
-/// builder/command rather than an extension of `send_channel_message`'s
-/// `supersedes_tags` validator.
-#[tauri::command]
-pub async fn link_channel_file_versions(
-    channel_id: String,
-    newer_event_id: String,
-    older_event_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let channel_uuid = uuid::Uuid::parse_str(&channel_id)
-        .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
-    let newer_eid = EventId::from_hex(&newer_event_id)
-        .map_err(|e| format!("invalid newer event ID: {e}"))?;
-    let older_eid = EventId::from_hex(&older_event_id)
-        .map_err(|e| format!("invalid older event ID: {e}"))?;
-    let builder = events::build_supersedes_link(channel_uuid, newer_eid, older_eid)?;
-    submit_event(builder, &state).await?;
-    Ok(())
-}
-
 fn event_has_client_marker(event: &Event, marker: &str) -> bool {
     event.tags.iter().any(|tag| {
         let parts = tag.as_slice();

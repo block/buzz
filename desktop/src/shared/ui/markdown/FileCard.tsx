@@ -1,9 +1,16 @@
 import * as React from "react";
-import { Download, FileText } from "lucide-react";
+import { ChevronRight, Download, FileText } from "lucide-react";
 import { toast } from "sonner";
 
 import { invokeTauri } from "@/shared/api/tauri";
+import {
+  useFileVersionInfo,
+  useFileVersionJump,
+} from "@/shared/context/FileVersionContext";
 import { FilePreviewModal } from "@/shared/ui/filePreview/FilePreviewModal";
+import { FileVersionBadge } from "@/shared/ui/FileVersionBadge";
+import { cn } from "@/shared/lib/cn";
+import { formatItemTimestamp } from "@/shared/lib/datetime";
 import type { FilePreviewKind } from "@/shared/ui/markdownFileCard";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 
@@ -49,8 +56,23 @@ export function FileCard({
 }) {
   const cardRef = React.useRef<HTMLButtonElement | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = React.useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = React.useState(false);
   const sizeLabel = size != null ? formatFileSize(size) : "";
+  // `null` outside a channel (thread pane, Inbox preview, forum) — those
+  // surfaces render the card without any version affordance, as before.
+  const versionInfo = useFileVersionInfo(href);
+  const jumpToMessage = useFileVersionJump();
   useSmoothCorners(cardRef);
+
+  const latestEventId = versionInfo?.latestEventId ?? null;
+  const handleJumpToLatest =
+    jumpToMessage && latestEventId ? () => jumpToMessage(latestEventId) : null;
+
+  // Only the head of a chain offers history. An outdated file gets the jump
+  // affordance instead — rendering both would show the same chain nested
+  // inside itself and put two competing actions on one card.
+  const olderVersions = versionInfo?.olderVersions ?? [];
+  const showHistory = olderVersions.length > 0 && !versionInfo?.status.outdated;
 
   const handleClick = () => {
     if (previewKind) {
@@ -66,13 +88,13 @@ export function FileCard({
   };
 
   return (
-    <>
+    <span className="my-1 block max-w-sm">
       <button
         ref={cardRef}
         type="button"
         onClick={handleClick}
         data-testid="file-card"
-        className="my-1 inline-flex max-w-sm items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-3 py-2 text-left no-underline transition-colors hover:bg-muted/70"
+        className="inline-flex w-full items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-3 py-2 text-left no-underline transition-colors hover:bg-muted/70"
         style={{ borderRadius: "1rem" }}
       >
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
@@ -82,14 +104,74 @@ export function FileCard({
           <span className="block truncate text-sm font-medium text-foreground">
             {filename}
           </span>
-          {sizeLabel ? (
-            <span className="block text-xs text-muted-foreground">
-              {sizeLabel}
-            </span>
-          ) : null}
+          <span className="flex items-center gap-1.5">
+            {sizeLabel ? (
+              <span className="text-xs text-muted-foreground">{sizeLabel}</span>
+            ) : null}
+            {versionInfo && versionInfo.total > 1 ? (
+              <span className="text-xs text-muted-foreground">
+                Version {versionInfo.position} of {versionInfo.total}
+              </span>
+            ) : null}
+            <FileVersionBadge
+              onJumpToLatest={handleJumpToLatest}
+              status={versionInfo?.status}
+            />
+          </span>
         </span>
         <Download className="h-4 w-4 shrink-0 text-muted-foreground" />
       </button>
+      {showHistory ? (
+        <span className="mt-1 block">
+          <button
+            aria-expanded={isHistoryOpen}
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            data-testid="file-card-history-toggle"
+            onClick={() => setIsHistoryOpen((value) => !value)}
+            type="button"
+          >
+            <ChevronRight
+              className={cn(
+                "h-3 w-3 transition-transform",
+                isHistoryOpen && "rotate-90",
+              )}
+            />
+            {isHistoryOpen
+              ? "Hide earlier versions"
+              : `Supersedes ${olderVersions.length} earlier version${
+                  olderVersions.length === 1 ? "" : "s"
+                }`}
+          </button>
+          {isHistoryOpen ? (
+            <span className="mt-1 flex flex-col gap-0.5 border-l border-border/60 pl-3">
+              {olderVersions.map((older, index) => {
+                const label = older.filename ?? "Untitled file";
+                const position = versionInfo
+                  ? versionInfo.total - 1 - index
+                  : null;
+                const canJump = Boolean(jumpToMessage);
+                return (
+                  <button
+                    className="flex items-baseline gap-1.5 rounded px-1 py-0.5 text-left text-2xs text-muted-foreground transition-colors enabled:hover:bg-muted enabled:hover:text-foreground disabled:cursor-default"
+                    disabled={!canJump}
+                    key={older.eventId}
+                    onClick={() => jumpToMessage?.(older.eventId)}
+                    type="button"
+                  >
+                    {position != null ? <span>v{position}</span> : null}
+                    <span className="truncate">{label}</span>
+                    <span className="shrink-0 opacity-70">
+                      {formatItemTimestamp(older.uploadedAt, {
+                        withTime: true,
+                      })}
+                    </span>
+                  </button>
+                );
+              })}
+            </span>
+          ) : null}
+        </span>
+      ) : null}
       {previewKind ? (
         <FilePreviewModal
           href={href}
@@ -98,8 +180,9 @@ export function FileCard({
           open={isPreviewOpen}
           previewKind={previewKind}
           size={size}
+          versionStatus={versionInfo?.status}
         />
       ) : null}
-    </>
+    </span>
   );
 }

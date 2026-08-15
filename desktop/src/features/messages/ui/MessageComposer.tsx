@@ -22,6 +22,10 @@ import {
   listChannelFiles,
 } from "@/shared/api/channelFiles";
 import {
+  preselectedSupersedesCandidate,
+  rankSupersedesCandidates,
+} from "@/features/messages/lib/supersedesRanking.mjs";
+import {
   cancelBackgroundMediaUploads,
   saveQueuedAttachmentsForDraft,
   takeQueuedAttachmentsForDraft,
@@ -211,16 +215,11 @@ function MessageComposerImpl({
           }
         }
         if (cancelled) return;
-        const normalized = filename.trim().toLowerCase();
-        const candidates = files.filter(
-          (f) =>
-            f.filename != null &&
-            f.filename.trim().toLowerCase() === normalized &&
-            f.sha256 !== attachment.sha256 &&
-            f.supersededBy == null,
+        const candidate = preselectedSupersedesCandidate(
+          // Fuzzy, not byte-identical — see `supersedesRanking.mjs`.
+          rankSupersedesCandidates(filename, attachment.sha256, files),
         );
-        if (candidates.length === 1) {
-          const candidate = candidates[0];
+        if (candidate) {
           setSupersedesCandidates((prev) => {
             const next = new Map(prev);
             next.set(attachment.url, candidate);

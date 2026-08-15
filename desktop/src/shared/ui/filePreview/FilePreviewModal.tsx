@@ -5,7 +5,9 @@ import { toast } from "sonner";
 
 import { invokeTauri } from "@/shared/api/tauri";
 import { fetchMediaBytes } from "@/shared/api/tauriMedia";
+import type { FileVersionStatus } from "@/shared/context/FileVersionContext";
 import { cn } from "@/shared/lib/cn";
+import { FileVersionBadge } from "@/shared/ui/FileVersionBadge";
 import {
   TEXT_PREVIEW_MAX_BYTES,
   type FilePreviewKind,
@@ -62,6 +64,7 @@ export function FilePreviewModal({
   open,
   previewKind,
   size,
+  versionStatus = null,
 }: {
   href: string;
   filename: string;
@@ -69,6 +72,13 @@ export function FilePreviewModal({
   open: boolean;
   previewKind: FilePreviewKind;
   size?: number;
+  /**
+   * Passed in rather than read from `FileVersionContext` here, so this stays a
+   * presentational component and each caller supplies the status it already
+   * has: `FileCard` from the context, `FilesPanel` from its own files query.
+   * Neither pays for a second fetch.
+   */
+  versionStatus?: FileVersionStatus | null;
 }) {
   const [bytes, setBytes] = React.useState<Uint8Array | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -134,6 +144,7 @@ export function FilePreviewModal({
               <DialogPrimitive.Description className="sr-only">
                 File preview. Press Escape or use the close button to dismiss.
               </DialogPrimitive.Description>
+              <FileVersionBadge status={versionStatus} />
               {sizeLabel ? (
                 <span className="shrink-0 text-xs text-muted-foreground">
                   {sizeLabel}
