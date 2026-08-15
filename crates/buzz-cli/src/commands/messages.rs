@@ -342,7 +342,7 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
 /// `pubkey` and `channel` are therefore part of the compact projection. Both are
 /// small next to `content`, and without them the caller has to re-query in the
 /// full format to do anything with a result.
-fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
+pub(crate) fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     match format {
         crate::OutputFormat::Compact => {
             let events: Vec<serde_json::Value> =
