@@ -4,8 +4,31 @@ platforms: [macos]
 fixture: local_review_channel
 record: {video: "off", screenshots: true, accessibility: true}
 steps:
-  - name: scroll_cannot_create_dialog
-    act: {type: scroll, delta_y: -240}
-    expect: {exists: {id: search-results}}
+  - name: await_interactive_app
+    act: {type: wait, duration_ms: 100}
+    expect: {not_exists: {id: app-loading-gate}}
+    timeout_ms: 60000
+  - name: reach_seeded_channel
+    locate:
+      - {id: channel-welcome-everyone}
+    act: {type: click}
+    expect: {exists: {id: message-composer}}
+    timeout_ms: 15000
+  - name: focus_composer
+    locate:
+      - {id: message-input}
+    act: {type: click}
+    expect: {focused: {id: message-input}}
+  - name: create_scrollable_draft
+    act: {type: type_text, text: "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15"}
+    expect: {value: "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15"}
+  - name: wrong_scroll_postcondition
+    locate:
+      - {id: message-input-scroll}
+    act: {type: scroll, delta_y: 240}
+    # The draft starts at the caret-driven bottom (~172px). Scrolling down moves
+    # it to 0, so this impossible >200 assertion cannot pass on either the
+    # pre-action snapshot or the settled result.
+    expect: {scroll_y_greater_than: 200}
     timeout_ms: 100
 cleanup: {terminate_app: true, remove_state: true}

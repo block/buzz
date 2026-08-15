@@ -3,6 +3,7 @@ type SemanticNode = {
   role?: string;
   name?: string;
   value?: string;
+  scrollY: number;
   enabled: boolean;
   focused: boolean;
   frame: { x: number; y: number; width: number; height: number };
@@ -58,7 +59,7 @@ function snapshot(): SemanticNode[] {
       candidate instanceof HTMLTextAreaElement
         ? candidate.value
         : candidate.isContentEditable
-          ? (candidate.textContent ?? "")
+          ? candidate.innerText.replace(/\r\n?/g, "\n").replace(/\n$/, "")
           : undefined;
     if (!id && !role && !name) continue;
     nodes.push({
@@ -66,6 +67,7 @@ function snapshot(): SemanticNode[] {
       ...(role ? { role } : {}),
       ...(name ? { name } : {}),
       ...(value !== undefined ? { value } : {}),
+      scrollY: candidate.scrollTop,
       enabled:
         !candidate.hasAttribute("disabled") &&
         candidate.getAttribute("aria-disabled") !== "true",

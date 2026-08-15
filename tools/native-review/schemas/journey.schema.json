@@ -71,7 +71,9 @@
         "not_exists": {"$ref": "#/$defs/locator"},
         "focused": {"oneOf": [{"type": "boolean"}, {"$ref": "#/$defs/locator"}]},
         "enabled": {"type": "boolean"},
-        "value": {"type": "string"}
+        "value": {"type": "string"},
+        "scroll_y_greater_than": {"type": "number"},
+        "scroll_y_less_than": {"type": "number"}
       }
     }
   }

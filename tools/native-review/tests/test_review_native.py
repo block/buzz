@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -35,7 +36,7 @@ class JourneyTests(unittest.TestCase):
 
     def test_type_text_requires_text(self):
         source = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
-        source = source.replace('{type: type_text, text: "native review draft"}', "{type: type_text}", 1)
+        source = re.sub(r'\{type: type_text, text: "[^"]*"\}', "{type: type_text}", source, count=1)
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "invalid.yaml"
             path.write_text(source)
@@ -44,7 +45,7 @@ class JourneyTests(unittest.TestCase):
 
     def test_scroll_requires_integer_delta(self):
         source = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
-        source = source.replace("{type: scroll, delta_y: -240}", "{type: scroll, delta_y: nope}", 1)
+        source = re.sub(r"\{type: scroll, delta_y: -?240\}", "{type: scroll, delta_y: nope}", source, count=1)
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "invalid.yaml"
             path.write_text(source)
@@ -56,6 +57,14 @@ class JourneyTests(unittest.TestCase):
         driver.request.return_value = {"ok": True, "element": {"value": "draft"}}
         self.assertTrue(review_native.expectation_holds(driver, {"value": "draft"}))
         self.assertFalse(review_native.expectation_holds(driver, {"value": "wrong"}))
+
+    def test_scroll_expectation_uses_selected_element(self):
+        driver = mock.Mock()
+        driver.request.return_value = {"ok": True, "element": {"scrollY": 240}}
+        self.assertTrue(review_native.expectation_holds(driver, {"scroll_y_greater_than": 0}))
+        self.assertFalse(review_native.expectation_holds(driver, {"scroll_y_greater_than": 240}))
+        self.assertTrue(review_native.expectation_holds(driver, {"scroll_y_less_than": 241}))
+        self.assertFalse(review_native.expectation_holds(driver, {"scroll_y_less_than": 240}))
 
     def test_action_without_postcondition_is_rejected(self):
         source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
