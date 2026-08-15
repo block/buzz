@@ -21,17 +21,20 @@ const _typingThrottleMs = 3000;
 
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
+  final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
   bool _wasVisible;
 
   _ComposerKeyboardMetricsObserver({
     required this.view,
+    required this.onKeyboardShown,
     required this.onKeyboardHidden,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
   @override
   void didChangeMetrics() {
     final isVisible = view.viewInsets.bottom > 0;
+    if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();
     _wasVisible = isVisible;
   }
@@ -58,6 +61,112 @@ void _dismissComposerKeyboard(FocusNode focusNode) {
   focusNode.unfocus();
   unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
 }
+
+Duration _composerMotionDuration(
+  bool reducedMotion,
+  _AttachmentSurface surface,
+) => reducedMotion
+    ? Duration.zero
+    : Duration(
+        milliseconds:
+            surface == _AttachmentSurface.camera ||
+                surface == _AttachmentSurface.photos
+            ? 320
+            : 250,
+      );
+
+void _expandComposer({
+  required BuildContext context,
+  required ValueNotifier<bool> isExpanded,
+  required ValueNotifier<_AttachmentSurface> attachmentSurface,
+  required VoidCallback? onFocusRequested,
+  required FocusNode focusNode,
+  required FlutterView view,
+  required ValueNotifier<bool> androidImeTransitionStarted,
+  required ObjectRef<Timer?> androidImeFallbackTimer,
+}) {
+  if (isExpanded.value) return;
+  attachmentSurface.value = _AttachmentSurface.closed;
+  onFocusRequested?.call();
+  isExpanded.value = true;
+  // Attach the editor before requesting focus so native restoration cannot
+  // reopen a composer behind a popped route.
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (context.mounted && isExpanded.value) focusNode.requestFocus();
+  });
+  if (defaultTargetPlatform != TargetPlatform.android) return;
+  androidImeFallbackTimer.value?.cancel();
+  if (view.viewInsets.bottom > 0) {
+    androidImeTransitionStarted.value = true;
+    return;
+  }
+  androidImeTransitionStarted.value = false;
+  androidImeFallbackTimer.value = Timer(const Duration(milliseconds: 250), () {
+    if (context.mounted && isExpanded.value) {
+      androidImeTransitionStarted.value = true;
+    }
+  });
+}
+
+Widget _composerSuggestionPanel({
+  required List<Channel> channelSuggestions,
+  required List<MentionCandidate> mentionSuggestions,
+  required Map<String, UserProfile> userCache,
+  required String? currentPubkey,
+  required bool isDmChannel,
+  required ValueChanged<Channel> onChannelSelect,
+  required ValueChanged<MentionCandidate> onMentionSelect,
+}) => channelSuggestions.isNotEmpty
+    ? KeyedSubtree(
+        key: const ValueKey('channel-suggestions'),
+        child: _ChannelSuggestions(
+          suggestions: channelSuggestions,
+          onSelect: onChannelSelect,
+        ),
+      )
+    : mentionSuggestions.isNotEmpty
+    ? KeyedSubtree(
+        key: const ValueKey('mention-suggestions'),
+        child: _MentionSuggestions(
+          suggestions: mentionSuggestions,
+          userCache: userCache,
+          currentPubkey: currentPubkey,
+          isDmChannel: isDmChannel,
+          onSelect: onMentionSelect,
+        ),
+      )
+    : const SizedBox.shrink(key: ValueKey('no-suggestions'));
+
+Widget _composerAttachmentPanel({
+  required _AttachmentSurface surface,
+  required Widget suggestionPanel,
+  required VoidCallback onBack,
+  required VoidCallback onCamera,
+  required VoidCallback onPhotos,
+  required VoidCallback onVideo,
+  required VoidCallback onFiles,
+  required Future<void> Function(XFile image) onCapture,
+  required Future<List<XFile>> Function() onPickAllPhotos,
+  required Future<void> Function(List<XFile> photos) onChoosePhotos,
+  required Future<void> Function(List<XFile> photos) onChooseAllPhotos,
+}) => _AttachmentSurfacePanel(
+  key: ValueKey(
+    surface == _AttachmentSurface.closed
+        ? 'composer-suggestions'
+        : 'attachment-surface',
+  ),
+  surface: surface,
+  suggestionPanel: suggestionPanel,
+  onBack: onBack,
+  onCamera: onCamera,
+  onPhotos: onPhotos,
+  onVideo: onVideo,
+  onFiles: onFiles,
+  onCapture: onCapture,
+  onPickAllPhotos: onPickAllPhotos,
+  onChoosePhotos: onChoosePhotos,
+  onChooseAllPhotos: onChooseAllPhotos,
+);
 
 const _pastedImageMimeTypes = <String>[
   'image/jpeg',

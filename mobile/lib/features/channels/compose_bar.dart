@@ -58,3 +58,11 @@ part 'compose_bar/send_button.dart';
 part 'compose_bar/layout.dart';
 part 'compose_bar/dock.dart';
 part 'compose_bar/compose_bar_widget.dart';
+
+/// Callback used by channels and threads to submit composer content.
+typedef ComposeBarOnSend =
+    Future<void> Function(
+      String content,
+      List<String> mentionPubkeys, {
+      List<List<String>> mediaTags,
+    });

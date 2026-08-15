@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.5.14
+
+### Desktop and shared changes
+
+- None
+
+### Other repository changes
+
+- ci(release): remove desktop smoke gate ([#5914](https://github.com/block/buzz/pull/5914)) ([`1b3dbcaaea882eeea90359c1db02e306d2f4f50a`](https://github.com/block/buzz/commit/1b3dbcaaea882eeea90359c1db02e306d2f4f50a))
+
+[Compare desktop-v0.5.13...desktop-v0.5.14](https://github.com/block/buzz/compare/desktop-v0.5.13...desktop-v0.5.14)
+
 ## v0.5.13
 
 ### Desktop and shared changes
