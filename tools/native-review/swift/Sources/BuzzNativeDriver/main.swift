@@ -20,6 +20,7 @@ struct SemanticNode: Codable {
     let role: String?
     let name: String?
     let value: String?
+    let scrollY: Double
     let enabled: Bool
     let focused: Bool
     let frame: Rect
@@ -32,6 +33,7 @@ struct ElementDescription: Codable {
     let name: String?
     let identifier: String?
     let value: String?
+    let scrollY: Double?
     let enabled: Bool
     let focused: Bool
     let frame: Rect?
@@ -184,7 +186,7 @@ func find(_ roots: [AXUIElement], locator: Locator, maxNodes: Int = 20_000) -> A
 func describe(_ element: AXUIElement, locator: Locator) -> ElementDescription {
     ElementDescription(locator: locator, role: normalizedRole(elementRole(element)), name: elementName(element),
                        identifier: elementIdentifier(element), value: stringAttribute(element, [kAXValueAttribute]),
-                       enabled: boolAttribute(element, kAXEnabledAttribute, default: true),
+                       scrollY: nil, enabled: boolAttribute(element, kAXEnabledAttribute, default: true),
                        focused: boolAttribute(element, kAXFocusedAttribute), frame: frameAttribute(element))
 }
 
@@ -201,6 +203,7 @@ func semanticNodes(path: String, pid: pid_t) -> [SemanticNode] {
             role: node.role,
             name: node.name,
             value: node.value,
+            scrollY: node.scrollY,
             enabled: node.enabled,
             focused: node.focused,
             frame: Rect(
@@ -223,8 +226,8 @@ func matches(_ element: SemanticNode, locator: Locator) -> Bool {
 
 func describe(_ element: SemanticNode, locator: Locator) -> ElementDescription {
     ElementDescription(locator: locator, role: normalizedRole(element.role), name: element.name,
-                       identifier: element.id, value: element.value, enabled: element.enabled, focused: element.focused,
-                       frame: element.frame)
+                       identifier: element.id, value: element.value, scrollY: element.scrollY,
+                       enabled: element.enabled, focused: element.focused, frame: element.frame)
 }
 
 func snapshot(_ element: AXUIElement, depth: Int = 0, budget: inout Int) -> AXNode {
@@ -430,21 +433,31 @@ func postKey(_ key: String, modifiers: [String] = []) throws {
     }
 }
 
+func postUnicodeScalar(_ scalar: Unicode.Scalar) throws {
+    guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+          let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+        throw DriverError.message("could not create text event")
+    }
+    let units = Array(String(scalar).utf16)
+    units.withUnsafeBufferPointer { buffer in
+        down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+        up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+    }
+    down.flags = []
+    up.flags = []
+    down.post(tap: .cghidEventTap)
+    up.post(tap: .cghidEventTap)
+}
+
 func postText(_ text: String) throws {
     for scalar in text.unicodeScalars {
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
-            throw DriverError.message("could not create text event")
+        if scalar == "\n" {
+            // Buzz submits the composer on plain Enter. A newline in typed text
+            // therefore has to follow the same native path as a user: Shift+Enter.
+            try postKey("return", modifiers: ["shift"])
+        } else if scalar != "\r" {
+            try postUnicodeScalar(scalar)
         }
-        let units = Array(String(scalar).utf16)
-        units.withUnsafeBufferPointer { buffer in
-            down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-            up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-        }
-        down.flags = []
-        up.flags = []
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
     }
 }
 

@@ -71,7 +71,7 @@ def validate_locator(locator: Any, where: str) -> None:
 
 
 def validate_expectation(expectation: Any, where: str) -> None:
-    allowed = {"exists", "not_exists", "focused", "enabled", "value"}
+    allowed = {"exists", "not_exists", "focused", "enabled", "value", "scroll_y_greater_than", "scroll_y_less_than"}
     if (
         not isinstance(expectation, dict)
         or len(expectation) != 1
@@ -88,6 +88,9 @@ def validate_expectation(expectation: Any, where: str) -> None:
         raise HarnessError(f"{where}.enabled must be boolean")
     if "value" in expectation and not isinstance(expectation["value"], str):
         raise HarnessError(f"{where}.value must be a string")
+    for key in ("scroll_y_greater_than", "scroll_y_less_than"):
+        if key in expectation and not isinstance(expectation[key], (int, float)):
+            raise HarnessError(f"{where}.{key} must be numeric")
 
 
 def load_journey(path: pathlib.Path) -> dict[str, Any]:
@@ -436,6 +439,12 @@ def expectation_holds(driver: Driver, expectation: dict[str, Any]) -> bool:
         return bool(driver.request("selected").get("element", {}).get("enabled")) == expectation["enabled"]
     if "value" in expectation:
         return driver.request("selected").get("element", {}).get("value") == expectation["value"]
+    if "scroll_y_greater_than" in expectation:
+        scroll_y = driver.request("selected").get("element", {}).get("scrollY")
+        return isinstance(scroll_y, (int, float)) and scroll_y > expectation["scroll_y_greater_than"]
+    if "scroll_y_less_than" in expectation:
+        scroll_y = driver.request("selected").get("element", {}).get("scrollY")
+        return isinstance(scroll_y, (int, float)) and scroll_y < expectation["scroll_y_less_than"]
     return False
 
 
