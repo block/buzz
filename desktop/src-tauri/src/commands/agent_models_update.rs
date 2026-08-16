@@ -27,68 +27,6 @@ fn ensure_access_policy_change_supported(
     Ok(())
 }
 
-async fn stop_local_agent_for_access_policy_change(
-    app: &AppHandle,
-    pubkey: &str,
-) -> Result<Vec<String>, String> {
-    let app_for_stop = app.clone();
-    let pubkey = pubkey.to_string();
-    tokio::task::spawn_blocking(move || {
-        use tauri::Manager;
-        let state = app_for_stop.state::<AppState>();
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|error| error.to_string())?;
-        let mut records = load_managed_agents(&app_for_stop)?;
-        let mut runtimes = state
-            .managed_agent_processes
-            .lock()
-            .map_err(|error| error.to_string())?;
-        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app_for_stop),
-        );
-        for exited in &exited_pubkeys {
-            state.clear_agent_session_caches(exited);
-        }
-
-        let record = find_managed_agent_mut(&mut records, &pubkey)?;
-        if record.backend != crate::managed_agents::BackendKind::Local {
-            if sync_changed {
-                save_managed_agents(&app_for_stop, &records)?;
-            }
-            return Ok(Vec::new());
-        }
-
-        let mut relay_urls =
-            crate::managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey)
-                .into_iter()
-                .map(|key| key.relay_url)
-                .collect::<Vec<_>>();
-        if relay_urls.is_empty() && record.runtime_pid.is_some() {
-            relay_urls.push(crate::relay::effective_agent_relay_url(
-                &record.relay_url,
-                &relay_ws_url_with_override(&state),
-            ));
-        }
-        if !relay_urls.is_empty() {
-            crate::managed_agents::stop_managed_agent_process(
-                &app_for_stop,
-                record,
-                &mut runtimes,
-            )?;
-        }
-        if sync_changed || !relay_urls.is_empty() {
-            save_managed_agents(&app_for_stop, &records)?;
-        }
-        Ok(relay_urls)
-    })
-    .await
-    .map_err(|error| format!("spawn_blocking failed while applying agent access policy: {error}"))?
-}
-
 /// Flush a retained managed-agent policy, preserving any earlier profile error.
 pub(crate) async fn flush_managed_agent_policy(
     app: &AppHandle,
@@ -118,7 +56,7 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
-    let (mut summary, sync_params, rollback, access_policy_changed) = {
+    let (mut summary, sync_params, rollback, access_policy_changed, access_restart_relays) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -233,6 +171,30 @@ pub async fn update_managed_agent(
             &prospective_allowlist,
         );
         ensure_access_policy_change_supported(record, access_policy_changed)?;
+
+        // Revoke the currently running local gate before persisting or
+        // advertising the replacement policy. Keeping this inside the same
+        // store/process critical section prevents another command or a status
+        // refresh from observing a saved narrow policy while the old broad
+        // process is still alive. A stop failure aborts before mutation.
+        let mut access_restart_relays = Vec::new();
+        if access_policy_changed && record.backend == crate::managed_agents::BackendKind::Local {
+            access_restart_relays =
+                crate::managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey)
+                    .into_iter()
+                    .map(|key| key.relay_url)
+                    .collect();
+            if access_restart_relays.is_empty() && record.runtime_pid.is_some() {
+                access_restart_relays.push(crate::relay::effective_agent_relay_url(
+                    &record.relay_url,
+                    &relay_ws_url_with_override(&state),
+                ));
+            }
+            if !access_restart_relays.is_empty() {
+                crate::managed_agents::stop_managed_agent_process(&app, record, &mut runtimes)?;
+            }
+        }
+
         record.respond_to = prospective_mode;
         // Preserve the persisted allowlist across mode toggles — only replace
         // when the caller explicitly supplied a new list.
@@ -291,20 +253,16 @@ pub async fn update_managed_agent(
         };
         let rollback = name_changed
             .then(|| AgentUpdateRollback::new(previous_record, record, access_policy_changed));
-        (summary, sync_params, rollback, access_policy_changed)
+        (
+            summary,
+            sync_params,
+            rollback,
+            access_policy_changed,
+            access_restart_relays,
+        )
     }; // lock dropped here
 
     try_regenerate_nest(&app);
-
-    // A running harness has the access gate baked into its spawn environment.
-    // Stop active pairs before publishing the replacement relay policy so an
-    // access reduction does not leave the old, wider runtime accepting work
-    // during relay I/O. Restart happens only after all relay sync below.
-    let access_restart_relays = if access_policy_changed {
-        stop_local_agent_for_access_policy_change(&app, &summary.pubkey).await?
-    } else {
-        Vec::new()
-    };
 
     // Phase 2: relay sync (async, outside lock). The owner-signed managed
     // policy is security-sensitive: an access reduction must replace the old

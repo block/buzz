@@ -160,8 +160,12 @@ with a TypeScript lookup table or an id comparison in a component.
    computer, including files, accounts, and connected tools"; remote names "the
    server it runs on, including any accounts and tools available there" —
    deliberately *not* the owner's files, which aren't theirs to describe on a
-   host they don't own. **An unknown location falls back to the local wording —
-   never hedge with "computer or server".** A remote host requires an
+   host they don't own. **For a persona-linked deployed agent, the profile Edit
+   dialog seeds access from the exact clicked instance and saves access through
+   `update_managed_agent`; persona behavior remains the definition default, but
+   must never bypass the instance command's stop, persist, publish, and restart
+   boundary.** An unknown location falls back to the local wording — never hedge
+   with "computer or server". A remote host requires an
    installed `buzz-backend-*` provider, and without one `WhereToRunSection`
    never renders, so "server" would name a concept the owner has never been
    shown; when it *is* remote they picked that host from the selector

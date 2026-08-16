@@ -449,7 +449,6 @@ pub(super) async fn start_local_agent_with_preflight(
 /// The protocol has no explicit `undeploy` operation or acknowledgement that an
 /// existing process stopped, so a successful redeploy delegates access-policy
 /// revocation semantics to the provider implementation (deferred to v2).
-///
 /// Returns Ok(()) on success, Err(message) on failure. Either way the record is
 /// updated and saved before returning.
 pub(super) async fn deploy_to_provider(

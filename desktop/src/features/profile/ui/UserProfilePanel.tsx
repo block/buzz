@@ -187,7 +187,6 @@ export function UserProfilePanel({
       requestedInstancePubkey &&
       normalizePubkey(pubkey) === normalizePubkey(requestedInstancePubkey),
   );
-
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
   const { linkedPersonaId, managedAgent, personaInstances } =
@@ -195,6 +194,7 @@ export function UserProfilePanel({
       currentPubkey,
       managedAgents: managedAgentsQuery.data,
       personaId: persona?.id,
+      preferDirectManagedAgent: true,
       preserveRequestedInstance,
       pubkey,
     });
@@ -398,15 +398,15 @@ export function UserProfilePanel({
     onClose,
     viewerIsOwner,
   });
-
   const handleEditAgent = React.useCallback(() => {
     if (resolvedPersona) {
-      setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+      setPersonaDialogState(
+        editPersonaDialogState(resolvedPersona, managedAgent),
+      );
       return;
     }
     setEditAgentOpen(true);
-  }, [resolvedPersona, setEditAgentOpen]);
-
+  }, [managedAgent, resolvedPersona, setEditAgentOpen]);
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({
       channels: channelsQuery.data,
