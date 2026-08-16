@@ -30,6 +30,7 @@ import {
 } from "@/features/agents/activeAgentTurnsStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
+import { resetChannelPanelMemory } from "@/features/channels/channelPanelMemory";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -77,6 +78,7 @@ async function resetCommunityState({
   resetLinkPreviewPreparations();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
+  resetChannelPanelMemory();
 }
 
 type CommunityInitResult =

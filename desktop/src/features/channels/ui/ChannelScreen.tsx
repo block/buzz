@@ -73,6 +73,7 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useChannelThreadMemory } from "@/features/channels/useChannelThreadMemory";
 import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useMessageProfiles } from "./useMessageProfiles";
@@ -189,6 +190,12 @@ export function ChannelScreen({
         : current;
     });
   }, [activeChannelId, openThreadHeadId]);
+  useChannelThreadMemory({
+    activeChannelId,
+    isHuddleTranscript,
+    openThreadHeadId,
+    selectedForumPostId,
+  });
   const messagesQuery = useChannelMessagesQuery(activeChannel);
   const windowQuery = useChannelWindowQuery(activeChannel);
   const threadRepliesQuery = useThreadReplies(

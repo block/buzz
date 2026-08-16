@@ -22,6 +22,12 @@ export type { ChannelSearchKey } from "./channelSearchKeys";
  * via useHistorySearchState: back/forward restores the panel a given entry
  * was showing, and reloads restore the panel from the URL.
  *
+ * Forward navigation extends the same philosophy: `goChannel` seeds the
+ * `thread` param of a fresh channel entry from the per-channel memory
+ * (`channelPanelMemory.ts`, recorded by `useChannelThreadMemory`), so
+ * returning to a channel restores its thread panel. Each history entry still
+ * carries its own truth — memory only seeds brand-new entries.
+ *
  * Params: `thread` (open thread head id), `profile` (profile panel pubkey),
  * `profileView` (profile panel focused view), `profileTab` (profile summary
  * tab), `agentSession` (agent session panel pubkey), `agentSessionChannel`
