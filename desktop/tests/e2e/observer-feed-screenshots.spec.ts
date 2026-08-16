@@ -825,14 +825,13 @@ test.describe("observer feed screenshots", () => {
     // panicked-in-channel call site passes the triggering channel's id, see
     // emit_circuit_open_alert's caller in buzz-acp/src/lib.rs), then
     // recovered. Both events are seeded with this channel's id to prove the
-    // renderer works when a channel context is present. NOTE: the real
-    // circuit_recovered alert is always emitted with channel_id=None (a
-    // respawned agent slot isn't tied to any single channel) and every
-    // desktop surface that shows agent transcripts is channel-scoped
-    // (scopeByChannel drops non-matching events) — that alert has no visible
-    // surface in the app today. That is a pre-existing, separate gap this
-    // change does not address; this test only proves the render branch
-    // itself is correct.
+    // renderer works when a channel context is present. The real
+    // circuit_recovered alert now carries that same real channel_id too —
+    // it's threaded through from the SlotCircuit that opened it (see
+    // emit_circuit_recovered_alert's caller in buzz-acp/src/lib.rs) rather
+    // than always being channel_id=None. Both the transcript bubble here and
+    // the persistent ManagedAgentRow badge
+    // (data-testid="managed-agent-circuit-open") reflect it.
     await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
       {
         seq: 1,

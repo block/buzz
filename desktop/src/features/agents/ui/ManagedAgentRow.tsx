@@ -7,6 +7,7 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
+import { useAgentCircuitStatus } from "@/features/agents/observerRelayStore";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useNow } from "@/shared/lib/useNow";
@@ -60,6 +61,7 @@ export function ManagedAgentRow({
     : null;
   const presenceStatus = presenceLookup[agent.pubkey.trim().toLowerCase()];
   const activeTurns = useAgentWorking(agent.pubkey).channels;
+  const circuitStatus = useAgentCircuitStatus(agent.pubkey);
   const activeWorkingChannels = React.useMemo(
     () =>
       activeTurns
@@ -120,6 +122,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
               />
               <StatusBlock
+                circuitStatus={circuitStatus}
                 friendlyError={friendlyError}
                 isWorking={isWorking}
                 presenceLoaded={presenceLoaded}
@@ -143,6 +146,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
               />
               <StatusBlock
+                circuitStatus={circuitStatus}
                 friendlyError={friendlyError}
                 isWorking={isWorking}
                 presenceLoaded={presenceLoaded}
@@ -353,7 +357,37 @@ function WorkingBadge({
   );
 }
 
+function CircuitOpenBadge({
+  channelId,
+  message,
+}: {
+  channelId: string | null;
+  message: string | null;
+}) {
+  const { goChannel } = useAppNavigation();
+  return (
+    <Badge
+      className={cn("gap-1", channelId && "cursor-pointer hover:opacity-80")}
+      data-testid="managed-agent-circuit-open"
+      title={message ?? undefined}
+      variant="destructive"
+      onClick={
+        channelId
+          ? (e) => {
+              e.stopPropagation();
+              void goChannel(channelId);
+            }
+          : undefined
+      }
+    >
+      <AlertTriangle className="h-3 w-3" />
+      Suspended — repeated crashes
+    </Badge>
+  );
+}
+
 function StatusBlock({
+  circuitStatus,
   friendlyError,
   isWorking,
   presenceLoaded,
@@ -361,6 +395,7 @@ function StatusBlock({
   processDetail,
   status,
 }: {
+  circuitStatus: ReturnType<typeof useAgentCircuitStatus>;
   friendlyError: ReturnType<typeof friendlyAgentLastError>;
   isWorking: boolean;
   presenceLoaded: boolean;
@@ -371,12 +406,20 @@ function StatusBlock({
   return (
     <div className="space-y-1 lg:pt-0.5">
       <SubsectionLabel className="lg:hidden">Status</SubsectionLabel>
-      <AgentStatusBadge
-        isWorking={isWorking}
-        presenceLoaded={presenceLoaded}
-        presenceStatus={presenceStatus}
-        status={status}
-      />
+      <div className="flex flex-wrap items-center gap-1.5">
+        <AgentStatusBadge
+          isWorking={isWorking}
+          presenceLoaded={presenceLoaded}
+          presenceStatus={presenceStatus}
+          status={status}
+        />
+        {circuitStatus.isOpen ? (
+          <CircuitOpenBadge
+            channelId={circuitStatus.channelId}
+            message={circuitStatus.message}
+          />
+        ) : null}
+      </div>
       <p className="text-xs text-muted-foreground">{processDetail}</p>
       {friendlyError ? (
         <p

@@ -25,6 +25,25 @@ import {
   createEmptyTranscriptState,
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
+import {
+  compareObserverEvents,
+  isObserverEventAfter,
+} from "./lib/observerEventOrdering";
+import {
+  applyCircuitEvent,
+  getAgentCircuitStatus,
+  resetCircuitState,
+  type AgentCircuitStatus,
+} from "./agentCircuitStatus";
+
+export {
+  compareObserverEvents,
+  isObserverEventAfter,
+} from "./lib/observerEventOrdering";
+export {
+  getAgentCircuitStatus,
+  type AgentCircuitStatus,
+} from "./agentCircuitStatus";
 
 const MAX_OBSERVER_EVENTS = 3000;
 // Length the per-agent journal is evicted down to when it overflows
@@ -64,6 +83,15 @@ const listeners = new Set<AgentObserverStoreListener>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
+
+/** Persistent per-agent circuit-breaker status, independent of channel/transcript scope. */
+export function useAgentCircuitStatus(
+  agentPubkey: string | null | undefined,
+): AgentCircuitStatus {
+  return React.useSyncExternalStore(subscribeAgentObserverStore, () =>
+    getAgentCircuitStatus(agentPubkey),
+  );
+}
 
 // Per-agent eviction floor: the ordering key of the newest event that eviction
 // has ever discarded for this agent. Once the journal is trimmed to the
@@ -386,42 +414,6 @@ export function getArchivedChannelEvents(
   );
 }
 
-export function compareObserverEvents(
-  left: ObserverEvent,
-  right: ObserverEvent,
-) {
-  const leftTime = Date.parse(left.timestamp);
-  const rightTime = Date.parse(right.timestamp);
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-    const timeDiff = leftTime - rightTime;
-    if (timeDiff !== 0) {
-      return timeDiff;
-    }
-  }
-
-  return left.seq - right.seq;
-}
-
-/**
- * Returns true if `candidate` sorts strictly after `stored` using the same
- * two-key ordering as `compareObserverEvents`: later timestamp wins; equal
- * timestamp falls back to higher seq.  Extracted so latest-live advancement
- * cannot drift from transcript ordering.
- */
-export function isObserverEventAfter(
-  candidate: { timestamp: string; seq: number },
-  stored: { timestamp: string; seq: number },
-): boolean {
-  const candidateTime = Date.parse(candidate.timestamp);
-  const storedTime = Date.parse(stored.timestamp);
-  if (Number.isFinite(candidateTime) && Number.isFinite(storedTime)) {
-    if (candidateTime !== storedTime) {
-      return candidateTime > storedTime;
-    }
-  }
-  return candidate.seq > stored.seq;
-}
-
 // Observer event kind for a batch envelope wrapping multiple events. The ACP
 // harness publishes one frame per second; everything that accumulated between
 // ticks arrives as `{ kind: "batch", payload: { events: [...] } }` with every
@@ -457,6 +449,8 @@ function processLiveObserverEvents(
   const addedEvents = appendAgentEvents(agentPubkey, events);
 
   for (const parsed of events) {
+    applyCircuitEvent(agentPubkey, parsed);
+
     // Track the latest-live-session-id per (agent, channel) on the live path.
     // Only set when the parsed event carries both a sessionId and channelId,
     // so we never attribute a session to the wrong channel.
@@ -807,6 +801,12 @@ export async function ingestArchivedObserverEvents(
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
       for (const inner of unwrapObserverBatch(parsed)) {
+        // Circuit state is derived independent of channel scope, so apply it
+        // regardless of which branch below routes the raw event.
+        if (applyCircuitEvent(agentPubkey, inner)) {
+          archiveChanged = true;
+        }
+
         // Route archived events to the channel-scoped archive window (no cap)
         // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
         // Events without a channelId fall through to the live store so they
@@ -849,8 +849,16 @@ export function injectObserverEventsForE2E(
   events: ObserverEvent[],
 ) {
   const added = appendAgentEvents(agentPubkey, events);
+  let circuitChanged = false;
+  for (const event of events) {
+    if (applyCircuitEvent(agentPubkey, event)) circuitChanged = true;
+  }
   if (added) {
+    // The targeted payload also wakes circuit subscribers, so one notify covers
+    // both; a circuit-only change still needs the untargeted broadcast.
     notifyListeners({ agentPubkey, events: added });
+  } else if (circuitChanged) {
+    notifyListeners();
   }
 }
 
@@ -863,8 +871,14 @@ export function syncAgentObserverEvents(
   events: ObserverEvent[],
 ) {
   const added = appendAgentEvents(agentPubkey, events);
+  let circuitChanged = false;
+  for (const event of events) {
+    if (applyCircuitEvent(agentPubkey, event)) circuitChanged = true;
+  }
   if (added) {
     notifyListeners({ agentPubkey, events: added });
+  } else if (circuitChanged) {
+    notifyListeners();
   }
 }
 
@@ -878,6 +892,7 @@ export function resetAgentObserverStore() {
   transcriptByAgent.clear();
   evictionFloorByAgent.clear();
   snapshotByAgent.clear();
+  resetCircuitState();
   archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
