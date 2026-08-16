@@ -131,35 +131,26 @@ function markerEvent(events: readonly RelayEvent[], marker: string) {
   );
 }
 
+/**
+ * Resolve the provisioned Welcome trio, preferring instances pinned to
+ * `relayUrl`. Relay preference is delegated to
+ * {@link pickWelcomeTeamStarterAgentForRelay} rather than pre-filtering the
+ * list: provisioning reuses one identity across every community, so a pin-based
+ * filter here would resolve to `null` on the second community a user joins and
+ * silently disable the kickoff backstop.
+ */
 export function resolveWelcomeAgentSet(
   agents: readonly ManagedAgent[],
+  relayUrl?: string | null,
 ): WelcomeAgentSet | null {
   const ordered = WELCOME_TEAM_STARTERS.map((starter) =>
-    pickWelcomeTeamStarterAgentForRelay([...agents], starter),
+    pickWelcomeTeamStarterAgentForRelay([...agents], starter, relayUrl),
   );
   if (ordered.some((agent) => !agent)) return null;
   return {
     lead: ordered[0] as ManagedAgent,
     teammates: [ordered[1] as ManagedAgent, ordered[2] as ManagedAgent],
   };
-}
-
-function normalizeRelayUrl(relayUrl?: string | null) {
-  return relayUrl?.trim().replace(/\/+$/, "") ?? null;
-}
-
-function resolveWelcomeAgentSetForRelay(
-  agents: readonly ManagedAgent[],
-  relayUrl?: string | null,
-) {
-  const normalizedRelayUrl = normalizeRelayUrl(relayUrl);
-  return resolveWelcomeAgentSet(
-    agents.filter(
-      (agent) =>
-        !normalizedRelayUrl ||
-        normalizeRelayUrl(agent.relayUrl) === normalizedRelayUrl,
-    ),
-  );
 }
 
 export function buildWelcomeKickoffOpener(
@@ -346,7 +337,7 @@ async function resolveLatestWelcomeAgentSet({
     queryKey: managedAgentsQueryKey,
     queryFn: listManagedAgents,
   });
-  return resolveWelcomeAgentSetForRelay(agents, relayUrl) ?? fallback;
+  return resolveWelcomeAgentSet(agents, relayUrl) ?? fallback;
 }
 
 async function markerExists(channelId: string, marker: string) {
@@ -547,7 +538,7 @@ export function useWelcomeKickoff(
   channelEventsRef.current = kickoffEvents;
   const agentSet = React.useMemo(
     () =>
-      resolveWelcomeAgentSetForRelay(
+      resolveWelcomeAgentSet(
         managedAgentsQuery.data ?? [],
         activeCommunity?.relayUrl,
       ),

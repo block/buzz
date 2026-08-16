@@ -104,7 +104,7 @@ test("pickWelcomeGuideAgent ignores non-Kit agents with the legacy prompt", () =
   assert.equal(pickWelcomeGuideAgent([nonKit, fizz]), fizz);
 });
 
-test("pickWelcomeGuideAgentForRelay ignores Fizz agents from other communities", () => {
+test("pickWelcomeGuideAgentForRelay prefers Fizz pinned to the target community", () => {
   const otherCommunityFizz = makeAgent({
     pubkey: PUB_A,
     personaId: WELCOME_GUIDE_PERSONA_ID,
@@ -127,7 +127,7 @@ test("pickWelcomeGuideAgentForRelay ignores Fizz agents from other communities",
   );
 });
 
-test("pickWelcomeGuideAgentForRelay returns null when Fizz only exists in another community", () => {
+test("pickWelcomeGuideAgentForRelay reuses Fizz from another community", () => {
   const otherCommunityFizz = makeAgent({
     pubkey: PUB_A,
     personaId: WELCOME_GUIDE_PERSONA_ID,
@@ -136,7 +136,7 @@ test("pickWelcomeGuideAgentForRelay returns null when Fizz only exists in anothe
 
   assert.equal(
     pickWelcomeGuideAgentForRelay([otherCommunityFizz], RELAY_B),
-    null,
+    otherCommunityFizz,
   );
 });
 
@@ -351,6 +351,90 @@ test("starter matching is relay scoped and normalizes trailing slashes", () => {
       RELAY_A,
     ),
     matchingRelay,
+  );
+});
+
+test("starter matching reuses the existing instance in a second community", () => {
+  // Regression: a pin miss used to fall through to createManagedAgent, which
+  // mints a fresh keypair — so every community a user joined produced another
+  // Bumble with a different pubkey.
+  const bumble = WELCOME_TEAM_STARTERS[2];
+  const firstCommunityBumble = makeAgent({
+    personaId: bumble.personaId,
+    relayUrl: RELAY_A,
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay(
+      [firstCommunityBumble],
+      bumble,
+      RELAY_B,
+    ),
+    firstCommunityBumble,
+  );
+});
+
+test("starter matching reuses an unbound instance", () => {
+  // The backend stores "" when no relay pin was supplied, and "" never equalled
+  // any target relay — so unbound records matched nothing and always re-minted.
+  const honey = WELCOME_TEAM_STARTERS[1];
+  const unbound = makeAgent({ personaId: honey.personaId, relayUrl: "" });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([unbound], honey, RELAY_A),
+    unbound,
+  );
+});
+
+test("starter matching ranks pinned over unbound over another community", () => {
+  const fizz = WELCOME_TEAM_STARTERS[0];
+  const pinned = makeAgent({ personaId: fizz.personaId, relayUrl: RELAY_A });
+  const unbound = makeAgent({
+    personaId: fizz.personaId,
+    pubkey: PUB_B,
+    relayUrl: "",
+  });
+  const otherCommunity = makeAgent({
+    personaId: fizz.personaId,
+    pubkey: PUB_C,
+    relayUrl: RELAY_B,
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay(
+      [otherCommunity, unbound, pinned],
+      fizz,
+      RELAY_A,
+    ),
+    pinned,
+  );
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay(
+      [otherCommunity, unbound],
+      fizz,
+      RELAY_A,
+    ),
+    unbound,
+  );
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([otherCommunity], fizz, RELAY_A),
+    otherCommunity,
+  );
+});
+
+test("relay preference never overrides the Welcome Team scope", () => {
+  // Falling through pin ranks must not start reusing a user's own agent that
+  // merely shares the persona.
+  const honey = WELCOME_TEAM_STARTERS[1];
+  const userHoney = makeAgent({
+    personaId: honey.personaId,
+    teamId: null,
+    relayUrl: RELAY_B,
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([userHoney], honey, RELAY_A),
+    null,
   );
 });
 

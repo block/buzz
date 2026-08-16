@@ -55,13 +55,31 @@ function normalizeRelayUrl(relayUrl: string | null | undefined) {
   return relayUrl?.trim().replace(/\/+$/, "") ?? null;
 }
 
-function isAgentScopedToRelay(agent: ManagedAgent, relayUrl?: string | null) {
-  const targetRelayUrl = normalizeRelayUrl(relayUrl);
-  if (!targetRelayUrl) {
-    return true;
-  }
-  return normalizeRelayUrl(agent.relayUrl) === targetRelayUrl;
+/**
+ * How well a record's stored relay pin matches the community being provisioned.
+ * Lower is better.
+ *
+ * The pin is advisory only. The backend resolves an agent's relay purely from
+ * the active workspace and deliberately ignores `relay_url`
+ * (`effective_agent_relay_url` in `src-tauri/src/relay.rs`, agents-everywhere
+ * #2122): every agent is eligible on every community. Treating a pin miss as a
+ * hard *filter* is what made joining a second community mint a second keypair
+ * for a starter that already existed — and an unbound record (`relayUrl === ""`,
+ * which is what the backend stores when no pin was supplied) matched no
+ * community at all. Ranking instead of filtering keeps the existing local
+ * record for the community that pinned it while still reusing that same
+ * identity everywhere else.
+ */
+function relayPinRank(agent: ManagedAgent, targetRelayUrl: string | null) {
+  if (!targetRelayUrl) return 0;
+  const pinnedRelayUrl = normalizeRelayUrl(agent.relayUrl);
+  if (pinnedRelayUrl === targetRelayUrl) return 0;
+  // Unbound records are eligible everywhere, so they outrank a record another
+  // community already claimed.
+  return pinnedRelayUrl ? 2 : 1;
 }
+
+const RELAY_PIN_RANKS = [0, 1, 2] as const;
 
 function isBuiltInWelcomeGuideAgent(agent: ManagedAgent) {
   return agent.personaId === WELCOME_GUIDE_PERSONA_ID;
@@ -90,6 +108,23 @@ function pickAgentByStatus(agents: ManagedAgent[]) {
   );
 }
 
+/**
+ * Pick one already-provisioned agent out of `agents`, preferring the community
+ * that pinned it but never rejecting a candidate over its pin alone. A miss
+ * here is what mints a brand new keypair, so this must fall through to any
+ * surviving record rather than return null.
+ */
+function pickAgentForRelay(agents: ManagedAgent[], relayUrl?: string | null) {
+  const targetRelayUrl = normalizeRelayUrl(relayUrl);
+  for (const rank of RELAY_PIN_RANKS) {
+    const picked = pickAgentByStatus(
+      agents.filter((agent) => relayPinRank(agent, targetRelayUrl) === rank),
+    );
+    if (picked) return picked;
+  }
+  return null;
+}
+
 export function pickWelcomeGuideAgent(agents: ManagedAgent[]) {
   return pickAgentByStatus(agents.filter(isWelcomeGuideAgent));
 }
@@ -98,32 +133,34 @@ export function pickWelcomeGuideAgentForRelay(
   agents: ManagedAgent[],
   relayUrl?: string | null,
 ) {
-  return pickAgentByStatus(
-    agents.filter(
-      (agent) =>
-        isWelcomeGuideAgent(agent) && isAgentScopedToRelay(agent, relayUrl),
-    ),
-  );
+  return pickAgentForRelay(agents.filter(isWelcomeGuideAgent), relayUrl);
 }
 
-/** Find the preferred managed instance for one starter persona and relay. */
+/**
+ * Find the preferred managed instance for one starter persona, preferring the
+ * instance pinned to `relayUrl` but reusing an existing instance from any
+ * community rather than reporting the starter as missing.
+ */
 export function pickWelcomeTeamStarterAgentForRelay(
   agents: ManagedAgent[],
   starter: WelcomeTeamStarterDefinition,
   relayUrl?: string | null,
 ) {
-  return pickAgentByStatus(
+  return pickAgentForRelay(
     agents.filter(
       (agent) =>
         agent.teamId === WELCOME_TEAM_ID &&
-        agent.personaId === starter.personaId &&
-        isAgentScopedToRelay(agent, relayUrl),
+        agent.personaId === starter.personaId,
     ),
+    relayUrl,
   );
 }
 
-/** Pubkeys belonging to any managed Welcome Team persona on this relay. */
-export async function getWelcomeTeamAgentPubkeys(relayUrl?: string | null) {
+/**
+ * Pubkeys belonging to any managed Welcome Team persona. Relay-agnostic, to
+ * match how the backend resolves an agent's relay — see {@link relayPinRank}.
+ */
+export async function getWelcomeTeamAgentPubkeys() {
   const personaIds = new Set<string>(
     WELCOME_TEAM_STARTERS.map(({ personaId }) => personaId),
   );
@@ -132,19 +169,15 @@ export async function getWelcomeTeamAgentPubkeys(relayUrl?: string | null) {
       (agent) =>
         agent.teamId === WELCOME_TEAM_ID &&
         agent.personaId !== null &&
-        personaIds.has(agent.personaId) &&
-        isAgentScopedToRelay(agent, relayUrl),
+        personaIds.has(agent.personaId),
     )
     .map((agent) => agent.pubkey);
 }
 
 /** Legacy Fizz/Kit lookup retained for existing channel reuse checks. */
-export async function getWelcomeGuideAgentPubkeys(relayUrl?: string | null) {
+export async function getWelcomeGuideAgentPubkeys() {
   return (await listManagedAgents())
-    .filter(
-      (agent) =>
-        isWelcomeGuideAgent(agent) && isAgentScopedToRelay(agent, relayUrl),
-    )
+    .filter(isWelcomeGuideAgent)
     .map((agent) => agent.pubkey);
 }
 

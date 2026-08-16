@@ -41,6 +41,31 @@ test("resolveWelcomeAgentSet orders agents by stable persona identity", () => {
   assert.equal(resolveWelcomeAgentSet([fizz, honey]), null);
 });
 
+test("resolveWelcomeAgentSet honors relay preference without dropping to null", () => {
+  // Provisioning reuses one identity everywhere, so the kickoff backstop must
+  // still resolve the set when the records are pinned to a different relay —
+  // a null set silently disables the closer effect.
+  assert.deepEqual(
+    resolveWelcomeAgentSet([bumble, fizz, honey], "ws://localhost:3001"),
+    { lead: fizz, teammates: [honey, bumble] },
+  );
+
+  // And when both communities have a record, the relay-pinned one wins even
+  // though the other is first in the list.
+  const otherCommunityFizz = {
+    ...fizz,
+    pubkey: "a".repeat(64),
+    relayUrl: "ws://localhost:3001",
+  };
+  assert.equal(
+    resolveWelcomeAgentSet(
+      [otherCommunityFizz, fizz, honey, bumble],
+      "ws://localhost:3000",
+    )?.lead,
+    fizz,
+  );
+});
+
 test("opener uses current agent names and requests bounded simultaneous intros", () => {
   const opener = buildWelcomeKickoffOpener({ ...fizz, name: "Fizzy" }, [
     { ...honey, name: "Honeybee" },
