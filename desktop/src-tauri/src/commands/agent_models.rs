@@ -725,16 +725,51 @@ pub async fn update_managed_agent(
             state.clear_agent_session_caches(pubkey);
         }
 
+        // Duplicate-name guard: run this BEFORE find_managed_agent_mut so the
+        // immutable &records borrow does not conflict with the mutable borrow
+        // below.
+        let maybe_rename = if let Some(name_update) = &input.name {
+            let candidate = name_update.trim().to_string();
+            let current_name = records
+                .iter()
+                .find(|r| r.pubkey == input.pubkey)
+                .map(|r| r.name.clone());
+            if !candidate.is_empty() {
+                let dup = crate::managed_agents::find_duplicate_keyed_name(
+                    &records,
+                    &candidate,
+                    Some(&input.pubkey),
+                );
+                if let Some(cur) = current_name {
+                    if candidate != cur && dup.is_none() {
+                        Some(candidate)
+                    } else if dup.is_some() {
+                        return Err(format!("agent with name '{candidate}' already exists"));
+                    } else {
+                        None
+                    }
+                } else {
+                    // No existing record found — should not happen after
+                    // find_managed_agent_mut succeeds below. Reject silently.
+                    if dup.is_some() {
+                        return Err(format!("agent with name '{candidate}' already exists"));
+                    }
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
 
         let mut name_changed = false;
-        if let Some(name_update) = input.name {
-            let trimmed = name_update.trim().to_string();
-            if !trimmed.is_empty() && trimmed != record.name {
-                record.name = trimmed;
-                name_changed = true;
-            }
+        if let Some(trimmed) = maybe_rename {
+            record.name = trimmed;
+            name_changed = true;
         }
         apply_model_provider_prompt_update(
             record,

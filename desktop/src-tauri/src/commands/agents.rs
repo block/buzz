@@ -626,6 +626,11 @@ pub async fn create_managed_agent(
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
         }
+        // Reject duplicate names among keyed managed instances (trimmed,
+        // case-insensitive).
+        if crate::managed_agents::find_duplicate_keyed_name(&records, &name, None).is_some() {
+            return Err(format!("agent with name '{name}' already exists"));
+        }
         let private_key_nsec = keys
             .secret_key()
             .to_bech32()
@@ -693,6 +698,11 @@ pub async fn create_managed_agent(
         // (extremely unlikely but safe to check).
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
+        }
+        // Re-check duplicate name under the final lock (race between Phase 1
+        // check and Phase 3 save is extremely unlikely but safe to close).
+        if crate::managed_agents::find_duplicate_keyed_name(&records, &name, None).is_some() {
+            return Err(format!("agent with name '{name}' already exists"));
         }
         // Provider config was already validated in Pre-Phase 2; cache the discovered binary path for deploy_to_provider.
         let provider_binary_path = if let BackendKind::Provider { ref id, .. } = input.backend {
