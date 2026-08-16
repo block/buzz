@@ -103,18 +103,31 @@ test("top-level project lists align dates and overflow actions", async ({
   await expect(page.getByRole("menuitem", { name: "Local" })).toBeVisible();
   await page.keyboard.press("Escape");
   const projectRow = page.locator('[data-testid^="project-row-"]').first();
-  const projectPositions = await trailingPositions(projectRow, {
-    summaryTestId: "projects-row-summary",
-  });
-  // Project rows show the activity bar alone — counts stay in its tooltips.
+  const projectPositions = await trailingPositions(projectRow);
+  await expect(projectRow.getByTestId("projects-row-context")).toBeVisible();
+  await expect(projectRow.getByTestId("projects-row-people")).toBeVisible();
   await expect(
-    projectRow
-      .getByTestId("projects-row-summary")
-      .getByTestId("project-activity-bar"),
+    page
+      .getByTestId("project-row-buzz")
+      .getByTestId("projects-row-description"),
   ).toBeVisible();
   await expect(
-    projectRow.getByTestId("projects-row-summary"),
-  ).not.toContainText("commits");
+    page
+      .getByTestId("project-row-buzz")
+      .getByTestId("projects-row-description"),
+  ).toContainText(/Buzz community platform/);
+  const projectDescriptionBox = await page
+    .getByTestId("project-row-buzz")
+    .getByTestId("projects-row-description")
+    .boundingBox();
+  const projectDateBox = await projectRow
+    .getByTestId("projects-row-date")
+    .boundingBox();
+  expect(projectDescriptionBox).not.toBeNull();
+  expect(projectDateBox).not.toBeNull();
+  expect(
+    Math.abs((projectDescriptionBox?.y ?? 0) - (projectDateBox?.y ?? 0)),
+  ).toBeLessThanOrEqual(4);
 
   await page.getByTestId("projects-section-repositories").click();
   await page.getByRole("button", { name: "Filter repositories" }).click();
@@ -126,17 +139,14 @@ test("top-level project lists align dates and overflow actions", async ({
   await expect(page.getByTestId("repository-row-relay-tools")).toBeVisible();
   const repositoryRow = page.getByTestId("repository-row-buzz");
   await expect(
-    repositoryRow.getByTestId("repositories-row-summary"),
-  ).toContainText("commits");
+    repositoryRow.getByTestId("repositories-row-project"),
+  ).toBeVisible();
   await expect(
-    repositoryRow.getByTestId("repositories-row-branch"),
-  ).toContainText("main");
-  // Subtitle is the repository location (owner/repo for Buzz-hosted repos).
-  await expect(repositoryRow.locator("p")).toHaveText(/\/buzz$/);
+    repositoryRow.getByTestId("repositories-row-description"),
+  ).toContainText(/Relay, desktop, and mobile|community platform/);
   const repositoryPositions = await trailingPositions(repositoryRow, {
     actionName: /More options for/,
     dateTestId: "repositories-row-date",
-    summaryTestId: "repositories-row-summary",
   });
   // No summaryX comparison: repository rows carry text stats next to the bar
   // while project rows show the bar alone, so the columns differ in width by
@@ -219,11 +229,11 @@ test("top-level project lists align dates and overflow actions", async ({
     .locator('[data-testid^="project-row-"]')
     .first();
   await expect(
-    responsiveRepositoryRow.getByTestId("projects-row-summary"),
-  ).toBeHidden();
+    responsiveRepositoryRow.getByTestId("projects-row-context"),
+  ).toBeVisible();
   await expect(
     responsiveRepositoryRow.getByTestId("projects-row-people"),
-  ).toBeHidden();
+  ).toBeVisible();
   await expect(
     responsiveRepositoryRow.getByTestId("projects-row-date"),
   ).toBeVisible();

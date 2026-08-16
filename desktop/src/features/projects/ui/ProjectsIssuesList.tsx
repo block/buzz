@@ -7,7 +7,10 @@ import type {
   Repository,
 } from "@/features/projects/hooks";
 import { issueShareLink } from "@/features/projects/lib/projectShareLinks";
-import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
+import {
+  listRowDescription,
+  relativeTime,
+} from "@/features/projects/lib/projectsViewHelpers";
 import {
   projectTaskCategoryLabel,
   projectTaskUserLabels,
@@ -23,19 +26,15 @@ import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
-import { IssueAssigneeFacepile } from "./IssueAssigneesRow";
 import { ProjectAuthorIdentity } from "./ProjectAuthorIdentity";
+import { ProjectEntityListRow } from "./ProjectEntityListRow";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
-import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
 import {
   PROJECT_LIST_ROW_SUBTEXT_CLASS,
   PROJECT_LIST_ROW_TITLE_CLASS,
 } from "./projectListRowStyles";
-import {
-  ProjectsWorkItemTableHeader,
-  WORK_ITEM_TABLE_GRID_CLASS,
-} from "./ProjectsWorkItemTable";
+import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
 
 type ProjectsIssuesListProps = {
   /** Render without container chrome — a parent table container provides border and rounding. */
@@ -207,101 +206,42 @@ function IssueListRow({
   repository: Repository;
 }) {
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
-  const labelsSummary = issueLabelsSummary(issue);
 
   return (
-    <tr
-      className={cn(
-        WORK_ITEM_TABLE_GRID_CLASS,
-        "group relative cursor-pointer px-3 py-2.5 transition-colors duration-150 hover:bg-muted/20 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
-      )}
-      aria-label={`Open task ${issue.title}`}
-      data-testid={`projects-issue-row-${issue.id}`}
-      onClick={(event) => {
-        if ((event.target as Element).closest("button, a, [role='menuitem']")) {
-          return;
-        }
-        onOpen(project, issue);
-      }}
-      onKeyDown={(event) => {
-        if (
-          event.target === event.currentTarget &&
-          (event.key === "Enter" || event.key === " ")
-        ) {
-          event.preventDefault();
-          onOpen(project, issue);
-        }
-      }}
-      tabIndex={0}
-    >
-      <td className="min-w-0">
-        <div className="flex min-w-0 items-start gap-2 text-left">
-          <ProjectEventTypeIcon className="h-5 w-5" kind="issue" />
-          <div className="-mt-0.5 min-w-0 flex-1">
-            <p className={PROJECT_LIST_ROW_TITLE_CLASS}>{issue.title}</p>
-            <div
-              className={`flex min-w-0 items-center gap-x-1 overflow-hidden whitespace-nowrap ${PROJECT_LIST_ROW_SUBTEXT_CLASS}`}
-            >
-              <ProjectAuthorIdentity
-                label={authorLabel}
-                profiles={profiles}
-                pubkey={issue.author}
-                testId="projects-issue-author"
-              />
-              <span>opened this in</span>
-              <span className="truncate">{repository.name}</span>
-              {labelsSummary ? (
-                <>
-                  <span>and tagged it</span>
-                  <span className="truncate">{labelsSummary}</span>
-                </>
-              ) : null}
-              <span className="-ml-1">.</span>
-            </div>
-          </div>
-          <IssueAssigneeFacepile
-            assignees={issue.assignees}
-            profiles={profiles}
+    <ProjectEntityListRow
+      affiliation={repository.name}
+      count={issue.comments.length}
+      dateSeconds={issue.updatedAt}
+      dateTestId="projects-row-date"
+      description={listRowDescription(issue.content, issue.title)}
+      icon={<ProjectEventTypeIcon className="h-4 w-4" kind="issue" />}
+      onClick={() => onOpen(project, issue)}
+      peopleSlot={
+        <ProjectAuthorIdentity
+          label={authorLabel}
+          labelClassName="sr-only"
+          profiles={profiles}
+          pubkey={issue.author}
+          testId="projects-issue-author"
+        />
+      }
+      testId={`projects-issue-row-${issue.id}`}
+      title={issue.title}
+      titleAttr={`Open task ${issue.title}`}
+      trailing={
+        <ProjectListRowMenu label={`More options for ${issue.title}`}>
+          <DropdownMenuItem onSelect={() => onOpen(project, issue)}>
+            <Eye className="h-4 w-4" />
+            {nextStepLabel(issue.status)}
+          </DropdownMenuItem>
+          <CopyShareLinkMenuItem
+            link={issueShareLink(issue)}
+            label="Copy task link"
+            testId={`projects-issue-copy-link-${issue.id}`}
           />
-        </div>
-      </td>
-      <td className="min-w-0">
-        <span className="inline-flex max-w-full truncate rounded-full border border-border/60 px-1.5 py-0.5 text-2xs font-medium text-muted-foreground">
-          {projectTaskCategoryLabel(issue.category)}
-        </span>
-      </td>
-      <td className="truncate text-2xs text-muted-foreground">
-        {issue.status}
-      </td>
-      <td className="text-2xs text-muted-foreground">
-        <span className="flex items-center justify-end gap-1">
-          <MessageSquare className="h-3.5 w-3.5" />
-          {issue.comments.length}
-        </span>
-      </td>
-      <td
-        className="truncate text-right text-xs text-muted-foreground/70"
-        data-testid="projects-row-date"
-        title={new Date(issue.updatedAt * 1_000).toLocaleString()}
-      >
-        {relativeTime(issue.updatedAt)}
-      </td>
-      <td className="relative z-10">
-        <div className="flex justify-end">
-          <ProjectListRowMenu label={`More options for ${issue.title}`}>
-            <DropdownMenuItem onSelect={() => onOpen(project, issue)}>
-              <Eye className="h-4 w-4" />
-              {nextStepLabel(issue.status)}
-            </DropdownMenuItem>
-            <CopyShareLinkMenuItem
-              link={issueShareLink(issue)}
-              label="Copy task link"
-              testId={`projects-issue-copy-link-${issue.id}`}
-            />
-          </ProjectListRowMenu>
-        </div>
-      </td>
-    </tr>
+        </ProjectListRowMenu>
+      }
+    />
   );
 }
 
@@ -377,19 +317,14 @@ export function ProjectsIssuesList({
   return (
     <div className="space-y-3">
       {loadNotice}
-      <table
-        className={cn(
-          "block w-full overflow-x-auto bg-transparent",
-          !embedded && "rounded-xl border border-border/60",
-        )}
+      <ul
+        className="divide-y divide-border/60 bg-transparent"
         data-testid="projects-list-container"
       >
-        <ProjectsWorkItemTableHeader itemLabel="Task" typeLabel="Type" />
-        <tbody className="block divide-y divide-border/60">
-          {issues.map(({ project, issue, repository }) => (
+        {issues.map(({ project, issue, repository }) => (
+          <li key={`${repository.id}:${issue.id}`}>
             <IssueListRow
               issue={issue}
-              key={`${repository.id}:${issue.id}`}
               onOpen={(selectedProject, selectedIssue) =>
                 onOpen(selectedProject, repository, selectedIssue)
               }
@@ -397,9 +332,9 @@ export function ProjectsIssuesList({
               project={project}
               repository={repository}
             />
-          ))}
-        </tbody>
-      </table>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

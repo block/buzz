@@ -411,7 +411,7 @@ export function ProjectRepositoryActionsPanel({
                 <RepositoryPeople people={people} profiles={profiles} />
                 <dl className="text-sm [&>div]:h-7 [&_dd]:ml-auto [&_dd]:tabular-nums [&_dt]:gap-3 [&_dt]:text-foreground [&_dt_svg]:h-4 [&_dt_svg]:w-4 [&_dt_svg]:shrink-0 [&_dt_svg]:text-muted-foreground">
                   <div className="flex items-center justify-between gap-3">
-                    <dt className="flex items-center gap-1.5 text-muted-foreground">
+                    <dt className="flex items-center gap-3 text-muted-foreground">
                       <GitCommitHorizontal className="h-3.5 w-3.5" />
                       Latest
                     </dt>
@@ -420,7 +420,7 @@ export function ProjectRepositoryActionsPanel({
                     </dd>
                   </div>
                   <div className="flex items-center justify-between gap-3">
-                    <dt className="flex items-center gap-1.5 text-muted-foreground">
+                    <dt className="flex items-center gap-3 text-muted-foreground">
                       <FileCode2 className="h-3.5 w-3.5" />
                       Files
                     </dt>
@@ -432,7 +432,7 @@ export function ProjectRepositoryActionsPanel({
                     </dd>
                   </div>
                   <div className="flex items-center justify-between gap-3">
-                    <dt className="flex items-center gap-1.5 text-muted-foreground">
+                    <dt className="flex items-center gap-3 text-muted-foreground">
                       <Users className="h-3.5 w-3.5" />
                       Contributors
                     </dt>
@@ -463,7 +463,7 @@ export function ProjectRepositoryActionsPanel({
                     {activeTab !== "prs" ? (
                       <>
                         <div className="flex items-center justify-between gap-3">
-                          <dt className="flex items-center gap-1.5 text-muted-foreground">
+                          <dt className="flex items-center gap-3 text-muted-foreground">
                             <CircleDot className="h-3.5 w-3.5" />
                             {activeTab === "issues" ? "Tasks" : "Active tasks"}
                           </dt>
@@ -476,7 +476,7 @@ export function ProjectRepositoryActionsPanel({
                         {activeTab === "issues" ? (
                           <>
                             <div className="flex items-center justify-between gap-3">
-                              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                              <dt className="flex items-center gap-3 text-muted-foreground">
                                 <CircleDot className="h-3.5 w-3.5" />
                                 Active
                               </dt>
@@ -485,7 +485,7 @@ export function ProjectRepositoryActionsPanel({
                               </dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
-                              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                              <dt className="flex items-center gap-3 text-muted-foreground">
                                 <CheckCircle2 className="h-3.5 w-3.5" />
                                 Completed
                               </dt>
@@ -500,7 +500,7 @@ export function ProjectRepositoryActionsPanel({
                     {activeTab !== "issues" ? (
                       <>
                         <div className="flex items-center justify-between gap-3">
-                          <dt className="flex items-center gap-1.5 text-muted-foreground">
+                          <dt className="flex items-center gap-3 text-muted-foreground">
                             <GitPullRequest className="h-3.5 w-3.5" />
                             {activeTab === "prs" ? "Reviews" : "Open reviews"}
                           </dt>
@@ -513,7 +513,7 @@ export function ProjectRepositoryActionsPanel({
                         {activeTab === "prs" ? (
                           <>
                             <div className="flex items-center justify-between gap-3">
-                              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                              <dt className="flex items-center gap-3 text-muted-foreground">
                                 <GitPullRequest className="h-3.5 w-3.5" />
                                 Open
                               </dt>
@@ -522,7 +522,7 @@ export function ProjectRepositoryActionsPanel({
                               </dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
-                              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                              <dt className="flex items-center gap-3 text-muted-foreground">
                                 <GitMerge className="h-3.5 w-3.5" />
                                 Merged
                               </dt>

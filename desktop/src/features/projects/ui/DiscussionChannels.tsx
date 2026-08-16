@@ -1,4 +1,4 @@
-import { Hash, MessageSquare } from "lucide-react";
+import { Hash } from "lucide-react";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -22,7 +22,10 @@ import { KIND_FORUM_COMMENT, KIND_FORUM_POST } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Markdown } from "@/shared/ui/markdown";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  ProjectEntityFacepile,
+  ProjectEntityListRow,
+} from "./ProjectEntityListRow";
 import { useProjectConversationPanel } from "./ProjectConversationPanelContext";
 
 // Relay search caps a page at 500. Use the full page and surface a lower-bound
@@ -202,7 +205,7 @@ export function DiscussedInChannels({
                 type="button"
               />
               <span className="relative z-10 pt-0.5">
-                <ParticipantFacepile
+                <ProjectEntityFacepile
                   interactive
                   participants={channel.participants}
                   profiles={profiles}
@@ -325,69 +328,6 @@ function DiscussionNameList({
   );
 }
 
-function ParticipantFacepile({
-  interactive = false,
-  participants,
-  profiles,
-}: {
-  /** Wrap each avatar in a profile popover. Leave off when the facepile is
-   * nested inside another button (nested interactive elements are invalid). */
-  interactive?: boolean;
-  participants: string[];
-  profiles: UserProfileLookup | undefined;
-}) {
-  const shown = participants.slice(0, 4);
-  const overflow = participants.length - shown.length;
-  return (
-    <span className="flex shrink-0 items-center">
-      {shown.map((pubkey, index) => {
-        const label = resolveUserLabel({ profiles, pubkey });
-        if (!interactive) {
-          return (
-            <span
-              className={cn(index > 0 && "-ml-1.5")}
-              key={pubkey}
-              title={label}
-            >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
-                displayName={label}
-                size="xs"
-              />
-            </span>
-          );
-        }
-        return (
-          <UserProfilePopover
-            key={pubkey}
-            pubkey={pubkey}
-            triggerElement="span"
-          >
-            <button
-              className={cn("rounded-full", index > 0 && "-ml-1.5")}
-              title={label}
-              type="button"
-            >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
-                displayName={label}
-                size="xs"
-              />
-            </button>
-          </UserProfilePopover>
-        );
-      })}
-      {overflow > 0 ? (
-        <span className="-ml-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-muted text-3xs text-muted-foreground ring-2 ring-background">
-          +{overflow}
-        </span>
-      ) : null}
-    </span>
-  );
-}
-
 /**
  * Full-width channel list for the workspace "Channels" tab: every channel
  * where the repository (or its PRs/issues) is linked in chat, with the
@@ -428,56 +368,26 @@ export function DiscussionChannelsPanel({
           const name = channelName(channel.id, channel.name);
           return (
             <li className="relative" key={channel.id}>
-              <button
-                className="flex min-h-9 w-full min-w-0 items-center gap-2 px-4 py-1.5 text-left transition-colors hover:bg-muted/30"
-                data-testid="project-channel-row"
+              <ProjectEntityListRow
+                affiliation={repositoryName}
+                affiliationTestId="project-channel-repository"
+                count={channel.messageCount}
+                countSuffix={isTruncated ? "+" : undefined}
+                countTestId="project-channel-message-count"
+                countTitle={`${channel.messageCount}${isTruncated ? "+" : ""} ${
+                  channel.messageCount === 1 ? "message" : "messages"
+                }`}
+                dateSeconds={channel.lastActivityAt}
+                dateTestId="project-channel-row-date"
+                icon={<Hash className="h-3.5 w-3.5 text-muted-foreground/70" />}
                 onClick={() => void goChannel(channel.id)}
-                title={`Open #${name}`}
-                type="button"
-              >
-                <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                  <Hash className="h-3.5 w-3.5 text-muted-foreground/70" />
-                </span>
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                  #{name}
-                </span>
-                <span
-                  className="hidden w-28 shrink-0 truncate text-right text-xs text-muted-foreground md:block"
-                  data-testid="project-channel-repository"
-                  title={repositoryName}
-                >
-                  {repositoryName}
-                </span>
-                <span
-                  className="flex w-20 shrink-0 justify-end"
-                  data-testid="project-channel-participants"
-                >
-                  <ParticipantFacepile
-                    participants={channel.participants}
-                    profiles={profiles}
-                  />
-                </span>
-                <span
-                  className="flex w-12 shrink-0 items-center justify-end gap-1 text-xs text-muted-foreground"
-                  data-testid="project-channel-message-count"
-                  title={`${channel.messageCount}${isTruncated ? "+" : ""} ${
-                    channel.messageCount === 1 ? "message" : "messages"
-                  }`}
-                >
-                  <MessageSquare className="h-3.5 w-3.5" />
-                  {channel.messageCount}
-                  {isTruncated ? "+" : ""}
-                </span>
-                <span
-                  className="hidden w-20 shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground/70 sm:block"
-                  data-testid="project-channel-row-date"
-                  title={new Date(
-                    channel.lastActivityAt * 1_000,
-                  ).toLocaleString()}
-                >
-                  {relativeTime(channel.lastActivityAt)}
-                </span>
-              </button>
+                people={channel.participants}
+                peopleTestId="project-channel-participants"
+                profiles={profiles}
+                testId="project-channel-row"
+                title={`#${name}`}
+                titleAttr={`Open #${name}`}
+              />
             </li>
           );
         })}

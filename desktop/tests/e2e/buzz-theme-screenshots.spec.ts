@@ -95,7 +95,7 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
     (element) => getComputedStyle(element, "::before").backgroundColor,
   );
   expect(pinnedSpacerColor).toBe("rgba(0, 0, 0, 0)");
-  await expect(sidebarScroller.getByTestId("open-agents-view")).toBeVisible();
+  await expect(pinnedHeader.getByTestId("open-agents-view")).toBeVisible();
   const searchBox = await search.boundingBox();
   const pinnedHeaderBox = await pinnedHeader.boundingBox();
   const primaryMenuBox = await primaryMenu.boundingBox();
@@ -124,14 +124,15 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
   ) {
     throw new Error("Sidebar search or primary navigation geometry is missing");
   }
-  expect(primaryMenuBox.y - (searchBox.y + searchBox.height)).toBe(8);
+  expect(searchBox.y).toBeGreaterThanOrEqual(pinnedHeaderBox.y);
   expect(
-    pinnedHeaderBox.y +
-      pinnedHeaderBox.height -
-      (searchBox.y + searchBox.height),
-  ).toBe(8);
-  expect(primaryMenuBox.y - (pinnedHeaderBox.y + pinnedHeaderBox.height)).toBe(
-    0,
+    Math.abs(primaryMenuBox.y - (searchBox.y + searchBox.height) - 8),
+  ).toBeLessThanOrEqual(0.5);
+  expect(searchBox.y + searchBox.height).toBeLessThanOrEqual(
+    pinnedHeaderBox.y + pinnedHeaderBox.height,
+  );
+  expect(primaryMenuBox.y).toBeLessThan(
+    pinnedHeaderBox.y + pinnedHeaderBox.height,
   );
   for (const rowBox of [primaryRowBox, activeRowBox, hoverRowBox]) {
     expect(Math.abs(rowBox.x - searchBox.x)).toBeLessThanOrEqual(0.5);
@@ -1432,7 +1433,6 @@ test("settings content uses the same inset surface as the main app", async ({
   await seedTheme(page, "buzz");
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  const searchBox = await page.getByTestId("open-search").boundingBox();
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
 
@@ -1461,15 +1461,24 @@ test("settings content uses the same inset surface as the main app", async ({
 
   const viewBox = await settingsView.boundingBox();
   const surfaceBox = await contentSurface.boundingBox();
-  expect(searchBox).not.toBeNull();
+  const settingsSidebarTopChromeBox =
+    await settingsSidebarTopChrome.boundingBox();
   expect(backToAppBox).not.toBeNull();
   expect(viewBox).not.toBeNull();
   expect(surfaceBox).not.toBeNull();
-  if (!searchBox || !backToAppBox || !viewBox || !surfaceBox) {
+  expect(settingsSidebarTopChromeBox).not.toBeNull();
+  if (
+    !backToAppBox ||
+    !viewBox ||
+    !surfaceBox ||
+    !settingsSidebarTopChromeBox
+  ) {
     throw new Error("Settings layout is missing");
   }
 
-  expect(Math.abs(backToAppBox.y - searchBox.y)).toBeLessThanOrEqual(0.5);
+  expect(backToAppBox.y).toBeGreaterThanOrEqual(
+    settingsSidebarTopChromeBox.y + settingsSidebarTopChromeBox.height,
+  );
 
   // Match the normal app shell: a fixed 40px top chrome strip, then a 1px
   // top/left inset and 8px right/bottom inset around the rounded content card.

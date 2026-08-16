@@ -62,6 +62,12 @@ type ProjectActivityItem = {
   target: ActivityTarget;
 };
 
+type ProjectActivityGroup = {
+  key: string;
+  label: string;
+  items: ProjectActivityItem[];
+};
+
 type ProjectsActivityFeedProps = {
   compact?: boolean;
   isLoading: boolean;
@@ -85,6 +91,7 @@ type ProjectsActivityFeedProps = {
 };
 
 const ACTIVITY_LIMIT = 30;
+const WEEK_SECONDS = 7 * 24 * 60 * 60;
 
 function contentPreview(content: string) {
   return markdownToPlainText(content).replace(/\s+/g, " ").trim().slice(0, 280);
@@ -249,6 +256,36 @@ function buildActivityItems({
   return items
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, ACTIVITY_LIMIT);
+}
+
+function startOfWeek(timestamp: number) {
+  const date = new Date(timestamp * 1_000);
+  date.setHours(0, 0, 0, 0);
+  const daysSinceMonday = (date.getDay() + 6) % 7;
+  date.setDate(date.getDate() - daysSinceMonday);
+  return Math.floor(date.getTime() / 1_000);
+}
+
+function groupActivityItems(items: ProjectActivityItem[]) {
+  const thisWeek = startOfWeek(Math.floor(Date.now() / 1_000));
+  const lastWeek = thisWeek - WEEK_SECONDS;
+  const groups: ProjectActivityGroup[] = [
+    { key: "this-week", label: "This week", items: [] },
+    { key: "last-week", label: "Last week", items: [] },
+    { key: "earlier", label: "Earlier", items: [] },
+  ];
+
+  for (const item of items) {
+    if (item.createdAt >= thisWeek) {
+      groups[0].items.push(item);
+    } else if (item.createdAt >= lastWeek) {
+      groups[1].items.push(item);
+    } else {
+      groups[2].items.push(item);
+    }
+  }
+
+  return groups.filter((group) => group.items.length > 0);
 }
 
 function ActivityCard({
@@ -430,6 +467,7 @@ function ActivityCard({
 /** Mixed GitHub-style workspace activity shown beneath the overview callouts. */
 export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
   const items = buildActivityItems(props);
+  const groups = groupActivityItems(items);
 
   if (props.isLoading && items.length === 0) {
     return <BuzzLoadingState label="Loading project activity" />;
@@ -450,45 +488,59 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
 
   return (
     <div
-      className="relative bg-transparent"
+      className="relative space-y-7 bg-transparent"
       data-testid="projects-activity-timeline"
     >
-      {items.map((item, index) => {
-        return (
-          <div className="relative" key={item.id}>
-            <ActivityCard
-              compact={props.compact === true}
-              isFirst={index === 0}
-              isLast={index === items.length - 1}
-              item={item}
-              onOpen={() => {
-                if (item.target.type === "project") {
-                  props.onOpenProject(item.target.project);
-                } else if (item.target.type === "commit") {
-                  props.onOpenCommit(
-                    item.target.project,
-                    item.target.commitHash,
-                  );
-                } else if (item.target.type === "pull-request") {
-                  props.onOpenPullRequest(
-                    item.target.project,
-                    item.target.repository,
-                    item.target.pullRequest,
-                  );
-                } else {
-                  props.onOpenIssue(
-                    item.target.project,
-                    item.target.repository,
-                    item.target.issue,
-                  );
-                }
-              }}
-              onOpenProject={() => props.onOpenProject(item.target.project)}
-              profiles={props.profiles}
-            />
+      {groups.map((group) => (
+        <section data-testid="projects-activity-group" key={group.key}>
+          <div className="mb-1 flex items-center gap-3">
+            <h3 className="shrink-0 text-xs font-medium text-muted-foreground">
+              {group.label}
+            </h3>
+            <span aria-hidden="true" className="h-px flex-1 bg-border/70" />
           </div>
-        );
-      })}
+          <div>
+            {group.items.map((item, index) => {
+              return (
+                <div className="relative" key={item.id}>
+                  <ActivityCard
+                    compact={props.compact === true}
+                    isFirst={index === 0}
+                    isLast={index === group.items.length - 1}
+                    item={item}
+                    onOpen={() => {
+                      if (item.target.type === "project") {
+                        props.onOpenProject(item.target.project);
+                      } else if (item.target.type === "commit") {
+                        props.onOpenCommit(
+                          item.target.project,
+                          item.target.commitHash,
+                        );
+                      } else if (item.target.type === "pull-request") {
+                        props.onOpenPullRequest(
+                          item.target.project,
+                          item.target.repository,
+                          item.target.pullRequest,
+                        );
+                      } else {
+                        props.onOpenIssue(
+                          item.target.project,
+                          item.target.repository,
+                          item.target.issue,
+                        );
+                      }
+                    }}
+                    onOpenProject={() =>
+                      props.onOpenProject(item.target.project)
+                    }
+                    profiles={props.profiles}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }
