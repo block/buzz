@@ -12,6 +12,9 @@ use sherpa_onnx::{
 use crate::german_normalize::normalize_german_text;
 
 pub const KOKORO_SAMPLE_RATE: u32 = 24_000;
+pub const KOKORO_STYLE_FRAMES: usize = 510;
+pub const KOKORO_STYLE_DIM: usize = 256;
+pub const KOKORO_STYLE_BYTES: usize = KOKORO_STYLE_FRAMES * KOKORO_STYLE_DIM * 4;
 
 pub struct KokoroGerman {
     engine: OfflineTts,
@@ -28,6 +31,7 @@ impl KokoroGerman {
             && (model_dir.join("voices.bin").is_file()
                 || model_dir.join("voices-martin.npz").is_file())
             && model_dir.join("tokens.txt").is_file()
+            && model_dir.join("espeak-ng-data").join("phontab").is_file()
     }
 
     pub fn load(model_dir: &Path) -> Result<Self, String> {
@@ -44,18 +48,20 @@ impl KokoroGerman {
         let data_dir = first_existing(&[
             model_dir.join("espeak-ng-data"),
             model_dir.join("espeak-ng-data-dir"),
-        ]);
-        let mut kokoro = OfflineTtsKokoroModelConfig {
+        ])
+        .ok_or_else(|| {
+            "Kokoro espeak-ng-data is missing. Download German speech models and try again."
+                .to_string()
+        })?;
+        let kokoro = OfflineTtsKokoroModelConfig {
             model: Some(model.to_string_lossy().into_owned()),
             voices: Some(voices_bin.to_string_lossy().into_owned()),
             tokens: Some(tokens.to_string_lossy().into_owned()),
+            data_dir: Some(data_dir.to_string_lossy().into_owned()),
             lang: Some("de".into()),
             length_scale: 1.0,
             ..Default::default()
         };
-        if let Some(dir) = data_dir {
-            kokoro.data_dir = Some(dir.to_string_lossy().into_owned());
-        }
         let config = OfflineTtsConfig {
             model: OfflineTtsModelConfig {
                 kokoro,
@@ -68,8 +74,10 @@ impl KokoroGerman {
         };
         let engine = OfflineTts::create(&config)
             .ok_or_else(|| "Kokoro OfflineTts::create failed".to_string())?;
-        let victoria_available = model_dir.join("victoria.pt").is_file()
-            || model_dir.join("voices-victoria.bin").is_file()
+        let victoria_available = voices_bin
+            .metadata()
+            .map(|meta| meta.len() as usize >= KOKORO_STYLE_BYTES * 2)
+            .unwrap_or(false)
             || engine.num_speakers() > 1;
         eprintln!("buzz-desktop: Kokoro ready");
         Ok(Self {
@@ -132,37 +140,107 @@ fn first_existing(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().find(|path| path.exists()).cloned()
 }
 
-fn ensure_voices_bin(model_dir: &Path) -> Result<PathBuf, String> {
-    let voices_bin = model_dir.join("voices.bin");
-    if voices_bin.is_file() {
-        return Ok(voices_bin);
-    }
-    let npz = model_dir.join("voices-martin.npz");
-    if npz.is_file() {
-        convert_npz_to_bin(&npz, &voices_bin)?;
-        return Ok(voices_bin);
-    }
-    Err("Kokoro voices.bin is missing".into())
+pub fn install_voices_bin(model_dir: &Path) -> Result<PathBuf, String> {
+    ensure_voices_bin(model_dir)
 }
 
-fn convert_npz_to_bin(npz_path: &Path, dest: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(npz_path).map_err(|e| format!("open voices npz: {e}"))?;
+fn ensure_voices_bin(model_dir: &Path) -> Result<PathBuf, String> {
+    let voices_bin = model_dir.join("voices.bin");
+    let martin = if voices_bin.is_file() {
+        let existing = std::fs::read(&voices_bin).map_err(|e| format!("read voices.bin: {e}"))?;
+        if existing.len() >= KOKORO_STYLE_BYTES {
+            existing[..KOKORO_STYLE_BYTES].to_vec()
+        } else {
+            return Err("voices.bin is smaller than one Kokoro speaker".into());
+        }
+    } else {
+        let npz = model_dir.join("voices-martin.npz");
+        if !npz.is_file() {
+            return Err("Kokoro voices.bin is missing".into());
+        }
+        style_payload_from_file(&npz)?
+    };
+    let mut styles = vec![martin];
+    let victoria_pt = model_dir.join("victoria.pt");
+    if victoria_pt.is_file() {
+        match style_payload_from_file(&victoria_pt) {
+            Ok(victoria) => styles.push(victoria),
+            Err(error) => {
+                return Err(format!("Victoria voice could not be installed: {error}"));
+            }
+        }
+    }
+    let merged = merge_speaker_styles(&styles)?;
+    std::fs::write(&voices_bin, merged).map_err(|e| format!("write voices.bin: {e}"))?;
+    Ok(voices_bin)
+}
+
+pub fn merge_speaker_styles(styles: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    if styles.is_empty() {
+        return Err("at least one Kokoro speaker style is required".into());
+    }
+    let mut out = Vec::with_capacity(styles.len() * KOKORO_STYLE_BYTES);
+    for style in styles {
+        if style.len() != KOKORO_STYLE_BYTES {
+            return Err(format!(
+                "Kokoro style must be {KOKORO_STYLE_BYTES} bytes, got {}",
+                style.len()
+            ));
+        }
+        out.extend_from_slice(style);
+    }
+    Ok(out)
+}
+
+pub fn style_payload_from_file(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if bytes.len() >= 4 && &bytes[0..4] == b"PK\x03\x04" {
+        return style_payload_from_zip(&bytes);
+    }
+    extract_style_payload(&bytes)
+}
+
+fn style_payload_from_zip(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let cursor = std::io::Cursor::new(bytes);
     let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("voices npz is not a zip: {e}"))?;
+        zip::ZipArchive::new(cursor).map_err(|e| format!("style archive is not a zip: {e}"))?;
+    let mut fallback = None;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
-            .map_err(|e| format!("read voices npz entry: {e}"))?;
-        if !entry.name().ends_with(".npy") {
-            continue;
+            .map_err(|e| format!("read style zip entry: {e}"))?;
+        let mut data = Vec::new();
+        std::io::copy(&mut entry, &mut data).map_err(|e| format!("read style zip bytes: {e}"))?;
+        if data.len() == KOKORO_STYLE_BYTES {
+            return Ok(data);
         }
-        let mut bytes = Vec::new();
-        std::io::copy(&mut entry, &mut bytes).map_err(|e| format!("read npy: {e}"))?;
-        let payload = skip_npy_header(&bytes)?;
-        std::fs::write(dest, payload).map_err(|e| format!("write voices.bin: {e}"))?;
-        return Ok(());
+        if fallback.is_none() {
+            if let Ok(payload) = extract_style_payload(&data) {
+                fallback = Some(payload);
+            }
+        }
     }
-    Err("voices npz contained no .npy arrays".into())
+    fallback.ok_or_else(|| "style archive contained no 510x256 f32 speaker".to_string())
+}
+
+fn extract_style_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.len() == KOKORO_STYLE_BYTES {
+        return Ok(bytes.to_vec());
+    }
+    if bytes.len() >= 10 && &bytes[0..6] == b"\x93NUMPY" {
+        let payload = skip_npy_header(bytes)?;
+        if payload.len() != KOKORO_STYLE_BYTES {
+            return Err(format!(
+                "npy style payload must be {KOKORO_STYLE_BYTES} bytes, got {}",
+                payload.len()
+            ));
+        }
+        return Ok(payload.to_vec());
+    }
+    Err(format!(
+        "unsupported Kokoro style artifact ({} bytes)",
+        bytes.len()
+    ))
 }
 
 fn skip_npy_header(bytes: &[u8]) -> Result<&[u8], String> {
@@ -199,5 +277,47 @@ mod tests {
     #[test]
     fn missing_model_is_not_available() {
         assert!(!KokoroGerman::is_available(Path::new("/tmp/missing-kokoro")));
+    }
+
+    #[test]
+    fn merges_martin_and_victoria_styles() {
+        let martin = vec![1u8; KOKORO_STYLE_BYTES];
+        let victoria = vec![2u8; KOKORO_STYLE_BYTES];
+        let merged = merge_speaker_styles(&[martin.clone(), victoria.clone()]).unwrap();
+        assert_eq!(merged.len(), KOKORO_STYLE_BYTES * 2);
+        assert_eq!(&merged[..KOKORO_STYLE_BYTES], martin);
+        assert_eq!(&merged[KOKORO_STYLE_BYTES..], victoria);
+    }
+
+    #[test]
+    fn extracts_raw_and_npy_style_payloads() {
+        let raw = vec![7u8; KOKORO_STYLE_BYTES];
+        assert_eq!(extract_style_payload(&raw).unwrap(), raw);
+
+        let mut npy = b"\x93NUMPY\x01\x00".to_vec();
+        npy.extend_from_slice(&(20u16).to_le_bytes());
+        npy.extend_from_slice(&[b' '; 20]);
+        npy.extend_from_slice(&raw);
+        assert_eq!(extract_style_payload(&npy).unwrap(), raw);
+    }
+
+    #[test]
+    fn extracts_victoria_pt_zip_payload() {
+        let style = vec![9u8; KOKORO_STYLE_BYTES];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("victoria.pt");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "victoria_ep2/data/0",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            use std::io::Write;
+            zip.write_all(&style).unwrap();
+            zip.finish().unwrap();
+        }
+        assert_eq!(style_payload_from_file(&path).unwrap(), style);
     }
 }

@@ -33,12 +33,13 @@ Provided \"AS IS\", without warranty of any kind.
 ";
 
 const KOKORO_MODEL_DIR_NAME: &str = "kokoro-de";
-const KOKORO_MODEL_VERSION: &str = "1";
+const KOKORO_MODEL_VERSION: &str = "2";
 const KOKORO_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
 const KOKORO_EXPECTED_FILES: &[&str] = &[
     "model.onnx",
-    "voices-martin.npz",
+    "voices.bin",
     "tokens.txt",
+    "espeak-ng-data/phontab",
     KOKORO_LICENSE_FILE_NAME,
 ];
 
@@ -50,6 +51,10 @@ const KOKORO_TOKENS_URL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-kokoro-multi-lang-v1_0/resolve/main/tokens.txt";
 const KOKORO_VICTORIA_URL: &str =
     "https://huggingface.co/kikiri-tts/kikiri-german-victoria/resolve/main/voices/victoria.pt";
+const KOKORO_ESPEAK_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2";
+const KOKORO_ESPEAK_SHA256: &str =
+    "4135ccf82e1f40613491c0874d4945ae9e9c7840933d8e25a6f9e003d9ebf533";
 
 const KOKORO_LICENSE_TEXT: &str = "\
 Kokoro German TTS
@@ -231,17 +236,17 @@ impl ModelManager {
                         |downloaded, total| {
                             if let Some(pct) = total.and_then(|t| (downloaded * 20).checked_div(t))
                             {
-                                let overall = (index as u64 * 20 + pct.min(20)) as u8;
+                                let overall = (index as u64 * 18 + pct.min(18)) as u8;
                                 self.kokoro.set_status(ModelStatus::Downloading {
-                                    progress_percent: overall.min(89),
+                                    progress_percent: overall.min(85),
                                 });
                             }
                         },
                     )
                     .await?;
                 }
-                Err(error) if *filename == "victoria.pt" || *filename == "tokens.txt" => {
-                    eprintln!("buzz-desktop: optional Kokoro artifact {filename} skipped: {error}");
+                Err(error) if *filename == "tokens.txt" => {
+                    eprintln!("buzz-desktop: Kokoro tokens download failed ({error}); using bundled vocab");
                 }
                 Err(error) => {
                     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
@@ -249,6 +254,39 @@ impl ModelManager {
                 }
             }
         }
+
+        if !temp_dir.join("victoria.pt").is_file() {
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            return Err("Victoria voice artifact is missing".into());
+        }
+
+        let espeak_archive = temp_dir.join("espeak-ng-data.tar.bz2");
+        let response = fetch_url(&http_client, KOKORO_ESPEAK_URL, "espeak-ng-data").await?;
+        download_file(
+            response,
+            &espeak_archive,
+            20 * 1024 * 1024,
+            "espeak-ng-data",
+            |downloaded, total| {
+                if let Some(pct) = total.and_then(|t| (downloaded * 8).checked_div(t)) {
+                    self.kokoro.set_status(ModelStatus::Downloading {
+                        progress_percent: (86 + pct.min(4)) as u8,
+                    });
+                }
+            },
+        )
+        .await?;
+        let espeak_hash = sha256_file(&espeak_archive).await?;
+        if espeak_hash != KOKORO_ESPEAK_SHA256 {
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            return Err(format!(
+                "espeak-ng-data integrity check failed: expected {KOKORO_ESPEAK_SHA256}, got {espeak_hash}"
+            ));
+        }
+        let (archive, dest) = (espeak_archive.clone(), temp_dir.clone());
+        tokio::task::spawn_blocking(move || extract_archive(&archive, &dest))
+            .await
+            .map_err(|e| format!("espeak extract task panicked: {e}"))??;
 
         tokio::fs::write(temp_dir.join(KOKORO_LICENSE_FILE_NAME), KOKORO_LICENSE_TEXT)
             .await
@@ -259,6 +297,11 @@ impl ModelManager {
                 .await
                 .map_err(|e| format!("write Kokoro tokens: {e}"))?;
         }
+
+        let voices_dir = temp_dir.clone();
+        tokio::task::spawn_blocking(move || super::super::pocket::install_voices_bin(&voices_dir))
+            .await
+            .map_err(|e| format!("voices.bin task panicked: {e}"))??;
 
         if let Err(e) = self
             .kokoro
