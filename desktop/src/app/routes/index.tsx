@@ -95,7 +95,12 @@ function HomeRouteComponent() {
       availableChannelIds={availableChannelIds}
       currentPubkey={identityQuery.data?.pubkey}
       onOpenContext={(channelId, messageId, threadRootId) => {
-        void goChannel(channelId, { messageId, threadRootId });
+        // messageId is null for channel-level rows, which have no specific
+        // event to scroll to; goChannel wants it absent rather than null.
+        void goChannel(channelId, {
+          messageId: messageId ?? undefined,
+          threadRootId,
+        });
       }}
     />
   );

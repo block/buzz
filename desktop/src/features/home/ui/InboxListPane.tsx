@@ -7,6 +7,7 @@ import {
   type InboxItem,
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
+import type { ChannelUnreadRow } from "@/features/home/lib/channelUnreadRows.mjs";
 import { buildInboxListRows } from "@/features/home/lib/inboxListRows";
 import { hasRenderedVideoAttachment } from "@/features/messages/lib/videoReviewContext";
 import { getThreadReference } from "@/features/messages/lib/threading";
@@ -22,8 +23,10 @@ import {
   RemindersPanel,
   useReminderSources,
 } from "@/features/reminders/ui/RemindersPanel";
+import type { Channel } from "@/shared/api/types";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
+import { formatItemTimestamp } from "@/shared/lib/datetime";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   ContextMenu,
@@ -202,14 +205,60 @@ function PersonalItemRow({
   );
 }
 
+/**
+ * A channel with unread activity, as one Inbox row.
+ *
+ * Shows the channel and how much is waiting, and nothing else. There is no
+ * message preview because the app does not retain the latest message body per
+ * channel — only its timestamp — so a preview here would either be blank on a
+ * cold start or require a new per-channel query. The count plus the channel
+ * name is enough to decide whether to open it.
+ */
+function ChannelUnreadRowButton({
+  channel,
+  onClick,
+  sortAt,
+  unreadCount,
+}: {
+  channel: Channel;
+  onClick: () => void;
+  sortAt: number;
+  unreadCount: number;
+}) {
+  const isDm = channel.channelType === "dm";
+  const label = isDm ? channel.name : `#${channel.name}`;
+
+  return (
+    <button
+      className="flex w-full items-center gap-3 border-b border-border/40 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+      onClick={onClick}
+      type="button"
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-semibold">{label}</span>
+        <span className="block truncate text-xs text-muted-foreground">
+          {unreadCount === 1 ? "1 new message" : `${unreadCount} new messages`}
+        </span>
+      </span>
+      <span className="shrink-0 text-xs text-muted-foreground">
+        {sortAt > 0 ? formatItemTimestamp(sortAt) : null}
+      </span>
+    </button>
+  );
+}
+
 type InboxListPaneProps = {
   activeReminderEventIds?: ReadonlySet<string>;
   agentPubkeys?: ReadonlySet<string>;
   activeDraftCount: number;
+  // Channel-level unread rows. Optional so isolated tests can mount the pane
+  // without an AppShell to derive them from.
+  channelRows?: readonly ChannelUnreadRow[];
   draftItems: DraftViewItem[];
   doneSet: ReadonlySet<string>;
   filter: InboxFilter;
   items: InboxItem[];
+  onOpenChannel?: (channelId: string) => void;
   onFilterChange: (filter: InboxFilter) => void;
   onDeleteDraft: (draftKey: string) => void;
   onMarkRead: (itemId: string) => void;
@@ -234,10 +283,12 @@ export function InboxListPane({
   activeReminderEventIds,
   agentPubkeys,
   activeDraftCount,
+  channelRows,
   draftItems,
   doneSet,
   filter,
   items,
+  onOpenChannel,
   onFilterChange,
   onDeleteDraft,
   onMarkRead,
@@ -264,6 +315,10 @@ export function InboxListPane({
   const inboxRows = React.useMemo(
     () =>
       buildInboxListRows({
+        // Channel rows belong to the mixed All view only: the narrower filters
+        // are about feed categories, and a generic "4 new" row answers none of
+        // them.
+        channelRows: isMixedInboxView ? channelRows : [],
         items,
         reminders: unreadOnly
           ? []
@@ -271,7 +326,7 @@ export function InboxListPane({
               isDue(reminder, Math.floor(Date.now() / 1_000)),
             ),
       }),
-    [items, reminders, unreadOnly],
+    [channelRows, isMixedInboxView, items, reminders, unreadOnly],
   );
   const visibleInboxRows = React.useMemo(
     () =>
@@ -649,6 +704,19 @@ export function InboxListPane({
               renderItem={(row) => {
                 if (row.kind === "inbox") {
                   return renderItem(row.item, row.dueReminder);
+                }
+
+                if (row.kind === "channel") {
+                  return (
+                    <ChannelUnreadRowButton
+                      channel={row.channel}
+                      onClick={() => {
+                        onOpenChannel?.(row.channelId);
+                      }}
+                      sortAt={row.sortAt}
+                      unreadCount={row.unreadCount}
+                    />
+                  );
                 }
 
                 const source = reminderSources.get(row.reminder.id);

@@ -14,7 +14,7 @@ type HomeScreenProps = {
   currentPubkey?: string;
   onOpenContext: (
     channelId: string,
-    messageId: string,
+    messageId: string | null,
     threadRootId?: string | null,
   ) => void;
 };

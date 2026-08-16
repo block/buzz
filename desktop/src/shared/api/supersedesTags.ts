@@ -34,8 +34,6 @@ export const SUPERSEDES_SUBJECT_MARKER = "supersedes-subject";
  */
 export function isSupersedesLinkDeclaration(tags?: string[][] | null): boolean {
   return Boolean(
-    tags?.some(
-      (tag) => tag[0] === "e" && tag[3] === SUPERSEDES_SUBJECT_MARKER,
-    ),
+    tags?.some((tag) => tag[0] === "e" && tag[3] === SUPERSEDES_SUBJECT_MARKER),
   );
 }

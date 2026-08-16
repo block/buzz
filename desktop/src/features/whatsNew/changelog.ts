@@ -70,6 +70,15 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Clearer unread dot on the channel you're currently reading",
     ],
   },
+  {
+    version: "0.5.14-2",
+    bullets: [
+      "Your Inbox now shows every channel and DM with something new, whether or not you were mentioned",
+      "One row per conversation, with a count — not one row per message",
+      "Reading a conversation clears it from the Inbox, and reading it in the Inbox clears it everywhere else",
+      "Muted channels stay out of the Inbox",
+    ],
+  },
 ];
 
 /**

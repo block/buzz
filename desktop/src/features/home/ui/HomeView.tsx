@@ -46,6 +46,7 @@ import { getHomeMessageCapabilities } from "@/features/home/lib/homeMessageCapab
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
+import { useChannelUnreadRows } from "@/features/home/useChannelUnreadRows";
 import { HomePersonalInboxDetail } from "@/features/home/ui/HomePersonalInboxDetail";
 import {
   useChannelMessagesQuery,
@@ -87,9 +88,11 @@ type HomeViewProps = {
   errorMessage?: string;
   currentPubkey?: string;
   availableChannelIds: ReadonlySet<string>;
+  // `messageId` is null when there is no specific event to scroll to — a
+  // channel-level Inbox row opens the channel itself rather than a message.
   onOpenContext: (
     channelId: string,
-    messageId: string,
+    messageId: string | null,
     threadRootId?: string | null,
   ) => void;
   onRefresh: () => void;
@@ -270,27 +273,19 @@ export function HomeView({
   // anchor event has been displaced from the current groupItems. This is null
   // until the active item is resolved (anchor not yet found in feedItems and
   // no matching committed latch).
-  const latchedDefaultParentId =
-    activeLatchedItem !== null
-      ? (getThreadReference(activeLatchedItem.tags).parentId ??
-        activeLatchedItem.id)
-      : null;
+  // biome-ignore format: file size ratchet
+  const latchedDefaultParentId = activeLatchedItem !== null ? (getThreadReference(activeLatchedItem.tags).parentId ?? activeLatchedItem.id) : null;
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data;
-  const selectedChannelIdCandidate = React.useMemo(() => {
-    return threadContextFeedItem?.channelId ?? null;
-  }, [threadContextFeedItem]);
-  const selectedChannel = React.useMemo(() => {
-    if (!selectedChannelIdCandidate || !channels) return null;
-    return (
-      channels.find((channel) => channel.id === selectedChannelIdCandidate) ??
-      null
-    );
-  }, [channels, selectedChannelIdCandidate]);
-  const managedChannel = React.useMemo(() => {
-    if (!managedChannelId || !channels) return null;
-    return channels.find((channel) => channel.id === managedChannelId) ?? null;
-  }, [channels, managedChannelId]);
+  // Channel-level unread rows for the Inbox's All view. Derived from the same
+  // projections the sidebar renders, so the two cannot disagree.
+  const channelUnreadRows = useChannelUnreadRows(channels);
+  // biome-ignore format: file size ratchet
+  const selectedChannelIdCandidate = React.useMemo(() => threadContextFeedItem?.channelId ?? null, [threadContextFeedItem]);
+  // biome-ignore format: file size ratchet
+  const selectedChannel = React.useMemo(() => (!selectedChannelIdCandidate || !channels ? null : (channels.find((channel) => channel.id === selectedChannelIdCandidate) ?? null)), [channels, selectedChannelIdCandidate]);
+  // biome-ignore format: file size ratchet
+  const managedChannel = React.useMemo(() => (!managedChannelId || !channels ? null : (channels.find((channel) => channel.id === managedChannelId) ?? null)), [channels, managedChannelId]);
   const isChannelManagementOpen = managedChannel !== null;
   const hasAuxiliaryPane =
     isChannelManagementOpen || profilePanelPubkey !== null;
@@ -691,6 +686,7 @@ export function HomeView({
               activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
               activeDraftCount={activeDraftCount}
+              channelRows={channelUnreadRows}
               draftItems={draftItems}
               doneSet={effectiveDoneSet}
               dueReminderCount={dueReminderCount}
@@ -700,6 +696,8 @@ export function HomeView({
               onFilterChange={handleFilterChange}
               onMarkRead={markItemRead}
               onMarkUnread={markItemUnread}
+              // biome-ignore format: file size ratchet
+              onOpenChannel={(channelId) => onOpenContext(channelId, null, null)}
               onOpenDirect={(item) => {
                 const channelId = item.item.channelId;
                 if (!channelId) {

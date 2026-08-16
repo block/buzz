@@ -1,3 +1,5 @@
+import { withoutDuplicatedChannels } from "@/features/home/lib/channelUnreadRows.mjs";
+import type { ChannelUnreadRow } from "@/features/home/lib/channelUnreadRows.mjs";
 import type { InboxItem } from "@/features/home/lib/inbox";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
 
@@ -14,12 +16,19 @@ export type InboxListRow =
       kind: "reminder";
       reminder: Reminder;
       sortAt: number;
-    };
+    }
+  | ChannelUnreadRow;
 
 export function buildInboxListRows({
+  channelRows,
   items,
   reminders,
 }: {
+  // Channel-level unread rows, derived from the sidebar's own unread
+  // projections. Only supplied for the All filter — the narrower filters are
+  // definitionally about feed categories, so a generic "4 new" row has no
+  // meaning under Mentions or Drafts.
+  channelRows?: readonly ChannelUnreadRow[];
   items: readonly InboxItem[];
   reminders: readonly Reminder[];
 }): InboxListRow[] {
@@ -62,8 +71,18 @@ export function buildInboxListRows({
     };
   });
 
+  // A channel that already has a feed row must not also get a generic one:
+  // the feed row names what actually happened, so it wins and the channel row
+  // is dropped. See withoutDuplicatedChannels for the cost of that choice.
+  const occupiedChannelIds = new Set<string>();
+  for (const item of items) {
+    const channelId = item.item.channelId;
+    if (channelId) occupiedChannelIds.add(channelId);
+  }
+
   return [
     ...inboxRows,
+    ...withoutDuplicatedChannels(channelRows ?? [], occupiedChannelIds),
     ...reminders
       .filter(
         (reminder) =>

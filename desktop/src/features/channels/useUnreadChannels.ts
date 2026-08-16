@@ -804,19 +804,15 @@ export function useUnreadChannels(
     // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and latestVersion are intentional invalidation signals
     React.useMemo(() => {
       if (!isReadStateReady || !observedPersistence.isScopeLoaded()) {
-        return {
-          unreadChannelIds: new Set<string>(),
-          topLevelUnreadChannelIds: new Set<string>(),
-          highPriorityUnreadChannelIds: new Set<string>(),
-          unreadChannelCounts: new Map<string, number>(),
-          unreadChannelNotificationCount: 0,
-        };
+        // biome-ignore format: file size ratchet
+        return { unreadChannelIds: new Set<string>(), topLevelUnreadChannelIds: new Set<string>(), highPriorityUnreadChannelIds: new Set<string>(), unreadChannelCounts: new Map<string, number>(), latestUnreadActivityByChannelId: new Map<string, number>(), unreadChannelNotificationCount: 0 };
       }
 
       const unread = new Set<string>();
       const topLevelUnread = new Set<string>();
       const highPriority = new Set<string>();
       const counts = new Map<string, number>();
+      const latestActivity = new Map<string, number>();
       let unreadChannelNotificationCount = 0;
 
       for (const channel of channels) {
@@ -847,11 +843,15 @@ export function useUnreadChannels(
           unread.add(channel.id);
           topLevelUnread.add(channel.id);
           counts.set(channel.id, 1);
+          // biome-ignore format: file size ratchet
+          latestActivity.set(channel.id, latestByChannelRef.current.get(channel.id) ?? channelReadAt ?? 0);
           unreadChannelNotificationCount += 1;
           continue;
         }
 
         unread.add(channel.id);
+        // biome-ignore format: file size ratchet
+        latestActivity.set(channel.id, latestByChannelRef.current.get(channel.id) ?? channelReadAt ?? 0);
         if (
           hasUnreadTopLevelObservedEvent(observedEvents, readAtForObservedEvent)
         ) {
@@ -887,6 +887,7 @@ export function useUnreadChannels(
         topLevelUnreadChannelIds: topLevelUnread,
         highPriorityUnreadChannelIds: highPriority,
         unreadChannelCounts: counts,
+        latestUnreadActivityByChannelId: latestActivity,
         unreadChannelNotificationCount,
       };
     }, [
@@ -907,6 +908,9 @@ export function useUnreadChannels(
     rawUnread.highPriorityUnreadChannelIds,
   );
   const unreadChannelCounts = useStableMap(rawUnread.unreadChannelCounts);
+  const latestUnreadActivityByChannelId = useStableMap(
+    rawUnread.latestUnreadActivityByChannelId,
+  );
   const unreadChannelNotificationCount =
     rawUnread.unreadChannelNotificationCount;
 
@@ -959,6 +963,7 @@ export function useUnreadChannels(
     unreadChannelIds,
     topLevelUnreadChannelIds,
     unreadChannelCounts,
+    latestUnreadActivityByChannelId,
     highPriorityUnreadChannelIds,
     unreadChannelNotificationCount,
     markAllChannelsRead,
