@@ -196,7 +196,10 @@ test("full agent editor tightens the exact sidebar agent instance", async ({
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Advanced" }).click();
   await choosePersonaAccess(page, "Only me (default)");
-  await dialog.getByRole("button", { name: "Save changes" }).click();
+  await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
+  const saveChanges = dialog.getByRole("button", { name: "Save changes" });
+  await expect(saveChanges).toBeEnabled();
+  await saveChanges.click();
   await expect(dialog).not.toBeVisible();
 
   const updateCommand = await page.evaluate(() =>
