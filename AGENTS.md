@@ -109,8 +109,9 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 
 ## Quality Gates
 
-Run `just ci` before every PR — it runs `fmt` + `clippy` + desktop lint +
-unit tests + builds. Clippy passing does not mean fmt passes; run both.
+Run `just ci` before every PR — it runs repository-wide formatting, lint,
+and static checks; Rust, Tauri, desktop, and mobile tests; and desktop and web
+builds. Clippy passing does not mean fmt passes; run both.
 
 Run `just test` for integration tests if you touched `buzz-relay`,
 `buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
@@ -204,7 +205,7 @@ or invoke with the full path.
 thread. To read the linked thread:
 
 ```bash
-buzz messages thread --channel <uuid> --event <hex> --format compact
+buzz --format compact messages thread --channel <uuid> --event <hex>
 ```
 
 Extract `channel` and `id` from the URL query parameters. The optional
@@ -235,7 +236,9 @@ E2E tests live in `crates/buzz-test-client/tests/`:
 - `e2e_media_extended.rs` — extended media scenarios
 - `e2e_nostr_interop.rs` — Nostr interop (NIP-50 search, NIP-10 threads, NIP-17 gift wraps)
 
-Desktop E2E: `cd desktop && pnpm exec playwright test`
+Desktop E2E: `cd desktop && pnpm test:e2e:smoke` for mock-bridge smoke
+coverage, or `pnpm test:e2e:integration` for relay-backed coverage. These
+scripts build the required E2E bridge before running Playwright.
 
 See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 
@@ -446,11 +449,10 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 
 1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `buzz-core/src/kind.rs`.
 2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403). Always include explicit kind filters.
-3. **`messages search` must include `--kinds`** — an open-ended search (no kinds) hits the relay p-gate and returns 403. Pass at least `--kinds 9,45001,45003` to scope the query.
+3. **`messages search` chooses its own supported kinds** — do not add a `--kinds` option; the current command does not accept one. This differs from raw relay filters, which still need explicit kinds.
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
-6. **Desktop Tauri fmt fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
-7. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
+6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
 
 ---
 
@@ -511,27 +513,12 @@ class instances, cached promises) survive across remounts. Every community-scope
 singleton needs a reset function wired into `resetCommunityState()` in
 `desktop/src/features/communities/useCommunityInit.ts`.
 
-Current singletons that are reset on relay boundary changes (same-relay
-reconnects preserve pending avatar verification work):
-- `relayClient.disconnect()` — WebSocket teardown + promise rejection
-- `resetRateLimitGate()` — clears any active rate-limit window from the old relay
-- `clearAllDrafts()` — message draft cache
-- `resetAgentObserverStore()` — agent observer relay store
-- `resetActiveAgentTurnsStore()` — active agent turn timers
-- `resetAgentWorkingSignal()` — agent working indicator signal
-- `resetAvatarProfileSync()` — pending verified-avatar profile writes
-- `resetAvatarPresentations()` — avatar probes, previews, and Retry toasts
-- `resetSidebarRelayConnectionCardState()` — sidebar relay card dismiss state
-- `resetMediaCaches()` — proxy port and relay origin caches
-- `resetVideoPlayerState()` — video player singleton
-- `resetRenderScopedReactionHydration()` — reaction hydration cache
-- `clearSearchHitEventCache()` — search result event cache
-- `clearMarkdownNodeCache()` — markdown parse-node cache
-- `resetLinkPreviewTitleCache()` — link preview title cache (Buzz entity titles come from relay events)
-
-**If you add a new module-level cache, Map, or class instance that holds
-community-scoped data, you must add its reset to `resetCommunityState()`.**
-Failure to do so causes data from the old community to leak into the new one.
+`resetCommunityState()` is the canonical inventory of community-scoped
+singletons. **If you add a new module-level cache, Map, or class instance that
+holds community-scoped data, add its reset there in the same change.** Failure
+to do so causes data from the old community to leak into the new one. Avoid
+duplicating its complete reset list here; the implementation is the source of
+truth.
 
 Key files:
 - `desktop/src/app/App.tsx` — community key, init gate, remount boundary
@@ -556,9 +543,23 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 
 - **NEVER use `StatefulWidget`** — favor Riverpod for state and always use
   `HookConsumerWidget` or `ConsumerWidget` with `flutter_hooks` for local state.
-- **NEVER run `flutter run`, `flutter build`, `flutter clean`, or
-  `flutter upgrade`** — only `flutter test`, `flutter analyze`, and
-  `dart format` are safe for agents to run.
+- Agents may build and run the Flutter app when it materially helps implement,
+  debug, or validate mobile changes. Prefer the smallest relevant command and
+  reuse an already-running simulator/emulator and the app's configured staging
+  or production community when that is sufficient. Do not start or rebuild
+  local relay services unless the task specifically requires relay-side or
+  isolated integration behavior.
+- For iOS runtime validation, prefer `just mobile-dev`; it applies the
+  worktree-specific debug identity and runs `flutter run`. Direct `flutter run`
+  or IDE workflows are also allowed. Use `just mobile-build-android` only when
+  an APK build is relevant to the task.
+- Do not rebuild, reinstall, or relaunch merely for ceremony. Preserve Flutter's
+  incremental build cache and use hot reload/restart where appropriate. Use
+  `flutter clean` only when stale build artifacts are a credible cause. Run
+  `flutter upgrade` only when the task explicitly requires a toolchain change.
+- For user-visible or integration changes, exercise the affected workflow in a
+  real app when practical and report the device/simulator, connected community,
+  and workflow actually tested.
 - **Do NOT use `print()`** — use `debugPrint()` or structured logging.
 - Prefer `context.colors` and `context.textTheme` (via theme extensions)
   over raw `Theme.of(context)` calls.
@@ -584,11 +585,15 @@ flutter test
 
 Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).
 
-To run the app locally (starts Docker, relay, iOS simulator automatically):
+To run the app locally with a worktree-specific debug identity and a
+started or reused iOS Simulator:
 
 ```bash
 just mobile-dev
 ```
+
+This runs `flutter run` against the app's configured community; it does not
+start Docker or local relay services.
 
 When run from a git worktree, `just mobile-dev` (and `just
 mobile-build-android`) give the debug build a per-worktree app identifier
