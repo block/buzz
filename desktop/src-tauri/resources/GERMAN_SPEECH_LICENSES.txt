@@ -14,4 +14,5 @@ Kokoro German TTS
   Architecture: hexgrad/Kokoro-82M
   Normalization: german_text_rules.py from Godelaune/Kokoro-82M-ONNX-German-Martin
   Runtime: sherpa-onnx OfflineTts Kokoro (Apache-2.0)
+  Phonemizer data: espeak-ng-data from sherpa-onnx tts-models
   ONNX Runtime: MIT
