@@ -186,6 +186,9 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
+    /// Emit and audit NIP-AD agent dispositions (kind:44300)
+    #[command(subcommand)]
+    Dispositions(DispositionsCmd),
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
@@ -395,6 +398,20 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// Mark this message as a NIP-AD request addressed to this agent
+        /// (hex or npub). Adds `["t","request"]`, one `["agent", <pubkey>]`,
+        /// and the matching `p` mention automatically — `p` is what routes
+        /// the message to the agent, so an `agent` tag without it would name
+        /// a target that never receives the request. `buzz dispositions
+        /// list` can then detect an unanswered request AND verify that
+        /// whoever signs the disposition was actually asked; a disposition
+        /// from anyone else, including a merely `--mention`ed human, does
+        /// not resolve it. Exactly one target: v1 has no well-defined
+        /// outcome for a request naming several agents. Set automatically by
+        /// the desktop composer when a message @mentions an agent; pass
+        /// explicitly here for CLI parity.
+        #[arg(long = "request-agent")]
+        request_agent: Option<String>,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -723,6 +740,40 @@ pub enum CanvasCmd {
         /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DispositionsCmd {
+    /// Record how you resolved a request (completed, refused, responded, or errored)
+    ///
+    /// The requester (`p` tag) and channel (`h` tag) are both derived by
+    /// looking up the request event — you only need its id.
+    Emit {
+        /// Event ID (64-char hex) of the request this disposition answers
+        #[arg(long)]
+        request: String,
+        /// One of: completed | refused | responded | errored
+        #[arg(long)]
+        disposition: String,
+        /// Why (required for refused; optional — defaults to empty — for
+        /// completed/errored)
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// List a channel's dispositions with request/answer accounting
+    ///
+    /// Pairs kind:44300 dispositions to `["t","request"]`-marked messages by
+    /// their `e` tag and reports which marked requests remain unanswered.
+    /// `--state` filters CLIENT-side after the fetch (`#disposition` is not
+    /// a valid relay query filter — see NIP-AD.md).
+    List {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Narrow to one state: completed | refused | errored
+        #[arg(long)]
+        state: Option<String>,
     },
 }
 
@@ -2042,6 +2093,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
+        Cmd::Dispositions(sub) => commands::dispositions::dispatch(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
@@ -2149,6 +2201,7 @@ mod tests {
             "agents",
             "canvas",
             "channels",
+            "dispositions",
             "dms",
             "emoji",
             "feed",

@@ -773,3 +773,253 @@ test("verified agent owner may publish a suppression edit", () => {
     true,
   );
 });
+
+// ── NIP-AD dispositions (kind:44300) ────────────────────────────────────────
+// Dispositions overlay the request message the same way reactions do:
+// #e-referenced, attached to the request's own row as `.requestStatus`, not
+// rendered as their own row. See docs/nips/NIP-AD.md.
+
+function dispositionEvent(requestId, disposition, overrides = {}) {
+  return {
+    id: HEX64_B,
+    pubkey: PUBKEY_B,
+    kind: 44300,
+    created_at: 1_700_000_001,
+    content: JSON.stringify({ disposition, reason: overrides.reason ?? "" }),
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", requestId],
+      ["p", PUBKEY_A],
+      ["disposition", disposition],
+    ],
+    sig: "sig",
+    ...overrides,
+  };
+}
+
+// A marked request targeting PUBKEY_B — every `dispositionEvent` in this
+// section is signed by PUBKEY_B, so the request must name it as an `agent`
+// target for the binding check (see formatTimelineMessages.ts) to accept
+// the disposition. PUBKEY_A rides along as a plain `p` mention (an
+// uninvolved human CC), so any test that passes only because binding fell
+// back to the mention set would be caught. `streamMessage()`'s bare default
+// is intentionally left alone for tests elsewhere in this file.
+function requestForAgent(overrides = {}) {
+  return streamMessage({
+    tags: [
+      ["h", CHANNEL_ID],
+      ["t", "request"],
+      ["agent", PUBKEY_B],
+      ["p", PUBKEY_B],
+      ["p", PUBKEY_A],
+    ],
+    ...overrides,
+  });
+}
+
+test("a completed disposition attaches to the request message it answers", () => {
+  const events = [
+    requestForAgent(),
+    dispositionEvent(HEX64_A, "completed", { reason: "" }),
+  ];
+  const [message] = formatTimelineMessages(events, null, undefined, null);
+  assert.deepEqual(message.requestStatus, {
+    kind: "valid",
+    outcome: { kind: "settled", state: "completed" },
+    latestObservation: "completed",
+    reason: "",
+    warnings: [],
+    resolved: true,
+  });
+});
+
+test("a refused disposition carries its reason", () => {
+  const events = [
+    requestForAgent(),
+    dispositionEvent(HEX64_A, "refused", { reason: "outside my delegation" }),
+  ];
+  const [message] = formatTimelineMessages(events, null, undefined, null);
+  assert.deepEqual(message.requestStatus, {
+    kind: "valid",
+    outcome: { kind: "settled", state: "refused" },
+    latestObservation: "refused",
+    reason: "outside my delegation",
+    warnings: [],
+    resolved: true,
+  });
+});
+
+test("a disposition from a merely-mentioned signer does not resolve the request", () => {
+  // Cross-principal binding (external design review): PUBKEY_A is `p`-
+  // mentioned on the request but is NOT one of its `agent` targets. Under
+  // the earlier mention-set binding this assertion would fail — that rule
+  // let any CC'd human close the agent's obligation.
+  const events = [
+    requestForAgent(),
+    dispositionEvent(HEX64_A, "completed", { pubkey: PUBKEY_A }),
+  ];
+  const [message] = formatTimelineMessages(events, null, undefined, null);
+  assert.deepEqual(
+    message.requestStatus.outcome,
+    { kind: "unanswered" },
+    "an unbound disposition must leave the obligation exactly as unanswered as it was",
+  );
+  assert.equal(
+    message.requestStatus.latestObservation,
+    null,
+    "an unbound event contributes nothing at all, not even an observation",
+  );
+});
+
+test("a disposition on a message that was never marked as a request is ignored", () => {
+  // Binding requires the `t:request` marker too, matching what the CLI's
+  // gap-detection query selects. Without it the two implementations would
+  // disagree about which events are even candidates.
+  const events = [
+    streamMessage({
+      tags: [
+        ["h", CHANNEL_ID],
+        ["agent", PUBKEY_B],
+      ],
+    }),
+    dispositionEvent(HEX64_A, "completed", { reason: "" }),
+  ];
+  const [message] = formatTimelineMessages(events, null, undefined, null);
+  assert.equal(message.requestStatus, undefined);
+});
+
+test("a disposition after a terminal state warns, and never reopens it", () => {
+  const completed = dispositionEvent(HEX64_A, "completed", {
+    id: "c".repeat(64),
+    created_at: 1_700_000_001,
+  });
+  const errored = dispositionEvent(HEX64_A, "errored", {
+    id: "d".repeat(64),
+    created_at: 1_700_000_002,
+    reason: "tool blew up later",
+  });
+  const [message] = formatTimelineMessages(
+    [requestForAgent(), completed, errored],
+    null,
+    undefined,
+    null,
+  );
+  assert.equal(
+    message.requestStatus.outcome.state,
+    "completed",
+    "a terminal claim absorbs a later weaker observation instead of being reopened",
+  );
+  assert.equal(message.requestStatus.latestObservation, "errored");
+  assert.deepEqual(message.requestStatus.warnings, ["ordered_after_terminal"]);
+  assert.equal(
+    message.requestStatus.resolved,
+    true,
+    "the settled result stands; the stray write is a warning",
+  );
+});
+
+test("errored then completed is a clean repair", () => {
+  const errored = dispositionEvent(HEX64_A, "errored", {
+    id: "c".repeat(64),
+    created_at: 1_700_000_001,
+    reason: "tool call failed",
+  });
+  const completed = dispositionEvent(HEX64_A, "completed", {
+    id: "d".repeat(64),
+    created_at: 1_700_000_002,
+    reason: "",
+  });
+  const [message] = formatTimelineMessages(
+    [requestForAgent(), errored, completed],
+    null,
+    undefined,
+    null,
+  );
+  assert.equal(message.requestStatus.outcome.state, "completed");
+  assert.deepEqual(message.requestStatus.warnings, []);
+});
+
+test("same-second dispositions break ties by lexicographically greatest id", () => {
+  // Both share created_at — construction order must not leak into the
+  // result (mirrors the buzz-cli same-second tiebreaker test).
+  const zzz = dispositionEvent(HEX64_A, "errored", {
+    id: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+    created_at: 1_700_000_005,
+  });
+  const aaa = dispositionEvent(HEX64_A, "completed", {
+    id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    created_at: 1_700_000_005,
+  });
+
+  const forward = formatTimelineMessages(
+    [requestForAgent(), zzz, aaa],
+    null,
+    undefined,
+    null,
+  );
+  // `aaa` (completed) sorts first within the tie and is terminal, so it
+  // settles and absorbs the later `zzz`. What matters is that the tie order
+  // is stable, not which state happens to win it.
+  assert.equal(forward[0].requestStatus.outcome.state, "completed");
+  assert.equal(forward[0].requestStatus.latestObservation, "errored");
+
+  const reversed = formatTimelineMessages(
+    [requestForAgent(), aaa, zzz],
+    null,
+    undefined,
+    null,
+  );
+  assert.deepEqual(
+    reversed[0].requestStatus,
+    forward[0].requestStatus,
+    "result must not depend on input array order",
+  );
+});
+
+test("completed + refused on one request is disputed, never settled", () => {
+  const completed = dispositionEvent(HEX64_A, "completed", {
+    id: "c".repeat(64),
+    created_at: 1_700_000_001,
+  });
+  const refused = dispositionEvent(HEX64_A, "refused", {
+    id: "d".repeat(64),
+    created_at: 1_700_000_002,
+    reason: "changed course",
+  });
+  const [message] = formatTimelineMessages(
+    [requestForAgent(), completed, refused],
+    null,
+    undefined,
+    null,
+  );
+  assert.deepEqual(message.requestStatus.outcome, { kind: "disputed" });
+  assert.equal(
+    message.requestStatus.resolved,
+    false,
+    "a dispute is not a resolution",
+  );
+  assert.deepEqual(
+    message.requestStatus.warnings,
+    [],
+    "two DIFFERENT terminals are a contradiction, not a duplicate",
+  );
+});
+
+test("a message with no disposition leaves the field undefined", () => {
+  const [message] = formatTimelineMessages(
+    [streamMessage()],
+    null,
+    undefined,
+    null,
+  );
+  assert.equal(message.requestStatus, undefined);
+});
+
+test("kind:44300 never renders as its own timeline row", () => {
+  const events = [
+    requestForAgent(),
+    dispositionEvent(HEX64_A, "completed", { reason: "" }),
+  ];
+  const out = formatTimelineMessages(events, null, undefined, null);
+  assert.equal(out.length, 1, "only the request message should render");
+});

@@ -3,11 +3,9 @@ import { EditorContent } from "@tiptap/react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
-import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
-import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import {
   findSpoileredImetaMediaUrls,
@@ -32,7 +30,6 @@ import {
 } from "@/features/messages/lib/normalizeMentionClipboard";
 import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
-  type AutocompleteEdit,
   type LinkSelectionInfo,
   useRichTextEditor,
 } from "@/features/messages/lib/useRichTextEditor";
@@ -43,12 +40,12 @@ import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
+import { ComposerRequestBanner } from "./ComposerRequestBanner";
+import { useComposerRequestMarking } from "@/features/messages/lib/useComposerRequestMarking";
+import { useAutocompleteInserts } from "@/features/messages/lib/useAutocompleteInserts";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
-import {
-  MentionAutocomplete,
-  type MentionSuggestion,
-} from "./MentionAutocomplete";
+import { MentionAutocomplete } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
@@ -205,6 +202,13 @@ function MessageComposerImpl({
   const onEditSaveRef = React.useRef(onEditSave);
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   const editTargetRef = React.useRef(editTarget);
+  // NIP-AD: does this draft create a tracked obligation? Disclosed by the
+  // banner below and used verbatim by the send path.
+  const requestMarking = useComposerRequestMarking(
+    mentions.isAgentPubkey,
+    mentions.getMentionDisplayName,
+  );
+
   const extractMentionPubkeysRef = React.useRef(mentions.extractMentionPubkeys);
   const ownerPubkeyRef = React.useRef(ownerPubkey);
   disabledRef.current = disabled;
@@ -269,6 +273,7 @@ function MessageComposerImpl({
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
       setComposerContentFromText(text);
       setPreviewContent(linkPreviewContent);
+      requestMarking.syncFromText(extractMentionPubkeysRef.current(text));
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
@@ -404,50 +409,14 @@ function MessageComposerImpl({
   // ── Mention / channel / emoji autocomplete insertion ────────────────
   // Hooks return a plain-text edit descriptor; `replacePlainTextRange`
   // applies it as a single ProseMirror transaction (no markdown round-trip).
-  const applyAutocompleteEdit = React.useCallback(
-    (edit: AutocompleteEdit) => {
-      richText.replacePlainTextRange(
-        edit.replaceFromOffset,
-        edit.replaceToOffset,
-        edit.insertText,
-        edit.customEmojiShortcode,
-      );
-    },
-    [richText.replacePlainTextRange],
-  );
-  const applyMentionInsert = React.useCallback(
-    (suggestion: MentionSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      mentions.insertMention,
-      richText.getPlainTextAndCursor,
-    ],
-  );
-  const applyChannelInsert = React.useCallback(
-    (suggestion: ChannelSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(channelLinks.insertChannel(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      channelLinks.insertChannel,
-      richText.getPlainTextAndCursor,
-    ],
-  );
-  const applyEmojiInsert = React.useCallback(
-    (suggestion: EmojiSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(emojiAutocomplete.insertEmoji(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      emojiAutocomplete.insertEmoji,
-      richText.getPlainTextAndCursor,
-    ],
-  );
+  const { applyMentionInsert, applyChannelInsert, applyEmojiInsert } =
+    useAutocompleteInserts({
+      replacePlainTextRange: richText.replacePlainTextRange,
+      getPlainTextAndCursor: richText.getPlainTextAndCursor,
+      insertMention: mentions.insertMention,
+      insertChannel: channelLinks.insertChannel,
+      insertEmoji: emojiAutocomplete.insertEmoji,
+    });
   // ── Emoji insertion ─────────────────────────────────────────────────
   const insertEmoji = React.useCallback(
     (emoji: string) => {
@@ -601,6 +570,7 @@ function MessageComposerImpl({
         recoveryDraftKey: effectiveDraftKey,
         spoileredAttachmentUrls,
         trimmed,
+        requestTrackingOptedOut: requestMarking.optedOut,
         audienceGeneration: persistentAudience.generation,
         audienceRevision: audienceScope ? persistentAudience.revision : null,
       });
@@ -642,6 +612,7 @@ function MessageComposerImpl({
     mentions.getDraftMentionRefs,
     mentions.restoreDraftMentionRefs,
     mentions.revalidateMentionPubkeys,
+    requestMarking.optedOut,
   ]);
   submitMessageRef.current = submitMessage;
   // Draft auto-submit runs once after persisted editor state loads.
@@ -866,6 +837,7 @@ function MessageComposerImpl({
             onCancelEdit={onCancelEdit}
             onCancelReply={onCancelReply}
           />
+          <ComposerRequestBanner {...requestMarking.bannerProps} />
           {showBackgroundUploadProgress ? (
             <ComposerUploadProgressPill
               canCancel={backgroundUpload.canCancel}

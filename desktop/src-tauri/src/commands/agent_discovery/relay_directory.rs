@@ -522,6 +522,9 @@ mod real_relay_tests {
             &[],
             None,
             &relay_ws_url(),
+            // Mentioned, not requested: this probe asserts the `p` tag, and a
+            // mention alone must never create a NIP-AD obligation.
+            &[],
         )
         .unwrap()
         .sign_with_keys(&viewer)

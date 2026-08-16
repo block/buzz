@@ -93,6 +93,12 @@ export type MessageComposerProps = {
     } | null,
     /** Route through the REST publisher even when best-effort enrichment settled empty. */
     forceRest?: boolean,
+    /**
+     * The single agent this message addresses, if any — non-empty makes it a
+     * NIP-AD marked request whose `agent` tag a disposition must be signed by
+     * to resolve it. v1 carries at most one; see docs/nips/NIP-AD.md.
+     */
+    requestAgentPubkeys?: string[],
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;

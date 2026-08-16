@@ -9,6 +9,10 @@
 pub mod agent_turn_metric;
 /// Channel and membership enums shared across crates.
 pub mod channel;
+/// NIP-AD Agent Dispositions — the shared request/disposition verifier and
+/// lifecycle derivation. Every first-party consumer uses this so they cannot
+/// disagree about what was verified.
+pub mod disposition;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;

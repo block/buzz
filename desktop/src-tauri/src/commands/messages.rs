@@ -452,12 +452,18 @@ pub async fn send_channel_message(
     kind: Option<u32>,
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
+    // NIP-AD: pubkeys of the agents this message is addressed to. Non-empty
+    // makes it a marked request; each becomes an `["agent", <pubkey>]` tag
+    // that dispositions bind against. Empty/absent means "not a request."
+    request_agent_pubkeys: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
     let mentions = mention_pubkeys.unwrap_or_default();
     let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
+    let request_agent_pubkeys = request_agent_pubkeys.unwrap_or_default();
+    let request_agents: Vec<&str> = request_agent_pubkeys.iter().map(|s| s.as_str()).collect();
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
@@ -531,6 +537,7 @@ pub async fn send_channel_message(
                 &link_previews,
                 sent_from_thread_tag.as_deref(),
                 &relay_base,
+                &request_agents,
             )?
         }
     };
@@ -706,6 +713,7 @@ fn build_managed_agent_channel_message(
         &[],
         None,
         &crate::relay::relay_api_base_url(),
+        &[], // an agent's own reply is never itself a request
         client_tags,
     )
 }

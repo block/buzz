@@ -6,6 +6,7 @@ import type {
 } from "@/shared/api/types";
 
 import type {
+  TimelineRequestStatus,
   TimelineMessage,
   TimelineReaction,
 } from "@/features/messages/types";
@@ -20,6 +21,12 @@ import {
 } from "@/features/profile/lib/identity";
 import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
 import {
+  classifyRequest,
+  deriveObligation,
+  isResolved,
+} from "@/shared/lib/disposition";
+import {
+  KIND_AGENT_DISPOSITION,
   KIND_JOB_ACCEPTED,
   KIND_JOB_CANCEL,
   KIND_JOB_ERROR,
@@ -398,6 +405,84 @@ export function formatTimelineMessages(
     reactionsByEventId.set(targetId, current);
   }
 
+  // NIP-AD dispositions overlay the request message the same way reactions
+  // do: `#e`-referenced, not their own row.
+  //
+  // All verification and lifecycle logic lives in the shared verifier
+  // (`@/shared/lib/disposition`), which is pinned to the same conformance
+  // corpora as the Rust implementation. This file used to derive state itself
+  // and drifted from buzz-cli's independent copy — different candidate sets,
+  // different binding rules — which is precisely what the shared module
+  // exists to prevent. Do not reimplement any of it here; add cases to the
+  // corpus instead.
+  //
+  // A status is attached to EVERY marked request, valid or not. An earlier
+  // version skipped invalid ones on the reasoning that a client fault is not
+  // an agent outcome — correct as far as it went, but it left them with no
+  // status at all, and the summary chip then counted "marked, no disposition"
+  // as unanswered. The reasoning was right and the result was the exact
+  // inversion it was trying to avoid. Carrying the classification forward is
+  // what actually keeps the two consistent.
+  const statusByRequestId = new Map<string, TimelineRequestStatus>();
+  {
+    // Grouped by `e` once, not re-scanned per request. Any channel writer
+    // can store structurally valid but unbound dispositions, so passing the
+    // whole array to every request made this O(requests x dispositions) over
+    // public input — the amplification NIP-AD's own security section forbids.
+    const dispositionsByRequest = new Map<string, RelayEvent[]>();
+    for (const event of events) {
+      if (event.kind !== KIND_AGENT_DISPOSITION) {
+        continue;
+      }
+      const target = event.tags.find(
+        (t) => t[0] === "e" && typeof t[1] === "string",
+      )?.[1];
+      if (target == null) {
+        continue;
+      }
+      const list = dispositionsByRequest.get(target);
+      if (list) {
+        list.push(event);
+      } else {
+        dispositionsByRequest.set(target, [event]);
+      }
+    }
+    for (const request of eventsById.values()) {
+      const classified = classifyRequest(request);
+      switch (classified.kind) {
+        case "not_request":
+          break;
+        case "invalid":
+          statusByRequestId.set(request.id, {
+            kind: "invalid",
+            reason: classified.reason,
+          });
+          break;
+        case "unsupported":
+          statusByRequestId.set(request.id, {
+            kind: "unsupported",
+            reason: classified.reason,
+          });
+          break;
+        case "valid": {
+          const derived = deriveObligation(
+            classified.obligation,
+            dispositionsByRequest.get(classified.obligation.requestId) ?? [],
+          );
+          statusByRequestId.set(classified.obligation.requestId, {
+            kind: "valid",
+            outcome: derived.outcome,
+            latestObservation: derived.latestObservation,
+            reason: derived.reason,
+            warnings: derived.warnings,
+            resolved: isResolved(derived),
+          });
+          break;
+        }
+      }
+    }
+  }
+
   const authorPubkeyByEventId = new Map<string, string>();
   const authorLabelByEventId = new Map<string, string>();
   const depthByEventId = new Map<string, number>();
@@ -540,6 +625,7 @@ export function formatTimelineMessages(
           )
           .map(({ earliestCreatedAt: _drop, ...pill }) => pill);
       })(),
+      requestStatus: statusByRequestId.get(event.id),
     };
   });
 }

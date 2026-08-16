@@ -1764,6 +1764,80 @@ fn send_prompt_result(
 /// 5. Send the actual prompt with turn timeout.
 /// 6. Handle all error paths, always returning the agent via `result_tx`.
 ///
+/// Whether `event` is a NIP-AD request this specific agent must answer:
+/// marked `["t","request"]` AND carrying `["agent", <agent_pubkey>]`.
+///
+/// Both halves matter, for different reasons:
+/// - The marker filters out ordinary chatter merged into the same batch. A
+///   flush window can bundle a real request with unrelated follow-up
+///   messages; without this the harness would label them all `completed`.
+/// - The target check keeps this agent from publishing a disposition
+///   against a request addressed to a *different* agent. Readers would
+///   reject such an event anyway (see NIP-AD.md's target-agent binding),
+///   but a writer that emits records it knows are unbindable pollutes the
+///   ledger with permanently-invalid rows. Don't write what no one can use.
+///
+/// The composer writes both tags together (`useMentionSendFlow.ts` desktop
+/// side, `with_request_tag` in `buzz-cli`'s `messages` command for parity).
+/// Owned storage so a `nostr::Event` can be handed to the shared verifier,
+/// which borrows from the event's own data.
+struct OwnedEventView {
+    id: String,
+    pubkey: String,
+    kind: u16,
+    created_at: i64,
+    content: String,
+    tags: Vec<Vec<String>>,
+}
+
+impl OwnedEventView {
+    fn from_event(event: &nostr::Event) -> Self {
+        Self {
+            id: event.id.to_hex(),
+            pubkey: event.pubkey.to_hex(),
+            kind: event.kind.as_u16(),
+            created_at: event.created_at.as_secs() as i64,
+            content: event.content.clone(),
+            tags: event.tags.iter().map(|t| t.as_slice().to_vec()).collect(),
+        }
+    }
+
+    fn view(&self) -> buzz_core::disposition::EventView<'_> {
+        buzz_core::disposition::EventView {
+            id: &self.id,
+            pubkey: &self.pubkey,
+            kind: self.kind,
+            created_at: self.created_at,
+            content: &self.content,
+            tags: &self.tags,
+        }
+    }
+}
+
+/// The obligation this event creates for `agent_pubkey_hex`, if any.
+///
+/// Delegates entirely to `buzz_core::disposition::classify_request`. An
+/// earlier version was a hand-rolled predicate here — marker plus a
+/// case-insensitive `agent` match — which accepted uppercase targets,
+/// multi-target requests, and targets that were never `p`-mentioned. The
+/// harness would then do real work and publish dispositions for events every
+/// consumer classified as invalid or unsupported. One verifier means one
+/// verifier, including for the component that decides whether to act.
+fn obligation_for_agent(
+    event: &nostr::Event,
+    agent_pubkey_hex: &str,
+) -> Option<buzz_core::disposition::Obligation> {
+    let owned = OwnedEventView::from_event(event);
+    match buzz_core::disposition::classify_request(&owned.view()) {
+        buzz_core::disposition::RequestClass::Valid(ob)
+            if ob.target_agent_pubkey == agent_pubkey_hex =>
+        {
+            Some(*ob)
+        }
+        _ => None,
+    }
+}
+
 /// The agent is ALWAYS returned — even on panic the `JoinSet` detects the
 /// abort and the caller uses `task_map` to recover the agent index.
 pub async fn run_prompt_task(
@@ -1794,6 +1868,27 @@ pub async fn run_prompt_task(
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .unwrap_or_default();
+    // Extracted here, alongside triggering_event_ids, for the same reason:
+    // `batch` is moved out from under several later branches (e.g.
+    // `requeue_cancelled_batch`), so anything derived from it that a
+    // turn-completion call site needs — here, each triggering request's
+    // (id, author pubkey) pair for NIP-AD disposition emission — must be
+    // captured into an owned value before any branch can consume `batch`.
+    //
+    // Filtered through the shared verifier to the obligations *this agent*
+    // actually owes — see `obligation_for_agent`. A batched turn can merge
+    // several messages, only some marked as requests, and only some addressed
+    // to this agent.
+    let agent_pubkey_hex = ctx.agent_keys.public_key().to_hex();
+    let triggering_obligations: Vec<buzz_core::disposition::Obligation> = batch
+        .as_ref()
+        .map(|b| {
+            b.events
+                .iter()
+                .filter_map(|be| obligation_for_agent(&be.event, &agent_pubkey_hex))
+                .collect()
+        })
         .unwrap_or_default();
     agent.acp.observe(
         "turn_started",
@@ -2543,6 +2638,13 @@ pub async fn run_prompt_task(
                                     Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
                                 )
                                 .await;
+                                publish_turn_dispositions(
+                                    &ctx,
+                                    observer_channel_id,
+                                    &triggering_obligations,
+                                    &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                                )
+                                .await;
                                 send_prompt_result(
                                     &result_tx,
                                     &turn_id,
@@ -2577,6 +2679,13 @@ pub async fn run_prompt_task(
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                )
+                                .await;
+                                publish_turn_dispositions(
+                                    &ctx,
+                                    observer_channel_id,
+                                    &triggering_obligations,
+                                    &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::Error),
                                 )
                                 .await;
                                 send_prompt_result(
@@ -2640,6 +2749,13 @@ pub async fn run_prompt_task(
                             &session_id,
                             &turn_id,
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                        )
+                        .await;
+                        publish_turn_dispositions(
+                            &ctx,
+                            observer_channel_id,
+                            &triggering_obligations,
+                            &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
                         send_prompt_result(
@@ -2715,6 +2831,13 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+            publish_turn_dispositions(
+                &ctx,
+                observer_channel_id,
+                &triggering_obligations,
+                &acp_stop_to_outcome(&stop_reason),
+            )
+            .await;
 
             send_prompt_result(
                 &result_tx,
@@ -2736,6 +2859,13 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+            )
+            .await;
+            publish_turn_dispositions(
+                &ctx,
+                observer_channel_id,
+                &triggering_obligations,
+                &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::Error),
             )
             .await;
             send_prompt_result(
@@ -2770,6 +2900,13 @@ pub async fn run_prompt_task(
                         Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
                     )
                     .await;
+                    publish_turn_dispositions(
+                        &ctx,
+                        observer_channel_id,
+                        &triggering_obligations,
+                        &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                    )
+                    .await;
                     // Timeout triggers respawn in handle_prompt_result —
                     // session state will be discarded with the old agent.
                     send_prompt_result(
@@ -2798,6 +2935,13 @@ pub async fn run_prompt_task(
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
                     )
                     .await;
+                    publish_turn_dispositions(
+                        &ctx,
+                        observer_channel_id,
+                        &triggering_obligations,
+                        &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::Error),
+                    )
+                    .await;
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -2821,6 +2965,13 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
+                    )
+                    .await;
+                    publish_turn_dispositions(
+                        &ctx,
+                        observer_channel_id,
+                        &triggering_obligations,
+                        &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::Error),
                     )
                     .await;
                     send_prompt_result(
@@ -2852,6 +3003,13 @@ pub async fn run_prompt_task(
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
             )
             .await;
+            publish_turn_dispositions(
+                &ctx,
+                observer_channel_id,
+                &triggering_obligations,
+                &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::Error),
+            )
+            .await;
             send_prompt_result(
                 &result_tx,
                 &turn_id,
@@ -2877,6 +3035,13 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+            )
+            .await;
+            publish_turn_dispositions(
+                &ctx,
+                observer_channel_id,
+                &triggering_obligations,
+                &core_stop_to_outcome(buzz_core::agent_turn_metric::StopReason::Error),
             )
             .await;
             send_prompt_result(
@@ -4474,6 +4639,389 @@ async fn publish_agent_turn_metric(
             turn_id,
             "NIP-AM: publish timed out"
         ),
+    }
+}
+
+/// Map a completed turn's `CoreStop` outcome to a NIP-AD disposition state
+/// and a plain-language reason.
+///
+/// What the harness actually observed about how a turn ended, in NIP-AD
+/// terms.
+///
+/// The harness never produces `completed`. That state asserts the requested
+/// work was accomplished, and nothing at this layer verifies that — a clean
+/// end-of-turn equally covers an agent asking a clarifying question,
+/// reporting it couldn't finish, or answering one message of a batch.
+/// `Responded` is the honest counterpart: the agent answered. `completed`
+/// requires an explicit per-request assertion from the agent itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TurnOutcome {
+    /// Clean end of turn — the agent responded. Non-terminal.
+    Responded,
+    /// The runtime itself signalled a refusal. Terminal, and therefore only
+    /// attributable when the turn answered exactly one request.
+    Refused,
+    /// Technical failure, with a plain-language reason. Non-terminal.
+    Errored(String),
+}
+
+/// Reason recorded when the ACP runtime itself refuses a turn.
+///
+/// The runtime's `Refusal` stop reason carries no explanatory text, so this
+/// is the honest maximum: a stable, machine-readable marker meaning "the
+/// runtime refused and gave no reason", rather than an empty string that
+/// would read as an agent declining to explain itself.
+pub const ACP_RUNTIME_REFUSAL_REASON: &str = "acp-runtime-refusal";
+
+impl TurnOutcome {
+    fn state(&self) -> buzz_core::disposition::DispositionState {
+        use buzz_core::disposition::DispositionState as S;
+        match self {
+            Self::Responded => S::Responded,
+            Self::Refused => S::Refused,
+            Self::Errored(_) => S::Errored,
+        }
+    }
+
+    fn reason(&self) -> String {
+        match self {
+            Self::Responded => String::new(),
+            // A refusal with no stated reason defeats much of the point of
+            // recording it — NIP-AD's headline promise is that a reader can
+            // recover *why* an agent declined. The ACP runtime's `Refusal`
+            // stop reason carries no text at all, so an empty string here
+            // would publish a refusal that explains nothing while the spec
+            // advertised otherwise. This stable marker says exactly as much
+            // as the harness actually knows: the runtime refused, and it did
+            // not say why.
+            Self::Refused => ACP_RUNTIME_REFUSAL_REASON.to_string(),
+            Self::Errored(reason) => reason.clone(),
+        }
+    }
+}
+
+/// Map a raw ACP stop reason to a turn outcome.
+///
+/// This is the path that preserves `Refusal`. The previous implementation
+/// collapsed it into a generic non-`EndTurn` bucket and then reported
+/// `errored`, so a runtime that explicitly refused was recorded as a
+/// technical failure — losing one of the protocol's three headline states on
+/// the very path most likely to produce it.
+fn acp_stop_to_outcome(stop_reason: &StopReason) -> TurnOutcome {
+    match stop_reason {
+        StopReason::EndTurn => TurnOutcome::Responded,
+        StopReason::Refusal => TurnOutcome::Refused,
+        StopReason::Cancelled => TurnOutcome::Errored("turn was cancelled".to_string()),
+        StopReason::MaxTokens => {
+            TurnOutcome::Errored("turn stopped after reaching the max-tokens limit".to_string())
+        }
+        StopReason::MaxTurnRequests => TurnOutcome::Errored(
+            "turn stopped after reaching the max-turn-requests limit".to_string(),
+        ),
+    }
+}
+
+/// Map an already-collapsed `CoreStop` to a turn outcome.
+///
+/// Used only at sites that hardcode an outcome for something that never had
+/// an ACP stop reason at all — an idle timeout, a hard timeout, a
+/// cancellation. `Refusal` is unreachable there by construction, so nothing
+/// is lost by mapping through this narrower function: every site that *can*
+/// see a refusal routes through [`acp_stop_to_outcome`] instead. That is
+/// what makes the mapping uniform rather than partial.
+fn core_stop_to_outcome(stop_reason: buzz_core::agent_turn_metric::StopReason) -> TurnOutcome {
+    use buzz_core::agent_turn_metric::StopReason as CoreStop;
+    match stop_reason {
+        CoreStop::EndTurn => TurnOutcome::Responded,
+        CoreStop::Cancelled => TurnOutcome::Errored("turn was cancelled".to_string()),
+        CoreStop::MaxTokens => {
+            TurnOutcome::Errored("turn stopped after reaching the max-tokens limit".to_string())
+        }
+        CoreStop::Error => TurnOutcome::Errored("turn ended with an error".to_string()),
+        CoreStop::Unknown => {
+            TurnOutcome::Errored("turn ended for an unrecognized reason".to_string())
+        }
+    }
+}
+
+/// Which of `request_ids` this agent has already **terminally settled** —
+/// carries a `completed` or `refused` disposition signed by its own key.
+///
+/// This is what makes the harness a deferential writer rather than one
+/// racing the agent. An agent that explicitly asserts an outcome (via
+/// `buzz dispositions emit`) has made a claim the harness cannot improve on:
+/// the harness only ever observes *that a turn ended*, never what the agent
+/// decided. So when a terminal state already exists, the harness stays
+/// silent instead of appending its own weaker observation on top — which
+/// would land as a `post_terminal_write` anomaly on a perfectly normal
+/// exchange.
+///
+/// That is the practical resolution of the dual-writer problem for v1
+/// without new IPC: the agent's explicit assertion wins, and the harness
+/// fills in only where the agent asserted nothing.
+///
+/// **The residual race is real, and an earlier version of this comment had
+/// it backwards.** It claimed that a refusal landing after this check but
+/// before the harness publishes yields `responded` then `refused`, "a clean
+/// progression". It does not: this check runs *before* the harness builds and
+/// signs its event, so in that window the refusal carries the **earlier**
+/// `created_at` and the harness's observation sorts after it. The real
+/// ordering is `refused` → `responded` — precisely the terminal-then-weaker
+/// case. A pre-check cannot serialize two writers, and no amount of narrowing
+/// makes it able to.
+///
+/// What actually contains the race is the lifecycle itself: terminal claims
+/// are **absorbing**, so a later non-terminal observation records an
+/// `ordered_after_terminal` warning and leaves the settled outcome intact.
+/// This check is therefore an optimization that keeps the record tidy, not a
+/// correctness mechanism — which is why it may fail open without endangering
+/// anything.
+///
+/// **Bound, not tag-matched.** An earlier version filtered on signer plus a
+/// terminal `disposition` tag and nothing else — no channel, no requester, no
+/// validity. A stored-but-unbound event signed by this agent (say, one
+/// carrying the wrong `p`) would suppress the real disposition, turning a
+/// genuinely answered obligation into a permanent ledger gap. Candidates now
+/// go through the same `bind_disposition` every consumer uses.
+async fn already_settled_by_self(
+    ctx: &PromptContext,
+    obligations: &[buzz_core::disposition::Obligation],
+) -> std::collections::HashSet<String> {
+    if obligations.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    let agent_pubkey_hex = ctx.agent_keys.public_key().to_hex();
+    const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_AGENT_DISPOSITION as u16,
+        ))
+        .custom_tags(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::E),
+            obligations.iter().map(|o| o.request_id.clone()),
+        );
+    let result = match tokio::time::timeout(CHECK_TIMEOUT, ctx.rest_client.query(&[filter])).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::debug!(target: "pool::disposition", "NIP-AD: refusal pre-check failed: {e}");
+            return std::collections::HashSet::new();
+        }
+        Err(_) => {
+            tracing::debug!(target: "pool::disposition", "NIP-AD: refusal pre-check timed out");
+            return std::collections::HashSet::new();
+        }
+    };
+    let Some(events) = result.as_array() else {
+        return std::collections::HashSet::new();
+    };
+
+    // Adapt once, then bind each candidate against the obligation it claims.
+    let owned: Vec<OwnedJsonEvent> = events.iter().filter_map(OwnedJsonEvent::parse).collect();
+    let mut settled = std::collections::HashSet::new();
+    for obligation in obligations {
+        // A disposition signed by anyone else cannot settle this agent's
+        // obligation, and `bind_disposition` already enforces that — the
+        // explicit signer check here is belt-and-braces on the one thing
+        // whose absence would be silent.
+        if obligation.target_agent_pubkey != agent_pubkey_hex {
+            continue;
+        }
+        let candidates: Vec<buzz_core::disposition::EventView<'_>> =
+            owned.iter().map(OwnedJsonEvent::view).collect();
+        let derived = buzz_core::disposition::derive_obligation(obligation, &candidates);
+        if derived.is_resolved() || derived.is_disputed() {
+            settled.insert(obligation.request_id.clone());
+        }
+    }
+    settled
+}
+
+/// Owned view over a relay JSON event, so the shared verifier can borrow it.
+struct OwnedJsonEvent {
+    id: String,
+    pubkey: String,
+    kind: u16,
+    created_at: i64,
+    content: String,
+    tags: Vec<Vec<String>>,
+}
+
+impl OwnedJsonEvent {
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            id: value.get("id")?.as_str()?.to_string(),
+            pubkey: value.get("pubkey")?.as_str()?.to_string(),
+            kind: value.get("kind").and_then(serde_json::Value::as_u64)? as u16,
+            created_at: value
+                .get("created_at")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            content: value
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            tags: value
+                .get("tags")
+                .and_then(serde_json::Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| {
+                            Some(
+                                row.as_array()?
+                                    .iter()
+                                    .filter_map(|c| c.as_str().map(String::from))
+                                    .collect(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
+    fn view(&self) -> buzz_core::disposition::EventView<'_> {
+        buzz_core::disposition::EventView {
+            id: &self.id,
+            pubkey: &self.pubkey,
+            kind: self.kind,
+            created_at: self.created_at,
+            content: &self.content,
+            tags: &self.tags,
+        }
+    }
+}
+
+/// Publish this turn's NIP-AD dispositions — the single place the harness
+/// writes kind:44300.
+///
+/// Best-effort in the same sense as [`publish_agent_turn_metric`]: failures
+/// are logged and swallowed, never surfaced, because a disposition-publish
+/// failure must not break the conversation turn it describes.
+///
+/// Three rules govern what gets written:
+///
+/// 1. **Never `completed`.** [`TurnOutcome`] cannot express it. The harness
+///    observes that a turn ended, not that the work was done.
+/// 2. **One obligation, or nothing.** A turn observation is about the *turn*;
+///    a batched turn carries several obligations and cannot say which one any
+///    statement applies to. So a multi-obligation turn emits nothing at all.
+///
+///    An earlier version made an exception for `errored`, reasoning that a
+///    failed turn means no obligation in the batch received an answer. That
+///    is only true if output is atomic per turn — if the agent fully answers
+///    A, then B's tool call fails, `errored` on A is exactly the overclaim
+///    already removed from `responded`, one state further down. The ACP
+///    runtime makes no such atomicity guarantee that this code establishes,
+///    and asserting an unverified premise is how the `responded` projection
+///    got here in the first place.
+///
+///    Withholding leaves those obligations `unanswered`, which is the honest
+///    record: nothing here knows what happened to them. The agent settles
+///    them explicitly (`buzz dispositions emit`), being the only party that
+///    knows which request it addressed.
+/// 3. **Defer to the agent's own assertion.** Obligations this agent has
+///    already terminally settled are skipped ([`already_settled_by_self`]).
+///
+/// Skipped wholesale when `channel_id` is `None` (heartbeat/DM turn — v1 is
+/// channel-scoped) or when the turn carried no obligations for this agent.
+async fn publish_turn_dispositions(
+    ctx: &PromptContext,
+    channel_id: Option<uuid::Uuid>,
+    triggering_obligations: &[buzz_core::disposition::Obligation],
+    outcome: &TurnOutcome,
+) {
+    let Some(channel_id) = channel_id else {
+        return;
+    };
+    if triggering_obligations.is_empty() {
+        return;
+    }
+
+    // Rule 2: a turn outcome is attributable only when the turn carried
+    // exactly one obligation.
+    if triggering_obligations.len() != 1 {
+        tracing::debug!(
+            target: "pool::disposition",
+            obligations = triggering_obligations.len(),
+            outcome = outcome.state().as_str(),
+            "NIP-AD: withholding turn disposition — a batched turn cannot say \
+             which obligation any outcome applies to, and claiming all of them \
+             would be a false record. The agent may settle each explicitly."
+        );
+        return;
+    }
+    let disposition = outcome.state().as_str();
+    let reason = outcome.reason();
+
+    // Rule 3: never write over the agent's own explicit terminal claim.
+    let settled_ids = already_settled_by_self(ctx, triggering_obligations).await;
+
+    const DISPOSITION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    for obligation in triggering_obligations {
+        let request_id_hex = &obligation.request_id;
+        let requester_hex = &obligation.requester_pubkey;
+        if settled_ids.contains(request_id_hex) {
+            tracing::debug!(
+                target: "pool::disposition",
+                request_id_hex,
+                "NIP-AD: skipping — this agent already terminally settled this request"
+            );
+            continue;
+        }
+        let request_eid = match nostr::EventId::parse(request_id_hex) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    target: "pool::disposition",
+                    request_id_hex,
+                    "NIP-AD: invalid request event id: {e}"
+                );
+                continue;
+            }
+        };
+        let builder = match buzz_sdk::build_agent_disposition(
+            channel_id,
+            request_eid,
+            requester_hex,
+            disposition,
+            &reason,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    target: "pool::disposition",
+                    request_id_hex,
+                    "NIP-AD: build failed: {e}"
+                );
+                continue;
+            }
+        };
+        let event = match builder.sign_with_keys(&ctx.agent_keys) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    target: "pool::disposition",
+                    request_id_hex,
+                    "NIP-AD: sign failed: {e}"
+                );
+                continue;
+            }
+        };
+        match tokio::time::timeout(DISPOSITION_TIMEOUT, ctx.rest_client.submit_event(&event)).await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(
+                target: "pool::disposition",
+                request_id_hex,
+                "NIP-AD: publish failed: {e}"
+            ),
+            Err(_) => tracing::warn!(
+                target: "pool::disposition",
+                request_id_hex,
+                "NIP-AD: publish timed out"
+            ),
+        }
     }
 }
 
@@ -7699,6 +8247,405 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
         )
         .await;
+    }
+
+    /// The harness must NEVER be able to produce `completed`. That state
+    /// asserts the requested work was accomplished; the harness only ever
+    /// observes that a turn ended. This is the guard against regressing to
+    /// the old `EndTurn -> completed` mapping, which made a clarifying
+    /// question indistinguishable from finished work.
+    #[test]
+    fn no_harness_outcome_can_ever_report_completed() {
+        use buzz_core::agent_turn_metric::StopReason as CoreStop;
+        use buzz_core::disposition::DispositionState;
+
+        let mut produced = Vec::new();
+        for raw in [
+            StopReason::EndTurn,
+            StopReason::Refusal,
+            StopReason::Cancelled,
+            StopReason::MaxTokens,
+            StopReason::MaxTurnRequests,
+        ] {
+            produced.push(acp_stop_to_outcome(&raw).state());
+        }
+        for core in [
+            CoreStop::EndTurn,
+            CoreStop::Cancelled,
+            CoreStop::MaxTokens,
+            CoreStop::Error,
+            CoreStop::Unknown,
+        ] {
+            produced.push(core_stop_to_outcome(core).state());
+        }
+        assert!(
+            !produced.contains(&DispositionState::Completed),
+            "the harness cannot assert completion — only an explicit \
+             per-request signal from the agent can"
+        );
+    }
+
+    /// A clean end of turn is `responded`, and a native runtime refusal
+    /// survives as `refused` rather than collapsing into a generic error.
+    #[test]
+    fn acp_stop_to_outcome_preserves_refusal_and_never_overclaims() {
+        use buzz_core::disposition::DispositionState;
+
+        assert_eq!(
+            acp_stop_to_outcome(&StopReason::EndTurn).state(),
+            DispositionState::Responded,
+            "a bare end-of-turn means the agent answered, not that it finished the work"
+        );
+        assert_eq!(
+            acp_stop_to_outcome(&StopReason::Refusal).state(),
+            DispositionState::Refused,
+            "a native refusal must not be recorded as a technical failure"
+        );
+        for failure in [
+            StopReason::Cancelled,
+            StopReason::MaxTokens,
+            StopReason::MaxTurnRequests,
+        ] {
+            let outcome = acp_stop_to_outcome(&failure);
+            assert_eq!(outcome.state(), DispositionState::Errored);
+            assert!(
+                !outcome.reason().is_empty(),
+                "{failure:?} must carry a plain-language reason"
+            );
+        }
+    }
+
+    /// Each technical failure keeps its own reason — a single generic
+    /// "something went wrong" would defeat the point of recording one.
+    #[test]
+    fn core_stop_to_outcome_gives_each_failure_a_distinct_reason() {
+        use buzz_core::agent_turn_metric::StopReason as CoreStop;
+        use buzz_core::disposition::DispositionState;
+
+        assert_eq!(
+            core_stop_to_outcome(CoreStop::EndTurn).state(),
+            DispositionState::Responded
+        );
+        let reasons: std::collections::HashSet<String> = [
+            CoreStop::Cancelled,
+            CoreStop::MaxTokens,
+            CoreStop::Error,
+            CoreStop::Unknown,
+        ]
+        .into_iter()
+        .map(|v| {
+            let outcome = core_stop_to_outcome(v);
+            assert_eq!(outcome.state(), DispositionState::Errored);
+            outcome.reason()
+        })
+        .collect();
+        assert_eq!(reasons.len(), 4, "each failure needs its own reason");
+    }
+
+    const TEST_CHANNEL: &str = "36411e44-0e2d-4cfe-bd6e-567eb169db9f";
+
+    /// A canonical v1 request: marked, one target, target `p`-mentioned.
+    fn request_event(keys: &Keys, tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), "@agent do the thing")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    /// `obligation_for_agent` decides which triggering batch events this agent
+    /// owes an answer for. It delegates wholly to the shared classifier, so
+    /// the harness cannot act on something every reader calls invalid.
+    #[test]
+    fn test_obligation_for_agent_matches_the_shared_classifier() {
+        let keys = Keys::generate();
+        let me = "a".repeat(64);
+        let other = "b".repeat(64);
+
+        let for_me = request_event(
+            &keys,
+            vec![
+                Tag::parse(["h", TEST_CHANNEL]).unwrap(),
+                Tag::parse(["t", "request"]).unwrap(),
+                Tag::parse(["agent", &me]).unwrap(),
+                Tag::parse(["p", &me]).unwrap(),
+            ],
+        );
+        let ob = obligation_for_agent(&for_me, &me).expect("canonical request is ours");
+        assert_eq!(ob.target_agent_pubkey, me);
+        assert_eq!(ob.channel_id, TEST_CHANNEL);
+        assert_eq!(ob.requester_pubkey, keys.public_key().to_hex());
+
+        // Marked, but addressed to a different agent — not ours to answer.
+        let for_other = request_event(
+            &keys,
+            vec![
+                Tag::parse(["h", TEST_CHANNEL]).unwrap(),
+                Tag::parse(["t", "request"]).unwrap(),
+                Tag::parse(["agent", &other]).unwrap(),
+                Tag::parse(["p", &other]).unwrap(),
+            ],
+        );
+        assert!(obligation_for_agent(&for_other, &me).is_none());
+
+        // Addressed to us but never marked as a request (ordinary mention).
+        let unmarked = request_event(
+            &keys,
+            vec![
+                Tag::parse(["h", TEST_CHANNEL]).unwrap(),
+                Tag::parse(["agent", &me]).unwrap(),
+                Tag::parse(["p", &me]).unwrap(),
+            ],
+        );
+        assert!(obligation_for_agent(&unmarked, &me).is_none());
+
+        // Plain chatter with neither tag.
+        let chatter = EventBuilder::new(Kind::Custom(9), "lunch?")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(obligation_for_agent(&chatter, &me).is_none());
+
+        // A `t` tag with a different value is not a request marker.
+        let other_t_tag = request_event(
+            &keys,
+            vec![
+                Tag::parse(["h", TEST_CHANNEL]).unwrap(),
+                Tag::parse(["t", "announcement"]).unwrap(),
+                Tag::parse(["agent", &me]).unwrap(),
+                Tag::parse(["p", &me]).unwrap(),
+            ],
+        );
+        assert!(obligation_for_agent(&other_t_tag, &me).is_none());
+    }
+
+    /// The behavior change the shared classifier forces, called out on its
+    /// own because the old harness predicate did the opposite: a multi-target
+    /// request is unsupported in v1, so the harness must NOT treat it as its
+    /// own. Acting on it would produce dispositions no consumer can bind and
+    /// work attributed to an obligation that does not exist.
+    #[test]
+    fn test_multi_target_request_is_not_this_agents_obligation() {
+        let keys = Keys::generate();
+        let me = "a".repeat(64);
+        let other = "b".repeat(64);
+        let multi = request_event(
+            &keys,
+            vec![
+                Tag::parse(["h", TEST_CHANNEL]).unwrap(),
+                Tag::parse(["t", "request"]).unwrap(),
+                Tag::parse(["agent", &other]).unwrap(),
+                Tag::parse(["agent", &me]).unwrap(),
+                Tag::parse(["p", &other]).unwrap(),
+                Tag::parse(["p", &me]).unwrap(),
+            ],
+        );
+        assert!(
+            obligation_for_agent(&multi, &me).is_none(),
+            "the previous predicate answered yes here, which is how the harness \
+             ended up acting on requests every consumer classified as unsupported"
+        );
+    }
+
+    /// The other divergence the old predicate carried: it compared the
+    /// `agent` target case-insensitively while every reader compares exactly,
+    /// so an uppercase target made the harness emit dispositions nobody binds.
+    #[test]
+    fn test_uppercase_target_is_not_this_agents_obligation() {
+        let keys = Keys::generate();
+        let me = "a".repeat(64);
+        let upper = me.to_ascii_uppercase();
+        let event = request_event(
+            &keys,
+            vec![
+                Tag::parse(["h", TEST_CHANNEL]).unwrap(),
+                Tag::parse(["t", "request"]).unwrap(),
+                Tag::parse(["agent", &upper]).unwrap(),
+                Tag::parse(["p", &upper]).unwrap(),
+            ],
+        );
+        assert!(obligation_for_agent(&event, &me).is_none());
+    }
+
+    /// A target that is never `p`-mentioned is not routed to anyone, so it is
+    /// not an obligation the harness may act on either.
+    #[test]
+    fn test_target_without_p_mention_is_not_an_obligation() {
+        let keys = Keys::generate();
+        let me = "a".repeat(64);
+        let event = request_event(
+            &keys,
+            vec![
+                Tag::parse(["h", TEST_CHANNEL]).unwrap(),
+                Tag::parse(["t", "request"]).unwrap(),
+                Tag::parse(["agent", &me]).unwrap(),
+            ],
+        );
+        assert!(obligation_for_agent(&event, &me).is_none());
+    }
+
+    /// `publish_agent_dispositions` is a no-op when `channel_id` is `None`
+    /// (heartbeat/DM turn) — v1 scopes dispositions to channel-scoped
+    /// requests only. Must not panic even with non-empty triggering data.
+    #[tokio::test]
+    async fn test_publish_turn_dispositions_noop_on_no_channel() {
+        let ctx = make_prompt_context_no_owner();
+        let triggering = vec![test_obligation("a")];
+        publish_turn_dispositions(&ctx, None, &triggering, &TurnOutcome::Responded).await;
+    }
+
+    fn test_obligation(seed: &str) -> buzz_core::disposition::Obligation {
+        buzz_core::disposition::Obligation {
+            request_id: seed.repeat(64),
+            channel_id: TEST_CHANNEL.to_string(),
+            requester_pubkey: "d".repeat(64),
+            target_agent_pubkey: "a".repeat(64),
+        }
+    }
+
+    /// `publish_agent_dispositions` is a no-op when there are no triggering
+    /// requests (e.g. a resumed/merged batch with nothing new this turn).
+    #[tokio::test]
+    async fn test_publish_turn_dispositions_noop_on_empty_triggering_requesters() {
+        let ctx = make_prompt_context_no_owner();
+        publish_turn_dispositions(
+            &ctx,
+            Some(uuid::Uuid::new_v4()),
+            &[],
+            &TurnOutcome::Responded,
+        )
+        .await;
+    }
+
+    /// With a channel and triggering requests present, `publish_agent_dispositions`
+    /// runs the full build/sign/publish path per request without panicking —
+    /// mirrors `test_publish_agent_turn_metric_encrypts_with_owner`'s bar (no
+    /// real relay is reachable in tests; HTTP will fail, that's expected).
+    /// Covers both the `completed` path (which also runs the refusal
+    /// pre-check query) and the `errored` path (which skips it).
+    #[tokio::test]
+    async fn test_publish_turn_dispositions_executes_without_panic() {
+        let ctx = make_prompt_context_no_owner();
+        let triggering = vec![test_obligation("a")];
+        publish_turn_dispositions(
+            &ctx,
+            Some(uuid::Uuid::new_v4()),
+            &triggering,
+            &TurnOutcome::Responded,
+        )
+        .await;
+        publish_turn_dispositions(
+            &ctx,
+            Some(uuid::Uuid::new_v4()),
+            &triggering,
+            &TurnOutcome::Errored("turn ended with an error".to_string()),
+        )
+        .await;
+    }
+
+    /// `publish_turn_dispositions` skips a malformed request id (invalid hex)
+    /// rather than panicking — defensive parsing, since ids ultimately come
+    /// from `nostr::Event::id.to_hex()` and should always be well-formed, but
+    /// the function must not trust that blindly.
+    #[tokio::test]
+    async fn test_publish_turn_dispositions_skips_malformed_request_id() {
+        let ctx = make_prompt_context_no_owner();
+        let mut ob = test_obligation("a");
+        ob.request_id = "not-a-valid-event-id".to_string();
+        publish_turn_dispositions(
+            &ctx,
+            Some(uuid::Uuid::new_v4()),
+            &[ob],
+            &TurnOutcome::Responded,
+        )
+        .await;
+    }
+
+    /// A native ACP refusal must carry a non-empty reason.
+    ///
+    /// NIP-AD's headline promise is that a reader can recover why an agent
+    /// declined. The runtime's `Refusal` stop reason carries no text, so an
+    /// empty reason here would leave that promise unmet on the one path most
+    /// likely to produce a refusal.
+    #[test]
+    fn test_refusal_carries_a_stable_reason() {
+        let outcome = acp_stop_to_outcome(&StopReason::Refusal);
+        assert!(matches!(outcome, TurnOutcome::Refused));
+        assert_eq!(outcome.reason(), ACP_RUNTIME_REFUSAL_REASON);
+        assert!(
+            !outcome.reason().is_empty(),
+            "a refusal that explains nothing defeats the point of recording it"
+        );
+        // `responded` genuinely has nothing to say, and inventing text for it
+        // would be the opposite mistake.
+        assert_eq!(TurnOutcome::Responded.reason(), "");
+    }
+
+    /// The attribution rule, which is what a turn can honestly say about each
+    /// obligation it carried.
+    ///
+    /// `errored` is a fact about every obligation in a batch — the turn
+    /// failed, so none of them got an answer. `responded` is not: it says an
+    /// answer was produced without saying *which* request it answered, and a
+    /// turn that addressed one of three messages would otherwise mark all
+    /// three answered. An earlier version asserted in a comment that all
+    /// non-terminal outcomes were true of every request, which is right for
+    /// one of them and wrong for the other.
+    #[test]
+    fn test_batched_turn_attribution_rule() {
+        let one = [test_obligation("a")];
+        let many = [test_obligation("a"), test_obligation("c")];
+
+        let attributable = |obs: &[buzz_core::disposition::Obligation], o: &TurnOutcome| {
+            obs.len() == 1 || matches!(o, TurnOutcome::Errored(_))
+        };
+
+        // A single obligation can carry any outcome.
+        for outcome in [
+            TurnOutcome::Responded,
+            TurnOutcome::Refused,
+            TurnOutcome::Errored("boom".into()),
+        ] {
+            assert!(
+                attributable(&one, &outcome),
+                "single obligation: {outcome:?}"
+            );
+        }
+
+        // A batch can only carry `errored`.
+        assert!(
+            attributable(&many, &TurnOutcome::Errored("boom".into())),
+            "a failed turn answered none of them — true of all"
+        );
+        assert!(
+            !attributable(&many, &TurnOutcome::Responded),
+            "`responded` for every request in a batch is a claim the turn cannot support"
+        );
+        assert!(
+            !attributable(&many, &TurnOutcome::Refused),
+            "`refused` cannot say which request was declined"
+        );
+    }
+
+    /// `already_settled_by_self` returns an empty set immediately for an empty
+    /// input slice, without attempting any query.
+    #[tokio::test]
+    async fn test_already_settled_empty_input_short_circuits() {
+        let ctx = make_prompt_context_no_owner();
+        let result = already_settled_by_self(&ctx, &[]).await;
+        assert!(result.is_empty());
+    }
+
+    /// `already_settled_by_self` is best-effort: when the relay is unreachable (as
+    /// in tests — `base_url` points at a closed port), it must return an
+    /// empty set rather than panicking or propagating the error. A failed
+    /// pre-check must never block the primary disposition publish it guards.
+    #[tokio::test]
+    async fn test_already_settled_returns_empty_on_query_failure() {
+        let ctx = make_prompt_context_no_owner();
+        let result = already_settled_by_self(&ctx, &[test_obligation("a")]).await;
+        assert!(
+            result.is_empty(),
+            "a failed pre-check must fail open (empty), not panic or block"
+        );
     }
 
     /// `build_turn_metric_counts` maps exact turn and cumulative totals from

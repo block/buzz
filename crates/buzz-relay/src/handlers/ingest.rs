@@ -12,29 +12,29 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    is_relay_admin_kind, KIND_AGENT_DISPOSITION, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE,
+    KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST,
+    KIND_BOOKMARK_SET, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -353,6 +353,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        // NIP-AD: agent dispositions are agent-authored, channel-scoped, world-readable.
+        KIND_AGENT_DISPOSITION => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
@@ -637,6 +639,12 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_HUDDLE_PARTICIPANT_LEFT
             | KIND_HUDDLE_ENDED
             | KIND_HUDDLE_GUIDELINES
+            // NIP-AD: v1 scopes dispositions to channel-scoped requests only —
+            // same treatment as the stream-message kinds above. DMs already use
+            // a distinct kind family (KIND_DM_OPEN and friends) rather than an
+            // optional `h` tag on a shared kind, so there is no existing
+            // "conditionally channel-scoped" precedent to extend instead.
+            | KIND_AGENT_DISPOSITION
     )
 }
 
@@ -1727,6 +1735,68 @@ fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), Strin
     Ok(())
 }
 
+/// Validate a NIP-AD `kind:44300` disposition event before it is stored.
+///
+/// **Delegates to `buzz_core::disposition::validate_disposition_event`** — it
+/// does not reimplement the rules, and deliberately not a mirror of them
+/// either. There is one validity boundary and this calls it.
+///
+/// That matters more than it looks. This function used to be an independent
+/// implementation of the same contract, and the consumer-side verifier
+/// enforced a strictly weaker one: it read the first matching tag and checked
+/// neither kind, nor tag cardinality, nor the required `reason`. So an event
+/// with two `e` tags, or no `reason`, or not even of kind 44300, was rejected
+/// here and simultaneously accepted as a settling disposition by the auditor.
+/// Two implementations of one contract will drift; one implementation with
+/// two callers cannot.
+fn validate_agent_disposition_envelope(event: &Event) -> Result<(), String> {
+    let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+    let id = event.id.to_hex();
+    let pubkey = event.pubkey.to_hex();
+    let view = buzz_core::disposition::EventView {
+        id: &id,
+        pubkey: &pubkey,
+        kind: event.kind.as_u16(),
+        created_at: event.created_at.as_secs() as i64,
+        content: &event.content,
+        tags: &tags,
+    };
+
+    buzz_core::disposition::validate_disposition_event(&view)
+        .map(|_| ())
+        .map_err(describe_invalid_disposition)
+}
+
+/// Operator-facing text for a structural rejection. Only the wording lives
+/// here; every rule lives in `buzz-core`.
+fn describe_invalid_disposition(reason: buzz_core::disposition::InvalidDisposition) -> String {
+    use buzz_core::disposition::InvalidDisposition as I;
+    let detail = match reason {
+        I::WrongKind => "event is not kind 44300",
+        I::RequestIdCardinality => "must have exactly one `e` tag referencing the request",
+        I::ChannelCardinality => "must have exactly one `h` tag naming its channel",
+        I::RequesterCardinality => "must have exactly one `p` tag naming the requesting principal",
+        I::StateCardinality => "must have exactly one `disposition` tag",
+        I::MalformedRequestId => "`e` tag must be 64 lowercase hex characters",
+        I::MalformedRequester => "`p` tag must be 64 lowercase hex characters",
+        I::UnknownState => "`disposition` tag must be one of",
+        I::ContentNotObject => "content must be a JSON object",
+        I::ContentStateMismatch => "content `disposition` must match the tag",
+        I::MissingReason => "content must have a `reason` field",
+        I::ReasonNotString => "content `reason` must be a string",
+        I::RequestIdNotString => "content `request_id` must be a string",
+        I::ContentRequestIdMismatch => "content `request_id` must equal the `e` tag",
+    };
+    let valid: Vec<&str> = buzz_core::disposition::DispositionState::ALL
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    if matches!(reason, I::UnknownState) {
+        return format!("agent-disposition {detail}: {}", valid.join(", "));
+    }
+    format!("agent-disposition {detail}")
+}
+
 /// Parse a NIP-ER `not_before` tag value into a Unix timestamp.
 ///
 /// The value MUST be a decimal integer string containing only ASCII digits, with
@@ -2548,6 +2618,11 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_EVENT_REMINDER {
         validate_event_reminder(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_AGENT_DISPOSITION {
+        validate_agent_disposition_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
@@ -3623,6 +3698,7 @@ mod tests {
             KIND_TEAM,
             KIND_MANAGED_AGENT,
             KIND_AGENT_TURN_METRIC,
+            KIND_AGENT_DISPOSITION,
         ];
         for kind in migrated {
             assert!(
@@ -3666,6 +3742,70 @@ mod tests {
             required_scope_for_kind(KIND_AGENT_TURN_METRIC, &dummy).unwrap(),
             Scope::MessagesWrite,
             "kind:44200 requires MessagesWrite scope"
+        );
+    }
+
+    #[test]
+    fn agent_disposition_requires_h_channel_scope_and_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert!(
+            !is_global_only_kind(KIND_AGENT_DISPOSITION),
+            "kind:44300 must not be global-only — v1 scopes it to channel-scoped requests"
+        );
+        assert!(
+            requires_h_channel_scope(KIND_AGENT_DISPOSITION),
+            "kind:44300 must require an h-tag (channel-scoped requests only in v1)"
+        );
+        assert_eq!(
+            required_scope_for_kind(KIND_AGENT_DISPOSITION, &dummy).unwrap(),
+            Scope::MessagesWrite,
+            "kind:44300 requires MessagesWrite scope"
+        );
+    }
+
+    #[test]
+    fn agent_disposition_rejects_two_h_tags() {
+        // Two distinct `h` tags are cross-channel ambiguity: the shared
+        // channel-scope resolver would silently take the first for storage
+        // and authorization while the second still rides along on the
+        // stored event. NIP-AD states exactly-one-`h` as a MUST, so the
+        // validator enforces it rather than leaving the spec and the code
+        // disagreeing (an external design review caught that gap).
+        let agent = nostr::Keys::generate();
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["e", &"a".repeat(64)],
+                &["h", &uuid::Uuid::new_v4().to_string()],
+                &["h", &uuid::Uuid::new_v4().to_string()],
+                &["p", &"b".repeat(64)],
+                &["disposition", "completed"],
+            ],
+            r#"{"disposition":"completed","reason":""}"#,
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("exactly one `h` tag"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn agent_disposition_rejects_missing_h_tag() {
+        let agent = nostr::Keys::generate();
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["e", &"a".repeat(64)],
+                &["p", &"b".repeat(64)],
+                &["disposition", "completed"],
+            ],
+            r#"{"disposition":"completed","reason":""}"#,
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("exactly one `h` tag"),
+            "unexpected error: {err}"
         );
     }
 
@@ -5194,6 +5334,211 @@ mod tests {
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
         assert!(err.contains("agent-turn-metric"), "got: {err}");
+    }
+
+    fn make_agent_disposition(
+        agent_keys: &nostr::Keys,
+        tags: &[&[&str]],
+        content: &str,
+    ) -> nostr::Event {
+        let nostr_tags: Vec<nostr::Tag> = tags
+            .iter()
+            .map(|t| nostr::Tag::parse(t.iter().copied()).unwrap())
+            .collect();
+        nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_DISPOSITION as u16),
+            content,
+        )
+        .tags(nostr_tags)
+        .sign_with_keys(agent_keys)
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_disposition_envelope_accepts_canonical() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["e", &request_id],
+                &["h", "some-channel-uuid"],
+                &["p", &requester_hex],
+                &["disposition", "refused"],
+            ],
+            r#"{"disposition":"refused","reason":"outside my delegation"}"#,
+        );
+        assert!(validate_agent_disposition_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn agent_disposition_envelope_accepts_matching_request_id_in_content() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["e", &request_id],
+                &["p", &requester_hex],
+                &["disposition", "completed"],
+            ],
+            &format!(r#"{{"disposition":"completed","reason":"","request_id":"{request_id}"}}"#),
+        );
+        assert!(validate_agent_disposition_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn agent_disposition_envelope_rejects_missing_e() {
+        let agent = nostr::Keys::generate();
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["p", &requester_hex],
+                &["disposition", "completed"],
+            ],
+            r#"{"disposition":"completed","reason":""}"#,
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(err.contains("`e` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_disposition_envelope_rejects_missing_p() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["e", &request_id],
+                &["disposition", "completed"],
+            ],
+            r#"{"disposition":"completed","reason":""}"#,
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(err.contains("`p` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_disposition_envelope_rejects_missing_disposition_tag() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["e", &request_id],
+                &["p", &requester_hex],
+            ],
+            r#"{"disposition":"completed","reason":""}"#,
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(err.contains("`disposition` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_disposition_envelope_rejects_invalid_disposition_value() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["e", &request_id],
+                &["p", &requester_hex],
+                &["disposition", "maybe-later"],
+            ],
+            r#"{"disposition":"maybe-later","reason":""}"#,
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        // The valid-state list is enumerated from `DispositionState::ALL`,
+        // so a new state can never leave this message stale.
+        assert!(err.contains("must be one of"), "got: {err}");
+        assert!(err.contains("responded"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_disposition_envelope_rejects_content_tag_mismatch() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["e", &request_id],
+                &["p", &requester_hex],
+                &["disposition", "completed"],
+            ],
+            r#"{"disposition":"refused","reason":"changed my mind"}"#,
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(err.contains("must match the tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_disposition_envelope_rejects_malformed_json() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["e", &request_id],
+                &["p", &requester_hex],
+                &["disposition", "completed"],
+            ],
+            "not json",
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(err.contains("JSON object"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_disposition_envelope_rejects_missing_reason_field() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["e", &request_id],
+                &["p", &requester_hex],
+                &["disposition", "completed"],
+            ],
+            r#"{"disposition":"completed"}"#,
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(err.contains("`reason` field"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_disposition_envelope_rejects_request_id_mismatch() {
+        let agent = nostr::Keys::generate();
+        let request_id = "a".repeat(64);
+        let other_id = "f".repeat(64);
+        let requester_hex = "b".repeat(64);
+        let ev = make_agent_disposition(
+            &agent,
+            &[
+                &["h", "some-channel-uuid"],
+                &["e", &request_id],
+                &["p", &requester_hex],
+                &["disposition", "completed"],
+            ],
+            &format!(r#"{{"disposition":"completed","reason":"","request_id":"{other_id}"}}"#),
+        );
+        let err = validate_agent_disposition_envelope(&ev).unwrap_err();
+        assert!(err.contains("must equal the `e` tag"), "got: {err}");
     }
 
     /// The HTTP bridge's `submit_event` 400 arm and the WS `EVENT` handler's

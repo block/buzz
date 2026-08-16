@@ -3,6 +3,7 @@ import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
+  KIND_AGENT_DISPOSITION,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
@@ -128,6 +129,19 @@ export function buildChannelReactionAuxFilter(
   messageIds: string[],
 ): RelaySubscriptionFilter {
   return buildChannelAuxKindFilter(messageIds, [KIND_REACTION]);
+}
+
+/**
+ * NIP-AD disposition filter for the message rows the GUI is currently
+ * rendering. Kept separate from reactions and structural aux for the same
+ * reason those are separate from each other: an unrelated slow scan must
+ * never delay pixels a different aux kind is about to paint.
+ */
+export function buildChannelDispositionAuxFilter(
+  _channelId: string,
+  messageIds: string[],
+): RelaySubscriptionFilter {
+  return buildChannelAuxKindFilter(messageIds, [KIND_AGENT_DISPOSITION]);
 }
 
 export function buildChannelAuxDeletionFilter(

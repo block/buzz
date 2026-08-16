@@ -4479,6 +4479,43 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    /// The base prompt must teach BOTH terminal dispositions with the flags
+    /// the CLI actually accepts.
+    ///
+    /// Completion used to be missing entirely: the prompt told agents the
+    /// harness "automatically records that you completed or errored", which
+    /// stopped being true when the harness lost the ability to emit
+    /// `completed` at all. So the only settling state in the protocol had no
+    /// instruction anywhere and no agent would ever produce one.
+    #[test]
+    fn shared_base_prompt_teaches_both_terminal_dispositions() {
+        let prompt = include_str!("base_prompt.md");
+        // Exact command strings — a prompt teaching a flag the parser rejects
+        // is worse than no instruction. `--state` was documented once and
+        // does not exist.
+        assert!(
+            prompt.contains("buzz dispositions emit --request <event-id> --disposition completed")
+        );
+        assert!(
+            prompt.contains("buzz dispositions emit --request <event-id> --disposition refused")
+        );
+        assert!(
+            !prompt.contains("--state"),
+            "the CLI flag is --disposition; --state does not exist"
+        );
+        // The harness cannot observe completion, so the agent must be told
+        // that recording it is its own job.
+        assert!(prompt.contains("You are the only party that can say a request"));
+        assert!(prompt.contains("never records completion on your"));
+        // Must be explicit that the disposition supplements the reply, never
+        // replaces it — a disposition that's only a signed event with no
+        // human-readable explanation in the channel is a silent failure by
+        // the base prompt's own "if it isn't published, it didn't happen" rule.
+        assert!(prompt.contains("not instead of it"));
+        // And that a terminal claim cannot be taken back in v1.
+        assert!(prompt.contains("**final**"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {

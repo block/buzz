@@ -454,6 +454,15 @@ export function useSendMessageMutation(
       sentFromThreadRootId?: string | null;
       sentFromThreadRootExcerpt?: string | null;
       transport?: "auto" | "http";
+      /**
+       * NIP-AD: pubkeys of the agents this message is addressed to. Non-empty
+       * makes it a marked request awaiting a disposition, and each becomes an
+       * `["agent", <pubkey>]` tag that a disposition binds against. Only
+       * meaningful for real channels — DMs are out of scope for v1 (see
+       * docs/nips/NIP-AD.md), so this is silently dropped for a DM channel
+       * rather than requiring every caller to know that boundary.
+       */
+      requestAgentPubkeys?: string[];
     },
     MessageQueryContext | undefined
   >({
@@ -468,6 +477,7 @@ export function useSendMessageMutation(
       sentFromThreadRootId,
       sentFromThreadRootExcerpt,
       transport = "auto",
+      requestAgentPubkeys,
     }) => {
       // Prefer a channel captured by the caller at compose time. Otherwise,
       // resolve a captured id from the shared channel cache so navigation
@@ -494,6 +504,23 @@ export function useSendMessageMutation(
       if (!identity) {
         throw new Error("No identity available for sending messages.");
       }
+
+      // NIP-AD v1 scopes the request marker to real channels — DMs are out
+      // of scope (see docs/nips/NIP-AD.md). Resolved here, not upstream,
+      // because this is the one place `effectiveChannel.channelType` is
+      // authoritatively known; callers only need to name the agents they
+      // addressed, not track the channel/DM boundary themselves.
+      const effectiveRequestAgents =
+        effectiveChannel.channelType === "dm"
+          ? []
+          : (requestAgentPubkeys ?? []);
+      const requestTags: string[][] =
+        effectiveRequestAgents.length > 0
+          ? [
+              ["t", "request"],
+              ...effectiveRequestAgents.map((pk) => ["agent", pk]),
+            ]
+          : [];
 
       // `mediaTags` arrives as the merged outgoing tag set (imeta + NIP-30
       // emoji). Split it so each kind goes to its own validated Tauri arg —
@@ -549,6 +576,11 @@ export function useSendMessageMutation(
           mentionTags,
           linkPreviewTags,
           sentFromThreadTag,
+          // expectedRelayUrl / expectedSignerPubkey are positional and unused
+          // at this call site, same as before NIP-AD.
+          undefined,
+          undefined,
+          effectiveRequestAgents,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -588,6 +620,7 @@ export function useSendMessageMutation(
             ...mentionTags,
             ...linkPreviewTags,
             ...(sentFromThreadTag ? [sentFromThreadTag] : []),
+            ...requestTags,
           ],
           content: content.trim(),
           sig: "",
@@ -598,7 +631,11 @@ export function useSendMessageMutation(
         effectiveChannel.id,
         content,
         recipientPubkeys,
-        [...mentionTags, ...(sentFromThreadTag ? [sentFromThreadTag] : [])],
+        [
+          ...mentionTags,
+          ...(sentFromThreadTag ? [sentFromThreadTag] : []),
+          ...requestTags,
+        ],
       );
     },
     onMutate: async ({

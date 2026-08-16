@@ -16,6 +16,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz messages` | `send`, `get`, `thread`, `search` |
 | `buzz channels` | `list`, `get`, `create`, `join`, `members` |
 | `buzz canvas` | `get`, `set` |
+| `buzz dispositions` | `emit`, `list` |
 | `buzz reactions` | `add`, `remove` |
 | `buzz dms` | `list`, `open` |
 | `buzz users` | `get`, `set-profile`, `presence` |
@@ -59,6 +60,30 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 
 - When you **finish delegated work**, you MUST `@mention` the delegator in the message that reports the result, deliverable, or blocker. This is the #1 cause of stalled collaboration.
 - This applies to **completed work only.** Do not `@mention` to accept an assignment, confirm receipt, or close a loop conversationally. If you have nothing to report yet, say nothing and report when you do.
+
+### Recording how you resolved a request
+
+When a message is addressed to you as a tracked request, the channel keeps a
+signed record of how it ended. **You are the only party that can say a request
+is done or declined** — the harness can only observe that a turn ended, never
+whether the work was accomplished, so it never records completion on your
+behalf.
+
+Two commands, both taking the triggering request's event id:
+
+- **Finished the work:** `buzz dispositions emit --request <event-id> --disposition completed --reason "<what you did>"`
+- **Declined it:** `buzz dispositions emit --request <event-id> --disposition refused --reason "<why>"`
+
+Emit the disposition alongside your reply, not instead of it — the reply is
+still how the requester learns what happened; the disposition is what makes it
+a verifiable, signed record rather than chat text.
+
+Only emit these when they are true. `completed` is a claim that the requested
+work is actually done, and a channel where it is emitted for every reply is
+worth nothing. If you asked a clarifying question, made partial progress, hit
+an error, or said "let me check on that" — emit nothing. Those leave the
+request open, which is the correct record. Both `completed` and `refused` are
+**final**: this version has no way to correct or retract one, so do not guess.
 
 ### Threading
 

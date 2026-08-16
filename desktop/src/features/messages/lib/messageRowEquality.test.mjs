@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   depthGuideActionsEqual,
+  requestStatusEqual,
   numberArrayEqual,
   reactionsEqual,
   tagsEqual,
@@ -111,4 +112,82 @@ test("depthGuideActionsEqual: same values (message by id) → equal", () => {
     ),
     false,
   );
+});
+
+test("requestStatusEqual: fresh identity, same values → equal", () => {
+  const make = () => ({
+    kind: "valid",
+    outcome: { kind: "settled", state: "refused" },
+    latestObservation: "refused",
+    reason: "outside my delegation",
+    warnings: [],
+    resolved: true,
+  });
+  assert.equal(requestStatusEqual(make(), make()), true);
+});
+
+test("requestStatusEqual: changed field → not equal", () => {
+  const base = {
+    kind: "valid",
+    outcome: { kind: "settled", state: "completed" },
+    latestObservation: "completed",
+    reason: "",
+    warnings: [],
+    resolved: true,
+  };
+  assert.equal(
+    requestStatusEqual(base, {
+      ...base,
+      outcome: { kind: "settled", state: "refused" },
+    }),
+    false,
+  );
+  assert.equal(requestStatusEqual(base, { ...base, reason: "x" }), false);
+  assert.equal(
+    requestStatusEqual(base, { ...base, warnings: ["duplicate_terminal"] }),
+    false,
+  );
+  assert.equal(
+    requestStatusEqual(base, { ...base, latestObservation: "errored" }),
+    false,
+    "the raw latest observation is part of what the row renders",
+  );
+  // Same outcome kind, different state: the comparator must look past `kind`.
+  assert.equal(
+    requestStatusEqual(
+      { ...base, outcome: { kind: "open", state: "responded" } },
+      { ...base, outcome: { kind: "open", state: "errored" } },
+    ),
+    false,
+  );
+});
+
+test("requestStatusEqual: classification kinds are compared", () => {
+  const invalid = { kind: "invalid", reason: "missing_agent_target" };
+  assert.equal(requestStatusEqual(invalid, { ...invalid }), true);
+  assert.equal(
+    requestStatusEqual(invalid, { kind: "invalid", reason: "missing_channel" }),
+    false,
+  );
+  assert.equal(
+    requestStatusEqual(invalid, {
+      kind: "unsupported",
+      reason: "multiple_agent_targets",
+    }),
+    false,
+  );
+});
+
+test("requestStatusEqual: undefined handling", () => {
+  assert.equal(requestStatusEqual(undefined, undefined), true);
+  const base = {
+    kind: "valid",
+    outcome: { kind: "settled", state: "completed" },
+    latestObservation: "completed",
+    reason: "",
+    warnings: [],
+    resolved: true,
+  };
+  assert.equal(requestStatusEqual(base, undefined), false);
+  assert.equal(requestStatusEqual(undefined, base), false);
 });

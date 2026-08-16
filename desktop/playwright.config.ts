@@ -106,6 +106,8 @@ export default defineConfig({
         "**/reaction-order.spec.ts",
         "**/reaction-names.spec.ts",
         "**/inbox-reactions.spec.ts",
+        "**/agent-disposition.spec.ts",
+        "**/agent-disposition-screenshots.spec.ts",
         "**/inbox-edit.spec.ts",
         "**/send-channel-binding.spec.ts",
         "**/project-commit-detail.spec.ts",
