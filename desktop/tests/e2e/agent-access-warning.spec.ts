@@ -202,10 +202,15 @@ test("full agent editor tightens the exact sidebar agent instance", async ({
   await saveChanges.click();
   await expect(dialog).not.toBeVisible();
 
-  const updateCommand = await page.evaluate(() =>
-    window.__BUZZ_E2E_COMMAND_LOG__?.findLast(
-      (entry) => entry.command === "update_managed_agent",
-    ),
+  const updateCommand = await page.evaluate(
+    (pubkey) =>
+      window.__BUZZ_E2E_COMMAND_LOG__?.findLast(
+        (entry) =>
+          entry.command === "update_managed_agent" &&
+          (entry.payload as { input?: { pubkey?: string } })?.input?.pubkey ===
+            pubkey,
+      ),
+    agent.pubkey,
   );
   expect(updateCommand?.payload).toMatchObject({
     input: { pubkey: agent.pubkey, respondTo: "owner-only" },
@@ -216,6 +221,39 @@ test("full agent editor tightens the exact sidebar agent instance", async ({
 
   await page.getByTestId("channel-members-trigger").click();
   await expect(accessBadge).toHaveText("Only me");
+
+  // The definition still says "anyone" after the instance-only save above.
+  // Reopening the same linked agent for an unrelated prompt edit must seed
+  // access from the exact instance, or the submit silently widens it again.
+  await page.getByTestId(`sidebar-member-${agent.pubkey}`).click();
+  await page.getByTestId("user-profile-edit-agent").click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Advanced" }).click();
+  await expect(page.locator("#agent-respond-to")).toHaveText(
+    "Only me (default)",
+  );
+  await page
+    .locator("#persona-system-prompt")
+    .fill("Test unrelated prompt editing after tightening access.");
+  await dialog.getByRole("button", { name: "Save changes" }).click();
+  await expect(dialog).not.toBeVisible();
+
+  const unrelatedEditCommand = await page.evaluate(
+    (pubkey) =>
+      window.__BUZZ_E2E_COMMAND_LOG__?.findLast(
+        (entry) =>
+          entry.command === "update_managed_agent" &&
+          (entry.payload as { input?: { pubkey?: string } })?.input?.pubkey ===
+            pubkey,
+      ),
+    agent.pubkey,
+  );
+  expect(unrelatedEditCommand?.payload).toMatchObject({
+    input: { pubkey: agent.pubkey },
+  });
+  expect(unrelatedEditCommand?.payload).not.toMatchObject({
+    input: { respondTo: "anyone" },
+  });
 });
 
 test("a provider-backed agent's warning names the server, not this computer", async ({
