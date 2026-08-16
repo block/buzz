@@ -308,7 +308,9 @@ fn windows_mesh_gpu_sdk_dll_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-const WINDOWS_MESH_NATIVE_RUNTIME_VERSION: &str = "0.75.1";
+fn windows_mesh_native_runtime_version() -> &'static str {
+    mesh_llm_host_runtime::VERSION
+}
 
 #[cfg(target_os = "windows")]
 fn windows_mesh_native_runtime_lib_dirs_from(
@@ -355,14 +357,23 @@ fn prepare_windows_mesh_runtime_dependencies(app: &AppHandle) {
         append_mesh_debug_log(app, "windows mesh runtime dependency resources not found");
     }
 
+    let runtime_version = windows_mesh_native_runtime_version();
     let runtime_lib_dirs = dirs::data_local_dir()
         .map(|local_data_dir| {
             windows_mesh_native_runtime_lib_dirs_from(
                 &local_data_dir.join("mesh-llm").join("native-runtimes"),
-                WINDOWS_MESH_NATIVE_RUNTIME_VERSION,
+                runtime_version,
             )
         })
         .unwrap_or_default();
+    if runtime_lib_dirs.is_empty() {
+        append_mesh_debug_log(
+            app,
+            format!(
+                "no MeshLLM native runtime lib dirs found for current version {runtime_version}"
+            ),
+        );
+    }
 
     for lib_dir in &runtime_lib_dirs {
         for dependency_dir in &dependency_dirs {

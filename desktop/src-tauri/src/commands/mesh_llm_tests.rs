@@ -72,7 +72,7 @@ fn windows_mesh_dll_registration_order_prefers_runtime_libs_before_bundled_fallb
     let runtime_lib = temp
         .path()
         .join("native-runtimes")
-        .join("0.75.1")
+        .join(windows_mesh_native_runtime_version())
         .join("meshllm-native-runtime-windows-x86_64-vulkan")
         .join("lib");
     let bundled = temp
@@ -104,17 +104,29 @@ fn windows_mesh_native_runtime_lib_dirs_are_registered_without_bundled_resources
         .join("meshllm-native-runtime-windows-x86_64-rocm")
         .join("lib");
     let runtime_lib = native_root
-        .join("0.75.1")
+        .join(windows_mesh_native_runtime_version())
         .join("meshllm-native-runtime-windows-x86_64-vulkan")
         .join("lib");
     std::fs::create_dir_all(&stale_runtime_lib).unwrap();
     std::fs::create_dir_all(&runtime_lib).unwrap();
 
-    let runtime_lib_dirs = windows_mesh_native_runtime_lib_dirs_from(&native_root, "0.75.1");
+    let runtime_lib_dirs = windows_mesh_native_runtime_lib_dirs_from(
+        &native_root,
+        windows_mesh_native_runtime_version(),
+    );
     let registered_dirs =
         windows_mesh_dll_registration_order(runtime_lib_dirs, Vec::new(), Vec::new());
 
     assert_eq!(registered_dirs, vec![runtime_lib]);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_mesh_native_runtime_version_tracks_mesh_llm_dependency() {
+    assert_eq!(
+        windows_mesh_native_runtime_version(),
+        mesh_llm_host_runtime::VERSION
+    );
 }
 
 #[test]
