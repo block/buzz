@@ -9,6 +9,7 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+mod session_store;
 mod setup_mode;
 mod usage;
 
@@ -2207,7 +2208,20 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        session_store: Arc::new(match &config.state_dir {
+            Some(dir) => {
+                session_store::SessionStore::open(dir.join(format!("sessions-{pubkey_hex}.json")))
+            }
+            None => session_store::SessionStore::disabled(),
+        }),
     });
+
+    if !ctx.session_store.is_enabled() {
+        tracing::info!(
+            target: "session_store",
+            "channel session resumption disabled (--no-resume-sessions / BUZZ_ACP_NO_RESUME_SESSIONS): every restart opens fresh sessions"
+        );
+    }
 
     if !config.memory_enabled {
         tracing::info!(
@@ -2693,6 +2707,8 @@ async fn tokio_main() -> Result<()> {
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
+                                    // A channel we left must not be resumed after a restart.
+                                    ctx.session_store.remove(ch);
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
                                     } else {
@@ -2825,6 +2841,8 @@ async fn tokio_main() -> Result<()> {
                                             );
                                         } else {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            // The owner asked for a fresh session; do not bring the old one back.
+                                            ctx.session_store.remove(buzz_event.channel_id);
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,
@@ -7138,6 +7156,7 @@ mod build_mcp_servers_tests {
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: false,
+            state_dir: None,
             model: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
@@ -7361,6 +7380,7 @@ mod error_outcome_emission_tests {
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: false,
+            state_dir: None,
             model: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
