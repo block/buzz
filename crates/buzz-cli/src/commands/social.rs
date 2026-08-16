@@ -7,12 +7,16 @@ use serde::Deserialize;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::limits::{effective_limit, truncation_notice};
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 use crate::validate::{parse_event_id, validate_hex64};
 
-/// Default and maximum `--limit` for `social notes`.
-const NOTES_LIMIT_DEFAULT: u32 = 50;
-const NOTES_LIMIT_MAX: u32 = 100;
+/// `social notes` pages backwards with the composite `--before` +
+/// `--before-id` cursor, so a caller at the cap has a real next call to make.
+const NOTES_LIMITS: ReadLimits = ReadLimits {
+    default: 50,
+    max: 100,
+    paging: Paging::BeforeCursor,
+};
 
 /// A single contact entry (CLI-local, not from buzz-sdk).
 #[derive(Debug, Deserialize)]
@@ -96,7 +100,7 @@ pub async fn cmd_get_user_notes(
     if let Some(bid) = before_id {
         validate_hex64(bid)?;
     }
-    let limit = effective_limit(requested_limit, NOTES_LIMIT_DEFAULT, NOTES_LIMIT_MAX);
+    let limit = NOTES_LIMITS.effective(requested_limit);
 
     let mut filter = serde_json::json!({
         "kinds": [1],
@@ -116,12 +120,7 @@ pub async fn cmd_get_user_notes(
     let returned = serde_json::from_str::<Vec<serde_json::Value>>(&resp)
         .map(|events| events.len())
         .unwrap_or(0);
-    if let Some(notice) = truncation_notice(
-        returned,
-        requested_limit,
-        NOTES_LIMIT_DEFAULT,
-        NOTES_LIMIT_MAX,
-    ) {
+    if let Some(notice) = truncation_notice(returned, requested_limit, NOTES_LIMITS) {
         eprintln!("{notice}");
     }
     Ok(())
@@ -296,5 +295,16 @@ mod tests {
         assert!(is_parameterized_social_list_kind(KIND_FOLLOW_SET));
         assert!(is_parameterized_social_list_kind(KIND_BOOKMARK_SET));
         assert!(!is_parameterized_social_list_kind(KIND_MUTE_LIST));
+    }
+}
+
+#[cfg(test)]
+mod note_count_tests {
+    use super::{truncation_notice, NOTES_LIMITS};
+
+    #[test]
+    fn a_full_page_of_notes_advertises_the_cursor_it_really_has() {
+        let notice = truncation_notice(100, Some(100), NOTES_LIMITS).expect("full read must warn");
+        assert!(notice.contains("--before / --before-id"), "{notice}");
     }
 }

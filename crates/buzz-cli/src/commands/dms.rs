@@ -2,12 +2,16 @@ use uuid::Uuid;
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::limits::{effective_limit, truncation_notice};
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 use crate::validate::{parse_uuid, sdk_err, validate_hex64};
 
-/// Default and maximum `--limit` for `dms list`.
-const LIST_LIMIT_DEFAULT: u32 = 50;
-const LIST_LIMIT_MAX: u32 = 200;
+/// `dms list` exposes `--limit` and nothing else, so a caller who hits the cap
+/// has no older page to ask for.
+const LIST_LIMITS: ReadLimits = ReadLimits {
+    default: 50,
+    max: 200,
+    paging: Paging::None,
+};
 
 /// Tag values named `name` on a relay event.
 fn tag_values<'a>(event: &'a serde_json::Value, name: &'a str) -> impl Iterator<Item = &'a str> {
@@ -31,15 +35,10 @@ pub async fn cmd_list_dms(
     client: &BuzzClient,
     requested_limit: Option<u32>,
 ) -> Result<(), CliError> {
-    let limit = effective_limit(requested_limit, LIST_LIMIT_DEFAULT, LIST_LIMIT_MAX);
+    let limit = LIST_LIMITS.effective(requested_limit);
     let dms = list_dms(client, limit).await?;
     println!("{}", serde_json::Value::Array(dms.clone()));
-    if let Some(notice) = truncation_notice(
-        dms.len(),
-        requested_limit,
-        LIST_LIMIT_DEFAULT,
-        LIST_LIMIT_MAX,
-    ) {
+    if let Some(notice) = truncation_notice(dms.len(), requested_limit, LIST_LIMITS) {
         eprintln!("{notice}");
     }
     Ok(())
