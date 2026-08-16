@@ -147,7 +147,11 @@ test("a fully archived name gets no card of its own", () => {
 });
 
 test("a split persona with every instance archived keeps one persona-only card", () => {
-  const { groups } = buildUnifiedGroups([FIZZ_PERSONA], FIZZ_AGENTS, () => true);
+  const { groups } = buildUnifiedGroups(
+    [FIZZ_PERSONA],
+    FIZZ_AGENTS,
+    () => true,
+  );
 
   assert.equal(groups[0].cards.length, 1);
   assert.equal(groups[0].cards[0].key, FIZZ_PERSONA.id);
@@ -238,6 +242,82 @@ test("persona-level actions live on exactly one card per persona", () => {
   );
 });
 
+test("persona actions stay put when an instance starts or stops", () => {
+  // Deriving the owner from an active-first pick relocated the only route to
+  // editing or deleting a persona the moment an agent started.
+  const ownerOf = (agents) =>
+    buildUnifiedGroups(
+      [FIZZ_PERSONA],
+      agents,
+      NONE_ARCHIVED,
+    ).groups[0].cards.find((card) => card.ownsPersonaActions).label;
+
+  assert.equal(ownerOf(FIZZ_AGENTS), "Fizz");
+  assert.equal(
+    ownerOf([
+      namedAgent(PUBKEYS.claudeOne, "Claude", "builtin:fizz", "running"),
+      namedAgent(PUBKEYS.claudeTwo, "Claude", "builtin:fizz"),
+      namedAgent(PUBKEYS.fizzOne, "Fizz", "builtin:fizz"),
+      namedAgent(PUBKEYS.fizzTwo, "Fizz", "builtin:fizz"),
+    ]),
+    "Fizz",
+  );
+  assert.equal(
+    ownerOf([
+      namedAgent(PUBKEYS.claudeOne, "Claude", "builtin:fizz"),
+      namedAgent(PUBKEYS.claudeTwo, "Claude", "builtin:fizz"),
+      namedAgent(PUBKEYS.fizzOne, "Fizz", "builtin:fizz", "running"),
+      namedAgent(PUBKEYS.fizzTwo, "Fizz", "builtin:fizz"),
+    ]),
+    "Fizz",
+  );
+});
+
+test("persona actions fall back to the first card when every name was changed", () => {
+  const renamed = [
+    namedAgent(PUBKEYS.claudeOne, "Cascade Instance A", "custom:cascade"),
+    namedAgent(
+      PUBKEYS.claudeTwo,
+      "Cascade Instance B",
+      "custom:cascade",
+      "running",
+    ),
+  ];
+  const { groups } = buildUnifiedGroups(
+    [namedPersona("custom:cascade", "Cascade Test Agent")],
+    renamed,
+    NONE_ARCHIVED,
+  );
+
+  assert.deepEqual(
+    groups[0].cards.map((card) => card.ownsPersonaActions),
+    [true, false],
+  );
+});
+
+test("a split persona keeps its own name on every card", () => {
+  const { groups } = buildUnifiedGroups(
+    [FIZZ_PERSONA],
+    FIZZ_AGENTS,
+    NONE_ARCHIVED,
+  );
+
+  assert.deepEqual(
+    groups[0].cards.map((card) => card.personaLabel),
+    ["Fizz", "Fizz"],
+  );
+});
+
+test("an unsplit persona has no second line to add", () => {
+  const { groups } = buildUnifiedGroups(
+    [namedPersona("custom:solo", "Solo")],
+    [namedAgent(PUBKEYS.claudeOne, "Solo", "custom:solo")],
+    NONE_ARCHIVED,
+  );
+
+  assert.equal(groups[0].cards[0].personaLabel, null);
+});
+
 test("card keys stay unique so cards cannot overwrite each other", () => {
   const { groups } = buildUnifiedGroups(
     [FIZZ_PERSONA],
@@ -247,6 +327,55 @@ test("card keys stay unique so cards cannot overwrite each other", () => {
   const keys = groups[0].cards.map((card) => card.key);
 
   assert.equal(new Set(keys).size, keys.length);
+  // Pinned: e2e specs address split cards by `persona-agent-row-<key>`.
+  assert.deepEqual(keys, ["builtin:fizz::claude", "builtin:fizz::fizz"]);
+});
+
+test("card keys do not move when an instance starts, stops, or is reordered", () => {
+  // A key derived from the current active-first winner remounts the card and
+  // refires its avatar query whenever a sibling's status changes.
+  const keysFor = (agents) =>
+    buildUnifiedGroups(
+      [FIZZ_PERSONA],
+      agents,
+      NONE_ARCHIVED,
+    ).groups[0].cards.map((card) => card.key);
+  const baseline = keysFor(FIZZ_AGENTS);
+
+  assert.deepEqual(
+    keysFor([
+      namedAgent(PUBKEYS.claudeOne, "Claude", "builtin:fizz"),
+      namedAgent(PUBKEYS.claudeTwo, "Claude", "builtin:fizz", "running"),
+      namedAgent(PUBKEYS.fizzOne, "Fizz", "builtin:fizz"),
+      namedAgent(PUBKEYS.fizzTwo, "Fizz", "builtin:fizz", "running"),
+    ]),
+    baseline,
+  );
+  assert.deepEqual(
+    keysFor([
+      namedAgent(PUBKEYS.claudeTwo, "Claude", "builtin:fizz"),
+      namedAgent(PUBKEYS.claudeOne, "Claude", "builtin:fizz"),
+      namedAgent(PUBKEYS.fizzTwo, "Fizz", "builtin:fizz"),
+      namedAgent(PUBKEYS.fizzOne, "Fizz", "builtin:fizz"),
+    ]),
+    baseline,
+  );
+});
+
+test("every distinct name is openable from a card the library actually renders", () => {
+  // `card.agent` is what the card's click handler opens; `card.agents` is the
+  // full set behind it. The render layer reads `agent`, so assert on it too —
+  // an invariant held only by a field no component reads proves nothing.
+  const { groups } = buildUnifiedGroups(
+    [FIZZ_PERSONA],
+    FIZZ_AGENTS,
+    NONE_ARCHIVED,
+  );
+
+  assert.deepEqual(
+    groups[0].cards.map((card) => card.agent.name),
+    ["Claude", "Fizz"],
+  );
 });
 
 test("a persona with no instances keeps its single unchanged card", () => {
