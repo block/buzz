@@ -94,21 +94,37 @@ def _strip_fences(text: str) -> str:
     Blockquote markers are stripped before matching, so a fence quoted with `> `
     is recognised. Without that, quoting someone else's fenced output left its
     contents standing as prose.
+
+    A FENCE OPENED INSIDE A QUOTE CLOSES WITH THE QUOTE. CommonMark ends a block
+    quote lazily — a line with no `>` marker (a blank line included, since a bare
+    `>` strips to empty) closes it, the same way a blank line ends one at the top
+    level. A fence keeps no memory of the container it opened in, so one opened
+    with `> ` and never explicitly closed used to stay open to the end of the
+    document once the quote ended, silently consuming every line after it —
+    including a `Refs #<n>` GitHub would render as ordinary prose (#145).
     """
     out: list[str] = []
     fence: str | None = None
+    fence_in_quote = False
     for line in text.splitlines(keepends=True):
+        if fence is not None and fence_in_quote and not BLOCKQUOTE.match(line):
+            # The quote that contained this fence just ended. The fence closes
+            # with it, so this line is evaluated fresh below — as prose, or as
+            # the start of a new fence — not as content of the old one.
+            fence, fence_in_quote = None, False
+
         probe = BLOCKQUOTE.sub("", line)
         if fence is None:
             m = FENCE_OPEN.match(probe)
             if m:
                 fence = m.group(1)
+                fence_in_quote = bool(BLOCKQUOTE.match(line))
                 continue
             out.append(line)
         else:
             closer = FENCE_CLOSE.match(probe)
             if closer and closer.group(1)[0] == fence[0] and len(closer.group(1)) >= len(fence):
-                fence = None
+                fence, fence_in_quote = None, False
     return "".join(out)
 
 
