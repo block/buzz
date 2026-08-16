@@ -513,8 +513,10 @@ pub(super) trait DeployEffects {
     /// store failed to save.
     fn record_ambiguous_success(&mut self, receipt: &AmbiguousDeployReceipt) -> Result<(), String>;
 
-    /// Drop any ambiguous-success receipt for `pubkey`: the store has just
-    /// recorded a known outcome for this agent, so the ambiguity is resolved.
+    /// Drop any ambiguous-success receipt for `pubkey`. Called only after a
+    /// provider success the store recorded: that deploy superseded the earlier
+    /// one remotely *and* left a local record of doing so, so the ambiguity is
+    /// genuinely resolved. A saved failure must not reach this.
     fn clear_ambiguous_success(&mut self, pubkey: &str);
 
     /// Build the success value from the freshly persisted record.
@@ -557,7 +559,13 @@ pub(super) async fn run_deploy<E: DeployEffects>(
             save_error,
         ));
     }
-    if saved {
+    // Only a provider success that the store also recorded resolves an earlier
+    // ambiguity. A saved *failure* records that this attempt never reached the
+    // provider, which says nothing about the deployment a previous attempt may
+    // have left running — it did not supersede it remotely. Clearing the
+    // receipt on it would delete the only evidence of a deployment the store
+    // never recorded.
+    if saved && deploy_result.is_ok() {
         effects.clear_ambiguous_success(pubkey);
     }
 

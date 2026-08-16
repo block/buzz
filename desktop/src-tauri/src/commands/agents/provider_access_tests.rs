@@ -668,9 +668,10 @@ async fn a_failed_deploy_the_store_could_not_save_leaves_no_receipt() {
     );
 }
 
-/// The next deploy that *does* save resolves the ambiguity, so the receipt is
-/// dropped — a receipt on disk always means an outcome the store still does
-/// not reflect.
+/// The next provider *success* that also saves resolves the ambiguity — it
+/// superseded the earlier deploy remotely and left a local record of doing so —
+/// so the receipt is dropped. A receipt on disk always means an outcome the
+/// store still does not reflect.
 #[tokio::test]
 async fn a_saved_completion_clears_an_earlier_receipt() {
     let pubkey = "reconciled-agent";
@@ -695,6 +696,61 @@ async fn a_saved_completion_clears_an_earlier_receipt() {
     assert!(
         receipts.lock().unwrap().is_empty(),
         "a recorded completion left the stale receipt behind"
+    );
+}
+
+/// A saved *failure* is not a resolution. Attempt A succeeds at the provider
+/// and loses its store write, leaving a receipt. Attempt B then fails at the
+/// provider, and that failure saves cleanly — but B never reached the
+/// provider's desired state, so it did not supersede A remotely. A's
+/// deployment may still be running with an input the store never recorded, and
+/// the receipt is the only evidence of it. It must survive B.
+#[tokio::test]
+async fn a_saved_failure_does_not_clear_an_earlier_receipt() {
+    let pubkey = "still-ambiguous-agent";
+    let store = Arc::new(Mutex::new(vec![provider_backed_record(
+        pubkey, "model-v1", "t1",
+    )]));
+    let world = World::new("persona-v1");
+
+    // Attempt A: the provider accepted it, the store write failed.
+    let mut effects = FakeDeployEffects::new(&store, &world, Ok("deploy-a".to_string()));
+    effects.save_fails_with = Some("no space left on device".to_string());
+    let receipts = effects.receipts.clone();
+    let _ = provider_access::run_deploy(pubkey, &mut effects).await;
+    assert_eq!(
+        receipts.lock().unwrap().len(),
+        1,
+        "attempt A left no receipt"
+    );
+
+    // Attempt B: the provider rejected it, and the store recorded that.
+    let saves = Arc::new(Mutex::new(0));
+    let mut effects = FakeDeployEffects::new(&store, &world, Err("image pull failed".to_string()))
+        .sharing(&Arc::new(Mutex::new(Vec::new())), &saves);
+    effects.receipts = receipts.clone();
+    let error = provider_access::run_deploy(pubkey, &mut effects)
+        .await
+        .expect_err("a provider failure is not a success");
+    assert_eq!(error, "image pull failed");
+
+    // The failure really did save — otherwise the assertion below would pass
+    // for the wrong reason.
+    assert_eq!(*saves.lock().unwrap(), 1, "attempt B did not save");
+    assert_eq!(
+        store.lock().unwrap()[0].last_error.as_deref(),
+        Some("image pull failed")
+    );
+
+    let receipts = receipts.lock().unwrap();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "a saved provider failure cleared the earlier ambiguity receipt"
+    );
+    assert_eq!(
+        receipts[0].backend_agent_id, "deploy-a",
+        "the surviving receipt must still name attempt A's deployment"
     );
 }
 
