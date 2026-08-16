@@ -491,22 +491,30 @@ pub(crate) fn connection_relay_url(configured_relay_url: &str) -> String {
 /// tenancy-significant differences: `localhost`, `127.0.0.1`, and `[::1]`
 /// stay three distinct hosts, and `ws` vs `wss`, non-default ports (including
 /// the OTHER scheme's default), paths, and query strings stay distinct.
-/// `None` for unparsable URLs - the caller falls back to exact comparison.
+/// `None` for unparsable URLs - and for parseable ones that are not valid
+/// relay targets: a non-ws(s) scheme, userinfo, or a fragment (all rejected
+/// by `normalize_relay_url`, and matching the TS mirror's scheme gate).
+/// Folding those away would alias distinct spellings like
+/// `wss://alice@relay.example` and `wss://bob@relay.example`; returning
+/// `None` fails closed onto the caller's exact comparison instead.
 fn connection_target(raw: &str) -> Option<ConnectionTarget> {
     let url = url::Url::parse(raw.trim()).ok()?;
     let scheme = url.scheme().to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "ws" => 80,
+        "wss" => 443,
+        _ => return None,
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return None;
+    }
     let host = {
         let host = url.host_str()?.to_ascii_lowercase();
         host.strip_suffix('.').map(str::to_string).unwrap_or(host)
     };
-    let default_port = match scheme.as_str() {
-        "ws" | "http" => Some(80),
-        "wss" | "https" => Some(443),
-        _ => None,
-    };
     let port = url
         .port_or_known_default()
-        .filter(|port| Some(*port) != default_port);
+        .filter(|port| *port != default_port);
     let path = match url.path() {
         "/" => String::new(),
         path => path.to_string(),

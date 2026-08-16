@@ -195,3 +195,37 @@ test("connectionTargetUrl folds formatting but preserves tenant hosts", () => {
     connectionTargetUrl("ws://127.0.0.1:3000"),
   );
 });
+
+test("connectionTargetUrl fails closed on userinfo and fragments", () => {
+  // normalize_relay_url rejects these; folding them away here would alias
+  // wss://alice@relay with wss://bob@relay. Null routes the caller to the
+  // exact-string fallback instead.
+  assert.equal(connectionTargetUrl("ws://alice@relay.example"), null);
+  assert.equal(connectionTargetUrl("ws://:secret@relay.example"), null);
+  assert.equal(connectionTargetUrl("wss://relay.example#a"), null);
+});
+
+test("userinfo spellings never alias through requested-URL matching", () => {
+  const runtimes = [
+    runtime({
+      relayUrl: "ws://relay.example:3000",
+      requestedRelayUrl: "ws://alice@relay.example:3000",
+      lifecycle: "ready",
+    }),
+  ];
+  // Exact fallback still resolves the row that was actually dialed...
+  assert.equal(
+    findManagedAgentRuntime(runtimes, "aa", "ws://alice@relay.example:3000")
+      ?.lifecycle,
+    "ready",
+  );
+  // ...but a different credential spelling of the same authority must not.
+  assert.equal(
+    findManagedAgentRuntime(runtimes, "aa", "ws://bob@relay.example:3000"),
+    undefined,
+  );
+  assert.equal(
+    findManagedAgentRuntime(runtimes, "aa", "ws://relay.example:3000"),
+    undefined,
+  );
+});

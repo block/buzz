@@ -180,3 +180,39 @@ fn pair_reuse_keeps_tenancy_significant_differences_conflicting() {
         );
     }
 }
+
+#[test]
+fn pair_reuse_fails_closed_on_invalid_connection_targets() {
+    // Userinfo, fragments, and non-ws(s) schemes are rejected by
+    // `normalize_relay_url` and never fold — target comparison would
+    // otherwise alias `alice@` with `bob@` (or `#a` with `#b`). They fall
+    // back to exact comparison: only the byte-identical spelling reuses.
+    for spelling in [
+        "ws://alice@relay.example:3000",
+        "wss://relay.example#a",
+        "http://relay.example:3000",
+    ] {
+        let runtime = make_pair_runtime_with_connect_url(spelling);
+        assert!(
+            super::ensure_pair_connection_matches(&runtime, spelling).is_ok(),
+            "byte-identical invalid spelling must reuse via exact fallback: {spelling}",
+        );
+    }
+    for (live, requested) in [
+        (
+            "ws://alice@relay.example:3000",
+            "ws://bob@relay.example:3000",
+        ),
+        ("ws://alice@relay.example:3000", "ws://relay.example:3000"),
+        ("wss://relay.example#a", "wss://relay.example#b"),
+        ("wss://relay.example#a", "wss://relay.example"),
+        // Non-relay schemes never fold, even across pure formatting drift.
+        ("http://relay.example:3000", "http://Relay.Example:3000"),
+    ] {
+        let runtime = make_pair_runtime_with_connect_url(live);
+        assert!(
+            super::ensure_pair_connection_matches(&runtime, requested).is_err(),
+            "invalid targets must not alias: {live} vs {requested}",
+        );
+    }
+}

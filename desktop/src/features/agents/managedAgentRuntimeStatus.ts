@@ -97,7 +97,11 @@ export function canonicalRelayUrl(raw: string): string | null {
  * (buzz-core's `tenant::normalize_host`): lowercase host, strip an explicit
  * default port and the FQDN root dot, fold the root-path slash - WITHOUT
  * folding loopback spellings, which are distinct tenants on a host-scoped
- * relay. Returns null when the URL cannot be parsed as ws/wss.
+ * relay. Returns null when the URL cannot be parsed as ws/wss — or carries
+ * userinfo or a fragment, which `normalize_relay_url` rejects: folding those
+ * away would alias distinct spellings like `wss://alice@relay.example` and
+ * `wss://bob@relay.example`, so they fail closed onto the caller's
+ * exact-string fallback instead (mirrors the Rust `connection_target`).
  */
 export function connectionTargetUrl(raw: string): string | null {
   let url: URL;
@@ -107,6 +111,9 @@ export function connectionTargetUrl(raw: string): string | null {
     return null;
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  if (url.username !== "" || url.password !== "" || url.hash !== "") {
+    return null;
+  }
   const host = url.hostname.toLowerCase().replace(/\.$/, "");
   const defaultPort = url.protocol === "ws:" ? "80" : "443";
   const port = url.port && url.port !== defaultPort ? `:${url.port}` : "";
