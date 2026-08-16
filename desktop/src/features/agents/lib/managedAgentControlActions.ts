@@ -60,12 +60,22 @@ export function isManagedAgentLive(
 
 /**
  * Avatar / presence-dot display for bots and managed agents.
- * Prefer real relay presence; never map provider `deployed` → online.
+ * Provider-backed: relay presence only (never map infrastructure `deployed` → online).
+ * Local / non-provider: infrastructure status (running/deployed → online).
  */
 export function resolveManagedAgentDisplayPresence(
-  _agent: ManagedAgent | undefined,
+  agent: ManagedAgent | undefined,
   presence?: PresenceStatus | null,
 ): PresenceStatus {
+  if (agent?.backend.type === "provider") {
+    return presence ?? "offline";
+  }
+  if (agent && isManagedAgentActive(agent)) {
+    return "online";
+  }
+  if (agent) {
+    return "offline";
+  }
   return presence ?? "offline";
 }
 

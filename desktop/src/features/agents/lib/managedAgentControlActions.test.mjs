@@ -235,3 +235,19 @@ test("missing presence on provider → not live / Deploy", () => {
   );
   assert.equal(resolveManagedAgentDisplayPresence(remote, "online"), "online");
 });
+
+test("local running without presence row stays online (infra, not relay)", () => {
+  const running = agent({ status: "running" });
+  const stopped = agent({ status: "stopped" });
+
+  assert.equal(resolveManagedAgentDisplayPresence(running, undefined), "online");
+  assert.equal(resolveManagedAgentDisplayPresence(running, null), "online");
+  assert.equal(resolveManagedAgentDisplayPresence(running, "offline"), "online");
+  assert.equal(resolveManagedAgentDisplayPresence(stopped, undefined), "offline");
+  assert.equal(resolveManagedAgentDisplayPresence(stopped, "online"), "offline");
+});
+
+test("undefined agent falls back to relay presence", () => {
+  assert.equal(resolveManagedAgentDisplayPresence(undefined, "away"), "away");
+  assert.equal(resolveManagedAgentDisplayPresence(undefined, undefined), "offline");
+});
