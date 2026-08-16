@@ -67,6 +67,9 @@ ALLOWLIST: dict[str, frozenset[str]] = {
     # call placed here left every control green, on precisely the file anyone
     # checking the no-model claim would look at.
     "pr-preflight.py": frozenset({"__future__", "os", "sys", "preflight_fetch"}),
+    # ADR-0005's boundary check. Reads tracked files for upstream-namespace
+    # leftovers; no subprocess, no network.
+    "adr_boundary_check.py": frozenset({"re", "sys", "pathlib"}),
 }
 
 
