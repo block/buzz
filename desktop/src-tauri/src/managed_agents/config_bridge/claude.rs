@@ -1,10 +1,13 @@
+use std::path::{Path, PathBuf};
+
 use super::types::{ExtensionEntry, RuntimeFileConfig};
 
-/// Read Claude Code config from `~/.claude/settings.json` and `~/.claude.json`.
-pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
-    let home = dirs::home_dir()?;
-    let settings_path = home.join(".claude").join("settings.json");
-    let mcp_path = home.join(".claude.json");
+/// Read Claude Code config from `settings.json` and `.claude.json`, resolved
+/// against `config_dir` (the agent's effective `CLAUDE_CONFIG_DIR`, if set) or
+/// `~/.claude`/`~` otherwise. Passing the correct `config_dir` for an isolated
+/// agent is what keeps this from reading the operator's personal config.
+pub(super) fn read_config_file(config_dir: Option<&Path>) -> Option<RuntimeFileConfig> {
+    let (settings_path, mcp_path) = claude_config_paths(config_dir)?;
 
     let settings = read_json_file(&settings_path);
     let mcp_config = read_json_file(&mcp_path);
@@ -26,7 +29,7 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
         cfg.extra = super::schema_walker::extract_config_fields(s, skip);
     }
 
-    // MCP servers from ~/.claude.json
+    // MCP servers from mcp_path (~/.claude.json, or <CLAUDE_CONFIG_DIR>/.claude.json)
     let mut extensions = Vec::new();
     if let Some(ref mc) = mcp_config {
         if let Some(servers) = mc.get("mcpServers").and_then(|v| v.as_object()) {
@@ -42,6 +45,24 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     cfg.extensions = extensions;
 
     Some(cfg)
+}
+
+/// Resolve `(settings.json, .claude.json)` for `config_dir`. When
+/// `config_dir` is `Some` (an explicit `CLAUDE_CONFIG_DIR`), both files live
+/// directly under it — matching Claude Code's own resolution, which replaces
+/// `~/.claude` *and* moves the top-level `.claude.json` inside it. Otherwise
+/// falls back to the default `~/.claude/settings.json` + `~/.claude.json`.
+pub(super) fn claude_config_paths(config_dir: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
+    match config_dir {
+        Some(dir) => Some((dir.join("settings.json"), dir.join(".claude.json"))),
+        None => {
+            let home = dirs::home_dir()?;
+            Some((
+                home.join(".claude").join("settings.json"),
+                home.join(".claude.json"),
+            ))
+        }
+    }
 }
 
 fn read_json_file(path: &std::path::Path) -> Option<serde_json::Value> {
@@ -60,6 +81,47 @@ fn json_string(val: &serde_json::Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_dir_override_reads_settings_and_mcp_from_isolated_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"model": "isolated-model"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".claude.json"),
+            r#"{"mcpServers": {"isolated-server": {"command": "foo"}}}"#,
+        )
+        .unwrap();
+
+        let cfg = read_config_file(Some(dir.path())).expect("config read from isolated dir");
+        assert_eq!(cfg.model.as_deref(), Some("isolated-model"));
+        assert_eq!(cfg.extensions.len(), 1);
+        assert_eq!(cfg.extensions[0].name, "isolated-server");
+    }
+
+    #[test]
+    fn config_dir_override_does_not_leak_operator_home_config() {
+        // An isolated agent's CLAUDE_CONFIG_DIR pointing at an empty directory
+        // must never fall back to reading the operator's ~/.claude.json, even
+        // when the isolated dir has no files of its own yet.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = read_config_file(Some(dir.path()));
+        assert!(
+            cfg.is_none(),
+            "empty isolated dir must not surface any config"
+        );
+    }
+
+    #[test]
+    fn claude_config_paths_nests_both_files_under_explicit_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (settings_path, mcp_path) = claude_config_paths(Some(dir.path())).unwrap();
+        assert_eq!(settings_path, dir.path().join("settings.json"));
+        assert_eq!(mcp_path, dir.path().join(".claude.json"));
+    }
 
     /// Parse a settings JSON string into a RuntimeFileConfig using the same
     /// logic as read_config_file but without touching the filesystem.
