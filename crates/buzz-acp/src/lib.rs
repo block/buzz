@@ -1417,6 +1417,10 @@ struct SlotCircuit {
     /// not yet followed by a successful respawn. Lets the respawn-complete
     /// path emit a matching "recovered" alert exactly once.
     alerted_open: bool,
+    /// Channel of the prompt that triggered the crash behind `alerted_open`,
+    /// if any. Carried forward so the "recovered" alert renders in the same
+    /// channel as the "suspended" alert it resolves, instead of nowhere.
+    alerted_channel_id: Option<Uuid>,
 }
 
 /// Result of [`SlotCircuit::record_crash`].
@@ -1799,6 +1803,7 @@ mod idle_pool_sleep_tests {
             open_until: None,
             respawn_in_flight,
             alerted_open: false,
+            alerted_channel_id: None,
         }
     }
 
@@ -2379,6 +2384,7 @@ async fn tokio_main() -> Result<()> {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         })
         .collect();
 
@@ -2492,7 +2498,8 @@ async fn tokio_main() -> Result<()> {
                     tracing::info!(agent = rr.index, "respawn complete");
                     if crash_history[rr.index].alerted_open {
                         crash_history[rr.index].alerted_open = false;
-                        emit_circuit_recovered_alert(observer.as_ref(), rr.index);
+                        let channel_id = crash_history[rr.index].alerted_channel_id.take();
+                        emit_circuit_recovered_alert(observer.as_ref(), rr.index, channel_id);
                     }
                     respawn_collected = true;
                 }
@@ -4007,14 +4014,25 @@ fn emit_circuit_open_alert(
 ///
 /// Closes the loop for an owner watching the observer stream: they see both
 /// when a slot went dark and when it came back, rather than only the former.
-fn emit_circuit_recovered_alert(observer: Option<&observer::ObserverHandle>, agent_index: usize) {
+///
+/// `channel_id` is the channel of the prompt that triggered the crash behind
+/// this recovery, if any — carried from `SlotCircuit::alerted_channel_id` so
+/// this alert renders in the same channel as the "suspended" alert it
+/// resolves. Previously this was always emitted with no channel, so it had no
+/// channel-scoped surface in the desktop app and the "suspended" message
+/// never appeared to resolve.
+fn emit_circuit_recovered_alert(
+    observer: Option<&observer::ObserverHandle>,
+    agent_index: usize,
+    channel_id: Option<Uuid>,
+) {
     let Some(observer) = observer else {
         return;
     };
     observer.emit(
         "circuit_recovered",
         Some(agent_index),
-        &observer::context_for(None, None, None),
+        &observer::context_for(channel_id, None, None),
         serde_json::json!({
             "error": format!(
                 "Agent slot {agent_index} recovered — its circuit breaker probe succeeded and it is responding again."
@@ -4492,6 +4510,7 @@ fn recover_panicked_agent(
             tracing::error!(agent = i, "circuit open after panic — not respawning");
             emit_circuit_open_alert(observer.as_ref(), i, meta.channel_id, "panicked");
             slot.alerted_open = true;
+            slot.alerted_channel_id = meta.channel_id;
             return;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -4716,6 +4735,7 @@ fn spawn_respawn_task(
             tracing::error!(agent = index, "circuit open — not respawning");
             emit_circuit_open_alert(observer.as_ref(), index, channel_id, "crashed");
             slot.alerted_open = true;
+            slot.alerted_channel_id = channel_id;
             return false;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -7549,6 +7569,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7622,6 +7643,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7737,6 +7759,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7799,6 +7822,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7881,6 +7905,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -7970,6 +7995,7 @@ mod error_outcome_emission_tests {
                 open_until: None,
                 respawn_in_flight: false,
                 alerted_open: false,
+                alerted_channel_id: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8063,6 +8089,7 @@ mod error_outcome_emission_tests {
                 open_until: None,
                 respawn_in_flight: false,
                 alerted_open: false,
+                alerted_channel_id: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8170,6 +8197,7 @@ mod error_outcome_emission_tests {
                 open_until: None,
                 respawn_in_flight: false,
                 alerted_open: false,
+                alerted_channel_id: None,
             }];
             let (respawn_tx, _respawn_rx) = mpsc::channel(8);
             let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8248,6 +8276,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8343,6 +8372,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8472,6 +8502,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8603,6 +8634,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8793,6 +8825,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
@@ -8880,6 +8913,7 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
             alerted_open: false,
+            alerted_channel_id: None,
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
