@@ -23,6 +23,7 @@ type SidebarSelectedView =
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
+  currentChannelId?: string | null;
   currentPubkey?: string;
   onBrowseChannels?: () => void;
   onCreateAgent: () => void;
@@ -32,6 +33,7 @@ type AppSidebarPinnedHeaderProps = {
   onSelectChannel: (channelId: string) => void;
   searchChannels: Channel[];
   searchFocusRequest: number;
+  scopeSearchFocusRequest: number;
   suggestionChannels: Channel[];
 };
 
@@ -47,6 +49,7 @@ type AppSidebarPrimaryMenuProps = {
 
 export function AppSidebarPinnedHeader({
   channelLabels,
+  currentChannelId,
   currentPubkey,
   onBrowseChannels,
   onCreateAgent,
@@ -56,6 +59,7 @@ export function AppSidebarPinnedHeader({
   onSelectChannel,
   searchChannels,
   searchFocusRequest,
+  scopeSearchFocusRequest,
   suggestionChannels,
 }: AppSidebarPinnedHeaderProps) {
   return (
@@ -66,6 +70,7 @@ export function AppSidebarPinnedHeader({
       <TopbarSearch
         channelLabels={channelLabels}
         channels={searchChannels}
+        currentChannelId={currentChannelId}
         currentPubkey={currentPubkey}
         focusRequest={searchFocusRequest}
         onOpenChannel={onSelectChannel}
@@ -74,6 +79,7 @@ export function AppSidebarPinnedHeader({
         onBrowseChannels={onBrowseChannels}
         onCreateAgent={onCreateAgent}
         onCreateChannel={onCreateChannel}
+        scopeFocusRequest={scopeSearchFocusRequest}
         suggestionChannels={suggestionChannels}
       />
     </div>
@@ -98,13 +104,22 @@ export function AppSidebarPrimaryMenu({
       <SidebarMenu className="pb-2">
         <SidebarMenuItem>
           <SidebarMenuButton
+            className="data-[active=true]:font-normal"
             isActive={selectedView === "home"}
             onClick={onSelectHome}
             tooltip="Inbox"
             type="button"
           >
-            <Inbox className="h-4 w-4" />
-            <SidebarMenuLabel>Inbox</SidebarMenuLabel>
+            <Inbox
+              className={
+                selectedView !== "home" ? "h-4 w-4 opacity-80" : "h-4 w-4"
+              }
+            />
+            <SidebarMenuLabel
+              className={selectedView !== "home" ? "opacity-80" : undefined}
+            >
+              Inbox
+            </SidebarMenuLabel>
           </SidebarMenuButton>
           {homeBadgeCount > 0 ? (
             <SidebarMenuBadge
@@ -145,14 +160,23 @@ export function AppSidebarPrimaryMenu({
         </FeatureGate>
         <SidebarMenuItem>
           <SidebarMenuButton
+            className="data-[active=true]:font-normal"
             data-testid="open-agents-view"
             isActive={selectedView === "agents"}
             onClick={onSelectAgents}
             tooltip="Agents"
             type="button"
           >
-            <Bot className="h-4 w-4" />
-            <SidebarMenuLabel>Agents</SidebarMenuLabel>
+            <Bot
+              className={
+                selectedView !== "agents" ? "h-4 w-4 opacity-80" : "h-4 w-4"
+              }
+            />
+            <SidebarMenuLabel
+              className={selectedView !== "agents" ? "opacity-80" : undefined}
+            >
+              Agents
+            </SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="workflows">

@@ -212,28 +212,34 @@ desktop-tauri-test: _ensure-sidecar-stubs
 desktop-terminal-performance-test:
     cargo test --manifest-path desktop/src-tauri/crates/buzz-terminal/Cargo.toml --release --test latency g3_renderer_acquire_stays_within_frame_budget -- --ignored --exact --nocapture
 
-# Verify compiled-flag behavior under both compile states (clean + internal).
-# Runs the observer_archive focused test twice with independently supplied
-# expected values; build.rs rerun-if-env-changed triggers recompilation.
+# Verify compiled-flag behavior under both compile states (clean + capability set).
+# Runs the auto-connect and owner-only access focused tests twice with
+# independently supplied expected values; build.rs rerun-if-env-changed
+# triggers recompilation.
 desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     cd desktop/src-tauri
     echo "=== Clean build (no flag) → expect false ==="
-    env -u BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT \
-      -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
-      BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=false \
-      cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
     env -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
       BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false \
       cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    env -u BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false \
+      cargo test --lib
+    env -u BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false \
+      cargo test compiled_policy_matches_expected -- --ignored --nocapture
     echo "=== Internal build (flags set) → expect true ==="
-    BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT=1 \
-      BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=true \
-      cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
     BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1 \
       BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true \
       cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
+      cargo test --lib
+    BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
+      cargo test compiled_policy_matches_expected -- --ignored --nocapture
     echo "Both compiled states verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
@@ -269,6 +275,10 @@ desktop-e2e-smoke:
 # Run desktop relay-backed e2e tests
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
+
+# Run the deterministic desktop correctness smoke against an isolated local relay
+desktop-release-smoke:
+    ./scripts/run-desktop-release-smoke.sh
 
 # Run only the e2e specs changed vs origin/main (both projects) before pushing
 desktop-e2e-pre-push: _ensure-migrations
@@ -349,7 +359,6 @@ mesh-dev-fresh:
 mesh-e2e-hardware:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo run -p buzz-relay --example mesh_serve_client_smoke
 
 # Three isolated node processes: trusted member joins and infers; stranger is rejected.
@@ -357,14 +366,12 @@ mesh-e2e-hardware:
 mesh-e2e-admission:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo run -p buzz-relay --example mesh_admission_smoke
 
 # Full hardware confidence suite: routing, owner admission, and real agent inference.
 mesh-e2e-confidence:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo build --release -p buzz-agent -p buzz-dev-mcp
     cargo run -p buzz-relay --example mesh_serve_client_smoke
     cargo run -p buzz-relay --example mesh_admission_smoke
@@ -451,9 +458,6 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
         done
     fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
-    if [[ -n "{{mesh}}" ]]; then
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
-    fi
     # Docker Desktop's forwarded MinIO port can stall under the deployment
     # probe's 32 concurrent writers. Keep the gate enabled in local dev, using
     # the bounded profile already used by the relay test launcher.
@@ -530,7 +534,6 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
     # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
     # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
@@ -566,7 +569,6 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
     # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
     # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the

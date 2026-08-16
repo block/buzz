@@ -5,7 +5,7 @@ import * as React from "react";
 
 import type { Channel } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
-import { useHuddle } from "../HuddleContext";
+import { useHuddle, useHuddleLevels } from "../HuddleContext";
 import { MicControls } from "./MicControls";
 
 type HuddleProfileState = {
@@ -42,8 +42,6 @@ export function HuddleProfileControl({
     leaveHuddle,
     micConnected,
     micGain,
-    micLevel,
-    pttActive,
     selectedDeviceId,
     setMicGain,
     setSelectedDeviceId,
@@ -51,6 +49,7 @@ export function HuddleProfileControl({
     toggleMute,
     voiceInputMode,
   } = useHuddle();
+  const { micLevel } = useHuddleLevels();
   const [isLeaving, setIsLeaving] = React.useState(false);
   const [state, setState] = React.useState<HuddleProfileState | null>(null);
   const lastHuddleChannelIdRef = React.useRef<string | null>(null);
@@ -156,7 +155,6 @@ export function HuddleProfileControl({
           onSelectDevice={setSelectedDeviceId}
           onSelectVoiceInputMode={setVoiceInputMode}
           onToggleMute={toggleMute}
-          pttActive={pttActive}
           selectedDeviceId={selectedDeviceId}
         />
         <Button

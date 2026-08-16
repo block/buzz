@@ -250,6 +250,9 @@ type MockBridgeOptions = {
   personaSharePublicationStatuses?: Array<"published" | "queued">;
   teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
+  /** Reject successive relay-agent directory reads, then resume. */
+  relayAgentListErrors?: (string | null)[];
+  /** Delay both managed and relay agent directory reads. */
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
   channelTemplates?: ChannelTemplate[];
@@ -266,14 +269,25 @@ type MockBridgeOptions = {
   ensureStarterChannelsErrors?: string[];
   /** Reject successive mock `join_channel` calls, then resume. */
   joinChannelErrors?: string[];
+  channelsReadDelayMs?: number;
+  /** Return not-modified for this many reads before resuming full payloads. */
+  channelsNotModifiedResponses?: number;
+  /** When true, a matching knownHash returns a not-modified channel payload. */
+  honorChannelsKnownHash?: boolean;
   /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
   deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
+  /** Reject `clear_pending_navigation_deep_links` with this message. */
+  clearPendingNavigationDeepLinksError?: string;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
+  mediaProxyInitiallyUnavailable?: boolean;
+  /** Hold mock send live echoes until the E2E release seam is invoked. */
+  deferSendMessageLiveEcho?: boolean;
   /** Close the first channel-window live REQ; its retry is accepted. */
   closeChannelLiveSubscriptionOnce?: boolean;
   /** Reject successive kind-9 sends with these messages, then resume. */
@@ -292,6 +306,39 @@ type MockBridgeOptions = {
   profileHasEvent?: boolean;
   profileUpdateError?: string;
   profileUpdateErrors?: string[];
+  linkPreviewMetadata?: {
+    title: string;
+    siteName: string | null;
+    description: string | null;
+    imageDataUrl: string | null;
+    imageDomain: string | null;
+    imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+    imageRetryAfterMs?: number | null;
+    faviconDataUrl?: string | null;
+  } | null;
+  linkPreviewMetadataByHref?: Record<
+    string,
+    {
+      title: string;
+      siteName: string | null;
+      description: string | null;
+      imageDataUrl: string | null;
+      imageDomain: string | null;
+      imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+      imageRetryAfterMs?: number | null;
+      faviconDataUrl?: string | null;
+    } | null
+  >;
+  linkPreviewMetadataDelayMs?: number;
+  /** Simulates native cold-cache startup work before the async response. */
+  linkPreviewMetadataStartBlockMs?: number;
+  /** Delays link-preview snapshot media uploads so specs can drive an in-flight
+   *  snapshot upload. See e2eBridge mock.linkPreviewUploadDelayMs. */
+  linkPreviewUploadDelayMs?: number;
+  /** Substrings of `link-preview-*` upload filenames whose upload should reject,
+   *  so specs can drive a per-media snapshot upload failure. See e2eBridge
+   *  mock.linkPreviewUploadErrorFilenames. */
+  linkPreviewUploadErrorFilenames?: string[];
   searchProfiles?: MockSearchProfileSeed[];
   updateAvailable?: boolean;
   updateChannelDelayMs?: number;
@@ -308,28 +355,6 @@ type MockBridgeOptions = {
   websocketConnectErrors?: string[];
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
-  /**
-   * Value returned by the `observer_archive_default_enabled` mock command.
-   * `true` = internal-policy build (toggle locked ON); `false`/omitted = OSS
-   * build (toggle functional). Drives LocalArchiveSettingsCard policy state.
-   */
-  observerArchiveDefaultEnabled?: boolean;
-  /**
-   * Delay (ms) applied to `observer_archive_default_enabled` so specs can
-   * exercise short-lived loading UI. Prefer the explicit defer/release seam
-   * when asserting behavior while the policy check is pending.
-   */
-  observerArchiveDefaultEnabledDelayMs?: number;
-  /**
-   * Hold `observer_archive_default_enabled` until the test calls
-   * `__BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__`.
-   */
-  deferObserverArchiveDefaultEnabled?: boolean;
-  /**
-   * When set, `observer_archive_default_enabled` throws with this message —
-   * drives the fail-closed path when the policy check itself fails.
-   */
-  observerArchiveDefaultEnabledError?: string;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**
@@ -360,6 +385,8 @@ type MockBridgeOptions = {
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
   uploadDelayMs?: number;
+  /** Exercise the production composer path that queues files until send. */
+  deferredComposerUploads?: boolean;
   /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
    *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
   encodeDelayMs?: number;
@@ -424,6 +451,8 @@ type MockBridgeOptions = {
    * invoked. Drives the keyring-locked screen in tests.
    */
   identityLocked?: boolean;
+  /** Delay (ms) applied to identity import so specs can observe pending navigation. */
+  identityImportDelayMs?: number;
   /**
    * Pending community deep links seeded into the mocked Rust-side queue.
    * The frontend drains these on boot into onboarding or an editable Add
@@ -436,6 +465,19 @@ type MockBridgeOptions = {
     code?: string | null;
     name?: string | null;
   }>;
+  /** Pending channel/message links that arrived before AppShell mounted. */
+  pendingNavigationDeepLinks?: Array<{
+    id: string;
+    kind: "channel" | "message";
+    channelId: string;
+    messageId?: string | null;
+    threadRootId?: string | null;
+  }>;
+  /** Entity links captured by Rust before the React listener mounts. */
+  pendingEntityDeepLinks?: Array<{
+    id: string;
+    href: string;
+  }>;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
    * an empty config (no provider, model, or env vars) if not specified.
@@ -447,6 +489,7 @@ type MockBridgeOptions = {
     model: string | null;
     preferred_runtime?: string | null;
   };
+  ownerOnlyAccessBuild?: boolean;
   /** File-layer config returned by runtime id. */
   runtimeFileConfigs?: Record<
     string,

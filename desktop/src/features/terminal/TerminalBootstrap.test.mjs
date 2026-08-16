@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { after, afterEach, before, test } from "node:test";
+import { after, afterEach, before, beforeEach, test } from "node:test";
 
 import { JSDOM } from "jsdom";
+import { setTerminalPanelMode } from "./terminalPanelStore.ts";
 
 // `pretendToBeVisual` is what gives jsdom requestAnimationFrame. The banner's
 // animation loop needs it; without it the loop silently never runs and every
@@ -18,6 +19,8 @@ let resizeCallback;
 let canvasWidth = 840;
 let attachResolver = null;
 let deferResizes = false;
+let deferClose = false;
+let closeResolver = null;
 const pendingResizes = [];
 
 before(async () => {
@@ -33,7 +36,10 @@ before(async () => {
   dom.window.localStorage.setItem("buzz-follow-system", "false");
   dom.window.isTauri = true;
   dom.window.matchMedia = () => ({
-    matches: false,
+    // This suite exercises bootstrap/IPC behavior, not banner motion. Keeping
+    // animation disabled avoids competing perpetual rAF loops under the full
+    // parallel test runner; motion itself is covered by TerminalSubstrate.
+    matches: true,
     addEventListener() {},
     removeEventListener() {},
   });
@@ -79,9 +85,12 @@ before(async () => {
       calls.push({ command, args });
       if (command === "terminal_attach") {
         channel = args.onFrame;
+        const sessionNumber = calls.filter(
+          ({ command }) => command === "terminal_attach",
+        ).length;
         const response = {
-          sessionId: "session-1",
-          subscriptionId: "subscription-1",
+          sessionId: `session-${sessionNumber}`,
+          subscriptionId: `subscription-${sessionNumber}`,
           viewport: { columns: 100, generation: 0, screenLines: 24 },
         };
         return attachResolver
@@ -101,6 +110,11 @@ before(async () => {
           pendingResizes.push(() => resolve(value));
         });
       }
+      if (command === "terminal_close" && deferClose) {
+        return new Promise((resolve) => {
+          closeResolver = resolve;
+        });
+      }
       return Promise.resolve();
     },
     transformCallback(callback) {
@@ -115,11 +129,17 @@ before(async () => {
 });
 
 after(() => dom.window.close());
-afterEach(() => {
+beforeEach(() => setTerminalPanelMode("docked"));
+afterEach(async () => {
+  const { cleanup } = await import("@testing-library/react");
+  cleanup();
+  setTerminalPanelMode("closed");
   calls.length = 0;
   canvasWidth = 840;
   attachResolver = null;
   deferResizes = false;
+  deferClose = false;
+  closeResolver = null;
   pendingResizes.length = 0;
 });
 
@@ -172,6 +192,9 @@ test("mounted bootstrap passes GUI context and ACKs only after consuming a frame
     threadId: "thread-1",
   });
 
+  const sessionNumber = calls.filter(
+    ({ command }) => command === "terminal_attach",
+  ).length;
   const frameMessage = {
     type: "frame",
     payload: {
@@ -181,7 +204,7 @@ test("mounted bootstrap passes GUI context and ACKs only after consuming a frame
       full: true,
       rows: [],
       sequence: 7,
-      subscriptionId: "subscription-1",
+      subscriptionId: `subscription-${sessionNumber}`,
       viewport: { columns: 100, generation: 0, screenLines: 24 },
     },
   };
@@ -195,8 +218,8 @@ test("mounted bootstrap passes GUI context and ACKs only after consuming a frame
     calls.find(({ command }) => command === "terminal_ack").args,
     {
       sequence: 7,
-      sessionId: "session-1",
-      subscriptionId: "subscription-1",
+      sessionId: `session-${sessionNumber}`,
+      subscriptionId: `subscription-${sessionNumber}`,
     },
   );
 
@@ -211,6 +234,56 @@ test("mounted bootstrap passes GUI context and ACKs only after consuming a frame
   );
   view.unmount();
 });
+
+test("first-open splash waits for the first terminal frame", async () => {
+  const { createElement } = await import("react");
+  const { act, render, waitFor } = await import("@testing-library/react");
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  const view = render(
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, {
+        channelId: "channel-1",
+        channelName: "general",
+        npub: "npub1owner",
+        relayUrl: "wss://relay.example",
+        threadId: null,
+      }),
+    ),
+  );
+  await waitFor(() =>
+    assert.ok(calls.some(({ command }) => command === "terminal_attach")),
+  );
+  assert.equal(
+    view.container.querySelector(".buzz-terminal-welcome"),
+    null,
+    "the splash must not be consumed while the first PTY frame is pending",
+  );
+
+  await act(async () => {
+    emit({
+      type: "frame",
+      payload: {
+        bracketedPaste: false,
+        cursor: { column: 0, line: 0, visible: true },
+        focusReporting: false,
+        full: true,
+        rows: [],
+        sequence: 1,
+        subscriptionId: "subscription-1",
+        viewport: { columns: 100, generation: 0, screenLines: 24 },
+      },
+    });
+  });
+  await waitFor(() =>
+    assert.ok(view.container.querySelector(".buzz-terminal-welcome")),
+  );
+  view.unmount();
+});
+
 test("resize during in-flight catch-up keeps the newest viewport ready", async () => {
   const { createElement } = await import("react");
   const { act, render, waitFor } = await import("@testing-library/react");
@@ -300,11 +373,6 @@ test("opening a tab keeps terminal ownership while its attachment is pending", a
     await Promise.resolve();
   });
   const substrate = view.container.querySelector(".buzz-terminal-substrate");
-  const chord = { bubbles: true, code: "KeyJ", metaKey: true };
-  act(() => {
-    window.dispatchEvent(new KeyboardEvent("keydown", chord));
-    window.dispatchEvent(new KeyboardEvent("keyup", chord));
-  });
   await waitFor(() =>
     assert.equal(substrate.dataset.terminalOwner, "terminal"),
   );
@@ -323,7 +391,124 @@ test("opening a tab keeps terminal ownership while its attachment is pending", a
   view.unmount();
 });
 
-test("a successful close removes the tab even if the exit event is lost", async () => {
+test("restoring a channel resizes its PTY to the current dock viewport", async () => {
+  const { createElement } = await import("react");
+  const { act, render, waitFor } = await import("@testing-library/react");
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  const props = (channelId, channelName) => ({
+    channelId,
+    channelName,
+    npub: "npub1owner",
+    relayUrl: "wss://relay.example",
+    threadId: null,
+  });
+  const tree = (channelId, channelName) =>
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, props(channelId, channelName)),
+    );
+  const view = render(tree("channel-a", "alpha"));
+  await waitFor(() =>
+    assert.ok(
+      calls.some(
+        ({ command, args }) =>
+          command === "terminal_attach" &&
+          args.request.channelId === "channel-a",
+      ),
+    ),
+  );
+
+  view.rerender(tree("channel-b", "beta"));
+  await waitFor(() =>
+    assert.ok(
+      calls.some(
+        ({ command, args }) =>
+          command === "terminal_attach" &&
+          args.request.channelId === "channel-b",
+      ),
+    ),
+  );
+  canvasWidth = 1_680;
+  await act(async () => resizeCallback());
+  await waitFor(() =>
+    assert.ok(
+      calls.some(
+        ({ command, args }) =>
+          command === "terminal_resize" &&
+          args.sessionId === "session-2" &&
+          args.columns === 200,
+      ),
+    ),
+  );
+
+  view.rerender(tree("channel-a", "alpha"));
+  await waitFor(() =>
+    assert.ok(
+      calls.some(
+        ({ command, args }) =>
+          command === "terminal_resize" &&
+          args.sessionId === "session-1" &&
+          args.columns === 200,
+      ),
+    ),
+  );
+  view.unmount();
+});
+
+test("closing a tab while attach is pending closes the eventual session", async () => {
+  const { createElement } = await import("react");
+  const { act, fireEvent, render, waitFor } = await import(
+    "@testing-library/react"
+  );
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  attachResolver = () => {};
+  const view = render(
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, {
+        channelId: "channel-1",
+        channelName: "general",
+        npub: "npub1owner",
+        relayUrl: "wss://relay.example",
+        threadId: null,
+      }),
+    ),
+  );
+  await waitFor(() => assert.equal(typeof attachResolver, "function"));
+  await waitFor(() =>
+    assert.ok(view.queryByRole("tab", { name: /Terminal 1/ })),
+  );
+
+  await act(async () => {
+    fireEvent.click(view.getByLabelText("Close SHELL"));
+    setTerminalPanelMode("closed");
+  });
+  await waitFor(() => assert.equal(view.queryByRole("tab"), null));
+  assert.equal(
+    calls.some(({ command }) => command === "terminal_close"),
+    false,
+    "a not-yet-attached session cannot be closed by backend id",
+  );
+
+  await act(async () => attachResolver());
+  await waitFor(() =>
+    assert.ok(
+      calls.some(
+        ({ command, args }) =>
+          command === "terminal_close" && args.sessionId === "session-1",
+      ),
+    ),
+  );
+  view.unmount();
+});
+
+test("closing removes the tab before native shutdown resolves", async () => {
   const { createElement } = await import("react");
   const { fireEvent, render, waitFor } = await import("@testing-library/react");
   const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
@@ -349,14 +534,19 @@ test("a successful close removes the tab even if the exit event is lost", async 
   await waitFor(() =>
     assert.ok(calls.some(({ command }) => command === "terminal_attach")),
   );
-  await waitFor(() => assert.ok(view.queryByRole("tab", { name: /SHELL/ })));
+  await waitFor(() =>
+    assert.ok(view.queryByRole("tab", { name: /Terminal 1/ })),
+  );
 
+  deferClose = true;
   fireEvent.click(view.getByLabelText("Close SHELL"));
 
   await waitFor(() =>
     assert.ok(calls.some(({ command }) => command === "terminal_close")),
   );
   await waitFor(() => assert.equal(view.queryByRole("tab"), null));
+  assert.equal(typeof closeResolver, "function");
+  closeResolver();
   view.unmount();
 });
 
@@ -421,5 +611,45 @@ test("wheel deltas reach terminal_scroll with the DOM sign intact", async () => 
   await waitFor(() => assert.equal(scrolls().length, 2));
   assert.equal(scrolls()[1].args.lines, 2, "and forwards must arrive positive");
 
+  view.unmount();
+});
+
+test("a non-channel route closes the panel and ignores the terminal shortcut", async () => {
+  const { createElement } = await import("react");
+  const { act, render, waitFor } = await import("@testing-library/react");
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+  const { getTerminalPanelSnapshotForTests } = await import(
+    "./terminalPanelStore.ts"
+  );
+
+  setTerminalPanelMode("docked");
+  const view = render(
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, {
+        channelId: null,
+        channelName: null,
+        npub: "npub1owner",
+        relayUrl: "wss://relay.example",
+        threadId: null,
+      }),
+    ),
+  );
+  await waitFor(() =>
+    assert.equal(getTerminalPanelSnapshotForTests().mode, "closed"),
+  );
+
+  const chord = {
+    bubbles: true,
+    code: "KeyJ",
+    metaKey: true,
+  };
+  act(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", chord));
+    window.dispatchEvent(new KeyboardEvent("keyup", chord));
+  });
+  assert.equal(getTerminalPanelSnapshotForTests().mode, "closed");
   view.unmount();
 });

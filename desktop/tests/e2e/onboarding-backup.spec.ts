@@ -59,6 +59,9 @@ test("backup step appears on fresh-key path after profile submit", async ({
     page.getByRole("heading", { name: "Creating your identity key" }),
   ).toBeVisible();
   await expect(page.getByTestId("backup-intro-logo")).toBeVisible();
+  await expect(page.getByTestId("onboarding-next")).toBeVisible();
+  await expect(page.getByTestId("onboarding-next")).toBeDisabled();
+  await expect(page.getByTestId("onboarding-back")).toBeEnabled();
 
   await expect(
     page.getByRole("heading", {
@@ -66,6 +69,7 @@ test("backup step appears on fresh-key path after profile submit", async ({
     }),
   ).toBeVisible();
   await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-next")).toBeEnabled();
 });
 
 // ---------------------------------------------------------------------------

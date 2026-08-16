@@ -1,11 +1,13 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 const ORIGINAL_SHA = "a".repeat(64);
 const EDITED_SHA = "b".repeat(64);
 const ORIGINAL_URL = "https://example.com/e2e/draw-original.svg";
 const EDITED_URL = "https://example.com/e2e/draw-edited.svg";
+const PR_SNAPSHOT_DIR = "test-results/video-upload-photo-scope";
 
 const ORIGINAL_DESCRIPTOR = {
   url: ORIGINAL_URL,
@@ -67,6 +69,31 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test("image annotation overlay and editor controls", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByRole("button", { name: "Attach file" }).click();
+
+  const composer = page.getByTestId("message-composer");
+  await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
+  await composer.getByTestId("composer-media-attachment").hover();
+  await expect(page.getByTestId("composer-attachment-annotate")).toBeVisible();
+  await waitForAnimations(page);
+  await composer.screenshot({
+    path: `${PR_SNAPSHOT_DIR}/01-image-annotation-overlay.png`,
+  });
+
+  await page.getByTestId("composer-attachment-annotate").click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(page.getByTestId("composer-attachment-edit")).toBeVisible();
+  await expect(page.getByTestId("composer-attachment-spoiler")).toBeVisible();
+  await waitForAnimations(page);
+  await dialog.screenshot({
+    path: `${PR_SNAPSHOT_DIR}/02-image-editor-controls.png`,
+  });
+});
+
 test("draw on an uploaded image, save replaces it, revert restores in place", async ({
   page,
 }) => {
@@ -75,12 +102,13 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   // Attach the original image via the mocked paperclip flow.
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
   const composer = page.getByTestId("message-composer");
   await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
 
   // Open the composer lightbox.
-  await composer.getByAltText("Attachment aaaa").click();
+  await composer.getByTestId("composer-media-attachment").hover();
+  await page.getByTestId("composer-attachment-annotate").click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog.locator(`img[src="${ORIGINAL_URL}"]`)).toBeVisible();
@@ -132,7 +160,8 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
   expect(uploadCommandCount).toBe(1);
 
   // Reopen the lightbox on the annotated attachment to revert.
-  await composer.getByAltText("Attachment bbbb").click();
+  await composer.getByTestId("composer-media-attachment").hover();
+  await page.getByTestId("composer-attachment-annotate").click();
   await expect(dialog).toBeVisible();
   await expect(dialog.locator(`img[src="${EDITED_URL}"]`)).toBeVisible();
 
@@ -153,19 +182,21 @@ test("spoiler marking survives drawing on the attachment", async ({ page }) => {
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
   const composer = page.getByTestId("message-composer");
   await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
 
   // Spoiler the attachment from its lightbox (media spoilers are
   // per-attachment; the text spoiler control no longer affects media),
   // then draw on it.
-  await composer.getByAltText("Attachment aaaa").click();
+  await composer.getByTestId("composer-media-attachment").hover();
+  await page.getByTestId("composer-attachment-annotate").click();
   await page.getByTestId("composer-attachment-spoiler").click();
   await page.keyboard.press("Escape");
   await expect(composer.locator("[data-composer-media-spoiler]")).toBeVisible();
 
-  await composer.getByAltText("Attachment aaaa").click();
+  await composer.getByTestId("composer-media-attachment").hover();
+  await page.getByTestId("composer-attachment-annotate").click();
   await page.getByTestId("composer-attachment-edit").click();
   await drawStrokeOnCanvas(page);
 

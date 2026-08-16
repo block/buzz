@@ -1,1 +1,0 @@
-.reviewDecision == "APPROVED"

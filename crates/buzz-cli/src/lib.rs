@@ -2,6 +2,7 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod links;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -297,8 +298,10 @@ pub enum AgentsCmd {
     },
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(
-        after_help = "The relay chooses the consent path (self / admin / owner) from the \
-submitted request; this command does not retry with a different shape.\n\n\
+        after_help = "Auth flow: when target != signer, the CLI fetches the target's kind:0 and \
+attaches its owner-auth tag. On extraction failure it retries once (common cause: profile \
+republish in progress). If the retry also fails, the command exits with an error — use \
+--admin to bypass this guard when your key is a relay admin.\n\n\
 Suggested --reason codes (unknown values are allowed): rotated, retired, \
 bot-rebuilt, left-organization, spam\n\n\
 Archiving a third-party identity is a human owner/admin action: an agent \
@@ -321,10 +324,21 @@ buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
         /// Optional human-readable note (not parsed for authorization)
         #[arg(long, default_value = "")]
         content: String,
+        /// Allow sending without owner-auth attestation after extraction fails
+        /// (relay-admin path). Use only when your key is a relay admin; ordinary
+        /// owners do not need this flag. Without it, auth-extraction failure after
+        /// one automatic retry is a hard error rather than a silent bare send.
+        #[arg(long, default_value_t = false)]
+        admin: bool,
     },
     /// Submit a NIP-IA unarchive request for an identity (kind 9036)
-    #[command(after_help = "Examples:\n  \
-buzz agents unarchive <PUBKEY> --reason returned")]
+    #[command(
+        after_help = "Auth flow: same as `archive` — retries kind:0 fetch once on \
+extraction failure, then exits with an error if still unresolvable. Use --admin to bypass \
+for relay-admin callers.\n\n\
+Examples:\n  \
+buzz agents unarchive <PUBKEY> --reason returned"
+    )]
     Unarchive {
         /// Target identity pubkey (hex)
         target_pubkey: String,
@@ -334,6 +348,12 @@ buzz agents unarchive <PUBKEY> --reason returned")]
         /// Optional human-readable note (not parsed for authorization)
         #[arg(long, default_value = "")]
         content: String,
+        /// Allow sending without owner-auth attestation after extraction fails
+        /// (relay-admin path). Use only when your key is a relay admin; ordinary
+        /// owners do not need this flag. Without it, auth-extraction failure after
+        /// one automatic retry is a hard error rather than a silent bare send.
+        #[arg(long, default_value_t = false)]
+        admin: bool,
     },
     /// Read the relay's current NIP-IA archive snapshot (kind 13535)
     #[command(
@@ -576,7 +596,10 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, or ephemeral TTL
+    /// Update channel name, description, visibility, or ephemeral TTL
+    #[command(
+        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private"
+    )]
     Update {
         /// Channel UUID
         #[arg(long)]
@@ -587,6 +610,9 @@ pub enum ChannelsCmd {
         /// New channel description
         #[arg(long)]
         description: Option<String>,
+        /// New channel visibility
+        #[arg(long, value_enum)]
+        visibility: Option<ChannelVisibility>,
         /// Make the channel ephemeral (or change its lifetime): seconds until
         /// the relay archives it after the last message. Conflicts with --no-ttl.
         #[arg(long, value_name = "SECONDS", conflicts_with = "no_ttl")]
@@ -1669,6 +1695,47 @@ pub enum IssuesCmd {
         #[arg(long = "to")]
         to: Vec<String>,
     },
+    /// Assign an issue to one or more people or agents. Only assignments
+    /// signed by the issue author or repo owner are trusted by clients;
+    /// anyone may assign themselves (sole assignee = your own pubkey).
+    Assign {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Assignee pubkey (64-char hex) — can be specified multiple times
+        #[arg(long = "assignee", required = true)]
+        assignee: Vec<String>,
+        /// Human-readable assignee name(s) for the note body, e.g. "Thomas".
+        /// Defaults to the truncated assignee pubkeys.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove one or more assignees from an issue. Issue authors and repo
+    /// owners may remove anyone; other users may remove only themselves.
+    Unassign {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Assignee pubkey to remove — can be specified multiple times
+        #[arg(long = "assignee", required = true)]
+        assignee: Vec<String>,
+        /// Human-readable assignee name(s) for the note body.
+        /// Defaults to the truncated assignee pubkeys.
+        #[arg(long)]
+        label: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2264,7 +2331,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["create", "get", "list", "status"]
+            vec!["assign", "create", "get", "list", "status", "unassign"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2293,7 +2360,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 4),
+            ("issues", 6),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),

@@ -4,11 +4,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../pairing/pairing_page.dart';
 import 'invite_join_provider.dart';
 
 Future<void> showInviteJoinSheet(BuildContext context, WidgetRef ref) {
-  return showModalBottomSheet<void>(
+  return showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,

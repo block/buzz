@@ -21,7 +21,7 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-async fn enforce_http_admission(
+pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: &nostr::PublicKey,
@@ -654,12 +654,13 @@ pub async fn submit_event(
         submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
 
     match &outcome {
-        SubmitOutcome::Ok { accepted, .. } => {
+        SubmitOutcome::Ok { accepted, kind, .. } => {
             tracing::info!(
                 pubkey = %pubkey_hex,
                 route = "/events",
                 status = 200u16,
                 accepted,
+                kind,
                 "HTTP bridge request"
             );
         }
@@ -713,6 +714,7 @@ enum SubmitOutcome {
     /// Ingest pipeline ran and returned a result (accepted or not).
     Ok {
         accepted: bool,
+        kind: u32,
         response: Json<Value>,
     },
     /// JSON parse failure before ingest — log category/line/column, not msg.
@@ -843,6 +845,7 @@ async fn submit_event_authed(
             }));
             SubmitOutcome::Ok {
                 accepted: result.accepted,
+                kind: kind_u32,
                 response,
             }
         }
@@ -1935,7 +1938,10 @@ pub async fn workflow_webhook(
                         buzz_db::workflow::RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
-                        Some(&format!("definition parse error: {e}")),
+                        Some(buzz_db::workflow::WorkflowRunFailure {
+                            code: "invalid_definition",
+                            message: &format!("definition parse error: {e}"),
+                        }),
                     )
                     .await
                 {
