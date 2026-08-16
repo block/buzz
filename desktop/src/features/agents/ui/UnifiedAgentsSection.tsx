@@ -165,6 +165,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   restartingAgentPubkey={restartingAgentPubkey}
                   startingAgentPubkey={startingAgentPubkey}
                   startingPersonaIds={startingPersonaIds}
+                  subtitle={card.personaLabel}
                   testId={`persona-agent-row-${card.key}`}
                   onOpenAgentProfile={onOpenAgentProfile}
                   onOpenPersonaProfile={onOpenPersonaProfile}
@@ -236,6 +237,7 @@ function AgentPersonaCard({
   restartingAgentPubkey,
   startingAgentPubkey,
   startingPersonaIds,
+  subtitle,
   testId,
   onOpenAgentProfile,
   onOpenPersonaProfile,
@@ -254,6 +256,7 @@ function AgentPersonaCard({
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
+  subtitle: string | null;
   testId: string;
   onOpenAgentProfile: (
     pubkey: string,
@@ -345,6 +348,7 @@ function AgentPersonaCard({
           </Badge>
         ) : null
       }
+      subtitle={subtitle}
     />
   );
 }

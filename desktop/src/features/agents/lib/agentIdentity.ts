@@ -37,14 +37,24 @@ export type AgentDisplayInput = AgentIdentityInput & {
  */
 export function agentDisplayGroupKey(agent: AgentDisplayInput): string {
   const personaId = agent.personaId?.trim() ?? "";
-  const name = agent.name?.trim().toLowerCase() ?? "";
-  return `persona:${personaId}|name:${name}`;
+  return `persona:${personaId}|name:${foldAgentDisplayName(agent.name)}`;
+}
+
+/**
+ * The one place a display name is folded for comparison. Callers that need a
+ * name-scoped key of their own (React keys, `data-testid`s) must fold through
+ * this rather than lowercasing inline, or their key and the group's disagree.
+ */
+export function foldAgentDisplayName(name: string | null | undefined): string {
+  return name?.trim().toLowerCase() ?? "";
 }
 
 export type AgentDisplayGroup<T> = {
   key: string;
   /** Trimmed display name shared by every member, empty when unnamed. */
   name: string;
+  /** `name` folded for comparison — the group's identity within a persona. */
+  foldedName: string;
   agents: T[];
 };
 
@@ -74,7 +84,12 @@ export function groupAgentsForDisplay<T extends AgentDisplayInput>(
       continue;
     }
 
-    const group = { key, name: agent.name?.trim() ?? "", agents: [agent] };
+    const group = {
+      key,
+      name: agent.name?.trim() ?? "",
+      foldedName: foldAgentDisplayName(agent.name),
+      agents: [agent],
+    };
     groupsByKey.set(key, group);
     groups.push(group);
   }

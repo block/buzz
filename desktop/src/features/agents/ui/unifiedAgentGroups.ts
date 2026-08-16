@@ -1,4 +1,7 @@
-import { groupAgentsForDisplay } from "@/features/agents/lib/agentIdentity";
+import {
+  foldAgentDisplayName,
+  groupAgentsForDisplay,
+} from "@/features/agents/lib/agentIdentity";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 
@@ -10,9 +13,23 @@ import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
  * it may never decide which agents exist (see `agentDisplayGroupKey`).
  */
 export type UnifiedAgentCard = {
-  /** Stable card key, also used for the card's `data-testid`. */
+  /**
+   * Stable card key, also used for the card's React key and `data-testid`.
+   *
+   * Derived only from the persona and the display group, never from runtime
+   * status or array position: a key that moves when an agent starts remounts
+   * the card and refires its avatar query.
+   */
   key: string;
   label: string;
+  /**
+   * Persona name, rendered as the card's second line, and only when the
+   * persona has split into several cards — otherwise `label` already is the
+   * persona name. Without it a split persona's own name appears nowhere in
+   * the library, which is the same disappearing act this module exists to
+   * prevent.
+   */
+  personaLabel: string | null;
   persona: AgentPersona;
   /** Instance the card opens; `undefined` for a persona with no instances. */
   agent: ManagedAgent | undefined;
@@ -52,6 +69,7 @@ function buildPersonaCards(
   const personaOnlyCard = (members: ManagedAgent[]): UnifiedAgentCard => ({
     key: persona.id,
     label: persona.displayName,
+    personaLabel: null,
     persona,
     agent: pickProfileAgent(members, isArchived),
     agents: members,
@@ -62,39 +80,44 @@ function buildPersonaCards(
     return [personaOnlyCard(displayGroups[0]?.agents ?? [])];
   }
 
-  const liveGroups = displayGroups
-    .map((group) => ({
-      group,
-      primary: pickProfileAgent(group.agents, isArchived),
-    }))
-    .filter(
-      (entry): entry is { group: (typeof displayGroups)[number]; primary: ManagedAgent } =>
-        entry.primary !== undefined,
-    );
-
+  const liveGroups = displayGroups.filter(
+    (group) => pickProfileAgent(group.agents, isArchived) !== undefined,
+  );
   if (liveGroups.length === 0) return [personaOnlyCard(agents)];
 
-  const personaPrimary = pickProfileAgent(agents, isArchived);
-  const cards = liveGroups.map(({ group, primary }) => ({
-    key: `${persona.id}-${primary.pubkey}`,
+  const ownerIndex = pickPersonaActionsIndex(persona, liveGroups);
+  return liveGroups.map((group, index) => ({
+    key: `${persona.id}::${group.foldedName}`,
     label: group.name || persona.displayName,
+    personaLabel: persona.displayName,
     persona,
-    agent: primary,
+    agent: pickProfileAgent(group.agents, isArchived),
     agents: group.agents,
-    ownsPersonaActions: personaPrimary
-      ? group.agents.includes(personaPrimary)
-      : false,
+    ownsPersonaActions: index === ownerIndex,
   }));
+}
 
-  // Persona actions must exist on exactly one card. `personaPrimary` is live so
-  // its own group survived the filter, but instance de-duplication can drop the
-  // very record it points at; fall back to the first card rather than stranding
-  // edit/share/delete on none of them.
-  if (!cards.some((card) => card.ownsPersonaActions)) {
-    cards[0].ownsPersonaActions = true;
-  }
-
-  return cards;
+/**
+ * Which split card carries the persona menu — Edit / Duplicate / Share /
+ * Deactivate / Delete persona.
+ *
+ * Deliberately independent of runtime status. Deriving it from
+ * `pickProfileAgent` (active-first) relocated the only route to editing or
+ * deleting a persona whenever an instance started, leaving the card the owner
+ * was looking at with no menu and no hint where it went. The card that still
+ * carries the persona's own name is the natural home; if the owner renamed
+ * every instance — or archiving retired the card that held the persona's own
+ * name — the first surviving card gets it.
+ */
+function pickPersonaActionsIndex(
+  persona: AgentPersona,
+  displayGroups: readonly { foldedName: string }[],
+): number {
+  const personaName = foldAgentDisplayName(persona.displayName);
+  const named = displayGroups.findIndex(
+    (group) => group.foldedName === personaName,
+  );
+  return named === -1 ? 0 : named;
 }
 
 /**

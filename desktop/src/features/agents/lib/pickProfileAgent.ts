@@ -3,11 +3,13 @@ import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlA
 import type { ManagedAgent } from "@/shared/api/types";
 
 /**
- * Pick the instance that represents a persona throughout the UI.
+ * Pick the instance that represents a *set of interchangeable instances* —
+ * a display group, or a whole persona when nothing has been renamed.
  *
- * A persona can have several historical agent instances. Keeping this rule in
- * one place prevents an avatar click on an older message from opening a
- * different detail surface than the card in the Agents library.
+ * Active-first, then by name, so the answer is stable for a given set. Callers
+ * choose the set; do not call this with a whole persona when the caller is
+ * resolving a specific instance — use `pickCanonicalProfileAgent`, which scopes
+ * the set to the requested instance's display group first.
  *
  * Relay-archived instances are never eligible, so an archived record early in
  * file order can't hijack the persona target. Returns `undefined` when every
@@ -31,12 +33,17 @@ export function pickProfileAgent(
 }
 
 /**
- * Pick the instance a profile request should actually land on.
+ * Pick the instance a profile request should actually land on. This is the
+ * rule that keeps every profile entry point — Agents library card, message
+ * avatar, mention, deep link, Inbox — agreeing with each other.
  *
  * Collapsing onto the persona's representative instance is only correct while
  * the instances are interchangeable presentations of that persona. Once the
- * owner has renamed one, opening its card must open *it* — otherwise the
- * Agents library shows a card the profile panel refuses to open.
+ * owner has renamed one, opening it must open *it*: the Agents library now
+ * shows the renamed instance its own card, and a message avatar must reach
+ * the same place that card does. So the requested instance's display group,
+ * not the whole persona, is the set we canonicalise over. Same-named siblings
+ * still collapse onto the active one, exactly as before.
  *
  * Scoping happens before archive filtering rather than after: the display group
  * decides *which* siblings are candidates, and `pickProfileAgent` then drops the
