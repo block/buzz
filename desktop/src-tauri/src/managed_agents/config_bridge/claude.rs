@@ -1,10 +1,31 @@
+use std::path::{Path, PathBuf};
+
 use super::types::{ExtensionEntry, RuntimeFileConfig};
 
-/// Read Claude Code config from `~/.claude/settings.json` and `~/.claude.json`.
-pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
+/// Resolve Claude settings + MCP config paths for an optional `CLAUDE_CONFIG_DIR`.
+///
+/// Default layout (no override):
+/// - settings: `~/.claude/settings.json`
+/// - MCP: `~/.claude.json`
+///
+/// Isolated layout (`CLAUDE_CONFIG_DIR=<dir>`):
+/// - settings: `<dir>/settings.json`
+/// - MCP: `<dir>/.claude.json`
+pub(super) fn claude_config_paths(config_dir: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
+    if let Some(dir) = config_dir {
+        return Some((dir.join("settings.json"), dir.join(".claude.json")));
+    }
     let home = dirs::home_dir()?;
-    let settings_path = home.join(".claude").join("settings.json");
-    let mcp_path = home.join(".claude.json");
+    Some((
+        home.join(".claude").join("settings.json"),
+        home.join(".claude.json"),
+    ))
+}
+
+/// Read Claude Code config from the default home paths, or from an isolated
+/// `CLAUDE_CONFIG_DIR` when the agent sets that env var.
+pub(super) fn read_config_file(config_dir: Option<&Path>) -> Option<RuntimeFileConfig> {
+    let (settings_path, mcp_path) = claude_config_paths(config_dir)?;
 
     let settings = read_json_file(&settings_path);
     let mcp_config = read_json_file(&mcp_path);
@@ -200,5 +221,21 @@ mod tests {
             Some("value"),
             "unknown future fields should appear in extra"
         );
+    }
+
+    #[test]
+    fn isolated_config_dir_paths_prefer_dir_over_home() {
+        let dir = PathBuf::from("/tmp/nest-claude-config");
+        let (settings, mcp) = claude_config_paths(Some(&dir)).expect("paths");
+        assert_eq!(settings, dir.join("settings.json"));
+        assert_eq!(mcp, dir.join(".claude.json"));
+    }
+
+    #[test]
+    fn default_config_paths_use_home_layout() {
+        let (settings, mcp) = claude_config_paths(None).expect("paths");
+        assert!(settings.ends_with(".claude/settings.json"));
+        assert!(mcp.ends_with(".claude.json"));
+        assert!(!mcp.ends_with(".claude/.claude.json"));
     }
 }
