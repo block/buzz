@@ -8,6 +8,7 @@ import {
   buildWelcomeKickoffOpenerSendInput,
   classifyWelcomeKickoffResolution,
   createWelcomeKickoffCoordinator,
+  ensureWelcomeTeamForKickoff,
   mergeKickoffEvents,
   resolveWelcomeAgentSet,
   selectWelcomeKickoffIntroTeammates,
@@ -32,6 +33,7 @@ function agent(name, personaId, pubkey) {
 const fizz = agent("Fizz", "builtin:fizz", "f".repeat(64));
 const honey = agent("Honey", "builtin:honey", "h".repeat(64));
 const bumble = agent("Bumble", "builtin:bumble", "b".repeat(64));
+const RELAY_A = "ws://localhost:3000";
 
 test("resolveWelcomeAgentSet orders agents by stable persona identity", () => {
   assert.deepEqual(resolveWelcomeAgentSet([bumble, fizz, honey]), {
@@ -146,6 +148,36 @@ test("kickoff coordinator preserves one task across rerenders and cancels on nav
   coordinator.cancel("welcome");
   assert.equal(first.signal.aborted, true);
   assert.ok(coordinator.begin("welcome"));
+});
+
+test("completed kickoff preserves intentional Welcome team removals", async () => {
+  let provisionCalls = 0;
+  const result = await ensureWelcomeTeamForKickoff("welcome", RELAY_A, {
+    hasCompleted: async () => true,
+    ensureTeam: async () => {
+      provisionCalls += 1;
+      return [fizz, honey, bumble];
+    },
+  });
+
+  assert.equal(result, null);
+  assert.equal(provisionCalls, 0);
+});
+
+test("incomplete kickoff still provisions the Welcome team", async () => {
+  let provisionCalls = 0;
+  const result = await ensureWelcomeTeamForKickoff("welcome", RELAY_A, {
+    hasCompleted: async () => false,
+    ensureTeam: async (channelId, relayUrl) => {
+      provisionCalls += 1;
+      assert.equal(channelId, "welcome");
+      assert.equal(relayUrl, RELAY_A);
+      return [fizz, honey, bumble];
+    },
+  });
+
+  assert.deepEqual(result, [fizz, honey, bumble]);
+  assert.equal(provisionCalls, 1);
 });
 
 test("closer degrades coherently for partial and total startup failure", () => {
