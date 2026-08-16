@@ -72,7 +72,8 @@ release_recipe=$(sed -n '/^desktop-release-build /,/^desktop-ci:/p' "${justfile}
 grep -Fq 'cargo build --release --target "$TARGET"' <<<"${release_recipe}"
 grep -Fq './scripts/bundle-sidecars.sh "$TARGET"' <<<"${release_recipe}"
 grep -Fq './scripts/verify-desktop-sidecars.sh' <<<"${release_recipe}"
-grep -Fq 'APPLE_SIGNING_IDENTITY=- pnpm tauri build' <<<"${release_recipe}"
+grep -Fq 'MACOS_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"' <<<"${release_recipe}"
+grep -Fq 'APPLE_SIGNING_IDENTITY="$MACOS_SIGNING_IDENTITY" pnpm tauri build' <<<"${release_recipe}"
 grep -Fq 'codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"' <<<"${release_recipe}"
 if grep -Fq -- '-p buzz-lmstudio-agent' <<<"${release_recipe}"; then
   echo "release recipe treats the buzz-lmstudio-agent binary as a Cargo package" >&2

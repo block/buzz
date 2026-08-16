@@ -317,10 +317,12 @@ desktop-release-build target="aarch64-apple-darwin":
     ./scripts/verify-desktop-sidecars.sh desktop/src-tauri/binaries "$TARGET"
     pnpm install
     # Seal local macOS release candidates before Tauri creates the DMG, so the
-    # app inside the disk image is verifiable too. Official release workflows
-    # replace this ad-hoc identity with their configured Developer ID.
+    # app inside the disk image is verifiable too. Use a configured stable
+    # Developer ID when available; fall back to ad-hoc signing for contributors
+    # without one.
     if [[ "$TARGET" == *-apple-darwin ]]; then
-        (cd {{desktop_dir}} && APPLE_SIGNING_IDENTITY=- pnpm tauri build --features mesh-llm --target {{target}})
+        MACOS_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+        (cd {{desktop_dir}} && APPLE_SIGNING_IDENTITY="$MACOS_SIGNING_IDENTITY" pnpm tauri build --features mesh-llm --target {{target}})
     else
         (cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}})
     fi
