@@ -108,6 +108,10 @@ struct ConnEntry {
     subscriptions: ConnectionSubscriptions,
     authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
     grace_limit: u8,
+    /// Flipped exactly once, by the first backpressure-driven disconnect of
+    /// this connection (see `ConnectionManager::count_backpressure_disconnect_and_cancel`),
+    /// so concurrent drops cannot inflate `buzz_ws_backpressure_disconnects_total`.
+    backpressure_disconnect_counted: AtomicBool,
 }
 
 /// Community-scoped lifecycle registry shared by every long-lived socket type.
@@ -283,6 +287,7 @@ impl ConnectionManager {
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
                 grace_limit,
+                backpressure_disconnect_counted: AtomicBool::new(false),
             },
         );
         // Insert-then-check pairs with drain_all's store-then-iterate: either
@@ -579,42 +584,167 @@ impl ConnectionManager {
         self.try_send_ws_message(conn_id, WsMessage::Text(msg.into()))
     }
 
-    /// Sends an already-serialized UTF-8 text payload to the given connection.
+    /// Sends an already-serialized EVENT fan-out frame to one subscriber.
     ///
     /// The shared `Bytes` payload is cloned into the outbound WS message without
     /// copying the frame body. Callers must only pass valid UTF-8 bytes.
-    pub fn send_to_text_bytes(&self, conn_id: Uuid, msg: Arc<Bytes>) -> bool {
+    ///
+    /// This is the EVENT fan-out send path (called from
+    /// `handlers::event::send_fanout_frames`). Unlike [`Self::send_to`], a
+    /// drop here means a subscriber silently misses an event, so every lost
+    /// frame is counted in `buzz_fanout_dropped_frames_total` and — while the
+    /// connection is live with a full data channel — the client is told about
+    /// the gap with a `BUZZ_SYNC_REQUIRED` frame on its priority control
+    /// channel.
+    pub fn send_fanout_frame(&self, conn_id: Uuid, msg: Arc<Bytes>) -> bool {
         let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
             .expect("relay fan-out frames are serialized UTF-8 JSON");
-        self.try_send_ws_message(conn_id, WsMessage::Text(text))
+        self.try_send_fanout_frame(conn_id, WsMessage::Text(text))
+    }
+
+    /// The `BUZZ_SYNC_REQUIRED` backpressure gap frame queued on a
+    /// connection's priority control channel when one of its fan-out frames
+    /// is dropped. See the `crate::protocol` module docs for the wire
+    /// contract and delivery rules.
+    fn sync_required_frame() -> WsMessage {
+        WsMessage::Text(crate::protocol::RelayMessage::sync_required().into())
+    }
+
+    /// Fan-out variant of [`Self::try_send_ws_message`] with gap signaling.
+    ///
+    /// Every frame that fails to reach the connection's data channel — full,
+    /// closed, or the connection already gone — increments
+    /// `buzz_fanout_dropped_frames_total`, so a silently lost EVENT frame
+    /// always leaves a telemetry trail. No sampling.
+    ///
+    /// Only the full-data-channel case additionally emits
+    /// `["BUZZ_SYNC_REQUIRED","backpressure"]` on the priority control
+    /// channel: the socket is still live, and the gap signal lets the client
+    /// replay without waiting for the grace counter to kill the connection.
+    /// Closed or gone connections get no signal — reconnect replay is their
+    /// fail-safe.
+    ///
+    /// Grace semantics are preserved: when the control frame is queued, the
+    /// existing consecutive-full counter decides cancellation exactly as
+    /// before (warn below the limit, cancel at it). When the control channel
+    /// is itself full or closed, the gap signal cannot be delivered, so the
+    /// socket is cancelled immediately and reconnect replay becomes the
+    /// fail-safe.
+    fn try_send_fanout_frame(&self, conn_id: Uuid, msg: WsMessage) -> bool {
+        let Some(entry) = self.connections.get(&conn_id) else {
+            // Stale subscription match after deregistration: the frame is
+            // still lost to its intended recipient.
+            metrics::counter!("buzz_fanout_dropped_frames_total").increment(1);
+            return false;
+        };
+        let conn = entry.value();
+        match Self::try_data_send(conn, msg) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!("buzz_fanout_dropped_frames_total").increment(1);
+                if conn.ctrl_tx.try_send(Self::sync_required_frame()).is_err() {
+                    // The control channel is also full or closed: in-band gap
+                    // signaling is impossible. Cancel at once rather than let
+                    // the client drift on a stale view; the reconnect replay
+                    // recovers the missed events. Drops that land between the
+                    // cancel and deregistration keep counting in
+                    // `buzz_fanout_dropped_frames_total` but count the
+                    // disconnect exactly once (see the helper).
+                    Self::count_backpressure_disconnect_and_cancel(
+                        conn_id,
+                        conn,
+                        "control channel unavailable",
+                    );
+                    return false;
+                }
+                let count = conn.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if count >= conn.grace_limit {
+                    // Same once-per-connection disconnect accounting as the
+                    // control-unavailable branch above.
+                    Self::count_backpressure_disconnect_and_cancel(
+                        conn_id,
+                        conn,
+                        "grace limit exhausted",
+                    );
+                } else {
+                    tracing::warn!(conn_id = %conn_id, count, grace = conn.grace_limit, "fan-out: send buffer full — grace counter incremented");
+                }
+                false
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!("buzz_fanout_dropped_frames_total").increment(1);
+                tracing::debug!(conn_id = %conn_id, "fan-out: send channel closed");
+                false
+            }
+        }
+    }
+
+    /// Non-blocking data-channel send shared by [`Self::try_send_ws_message`]
+    /// and [`Self::try_send_fanout_frame`]: attempts the send on the
+    /// connection's data channel and resets the shared grace counter on
+    /// success. Drop handling stays with each caller because the two paths
+    /// intentionally differ — only the fan-out path counts dropped frames and
+    /// emits the `BUZZ_SYNC_REQUIRED` gap signal.
+    fn try_data_send(
+        conn: &ConnEntry,
+        msg: WsMessage,
+    ) -> Result<(), tokio::sync::mpsc::error::TrySendError<WsMessage>> {
+        let result = conn.tx.try_send(msg);
+        if result.is_ok() {
+            conn.backpressure_count.store(0, Ordering::Relaxed);
+        }
+        result
+    }
+
+    /// Count a backpressure disconnect exactly once per connection, then
+    /// cancel the socket.
+    ///
+    /// Concurrent drops on one overflowing connection all observe the failure
+    /// at once; the compare-exchange on `backpressure_disconnect_counted`
+    /// picks exactly one of them to increment
+    /// `buzz_ws_backpressure_disconnects_total` and cancel (the token's own
+    /// cancel is idempotent, so the socket closes exactly once either way).
+    /// Connections already cancelled for an unrelated reason are skipped: their
+    /// disconnect is not a backpressure disconnect.
+    fn count_backpressure_disconnect_and_cancel(
+        conn_id: Uuid,
+        conn: &ConnEntry,
+        reason: &'static str,
+    ) {
+        if !conn.cancel.is_cancelled()
+            && conn
+                .backpressure_disconnect_counted
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            tracing::warn!(conn_id = %conn_id, reason, "fan-out: backpressure disconnect — cancelling slow client");
+            metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
+            conn.cancel.cancel();
+        }
     }
 
     fn try_send_ws_message(&self, conn_id: Uuid, msg: WsMessage) -> bool {
-        if let Some(entry) = self.connections.get(&conn_id) {
-            let conn = entry.value();
-            match conn.tx.try_send(msg) {
-                Ok(_) => {
-                    conn.backpressure_count.store(0, Ordering::Relaxed);
-                    true
+        let Some(entry) = self.connections.get(&conn_id) else {
+            return false;
+        };
+        let conn = entry.value();
+        match Self::try_data_send(conn, msg) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                let count = conn.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if count >= conn.grace_limit {
+                    tracing::warn!(conn_id = %conn_id, count, "fan-out: sustained backpressure — cancelling slow client");
+                    metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
+                    conn.cancel.cancel();
+                } else {
+                    tracing::warn!(conn_id = %conn_id, count, grace = conn.grace_limit, "fan-out: send buffer full — grace {count}/{}", conn.grace_limit);
                 }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    let count = conn.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if count >= conn.grace_limit {
-                        tracing::warn!(conn_id = %conn_id, count, "fan-out: sustained backpressure — cancelling slow client");
-                        metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
-                        conn.cancel.cancel();
-                    } else {
-                        tracing::warn!(conn_id = %conn_id, count, grace = conn.grace_limit, "fan-out: send buffer full — grace {count}/{}", conn.grace_limit);
-                    }
-                    false
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!(conn_id = %conn_id, "fan-out: send channel closed");
-                    false
-                }
+                false
             }
-        } else {
-            false
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(conn_id = %conn_id, "fan-out: send channel closed");
+                false
+            }
         }
     }
 }
@@ -1378,10 +1508,28 @@ mod tests {
         CancellationToken,
         Arc<AtomicU8>,
     ) {
+        setup_conn_with_ctrl(buffer_size, buffer_size)
+    }
+
+    /// Like [`setup_conn`] but with independent data and control channel
+    /// capacities. Production gives the control channel a fixed small
+    /// capacity (8) independent of `BUZZ_SEND_BUFFER`, and the gap-signal
+    /// tests need to model the two channels filling separately.
+    fn setup_conn_with_ctrl(
+        buffer_size: usize,
+        ctrl_buffer_size: usize,
+    ) -> (
+        ConnectionManager,
+        Uuid,
+        mpsc::Receiver<WsMessage>,
+        mpsc::Receiver<WsMessage>,
+        CancellationToken,
+        Arc<AtomicU8>,
+    ) {
         let mgr = ConnectionManager::new();
         let conn_id = Uuid::new_v4();
         let (tx, rx) = mpsc::channel(buffer_size);
-        let (ctrl_tx, ctrl_rx) = mpsc::channel(buffer_size);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(ctrl_buffer_size);
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         mgr.register(
@@ -1544,6 +1692,435 @@ mod tests {
             cancel.is_cancelled(),
             "shared counter reached limit via mixed path"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Fan-out backpressure gap signal (`BUZZ_SYNC_REQUIRED`)
+    //
+    // The relay tells a live client that it missed an EVENT fan-out frame by
+    // queuing `["BUZZ_SYNC_REQUIRED","backpressure"]` on the connection's
+    // priority control channel. These tests pin the wire shape, the channel
+    // choice, the metric path, and every cancellation boundary.
+    // ------------------------------------------------------------------
+
+    /// Exact wire bytes of the gap signal. Clients match on this precise
+    /// shape; see the `crate::protocol` module docs.
+    const SYNC_FRAME: &str = r#"["BUZZ_SYNC_REQUIRED","backpressure"]"#;
+
+    fn fanout_frame(body: &str) -> Arc<Bytes> {
+        Arc::new(Bytes::from(body.to_string()))
+    }
+
+    fn assert_is_sync_frame(msg: &WsMessage, context: &str) {
+        match msg {
+            WsMessage::Text(text) => {
+                assert_eq!(text.to_string(), SYNC_FRAME, "{context}")
+            }
+            other => panic!("{context}: expected BUZZ_SYNC_REQUIRED text frame, got {other:?}"),
+        }
+    }
+
+    fn counter_snapshot(
+        recorder: &metrics_util::debugging::DebuggingRecorder,
+    ) -> std::collections::HashMap<String, u64> {
+        recorder
+            .snapshotter()
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| match value {
+                metrics_util::debugging::DebugValue::Counter(v) => {
+                    Some((key.key().name().to_owned(), v))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fanout_drop_on_full_data_buffer_signals_sync_required_on_ctrl() {
+        let (mgr, id, mut rx, mut ctrl_rx, cancel, bp) = setup_conn_with_ctrl(1, 8);
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+
+        // First fan-out frame fills the 1-slot data buffer.
+        assert!(mgr.send_fanout_frame(id, fanout_frame("frame-0")));
+
+        // Second frame is dropped: the data buffer is full.
+        let dropped = metrics::with_local_recorder(&recorder, || {
+            mgr.send_fanout_frame(id, fanout_frame("frame-1"))
+        });
+        assert!(!dropped, "frame into a full data buffer must be dropped");
+
+        // The gap signal is delivered on the control channel, exactly once.
+        let ctrl_msg = ctrl_rx
+            .try_recv()
+            .expect("gap signal must be queued on the ctrl channel");
+        assert_is_sync_frame(&ctrl_msg, "ctrl frame after fan-out drop");
+        assert!(
+            ctrl_rx.try_recv().is_err(),
+            "exactly one gap signal per dropped frame"
+        );
+
+        // The data channel carries only the EVENT payload, never the signal.
+        match rx.try_recv().expect("queued fan-out frame") {
+            WsMessage::Text(text) => assert_eq!(text.to_string(), "frame-0"),
+            other => panic!("expected data frame, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "dropped frame must not reach the data channel"
+        );
+
+        // Grace semantics preserved: first overflow warns, does not cancel.
+        assert_eq!(bp.load(Ordering::Relaxed), 1);
+        assert!(
+            !cancel.is_cancelled(),
+            "below the grace limit the socket stays alive when the signal was queued"
+        );
+
+        let counters = counter_snapshot(&recorder);
+        assert_eq!(
+            counters.get("buzz_fanout_dropped_frames_total"),
+            Some(&1),
+            "dropped fan-out frame counted"
+        );
+        assert!(
+            !counters.contains_key("buzz_ws_backpressure_disconnects_total"),
+            "no backpressure disconnect below the grace limit"
+        );
+    }
+
+    #[test]
+    fn fanout_gap_signal_never_rides_the_data_channel() {
+        let (mgr, id, mut rx, mut ctrl_rx, _cancel, _bp) = setup_conn_with_ctrl(2, 8);
+        assert!(mgr.send_fanout_frame(id, fanout_frame("a")));
+        assert!(mgr.send_fanout_frame(id, fanout_frame("b")));
+        // Buffer full: two drops → two gap signals, all on ctrl.
+        assert!(!mgr.send_fanout_frame(id, fanout_frame("c")));
+        assert!(!mgr.send_fanout_frame(id, fanout_frame("d")));
+
+        let mut ctrl_count = 0;
+        while let Ok(msg) = ctrl_rx.try_recv() {
+            assert_is_sync_frame(&msg, "every gap signal lands on the ctrl channel");
+            ctrl_count += 1;
+        }
+        assert_eq!(ctrl_count, 2, "one gap signal per dropped frame");
+
+        // Drain the data channel entirely: EVENT payloads only.
+        let mut data_frames = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                WsMessage::Text(text) => {
+                    assert_ne!(
+                        text.to_string(),
+                        SYNC_FRAME,
+                        "gap signal must never ride the data channel"
+                    );
+                    data_frames.push(text.to_string());
+                }
+                other => panic!("unexpected non-text frame on data channel: {other:?}"),
+            }
+        }
+        assert_eq!(data_frames, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn fanout_drop_with_full_ctrl_channel_cancels_immediately() {
+        // Build the connection by hand so the 1-slot control channel can be
+        // prefilled before registration, modelling ctrl traffic (heartbeat
+        // pongs, close frames) stacked behind a stalled writer.
+        let mgr = ConnectionManager::new();
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(1);
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let bp = Arc::new(AtomicU8::new(0));
+        ctrl_tx
+            .try_send(WsMessage::Text("ctrl-fill".into()))
+            .expect("ctrl prefill fits the empty 1-slot channel");
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            None,
+            cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            Arc::clone(&bp),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+
+        // Fill the data buffer, then drop.
+        assert!(mgr.send_fanout_frame(conn_id, fanout_frame("fill")));
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let dropped = metrics::with_local_recorder(&recorder, || {
+            mgr.send_fanout_frame(conn_id, fanout_frame("overflow"))
+        });
+        assert!(!dropped);
+
+        assert!(
+            cancel.is_cancelled(),
+            "ctrl channel also full: cancel at once so reconnect replay becomes the fail-safe"
+        );
+        assert_eq!(
+            bp.load(Ordering::Relaxed),
+            0,
+            "immediate cancellation short-circuits the grace counter"
+        );
+
+        // The only queued ctrl frame is the prefill — the gap signal did not
+        // squeeze onto a full control channel.
+        match ctrl_rx.try_recv().expect("prefilled ctrl frame") {
+            WsMessage::Text(text) => assert_eq!(text.to_string(), "ctrl-fill"),
+            other => panic!("unexpected ctrl frame: {other:?}"),
+        }
+        assert!(ctrl_rx.try_recv().is_err());
+
+        let counters = counter_snapshot(&recorder);
+        assert_eq!(counters.get("buzz_fanout_dropped_frames_total"), Some(&1));
+        assert_eq!(
+            counters.get("buzz_ws_backpressure_disconnects_total"),
+            Some(&1),
+            "immediate cancel is a backpressure disconnect"
+        );
+    }
+
+    #[test]
+    fn repeated_drops_after_cancel_do_not_inflate_disconnect_counter() {
+        // Runtime-harness finding (local relay flood run): after a connection
+        // is cancelled, drops that land before deregistration re-enter the
+        // ctrl-full branch. The dropped-frame counter must keep counting every
+        // lost frame, but the disconnect counter records the transition once.
+        let mgr = ConnectionManager::new();
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let bp = Arc::new(AtomicU8::new(0));
+        ctrl_tx
+            .try_send(WsMessage::Text("ctrl-fill".into()))
+            .expect("ctrl prefill fits the empty 1-slot channel");
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            None,
+            cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            Arc::clone(&bp),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+
+        assert!(mgr.send_fanout_frame(conn_id, fanout_frame("fill")));
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let all_dropped = metrics::with_local_recorder(&recorder, || {
+            // Drop 1 cancels (ctrl full). Drops 2..=5 land between the cancel
+            // and deregistration.
+            let mut all_dropped = true;
+            for _ in 0..5 {
+                all_dropped &= !mgr.send_fanout_frame(conn_id, fanout_frame("overflow"));
+            }
+            all_dropped
+        });
+        assert!(all_dropped, "every frame after the buffer fills drops");
+        assert!(cancel.is_cancelled());
+
+        let counters = counter_snapshot(&recorder);
+        assert_eq!(counters.get("buzz_fanout_dropped_frames_total"), Some(&5));
+        assert_eq!(
+            counters.get("buzz_ws_backpressure_disconnects_total"),
+            Some(&1),
+            "disconnect counted once, at the transition, even though drops continue until deregistration"
+        );
+    }
+
+    #[test]
+    fn concurrent_drops_on_one_connection_count_exactly_one_disconnect() {
+        // The is_cancelled→cancel sequence alone is not atomic: parallel
+        // drops on the same overflowing connection can all pass the check at
+        // once. The compare-exchange in `count_backpressure_disconnect_and_cancel`
+        // must still count the disconnect exactly once across threads.
+        let (mgr, id, _rx, ctrl_rx, cancel, _bp) = setup_conn_with_ctrl(1, 1);
+        drop(ctrl_rx); // Closed control channel: immediate-cancel branch.
+        assert!(mgr.send_fanout_frame(id, fanout_frame("fill")));
+
+        let mgr = Arc::new(mgr);
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let mgr = Arc::clone(&mgr);
+                std::thread::spawn(move || {
+                    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+                    let delivered = metrics::with_local_recorder(&recorder, || {
+                        mgr.send_fanout_frame(id, fanout_frame("overflow"))
+                    });
+                    assert!(!delivered, "the full buffer drops every frame");
+                    counter_snapshot(&recorder)
+                })
+            })
+            .collect();
+
+        let mut drops = 0u64;
+        let mut disconnects = 0u64;
+        for handle in handles {
+            let counters = handle.join().expect("drop worker panicked");
+            drops += counters
+                .get("buzz_fanout_dropped_frames_total")
+                .copied()
+                .unwrap_or(0);
+            disconnects += counters
+                .get("buzz_ws_backpressure_disconnects_total")
+                .copied()
+                .unwrap_or(0);
+        }
+        assert_eq!(drops, 8, "every concurrent frame is dropped and counted");
+        assert_eq!(
+            disconnects, 1,
+            "concurrent drops count the backpressure disconnect exactly once"
+        );
+        assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn fanout_drop_with_closed_ctrl_channel_cancels_immediately() {
+        let (mgr, id, _rx, ctrl_rx, cancel, _bp) = setup_conn_with_ctrl(1, 8);
+        drop(ctrl_rx); // Writer gone: the control channel is closed.
+        assert!(mgr.send_fanout_frame(id, fanout_frame("fill")));
+        assert!(!mgr.send_fanout_frame(id, fanout_frame("overflow")));
+        assert!(
+            cancel.is_cancelled(),
+            "closed ctrl channel: cancel at once, reconnect replay is the fail-safe"
+        );
+    }
+
+    #[test]
+    fn fanout_drop_still_cancels_at_grace_limit_with_signal_queued() {
+        let (mgr, id, _rx, mut ctrl_rx, cancel, bp) = setup_conn_with_ctrl(1, 8);
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        assert!(mgr.send_fanout_frame(id, fanout_frame("fill")));
+
+        let dropped = metrics::with_local_recorder(&recorder, || {
+            let mut dropped = 0;
+            for i in 0..3u8 {
+                if !mgr.send_fanout_frame(id, fanout_frame("overflow")) {
+                    dropped += 1;
+                }
+                if i < 2 {
+                    // The writer drains ctrl ahead of data on every iteration;
+                    // model that so the ctrl buffer does not fill before grace
+                    // is exhausted.
+                    let drained = ctrl_rx.try_recv().expect("gap signal queued");
+                    assert_is_sync_frame(&drained, "drained gap signal");
+                }
+            }
+            dropped
+        });
+        assert_eq!(dropped, 3);
+        assert_eq!(bp.load(Ordering::Relaxed), 3);
+        assert!(cancel.is_cancelled(), "grace-limit cancellation unchanged");
+
+        // The grace-limit drop also queued its gap signal before cancelling.
+        let final_signal = ctrl_rx
+            .try_recv()
+            .expect("final gap signal queued before the grace-limit cancel");
+        assert_is_sync_frame(&final_signal, "grace-limit gap signal");
+
+        let counters = counter_snapshot(&recorder);
+        assert_eq!(
+            counters.get("buzz_fanout_dropped_frames_total"),
+            Some(&3),
+            "every lost frame counted — no sampling"
+        );
+        assert_eq!(
+            counters.get("buzz_ws_backpressure_disconnects_total"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn healthy_fanout_send_emits_no_signal_and_resets_grace_counter() {
+        let (mgr, id, _rx, mut ctrl_rx, cancel, bp) = setup_conn_with_ctrl(16, 8);
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        bp.store(2, Ordering::Relaxed); // Simulated earlier backpressure.
+
+        let delivered = metrics::with_local_recorder(&recorder, || {
+            mgr.send_fanout_frame(id, fanout_frame("healthy"))
+        });
+        assert!(delivered);
+        assert!(
+            ctrl_rx.try_recv().is_err(),
+            "a healthy send must not emit a gap signal"
+        );
+        assert!(!cancel.is_cancelled());
+        assert_eq!(
+            bp.load(Ordering::Relaxed),
+            0,
+            "successful fan-out resets the shared grace counter"
+        );
+
+        let counters = counter_snapshot(&recorder);
+        assert!(!counters.contains_key("buzz_fanout_dropped_frames_total"));
+        assert!(!counters.contains_key("buzz_ws_backpressure_disconnects_total"));
+    }
+
+    #[test]
+    fn fanout_drop_on_closed_data_channel_counts_without_signal_or_cancel() {
+        let (mgr, id, rx, mut ctrl_rx, cancel, _bp) = setup_conn_with_ctrl(1, 8);
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        assert!(mgr.send_fanout_frame(id, fanout_frame("fill")));
+        drop(rx); // Writer gone: the data channel is closed.
+
+        let dropped = metrics::with_local_recorder(&recorder, || {
+            mgr.send_fanout_frame(id, fanout_frame("lost"))
+        });
+        assert!(!dropped);
+        assert!(
+            ctrl_rx.try_recv().is_err(),
+            "closed connections get no gap signal — reconnect replay is their fail-safe"
+        );
+        assert!(
+            !cancel.is_cancelled(),
+            "closed-channel drops keep the existing no-cancel behaviour"
+        );
+        let counters = counter_snapshot(&recorder);
+        assert_eq!(
+            counters.get("buzz_fanout_dropped_frames_total"),
+            Some(&1),
+            "the lost frame is still counted"
+        );
+    }
+
+    #[test]
+    fn fanout_send_to_gone_connection_counts_drop_without_signal() {
+        let (mgr, _id, _rx, _ctrl_rx, _cancel, _bp) = setup_conn_with_ctrl(1, 8);
+        let gone = Uuid::new_v4(); // Never registered (or already deregistered).
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+
+        let dropped = metrics::with_local_recorder(&recorder, || {
+            mgr.send_fanout_frame(gone, fanout_frame("lost"))
+        });
+        assert!(!dropped);
+        let counters = counter_snapshot(&recorder);
+        assert_eq!(
+            counters.get("buzz_fanout_dropped_frames_total"),
+            Some(&1),
+            "stale-recipient frames are lost frames too"
+        );
+    }
+
+    #[test]
+    fn direct_send_drop_keeps_legacy_behaviour_without_gap_signal() {
+        // `send_to` carries non-fan-out frames (CLOSED notices, etc.): its
+        // drops must not emit the fan-out-only gap signal.
+        let (mgr, id, _rx, mut ctrl_rx, cancel, bp) = setup_conn(1);
+        assert!(mgr.send_to(id, "fill".into()));
+        assert!(!mgr.send_to(id, "overflow".into()));
+        assert!(
+            ctrl_rx.try_recv().is_err(),
+            "non-fan-out drops keep the pre-gap-signal behaviour"
+        );
+        assert_eq!(bp.load(Ordering::Relaxed), 1);
+        assert!(!cancel.is_cancelled());
     }
 
     #[tokio::test]
