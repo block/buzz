@@ -87,8 +87,8 @@ fn current_working_directory() -> Result<String> {
 /// Nearly every event in this crate is emitted on one of its own target
 /// families — `acp::*`, `pool::*`, `canvas::*`, `engram::*`, `observer` — not
 /// under the crate path. `EnvFilter` matches directives by target prefix, so
-/// `buzz_acp=info` alone silences all of them, including 26 warn/error
-/// statements, and leaves a log holding little more than the startup line.
+/// `buzz_acp=info` alone silences all of them — warn and error events
+/// included — and leaves a log holding little more than the startup line.
 /// The debug-level targets (`acp::wire` and friends) stay off at `info`.
 const LOG_FILTER: &str = "buzz_acp=info,acp=info,pool=info,canvas=info,engram=info,observer=info";
 

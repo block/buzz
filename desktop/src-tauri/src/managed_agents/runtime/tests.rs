@@ -1263,14 +1263,34 @@ fn default_child_filter_covers_every_harness_target_family() {
 }
 
 #[test]
-fn explicit_rust_log_naming_buzz_acp_is_passed_through_untouched() {
+fn explicit_target_directive_keeps_the_other_families() {
+    // The override a user reaches for first is `buzz_acp=debug`. Before this
+    // was fixed it was passed through verbatim, which left every other family
+    // silenced — the exact problem the default is meant to solve.
     let filter = super::child_rust_log_filter_from(Some("buzz_acp=debug".to_string()));
-    assert_eq!(filter, "buzz_acp=debug");
+    assert!(filter.contains("pool=info"), "{filter}");
+    assert!(filter.ends_with(",buzz_acp=debug"), "{filter}");
+}
+
+#[test]
+fn target_merely_containing_the_crate_name_does_not_bypass_the_defaults() {
+    let filter = super::child_rust_log_filter_from(Some("my_buzz_acp=debug".to_string()));
+    assert!(filter.starts_with(super::LOG_FILTER), "{filter}");
+}
+
+#[test]
+fn bare_global_level_is_left_exactly_as_written() {
+    // Target directives outrank a global level, so prefixing ours would narrow
+    // `RUST_LOG=debug` instead of widening it.
+    for value in ["debug", "TRACE", " info "] {
+        let filter = super::child_rust_log_filter_from(Some(value.to_string()));
+        assert_eq!(filter, value, "global level must survive untouched");
+    }
 }
 
 #[test]
 fn unrelated_rust_log_is_extended_rather_than_replaced() {
     let filter = super::child_rust_log_filter_from(Some("hyper=warn".to_string()));
-    assert!(filter.starts_with("hyper=warn,"));
-    assert!(filter.contains("pool=info"));
+    assert!(filter.starts_with(super::LOG_FILTER), "{filter}");
+    assert!(filter.ends_with(",hyper=warn"), "{filter}");
 }
