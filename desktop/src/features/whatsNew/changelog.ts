@@ -20,6 +20,17 @@
 export type ChangelogEntry = {
   /** Full app version, e.g. `"0.5.14-1"`. */
   version: string;
+  /**
+   * Release date as `YYYY-MM-DD`, taken from the git tag.
+   *
+   * Only used to interleave these entries with upstream Buzz releases in the
+   * Settings → Updates history. Optional because the two earliest entries
+   * predate the release pipeline and were never tagged, so no date exists for
+   * them; undated entries sort to the end, which is where they belong anyway.
+   * Nothing else derives ordering from this — array position remains
+   * authoritative for release order.
+   */
+  date?: string;
   bullets: string[];
 };
 
@@ -39,6 +50,7 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
   },
   {
     version: "0.5.5-4",
+    date: "2026-08-12",
     bullets: [
       "Pin up to 3 important messages to the top of a channel or DM",
       "Forward one or more messages to other people or channels",
@@ -47,12 +59,14 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
   },
   {
     version: "0.5.5-5",
+    date: "2026-08-14",
     bullets: [
       "Start a Google Meet from any channel or DM — connect your Google account in Settings, then share a call link in one click",
     ],
   },
   {
     version: "0.5.14-0",
+    date: "2026-08-15",
     bullets: [
       "Updated to the latest Buzz release, bringing nine versions of upstream improvements",
       "Fixed Windows desktop notifications not appearing at all",
@@ -60,6 +74,7 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
   },
   {
     version: "0.5.14-1",
+    date: "2026-08-15",
     bullets: [
       "File versions are now grouped: the current version shows in the Files tab with earlier ones tucked underneath",
       "Outdated files are marked wherever you see them — in chat, in the preview window, and in the Files tab — and one click takes you to the latest version",
@@ -72,11 +87,22 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
   },
   {
     version: "0.5.14-2",
+    date: "2026-08-16",
     bullets: [
       "Your Inbox now shows every channel and DM with something new, whether or not you were mentioned",
       "One row per conversation, with a count — not one row per message",
       "Reading a conversation clears it from the Inbox, and reading it in the Inbox clears it everywhere else",
       "Muted channels stay out of the Inbox",
+    ],
+  },
+  {
+    version: "0.5.14-3",
+    date: "2026-08-16",
+    bullets: [
+      "The Inbox now shows only what is addressed to you: mentions, threads you are part of, and approvals waiting on you. Use the sidebar to see everything else that is new",
+      "A mention inside a thread is counted once, as a mention, rather than appearing under both Mentions and Threads",
+      "Threads now leave the Inbox once you have read them",
+      "Settings → Updates lists upstream Buzz releases alongside this app's own, up to the version this build is based on",
     ],
   },
 ];

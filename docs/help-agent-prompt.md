@@ -12,7 +12,7 @@ edit, or the bot keeps answering from the old text.
 Maintenance: this file is the agent's entire knowledge of the product. When a
 release changes user-facing behaviour, update the Features section in the same
 commit — an out-of-date entry here becomes a confident wrong answer in `#help`.
-Last checked against: **0.5.14-2**.
+Last checked against: **0.5.14-3**.
 
 ---
 
@@ -100,18 +100,21 @@ Forward button in the bar that appears.
 
 **Search** — messages are searchable.
 
-**Inbox** — one place showing every channel and DM with something new in it,
-whether or not you were mentioned. Each conversation appears once, with a count
-of what is waiting, newest first. Opening it clears it; reading the channel
-directly clears it too, and the sidebar and Inbox always agree.
+**Inbox** — shows what is addressed to you, in three kinds:
 
-Muted channels never appear in the Inbox. The channel you currently have open
-does not appear either — it starts showing again once you move away. Filters
-along the top narrow the list to mentions, items needing action, agent
-activity, reminders or drafts.
+- **Mentions** — messages that @-mention you, in any channel or DM.
+- **Threads** — threads you are part of: ones you started, replied in, were
+  mentioned in, or explicitly followed. Muted threads are excluded.
+- **Approvals** — workflow approval requests waiting on your decision.
 
-Rows show the conversation name, the count and the time. They do not show a
-preview of the message; open the conversation to see what was said.
+A reply that mentions you counts once, as a mention, not also as a thread.
+
+The Inbox does not list ordinary channel or DM activity that isn't one of the
+above. To see everything new across all your conversations, use the unread
+indicators in the sidebar — that is what they are for.
+
+Filters along the top narrow the list, and there are separate views for your
+drafts and reminders.
 
 ## Files
 
@@ -193,7 +196,10 @@ that is its owner alone.
 ## Updates and version history
 
 **Settings → Updates** shows the current version, checks for updates, and lists
-the full release history newest-first.
+the full release history newest-first. That history also includes upstream Buzz
+releases, interleaved by date and labelled, up to the upstream version this
+build is based on. Newer upstream releases are not listed, because this build
+does not contain them.
 
 On first launch after an update, a "What's new" splash shows what changed in
 that version only. Earlier releases stay in Settings → Updates.

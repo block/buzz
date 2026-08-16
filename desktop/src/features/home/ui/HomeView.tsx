@@ -46,7 +46,6 @@ import { getHomeMessageCapabilities } from "@/features/home/lib/homeMessageCapab
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
-import { useChannelUnreadRows } from "@/features/home/useChannelUnreadRows";
 import { HomePersonalInboxDetail } from "@/features/home/ui/HomePersonalInboxDetail";
 import {
   useChannelMessagesQuery,
@@ -277,9 +276,6 @@ export function HomeView({
   const latchedDefaultParentId = activeLatchedItem !== null ? (getThreadReference(activeLatchedItem.tags).parentId ?? activeLatchedItem.id) : null;
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data;
-  // Channel-level unread rows for the Inbox's All view. Derived from the same
-  // projections the sidebar renders, so the two cannot disagree.
-  const channelUnreadRows = useChannelUnreadRows(channels);
   // biome-ignore format: file size ratchet
   const selectedChannelIdCandidate = React.useMemo(() => threadContextFeedItem?.channelId ?? null, [threadContextFeedItem]);
   // biome-ignore format: file size ratchet
@@ -686,7 +682,6 @@ export function HomeView({
               activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
               activeDraftCount={activeDraftCount}
-              channelRows={channelUnreadRows}
               draftItems={draftItems}
               doneSet={effectiveDoneSet}
               dueReminderCount={dueReminderCount}
@@ -696,8 +691,6 @@ export function HomeView({
               onFilterChange={handleFilterChange}
               onMarkRead={markItemRead}
               onMarkUnread={markItemUnread}
-              // biome-ignore format: file size ratchet
-              onOpenChannel={(channelId) => onOpenContext(channelId, null, null)}
               onOpenDirect={(item) => {
                 const channelId = item.item.channelId;
                 if (!channelId) {

@@ -72,6 +72,57 @@ test("matchesInboxFilter returns true for the 'all' filter regardless of categor
   assert.equal(matchesInboxFilter({ categories: ["mentions"] }, "all"), true);
 });
 
+// --- mentions supersede threads ---
+
+const threadReplyItem = (categories) => ({
+  categories,
+  item: {
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "reply"],
+    ],
+  },
+  groupItems: [],
+});
+
+test("a thread reply that mentions you is a mention, not a thread", () => {
+  // The two lanes must be mutually exclusive: counted under both, one item
+  // shows up twice and neither lane describes what is actually waiting.
+  assert.equal(
+    matchesInboxFilter(threadReplyItem(["mention"]), "thread"),
+    false,
+  );
+});
+
+test("a mention inside a thread is still reachable under Mentions", () => {
+  // Superseding must reclassify the item, never drop it.
+  assert.equal(
+    matchesInboxFilter(threadReplyItem(["mention"]), "mention"),
+    true,
+  );
+});
+
+test("a thread reply without a mention still counts as a thread", () => {
+  assert.equal(
+    matchesInboxFilter(threadReplyItem(["activity"]), "thread"),
+    true,
+  );
+});
+
+test("a top-level mention is not a thread either way", () => {
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["mention"],
+        item: { tags: [["h", "channel"]] },
+        groupItems: [],
+      },
+      "thread",
+    ),
+    false,
+  );
+});
+
 test("Inbox All excludes generic top-level channel traffic", () => {
   const owned = new Set(["owned-agent"]);
   assert.equal(
@@ -239,7 +290,7 @@ test("matchesInboxFilter matches thread rows by thread tags", () => {
       },
       "thread",
     ),
-    true,
+    false,
   );
 
   assert.equal(
@@ -251,7 +302,7 @@ test("matchesInboxFilter matches thread rows by thread tags", () => {
       },
       "thread",
     ),
-    true,
+    false,
   );
 
   assert.equal(

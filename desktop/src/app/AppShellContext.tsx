@@ -7,7 +7,6 @@ import type { FeedItem } from "@/shared/api/types";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 
 const EMPTY_SET = new Set<string>();
-const EMPTY_MAP = new Map<string, number>();
 
 type AppShellContextValue = {
   markAllChannelsRead: () => void;
@@ -73,18 +72,6 @@ type AppShellContextValue = {
   // Ordinary unread channel-level activity. Sidebar rows use this for text
   // emphasis only; thread activity owns the dot.
   topLevelUnreadChannelIds: ReadonlySet<string>;
-  // Badge-tier unread count per channel, for surfaces that show a number
-  // rather than a dot. Absent for a channel means "unread, count unknown" —
-  // callers should fall back rather than treating it as zero.
-  unreadChannelCounts: ReadonlyMap<string, number>;
-  // Unix-seconds timestamp of the newest unread activity per channel. Only
-  // populated for channels that are currently unread; this is the sort key
-  // Home's Inbox orders rows by.
-  latestUnreadActivityByChannelId: ReadonlyMap<string, number>;
-  // Muted channels. Exposed from the single AppShell-mounted useChannelMutes
-  // rather than re-mounted per surface: that hook owns a relay sync manager,
-  // so a second instance would publish mute state twice.
-  mutedChannelIds: ReadonlySet<string>;
   // Lets isolated component tests retain the legacy hasUnread fallback while
   // the mounted shell uses the split projections above.
   hasSidebarUnreadProjections: boolean;
@@ -123,9 +110,6 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   unreadThreadFeedItems: [],
   unreadThreadChannelIds: EMPTY_SET,
   topLevelUnreadChannelIds: EMPTY_SET,
-  unreadChannelCounts: EMPTY_MAP,
-  latestUnreadActivityByChannelId: EMPTY_MAP,
-  mutedChannelIds: EMPTY_SET,
   hasSidebarUnreadProjections: false,
   feedItemState: {
     doneSet: EMPTY_SET,

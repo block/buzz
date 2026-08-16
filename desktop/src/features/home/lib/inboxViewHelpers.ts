@@ -54,6 +54,11 @@ export function matchesInboxFilter(
   }
 
   if (filter === "thread") {
+    // Mentions supersede threads, so the two lanes stay mutually exclusive.
+    // A reply that @-mentions you is a mention first: it would otherwise
+    // appear under both filters, and counting one item twice makes the lanes
+    // useless as a picture of what is actually waiting.
+    if (item.categories.includes("mention")) return false;
     return [item.item, ...(item.groupItems ?? [])].some((groupItem) =>
       groupItem ? hasThreadReplyTags(groupItem.tags) : false,
     );
