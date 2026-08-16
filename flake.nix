@@ -181,6 +181,10 @@
                 shellHook = ''
                   export PATH="$PWD/node_modules/.bin:$PATH"
 
+                  ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                    export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:''${XDG_DATA_DIRS:-}"
+                  ''}
+
                   echo "Buzz ${label} development shell"
                   echo "  Rust: $(rustc --version)"
                   echo "  Node: $(node --version)"
