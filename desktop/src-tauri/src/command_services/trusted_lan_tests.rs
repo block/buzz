@@ -17,6 +17,15 @@ fn accepts_the_approved_literal_private_endpoints() {
 }
 
 #[test]
+fn accepts_literal_loopback_for_the_mac_local_rag_only() {
+    let rag = TrustedLanEndpoint::parse_rag("http://127.0.0.1:8005/mcp/")
+        .expect("Mac-local RAG endpoint");
+
+    assert_eq!(rag.as_str(), "http://127.0.0.1:8005/mcp/");
+    assert!(TrustedLanEndpoint::parse_memory("http://127.0.0.1:8006/mcp").is_err());
+}
+
+#[test]
 fn optional_loader_selects_only_a_valid_protected_trusted_lan_config() {
     let directory = tempfile::tempdir_in(std::env::current_dir().expect("working directory"))
         .expect("temporary protected config directory");

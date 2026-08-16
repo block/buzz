@@ -41,9 +41,11 @@ grep -Fq 'bash scripts/tests/command-memory-service-test.sh' "${command_log}" ||
   fail "Memory topology fixture was not run"
 grep -Fq 'bash scripts/tests/check-lmstudio-native-test.sh' "${command_log}" ||
   fail "LM Studio fixture was not run"
+grep -Fq 'bash scripts/tests/commission-command-rag-test.sh' "${command_log}" ||
+  fail "Mac-local RAG commissioning fixture was not run"
 grep -Fq 'cargo test -p buzz-core agent_memory_canonical --lib' "${command_log}" ||
   fail "canonical JSON check was not run"
-grep -Fq 'malicious_native_mcp_evidence_is_blocked_before_any_continuation_request' \
+grep -Fq 'malformed_native_mcp_evidence_is_blocked_before_any_continuation_request' \
   "${command_log}" ||
   fail "continuation-state evidence check was not run"
 grep -Fq 'command_services::memory::replication::tests -- --test-threads=1' \

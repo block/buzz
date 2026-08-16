@@ -21,17 +21,25 @@ pub(crate) struct TrustedLanEndpoint(String);
 
 impl TrustedLanEndpoint {
     pub(crate) fn parse_memory(value: &str) -> Result<Self, TrustedLanError> {
-        Self::parse(value, "/mcp")
+        Self::parse(value, "/mcp", false)
     }
 
     pub(crate) fn parse_rag(value: &str) -> Result<Self, TrustedLanError> {
-        Self::parse(value, "/mcp/")
+        Self::parse(value, "/mcp/", true)
     }
 
-    fn parse(value: &str, required_path: &str) -> Result<Self, TrustedLanError> {
+    fn parse(
+        value: &str,
+        required_path: &str,
+        allow_loopback: bool,
+    ) -> Result<Self, TrustedLanError> {
         let parsed = Url::parse(value).map_err(|_| TrustedLanError::InvalidEndpoint)?;
         let host = match parsed.host() {
-            Some(Host::Ipv4(host)) if host.is_private() => IpAddr::V4(host),
+            Some(Host::Ipv4(host))
+                if host.is_private() || (allow_loopback && host.is_loopback()) =>
+            {
+                IpAddr::V4(host)
+            }
             _ => return Err(TrustedLanError::InvalidEndpoint),
         };
         if parsed.scheme() != "http"

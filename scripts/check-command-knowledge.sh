@@ -22,6 +22,9 @@ run_check \
   "LM Studio loopback, proxy, auth, response-bound, and structured-tool fixtures" \
   bash scripts/tests/check-lmstudio-native-test.sh
 run_check \
+  "Mac-local RAG loopback commissioning and semantic identity fixtures" \
+  bash scripts/tests/commission-command-rag-test.sh
+run_check \
   "AgentMemory canonical JSON compatibility" \
   "${cargo_bin}" test -p buzz-core agent_memory_canonical --lib
 run_check \
