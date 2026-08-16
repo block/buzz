@@ -193,6 +193,46 @@ fn workflow_wire_serializes_with_snake_case_keys() {
 }
 
 #[test]
+fn multi_channel_workflow_query_uses_one_filter_per_channel() {
+    let other_channel = "33333333-3333-3333-3333-333333333333";
+    let filters = channel_workflow_filters(vec![CHAN.to_string(), other_channel.to_string()])
+        .expect("valid channels");
+
+    assert_eq!(filters.len(), 2);
+    assert_eq!(
+        filters[0],
+        serde_json::json!({
+            "kinds": [30620],
+            "#h": [CHAN],
+        })
+    );
+    assert_eq!(
+        filters[1],
+        serde_json::json!({
+            "kinds": [30620],
+            "#h": [other_channel],
+        })
+    );
+}
+
+#[test]
+fn channel_workflow_filters_reject_malformed_or_blank_channel_ids() {
+    for channel_id in ["not-a-uuid", "", "   "] {
+        let error = channel_workflow_filters(vec![channel_id.to_string()])
+            .expect_err("malformed channel id must fail before querying the relay");
+        assert_eq!(error, "invalid channel id");
+    }
+}
+
+#[test]
+fn channel_workflow_filters_accepts_empty_input() {
+    assert_eq!(
+        channel_workflow_filters(Vec::new()).expect("empty input is valid"),
+        Vec::<Value>::new()
+    );
+}
+
+#[test]
 fn trigger_response_uses_persisted_run_id_contract() {
     let wire = trigger_wire_from_message(
         WF.to_string(),

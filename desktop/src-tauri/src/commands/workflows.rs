@@ -107,11 +107,13 @@ pub async fn get_channel_workflows(
 ///
 /// The Workflows overview screen previously issued one `get_channel_workflows`
 /// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
-/// relay POSTs. A nostr `#h` filter matches ANY of its listed values, so one
-/// query with all channel ids returns the same set. Each `WorkflowWire` carries
-/// its own `channel_id` (from the event's `h` tag), so the frontend can still
-/// group results by channel. Neither this nor the per-channel command sets a
-/// `limit`, so batching does not change result completeness.
+/// relay POSTs. This sends N single-channel filters in one query request. Using
+/// one multi-value `#h` filter would be equivalent under NIP-01, but older
+/// relays incorrectly narrowed that shape to its first channel. Each
+/// `WorkflowWire` carries its own `channel_id` (from the event's `h` tag), so
+/// the frontend can still group results by channel. Neither this nor the
+/// per-channel command sets a `limit`, so batching does not change result
+/// completeness.
 #[tauri::command]
 pub async fn get_channels_workflows(
     channel_ids: Vec<String>,
@@ -121,16 +123,24 @@ pub async fn get_channels_workflows(
         return Ok(Vec::new());
     }
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [30620],
-            "#h": channel_ids,
-        })],
-    )
-    .await?;
+    let filters = channel_workflow_filters(channel_ids)?;
+    let events = query_relay(&state, &filters).await?;
 
     Ok(events.iter().map(workflow_from_event).collect())
+}
+
+fn channel_workflow_filters(channel_ids: Vec<String>) -> Result<Vec<Value>, String> {
+    channel_ids
+        .into_iter()
+        .map(|channel_id| {
+            let channel_id = uuid::Uuid::parse_str(channel_id.trim())
+                .map_err(|_| "invalid channel id".to_string())?;
+            Ok(serde_json::json!({
+                "kinds": [30620],
+                "#h": [channel_id.to_string()],
+            }))
+        })
+        .collect()
 }
 
 #[tauri::command]
