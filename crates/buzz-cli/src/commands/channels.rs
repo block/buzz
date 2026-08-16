@@ -2094,6 +2094,7 @@ mod tests {
         ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
+    use crate::validate::fold_name;
     use crate::CliError;
     use serde_json::json;
     use std::collections::HashMap;
@@ -2338,6 +2339,20 @@ mod tests {
         assert!(name_matches("Buzz-Chat-Composer", "composer", false));
         assert!(name_matches("Buzz-Chat-Composer", "buzz", false));
         assert!(!name_matches("design", "composer", false));
+    }
+
+    #[test]
+    fn name_matches_folds_non_ascii_case() {
+        // `to_ascii_lowercase` left these untouched, so a channel named in any
+        // language with cased non-ASCII letters could not be found by the
+        // obvious query — while Desktop, on JavaScript's `toLowerCase`, found
+        // it. The needle is pre-folded by the caller, as the comment above says.
+        assert!(name_matches("ÉQUIPE", &fold_name("équipe"), true));
+        assert!(name_matches("ÉQUIPE Produit", &fold_name("équipe"), false));
+        assert!(name_matches("ОБЩИЙ", &fold_name("общий"), true));
+        assert!(name_matches("Ünnepek", &fold_name("ünnepek"), true));
+        // Still a non-match, so the fold has not made matching sloppy.
+        assert!(!name_matches("ÉQUIPE", &fold_name("equipe"), true));
     }
 
     #[test]
