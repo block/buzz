@@ -2201,6 +2201,7 @@ async fn tokio_main() -> Result<()> {
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
+        load_session_id: config.load_session_id.clone(),
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
             None
@@ -6821,6 +6822,7 @@ mod build_mcp_servers_tests {
             model: None,
             effort_level: None,
             session_title: None,
+            load_session_id: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
@@ -7045,6 +7047,7 @@ mod error_outcome_emission_tests {
             model: None,
             effort_level: None,
             session_title: None,
+            load_session_id: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),

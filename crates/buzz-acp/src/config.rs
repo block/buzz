@@ -443,6 +443,13 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_SESSION_TITLE")]
     pub session_title: Option<String>,
 
+    /// Load one exact existing ACP session for the single configured channel.
+    /// Fails closed if the adapter cannot load that ID; never falls back to a
+    /// new session. Restricted to one agent, one channel, no heartbeat, and no
+    /// proactive session rotation.
+    #[arg(long, env = "BUZZ_ACP_LOAD_SESSION_ID")]
+    pub load_session_id: Option<String>,
+
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
@@ -563,6 +570,8 @@ pub struct Config {
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
+    /// Exact existing ACP session ID to load for the single configured channel.
+    pub load_session_id: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
@@ -1091,6 +1100,25 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        let load_session_id = if let Some(raw) = args.load_session_id.as_deref() {
+            let parsed = Uuid::parse_str(raw.trim()).map_err(|_| {
+                ConfigError::ConfigFile("load_session_id must be a canonical UUID".into())
+            })?;
+            if args.agents != 1
+                || args.heartbeat_interval != 0
+                || args.max_turns_per_session != 0
+                || args.channels.as_ref().map(Vec::len) != Some(1)
+            {
+                return Err(ConfigError::ConfigFile(
+                    "load_session_id requires exactly one agent, one --channels value, heartbeat disabled, and session rotation disabled"
+                        .into(),
+                ));
+            }
+            Some(parsed.to_string())
+        } else {
+            None
+        };
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
@@ -1130,6 +1158,7 @@ impl Config {
                 .session_title
                 .as_deref()
                 .and_then(sanitize_session_title),
+            load_session_id,
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
@@ -1503,6 +1532,7 @@ mod tests {
             model: None,
             effort_level: None,
             session_title: None,
+            load_session_id: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
@@ -2877,6 +2907,43 @@ channels = "ALL"
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
         );
+    }
+
+    #[test]
+    fn load_session_full_path_accepts_exact_single_channel_scope() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--channels",
+            "de5e9091-05fe-4719-beaf-81ebf679ad48",
+            "--load-session-id",
+            "81d9a95e-c9c0-4c78-b5ab-c52c5549d321",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("exact single-channel load should pass");
+        assert_eq!(
+            config.load_session_id.as_deref(),
+            Some("81d9a95e-c9c0-4c78-b5ab-c52c5549d321")
+        );
+    }
+
+    #[test]
+    fn load_session_full_path_rejects_multi_channel_scope() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--channels",
+            "de5e9091-05fe-4719-beaf-81ebf679ad48,13cd8c52-cd0b-427c-bace-8a606866a689",
+            "--load-session-id",
+            "81d9a95e-c9c0-4c78-b5ab-c52c5549d321",
+        ])
+        .expect("clap should parse args");
+        let error = Config::from_args(args).expect_err("multi-channel load must fail closed");
+        assert!(error
+            .to_string()
+            .contains("exactly one agent, one --channels"));
     }
 
     // --- max_turn_duration ceiling gate ---

@@ -38,8 +38,8 @@ use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::prompt_project::{pick_authoritative_project_home, PromptProjectInfo};
 use crate::queue::{
-    CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup, ThreadTags,
+    parse_thread_tags, CancelReason, ContextMessage, ConversationContext, FlushBatch,
+    PromptChannelInfo, PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -703,6 +703,8 @@ pub struct PromptContext {
     /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
     /// on `session/new`. Never part of the prompt.
     pub session_title: Option<String>,
+    /// Exact existing session to load for the single configured channel.
+    pub load_session_id: Option<String>,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
@@ -1142,20 +1144,27 @@ async fn create_session_and_apply_model(
         ctx.session_title.as_deref(),
     );
 
-    let resp = agent
-        .acp
-        .session_new_full(
-            &ctx.cwd,
-            mcp_servers,
-            session_new_system_prompt(
-                is_goose,
-                agent.protocol_version,
-                &agent.agent_name,
-                combined_system_prompt.as_deref(),
-            ),
-            session_title.as_deref(),
-        )
-        .await?;
+    let resp = if let Some(existing_session_id) = ctx.load_session_id.as_deref() {
+        agent
+            .acp
+            .session_load_full(existing_session_id, &ctx.cwd, mcp_servers)
+            .await?
+    } else {
+        agent
+            .acp
+            .session_new_full(
+                &ctx.cwd,
+                mcp_servers,
+                session_new_system_prompt(
+                    is_goose,
+                    agent.protocol_version,
+                    &agent.agent_name,
+                    combined_system_prompt.as_deref(),
+                ),
+                session_title.as_deref(),
+            )
+            .await?
+    };
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
@@ -1954,6 +1963,24 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // The reply destination is fixed from the triggering batch before any
+    // prompt work begins. A fresh root has no NIP-10 tags, so make that event
+    // both root and parent; an already-threaded event preserves its root and
+    // replies to the latest triggering event.
+    let response_thread_tags = batch.as_ref().and_then(|b| {
+        b.events.last().map(|be| {
+            let mut tags = parse_thread_tags(&be.event);
+            if tags.root_event_id.is_none() {
+                let event_id = be.event.id.to_hex();
+                tags.root_event_id = Some(event_id.clone());
+                tags.parent_event_id = Some(event_id);
+            } else {
+                tags.parent_event_id = Some(be.event.id.to_hex());
+            }
+            tags
+        })
+    });
+
     // Resolve project authority exactly once, before any ACP session creation or
     // initial-message delivery. An indeterminate result is a local relay-state
     // outcome: fail closed and preserve the batch without poisoning the healthy
@@ -2137,9 +2164,11 @@ pub async fn run_prompt_task(
                             .state
                             .deliveries
                             .insert(*cid, ChannelDeliveryState::default());
-                        // Seed a zero usage baseline: buzz-acp spawned this session
-                        // so prior usage is zero by definition — first turn is reliable.
-                        agent.acp.notify_session_spawned(&sid);
+                        if ctx.load_session_id.is_none() {
+                            // Seed a zero usage baseline: buzz-acp spawned this session
+                            // so prior usage is zero by definition — first turn is reliable.
+                            agent.acp.notify_session_spawned(&sid);
+                        }
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
@@ -2199,8 +2228,10 @@ pub async fn run_prompt_task(
                             agent.index
                         );
                         agent.state.heartbeat_session = Some(sid.clone());
-                        // Seed a zero usage baseline: buzz-acp spawned this session.
-                        agent.acp.notify_session_spawned(&sid);
+                        if ctx.load_session_id.is_none() {
+                            // Seed a zero usage baseline: buzz-acp spawned this session.
+                            agent.acp.notify_session_spawned(&sid);
+                        }
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
@@ -2789,6 +2820,44 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            // Exact-session adapters such as OpenClaw return their answer as
+            // ACP message chunks and do not execute Buzz's send-message tool.
+            // Publish that output here, and fail the turn if publication does
+            // not receive a relay acknowledgement so the batch is retried
+            // instead of being silently consumed.
+            let response_text = agent.acp.take_turn_response_text();
+            if ctx.load_session_id.is_some() && !response_text.trim().is_empty() {
+                if let (PromptSource::Channel(channel_id), Some(thread_tags)) =
+                    (&source, response_thread_tags.as_ref())
+                {
+                    if let Err(error) = post_acp_response(
+                        &ctx.rest_client,
+                        *channel_id,
+                        thread_tags,
+                        response_text.trim(),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            channel = %channel_id,
+                            "ACP final-response publication failed: {error}"
+                        );
+                        send_prompt_result(
+                            &result_tx,
+                            &turn_id,
+                            agent,
+                            source,
+                            PromptOutcome::Error(AcpError::Protocol(format!(
+                                "ACP final-response publication failed: {error}"
+                            ))),
+                            batch,
+                        );
+                        return;
+                    }
+                    tracing::info!(channel = %channel_id, "published ACP final response");
+                }
+            }
 
             if let PromptSource::Channel(cid) = &source {
                 let standing_sent = !agent.has_system_prompt_support();
@@ -4794,6 +4863,41 @@ pub(crate) async fn post_failure_notice(
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
     }
+}
+
+/// Publish text returned through ACP's `agent_message_chunk` stream as a
+/// signed Buzz reply. This is used by exact-session adapters (notably
+/// OpenClaw), whose final answer is ACP output rather than a `buzz` tool call.
+async fn post_acp_response(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    content: &str,
+) -> Result<(), String> {
+    let root = thread_tags
+        .root_event_id
+        .as_deref()
+        .ok_or_else(|| "ACP response has no triggering root".to_string())?;
+    let root_id = nostr::EventId::from_hex(root).map_err(|e| format!("invalid root id: {e}"))?;
+    let parent_id = thread_tags
+        .parent_event_id
+        .as_deref()
+        .and_then(|id| nostr::EventId::from_hex(id).ok())
+        .unwrap_or(root_id);
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id: root_id,
+        parent_event_id: parent_id,
+    };
+    let builder = buzz_sdk::build_message(channel_id, content, Some(&thread_ref), &[], false, &[])
+        .map_err(|e| format!("build failed: {e}"))?;
+    let event = builder
+        .sign_with_keys(&rest.keys)
+        .map_err(|e| format!("sign failed: {e}"))?;
+    tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event))
+        .await
+        .map_err(|_| "publication timed out".to_string())?
+        .map_err(|e| format!("publication failed: {e}"))?;
+    Ok(())
 }
 
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
@@ -8209,6 +8313,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
             session_title: None,
+            load_session_id: None,
             team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,

@@ -214,6 +214,11 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Text emitted by `agent_message_chunk` notifications during the current
+    /// prompt. ACP returns only a stop reason from `session/prompt`; adapters
+    /// such as OpenClaw deliver the human-facing final answer exclusively via
+    /// these notifications, so callers must be able to consume it.
+    turn_response_text: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +568,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            turn_response_text: String::new(),
         })
     }
 
@@ -685,6 +691,44 @@ impl AcpClient {
         })
     }
 
+    /// Load an exact existing ACP session instead of creating a replacement.
+    ///
+    /// This is an explicit, fail-closed operator path. The caller supplies the
+    /// adapter-owned session ID and the adapter decides whether it can resume
+    /// it. No fallback to `session/new` is attempted when loading fails.
+    pub async fn session_load_full(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<SessionNewResponse, AcpError> {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": mcp_servers,
+        });
+        let result = self.send_request("session/load", params).await?;
+        // ACP's LoadSessionResponse does not require a sessionId: the loaded
+        // session is identified by the request. Some agents echo it as an
+        // extension. When present, require exact parity; never accept a
+        // different or malformed ID.
+        if let Some(value) = result.get("sessionId") {
+            let loaded_id = value.as_str().ok_or_else(|| {
+                AcpError::Protocol("session/load returned a non-string sessionId".into())
+            })?;
+            if loaded_id != session_id {
+                return Err(AcpError::Protocol(format!(
+                    "session/load returned unexpected sessionId: expected {session_id}, got {loaded_id}"
+                )));
+            }
+        }
+        tracing::info!(target: "acp::session", "session loaded: {session_id}");
+        Ok(SessionNewResponse {
+            session_id: session_id.to_owned(),
+            raw: result,
+        })
+    }
+
     /// Send `session/new` and return only the `sessionId` string.
     ///
     /// Convenience wrapper around [`session_new_full`].
@@ -781,6 +825,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.turn_response_text.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -899,6 +944,11 @@ impl AcpClient {
     pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
         self.goose_usage.seed_zero_baseline(session_id);
         self.standard_usage.seed_zero_baseline(session_id);
+    }
+
+    /// Consume the human-facing text streamed by the most recent ACP turn.
+    pub fn take_turn_response_text(&mut self) -> String {
+        std::mem::take(&mut self.turn_response_text)
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1755,6 +1805,7 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.turn_response_text.push_str(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -3491,6 +3542,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_load_full_uses_exact_id_and_never_calls_new() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"81d9a95e-c9c0-4c78-b5ab-c52c5549d321","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_load_full("81d9a95e-c9c0-4c78-b5ab-c52c5549d321", "/tmp", vec![])
+            .await
+            .expect("session_load_full should succeed");
+
+        assert_eq!(resp.session_id, "81d9a95e-c9c0-4c78-b5ab-c52c5549d321");
+        let received = &resp.raw["_receivedRequest"];
+        assert_eq!(received["method"], "session/load");
+        assert_eq!(
+            received["params"]["sessionId"],
+            "81d9a95e-c9c0-4c78-b5ab-c52c5549d321"
+        );
+        assert_eq!(received["params"]["cwd"], "/tmp");
+    }
+
+    #[tokio::test]
+    async fn session_load_full_accepts_standard_response_without_session_id() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 _load
+            echo '{"jsonrpc":"2.0","id":1,"result":{"configOptions":[]}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        let resp = client
+            .session_load_full("81d9a95e-c9c0-4c78-b5ab-c52c5549d321", "/tmp", vec![])
+            .await
+            .expect("standard load response should succeed");
+        assert_eq!(resp.session_id, "81d9a95e-c9c0-4c78-b5ab-c52c5549d321");
+    }
+
+    #[tokio::test]
+    async fn session_load_full_rejects_mismatched_echoed_session_id() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 _load
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"3f3aeee9-1347-43c4-ac0d-b0cbe77dfabc"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        let error = match client
+            .session_load_full("81d9a95e-c9c0-4c78-b5ab-c52c5549d321", "/tmp", vec![])
+            .await
+        {
+            Ok(_) => panic!("mismatched load response must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unexpected sessionId"));
+    }
+
+    #[tokio::test]
     async fn goose_system_prompt_request_uses_set_contract() {
         let script = r#"
             read -t 2 REQ
@@ -3720,6 +3846,28 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn agent_message_chunks_accumulate_and_take_drains_response() {
+        let mut client = spawn_inert_client().await;
+        for text in ["Morning ", "listener proof"] {
+            let msg = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "test-session",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": text }
+                    }
+                }
+            });
+            assert!(!client.handle_session_update(&msg));
+        }
+
+        assert_eq!(client.take_turn_response_text(), "Morning listener proof");
+        assert_eq!(client.take_turn_response_text(), "");
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
