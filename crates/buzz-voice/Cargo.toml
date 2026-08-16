@@ -13,6 +13,7 @@ hex = { workspace = true }
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["api-24", "ndarray", "std"] }
 ort-sys = { version = "=2.0.0-rc.12", features = ["disable-linking"] }
 rand = "0.10"
+regex = "1"
 sentencepiece-model = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,6 +21,7 @@ sha2 = { workspace = true }
 sherpa-onnx = "1.12"
 symphonia = { version = "0.5", default-features = false, features = ["aac", "aiff", "alac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+zip = "8"
 
 [dev-dependencies]
 tempfile = "3"
