@@ -361,6 +361,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // Scope only proves the transport can submit message writes; the
         // command handler owns role/capability authorization.
         k if buzz_core::kind::is_moderation_command_kind(k) => Ok(Scope::MessagesWrite),
+        // SMS routing command. Scope only proves the transport may submit
+        // message writes; `sms_commands` owns the inbox-channel membership
+        // check that actually gates the capability.
+        buzz_core::kind::KIND_SMS_SET_ROUTE => Ok(Scope::MessagesWrite),
         // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
         // same ownership shape as kind:3 (contacts) and kind:0 (profile).
         KIND_MUTE_LIST
@@ -2103,6 +2107,22 @@ async fn ingest_event_inner(
     // any command, which also covers NIP-98 and missed live disconnects.
     if buzz_core::kind::is_moderation_command_kind(kind_u32) {
         super::moderation_commands::handle_moderation_command(tenant, state, &event)
+            .await
+            .map_err(IngestError::Rejected)?;
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
+    // SMS routing commands (9046) follow the same shape as the moderation
+    // commands above: executed directly, never stored, never fanned out. Here
+    // that is a privacy requirement — the command carries a subscriber's phone
+    // number, which must not be republished to channel subscribers or left
+    // queryable as an ordinary event. The handler owns its own authorization.
+    if kind_u32 == buzz_core::kind::KIND_SMS_SET_ROUTE {
+        super::sms_commands::handle_sms_command(tenant, state, &event)
             .await
             .map_err(IngestError::Rejected)?;
         return Ok(IngestResult {

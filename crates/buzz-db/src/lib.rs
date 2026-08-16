@@ -3851,6 +3851,19 @@ impl Db {
         sms::get_sms_identity(&self.pool, phone_number).await
     }
 
+    /// Set or clear an allow-listed number's default project route. Returns
+    /// `false` if no such number is registered in this community; never
+    /// creates an identity.
+    #[datastore_span(name = "set_sms_default_project", system = "postgresql")]
+    pub async fn set_sms_default_project(
+        &self,
+        community_id: CommunityId,
+        phone_number: &str,
+        project: Option<&str>,
+    ) -> Result<bool> {
+        sms::set_default_project(&self.pool, community_id, phone_number, project).await
+    }
+
     /// Fetch a single workflow by ID, scoped to its community.
     #[datastore_span(name = "get_workflow", system = "postgresql")]
     pub async fn get_workflow(

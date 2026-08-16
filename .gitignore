@@ -81,3 +81,4 @@ deploy/charts/*/charts/*.tgz
 crates/buzz-acp/*Temp*
 crates/buzz-acp/*tmp-build*
 /st.txt
+*.concat

@@ -240,6 +240,37 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// SMS bridge — route an allow-listed phone number to a project
+    #[command(subcommand)]
+    Sms(SmsCmd),
+}
+
+/// SMS bridge routing commands.
+///
+/// Both variants emit the same kind:9046 command; `clear-route` is
+/// `set-route` with no project, spelled out so "stop routing this number"
+/// does not require knowing that omitting a flag means "clear".
+#[derive(clap::Subcommand)]
+pub enum SmsCmd {
+    /// Route an allow-listed number's texts to a project (kind 9046)
+    #[command(
+        after_help = "Examples:\n  buzz sms set-route --phone +18655550123 --project bidcraft\n  buzz sms set-route --phone +18655550123 --project construct-pro\n\nThe number must already be allow-listed in this community; this changes\nrouting only and never admits a new number."
+    )]
+    SetRoute {
+        /// E.164 phone number, e.g. +18655550123
+        #[arg(long)]
+        phone: String,
+        /// NIP-MP project d-tag to dispatch this number's texts against
+        #[arg(long)]
+        project: String,
+    },
+    /// Clear a number's route, so the operator asks which project again
+    #[command(after_help = "Examples:\n  buzz sms clear-route --phone +18655550123")]
+    ClearRoute {
+        /// E.164 phone number, e.g. +18655550123
+        #[arg(long)]
+        phone: String,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2059,6 +2090,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Sms(sub) => commands::sms::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2164,6 +2196,7 @@ mod tests {
             "projects",
             "reactions",
             "repos",
+            "sms",
             "social",
             "upload",
             "users",

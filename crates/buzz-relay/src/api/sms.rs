@@ -70,6 +70,18 @@ fn build_tags(
     Ok(tags)
 }
 
+/// Twilio's webhook contract is TwiML or nothing. A JSON body — even on a
+/// 200 — is logged against the message as **error 12300, "Invalid
+/// Content-Type"**, so every inbound SMS showed up in the Twilio console as a
+/// failure even though the relay had accepted and dispatched it. `204 No
+/// Content` is Twilio's documented way to say "accepted, no reply to send",
+/// and carries no body or content type to object to. Returning it keeps the
+/// console clean so a *real* inbound failure is visible rather than buried in
+/// a permanent stream of 12300s.
+fn accepted() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
 /// Handle an inbound Twilio SMS webhook POST. Validates the request
 /// signature, requires the sender's phone number be allow-listed, then
 /// publishes the message into the SMS-inbox channel.
@@ -77,7 +89,7 @@ pub async fn twilio_inbound(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Form(params): Form<BTreeMap<String, String>>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
     let (Some(auth_token), Some(webhook_url)) = (
         state.config.twilio_auth_token.as_deref(),
         state.config.twilio_webhook_url.as_deref(),
@@ -171,20 +183,14 @@ pub async fn twilio_inbound(
                     community = %identity.community_id,
                     "inbound SMS community is not mapped to a host — event stored but not delivered"
                 );
-                return Ok((
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "status": "accepted" })),
-                ));
+                return Ok(accepted());
             }
             Err(e) => {
                 tracing::error!(
                     error = %e,
                     "inbound SMS host lookup failed — event stored but not delivered"
                 );
-                return Ok((
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "status": "accepted" })),
-                ));
+                return Ok(accepted());
             }
         };
         let tenant = TenantContext::resolved(identity.community_id, host);
@@ -200,10 +206,7 @@ pub async fn twilio_inbound(
         .await;
     }
 
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({ "status": "accepted" })),
-    ))
+    Ok(accepted())
 }
 
 #[cfg(test)]
@@ -215,6 +218,14 @@ mod tests {
         let (status, Json(body)) = rejected();
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"], "request not accepted");
+    }
+
+    /// Twilio logs error 12300 ("Invalid Content-Type") against any inbound
+    /// message whose webhook answered with something other than TwiML or an
+    /// empty body. 204 carries neither a body nor a content type.
+    #[test]
+    fn accepted_is_no_content_so_twilio_does_not_log_12300() {
+        assert_eq!(accepted(), StatusCode::NO_CONTENT);
     }
 
     fn test_identity() -> SmsIdentity {
