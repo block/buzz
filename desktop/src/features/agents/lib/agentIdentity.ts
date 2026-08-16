@@ -37,16 +37,28 @@ export type AgentDisplayInput = AgentIdentityInput & {
  */
 export function agentDisplayGroupKey(agent: AgentDisplayInput): string {
   const personaId = agent.personaId?.trim() ?? "";
-  return `persona:${personaId}|name:${foldAgentDisplayName(agent.name)}`;
+  // Length-prefixed segments, not a delimiter. A display name is free text and
+  // may contain any separator we could pick: with a plain `|` join,
+  // {personaId:"a", name:"x|name:y"} and {personaId:"a|name:x", name:"y"} both
+  // render `persona:a|name:x|name:y`, so two different agents share one card
+  // and one of them stops being openable.
+  const foldedName = foldAgentDisplayName(agent.name);
+  return `persona:${personaId.length}:${personaId}|name:${foldedName.length}:${foldedName}`;
 }
 
 /**
  * The one place a display name is folded for comparison. Callers that need a
  * name-scoped key of their own (React keys, `data-testid`s) must fold through
  * this rather than lowercasing inline, or their key and the group's disagree.
+ *
+ * Unicode is normalized to NFC before folding. macOS input methods and file
+ * systems commonly produce NFD while Windows produces NFC, so without this the
+ * same name typed on two machines in one fleet folds to two different keys and
+ * the library renders two cards with visually identical labels — a split the
+ * owner cannot see, explain, or fix from the UI.
  */
 export function foldAgentDisplayName(name: string | null | undefined): string {
-  return name?.trim().toLowerCase() ?? "";
+  return name?.normalize("NFC").trim().toLowerCase() ?? "";
 }
 
 export type AgentDisplayGroup<T> = {
