@@ -812,8 +812,24 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
     let normalized = agent_args
         .into_iter()
-        .map(|arg| arg.trim().to_string())
-        .filter(|arg| !arg.is_empty())
+        .flat_map(|arg| {
+            let trimmed = arg.trim().to_string();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else if trimmed.contains(' ') {
+                // `BUZZ_ACP_AGENT_ARGS` splits on commas (clap
+                // `value_delimiter`), so a space-separated value like
+                // "-m my-model --reasoning low" arrives as one entry.
+                // Shell-split it so each flag becomes its own argv
+                // element — matching what every shell user reaches for
+                // first. Without this, the agent receives the entire
+                // string as a single argument, fails to parse it, and
+                // times out at 60s with a misleading error (#6017).
+                shell_split(&trimmed)
+            } else {
+                vec![trimmed]
+            }
+        })
         .collect::<Vec<_>>();
 
     let Some(default_args) = default_agent_args(command) else {
@@ -833,6 +849,60 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     }
 
     normalized
+}
+
+/// Split a string into shell-style tokens.
+///
+/// Handles single and double quotes (with backslash escapes inside double
+/// quotes), and treats everything else as whitespace-delimited tokens.
+/// Bare backslash escapes the next character. Empty input produces no tokens.
+///
+/// This is a minimal shell splitter for the `BUZZ_ACP_AGENT_ARGS` fallback
+/// path — it covers the common cases (space-separated flags, quoted strings
+/// with spaces) without adding a dependency on the `shlex` crate (#6017).
+fn shell_split(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+    let mut has_content = false;
+
+    for ch in input.chars() {
+        if escape {
+            current.push(ch);
+            has_content = true;
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => {
+                escape = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                has_content = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                has_content = true;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if has_content {
+                    tokens.push(std::mem::take(&mut current));
+                    has_content = false;
+                }
+            }
+            c => {
+                current.push(c);
+                has_content = true;
+            }
+        }
+    }
+    if has_content {
+        tokens.push(current);
+    }
+    tokens
 }
 
 /// Propagate legacy env-var aliases to their canonical names.
@@ -1621,6 +1691,79 @@ mod tests {
         assert_eq!(
             normalize_agent_args("custom-agent", vec!["".into(), "serve".into()]),
             vec!["serve"]
+        );
+    }
+
+    // --- shell_split fallback for space-separated args (#6017) ---
+
+    #[test]
+    fn shell_split_space_separated_args() {
+        // The most common case: a user passes space-separated flags as one
+        // comma-delimited entry. shell_split must produce separate argv
+        // elements.
+        assert_eq!(
+            shell_split("-m my-model --reasoning low"),
+            vec!["-m", "my-model", "--reasoning", "low"]
+        );
+    }
+
+    #[test]
+    fn shell_split_preserves_single_arg_without_spaces() {
+        assert_eq!(shell_split("acp"), vec!["acp"]);
+        assert_eq!(shell_split("-c"), vec!["-c"]);
+    }
+
+    #[test]
+    fn shell_split_handles_double_quoted_strings() {
+        // Standard shell behavior: quotes are consumed, not preserved.
+        // `model="gpt-5"` → `model=gpt-5` (mid-token quotes stripped).
+        assert_eq!(
+            shell_split("-c model=\"gpt-5\" --flag"),
+            vec!["-c", "model=gpt-5", "--flag"]
+        );
+        // `"my model name"` → `my model name` (standalone quotes stripped,
+        // spaces inside preserved).
+        assert_eq!(
+            shell_split(r#"-c "my model name""#),
+            vec!["-c", "my model name"]
+        );
+    }
+
+    #[test]
+    fn shell_split_handles_single_quoted_strings() {
+        assert_eq!(
+            shell_split("-c 'my model name'"),
+            vec!["-c", "my model name"]
+        );
+    }
+
+    #[test]
+    fn shell_split_handles_backslash_escape() {
+        assert_eq!(shell_split(r"model=gpt\ 5"), vec!["model=gpt 5"]);
+    }
+
+    #[test]
+    fn shell_split_empty_input() {
+        assert!(shell_split("").is_empty());
+        assert!(shell_split("   ").is_empty());
+    }
+
+    #[test]
+    fn normalize_agent_args_shell_splits_space_separated_entries() {
+        // Integration: a single comma-delimited entry containing spaces is
+        // shell-split into multiple argv elements.
+        assert_eq!(
+            normalize_agent_args("custom-agent", vec!["-m my-model --reasoning low".into()]),
+            vec!["-m", "my-model", "--reasoning", "low"]
+        );
+    }
+
+    #[test]
+    fn normalize_agent_args_preserves_comma_delimited_no_spaces() {
+        // Existing comma-delimited entries without spaces are unchanged.
+        assert_eq!(
+            normalize_agent_args("codex-acp", vec!["-c".into(), "model=gpt-5".into()]),
+            vec!["-c", "model=gpt-5"]
         );
     }
 
