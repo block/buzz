@@ -14,7 +14,9 @@ use zeroize::Zeroize;
 /// Shell children receive `path_env`, `git_env`, and `BUZZ_PRIVATE_KEY` (for
 /// the buzz CLI). `NOSTR_PRIVATE_KEY` is removed from the process env after
 /// the keyfile is written — git helpers read from the keyfile only.
-/// Cleaned up on drop (TempDir).
+/// Cleaned up on drop (TempDir) in the common case; if this process is
+/// killed before `Drop` runs, a future buzz-dev-mcp startup's orphan sweep
+/// (`crate::sweep`) removes it once this process's pid is confirmed dead.
 pub struct Shim {
     _dir: TempDir,
     pub path_env: String,
@@ -25,6 +27,9 @@ impl Shim {
     pub fn install() -> std::io::Result<Self> {
         let dir = tempfile::Builder::new().prefix("buzz-dev-mcp-").tempdir()?;
         set_owner_only(dir.path())?;
+        // Ownership marker for the startup orphan sweep (#6025) — best-effort,
+        // see crate::sweep docs for why a write failure here is non-fatal.
+        crate::sweep::write_owner_marker(dir.path());
 
         let self_exe = std::env::current_exe()?;
 

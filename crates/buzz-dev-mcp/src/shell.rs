@@ -41,6 +41,9 @@ impl SharedState {
         let session_dir = tempfile::Builder::new()
             .prefix("buzz-dev-mcp-session-")
             .tempdir()?;
+        // Ownership marker for the startup orphan sweep (#6025) — best-effort,
+        // see crate::sweep docs for why a write failure here is non-fatal.
+        crate::sweep::write_owner_marker(session_dir.path());
         // Resolve the shell ONCE using the same PATH the spawn will use.
         // Both the bootstrap dialect hint and every run() call read this result,
         // so they can never disagree. A failed resolution is stored as Err and
