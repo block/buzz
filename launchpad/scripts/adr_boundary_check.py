@@ -56,10 +56,6 @@ FORBIDDEN = {
         "ghcr.io/block/buzz",
         "the file operators copy still names upstream's image",
     ),
-    ".github/workflows/docker.yml": (
-        "ghcr.io/block/buzz",
-        "publishes to upstream's namespace",
-    ),
     "Dockerfile": (
         "github.com/block/buzz",
         "OCI labels still attribute the image to upstream",
@@ -71,6 +67,40 @@ REQUIRED = {
         "does not point operators at the Launchpad wrapper",
     ),
 }
+
+# .github/workflows/docker.yml needs more than the FORBIDDEN/REQUIRED shape above
+# can express. That file also builds and publishes ghcr.io/block/buzz-push-gateway,
+# an unrelated component this fork deliberately leaves under upstream's ownership
+# (disabled here via `if: github.repository == 'block/buzz'`, never deleted) — and
+# "ghcr.io/block/buzz" is a literal prefix of that name. A plain forbidden-substring
+# check that ignores the distinction reports the relay as still publishing to
+# upstream on every commit, forever, because it can never stop matching a string
+# this file is supposed to keep. And a check that only asserts the forbidden
+# substring's absence cannot tell "the relay moved to Launchpad's namespace" from
+# "the relay moved to some other namespace that also isn't Block's" — so the
+# sanctioned values are asserted positively here too, not just by absence.
+DOCKER_YML_ASSERTIONS = [
+    (
+        "forbid_re",
+        re.compile(r"ghcr\.io/block/buzz(?!-push-gateway)"),
+        "publishes the relay to upstream's namespace",
+    ),
+    (
+        "require",
+        "ghcr.io/launchpad-26/buzz",
+        "does not publish the relay to Launchpad's namespace",
+    ),
+    (
+        "require",
+        "branches: [launchpad]",
+        "does not trigger relay publication on push to launchpad",
+    ),
+    (
+        "require",
+        "if: github.repository == 'block/buzz'",
+        "does not keep the upstream-only push-gateway jobs disabled for this fork",
+    ),
+]
 
 NUMBER_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
@@ -182,7 +212,15 @@ def check_documents(adr_text, agents_text, read_file):
             failures.append(f"sanctioned file named by the ADR does not exist: {rel}")
             continue
 
-        if rel in FORBIDDEN:
+        if rel == ".github/workflows/docker.yml":
+            for kind, pattern, why in DOCKER_YML_ASSERTIONS:
+                if kind == "forbid_re":
+                    if pattern.search(content):
+                        failures.append(f"{rel} {why} (matches {pattern.pattern!r})")
+                elif kind == "require":
+                    if pattern not in content:
+                        failures.append(f"{rel} {why} (no {pattern!r})")
+        elif rel in FORBIDDEN:
             needle, why = FORBIDDEN[rel]
             if needle in content:
                 failures.append(f"{rel} {why} (still contains '{needle}')")

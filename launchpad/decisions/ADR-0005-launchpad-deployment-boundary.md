@@ -41,7 +41,7 @@ requires this record's own prose count to agree with it, then requires `launchpa
 §3 and the filesystem to match. The workflow is `launchpad-adr-check.yml`, and the
 enforcement task is #153.
 
-Four properties of that check are decisions in their own right, because each one costs
+Five properties of that check are decisions in their own right, because each one costs
 somebody something:
 
 - **This record is the source of truth.** The check does not hold its own copy of the

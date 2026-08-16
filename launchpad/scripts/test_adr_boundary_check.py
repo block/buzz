@@ -28,7 +28,18 @@ FIVE = [
 GOOD_CONTENT = {
     "deploy/compose/compose.yml": "image: ${BUZZ_IMAGE:?set it}",
     "deploy/compose/.env.example": "BUZZ_IMAGE=ghcr.io/launchpad-26/buzz:sha-abc",
-    ".github/workflows/docker.yml": "branches: [launchpad]",
+    ".github/workflows/docker.yml": (
+        "env:\n"
+        "  IMAGE_NAME: ghcr.io/launchpad-26/buzz\n"
+        "on:\n"
+        "  push:\n"
+        "    branches: [launchpad]\n"
+        "jobs:\n"
+        "  push-gateway-build:\n"
+        "    if: github.repository == 'block/buzz'\n"
+        "    with:\n"
+        "      images: ghcr.io/block/buzz-push-gateway\n"
+    ),
     "Dockerfile": 'LABEL org.opencontainers.image.source="https://github.com/launchpad-26/buzz"',
     "deploy/compose/README.md": "Use the wrapper at launchpad/deploy instead.",
 }
@@ -163,7 +174,44 @@ class ContentAssertions(unittest.TestCase):
             adr(), agents(),
             reader({".github/workflows/docker.yml": "IMAGE_NAME: ghcr.io/block/buzz"}),
         )
-        self.assertTrue(any("docker.yml" in f for f in failures))
+        self.assertTrue(any("docker.yml" in f and "upstream's namespace" in f
+                            for f in failures))
+
+    def test_push_gateway_image_name_does_not_trip_the_relay_forbidden_check(self):
+        """ghcr.io/block/buzz is a literal prefix of the upstream-only gateway's
+        image name. GOOD_CONTENT carries that name deliberately -- this asserts
+        the forbidden pattern does not fire on it."""
+        self.assertEqual(m.check_documents(adr(), agents(), reader()), [])
+
+    def test_docker_yml_missing_launchpad_namespace_is_reported(self):
+        failures = m.check_documents(
+            adr(), agents(),
+            reader({".github/workflows/docker.yml":
+                    GOOD_CONTENT[".github/workflows/docker.yml"]
+                    .replace("ghcr.io/launchpad-26/buzz", "ghcr.io/some-other-fork/buzz")}),
+        )
+        self.assertTrue(any("docker.yml" in f and "Launchpad's namespace" in f
+                            for f in failures))
+
+    def test_docker_yml_missing_launchpad_trigger_is_reported(self):
+        failures = m.check_documents(
+            adr(), agents(),
+            reader({".github/workflows/docker.yml":
+                    GOOD_CONTENT[".github/workflows/docker.yml"]
+                    .replace("branches: [launchpad]", "branches: [main]")}),
+        )
+        self.assertTrue(any("docker.yml" in f and "trigger relay publication" in f
+                            for f in failures))
+
+    def test_docker_yml_missing_push_gateway_guard_is_reported(self):
+        failures = m.check_documents(
+            adr(), agents(),
+            reader({".github/workflows/docker.yml":
+                    GOOD_CONTENT[".github/workflows/docker.yml"]
+                    .replace("if: github.repository == 'block/buzz'", "")}),
+        )
+        self.assertTrue(any("docker.yml" in f and "push-gateway jobs disabled" in f
+                            for f in failures))
 
     def test_readme_not_pointing_at_the_wrapper_is_reported(self):
         failures = m.check_documents(
@@ -174,8 +222,11 @@ class ContentAssertions(unittest.TestCase):
     def test_existing_but_unchanged_file_no_longer_passes(self):
         """The Blocker: Path.exists() on files that exist upstream anyway.
 
-        Every file present, every one still carrying upstream values -> five
-        failures, where the previous version reported none.
+        Every file present, every one still carrying upstream values -> every
+        one of the five is caught, where the previous version reported none.
+        docker.yml carries several independent assertions now (namespace,
+        trigger, push-gateway guard), so it alone can raise more than one
+        failure -- the count is per-file coverage, not a fixed total.
         """
         upstream = {
             "deploy/compose/compose.yml": "image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}",
@@ -185,7 +236,8 @@ class ContentAssertions(unittest.TestCase):
             "deploy/compose/README.md": "Run deploy/compose/run.sh.",
         }
         failures = m.check_documents(adr(), agents(), reader(upstream))
-        self.assertEqual(len(failures), 5, failures)
+        for rel in upstream:
+            self.assertTrue(any(rel in f for f in failures), f"{rel} not caught: {failures}")
 
     def test_missing_file_is_reported(self):
         failures = m.check_documents(
