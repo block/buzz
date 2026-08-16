@@ -2,6 +2,7 @@ import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "@/features/agents/lib/instanceInputForDefinition";
+import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
 import {
   addChannelMembers,
   createManagedAgent,
@@ -51,8 +52,27 @@ export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 
 const welcomeTeamPromises = new Map<string, Promise<WelcomeTeamAgents>>();
 
+/**
+ * Comparison key for a relay pin.
+ *
+ * Reuses the backend-compatible `canonicalRelayUrl` rather than trimming,
+ * because the pair key the backend matches on already folds host case,
+ * loopback aliases (`localhost` / `[::1]` / `127.*`) and default ports.
+ * Trimming alone ranked `ws://localhost:3000` and `ws://127.0.0.1:3000` as two
+ * different communities, so on an install that already carries duplicate
+ * Welcome records the picker could reuse the wrong identity while the backend
+ * considered both pins the same relay.
+ *
+ * A legacy or malformed pin canonicalizes to `null`; it falls back to a stable
+ * lowercased form so two records carrying the same bad pin still match each
+ * other instead of each becoming its own community. An unbound pin (`""`, what
+ * the backend stores when none was supplied) stays `null` and is ranked as
+ * eligible-everywhere by `relayPinRank`.
+ */
 function normalizeRelayUrl(relayUrl: string | null | undefined) {
-  return relayUrl?.trim().replace(/\/+$/, "") ?? null;
+  const raw = relayUrl?.trim() ?? "";
+  if (!raw) return null;
+  return canonicalRelayUrl(raw) ?? raw.toLowerCase().replace(/\/+$/, "");
 }
 
 /**

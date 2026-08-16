@@ -127,6 +127,87 @@ test("pickWelcomeGuideAgentForRelay prefers Fizz pinned to the target community"
   );
 });
 
+test("a relay pin matches its backend-equivalent spellings", () => {
+  // The backend's pair key folds host case, loopback aliases and default
+  // ports. Trimming alone treated each spelling as a separate community.
+  //
+  // A lone candidate is returned whatever its rank — `pickAgentForRelay` falls
+  // through every rank rather than reporting a starter missing — so a
+  // single-agent assertion here would pass with or without canonicalization.
+  // Each case therefore offers a DECOY listed first: unless the equivalent
+  // spelling is recognised as rank 0, the decoy wins on array order.
+  const equivalent = [
+    ["ws://localhost:3000", "ws://127.0.0.1:3000"],
+    ["wss://RELAY.EXAMPLE:443/", "wss://relay.example"],
+    ["ws://relay.example:80", "ws://relay.example"],
+    ["wss://relay.example/", "wss://relay.example"],
+  ];
+
+  for (const [pinned, target] of equivalent) {
+    const decoy = makeAgent({
+      pubkey: PUB_B,
+      personaId: WELCOME_GUIDE_PERSONA_ID,
+      relayUrl: "wss://unrelated.example",
+    });
+    const match = makeAgent({
+      pubkey: PUB_A,
+      personaId: WELCOME_GUIDE_PERSONA_ID,
+      relayUrl: pinned,
+    });
+
+    assert.equal(
+      pickWelcomeGuideAgentForRelay([decoy, match], target),
+      match,
+      `${pinned} should rank as pinned to ${target}`,
+    );
+  }
+});
+
+test("a genuinely different relay is still a different community", () => {
+  // Canonicalization must fold equivalent spellings without collapsing
+  // distinct hosts — the failure mode in the other direction.
+  const pinnedElsewhere = makeAgent({
+    pubkey: PUB_A,
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    relayUrl: "wss://relay.example",
+  });
+  const pinnedHere = makeAgent({
+    pubkey: PUB_B,
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    relayUrl: "wss://other.example",
+  });
+
+  assert.equal(
+    pickWelcomeGuideAgentForRelay(
+      [pinnedElsewhere, pinnedHere],
+      "wss://other.example",
+    ),
+    pinnedHere,
+  );
+});
+
+test("a malformed legacy pin still matches itself", () => {
+  // canonicalRelayUrl returns null for anything that is not a ws/wss URL. Two
+  // records carrying the same unparseable pin must still rank as the same
+  // community rather than each becoming its own. Decoy first again, so the
+  // assertion fails if the malformed pin is not recognised as a match.
+  const decoy = makeAgent({
+    pubkey: PUB_B,
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    relayUrl: "wss://unrelated.example",
+  });
+  const legacy = makeAgent({
+    pubkey: PUB_A,
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    relayUrl: "not a url",
+  });
+
+  assert.equal(
+    pickWelcomeGuideAgentForRelay([decoy, legacy], "NOT A URL "),
+    legacy,
+  );
+});
+
 test("pickWelcomeGuideAgentForRelay reuses Fizz from another community", () => {
   const otherCommunityFizz = makeAgent({
     pubkey: PUB_A,
