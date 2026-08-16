@@ -85,6 +85,152 @@ fn managed_agent_message_builder_rejects_invalid_mentions() {
     .expect_err("invalid mentions should fail");
     assert!(error.contains("pubkey must be a 64-character hex string"));
 }
+
+fn p_tag_pubkeys(event: &nostr::Event) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("p"))
+                .then(|| parts.get(1).cloned())
+                .flatten()
+        })
+        .collect()
+}
+
+#[test]
+fn desktop_all_resolution_feeds_each_interactive_builder() {
+    let sender = Keys::generate();
+    let first = Keys::generate().public_key().to_hex();
+    let second = Keys::generate().public_key().to_hex();
+    let members = vec![sender.public_key().to_hex(), first.clone(), second.clone()];
+    let resolved = mentions::resolve(
+        "review @ALL",
+        std::slice::from_ref(&first),
+        &members,
+        &sender.public_key().to_hex(),
+    )
+    .expect("group expansion should fit");
+    let mention_refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
+    let channel_id = uuid::Uuid::new_v4();
+    let root = EventId::from_hex(&"1".repeat(64)).expect("valid event id");
+    let parent = EventId::from_hex(&"2".repeat(64)).expect("valid event id");
+    let thread_ref = events::ThreadRef {
+        root_event_id: root,
+        parent_event_id: parent,
+    };
+
+    let events = [
+        events::build_message(
+            channel_id,
+            "review @ALL",
+            None,
+            &mention_refs,
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            "https://relay.example",
+        )
+        .expect("stream builder should accept resolved mentions")
+        .sign_with_keys(&sender)
+        .expect("stream message should sign"),
+        events::build_forum_post(channel_id, "review @ALL", &mention_refs, &[], &[])
+            .expect("forum-post builder should accept resolved mentions")
+            .sign_with_keys(&sender)
+            .expect("forum post should sign"),
+        events::build_forum_comment(
+            channel_id,
+            "review @ALL",
+            &thread_ref,
+            &mention_refs,
+            &[],
+            &[],
+        )
+        .expect("forum-comment builder should accept resolved mentions")
+        .sign_with_keys(&sender)
+        .expect("forum comment should sign"),
+    ];
+
+    for event in events {
+        assert_eq!(p_tag_pubkeys(&event), vec![first.clone(), second.clone()]);
+    }
+}
+
+#[test]
+fn desktop_all_resolution_uses_managed_agent_signer_for_self_exclusion() {
+    let agent = Keys::generate();
+    let teammate = Keys::generate().public_key().to_hex();
+    let members = vec![agent.public_key().to_hex(), teammate.clone()];
+    let resolved = mentions::resolve("@all", &[], &members, &agent.public_key().to_hex())
+        .expect("group expansion should fit");
+
+    let event =
+        build_managed_agent_channel_message(uuid::Uuid::new_v4(), "@all", None, &resolved, &[])
+            .expect("managed-agent builder should accept resolved mentions")
+            .sign_with_keys(&agent)
+            .expect("managed-agent message should sign");
+
+    assert_eq!(p_tag_pubkeys(&event), vec![teammate]);
+}
+
+#[test]
+fn desktop_without_all_preserves_frontend_mentions() {
+    let existing = vec![Keys::generate().public_key().to_hex()];
+    let resolved = mentions::resolve(
+        "ordinary @name",
+        &existing,
+        &[Keys::generate().public_key().to_hex()],
+        &Keys::generate().public_key().to_hex(),
+    )
+    .expect("ordinary mentions should remain unchanged");
+    assert_eq!(resolved, existing);
+}
+
+#[test]
+fn edit_literal_all_stays_literal_and_explicit_mentions_still_work() {
+    let signer = Keys::generate();
+    let channel_id = uuid::Uuid::new_v4();
+    let target = EventId::from_hex(&"3".repeat(64)).expect("valid event id");
+
+    let literal = events::build_message_edit(
+        channel_id,
+        target,
+        "@all",
+        events::MessageEditTags {
+            media: &[],
+            custom_emoji: &[],
+            mentions: &[],
+            mention_refs: None,
+        },
+        false,
+    )
+    .expect("literal edit should build")
+    .sign_with_keys(&signer)
+    .expect("literal edit should sign");
+    assert!(p_tag_pubkeys(&literal).is_empty());
+
+    let mentioned = Keys::generate().public_key().to_hex();
+    let explicit = events::build_message_edit(
+        channel_id,
+        target,
+        "@all plus explicit",
+        events::MessageEditTags {
+            media: &[],
+            custom_emoji: &[],
+            mentions: &[mentioned.as_str()],
+            mention_refs: None,
+        },
+        false,
+    )
+    .expect("explicit edit should build")
+    .sign_with_keys(&signer)
+    .expect("explicit edit should sign");
+    assert_eq!(p_tag_pubkeys(&explicit), vec![mentioned]);
+}
+
 #[test]
 fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
     let filter = build_search_messages_filter("  pro  ", 12, Some("channel-1"), None, None, None);

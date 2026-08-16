@@ -8,6 +8,7 @@ import {
 
 const MOCK_VIEWER_PUBKEY = "deadbeef".repeat(8);
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const ALL_ROSTER_UNAVAILABLE_ERROR = "Fresh channel membership is unavailable.";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -140,6 +141,29 @@ async function readOutgoingMentionPubkeys(
     }
 
     return null;
+  }, content);
+}
+
+async function hasOutgoingWebsocketContent(
+  page: import("@playwright/test").Page,
+  content: string,
+) {
+  return page.evaluate((expectedContent) => {
+    const entries = window.__BUZZ_E2E_COMMAND_LOG__ ?? [];
+    return entries.some((entry) => {
+      if (entry.command !== "plugin:websocket|send") return false;
+      const data = (
+        entry.payload as { message?: { data?: string } } | undefined
+      )?.message?.data;
+      if (!data) return false;
+
+      try {
+        const frame = JSON.parse(data) as [string, { content?: string }];
+        return frame[0] === "EVENT" && frame[1]?.content === expectedContent;
+      } catch {
+        return false;
+      }
+    });
   }, content);
 }
 
@@ -342,6 +366,121 @@ test("relay-only shared agents emit an outbound mention tag when selected", asyn
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, content))
     .toContain(TEST_IDENTITIES.alice.pubkey);
+});
+
+test("plain top-level @all uses Tauri and reconciles one stable local echo", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const suffix = `transport-check-${Date.now()}`;
+  const content = `@all ${suffix}`;
+  const input = page.getByTestId("message-input");
+  await input.fill("@al");
+  await autocomplete(page).getByText("all", { exact: true }).click();
+  await expect
+    .poll(() => input.evaluate((element) => element.textContent))
+    .toBe("@all ");
+  await page.keyboard.type(suffix);
+  await expect(input).toHaveText(content);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () =>
+      (await readCommandPayloadLog(page)).some(
+        (entry) =>
+          entry.command === "send_channel_message" &&
+          (entry.payload as { content?: string })?.content === content,
+      ),
+    )
+    .toBe(true);
+  expect(await hasOutgoingWebsocketContent(page, content)).toBe(false);
+
+  await waitForTimelineSettled(page);
+  const sentRows = page.getByTestId("message-row").filter({ hasText: content });
+  await expect(sentRows).toHaveCount(1);
+  await expect(sentRows.first()).toContainText(content);
+  await expect(sentRows.first().getByTestId("message-send-status")).toHaveCount(
+    0,
+  );
+});
+
+test("failed @all roster resolution restores the complete draft without an event", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.evaluate((sendError) => {
+    const tauriWindow = window as Window & {
+      __TAURI_INTERNALS__?: {
+        invoke?: (
+          command: string,
+          payload?: unknown,
+          options?: unknown,
+        ) => Promise<unknown>;
+      };
+    };
+    const originalInvoke = tauriWindow.__TAURI_INTERNALS__?.invoke;
+    if (!originalInvoke || !tauriWindow.__TAURI_INTERNALS__) {
+      throw new Error("Mock invoke bridge is unavailable");
+    }
+    tauriWindow.__TAURI_INTERNALS__.invoke = (command, payload, options) => {
+      if (command === "send_channel_message") {
+        return Promise.reject(new Error(sendError));
+      }
+      return originalInvoke(command, payload, options);
+    };
+  }, ALL_ROSTER_UNAVAILABLE_ERROR);
+
+  const content = `@all preserve-this-draft-${Date.now()}`;
+  const input = page.getByTestId("message-input");
+  await input.fill(content);
+  await page.getByTestId("send-message").click();
+
+  await expect(input).toHaveText(content);
+  await expect(
+    page.getByTestId("message-row").filter({ hasText: content }),
+  ).toHaveCount(0);
+  await expect(page.getByText("Sending", { exact: true })).toHaveCount(0);
+});
+
+test("ordinary plain top-level text retains the WebSocket send path", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const content = `ordinary transport-check-${Date.now()}`;
+  await page.getByTestId("message-input").fill(content);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => hasOutgoingWebsocketContent(page, content))
+    .toBe(true);
+  expect(
+    (await readCommandPayloadLog(page)).some(
+      (entry) =>
+        entry.command === "send_channel_message" &&
+        (entry.payload as { content?: string })?.content === content,
+    ),
+  ).toBe(false);
+});
+
+test("direct messages do not offer the reserved all candidate", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-bob-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
+
+  await page.getByTestId("message-input").fill("@al");
+  await expect(
+    autocomplete(page).getByText("all", { exact: true }),
+  ).toHaveCount(0);
 });
 
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({

@@ -89,6 +89,8 @@ Write commands are unaffected. `--format json` (default) returns full fields.
 
 **Mentions that notify:** Keep readable `@Name` text in message content and, when intended pubkeys are known, pass the identities in the same send with repeatable `--mention <hex-or-npub>`. Any explicit identity (`--mention` or `nostr:npub...`) permits unresolved or ambiguous `@Name` text as presentation-only; uniquely resolved member names still add recipients. Include a pubkey for every presentation-only name that should notify. The CLI reports the signed event's `mention_pubkeys`; no follow-up verification command is needed. Without explicit identities, names resolve against current channel members. An unresolved/ambiguous name or non-member target stops before publishing. Add membership separately only when authorized, then retry; sending never changes membership automatically.
 
+**Channel-wide mention:** `@all` is a reserved, case-insensitive token that expands at send time to every current channel member except the sender. Resolution always uses a fresh membership query; query failure or more than 50 final unique recipients stops the send without truncation. Inline and fenced code suppress the token. A member whose display name is “all” never captures it; address that person with an explicit `--mention` pubkey. Message edits and workflow-authored messages do not expand `@all` in this pilot.
+
 ```bash
 buzz messages send --channel <UUID> \
   --content "@Alice check this" --mention <alice-pubkey>

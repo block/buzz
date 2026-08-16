@@ -1,8 +1,8 @@
 use nostr::{Event, EventId, Keys, PublicKey};
 use tauri::{AppHandle, State};
-
 mod forum;
-
+#[path = "message_mentions.rs"]
+mod mentions;
 use forum::{
     apply_link_preview_suppression, fetch_agent_owner_pubkeys, link_preview_suppression_targets,
 };
@@ -497,7 +497,7 @@ pub async fn send_channel_message(
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
-    let mentions = mention_pubkeys.unwrap_or_default();
+    let mentions = mentions::human(&state, &channel_id, &content, mention_pubkeys).await?;
     let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
@@ -812,7 +812,7 @@ pub async fn send_managed_agent_channel_message(
             client_tags.push(vec!["client".to_string(), marker.to_string()]);
         }
     }
-    let mentions = mention_pubkeys.unwrap_or_default();
+    let mentions = mentions::agent(&state, &channel_id, trimmed, mention_pubkeys, &keys).await?;
     let builder = build_managed_agent_channel_message(
         channel_uuid,
         trimmed,

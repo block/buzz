@@ -9,7 +9,8 @@ use crate::validate::{
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
-    extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
+    contains_all_mention, extract_at_mentions_with_known, extract_nostr_uris,
+    resolve_all_mention_pubkeys, strip_code_regions, MENTION_CAP,
 };
 
 /// Extract the thread root event ID from a Nostr tag array.
@@ -220,9 +221,16 @@ async fn resolve_content_mentions(
     }
 
     let known_refs: Vec<&str> = display_names.iter().map(String::as_str).collect();
-    let names = extract_at_mentions_with_known(&stripped, &known_refs);
+    let names = filter_reserved_all_name(extract_at_mentions_with_known(&stripped, &known_refs));
+    if names.is_empty() {
+        return Ok((member_pubkeys, vec![]));
+    }
     let resolved = resolve_names_to_pubkeys(&names, &name_to_pubkeys, has_explicit_mentions)?;
     Ok((member_pubkeys, resolved))
+}
+
+fn filter_reserved_all_name(names: Vec<String>) -> Vec<String> {
+    names.into_iter().filter(|name| name != "all").collect()
 }
 
 fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliError> {
@@ -248,6 +256,20 @@ fn merge_message_mentions(
     uri_pubkeys: &[String],
     auto_resolved: &[String],
 ) -> Result<Vec<String>, CliError> {
+    let mentions = merge_message_mentions_unchecked(explicit, uri_pubkeys, auto_resolved);
+    if mentions.len() > MENTION_CAP {
+        return Err(CliError::Usage(format!(
+            "too many unique message mentions (max {MENTION_CAP})"
+        )));
+    }
+    Ok(mentions)
+}
+
+fn merge_message_mentions_unchecked(
+    explicit: &[String],
+    uri_pubkeys: &[String],
+    auto_resolved: &[String],
+) -> Vec<String> {
     let mut mentions = Vec::new();
     for pubkey in explicit
         .iter()
@@ -258,12 +280,18 @@ fn merge_message_mentions(
             mentions.push(pubkey.clone());
         }
     }
-    if mentions.len() > MENTION_CAP {
-        return Err(CliError::Usage(format!(
-            "too many unique message mentions (max {MENTION_CAP})"
-        )));
-    }
-    Ok(mentions)
+    mentions
+}
+
+fn finalize_message_mentions(
+    content: &str,
+    existing_mentions: &[String],
+    member_pubkeys: &[String],
+    sender_pubkey: &str,
+) -> Result<Vec<String>, CliError> {
+    resolve_all_mention_pubkeys(content, existing_mentions, member_pubkeys, sender_pubkey)
+        .map(|resolved| resolved.unwrap_or_else(|| existing_mentions.to_vec()))
+        .map_err(|error| CliError::Usage(error.to_string()))
 }
 
 fn missing_members(mentions: &[String], members: &[String]) -> Vec<String> {
@@ -596,7 +624,14 @@ pub async fn cmd_send_message(
     let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
     let (member_pubkeys, auto_resolved) =
         resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
-    let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
+    let base_mentions = if contains_all_mention(&p.content) {
+        merge_message_mentions_unchecked(&explicit_mentions, &uri_pubkeys, &auto_resolved)
+    } else {
+        merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?
+    };
+    let sender_pubkey = client.keys().public_key().to_hex();
+    let mention_pubkeys =
+        finalize_message_mentions(&p.content, &base_mentions, &member_pubkeys, &sender_pubkey)?;
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
     if !missing.is_empty() {
@@ -993,9 +1028,9 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        event_mention_pubkeys, filter_reserved_all_name, finalize_message_mentions,
+        find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1181,6 +1216,53 @@ mod tests {
         // Sanity: no `@names` in body → no profile match attempt needed.
         let names = extract_at_names("plain message, no mentions");
         assert!(names.is_empty());
+    }
+
+    #[test]
+    fn cli_reserved_all_precedence_removes_profile_name_resolution() {
+        let names = vec!["all".to_string(), "alice".to_string()];
+        assert_eq!(filter_reserved_all_name(names), vec!["alice"]);
+    }
+
+    #[test]
+    fn cli_finalize_all_mentions_uses_sdk_resolution() {
+        let existing = vec![PK_VALID_A.to_ascii_uppercase()];
+        let members = vec![
+            PK_VALID_A.to_string(),
+            PK_VALID_B.to_string(),
+            PK_VALID_C.to_string(),
+        ];
+
+        let mentions = finalize_message_mentions("ping @ALL", &existing, &members, PK_VALID_B)
+            .expect("group expansion should fit");
+
+        assert_eq!(mentions, vec![PK_VALID_A, PK_VALID_C]);
+    }
+
+    #[test]
+    fn cli_finalize_without_all_preserves_existing_mentions() {
+        let existing = vec![PK_VALID_A.to_string()];
+        let mentions = finalize_message_mentions(
+            "ping @alice",
+            &existing,
+            &[PK_VALID_B.to_string()],
+            PK_VALID_C,
+        )
+        .expect("ordinary mentions should be unchanged");
+        assert_eq!(mentions, existing);
+    }
+
+    #[test]
+    fn cli_finalize_all_mentions_reports_final_unique_count() {
+        let members: Vec<String> = (0..=buzz_sdk::mentions::MENTION_CAP)
+            .map(|index| format!("{index:064x}"))
+            .collect();
+
+        let error = finalize_message_mentions("@all", &[], &members, PK_VALID_A)
+            .expect_err("one over the cap should fail");
+
+        assert!(error.to_string().contains("51 unique recipients"));
+        assert!(error.to_string().contains("max 50"));
     }
 
     #[test]

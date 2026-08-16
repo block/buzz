@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildTeamMentionCandidates,
   formatTeamMention,
+  withAllMentionCandidate,
 } from "./mentionCandidates.ts";
 
 function persona(id, displayName, isActive = true) {
@@ -168,5 +169,41 @@ test("teams with identity and persona display-name collisions are not suggested"
       candidates,
     ),
     [],
+  );
+});
+
+test("reserved all candidate is first and suppresses case-insensitive collisions", () => {
+  const candidates = [
+    identity(null, "All", {
+      isAgent: false,
+      isMember: true,
+      pubkey: "1".repeat(64),
+    }),
+    identity(null, "Alice", {
+      isAgent: false,
+      isMember: true,
+      pubkey: "2".repeat(64),
+    }),
+    {
+      kind: "team",
+      teamId: "all-team",
+      teamMembers: [],
+      displayName: "aLL",
+      isMember: false,
+      isAgent: true,
+    },
+  ];
+
+  const result = withAllMentionCandidate(candidates);
+
+  assert.deepEqual(result[0], {
+    kind: "identity",
+    displayName: "all",
+    isMember: true,
+    isAgent: false,
+  });
+  assert.deepEqual(
+    result.slice(1).map((candidate) => candidate.displayName),
+    ["Alice"],
   );
 });
