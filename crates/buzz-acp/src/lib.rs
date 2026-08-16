@@ -4039,6 +4039,14 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
+    // The channel that triggered this prompt, if any — threaded through to
+    // any crash-recovery alert below so it has somewhere to render instead
+    // of silently emitting with no channel context (a heartbeat prompt has
+    // no channel, so None is correct there).
+    let source_channel_id = match result.source {
+        PromptSource::Channel(channel_id) => Some(channel_id),
+        PromptSource::Heartbeat => None,
+    };
     let successful_steer_deliveries = pool
         .task_map()
         .values()
@@ -4284,6 +4292,7 @@ fn handle_prompt_result(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                source_channel_id,
             ) {
                 // Circuit open — slot stays empty until maintenance refill.
                 if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
@@ -4324,6 +4333,7 @@ fn handle_prompt_result(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                source_channel_id,
             ) {
                 // Circuit open — slot stays empty until maintenance refill.
                 if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
@@ -4389,6 +4399,7 @@ fn handle_prompt_result(
                     respawn_tx,
                     respawn_tasks,
                     observer,
+                    source_channel_id,
                 ) && pool.live_count() == 0
                     && !any_respawn_in_flight(crash_history)
                 {
@@ -4680,6 +4691,13 @@ fn default_heartbeat_prompt() -> String {
 /// the actual shutdown + backoff + spawn_and_init work into a background task.
 /// The result comes back through `respawn_tx` so the main loop stays responsive.
 ///
+/// `channel_id` is the channel of the prompt that triggered this crash, if
+/// any (`None` for a heartbeat-triggered crash) — threaded through so a
+/// circuit-open alert has somewhere to render; previously this was always
+/// `None` here, so most circuit-open alerts (the generic crash/timeout path,
+/// as opposed to the panic path which already had `meta.channel_id`) had no
+/// channel-scoped surface in the desktop app.
+///
 /// Returns `true` if a respawn task was spawned, `false` if the circuit is open.
 fn spawn_respawn_task(
     old_agent: OwnedAgent,
@@ -4688,6 +4706,7 @@ fn spawn_respawn_task(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    channel_id: Option<Uuid>,
 ) -> bool {
     let index = old_agent.index;
 
@@ -4695,7 +4714,7 @@ fn spawn_respawn_task(
     let delay = match slot.record_crash() {
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = index, "circuit open — not respawning");
-            emit_circuit_open_alert(observer.as_ref(), index, None, "crashed");
+            emit_circuit_open_alert(observer.as_ref(), index, channel_id, "crashed");
             slot.alerted_open = true;
             return false;
         }
