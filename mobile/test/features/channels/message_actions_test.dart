@@ -218,9 +218,43 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   Future<ui.Image> Function()? captureAnchorSnapshot,
   FocusNode? composerFocusNode,
   bool composerInitiallyFocused = false,
+  bool launcherOnNestedRoute = false,
   Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
 }) async {
   final sourceHidden = ValueNotifier(false);
+
+  Widget launcherPage() => Scaffold(
+    key: const ValueKey('message-actions-underlying-page'),
+    body: Consumer(
+      builder: (context, ref, _) => Column(
+        children: [
+          if (composerFocusNode != null)
+            TextField(focusNode: composerFocusNode),
+          TextButton(
+            key: const ValueKey('open-message-actions-popover'),
+            onPressed: () => showMessageActions(
+              context: context,
+              ref: ref,
+              message: message,
+              channelId: _channelId,
+              canManageMessage: canManageMessage,
+              allMessages: allMessages,
+              currentPubkey: 'self',
+              isMember: true,
+              anchorRect: anchorRect,
+              captureAnchorSnapshot:
+                  captureAnchorSnapshot ?? _testMessageSnapshot,
+              onPopoverPresented: () => sourceHidden.value = true,
+              onPopoverDismissed: () => sourceHidden.value = false,
+              composerFocusNode: composerFocusNode,
+              restoreComposerFocus: composerFocusNode?.requestFocus,
+            ),
+            child: const Text('open message actions'),
+          ),
+        ],
+      ),
+    ),
+  );
 
   await tester.pumpWidget(
     ProviderScope(
@@ -245,40 +279,29 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
           ),
           child: child!,
         ),
-        home: Scaffold(
-          body: Consumer(
-            builder: (context, ref, _) => Column(
-              children: [
-                if (composerFocusNode != null)
-                  TextField(focusNode: composerFocusNode),
-                TextButton(
-                  key: const ValueKey('open-message-actions-popover'),
-                  onPressed: () => showMessageActions(
-                    context: context,
-                    ref: ref,
-                    message: message,
-                    channelId: _channelId,
-                    canManageMessage: canManageMessage,
-                    allMessages: allMessages,
-                    currentPubkey: 'self',
-                    isMember: true,
-                    anchorRect: anchorRect,
-                    captureAnchorSnapshot:
-                        captureAnchorSnapshot ?? _testMessageSnapshot,
-                    onPopoverPresented: () => sourceHidden.value = true,
-                    onPopoverDismissed: () => sourceHidden.value = false,
-                    composerFocusNode: composerFocusNode,
-                    restoreComposerFocus: composerFocusNode?.requestFocus,
+        home: launcherOnNestedRoute
+            ? Builder(
+                builder: (context) => Scaffold(
+                  key: const ValueKey('message-actions-root-page'),
+                  body: TextButton(
+                    key: const ValueKey('push-message-actions-launcher'),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(builder: (_) => launcherPage()),
+                    ),
+                    child: const Text('push launcher'),
                   ),
-                  child: const Text('open message actions'),
                 ),
-              ],
-            ),
-          ),
-        ),
+              )
+            : launcherPage(),
       ),
     ),
   );
+  if (launcherOnNestedRoute) {
+    await tester.tap(
+      find.byKey(const ValueKey('push-message-actions-launcher')),
+    );
+    await tester.pumpAndSettle();
+  }
   if (composerInitiallyFocused) {
     composerFocusNode!.requestFocus();
     await tester.pump();
@@ -648,6 +671,45 @@ void main() {
       await _dismissMessageActionsPopover(tester);
     });
 
+    testWidgets('collapses fixed sections in a short keyboard viewport', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(800, 220);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      const keyboardInset = 100.0;
+      final prefs = await _mockPrefs();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        allMessages: [_message()],
+        reminderService: _stubReminderService(),
+        viewInsets: const EdgeInsets.only(bottom: keyboardInset),
+      );
+
+      expect(
+        find.byKey(const ValueKey('message-action-reaction-tray')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-preview')),
+        findsNothing,
+      );
+      final actionRect = tester.getRect(
+        find.byKey(const ValueKey('message-action-surface')),
+      );
+      expect(actionRect.top, greaterThanOrEqualTo(Grid.xxs));
+      expect(
+        actionRect.bottom,
+        lessThanOrEqualTo(220 - keyboardInset - Grid.xxs),
+      );
+      expect(tester.takeException(), isNull);
+
+      await _dismissMessageActionsPopover(tester);
+    });
+
     testWidgets('keeps tall message previews within the visible viewport', (
       tester,
     ) async {
@@ -794,6 +856,37 @@ void main() {
         findsOneWidget,
       );
       await _dismissMessageActionsPopover(tester);
+    });
+
+    testWidgets('ignores repeat action taps once dismissal starts', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      final harness = await _pumpMessageActionsPopover(
+        tester,
+        message: _message(rootId: 'root-9'),
+        prefs: prefs,
+        launcherOnNestedRoute: true,
+      );
+      final action = find.byKey(const ValueKey('message-action-followThread'));
+      final actionWidget = tester.widget<InkWell>(action);
+
+      actionWidget.onTap!.call();
+      actionWidget.onTap!.call();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('message-actions-underlying-page')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-actions-root-page')),
+        findsNothing,
+      );
+      expect(harness.container.read(threadFollowsProvider).followedRootIds, {
+        'root-9',
+      });
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('fallback action rows grow with accessibility text', (

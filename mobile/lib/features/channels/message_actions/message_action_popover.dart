@@ -496,7 +496,7 @@ class _IosNativeMessageActionSurface extends HookWidget {
   }
 }
 
-class _MessageActionsPopover extends StatelessWidget {
+class _MessageActionsPopover extends HookWidget {
   final Rect anchorRect;
   final ui.Image anchorSnapshot;
   final Animation<double> animation;
@@ -520,6 +520,14 @@ class _MessageActionsPopover extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mediaQuery = MediaQuery.of(context);
+    final selectionStarted = useRef(false);
+
+    void selectAction(String actionId) {
+      if (selectionStarted.value) return;
+      selectionStarted.value = true;
+      Navigator.of(context).pop(actionId);
+    }
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final safeLeft = mediaQuery.padding.left + Grid.xxs;
@@ -537,43 +545,65 @@ class _MessageActionsPopover extends StatelessWidget {
         final menuWidth = math.min(_messageActionMenuMaxWidth, availableWidth);
         final menuLayout = _MessageActionSurfaceLayout.from(context, actions);
         final preferredMenuHeight = menuLayout.preferredHeight;
-        final menuBudget = math.max(
+        final minimumMenuHeight = math.min(
           menuLayout.rowHeight,
+          availableHeight,
+        );
+        final showReactionTray =
+            availableHeight >=
+            _reactionTrayMaxHeight + _messageActionGap + minimumMenuHeight;
+        final trayHeight = showReactionTray ? _reactionTrayMaxHeight : 0.0;
+        final trayGap = showReactionTray ? _messageActionGap : 0.0;
+        final heightAfterTray = availableHeight - trayHeight - trayGap;
+        final showPreview =
+            showReactionTray &&
+            heightAfterTray >= minimumMenuHeight + _messageActionGap + 48.0;
+        final previewMinimumHeight = showPreview ? 48.0 : 0.0;
+        final previewGap = showPreview ? _messageActionGap : 0.0;
+        final menuBudget = math.max(
+          minimumMenuHeight,
           availableHeight -
-              _reactionTrayMaxHeight -
-              (_messageActionGap * 2) -
-              72,
+              trayHeight -
+              trayGap -
+              previewMinimumHeight -
+              previewGap,
         );
         final menuHeight = math.min(preferredMenuHeight, menuBudget);
-        final previewMaximumHeight = math.max(
-          48.0,
-          availableHeight -
-              _reactionTrayMaxHeight -
-              menuHeight -
-              (_messageActionGap * 2),
-        );
+        final previewMaximumHeight = showPreview
+            ? math.max(
+                previewMinimumHeight,
+                availableHeight -
+                    trayHeight -
+                    trayGap -
+                    menuHeight -
+                    previewGap,
+              )
+            : 0.0;
         final previewInsetExtent = _messageActionPreviewInset * 2;
-        final previewWidthRatio =
-            (math.min(_messageActionPreviewMaxWidth, availableWidth) -
-                previewInsetExtent) /
-            math.max(anchorRect.width, 1);
-        final previewHeightRatio =
-            (previewMaximumHeight - previewInsetExtent) /
-            math.max(anchorRect.height, 1);
-        final previewScale = math.min(
-          1.0,
-          math.max(0.0, math.min(previewWidthRatio, previewHeightRatio)),
-        );
-        final previewSize = Size(
-          (anchorRect.width * previewScale) + previewInsetExtent,
-          (anchorRect.height * previewScale) + previewInsetExtent,
-        );
+        final previewSize = showPreview
+            ? () {
+                final previewWidthRatio =
+                    (math.min(_messageActionPreviewMaxWidth, availableWidth) -
+                        previewInsetExtent) /
+                    math.max(anchorRect.width, 1);
+                final previewHeightRatio =
+                    (previewMaximumHeight - previewInsetExtent) /
+                    math.max(anchorRect.height, 1);
+                final previewScale = math.min(
+                  1.0,
+                  math.max(
+                    0.0,
+                    math.min(previewWidthRatio, previewHeightRatio),
+                  ),
+                );
+                return Size(
+                  (anchorRect.width * previewScale) + previewInsetExtent,
+                  (anchorRect.height * previewScale) + previewInsetExtent,
+                );
+              }()
+            : Size.zero;
         final totalHeight =
-            _reactionTrayMaxHeight +
-            _messageActionGap +
-            previewSize.height +
-            _messageActionGap +
-            menuHeight;
+            trayHeight + trayGap + previewSize.height + previewGap + menuHeight;
         final contentTop = math.max(safeTop, safeBottom - totalHeight);
         final surfaceLeft =
             safeLeft + ((availableWidth - math.max(trayWidth, menuWidth)) / 2);
@@ -581,7 +611,7 @@ class _MessageActionsPopover extends StatelessWidget {
           surfaceLeft,
           contentTop,
           trayWidth,
-          _reactionTrayMaxHeight,
+          trayHeight,
         );
         final trayHostWidth = math.min(
           trayWidth + _reactionTraySpringAllowance,
@@ -589,13 +619,13 @@ class _MessageActionsPopover extends StatelessWidget {
         );
         final previewRect = Rect.fromLTWH(
           surfaceLeft,
-          trayRect.bottom + _messageActionGap,
+          trayRect.bottom + trayGap,
           previewSize.width,
           previewSize.height,
         );
         final menuRect = Rect.fromLTWH(
           surfaceLeft,
-          previewRect.bottom + _messageActionGap,
+          previewRect.bottom + previewGap,
           menuWidth,
           menuHeight,
         );
@@ -630,69 +660,73 @@ class _MessageActionsPopover extends StatelessWidget {
                 onTap: () => Navigator.of(context).pop(),
               ),
             ),
-            Positioned.fromRect(
-              rect: previewRect,
-              child: AnimatedBuilder(
-                animation: animation,
-                child: RepaintBoundary(
-                  child: _LiftedMessagePreview(anchorSnapshot: anchorSnapshot),
-                ),
-                builder: (context, child) {
-                  final movement =
-                      (defaultTargetPlatform == TargetPlatform.iOS
-                              ? Curves.easeOutCubic
-                              : Curves.easeInOutCubic)
-                          .transform(animation.value);
-                  final sourceRect = anchorRect.inflate(
-                    _messageActionPreviewInset,
-                  );
-                  final translation = Offset(
-                    ui.lerpDouble(
-                      sourceRect.left - previewRect.left,
-                      0,
-                      movement,
-                    )!,
-                    ui.lerpDouble(
-                      sourceRect.top - previewRect.top,
-                      0,
-                      movement,
-                    )!,
-                  );
-                  final scaleX = ui.lerpDouble(
-                    sourceRect.width / previewRect.width,
-                    1,
-                    movement,
-                  )!;
-                  final scaleY = ui.lerpDouble(
-                    sourceRect.height / previewRect.height,
-                    1,
-                    movement,
-                  )!;
-                  return Transform.translate(
-                    offset: translation,
-                    child: Transform(
-                      alignment: Alignment.topLeft,
-                      transform: Matrix4.diagonal3Values(scaleX, scaleY, 1),
-                      child: child,
+            if (showPreview)
+              Positioned.fromRect(
+                rect: previewRect,
+                child: AnimatedBuilder(
+                  animation: animation,
+                  child: RepaintBoundary(
+                    child: _LiftedMessagePreview(
+                      anchorSnapshot: anchorSnapshot,
                     ),
-                  );
-                },
+                  ),
+                  builder: (context, child) {
+                    final movement =
+                        (defaultTargetPlatform == TargetPlatform.iOS
+                                ? Curves.easeOutCubic
+                                : Curves.easeInOutCubic)
+                            .transform(animation.value);
+                    final sourceRect = anchorRect.inflate(
+                      _messageActionPreviewInset,
+                    );
+                    final translation = Offset(
+                      ui.lerpDouble(
+                        sourceRect.left - previewRect.left,
+                        0,
+                        movement,
+                      )!,
+                      ui.lerpDouble(
+                        sourceRect.top - previewRect.top,
+                        0,
+                        movement,
+                      )!,
+                    );
+                    final scaleX = ui.lerpDouble(
+                      sourceRect.width / previewRect.width,
+                      1,
+                      movement,
+                    )!;
+                    final scaleY = ui.lerpDouble(
+                      sourceRect.height / previewRect.height,
+                      1,
+                      movement,
+                    )!;
+                    return Transform.translate(
+                      offset: translation,
+                      child: Transform(
+                        alignment: Alignment.topLeft,
+                        transform: Matrix4.diagonal3Values(scaleX, scaleY, 1),
+                        child: child,
+                      ),
+                    );
+                  },
+                ),
               ),
-            ),
-            Positioned(
-              left: trayRect.left,
-              top: trayRect.top,
-              width: trayHostWidth,
-              height: trayRect.height,
-              child: _MessageReactionTray(
-                animation: animation,
-                trayWidth: trayWidth,
-                message: message,
-                pageContext: pageContext,
-                pageRef: pageRef,
-                popResult: _messageActionReactionSelection,
+            if (showReactionTray)
+              Positioned(
+                left: trayRect.left,
+                top: trayRect.top,
+                width: trayHostWidth,
+                height: trayRect.height,
+                child: _MessageReactionTray(
+                  animation: animation,
+                  trayWidth: trayWidth,
+                  message: message,
+                  pageContext: pageContext,
+                  pageRef: pageRef,
+                  popResult: _messageActionReactionSelection,
+                ),
               ),
-            ),
             Positioned.fromRect(
               rect: menuRect,
               child: AnimatedBuilder(
@@ -701,13 +735,11 @@ class _MessageActionsPopover extends StatelessWidget {
                     ? _IosNativeMessageActionSurface(
                         actions: actions,
                         rowHeight: menuLayout.rowHeight,
-                        onSelected: (actionId) =>
-                            Navigator.of(context).pop(actionId),
+                        onSelected: selectAction,
                       )
                     : _MessageActionSurface(
                         actions: actions,
-                        onSelected: (actionId) =>
-                            Navigator.of(context).pop(actionId),
+                        onSelected: selectAction,
                       ),
                 builder: (context, child) {
                   final appearance = const Interval(
