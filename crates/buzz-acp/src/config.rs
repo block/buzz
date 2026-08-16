@@ -191,7 +191,8 @@ pub struct AuthAgentArgs {
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
-    /// Arguments passed to the agent binary.
+    /// Arguments passed to the agent binary (comma-separated, or a single
+    /// shell-quoted string when the value contains whitespace).
     #[arg(
         long,
         env = "BUZZ_ACP_AGENT_ARGS",
@@ -789,19 +790,38 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
     ))
 }
 
+fn shell_split_single_agent_arg(arg: &str) -> Vec<String> {
+    let trimmed = arg.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    match shlex::split(trimmed) {
+        Some(parts) => parts,
+        None => {
+            tracing::warn!(
+                agent_args = %trimmed,
+                "BUZZ_ACP_AGENT_ARGS shell split failed — preserving the original value; \
+                 fix quoting or switch to comma-separated args"
+            );
+            vec![trimmed.to_string()]
+        }
+    }
+}
+
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
     // clap splits BUZZ_ACP_AGENT_ARGS on commas (value_delimiter = ',').
-    // A space-separated value (the form every shell user reaches for first)
-    // arrives as a single element containing spaces, e.g.
+    // A shell-style value (the form every shell user reaches for first) arrives
+    // as a single element containing whitespace, e.g.
     //   BUZZ_ACP_AGENT_ARGS="-m my-model --reasoning low acp"
     // becomes vec!["-m my-model --reasoning low acp"].
-    // Detect this: when clap produced exactly one element that contains spaces,
-    // shell-split it so the agent receives individual arguments.
+    // Detect this: when clap produced exactly one element that contains
+    // whitespace, shell-split it so the agent receives individual arguments.
     // Comma-separated input is already correctly split by clap and is left alone.
     let pre_split = if agent_args.len() == 1 {
         let arg = &agent_args[0];
-        if arg.contains(' ') {
-            shlex::split(arg).unwrap_or_else(|| vec![arg.trim().to_string()])
+        if arg.chars().any(char::is_whitespace) {
+            shell_split_single_agent_arg(arg)
         } else {
             vec![arg.trim().to_string()]
         }
@@ -1164,11 +1184,11 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} agent_args={:?} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
-            format_args!("[{}]", self.agent_args.iter().map(|a| format!("\"{}\"", a)).collect::<Vec<_>>().join(", ")),
+            self.agent_args,
             self.mcp_command,
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
@@ -1644,6 +1664,22 @@ mod tests {
                 vec!["--model \"gpt-5\" --flag value".into()]
             ),
             vec!["--model", "gpt-5", "--flag", "value"]
+        );
+    }
+
+    #[test]
+    fn shell_splits_tab_separated_agent_args() {
+        assert_eq!(
+            normalize_agent_args("custom-agent", vec!["-m\tmy-model\tacp".into()]),
+            vec!["-m", "my-model", "acp"]
+        );
+    }
+
+    #[test]
+    fn shell_split_malformed_quoting_preserves_original() {
+        assert_eq!(
+            normalize_agent_args("custom-agent", vec!["-m \"unclosed".into()]),
+            vec!["-m \"unclosed"]
         );
     }
 

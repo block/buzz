@@ -109,13 +109,13 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_PRIVATE_KEY` | **yes** | — | Agent's Nostr private key (`nsec1...`). Used for relay auth and agent identity. |
 | `BUZZ_RELAY_URL` | no | `ws://localhost:3000` | Relay WebSocket URL. |
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
-| `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
+| `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated, or one shell-quoted string). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 
-**Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
+**Note:** `BUZZ_ACP_AGENT_ARGS` accepts either comma-separated tokens (`-m,my-model,--flag`) or a single shell-quoted string (`-m my-model --flag "value with spaces"`). Comma form is preferred for simple flags; shell form matches how most users set env vars. Malformed quoting is logged and left unchanged.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
