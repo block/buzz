@@ -4999,60 +4999,87 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+    let mut servers = Vec::new();
+
+    if !config.mcp_command.is_empty() {
+        servers.push(McpServer {
+            name: std::path::Path::new(&config.mcp_command)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("mcp")
+                .to_string(),
+            command: config.mcp_command.clone(),
+            args: vec![],
+            env: {
+                let mut env = vec![
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        // Panic here is correct: injecting a bogus secret would cause
+                        // delayed, hard-to-diagnose agent failures downstream.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ];
+                // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+                // so the MCP server can attach it to every signed event.
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
+                }
+                // Forward the agent's display name so dev-mcp can use it as the git
+                // author name instead of the raw npub. Read from the process env
+                // rather than Config: this is a pass-through of a contract owned
+                // upstream, and absent simply means dev-mcp falls back to the npub.
+                if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                    if !display_name.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                            value: display_name,
+                        });
+                    }
+                }
+                env
+            },
+        });
     }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
-        command: config.mcp_command.clone(),
-        args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
-            }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
-            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
-                if !display_name.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
-                        value: display_name,
-                    });
-                }
-            }
-            env
-        },
-    }]
+
+    // Cortex MCP bridge, added alongside (not instead of) the dev-mcp server
+    // above -- buzz-agent's McpRegistry supports up to MAX_MCP_SERVERS (16),
+    // so there's no need to sacrifice dev-mcp's tools to get Cortex tools.
+    // Gated on cortex_mcp_token being set; Desktop sources that token from
+    // wicket at spawn time (see managed_agents/runtime.rs) and sets it as
+    // BUZZ_ACP_CORTEX_MCP_TOKEN, so an empty value here just means Cortex
+    // wasn't wired up for this persona / wicket lookup failed -- not an error.
+    if !config.cortex_mcp_token.is_empty() {
+        servers.push(McpServer {
+            name: "cortex".to_string(),
+            command: "npx".to_string(),
+            args: vec![
+                "-y".into(),
+                "mcp-remote@0.1.16".into(),
+                "https://mcp.1507.cloud/cortex/mcp".into(),
+                "--header".into(),
+                // No space after the colon: documented mcp-remote arg-escaping
+                // workaround for passing a header value containing a space.
+                format!("Authorization:Bearer {}", config.cortex_mcp_token),
+            ],
+            env: vec![],
+        });
+    }
+
+    servers
 }
 
 #[cfg(test)]
@@ -6728,6 +6755,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            cortex_mcp_token: "".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -6914,6 +6942,59 @@ mod build_mcp_servers_tests {
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
     }
+
+    #[test]
+    fn empty_cortex_mcp_token_adds_no_cortex_server() {
+        let mut config = test_config();
+        config.cortex_mcp_token = "".into();
+        let servers = build_mcp_servers(&config);
+        assert!(
+            !servers.iter().any(|s| s.name == "cortex"),
+            "empty cortex_mcp_token should not add a cortex MCP server"
+        );
+    }
+
+    #[test]
+    fn cortex_mcp_token_adds_a_cortex_server_alongside_dev_mcp() {
+        let mut config = test_config();
+        config.cortex_mcp_token = "test-cortex-token".into();
+        let servers = build_mcp_servers(&config);
+
+        // Both the existing dev-mcp server and the new Cortex server should be
+        // present — Cortex is additive, never a replacement.
+        assert_eq!(servers.len(), 2);
+        assert!(servers.iter().any(|s| s.name == "test-mcp-server"));
+
+        let cortex = servers
+            .iter()
+            .find(|s| s.name == "cortex")
+            .expect("cortex server should be present when cortex_mcp_token is set");
+        assert_eq!(cortex.command, "npx");
+        assert_eq!(
+            cortex.args,
+            vec![
+                "-y",
+                "mcp-remote@0.1.16",
+                "https://mcp.1507.cloud/cortex/mcp",
+                "--header",
+                "Authorization:Bearer test-cortex-token",
+            ]
+        );
+        assert!(
+            cortex.env.is_empty(),
+            "cortex server should carry no extra env -- the token travels in the header arg"
+        );
+    }
+
+    #[test]
+    fn cortex_mcp_token_alone_adds_only_the_cortex_server() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        config.cortex_mcp_token = "test-cortex-token".into();
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "cortex");
+    }
 }
 
 #[cfg(test)]
@@ -6951,6 +7032,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            cortex_mcp_token: "".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

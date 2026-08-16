@@ -491,6 +491,30 @@ pub fn spawn_agent_child(
             }
         }
     };
+    // Cortex MCP bridge token, sourced from the local wicket credential broker
+    // (never from a shell-inherited env var -- a DMG/GUI-launched Buzz.app
+    // does not source ~/.zshrc, so a bare `export CORTEX_TOKEN=...` there is
+    // invisible to this process no matter which layer reads it). Best-effort:
+    // a wicket failure here degrades to no Cortex MCP server for this spawn
+    // rather than failing the spawn outright, mirroring the missing-
+    // mcp_command handling immediately above.
+    let cortex_mcp_token = resolve_command("wicket")
+        .and_then(|wicket_path| {
+            std::process::Command::new(wicket_path)
+                .args(["get", "cortex-buzz-agent/token"])
+                .output()
+                .ok()
+        })
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            eprintln!(
+                "buzz-desktop: wicket get cortex-buzz-agent/token failed, skipping Cortex MCP bridge"
+            );
+            String::new()
+        });
     // Resolve agent command to a full path (DMG launches have minimal PATH).
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
@@ -542,6 +566,7 @@ pub fn spawn_agent_child(
             command.env("BUZZ_ACP_MCP_COMMAND", "");
         }
     }
+    command.env("BUZZ_ACP_CORTEX_MCP_TOKEN", &cortex_mcp_token);
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
