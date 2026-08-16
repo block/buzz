@@ -113,7 +113,15 @@ Both paths are checked in CI, so structure holds whether the PR came from the br
 or the CLI.
 
 Branch from `launchpad`, commit with `-s` (the DCO check is not optional), and expect to
-need one approving review — the branch is protected and you can't approve your own.
+need two approving reviews from reviewers with write access — the branch is protected
+and you can't approve your own.
+
+**Run `gh repo set-default launchpad-26/buzz` once per clone.** This fork's default
+branch resolution otherwise targets `block/buzz` — the parent repository — for any `gh`
+command with no explicit `--repo`, including `gh issue create` and `gh pr comment`. A
+command aimed at this fork silently lands on upstream's public tracker instead. The
+setting lands in the shared `.git/config`, so one invocation covers every worktree of
+the clone too.
 
 ---
 

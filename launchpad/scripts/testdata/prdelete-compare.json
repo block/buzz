@@ -1,0 +1,25 @@
+{
+  "base_commit": {
+    "sha": "e14f5fafb9cc13890530f019556a343b02997c34"
+  },
+  "merge_base_commit": {
+    "sha": "e14f5fafb9cc13890530f019556a343b02997c34"
+  },
+  "status": "ahead",
+  "ahead_by": 1,
+  "behind_by": 0,
+  "files": [
+    {
+      "filename": "launchpad/AGENTS.md",
+      "status": "removed",
+      "additions": 0,
+      "deletions": 244
+    },
+    {
+      "filename": "launchpad/README.md",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 0
+    }
+  ]
+}

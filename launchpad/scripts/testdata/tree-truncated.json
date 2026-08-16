@@ -1,0 +1,164 @@
+{
+  "sha": "3d6d817622b0a9721e3cc404df3469171582be13",
+  "url": "https://api.github.com/repos/torvalds/linux/git/trees/3d6d817622b0a9721e3cc404df3469171582be13",
+  "truncated": true,
+  "tree": [
+    {
+      "path": ".clang-format",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6a3de86ab27a4fdc824a04277319faf890e99ddb",
+      "size": 24322,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/6a3de86ab27a4fdc824a04277319faf890e99ddb"
+    },
+    {
+      "path": ".clippy.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b0a78cc8be20c73e66c2fd1e874a0fdbe4cda339",
+      "size": 748,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/b0a78cc8be20c73e66c2fd1e874a0fdbe4cda339"
+    },
+    {
+      "path": ".cocciconfig",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "43967c6b20151ee126db08e24758e3c789bcb844",
+      "size": 59,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/43967c6b20151ee126db08e24758e3c789bcb844"
+    },
+    {
+      "path": ".editorconfig",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "69718ac91747a4d3eb3315a00b93f3e0d0215ca1",
+      "size": 566,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/69718ac91747a4d3eb3315a00b93f3e0d0215ca1"
+    },
+    {
+      "path": ".get_maintainer.ignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "60b6b2a374cd6e6543b9d706848a822aea21d525",
+      "size": 305,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/60b6b2a374cd6e6543b9d706848a822aea21d525"
+    },
+    {
+      "path": ".gitattributes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2325c529e1854545a1b611b72ad156bdbc4319cf",
+      "size": 105,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/2325c529e1854545a1b611b72ad156bdbc4319cf"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9875120ea7bde02d4ac6b7ebd19d2177eb07d1e3",
+      "size": 2412,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/9875120ea7bde02d4ac6b7ebd19d2177eb07d1e3"
+    },
+    {
+      "path": ".mailmap",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8079e9560748b09f102a96c9a5463405fe4fe78b",
+      "size": 57428,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/8079e9560748b09f102a96c9a5463405fe4fe78b"
+    },
+    {
+      "path": ".pylintrc",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8c6fc2b628b3e933b51cbbca54b1cf9ce266e12f",
+      "size": 66,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/8c6fc2b628b3e933b51cbbca54b1cf9ce266e12f"
+    },
+    {
+      "path": ".rustfmt.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3de5cc497465c2722e160cb76188a8b287e48b7f",
+      "size": 369,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/3de5cc497465c2722e160cb76188a8b287e48b7f"
+    },
+    {
+      "path": "COPYING",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a635a38ef9405fdfcfe97f3a435393c1e9cae971",
+      "size": 496,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/a635a38ef9405fdfcfe97f3a435393c1e9cae971"
+    },
+    {
+      "path": "CREDITS",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "91c51c14e993adff64c850f4221a4380560c169f",
+      "size": 108983,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/91c51c14e993adff64c850f4221a4380560c169f"
+    },
+    {
+      "path": "Documentation",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a7d654ae7390aaf238e024bb1968edacab84d5b9",
+      "url": "https://api.github.com/repos/torvalds/linux/git/trees/a7d654ae7390aaf238e024bb1968edacab84d5b9"
+    },
+    {
+      "path": "Documentation/.gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d6dc7c9b8e25020f1f3b28811df2291c38695d5f",
+      "size": 53,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/d6dc7c9b8e25020f1f3b28811df2291c38695d5f"
+    },
+    {
+      "path": "Documentation/.renames.txt",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "aa7e5aa4a81b31b60f65fab9c9d1a5482ba51cd4",
+      "size": 66666,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/aa7e5aa4a81b31b60f65fab9c9d1a5482ba51cd4"
+    },
+    {
+      "path": "Documentation/ABI",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "1a1f1256e9642a8b2e66a73d19caaa9ce56d7dfa",
+      "url": "https://api.github.com/repos/torvalds/linux/git/trees/1a1f1256e9642a8b2e66a73d19caaa9ce56d7dfa"
+    },
+    {
+      "path": "Documentation/ABI/README",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "315fffe1f831fd6c4e7c07325473820f3cca4894",
+      "size": 4139,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/315fffe1f831fd6c4e7c07325473820f3cca4894"
+    },
+    {
+      "path": "Documentation/ABI/obsolete",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9a4c0c9a0bf0ae4a79fad13977b4e59942c8261f",
+      "url": "https://api.github.com/repos/torvalds/linux/git/trees/9a4c0c9a0bf0ae4a79fad13977b4e59942c8261f"
+    },
+    {
+      "path": "Documentation/ABI/obsolete/automount-tracefs-debugfs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a5196ec78cb598f5e2e59f00eb31727b851fa48b",
+      "size": 894,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/a5196ec78cb598f5e2e59f00eb31727b851fa48b"
+    },
+    {
+      "path": "Documentation/ABI/obsolete/o2cb",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f39b596731d235eddc9ed562b5a37099a3eb709",
+      "size": 470,
+      "url": "https://api.github.com/repos/torvalds/linux/git/blobs/8f39b596731d235eddc9ed562b5a37099a3eb709"
+    }
+  ]
+}

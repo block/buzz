@@ -50,7 +50,11 @@ pre-push:
   parallel: true
   commands:
     branch-skew:
-      run: ./scripts/check-branch-skew.sh
+      # launchpad-26/buzz#15: the upstream script assumes origin/main is the PR
+      # base, which is wrong for this fork (base is `launchpad`, remote name
+      # varies by contributor). launchpad/scripts/check-branch-skew.sh carries
+      # the cohort-correct logic without touching the upstream script itself.
+      run: ./launchpad/scripts/check-branch-skew.sh
     rust-tests:
       glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
       run: just test-unit

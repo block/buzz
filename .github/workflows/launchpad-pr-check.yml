@@ -75,3 +75,34 @@ jobs:
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CLOSING_REFS: ${{ steps.closing.outputs.refs }}
         run: python3 launchpad/scripts/pr_body_check.py
+
+  # The controls for launchpad/scripts/. A suite that runs only on the author's
+  # machine is a claim, not a gate: the first commit to break it does so silently.
+  #
+  # These need NO token and NO network. Every read in the pre-flight goes through
+  # an injected runner and every fixture is recorded, so the suite passes under
+  # `env -i` with no HOME and no GH_TOKEN. That is why this does not wait on the
+  # scoped token in #119 — that credential is for RUNNING the pre-flight against a
+  # live PR, which this job does not do.
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials: false for the same reason the job above gives, and
+      # more sharply here: the next step runs mutation_harness.py, which rewrites
+      # and executes repository source by design, from the fork's own commit. The
+      # token is read-only on a public repo either way — leaving it in the git
+      # config would still be a credential this job never needs.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Controls
+        run: python3 -m unittest discover -s launchpad/scripts -t launchpad/scripts -v
+
+      # Proves the controls can FAIL. It rewrites the modules in place, one at a
+      # time, and restores them — verified byte-for-byte before it exits. On a
+      # throwaway CI checkout there is nothing to lose if it is interrupted, and a
+      # green suite whose controls were never observed failing is what this whole
+      # stage refuses to accept anywhere else.
+      - name: Mutation harness — every control must be shown to fail
+        run: python3 launchpad/scripts/mutation_harness.py

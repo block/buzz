@@ -1,0 +1,236 @@
+{
+  "base_commit": {
+    "sha": "72d56e7bd3a94fa3ee20b5a50bd1b868a9329d9c",
+    "node_id": "C_kwDORgXb2toAKDcyZDU2ZTdiZDNhOTRmYTNlZTIwYjVhNTBiZDFiODY4YTkzMjlkOWM",
+    "commit": {
+      "author": {
+        "name": "Atish Patel",
+        "email": "atishpatel2012@gmail.com",
+        "date": "2026-08-12T20:57:11Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2026-08-12T20:57:11Z"
+      },
+      "message": "fix(agent): raise output limit and allow 3 recoveries (#5475)\n\n## Summary\n\nRaise the built-in output and recovery defaults so long-running agents\nhave more room to finish useful work instead of terminating after\nrepeated 32,768-token reasoning-only responses.\n\n- Raise `BUZZ_AGENT_MAX_OUTPUT_TOKENS` from 32,768 to 65,536\n- Raise the finite output-truncation recovery allowance from 2 to 3 via\n`BUZZ_AGENT_MAX_TOKEN_RECOVERIES`; `0` still disables recovery\n- Strengthen the recovery prompt so the model stops prolonged reasoning,\nuses tools immediately, and builds scripts or artifacts in small\nverifiable steps\n- Preserve the safety invariant that incomplete truncated tool calls are\ndiscarded and never executed\n- Keep proactive handoff independently at 90% of\n`BUZZ_AGENT_MAX_CONTEXT_TOKENS` (180,000 tokens with the 200,000\ndefault), regardless of the output allowance\n- Add request-loop and configuration regressions for exact-N recovery,\ndisabled recovery, successful tool-first recovery, discarded truncated\ncalls, and finite round bounds\n\n`BUZZ_AGENT_MAX_OUTPUT_TOKENS` remains an explicit per-agent deployment\nsetting. Operators should configure it at or below the served model's\noutput limit; this PR does not perform live provider capability\ndiscovery or automatic clamping.\n\n**Risk:** Medium — this increases the default request size and permits\none additional recovery attempt by default. Recovery remains finite and\nbounded by `BUZZ_AGENT_MAX_ROUNDS`. Deployments whose served model\nrejects 65,536 output tokens must set a lower per-agent value.\n\nCurrent output limits\n- model - output token max\n- DeepSeek V4 Flash - 384,000 tokens\n- Qwen 3.8 (Max) - 131,072 tokens\n- GLM 5.2 - 131,072 tokens\n- GPT 5.6 - 128,000 tokens\n- Claude Opus 5 - 128,000 tokens\n- Gemini 3.6 Flash - 65,536 tokens\n- Kimi K3 (Moonshot)- 131,072 tokens\n\n### Related issue\n\nNone found. Originating benchmark analysis:\n`buzz://message?channel=c3252dd2-0142-4e01-88c7-a2183c3960a5&id=91e991aab5fd49094583c3937477f6c12db57a41d86edf7fd4745d0d57d10017`\n\n### Testing\n\n- `cargo fmt --all -- --check`\n- `cargo test -p buzz-agent` — 595 passed, 0 failed, 0 ignored at\n`bd6de557b367850f50325bafdd3c046131942bef`\n- `cargo clippy -p buzz-agent --all-targets -- -D warnings`\n- Previously failing\n`cancelled_turn_with_usage_emits_notification_before_response` passed\nalone and in the full rerun\n- Push hooks passed: organization guard, branch skew, Rust tests, and\nDesktop Tauri checks\n\n### Update — 2026-08-11\n\nPer review feedback, the recovery default is 3. The OpenRouter live\n`/models` output-cap discovery, cache, request clamp, and related\ntests/documentation were removed. Per-agent output configuration is now\nthe sole output-cap mechanism. Proactive handoff and its pre-usage byte\nfallback now depend only on 90% of `BUZZ_AGENT_MAX_CONTEXT_TOKENS`; with\nthe 200,000 default, the handoff threshold is 180,000 regardless of\n`BUZZ_AGENT_MAX_OUTPUT_TOKENS`.\n\nGenerated with Brainy Bumble\n\n\n### Targeted validation — 2026-08-11\n\nRan the exact PR binary once on each of the 11 benchmark tasks causally\naffected by the previous 32,768-token ceiling, using OpenRouter with\n`deepseek/deepseek-v4-flash-0731` pinned to Fireworks and maximum\nreasoning effort. Relay-429 collection failures were excluded and rerun\nat concurrency 2.\n\n- **6/11 passed:** `circuit-fibsqrt`, `feal-linear-cryptanalysis`,\n`model-extraction-relu-logits`, `path-tracing`,\n`schemelike-metacircular-eval`, and `sqlite-db-truncate`\n- **5/11 reached the benchmark deadline:** `adaptive-rejection-sampler`,\n`dna-assembly`, `path-tracing-reverse`, `regex-chess`, and\n`write-compressor`\n- `regex-chess` reached exactly 65,536 output tokens, triggered one\noutput-limit recovery, and then reached the deadline. This directly\nconfirms that the larger ceiling and recovery path were active, but not\nthat recovery guarantees completion.\n\nFor context, ten of these tasks were 0/5 in the historical baseline;\n`sqlite-db-truncate`, the clean control, was 4/5. This is targeted\none-attempt-per-task validation rather than a statistically powered\ncomparison. The result should not be attributed solely to the recovery\ndefault of 3: this PR also raises the output ceiling and strengthens\nrecovery behavior, and OpenRouter routing conditions may differ from the\nhistorical direct-Fireworks runs.\n\nGenerated with Brainy Bumble\n\n---------\n\nSigned-off-by: Atish Patel <atish@squareup.com>\nSigned-off-by: Brainy Bumble <0ed7657b57c0e8a9f5288390dd6c8d5d0a3a06abe9b01b9006814f52077d6cdf@buzz.block.builderlab.xyz>\nSigned-off-by: Hardworking Honey <c5c455215c2506cb8ba776518cec804af62d3a0526e32d496a22072e395042b9@buzz.block.builderlab.xyz>\nCo-authored-by: Brainy Bumble <0ed7657b57c0e8a9f5288390dd6c8d5d0a3a06abe9b01b9006814f52077d6cdf@buzz.block.builderlab.xyz>\nCo-authored-by: Hardworking Honey <c5c455215c2506cb8ba776518cec804af62d3a0526e32d496a22072e395042b9@buzz.block.builderlab.xyz>",
+      "tree": {
+        "sha": "58e609b2d08f16771c4731ac81b0d6c2d7308d5d",
+        "url": "https://api.github.com/repos/block/buzz/git/trees/58e609b2d08f16771c4731ac81b0d6c2d7308d5d"
+      },
+      "url": "https://api.github.com/repos/block/buzz/git/commits/72d56e7bd3a94fa3ee20b5a50bd1b868a9329d9c",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqfN4nCRC1aQ7uu5UhlAAAqtoQAIXIHZeX+YnwmKIlYSbZLR0N\naWv7qQO8VKvtqKe61GzLyKd+hQj8EVIc1j14Wzt/sbp3AXRfjaF569w/qhOIeffA\nyKNj4Ep+swirfseuKMCmE6l/U8xEPeyZJQ7UkV5qtTqAJGYQraF3/yAyYgtPBP1g\noF4j5U5jNlG0BmpU5X0R2Q1x10aAbpAKey/bqnYQWAhWIrF/5dWeevWXN1biacIF\nbtuTtxAqlUyMJCgFobLPQzUyq3AVoPuqXvLbVnK/r6wW/0d+gsSNJ+OZnL23eNFo\noNn3SFtne/W/pPRAFuA2vGZOrNmRsYD7ZrZyUKNLr8Dob98DOuHgHKyAaw1jRlnZ\nAjVNV8lSRIpD+OrQmNGk3lxqldm2yu/JrGyecdLqe6m5TM8irK7icVsjBcBeubsK\ncwkj1CSFFT9npyXbren9RjiiyywxyLT34zjcsj25Yy4y0eOcts5RRcgwzQfRDVL/\npr8KtuMeTMDsovUwqn2ASi5JuX5qe7jBfayrahgJ3uHz3OIfOwYNSUtLE1Suf8L2\nwz0z1azk2n4fJg74zaPHr3srA3uRBR27vl3tsykwCYXeGyLZmFbeKiinPtc1zpGn\nb7R9w7ojJqPuAUcGvH4u3PiW4mVFKjDCRRC0zThtELcjK0REK4DCK+2qVkFgL+Iw\nM/Nj8Gf8tlO0ZYQVeGso\n=ecqx\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 58e609b2d08f16771c4731ac81b0d6c2d7308d5d\nparent 59f613c404958d8ac99525b4aaaf26843257de31\nauthor Atish Patel <atishpatel2012@gmail.com> 1786568231 -0400\ncommitter GitHub <noreply@github.com> 1786568231 -0400\n\nfix(agent): raise output limit and allow 3 recoveries (#5475)\n\n## Summary\n\nRaise the built-in output and recovery defaults so long-running agents\nhave more room to finish useful work instead of terminating after\nrepeated 32,768-token reasoning-only responses.\n\n- Raise `BUZZ_AGENT_MAX_OUTPUT_TOKENS` from 32,768 to 65,536\n- Raise the finite output-truncation recovery allowance from 2 to 3 via\n`BUZZ_AGENT_MAX_TOKEN_RECOVERIES`; `0` still disables recovery\n- Strengthen the recovery prompt so the model stops prolonged reasoning,\nuses tools immediately, and builds scripts or artifacts in small\nverifiable steps\n- Preserve the safety invariant that incomplete truncated tool calls are\ndiscarded and never executed\n- Keep proactive handoff independently at 90% of\n`BUZZ_AGENT_MAX_CONTEXT_TOKENS` (180,000 tokens with the 200,000\ndefault), regardless of the output allowance\n- Add request-loop and configuration regressions for exact-N recovery,\ndisabled recovery, successful tool-first recovery, discarded truncated\ncalls, and finite round bounds\n\n`BUZZ_AGENT_MAX_OUTPUT_TOKENS` remains an explicit per-agent deployment\nsetting. Operators should configure it at or below the served model's\noutput limit; this PR does not perform live provider capability\ndiscovery or automatic clamping.\n\n**Risk:** Medium — this increases the default request size and permits\none additional recovery attempt by default. Recovery remains finite and\nbounded by `BUZZ_AGENT_MAX_ROUNDS`. Deployments whose served model\nrejects 65,536 output tokens must set a lower per-agent value.\n\nCurrent output limits\n- model - output token max\n- DeepSeek V4 Flash - 384,000 tokens\n- Qwen 3.8 (Max) - 131,072 tokens\n- GLM 5.2 - 131,072 tokens\n- GPT 5.6 - 128,000 tokens\n- Claude Opus 5 - 128,000 tokens\n- Gemini 3.6 Flash - 65,536 tokens\n- Kimi K3 (Moonshot)- 131,072 tokens\n\n### Related issue\n\nNone found. Originating benchmark analysis:\n`buzz://message?channel=c3252dd2-0142-4e01-88c7-a2183c3960a5&id=91e991aab5fd49094583c3937477f6c12db57a41d86edf7fd4745d0d57d10017`\n\n### Testing\n\n- `cargo fmt --all -- --check`\n- `cargo test -p buzz-agent` — 595 passed, 0 failed, 0 ignored at\n`bd6de557b367850f50325bafdd3c046131942bef`\n- `cargo clippy -p buzz-agent --all-targets -- -D warnings`\n- Previously failing\n`cancelled_turn_with_usage_emits_notification_before_response` passed\nalone and in the full rerun\n- Push hooks passed: organization guard, branch skew, Rust tests, and\nDesktop Tauri checks\n\n### Update — 2026-08-11\n\nPer review feedback, the recovery default is 3. The OpenRouter live\n`/models` output-cap discovery, cache, request clamp, and related\ntests/documentation were removed. Per-agent output configuration is now\nthe sole output-cap mechanism. Proactive handoff and its pre-usage byte\nfallback now depend only on 90% of `BUZZ_AGENT_MAX_CONTEXT_TOKENS`; with\nthe 200,000 default, the handoff threshold is 180,000 regardless of\n`BUZZ_AGENT_MAX_OUTPUT_TOKENS`.\n\nGenerated with Brainy Bumble\n\n\n### Targeted validation — 2026-08-11\n\nRan the exact PR binary once on each of the 11 benchmark tasks causally\naffected by the previous 32,768-token ceiling, using OpenRouter with\n`deepseek/deepseek-v4-flash-0731` pinned to Fireworks and maximum\nreasoning effort. Relay-429 collection failures were excluded and rerun\nat concurrency 2.\n\n- **6/11 passed:** `circuit-fibsqrt`, `feal-linear-cryptanalysis`,\n`model-extraction-relu-logits`, `path-tracing`,\n`schemelike-metacircular-eval`, and `sqlite-db-truncate`\n- **5/11 reached the benchmark deadline:** `adaptive-rejection-sampler`,\n`dna-assembly`, `path-tracing-reverse`, `regex-chess`, and\n`write-compressor`\n- `regex-chess` reached exactly 65,536 output tokens, triggered one\noutput-limit recovery, and then reached the deadline. This directly\nconfirms that the larger ceiling and recovery path were active, but not\nthat recovery guarantees completion.\n\nFor context, ten of these tasks were 0/5 in the historical baseline;\n`sqlite-db-truncate`, the clean control, was 4/5. This is targeted\none-attempt-per-task validation rather than a statistically powered\ncomparison. The result should not be attributed solely to the recovery\ndefault of 3: this PR also raises the output ceiling and strengthens\nrecovery behavior, and OpenRouter routing conditions may differ from the\nhistorical direct-Fireworks runs.\n\nGenerated with Brainy Bumble\n\n---------\n\nSigned-off-by: Atish Patel <atish@squareup.com>\nSigned-off-by: Brainy Bumble <0ed7657b57c0e8a9f5288390dd6c8d5d0a3a06abe9b01b9006814f52077d6cdf@buzz.block.builderlab.xyz>\nSigned-off-by: Hardworking Honey <c5c455215c2506cb8ba776518cec804af62d3a0526e32d496a22072e395042b9@buzz.block.builderlab.xyz>\nCo-authored-by: Brainy Bumble <0ed7657b57c0e8a9f5288390dd6c8d5d0a3a06abe9b01b9006814f52077d6cdf@buzz.block.builderlab.xyz>\nCo-authored-by: Hardworking Honey <c5c455215c2506cb8ba776518cec804af62d3a0526e32d496a22072e395042b9@buzz.block.builderlab.xyz>",
+        "verified_at": "2026-08-12T20:57:14Z"
+      }
+    },
+    "url": "https://api.github.com/repos/block/buzz/commits/72d56e7bd3a94fa3ee20b5a50bd1b868a9329d9c",
+    "html_url": "https://github.com/block/buzz/commit/72d56e7bd3a94fa3ee20b5a50bd1b868a9329d9c",
+    "comments_url": "https://api.github.com/repos/block/buzz/commits/72d56e7bd3a94fa3ee20b5a50bd1b868a9329d9c/comments",
+    "author": {
+      "login": "atishpatel",
+      "id": 6618430,
+      "node_id": "MDQ6VXNlcjY2MTg0MzA=",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6618430?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/atishpatel",
+      "html_url": "https://github.com/atishpatel",
+      "followers_url": "https://api.github.com/users/atishpatel/followers",
+      "following_url": "https://api.github.com/users/atishpatel/following{/other_user}",
+      "gists_url": "https://api.github.com/users/atishpatel/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/atishpatel/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/atishpatel/subscriptions",
+      "organizations_url": "https://api.github.com/users/atishpatel/orgs",
+      "repos_url": "https://api.github.com/users/atishpatel/repos",
+      "events_url": "https://api.github.com/users/atishpatel/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/atishpatel/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "59f613c404958d8ac99525b4aaaf26843257de31",
+        "url": "https://api.github.com/repos/block/buzz/commits/59f613c404958d8ac99525b4aaaf26843257de31",
+        "html_url": "https://github.com/block/buzz/commit/59f613c404958d8ac99525b4aaaf26843257de31"
+      }
+    ]
+  },
+  "merge_base_commit": {
+    "sha": "c6c6e7eca70d6b526c43af925e596e8616b19fb8",
+    "node_id": "C_kwDORgXb2toAKGM2YzZlN2VjYTcwZDZiNTI2YzQzYWY5MjVlNTk2ZTg2MTZiMTlmYjg",
+    "commit": {
+      "author": {
+        "name": "Will Pfleger",
+        "email": "pfleger.will@gmail.com",
+        "date": "2026-08-12T19:06:43Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2026-08-12T19:06:43Z"
+      },
+      "message": "perf(desktop): coalesce thread-activity localStorage writes (#5693)\n\nEach incoming thread reply drove a full `JSON.stringify` + `setItem` of\nthe ~600 KB thread-activity buffer. A burst of replies serialized the\nwhole blob once per event on the main thread, which is one of the\nrenderer stalls under load in the desktop-longevity arc.\n\nThis collapses the burst into a single debounced write, applying the\ncoalescing pattern Wes introduced for read-state persistence in #5591\n(`readStateManager`) to the thread-activity path.\n\n## What changed\n\n- **`threadActivityStorage.ts`** — coalescing primitives:\n- `scheduleThreadActivityWrite` — first-writer-wins (a pending timer is\n*not* reset), 1s trailing edge. The timer reads the live buffer *at fire\ntime* and re-checks the loaded scope, so N replies within the window\npersist exactly once with the burst's final state, and a write that\noutlives a scope switch can neither land under the new key nor persist\nthe wrong buffer.\n- `flushThreadActivityWrite` — synchronous persist + timer cancel; a\nno-op when nothing is pending.\n- `removeLegacyThreadActivityKey` — idempotent one-time cleanup of the\norphaned pre-relay-scoping `buzz-thread-activity.v1:<pubkey>` key.\n- **`useThreadActivityPersistence.ts`** (new companion hook) — owns the\nloaded scope, the write timer, the `pagehide` /\n`visibilitychange`→hidden / unmount flush, and hydration + legacy\ncleanup on identity/relay change. Mirrors the existing\n`useObservedUnreadPersistence` sibling.\n- **`useUnreadChannels.ts`** — rewired to instantiate the hook and call\n`activityPersistence.schedule(...)` at both writer sites instead of\nwriting per event. The buffer (`threadActivityRef`) stays parent-owned;\nthe hook decides when it is durably persisted. Net **990** lines (was\n1021), back under the 1000-line ceiling.\n\n## Durability\n\n`pagehide`, `visibilitychange`→hidden, unmount, and scope-reseed all\nflush synchronously, so the last burst of replies survives a `Cmd+R` or\nan idle reload that tears the webview down inside the coalescing window.\n\n## Tests\n\n- `threadActivityWriteScheduler.test.mjs` — fake-timer unit coverage:\nburst→one `setItem`, live-buffer-at-fire-time, scope-mismatch rejection,\nstale-scope timer abort, flush persists+cancels, flush no-op, legacy-key\nremoval.\n- `useThreadActivityPersistence.test.mjs` — mounts the real hook via\n`createRoot`+`act`: `pagehide` / visibility / unmount flush of the live\nbuffer, scope switch flushing A under A's key without leaking into B,\nB-bucket rehydration, legacy-key cleanup, and the empty-scope write\nfence.\n\n## Related\n\nBased on [#5591](https://github.com/block/buzz/pull/5591) (Wes) —\n`perf(desktop): coalesce read state localStorage persistence`, the\nproven first-writer-wins coalescing pattern this extends to thread\nactivity.\n\nSigned-off-by: Will Pfleger <pfleger.will@gmail.com>\nCo-authored-by: Duncan <dcfd242e557282d7a1e2cf2e6877522682f1e5c6156dc92ca7d90eaedd3b0f95@buzz.block.builderlab.xyz>",
+      "tree": {
+        "sha": "3add29f19dabafb09be40ab06816b271a910eb5d",
+        "url": "https://api.github.com/repos/block/buzz/git/trees/3add29f19dabafb09be40ab06816b271a910eb5d"
+      },
+      "url": "https://api.github.com/repos/block/buzz/git/commits/c6c6e7eca70d6b526c43af925e596e8616b19fb8",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqfMRDCRC1aQ7uu5UhlAAAsTcQAARRS/YKqX2bGQ9gy6W2bKrl\nhPZnPPQYM86zfjyi//qdaLonhvYEr/fLzVFSmAga+BrKldQhyXTmhJlE+ChSYM8y\ndUjIB3bYYwGnSn81CfbzhQ/fXgusweoujm5QgtkB7CX6j95JPSz7UKiLvXaI8u7x\nkoWHbFThloUbKy2rCSP3pY3vVfdKEV6h1NCVa4D8hI8BUhQ7/K3DpZNkcDZqntuk\n2HAJvZztXsvoZq/LRaCTgMBapt8CQFf4Q69evc7L7XFFP8mkp330WWHuaA9Fsoeq\nHr4bWeVTz6q7iGvnITBsU2LnFaOk/aJe24cXVLkJd787NznyC05w7Ipk3f4FghNt\nnzvdZ6EOuO2jY318vXZab7d+fv076Bng4y+DjhSiX+XXmUPbfyr6KR/bOY7U7jl2\nOt0rJ9W6LBcruhpPBHkpVgp2J7p+HqFHMe6jhEt23u4SBzZdABwFXwA5N6f0tL6A\nVlWUCjefWX63UnTLISH1swGqBcLC5uI+qolziZkgwWLLhYgQI2VRCnGV3/XAupwk\nDQqfIRIzPcPO1JSN3UVvqX9LgLBGZrLRYhGSHeJpBJAYYVdKZ5alJy4CA1jC60hz\nrwyg0RIhRstOUvDv1F2E4sjf0fJR9KBTYjJCVQCP78qCGysjrxfEPGrM/HrnmBJM\naKYXtTqWybBWUSofmCMV\n=eDKk\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 3add29f19dabafb09be40ab06816b271a910eb5d\nparent c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5\nauthor Will Pfleger <pfleger.will@gmail.com> 1786561603 -0400\ncommitter GitHub <noreply@github.com> 1786561603 -0700\n\nperf(desktop): coalesce thread-activity localStorage writes (#5693)\n\nEach incoming thread reply drove a full `JSON.stringify` + `setItem` of\nthe ~600 KB thread-activity buffer. A burst of replies serialized the\nwhole blob once per event on the main thread, which is one of the\nrenderer stalls under load in the desktop-longevity arc.\n\nThis collapses the burst into a single debounced write, applying the\ncoalescing pattern Wes introduced for read-state persistence in #5591\n(`readStateManager`) to the thread-activity path.\n\n## What changed\n\n- **`threadActivityStorage.ts`** — coalescing primitives:\n- `scheduleThreadActivityWrite` — first-writer-wins (a pending timer is\n*not* reset), 1s trailing edge. The timer reads the live buffer *at fire\ntime* and re-checks the loaded scope, so N replies within the window\npersist exactly once with the burst's final state, and a write that\noutlives a scope switch can neither land under the new key nor persist\nthe wrong buffer.\n- `flushThreadActivityWrite` — synchronous persist + timer cancel; a\nno-op when nothing is pending.\n- `removeLegacyThreadActivityKey` — idempotent one-time cleanup of the\norphaned pre-relay-scoping `buzz-thread-activity.v1:<pubkey>` key.\n- **`useThreadActivityPersistence.ts`** (new companion hook) — owns the\nloaded scope, the write timer, the `pagehide` /\n`visibilitychange`→hidden / unmount flush, and hydration + legacy\ncleanup on identity/relay change. Mirrors the existing\n`useObservedUnreadPersistence` sibling.\n- **`useUnreadChannels.ts`** — rewired to instantiate the hook and call\n`activityPersistence.schedule(...)` at both writer sites instead of\nwriting per event. The buffer (`threadActivityRef`) stays parent-owned;\nthe hook decides when it is durably persisted. Net **990** lines (was\n1021), back under the 1000-line ceiling.\n\n## Durability\n\n`pagehide`, `visibilitychange`→hidden, unmount, and scope-reseed all\nflush synchronously, so the last burst of replies survives a `Cmd+R` or\nan idle reload that tears the webview down inside the coalescing window.\n\n## Tests\n\n- `threadActivityWriteScheduler.test.mjs` — fake-timer unit coverage:\nburst→one `setItem`, live-buffer-at-fire-time, scope-mismatch rejection,\nstale-scope timer abort, flush persists+cancels, flush no-op, legacy-key\nremoval.\n- `useThreadActivityPersistence.test.mjs` — mounts the real hook via\n`createRoot`+`act`: `pagehide` / visibility / unmount flush of the live\nbuffer, scope switch flushing A under A's key without leaking into B,\nB-bucket rehydration, legacy-key cleanup, and the empty-scope write\nfence.\n\n## Related\n\nBased on [#5591](https://github.com/block/buzz/pull/5591) (Wes) —\n`perf(desktop): coalesce read state localStorage persistence`, the\nproven first-writer-wins coalescing pattern this extends to thread\nactivity.\n\nSigned-off-by: Will Pfleger <pfleger.will@gmail.com>\nCo-authored-by: Duncan <dcfd242e557282d7a1e2cf2e6877522682f1e5c6156dc92ca7d90eaedd3b0f95@buzz.block.builderlab.xyz>",
+        "verified_at": "2026-08-12T19:06:46Z"
+      }
+    },
+    "url": "https://api.github.com/repos/block/buzz/commits/c6c6e7eca70d6b526c43af925e596e8616b19fb8",
+    "html_url": "https://github.com/block/buzz/commit/c6c6e7eca70d6b526c43af925e596e8616b19fb8",
+    "comments_url": "https://api.github.com/repos/block/buzz/commits/c6c6e7eca70d6b526c43af925e596e8616b19fb8/comments",
+    "author": {
+      "login": "wpfleger96",
+      "id": 15384764,
+      "node_id": "MDQ6VXNlcjE1Mzg0NzY0",
+      "avatar_url": "https://avatars.githubusercontent.com/u/15384764?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/wpfleger96",
+      "html_url": "https://github.com/wpfleger96",
+      "followers_url": "https://api.github.com/users/wpfleger96/followers",
+      "following_url": "https://api.github.com/users/wpfleger96/following{/other_user}",
+      "gists_url": "https://api.github.com/users/wpfleger96/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/wpfleger96/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/wpfleger96/subscriptions",
+      "organizations_url": "https://api.github.com/users/wpfleger96/orgs",
+      "repos_url": "https://api.github.com/users/wpfleger96/repos",
+      "events_url": "https://api.github.com/users/wpfleger96/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/wpfleger96/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5",
+        "url": "https://api.github.com/repos/block/buzz/commits/c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5",
+        "html_url": "https://github.com/block/buzz/commit/c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5"
+      }
+    ]
+  },
+  "status": "diverged",
+  "ahead_by": 1,
+  "behind_by": 2,
+  "total_commits": 1,
+  "files": [
+    {
+      "sha": "0305a3c0a2471b85b695d49a59d6f3bf340ae8dc",
+      "filename": ".github/workflows/release.yml",
+      "status": "modified",
+      "additions": 37,
+      "deletions": 1,
+      "changes": 38
+    },
+    {
+      "sha": "9e47178427565d226db3607ae027e676207b58a6",
+      "filename": "Justfile",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 0,
+      "changes": 4
+    },
+    {
+      "sha": "5dda9a099b51f30333c9a8ee6f169803831d934c",
+      "filename": "desktop/.gitignore",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "sha": "fe1389d53ec9d2f9c9ea7807229828fe74f3f31b",
+      "filename": "desktop/package.json",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    },
+    {
+      "sha": "ff4c284562560aee8722bf8a410c1608db984ab2",
+      "filename": "desktop/playwright.release-smoke.config.ts",
+      "status": "added",
+      "additions": 29,
+      "deletions": 0,
+      "changes": 29
+    },
+    {
+      "sha": "3c65fcde955413fdcc8c6fbb8e4e81e29d51b1e7",
+      "filename": "desktop/tests/e2e/perf/metrics.ts",
+      "status": "added",
+      "additions": 68,
+      "deletions": 0,
+      "changes": 68
+    },
+    {
+      "sha": "19beb276171e7f09cddba8e39a1ffd251c306322",
+      "filename": "desktop/tests/e2e/release-smoke.spec.ts",
+      "status": "added",
+      "additions": 246,
+      "deletions": 0,
+      "changes": 246
+    },
+    {
+      "sha": "33f7013ab3e9543a0046822d1b86ac7b46207971",
+      "filename": "scripts/run-desktop-release-smoke.sh",
+      "status": "added",
+      "additions": 148,
+      "deletions": 0,
+      "changes": 148
+    }
+  ]
+}

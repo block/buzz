@@ -1,0 +1,48 @@
+name: launchpad — review agent containment controls
+
+# Runs the controls for launchpad-26/buzz#120. These prove that pull-request-authored
+# text is contained, and that the controls themselves fail when containment is removed.
+#
+# `pull_request`, deliberately NOT `pull_request_target`. The suite under test lives in
+# the repository, so a pull request can modify the very code this job runs. On
+# `pull_request` that code executes against the fork's own permissions with no access to
+# repository secrets; `pull_request_target` would hand it the base repository's token.
+
+on:
+  pull_request:
+    paths:
+      - "launchpad/review-agent/**"
+      - ".github/workflows/launchpad-review-agent-controls.yml"
+  push:
+    branches: [launchpad]
+    paths:
+      - "launchpad/review-agent/**"
+
+# Read-only, and no write scope of any kind. The controls read public issues and pull
+# requests; they never post, label, or modify anything.
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # check_step11.py parses the workflow with PyYAML and treats a missing parser as
+      # a failure, not a skip. The setup-python tool cache ships pip only, so without
+      # this the first CI run goes red for a reason unrelated to containment.
+      - name: Install control dependencies
+        run: pip install pyyaml
+
+      - name: Run containment controls
+        working-directory: launchpad/review-agent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 run_controls.py
