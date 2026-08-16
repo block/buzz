@@ -417,7 +417,7 @@ pub(crate) fn process_group_has_live_members(
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
+#[allow(unsafe_code)] // macOS FFI exception per block/buzz#6047 (process-group liveness)
 pub(crate) fn process_group_has_live_members(
     process_group: u32,
     excluded_pid: Option<u32>,

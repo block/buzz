@@ -347,75 +347,13 @@ pub fn process_start_marker(pid: u32) -> Result<String, ArtifactError> {
 
     #[cfg(target_os = "macos")]
     {
-        let native_pid = i32::try_from(pid).map_err(|_| ArtifactError::ProcessUnavailable(pid))?;
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
-        let expected_size = std::mem::size_of::<libc::proc_bsdinfo>();
-        // SAFETY: `info` points to writable storage sized exactly for the
-        // requested PROC_PIDTBSDINFO structure. The value is read only when
-        // proc_pidinfo reports that it initialized the entire structure.
-        #[allow(unsafe_code)]
-        let read_size = unsafe {
-            libc::proc_pidinfo(
-                native_pid,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                info.as_mut_ptr().cast(),
-                expected_size as libc::c_int,
-            )
-        };
-        if read_size != expected_size as libc::c_int {
-            return Err(ArtifactError::ProcessUnavailable(pid));
-        }
-        // SAFETY: the full-structure size check above proves initialization.
-        #[allow(unsafe_code)]
-        let info = unsafe { info.assume_init() };
-        if info.pbi_pid != pid || info.pbi_start_tvsec == 0 || info.pbi_start_tvusec >= 1_000_000 {
-            return Err(ArtifactError::ProcessUnavailable(pid));
-        }
-        return Ok(format!(
-            "{pid}:macos:{:016x}:{:05x}",
-            info.pbi_start_tvsec, info.pbi_start_tvusec
-        ));
+        return macos_process_start_marker(pid);
     }
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::{
-            Foundation::{CloseHandle, FILETIME},
-            System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-        };
-
-        // SAFETY: OpenProcess returns either a null handle or an owned process
-        // handle. GetProcessTimes receives valid writable FILETIME pointers, and
-        // every non-null handle is closed exactly once before this block exits.
-        #[allow(unsafe_code)]
-        unsafe {
-            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if process.is_null() {
-                return Err(ArtifactError::ProcessUnavailable(pid));
-            }
-            let mut creation = FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            };
-            let mut exit = creation;
-            let mut kernel = creation;
-            let mut user = creation;
-            let read_ok =
-                GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
-            let _ = CloseHandle(process);
-            if read_ok == 0 {
-                return Err(ArtifactError::ProcessUnavailable(pid));
-            }
-            let ticks =
-                (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
-            if ticks == 0 {
-                return Err(ArtifactError::ProcessUnavailable(pid));
-            }
-            return Ok(format!("{pid}:windows:{ticks:016x}"));
-        }
+        return windows_process_start_marker(pid);
     }
-
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
@@ -424,6 +362,74 @@ pub fn process_start_marker(pid: u32) -> Result<String, ArtifactError> {
         ))
     }
 }
+#[cfg(windows)]
+#[allow(unsafe_code)] // Windows FFI exception per block/buzz#6047 (process start-time identity)
+fn windows_process_start_marker(pid: u32) -> Result<String, ArtifactError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, FILETIME},
+        System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    // SAFETY: OpenProcess returns either null handle or an owned process
+    // handle. GetProcessTimes receives valid writable FILETIME pointers, and
+    // every non-null handle is closed exactly once before block exits.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return Err(ArtifactError::ProcessUnavailable(pid));
+        }
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit = creation;
+        let mut kernel = creation;
+        let mut user = creation;
+        let read_ok = GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
+        let _ = CloseHandle(process);
+        if read_ok == 0 {
+            return Err(ArtifactError::ProcessUnavailable(pid));
+        }
+        let ticks = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        if ticks == 0 {
+            return Err(ArtifactError::ProcessUnavailable(pid));
+        }
+        Ok(format!("{pid}:windows:{ticks:016x}"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // macOS FFI exception per block/buzz#6047 (process start-time identity)
+fn macos_process_start_marker(pid: u32) -> Result<String, ArtifactError> {
+    let native_pid = i32::try_from(pid).map_err(|_| ArtifactError::ProcessUnavailable(pid))?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let expected_size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: `info` points writable storage sized exactly
+    // requested PROC_PIDTBSDINFO structure. value read only
+    // proc_pidinfo reports initialized entire structure.
+    let read_size = unsafe {
+        libc::proc_pidinfo(
+            native_pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            expected_size as libc::c_int,
+        )
+    };
+    if read_size != expected_size as libc::c_int {
+        return Err(ArtifactError::ProcessUnavailable(pid));
+    }
+    // SAFETY: full-structure size check above proves initialization.
+    let info = unsafe { info.assume_init() };
+    if info.pbi_pid != pid || info.pbi_start_tvsec == 0 || info.pbi_start_tvusec >= 1_000_000 {
+        return Err(ArtifactError::ProcessUnavailable(pid));
+    }
+    Ok(format!(
+        "{pid}:macos:{:016x}:{:05x}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}
+
 #[cfg(target_os = "linux")]
 fn linux_proc_start_ticks(pid: u32, stat: &str) -> Option<u64> {
     let comm_start = stat.find('(')?;

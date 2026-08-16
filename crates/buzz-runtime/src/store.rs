@@ -24,6 +24,14 @@ pub const MAX_ARGV_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_PENDING_PER_CHANNEL: usize = 500;
 /// Maximum remote-cancel tombstones per request: 4096, bounding idempotency state.
 pub const MAX_REMOTE_CANCEL_TOMBSTONES: usize = 4096;
+/// Retention cutoff for terminal inbox rows: 7 days after completion.
+pub const RETENTION_TERMINAL_INBOX_SECS: u64 = 7 * 24 * 3600;
+/// Retention cutoff for terminal jobs/assignments: 7 days after their last update.
+pub const RETENTION_TERMINAL_JOBS_SECS: u64 = 7 * 24 * 3600;
+/// Retention cutoff for settled outbox rows: 7 days after publication/rejection.
+pub const RETENTION_SETTLED_OUTBOX_SECS: u64 = 7 * 24 * 3600;
+/// Rows removed per compaction transaction, bounding transaction duration.
+pub const COMPACTION_BATCH_ROWS: usize = 1000;
 /// Maximum inbox retries: 10 attempts before an event is dead-lettered.
 pub const MAX_INBOX_RETRIES: u32 = 10;
 /// Initial inbox retry delay: 5 seconds before the first retry.
@@ -970,6 +978,26 @@ impl StoreHandle {
     pub async fn operational_diagnostics(&self) -> Result<StoreDiagnostics, StoreError> {
         self.request(Command::OperationalDiagnostics).await
     }
+
+    /// Runs one retention/compaction pass and reports removed row counts.
+    ///
+    /// Removes terminal inbox rows, terminal jobs and assignments, and settled
+    /// outbox rows past their retention cutoffs, and prunes cancel tombstones
+    /// for jobs without live state down to the documented cap. Active work,
+    /// pending outbox entries, replay idempotency fences for live jobs, and
+    /// terminal history within the retention window are preserved (see
+    /// `compaction_preserves_active_work_and_fences`).
+    pub async fn compact(&self) -> Result<CompactionReport, StoreError> {
+        let now = stamp_now();
+        self.request(|reply| Command::Compact { now, reply }).await
+    }
+
+    /// Compaction pass evaluated at `now`; exposed for retention tests that
+    /// need to advance the effective clock past the retention cutoffs.
+    #[doc(hidden)]
+    pub async fn compact_at(&self, now: DateTime<Utc>) -> Result<CompactionReport, StoreError> {
+        self.request(|reply| Command::Compact { now, reply }).await
+    }
     /// Records whether startup reconciliation is outstanding.
     pub async fn set_recovery_state(
         &self,
@@ -1005,6 +1033,21 @@ impl StoreHandle {
             .await
     }
 }
+/// Rows removed by one compaction pass, reported back to callers and tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionReport {
+    /// Terminal inbox rows removed.
+    pub inbox_removed: usize,
+    /// Terminal job rows removed.
+    pub jobs_removed: usize,
+    /// Terminal assignment rows removed.
+    pub assignments_removed: usize,
+    /// Settled outbox rows removed.
+    pub outbox_removed: usize,
+    /// Cancel tombstones removed beyond the retention cap.
+    pub tombstones_removed: usize,
+}
+
 type Reply<T> = oneshot::Sender<Result<T, StoreError>>;
 enum Command {
     Enqueue(InboxEvent, Reply<EnqueueOutcome>),
@@ -1088,8 +1131,66 @@ enum Command {
         phase: StartupRecoveryPhase,
         reply: Reply<bool>,
     },
+    Compact {
+        now: DateTime<Utc>,
+        reply: Reply<CompactionReport>,
+    },
 }
+fn compact(c: &mut Connection, now: DateTime<Utc>) -> Result<CompactionReport, StoreError> {
+    let inbox_cutoff = stamp(now - chrono::Duration::seconds(RETENTION_TERMINAL_INBOX_SECS as i64));
+    let jobs_cutoff = stamp(now - chrono::Duration::seconds(RETENTION_TERMINAL_JOBS_SECS as i64));
+    let outbox_cutoff =
+        stamp(now - chrono::Duration::seconds(RETENTION_SETTLED_OUTBOX_SECS as i64));
+    let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let inbox_removed = tx.execute(
+        "DELETE FROM inbox_events WHERE state IN ('completed','dead_letter') AND received_at < ?1",
+        [&inbox_cutoff],
+    )?;
+    // Terminal jobs whose assignment (if any) is also terminal-and-old; linked
+    // active assignments keep their job rows through the join exclusion.
+    let jobs_removed = tx.execute(
+        "DELETE FROM jobs WHERE state IN ('succeeded','failed','cancelled','lost') \
+         AND updated_at < ?1 \
+         AND NOT EXISTS (SELECT 1 FROM assignments a \
+         WHERE a.active_job_id = jobs.job_id)",
+        [&jobs_cutoff],
+    )?;
+    let assignments_removed = tx.execute(
+        "DELETE FROM assignments WHERE state IN ('completed','failed','cancelled') \
+         AND updated_at < ?1",
+        [&jobs_cutoff],
+    )?;
+    let outbox_removed = tx.execute(
+        "DELETE FROM relay_outbox WHERE state IN ('published','rejected','superseded') \
+         AND COALESCE(published_at, rejected_at, created_at) < ?1",
+        [&outbox_cutoff],
+    )?;
+    // Tombstones for jobs with no live state are pruned to the documented cap;
+    // a global ceiling alone would eventually reject every new tombstone.
+    let tombstones_removed = tx.execute(
+        "DELETE FROM job_cancel_tombstones WHERE cancel_event_id IN ( \
+         SELECT cancel_event_id FROM job_cancel_tombstones \
+         WHERE job_id NOT IN (SELECT job_id FROM jobs WHERE state \
+         IN ('requested','accepted','running','cancelling')) \
+         ORDER BY created_at DESC LIMIT -1 OFFSET ?1)",
+        params![COMPACTION_BATCH_ROWS.saturating_sub(1)],
+    )?;
+    tx.commit()?;
+    Ok(CompactionReport {
+        inbox_removed,
+        jobs_removed,
+        assignments_removed,
+        outbox_removed,
+        tombstones_removed,
+    })
+}
+
 fn run(mut c: Connection, mut rx: mpsc::Receiver<Command>) {
+    // Automatic compaction cadence: one retention pass per hour of store uptime,
+    // checked after each handled command. The store thread is idle between
+    // commands, so the pass runs at most once per interval regardless of load.
+    const AUTO_COMPACT_INTERVAL: Duration = Duration::from_secs(3600);
+    let mut last_compact = SystemTime::now();
     while let Some(v) = rx.blocking_recv() {
         match v {
             Command::Enqueue(v, r) => {
@@ -1250,6 +1351,13 @@ fn run(mut c: Connection, mut rx: mpsc::Receiver<Command>) {
             Command::CompleteStartupRecoveryPhase { phase, reply } => {
                 let _ = reply.send(complete_startup_recovery_phase(&mut c, phase));
             }
+            Command::Compact { now, reply } => {
+                let _ = reply.send(compact(&mut c, now));
+            }
+        }
+        if last_compact.elapsed().unwrap_or(AUTO_COMPACT_INTERVAL) >= AUTO_COMPACT_INTERVAL {
+            let _ = compact(&mut c, stamp_now());
+            last_compact = SystemTime::now();
         }
     }
 }
@@ -1453,6 +1561,10 @@ fn ensure_assignment_column(
     }
     Ok(())
 }
+fn stamp_now() -> DateTime<Utc> {
+    Utc::now()
+}
+
 fn stamp(v: DateTime<Utc>) -> String {
     v.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -3862,5 +3974,195 @@ mod tests {
         let recovered = store.assignment_snapshot().await.unwrap();
         assert!(!recovered.recovering);
         assert!(recovered.recovery_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn compaction_preserves_active_work_and_fences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state").join("runtime.sqlite3");
+        let store = StoreHandle::open(&path).unwrap();
+        let channel_id = Uuid::new_v4();
+
+        // Active (queued) inbox event: must survive compaction.
+        let live_event = input(channel_id, "live");
+        assert_eq!(
+            store.enqueue_inbox(live_event).await.unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        // Terminal inbox row completed inside a claimed turn: aged past cutoff.
+        let terminal_event = input(channel_id, "done");
+        assert_eq!(
+            store.enqueue_inbox(terminal_event).await.unwrap(),
+            EnqueueOutcome::Enqueued
+        );
+        let batch = store
+            .claim_inbox_batch(50, "turn-1".into(), Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.events.len(), 2);
+        store.complete_inbox("turn-1".into()).await.unwrap();
+
+        let old_job_id = Uuid::new_v4();
+        let old_request = format!("request-{old_job_id}");
+        let old_created =
+            Utc::now() - chrono::Duration::seconds((RETENTION_TERMINAL_JOBS_SECS + 60) as i64);
+        let old_channel = Uuid::new_v4();
+        store
+            .create_local_job(
+                NewJob {
+                    job_id: old_job_id,
+                    request_event_id: old_request.clone(),
+                    requester_pubkey: "requester".into(),
+                    executable: PathBuf::from("/bin/echo"),
+                    request: remote_job(old_job_id, old_channel).request,
+                    attempt: 1,
+                    created_at: old_created,
+                },
+                OutboxEvent {
+                    event_id: old_request.clone(),
+                    job_id: Some(old_job_id),
+                    channel_id: old_channel,
+                    ordering_key: format!("job:{old_job_id}"),
+                    kind: 43_001,
+                    seq: None,
+                    is_terminal: false,
+                    event_json: "{}".into(),
+                    created_at: old_created,
+                },
+            )
+            .await
+            .unwrap();
+        let (transition, outbox) =
+            terminal_failure(&store.get_job(old_job_id).await.unwrap().unwrap());
+        store
+            .transition_job(transition, Some(outbox))
+            .await
+            .unwrap();
+
+        // Live job (running), created after the old job reached a terminal state.
+        let live_job_id = Uuid::new_v4();
+        let live_request = format!("request-{live_job_id}");
+        store
+            .create_local_job(
+                remote_job(live_job_id, channel_id),
+                OutboxEvent {
+                    event_id: live_request.clone(),
+                    job_id: Some(live_job_id),
+                    channel_id,
+                    ordering_key: format!("job:{live_job_id}"),
+                    kind: 43_001,
+                    seq: None,
+                    is_terminal: false,
+                    event_json: "{}".into(),
+                    created_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .transition_job(
+                JobTransition {
+                    job_id: live_job_id,
+                    attempt: 1,
+                    next_state: JobState::Running,
+                    runner: None,
+                    progress_seq: None,
+                    exit_code: None,
+                    result_json: None,
+                    error_code: None,
+                    terminal_event_id: None,
+                    publication_state: None,
+                    publication_error: None,
+                    occurred_at: Utc::now(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Fresh compaction keeps everything: nothing is past a cutoff yet.
+        let report = store.compact().await.unwrap();
+        assert_eq!(report.inbox_removed, 0, "nothing aged yet");
+
+        // Advance the effective clock past every retention cutoff and compact.
+        let future =
+            Utc::now() + chrono::Duration::seconds((RETENTION_TERMINAL_JOBS_SECS + 3600) as i64);
+        let report = store.compact_at(future).await.unwrap();
+        assert_eq!(report.inbox_removed, 2, "terminal inbox rows pruned");
+        assert_eq!(report.jobs_removed, 1, "terminal old job pruned");
+
+        // Live job survives compaction past the cutoff.
+        assert!(store.get_job(live_job_id).await.unwrap().is_some());
+        // Terminal history was pruned by design.
+        assert!(store.get_job(old_job_id).await.unwrap().is_none());
+
+        // Cancel tombstones: exceed the cap for jobs with no live state, then
+        // verify compaction prunes back under the cap instead of permanently
+        // rejecting every new tombstone.
+        // Fill the tombstone table to its cap for jobs with no live state.
+        let mut inserted = 0usize;
+        for i in 0..(MAX_REMOTE_CANCEL_TOMBSTONES + 5) {
+            let cancel_job = Uuid::new_v4();
+            let base = cancel_job.simple().to_string(); // 32 hex chars, no hyphens
+            let outcome = store
+                .record_remote_cancel(RemoteCancelTombstone {
+                    job_id: cancel_job,
+                    request_event_id: format!("{base}{base}"),
+                    channel_id,
+                    cancel_event_id: format!("{}{:032x}", &base, i),
+                    canceller_pubkey: "a".repeat(64),
+                    authorized_without_request: true,
+                    created_at: Utc::now(),
+                })
+                .await;
+            match outcome {
+                Ok(_) => inserted += 1,
+                Err(StoreError::CancelTombstoneCapacity) => break,
+                Err(other) => panic!("unexpected tombstone error: {other:?}"),
+            }
+        }
+        assert_eq!(
+            inserted, MAX_REMOTE_CANCEL_TOMBSTONES,
+            "table fills exactly to the cap"
+        );
+        assert!(matches!(
+            store
+                .record_remote_cancel(RemoteCancelTombstone {
+                    job_id: Uuid::new_v4(),
+                    request_event_id: "b".repeat(64),
+                    channel_id,
+                    cancel_event_id: "c".repeat(64),
+                    canceller_pubkey: "a".repeat(64),
+                    authorized_without_request: true,
+                    created_at: Utc::now(),
+                })
+                .await,
+            Err(StoreError::CancelTombstoneCapacity)
+        ));
+
+        // Compaction prunes tombstones whose jobs have no live state, so new
+        // tombstones are accepted again instead of being rejected forever.
+        let report = store.compact_at(future).await.unwrap();
+        assert!(
+            report.tombstones_removed > 0,
+            "tombstones for dead jobs are pruned: {report:?}"
+        );
+        assert!(
+            store
+                .record_remote_cancel(RemoteCancelTombstone {
+                    job_id: Uuid::new_v4(),
+                    request_event_id: "d".repeat(64),
+                    channel_id,
+                    cancel_event_id: "e".repeat(64),
+                    canceller_pubkey: "a".repeat(64),
+                    authorized_without_request: true,
+                    created_at: Utc::now(),
+                })
+                .await
+                .is_ok(),
+            "new tombstones accepted after compaction"
+        );
+        drop(store);
     }
 }

@@ -40,22 +40,21 @@ pub struct WindowsJobObject {
 
 impl WindowsJobObject {
     /// Creates an empty Job Object configured for crash-safe tree cleanup.
+    #[allow(unsafe_code)] // Win32 Job Object FFI exception per block/buzz#6047
+
     pub fn create_kill_on_close() -> io::Result<Self> {
         // SAFETY: null security/name pointers request an anonymous object. A
         // successful handle is immediately transferred to OwnedHandle.
-        #[allow(unsafe_code)]
         let raw = unsafe { CreateJobObjectW(null(), null()) };
         if raw.is_null() {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: `raw` is a newly owned, non-null Windows handle.
-        #[allow(unsafe_code)]
         let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
         let job = Self { handle };
 
         // SAFETY: the input buffer is initialized, correctly sized, and lives
         // for the duration of SetInformationJobObject.
-        #[allow(unsafe_code)]
         let configured = unsafe {
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -81,6 +80,8 @@ impl WindowsJobObject {
     /// The child must have been configured through [`Self::prepare_command`].
     /// Assignment uses the process handle retained by Tokio, never a PID lookup,
     /// so PID reuse cannot retarget ownership to an unrelated process.
+    #[allow(unsafe_code)] // Win32 Job Object FFI exception per block/buzz#6047
+
     pub fn assign_spawned_child_and_resume(&self, child: &tokio::process::Child) -> io::Result<()> {
         let pid = child
             .id()
@@ -94,7 +95,6 @@ impl WindowsJobObject {
 
         // SAFETY: `process` is the exact live handle borrowed from `child`;
         // this job handle remains valid for the duration of the call.
-        #[allow(unsafe_code)]
         if unsafe { AssignProcessToJobObject(self.raw(), process.cast()) } == FALSE {
             return Err(io::Error::last_os_error());
         }
@@ -107,20 +107,19 @@ impl WindowsJobObject {
     ///
     /// The PID must come directly from the successful suspended spawn. This
     /// method never terminates by PID; all later cleanup targets this Job Object.
+    #[allow(unsafe_code)] // Win32 Job Object FFI exception per block/buzz#6047
+
     pub fn assign_spawned_pid_and_resume(&self, pid: u32) -> io::Result<()> {
         // SAFETY: OpenProcess validates the PID and requested access. The
         // returned handle is immediately transferred to OwnedHandle.
-        #[allow(unsafe_code)]
         let raw_process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, pid) };
         if raw_process.is_null() {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: raw_process is non-null and newly owned by this call.
-        #[allow(unsafe_code)]
         let process = unsafe { OwnedHandle::from_raw_handle(raw_process.cast()) };
 
         // SAFETY: both handles are valid for this call.
-        #[allow(unsafe_code)]
         if unsafe { AssignProcessToJobObject(self.raw(), process.as_raw_handle().cast()) } == FALSE
         {
             return Err(io::Error::last_os_error());
@@ -130,10 +129,11 @@ impl WindowsJobObject {
     }
 
     /// Returns the number of processes currently associated with the job.
+    #[allow(unsafe_code)] // Win32 Job Object FFI exception per block/buzz#6047
+
     pub fn active_process_count(&self) -> io::Result<u32> {
         // SAFETY: the output buffer is initialized, correctly sized, and lives
         // for the duration of QueryInformationJobObject.
-        #[allow(unsafe_code)]
         unsafe {
             let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = zeroed();
             if QueryInformationJobObject(
@@ -151,9 +151,10 @@ impl WindowsJobObject {
     }
 
     /// Terminates every process associated with this object.
+    #[allow(unsafe_code)] // Win32 Job Object FFI exception per block/buzz#6047
+
     pub fn terminate(&self) -> io::Result<()> {
         // SAFETY: the Job Object handle is valid for this call.
-        #[allow(unsafe_code)]
         if unsafe { TerminateJobObject(self.raw(), 137) } == FALSE {
             return Err(io::Error::last_os_error());
         }
@@ -188,30 +189,27 @@ impl WindowsJobObject {
     }
 }
 
+#[allow(unsafe_code)] // Win32 Job Object FFI exception per block/buzz#6047
+
 fn resume_process_threads(pid: u32) -> io::Result<()> {
     // SAFETY: the returned snapshot is either INVALID_HANDLE_VALUE or a newly
     // owned snapshot handle.
-    #[allow(unsafe_code)]
     let raw_snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if raw_snapshot == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: checked above; OwnedHandle closes the snapshot exactly once.
-    #[allow(unsafe_code)]
     let snapshot = unsafe { OwnedHandle::from_raw_handle(raw_snapshot.cast()) };
     // SAFETY: zeroed THREADENTRY32 with dwSize initialized is the documented
     // iteration contract for Thread32First/Thread32Next.
-    #[allow(unsafe_code)]
     let mut entry: THREADENTRY32 = unsafe { zeroed() };
     entry.dwSize = size_of::<THREADENTRY32>() as u32;
     let mut resumed = 0u32;
 
     // SAFETY: snapshot and entry pointers remain valid through iteration.
-    #[allow(unsafe_code)]
     let mut found = unsafe { Thread32First(snapshot.as_raw_handle().cast(), &mut entry) };
     if found == FALSE {
         // SAFETY: GetLastError has no preconditions.
-        #[allow(unsafe_code)]
         let error = unsafe { GetLastError() };
         if error == ERROR_NO_MORE_FILES {
             return Err(io::Error::new(
@@ -225,17 +223,14 @@ fn resume_process_threads(pid: u32) -> io::Result<()> {
     loop {
         if entry.th32OwnerProcessID == pid {
             // SAFETY: OpenThread returns a new owned handle or null.
-            #[allow(unsafe_code)]
             let raw_thread =
                 unsafe { OpenThread(THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID) };
             if raw_thread.is_null() {
                 return Err(io::Error::last_os_error());
             }
             // SAFETY: `raw_thread` is newly owned and non-null.
-            #[allow(unsafe_code)]
             let thread = unsafe { OwnedHandle::from_raw_handle(raw_thread.cast()) };
             // SAFETY: thread has THREAD_SUSPEND_RESUME access.
-            #[allow(unsafe_code)]
             if unsafe { ResumeThread(thread.as_raw_handle().cast()) } == u32::MAX {
                 return Err(io::Error::last_os_error());
             }
@@ -243,7 +238,6 @@ fn resume_process_threads(pid: u32) -> io::Result<()> {
         }
 
         // SAFETY: snapshot and entry remain valid.
-        #[allow(unsafe_code)]
         found = unsafe { Thread32Next(snapshot.as_raw_handle().cast(), &mut entry) };
         if found == FALSE {
             break;

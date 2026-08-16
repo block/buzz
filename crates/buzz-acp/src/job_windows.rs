@@ -3,7 +3,8 @@
 //! # Safety
 //!
 //! This module is exempted from the crate's `#![deny(unsafe_code)]` policy
-//! because Win32 Job Object management has no safe Rust wrapper. Every
+//! because Win32 Job Object management has no safe Rust wrapper (security
+//! decision tracked in block/buzz#6047). Every
 //! `unsafe` block is a direct FFI call with three invariants, each held by
 //! construction:
 //!
