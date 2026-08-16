@@ -473,3 +473,45 @@ the process actually cycled — check that, not just that the query succeeded).
   same pass: the opt-in reply and message samples referenced "Hermes" and
   "lenny" (internal names) while the brand and DBA say BuildBid, and the HELP
   reply carried no brand name or support contact.
+
+### 2026-08-16: A2P campaign re-created — the real blocker was a rule change
+
+The campaign was deleted and re-created against the approved brand. Attempt 1
+carried the corrected CTA (citing `https://www.protelynx.ai/sms-opt-in`) and
+**cleared the original 30909 `MESSAGE_FLOW` rejection** — but failed within two
+minutes on two *different* errors:
+
+- **30908** — `PRIVACY_POLICY_URL`, "a compliant privacy policy can not be
+  verified"
+- **30882** — `TERMS_AND_CONDITIONS_URL`, "Terms and Conditions issues"
+
+Both error strings point at the *pages*, and both are misleading.
+`https://www.protelynx.ai/privacy` and `/sms-terms` are server-rendered (not an
+SPA a crawler would see empty), and both already carry the exact language TCR
+requires, verbatim: "We do not sell, rent, or share mobile numbers, SMS opt-in
+data, or SMS consent with third parties or affiliates for marketing or
+promotional purposes." They pass every content check.
+
+The actual cause: **`PrivacyPolicyUrl` and `TermsAndConditionsUrl` became
+required campaign fields on 2026-06-30**, and neither was being sent. The May
+filing predated the rule, so this failure mode did not exist when the campaign
+was originally written. Attempt 2 adds both fields.
+
+**Do not rewrite the policy pages on a 30908/30882 — send the fields.**
+
+Other traps from the same pass:
+
+- **Campaign `DELETE` is asynchronous.** It returns `204`, but the campaign
+  stays in the list for ~10-60s, and creating inside that window fails with
+  `20409 "There is already a Campaign associated with this Messaging Service"`.
+  Poll the list until it is empty before re-creating.
+- **`HelpMessage` is silently ignored on create.** It still reads the old
+  `"Reply STOP to unsubscribe. Msg&Data Rates May Apply."` across two
+  delete/recreate cycles, while `OptInMessage` updates normally. Worth fixing
+  before the program goes live, since the HELP reply is itself a compliance
+  surface.
+- **Describe the opt-in flow that actually exists.** `/sms-opt-in` is
+  keyword-only ("text START to +1 317-315-5284") — there is no web form and no
+  consent checkbox. An earlier draft of the message flow described a checkbox
+  form that is not on the page; a reviewer who cannot find the mechanism you
+  describe has grounds to reject.
