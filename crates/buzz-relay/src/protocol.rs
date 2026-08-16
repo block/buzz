@@ -1,4 +1,29 @@
 //! NIP-01 client/relay message parsing and formatting.
+//!
+//! # Buzz extension frames
+//!
+//! Alongside the NIP-01 relay→client messages ([`RelayMessage`]), the relay
+//! emits one Buzz-specific extension frame:
+//!
+//! ## `BUZZ_SYNC_REQUIRED`
+//!
+//! ```text
+//! ["BUZZ_SYNC_REQUIRED","<reason>"]
+//! ```
+//!
+//! Machine-readable signal that the client's view has a gap and it should
+//! resynchronize (replay from its watermark). Emitted today with reason
+//! `backpressure` when an EVENT fan-out frame for this connection was dropped
+//! because the connection's outbound data channel was full. Delivery rules:
+//!
+//! - Sent on the connection's priority control channel, never on the data
+//!   channel it signals about, and never as a human-readable `NOTICE`.
+//! - Emitted only for live connections whose data channel is full. Closed or
+//!   already-gone connections get no signal — reconnect replay is their
+//!   fail-safe.
+//! - Clients that do not recognize the frame MUST ignore it (unknown
+//!   relay→client array heads are non-fatal per NIP-01 client convention);
+//!   the reconnect-replay machinery remains the backstop either way.
 
 use nostr::{Event, Filter};
 use serde_json::Value;
@@ -213,6 +238,19 @@ impl RelayMessage {
     /// Format a COUNT response (NIP-45).
     pub fn count(sub_id: &str, count: u64) -> String {
         serde_json::json!(["COUNT", sub_id, {"count": count}]).to_string()
+    }
+
+    /// Format a `BUZZ_SYNC_REQUIRED` extension frame (see module docs).
+    ///
+    /// Machine-readable gap signal delivered on the connection's priority
+    /// control channel. `"backpressure"` — an EVENT fan-out frame was dropped
+    /// because the connection's data channel was full — is the only reason
+    /// the wire contract defines. The constructor is deliberately monomorphic
+    /// so the relay cannot emit a frame the contract does not define; if a
+    /// new reason ever appears, grow this into an enum and extend the
+    /// contract deliberately.
+    pub fn sync_required() -> String {
+        serde_json::json!(["BUZZ_SYNC_REQUIRED", "backpressure"]).to_string()
     }
 }
 
@@ -446,6 +484,18 @@ mod tests {
                     assert_eq!(v[0], "CLOSED");
                     assert_eq!(v[1], "sub1");
                     assert_eq!(v[2], "auth-required: not authenticated");
+                }),
+            ),
+            (
+                "sync_required",
+                Box::new(|| {
+                    let msg = RelayMessage::sync_required();
+                    // Exact wire bytes: clients match on this precise shape,
+                    // and the constructor cannot produce any other reason.
+                    assert_eq!(msg, r#"["BUZZ_SYNC_REQUIRED","backpressure"]"#);
+                    let v: Value = serde_json::from_str(&msg).unwrap();
+                    assert_eq!(v[0], "BUZZ_SYNC_REQUIRED");
+                    assert_eq!(v[1], "backpressure");
                 }),
             ),
         ];
