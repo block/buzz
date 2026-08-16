@@ -98,6 +98,15 @@ WARN buzz_acp::relay: initial relay connect failed with terminal error:
   ```
 
   `Host` тут не транспортна деталь, а частина підписаного матеріалу.
+- *Засіяти обидва аліаси через `scripts/seed-local-community.sh`.* Ця порада
+  вже гуляє трекером ([#4147](https://github.com/block/buzz/issues/4147)), і
+  вона робить **гірше**. Скрипт вставляє по рядку на аліас, а не кілька хостів
+  на одну спільноту — `schema/schema.sql` має
+  `CREATE UNIQUE INDEX idx_communities_host ON communities (lower(host))`, тож
+  інакше він і не може. Виходить до чотирьох окремих **порожніх** спільнот:
+  власник і агент так само в різних, зате 404 зникає. Гучна помилка стає тихою
+  порожнечею, і єдиним сигналом лишається `discovered 0 channel(s)` у лозі,
+  куди ніхто не дивиться.
 - *Змусити агента вживати `localhost`.* `BUZZ_RELAY_URL` — зарезервований ключ
   ([`reserved_env_keys.rs`](../../desktop/src-tauri/src/managed_agents/reserved_env_keys.rs)),
   користувацькі змінні його не перекривають, а нормалізація зашита в код.
