@@ -519,3 +519,33 @@ mod tests {
         assert!(matches!(err, CliError::Usage(_)));
     }
 }
+
+#[cfg(test)]
+mod fold_name_tests {
+    use super::fold_name;
+
+    /// Every expectation is JavaScript's `toLowerCase` output for the same
+    /// input, taken from node, because Desktop is the other implementation of
+    /// this rule and the two have to agree about what a query finds.
+    #[test]
+    fn folds_the_same_way_javascript_does() {
+        for (input, expected) in [
+            ("ÉQUIPE", "équipe"),
+            ("ОБЩИЙ", "общий"),
+            ("Ünnepek", "ünnepek"),
+            ("JOSÉ", "josé"),
+            ("Straße", "straße"),
+            ("ǅungla", "ǆungla"),
+            ("İstanbul", "i̇stanbul"),
+            ("ÅNGSTRÖM", "ångström"),
+        ] {
+            assert_eq!(fold_name(input), expected, "folding {input}");
+        }
+    }
+
+    #[test]
+    fn leaves_ascii_alone_as_before() {
+        assert_eq!(fold_name("Buzz-Chat-Composer"), "buzz-chat-composer");
+        assert_eq!(fold_name(""), "");
+    }
+}
