@@ -143,4 +143,41 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
   await detail.screenshot({
     path: "test-results/project-inbox/01-pull-request-detail.png",
   });
+
+  // At the wide two-column breakpoint, metadata may wrap between phrases but
+  // must never compress individual phrases into word-wide columns.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect
+    .poll(() =>
+      layout.evaluate(
+        (element) =>
+          getComputedStyle(element)
+            .gridTemplateColumns.split(" ")
+            .filter(Boolean).length,
+      ),
+    )
+    .toBe(2);
+  await expect(
+    detail.getByRole("button", {
+      name: "Open author-claimed origin channel #general",
+    }),
+  ).toBeVisible();
+  const metadataPhrases = detail.locator("[data-project-metadata-phrase]");
+  await expect(metadataPhrases).not.toHaveCount(0);
+  const phraseLayouts = await metadataPhrases.evaluateAll((phrases) =>
+    phrases.map((phrase) => {
+      const style = getComputedStyle(phrase);
+      return {
+        height: phrase.getBoundingClientRect().height,
+        lineHeight: Number.parseFloat(style.lineHeight),
+      };
+    }),
+  );
+  for (const phrase of phraseLayouts) {
+    expect(phrase.height).toBeLessThanOrEqual(phrase.lineHeight * 1.5);
+  }
+  await waitForAnimations(page);
+  await detail.screenshot({
+    path: "test-results/project-inbox/02-pull-request-detail-wide.png",
+  });
 });

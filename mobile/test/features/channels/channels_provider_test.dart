@@ -22,6 +22,42 @@ void main() {
   const myPk = 'me';
 
   test(
+    'seeds members from the channel-list snapshot during reconnect',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk, additionalPubkey: 'alice')],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      final memberQueryCount = session.historyFilters
+          .where(
+            (filter) =>
+                filter.kinds.contains(39002) && filter.tags['#d'] != null,
+          )
+          .length;
+
+      session.setStatus(SessionStatus.reconnecting);
+      final members = await container.read(
+        channelMembersProvider(_channelA).future,
+      );
+
+      expect(members.map((member) => member.pubkey), [myPk, 'alice']);
+      expect(
+        session.historyFilters
+            .where(
+              (filter) =>
+                  filter.kinds.contains(39002) && filter.tags['#d'] != null,
+            )
+            .length,
+        memberQueryCount,
+      );
+    },
+  );
+
+  test(
     'subscribes per-channel with #h tags (only joined, non-archived)',
     () async {
       final session = _FakeRelaySession(
@@ -53,6 +89,25 @@ void main() {
       }
     },
   );
+
+  test('retains channel-list member snapshots for immediate reuse', () async {
+    final joinedAt = DateTime.fromMillisecondsSinceEpoch(1000, isUtc: true);
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk, additionalPubkey: 'alice')],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final members = container
+        .read(channelsProvider.notifier)
+        .cachedMembersForChannel(_channelA);
+
+    expect(members, hasLength(2));
+    expect(members.map((member) => member.pubkey), [myPk, 'alice']);
+    expect(members.every((member) => member.joinedAt == joinedAt), isTrue);
+  });
 
   test(
     'refreshing an unchanged channel set issues zero new live REQs',
@@ -250,6 +305,83 @@ void main() {
     final channels = container.read(channelsProvider).value!;
     expect(channels.single.lastMessageAt?.millisecondsSinceEpoch, 20 * 1000);
   });
+
+  test(
+    'loads all channel timestamps through one batched relay query',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'direct', channelType: 'dm'),
+        ],
+        recentMessages: const [
+          NostrEvent(
+            id: 'stream-message',
+            pubkey: 'alice',
+            createdAt: 30,
+            kind: EventKind.streamMessageV2,
+            tags: [
+              ['h', _channelA],
+            ],
+            content: 'hello',
+            sig: 'sig',
+          ),
+          NostrEvent(
+            id: 'dm-message',
+            pubkey: 'alice',
+            createdAt: 40,
+            kind: 9,
+            tags: [
+              ['h', _channelB],
+            ],
+            content: 'hello privately',
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+
+      await _waitUntil(() => session.queryBatches.length == 2);
+      expect(session.queryBatches, hasLength(2));
+      expect(session.queryBatches.first, hasLength(2));
+      expect(
+        session.queryBatches.first
+            .map((filter) => filter.tags['#h']!.single)
+            .toSet(),
+        {_channelA, _channelB},
+      );
+      expect(session.queryBatches.last, hasLength(2));
+      expect(
+        session.queryBatches.last.every(
+          (filter) => filter.limit == 1000 && filter.since == 0,
+        ),
+        isTrue,
+      );
+      expect(
+        session.historyFilters.where((filter) {
+          final kinds = filter.kinds.toSet();
+          return kinds.length == EventKind.channelMessageEventKinds.length &&
+              kinds.containsAll(EventKind.channelMessageEventKinds);
+        }),
+        isEmpty,
+      );
+      expect(
+        channels.firstWhere((channel) => channel.id == _channelA).lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+      );
+      expect(
+        channels.firstWhere((channel) => channel.id == _channelB).lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(40 * 1000, isUtc: true),
+      );
+    },
+  );
 
   test('ephemeral (TTL) channels appear in the list', () async {
     // Regression: previously the provider unconditionally dropped any channel
@@ -529,7 +661,11 @@ const _channelB = '22222222-2222-4222-8222-222222222222';
 const _channelD = '44444444-4444-4444-8444-444444444444';
 
 /// Build a kind:39002 membership event tagged with the channel id and member.
-NostrEvent _membership(String channelId, String pubkey) => NostrEvent(
+NostrEvent _membership(
+  String channelId,
+  String pubkey, {
+  String? additionalPubkey,
+}) => NostrEvent(
   id: 'mem-$channelId',
   pubkey: 'creator',
   createdAt: 1,
@@ -537,6 +673,7 @@ NostrEvent _membership(String channelId, String pubkey) => NostrEvent(
   tags: [
     ['d', channelId],
     ['p', pubkey],
+    if (additionalPubkey != null) ['p', additionalPubkey],
   ],
   content: '',
   sig: 'sig',
@@ -608,15 +745,18 @@ class _FakeRelaySession extends RelaySessionNotifier {
     required this.memberships,
     required this.metadata,
     this.hiddenDmEvents = const [],
+    this.recentMessages = const [],
     this.membershipFailures = 0,
   });
 
   List<NostrEvent> memberships;
   List<NostrEvent> metadata;
   final List<NostrEvent> hiddenDmEvents;
+  final List<NostrEvent> recentMessages;
   int membershipFailures;
 
   final List<NostrFilter> historyFilters = [];
+  final List<List<NostrFilter>> queryBatches = [];
   final List<NostrFilter> subscribeFilters = [];
   final Map<int, (NostrFilter, void Function(NostrEvent))> _subscriptions = {};
   int _nextSubscriptionKey = 0;
@@ -685,6 +825,33 @@ class _FakeRelaySession extends RelaySessionNotifier {
       return metadata.where((e) => ids.contains(e.getTagValue('d'))).toList();
     }
     return const [];
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryBatches.add(filters);
+    return recentMessages.where((event) {
+      return filters.any((filter) {
+        if (!filter.kinds.contains(event.kind)) return false;
+        for (final entry in filter.tags.entries) {
+          final tagName = entry.key.startsWith('#')
+              ? entry.key.substring(1)
+              : entry.key;
+          if (!event.tags.any(
+            (tag) =>
+                tag.length > 1 &&
+                tag[0] == tagName &&
+                entry.value.contains(tag[1]),
+          )) {
+            return false;
+          }
+        }
+        return true;
+      });
+    }).toList();
   }
 
   @override

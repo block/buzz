@@ -5,7 +5,19 @@ import {
   MESSAGE_GROUPING_WINDOW_SECONDS,
   hasSameMessageAuthor,
   isWithinGroupingWindow,
+  startsNewMessageGroup,
 } from "./messageGrouping.ts";
+
+test("startsNewMessageGroup: sent-from-thread messages start a fresh group", () => {
+  assert.equal(
+    startsNewMessageGroup({
+      tags: [["buzz:sent-from-thread", "root-event", "Root summary"]],
+    }),
+    true,
+  );
+  assert.equal(startsNewMessageGroup({ tags: [["h", "channel-id"]] }), false);
+  assert.equal(startsNewMessageGroup(undefined), false);
+});
 
 test("hasSameMessageAuthor: matches case-insensitively and trims", () => {
   assert.equal(

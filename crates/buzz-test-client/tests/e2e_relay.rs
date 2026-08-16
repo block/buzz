@@ -120,7 +120,12 @@ async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
 }
 
 async fn seed_relay_owner(keys: &Keys) {
-    seed_relay_member("localhost:3000", keys, "owner").await;
+    seed_relay_member(&relay_authority(), keys, "owner").await;
+}
+
+fn relay_authority() -> String {
+    let url = url::Url::parse(&relay_http_url()).expect("relay HTTP URL");
+    url[url::Position::BeforeHost..url::Position::AfterPort].to_string()
 }
 
 fn http_origin_for_host(host: &str) -> String {
@@ -315,7 +320,7 @@ async fn test_invite_claim_rejects_invalid_code() {
 #[ignore]
 async fn test_invite_mint_requires_owner_or_admin() {
     let member = Keys::generate();
-    seed_relay_member("localhost:3000", &member, "member").await;
+    seed_relay_member(&relay_authority(), &member, "member").await;
 
     let response = invite_post(&member, "/api/invites", "{}").await;
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
@@ -791,10 +796,10 @@ async fn test_auth_event_kind_rejected() {
 
 /// NIP-11 max_subscriptions must be enforced; (limit+1)th REQ gets CLOSED.
 ///
-/// The relay's MAX_SUBSCRIPTIONS is 1024. Opening 1024 subs in a test is slow,
-/// so we open a smaller batch and verify the NIP-11 advertised limit matches
-/// the actual enforcement constant. The full-limit test is covered by the
-/// NIP-11 assertion below (which verifies the advertised value is 1024).
+/// This is a protocol-cap test, not an admission-throughput test. Open one REQ
+/// at a time and wait out any shared fixed-window quota before retrying a REQ
+/// rejected specifically as `rate-limited`, so production admission remains
+/// enabled while the test deterministically reaches the independent 1024 cap.
 #[tokio::test]
 #[ignore]
 async fn test_subscription_limit_enforced() {
@@ -802,58 +807,73 @@ async fn test_subscription_limit_enforced() {
     let keys = Keys::generate();
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
-    // Open 1024 subscriptions (the relay's MAX_SUBSCRIPTIONS).
     for i in 0..1024 {
         let sid = format!("limit-sub-{i}");
-        let filter = Filter::new().kind(Kind::Custom(9));
-        client
-            .subscribe(&sid, vec![filter])
-            .await
-            .expect("subscribe");
-        // Drain EOSE to avoid buffer buildup.
-        client
-            .collect_until_eose(&sid, Duration::from_secs(5))
-            .await
-            .expect("EOSE");
+        let filter = Filter::new().kind(Kind::Custom(49_999));
+        subscribe_until_eose(&mut client, &sid, filter).await;
     }
 
     let overflow_sid = sub_id("overflow");
-    // Use a kind that no other test writes, so we don't receive stale events.
-    let filter = Filter::new().kind(Kind::Custom(49999));
-    client
-        .subscribe(&overflow_sid, vec![filter])
-        .await
-        .expect("send REQ");
-
-    // Drain EOSE and stale events from the 100 earlier subscriptions
-    // until we receive the CLOSED for the overflow subscription.
-    let msg = loop {
-        let m = client
-            .recv_event(Duration::from_secs(5))
+    let filter = Filter::new().kind(Kind::Custom(49_999));
+    loop {
+        client
+            .subscribe(&overflow_sid, vec![filter.clone()])
             .await
-            .expect("recv CLOSED (or timeout)");
-        match &m {
-            RelayMessage::Eose { .. } => continue,
-            RelayMessage::Event { .. } => continue, // stale event from earlier subs
-            _ => break m,
-        }
-    };
+            .expect("send overflow REQ");
 
-    match msg {
-        RelayMessage::Closed {
-            subscription_id,
-            message,
-        } => {
-            assert_eq!(subscription_id, overflow_sid);
-            assert!(
-                message.to_lowercase().contains("too many"),
-                "Expected 'too many' in CLOSED message, got: {message}"
-            );
+        match client
+            .recv_event(Duration::from_secs(6))
+            .await
+            .expect("recv overflow CLOSED")
+        {
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == overflow_sid && message.starts_with("rate-limited:") => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } => {
+                assert_eq!(subscription_id, overflow_sid);
+                assert!(
+                    message.to_lowercase().contains("too many"),
+                    "Expected 'too many' in CLOSED message, got: {message}"
+                );
+                break;
+            }
+            other => panic!("Expected CLOSED for overflow subscription, got {other:?}"),
         }
-        other => panic!("Expected CLOSED for overflow subscription, got {other:?}"),
     }
 
     client.disconnect().await.expect("disconnect");
+}
+
+async fn subscribe_until_eose(client: &mut BuzzTestClient, sid: &str, filter: Filter) {
+    loop {
+        client
+            .subscribe(sid, vec![filter.clone()])
+            .await
+            .expect("subscribe");
+        match client
+            .recv_event(Duration::from_secs(6))
+            .await
+            .expect("EOSE or rate-limit CLOSED")
+        {
+            RelayMessage::Eose { subscription_id } => {
+                assert_eq!(subscription_id, sid);
+                return;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == sid && message.starts_with("rate-limited:") => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            other => panic!("unexpected response while opening {sid}: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -2249,14 +2269,17 @@ async fn add_member_with_role_ws(
     (ok.accepted, ok.message)
 }
 
-/// Only owners/admins can add another identity to a private channel.
+/// Any active member can add any ordinary role to a private channel.
 #[tokio::test]
 #[ignore]
-async fn test_private_channel_member_cannot_invite() {
+async fn test_private_channel_any_member_can_invite() {
     let url = relay_url();
     let owner_keys = Keys::generate();
-    let member_keys = Keys::generate();
-    let invitee_keys = Keys::generate();
+    let actors = [
+        ("member", Keys::generate()),
+        ("guest", Keys::generate()),
+        ("bot", Keys::generate()),
+    ];
 
     // Connect as owner and create a private channel.
     let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
@@ -2264,54 +2287,70 @@ async fn test_private_channel_member_cannot_invite() {
         .expect("connect as owner");
     let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
 
-    // Owner adds member_keys as a regular member.
-    let (accepted, msg) = add_member_ws(
-        &mut owner_client,
-        &channel_id,
-        &member_keys.public_key().to_hex(),
-        &owner_keys,
-    )
-    .await;
-    assert!(accepted, "owner should add member, got: {msg}");
+    // Seed one actor for each ordinary active role.
+    for (role, keys) in &actors {
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut owner_client,
+            &channel_id,
+            &keys.public_key().to_hex(),
+            role,
+            &owner_keys,
+        )
+        .await;
+        assert!(accepted, "owner should add {role} actor, got: {msg}");
+    }
 
-    // Connect as the regular member.
-    let mut member_client = BuzzTestClient::connect(&url, &member_keys)
-        .await
-        .expect("connect as member");
+    // Exercise the full ordinary-role target matrix. Relay and DB authorization
+    // both run here, unlike the Desktop/mobile policy-unit-test mirrors.
+    for (actor_role, actor_keys) in &actors {
+        let mut actor_client = BuzzTestClient::connect(&url, actor_keys)
+            .await
+            .unwrap_or_else(|err| panic!("connect as {actor_role}: {err}"));
 
-    // Regular member tries to invite a third user.
-    let (accepted, msg) = add_member_ws(
-        &mut member_client,
-        &channel_id,
-        &invitee_keys.public_key().to_hex(),
-        &member_keys,
-    )
-    .await;
-    assert!(
-        !accepted,
-        "regular member must not add another private-channel identity: {msg}"
-    );
-    assert!(
-        msg.contains("owners/admins"),
-        "rejection should name the owner/admin requirement, got: {msg}"
-    );
+        for target_role in ["member", "guest", "bot"] {
+            let target_keys = Keys::generate();
+            let target_pubkey_hex = target_keys.public_key().to_hex();
+            let (accepted, msg) = add_member_with_role_ws(
+                &mut actor_client,
+                &channel_id,
+                &target_pubkey_hex,
+                target_role,
+                actor_keys,
+            )
+            .await;
+            assert!(
+                accepted,
+                "private-channel {actor_role} should add {target_role}, got: {msg}"
+            );
+            assert_eq!(
+                member_role(&url, &owner_keys, &channel_id, &target_pubkey_hex).await,
+                Some(target_role.to_string()),
+                "private-channel {actor_role} add must persist the {target_role} role"
+            );
+        }
 
-    // The same member re-adding *themselves* stays idempotent — the huddle
-    // bot-add and kind:9021 paths depend on a self-targeted PUT_USER working.
-    let (accepted, msg) = add_member_ws(
-        &mut member_client,
-        &channel_id,
-        &member_keys.public_key().to_hex(),
-        &member_keys,
-    )
-    .await;
-    assert!(
-        accepted,
-        "self-targeted re-add must stay idempotent, got: {msg}"
-    );
+        // Re-adding oneself stays idempotent — the huddle bot-add and kind:9021
+        // paths depend on a self-targeted PUT_USER working.
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut actor_client,
+            &channel_id,
+            &actor_keys.public_key().to_hex(),
+            actor_role,
+            actor_keys,
+        )
+        .await;
+        assert!(
+            accepted,
+            "self-targeted {actor_role} re-add must stay idempotent, got: {msg}"
+        );
+
+        actor_client
+            .disconnect()
+            .await
+            .unwrap_or_else(|err| panic!("disconnect {actor_role}: {err}"));
+    }
 
     owner_client.disconnect().await.expect("disconnect owner");
-    member_client.disconnect().await.expect("disconnect member");
 }
 
 /// An admin — not just the owner — can still add to a private channel.

@@ -72,23 +72,28 @@ class _InboxRow extends HookConsumerWidget {
     final revealAmount = useState(0.0);
     final isDragging = useState(false);
     final labelHapticFired = useRef(false);
-    final userCache = ref.watch(userCacheProvider);
-    final profile = userCache[item.item.pubkey.toLowerCase()];
+    final senderPubkey = item.item.pubkey.toLowerCase();
+    final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
+    final relevantPubkeys = {senderPubkey, ...mentionPubkeys};
+    final profiles = <String, UserProfile?>{
+      for (final pubkey in relevantPubkeys)
+        pubkey: ref.watch(userCacheProvider.select((cache) => cache[pubkey])),
+    };
+    final profile = profiles[senderPubkey];
     final senderLabel = profile?.displayName ?? shortPubkey(item.item.pubkey);
     final profileMentionNames = {
-      for (final pubkey in mentionedPubkeysFromTags(item.item.tags))
-        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
-          pubkey: userCache[pubkey]!.displayName!.trim(),
+      for (final pubkey in mentionPubkeys)
+        if (profiles[pubkey]?.displayName?.trim().isNotEmpty == true)
+          pubkey: profiles[pubkey]!.displayName!.trim(),
     };
-    final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
     final knownAgentPubkeys = channel == null
         ? ref.watch(knownAgentPubkeysProvider)
         : ref.watch(agentMentionPubkeysProvider(channel!.id));
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: knownAgentPubkeys,
       profileOwnedAgentPubkeys: [
-        for (final profile in userCache.values)
-          if (profile.ownerPubkey != null) profile.pubkey,
+        for (final pubkey in mentionPubkeys)
+          if (profiles[pubkey]?.ownerPubkey != null) pubkey,
       ],
     );
     final mentionNames = mentionNamesWithDirectoryLabels(
@@ -239,7 +244,7 @@ class _InboxRow extends HookConsumerWidget {
                                           nameColor: context.colors.onSurface,
                                           metadataColor: mutedColor,
                                           nameStyle: activityUsernameTextStyle,
-                                          metadataStyle:
+                                          timestampStyle:
                                               activityTimestampTextStyle,
                                           displayNameKey: ValueKey(
                                             'activity-author-${item.id}',

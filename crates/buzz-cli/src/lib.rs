@@ -596,7 +596,10 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, or ephemeral TTL
+    /// Update channel name, description, visibility, or ephemeral TTL
+    #[command(
+        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private"
+    )]
     Update {
         /// Channel UUID
         #[arg(long)]
@@ -607,6 +610,9 @@ pub enum ChannelsCmd {
         /// New channel description
         #[arg(long)]
         description: Option<String>,
+        /// New channel visibility
+        #[arg(long, value_enum)]
+        visibility: Option<ChannelVisibility>,
         /// Make the channel ephemeral (or change its lifetime): seconds until
         /// the relay archives it after the last message. Conflicts with --no-ttl.
         #[arg(long, value_name = "SECONDS", conflicts_with = "no_ttl")]
@@ -1689,6 +1695,47 @@ pub enum IssuesCmd {
         #[arg(long = "to")]
         to: Vec<String>,
     },
+    /// Assign an issue to one or more people or agents. Only assignments
+    /// signed by the issue author or repo owner are trusted by clients;
+    /// anyone may assign themselves (sole assignee = your own pubkey).
+    Assign {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Assignee pubkey (64-char hex) — can be specified multiple times
+        #[arg(long = "assignee", required = true)]
+        assignee: Vec<String>,
+        /// Human-readable assignee name(s) for the note body, e.g. "Thomas".
+        /// Defaults to the truncated assignee pubkeys.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove one or more assignees from an issue. Issue authors and repo
+    /// owners may remove anyone; other users may remove only themselves.
+    Unassign {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Assignee pubkey to remove — can be specified multiple times
+        #[arg(long = "assignee", required = true)]
+        assignee: Vec<String>,
+        /// Human-readable assignee name(s) for the note body.
+        /// Defaults to the truncated assignee pubkeys.
+        #[arg(long)]
+        label: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2284,7 +2331,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["create", "get", "list", "status"]
+            vec!["assign", "create", "get", "list", "status", "unassign"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2313,7 +2360,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 4),
+            ("issues", 6),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),

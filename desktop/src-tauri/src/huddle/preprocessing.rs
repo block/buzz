@@ -12,87 +12,6 @@
 //!   → numbers → words           → "forty two"
 //!   → collapse whitespace       → clean string
 //! ```
-//!
-//! Also provides `split_sentences` — the single sentence-boundary splitter used
-//! by both the TTS batching pipeline and the Supertonic text chunker.
-
-use regex::Regex;
-use std::sync::LazyLock;
-
-// ── Sentence splitting ────────────────────────────────────────────────────────
-
-/// Regex: a sentence-ending punctuation mark followed by whitespace.
-static RE_SENTENCE_BOUNDARY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([.!?])\s+").unwrap());
-
-/// Common abbreviations that end with a period but are NOT sentence boundaries.
-const ABBREVIATIONS: &[&str] = &[
-    "Dr.", "Mr.", "Mrs.", "Ms.", "Prof.", "Sr.", "Jr.", "St.", "Ave.", "Rd.", "Blvd.", "Dept.",
-    "Inc.", "Ltd.", "Co.", "Corp.", "etc.", "vs.", "i.e.", "e.g.", "Ph.D.",
-];
-
-/// Split text into sentence-sized chunks.
-///
-/// Combines regex-based boundary detection with:
-/// - Abbreviation awareness (`Dr.`, `Mr.`, etc. don't split)
-/// - Digit-before-period check (avoids splitting `1.` `2.` numbered lists)
-/// - `\n` and `—` treated as sentence breaks
-///
-/// Returns non-empty, trimmed strings.
-pub fn split_sentences(text: &str) -> Vec<String> {
-    // First, split on newlines and em-dashes to get coarse segments.
-    let coarse: Vec<&str> = text.split(['\n', '—']).collect();
-
-    let mut sentences = Vec::new();
-
-    for segment in coarse {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-        // Within each segment, split on sentence-ending punctuation.
-        let matches: Vec<_> = RE_SENTENCE_BOUNDARY.find_iter(segment).collect();
-        if matches.is_empty() {
-            sentences.push(segment.to_string());
-            continue;
-        }
-
-        let mut last_end = 0usize;
-        for m in &matches {
-            let before = &segment[last_end..m.start()];
-            let punc_char = &segment[m.start()..m.start() + 1];
-
-            // Skip if this looks like an abbreviation.
-            let combined = format!("{}{}", before.trim(), punc_char);
-            let is_abbrev = ABBREVIATIONS.iter().any(|a| combined.ends_with(a));
-
-            // Skip if the character before the period is a digit (numbered list).
-            let is_digit_period = punc_char == "."
-                && !before.is_empty()
-                && before.ends_with(|c: char| c.is_ascii_digit());
-
-            if !is_abbrev && !is_digit_period {
-                let piece = segment[last_end..m.end()].trim();
-                if !piece.is_empty() {
-                    sentences.push(piece.to_string());
-                }
-                last_end = m.end();
-            }
-        }
-
-        if last_end < segment.len() {
-            let tail = segment[last_end..].trim();
-            if !tail.is_empty() {
-                sentences.push(tail.to_string());
-            }
-        }
-    }
-
-    if sentences.is_empty() {
-        vec![text.to_string()]
-    } else {
-        sentences
-    }
-}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -600,49 +519,6 @@ mod tests {
     fn collapses_whitespace() {
         let out = preprocess_for_tts("  hello   world  ");
         assert_eq!(out, "hello world");
-    }
-
-    #[test]
-    fn split_sentences_basic() {
-        let result = split_sentences("Hello world. How are you? I'm fine!");
-        assert_eq!(result, vec!["Hello world.", "How are you?", "I'm fine!"]);
-    }
-
-    #[test]
-    fn split_sentences_newline_break() {
-        let result = split_sentences("First line.\nSecond line.");
-        assert_eq!(result, vec!["First line.", "Second line."]);
-    }
-
-    #[test]
-    fn split_sentences_em_dash_break() {
-        let result = split_sentences("Start here—then continue.");
-        assert_eq!(result, vec!["Start here", "then continue."]);
-    }
-
-    #[test]
-    fn split_sentences_abbreviations() {
-        let result = split_sentences("Dr. Smith went home. He was tired.");
-        assert_eq!(result, vec!["Dr. Smith went home.", "He was tired."]);
-    }
-
-    #[test]
-    fn split_sentences_numbered_list() {
-        let result = split_sentences("1. First item. 2. Second item.");
-        // "1." and "2." should NOT cause a split (digit before period).
-        assert_eq!(result, vec!["1. First item.", "2. Second item."]);
-    }
-
-    #[test]
-    fn split_sentences_single() {
-        let result = split_sentences("Just one sentence");
-        assert_eq!(result, vec!["Just one sentence"]);
-    }
-
-    #[test]
-    fn split_sentences_empty() {
-        let result = split_sentences("");
-        assert_eq!(result, vec![""]);
     }
 
     #[test]

@@ -68,6 +68,68 @@ class ChannelMember {
   }
 }
 
+String _channelMemberSnapshotKey({
+  required String relayBaseUrl,
+  required String? pubkey,
+  required String channelId,
+}) =>
+    '${relayBaseUrl.toLowerCase()}::${pubkey?.toLowerCase() ?? 'anon'}::$channelId';
+
+class _ChannelMembersSnapshotCache {
+  final _membersByKey = <String, List<ChannelMember>>{};
+
+  List<ChannelMember>? read({
+    required String relayBaseUrl,
+    required String? pubkey,
+    required String channelId,
+  }) =>
+      _membersByKey[_channelMemberSnapshotKey(
+        relayBaseUrl: relayBaseUrl,
+        pubkey: pubkey,
+        channelId: channelId,
+      )];
+
+  void write({
+    required String relayBaseUrl,
+    required String? pubkey,
+    required String channelId,
+    required List<ChannelMember> members,
+  }) {
+    _membersByKey[_channelMemberSnapshotKey(
+      relayBaseUrl: relayBaseUrl,
+      pubkey: pubkey,
+      channelId: channelId,
+    )] = List.unmodifiable(
+      members,
+    );
+  }
+}
+
+final _channelMembersSnapshotCacheProvider =
+    Provider<_ChannelMembersSnapshotCache>((ref) {
+      return _ChannelMembersSnapshotCache();
+    });
+
+/// Uses the relay-backed member list when connected, but keeps the channel
+/// snapshot visible while a reconnect temporarily interrupts the refresh.
+///
+/// The provider retains its current value while disconnected and also keeps a
+/// relay/account/channel-scoped snapshot for consumers that mount during the
+/// reconnect window. An empty member list is authoritative only after a
+/// connected fetch completes.
+List<ChannelMember> channelMembersForAutocomplete({
+  required AsyncValue<List<ChannelMember>> membersAsync,
+  required SessionStatus sessionStatus,
+  required List<ChannelMember> cachedMembers,
+}) {
+  final loadedMembers = membersAsync.asData?.value;
+  if (loadedMembers == null) return cachedMembers;
+  if (sessionStatus != SessionStatus.connected && loadedMembers.isEmpty) {
+    return cachedMembers;
+  }
+  return loadedMembers;
+}
+
 @immutable
 class ChannelCanvas {
   final String? content;
@@ -421,17 +483,59 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
 final channelMembersProvider = FutureProvider.autoDispose
     .family<List<ChannelMember>, String>((ref, channelId) async {
       ref.watch(channelMembershipUpdateProvider(channelId));
-      final session = ref.watch(relaySessionProvider.notifier);
+      final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
+      final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
+      final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
+      // Re-fetch only after reconnect completes. During the disconnected
+      // interval this provider has no session dependency, so its current value
+      // remains visible to every consumer rather than becoming AsyncData([]).
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (next.status == SessionStatus.connected &&
+            previous?.status != SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
+      final sessionState = ref.read(relaySessionProvider);
+      if (sessionState.status != SessionStatus.connected) {
+        final cachedMembers = snapshotCache.read(
+          relayBaseUrl: relayBaseUrl,
+          pubkey: pubkey,
+          channelId: channelId,
+        );
+        if (cachedMembers != null) return cachedMembers;
+        final channelListMembers = ref
+            .read(channelsProvider.notifier)
+            .cachedMembersForChannel(channelId);
+        if (channelListMembers.isNotEmpty) {
+          snapshotCache.write(
+            relayBaseUrl: relayBaseUrl,
+            pubkey: pubkey,
+            channelId: channelId,
+            members: channelListMembers,
+          );
+          return channelListMembers;
+        }
+        return const [];
+      }
+      final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilters.channelMembers(channelId),
       );
-      if (events.isEmpty) return const [];
+      if (events.isEmpty) {
+        snapshotCache.write(
+          relayBaseUrl: relayBaseUrl,
+          pubkey: pubkey,
+          channelId: channelId,
+          members: const [],
+        );
+        return const [];
+      }
       final event = events.first;
       final joinedAt = DateTime.fromMillisecondsSinceEpoch(
         event.createdAt * 1000,
         isUtc: true,
       );
-      return membersFromEvent(event)
+      final members = membersFromEvent(event)
           .map(
             (m) => ChannelMember(
               pubkey: m.pubkey,
@@ -440,6 +544,13 @@ final channelMembersProvider = FutureProvider.autoDispose
             ),
           )
           .toList();
+      snapshotCache.write(
+        relayBaseUrl: relayBaseUrl,
+        pubkey: pubkey,
+        channelId: channelId,
+        members: members,
+      );
+      return members;
     });
 
 /// Channel canvas (kind:40100 for the channel).

@@ -32,8 +32,13 @@ type NostrKeyImportFormProps = {
   errorMessage?: string | null;
   onBack: () => void;
   onImport: (nsec: string, password?: string) => Promise<void>;
+  /** Reports whether an import is in flight so host-owned navigation can be disabled. */
+  onImportingChange?: (isImporting: boolean) => void;
   onStageChange?: (stage: NostrKeyImportStage) => void;
+  /** Hide the inline back control when the host renders navigation elsewhere. */
   showBack?: boolean;
+  /** Keep password-stage navigation out of the form when the host owns Back. */
+  showPasswordStageBack?: boolean;
   /** Restrict this instance to selecting a backup file instead of typing a key. */
   mode?: "key" | "backup";
   /** Dialogs keep their actions inside the surface instead of the onboarding dock. */
@@ -55,8 +60,10 @@ export function NostrKeyImportForm({
   errorMessage: externalErrorMessage = null,
   onBack,
   onImport,
+  onImportingChange,
   onStageChange,
   showBack = true,
+  showPasswordStageBack = true,
   mode = "key",
   footerMode = "onboarding",
   variant = "default",
@@ -64,6 +71,7 @@ export function NostrKeyImportForm({
   const [nsecInput, setNsecInput] = React.useState("");
   const [passphrase, setPassphrase] = React.useState("");
   const [isImporting, setIsImporting] = React.useState(false);
+  const importInFlightRef = React.useRef(false);
   const [importError, setImportError] = React.useState<string | null>(null);
   const [isDragging, setIsDragging] = React.useState(false);
   const dragDepthRef = React.useRef(0);
@@ -186,8 +194,9 @@ export function NostrKeyImportForm({
     // Guard here, not just on the submit button: the button now lives in the
     // portaled footer as type="button", so the single-field form still submits
     // on Enter. Without this, pressing Enter during an in-flight import fires a
-    // second concurrent onImport (double keyring write).
-    if (isInteractionDisabled) {
+    // second concurrent onImport (double keyring write). A ref closes the
+    // same-tick gap before React commits `isImporting`.
+    if (isInteractionDisabled || importInFlightRef.current) {
       return;
     }
 
@@ -202,6 +211,8 @@ export function NostrKeyImportForm({
       return;
     }
 
+    importInFlightRef.current = true;
+    onImportingChange?.(true);
     setIsImporting(true);
     setImportError(null);
 
@@ -212,6 +223,8 @@ export function NostrKeyImportForm({
         error instanceof Error ? error.message : "Couldn't import this key.",
       );
     } finally {
+      importInFlightRef.current = false;
+      onImportingChange?.(false);
       setIsImporting(false);
     }
   }, [
@@ -220,6 +233,7 @@ export function NostrKeyImportForm({
     isPasswordStage,
     isValid,
     onImport,
+    onImportingChange,
     passphrase,
     trimmedInput,
   ]);
@@ -611,7 +625,7 @@ export function NostrKeyImportForm({
           </Button>
         ) : null}
 
-        {showBack || isPasswordStage ? (
+        {showBack || (isPasswordStage && showPasswordStageBack) ? (
           <Button
             className={
               variant === "spotlight"

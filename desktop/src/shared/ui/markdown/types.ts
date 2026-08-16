@@ -1,3 +1,5 @@
+import type * as React from "react";
+
 import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import type { ParsedEntityLink } from "@/shared/lib/entityLink";
 import type { Channel } from "@/shared/api/types";
@@ -20,16 +22,21 @@ export type ImetaLookup = Map<string, ImetaEntry>;
 
 export type MessageLinkPillProps = {
   channels: Channel[];
-  href: string;
+  /** Original permalink text, preserved for the context menu's Copy action. */
+  href?: string;
   interactive: boolean;
   link: ParsedMessageLink;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
+  threadExcerpt?: string | null;
+  variant?: "default" | "sent-from-thread";
 };
 
 export type MarkdownRuntime = {
   agentMentionPubkeysByName?: Record<string, string>;
   channels: Channel[];
   imetaByUrl?: ImetaLookup;
+  /** Inline content supplied to the first prose-capable Markdown block. */
+  leadingInlineContent?: React.ReactNode;
   mentionPubkeysByName?: Record<string, string>;
   onOpenChannel: (channelId: string) => void;
   /** Navigate to a Buzz git entity (`buzz://pr|issue|repo` deep link). */
@@ -72,6 +79,8 @@ export type MarkdownProps = {
   messageId?: string;
   linkPreviewsSuppressed?: boolean;
   linkPreviewTags?: readonly (readonly string[])[];
+  /** Inline content prepended inside the first rendered prose paragraph. */
+  leadingInlineContent?: React.ReactNode;
   onRemoveLinkPreviewsForEveryone?: () => Promise<void>;
   searchQuery?: string;
   /** Display name shown in shared-agent card metadata. */

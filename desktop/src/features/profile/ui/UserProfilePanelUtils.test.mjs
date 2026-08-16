@@ -6,6 +6,7 @@ import {
   parseProfilePanelView,
   personaManagedAgentUpdate,
   profilePanelTabFromSearch,
+  profilePanelTargetKey,
   profilePanelViewFromSearch,
 } from "./UserProfilePanelUtils.ts";
 
@@ -188,4 +189,20 @@ test("profilePanelTabFromSearch falls back to info for invalid values", () => {
   assert.equal(parseProfilePanelTab("missing"), null);
   assert.equal(profilePanelTabFromSearch("missing"), "info");
   assert.equal(profilePanelTabFromSearch(null), "info");
+});
+
+test("profile target identity stays stable while a requested pubkey is canonicalized", () => {
+  const historicalPubkey = "a".repeat(64);
+  assert.equal(
+    profilePanelTargetKey(historicalPubkey, undefined),
+    historicalPubkey,
+  );
+  assert.equal(
+    profilePanelTargetKey(historicalPubkey, "resolved-persona"),
+    historicalPubkey,
+  );
+  assert.equal(
+    profilePanelTargetKey(undefined, "requested-persona"),
+    "persona:requested-persona",
+  );
 });

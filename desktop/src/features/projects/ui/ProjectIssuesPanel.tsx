@@ -2,6 +2,7 @@ import { CircleCheck, CircleDot, CircleX, MessageSquare } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
   type ProjectIssue,
@@ -13,20 +14,26 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { entityDiscussionQuery } from "@/features/projects/lib/discussionChannels";
+import { issueShareLink } from "@/features/projects/lib/projectShareLinks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { IssueAssigneeFacepile, IssueAssigneesRow } from "./IssueAssigneesRow";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
+import { DiscussedInChannels } from "./DiscussionChannels";
 import { ProjectIssueCommentTimeline } from "./ProjectIssueCommentTimeline";
 import { ProjectOriginReference } from "./ProjectOriginReference";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectRichContent } from "./ProjectRichContent";
+import { ShareLinkButton } from "./ShareLinkButton";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
@@ -97,7 +104,7 @@ function IssueRow({
           />
           <span className="truncate text-foreground/80">
             <span className="font-medium">{authorLabel}</span> created this
-            issue {relativeTime(issue.createdAt)}
+            issue
           </span>
           <span>·</span>
           <span>{issue.status}</span>
@@ -111,6 +118,7 @@ function IssueRow({
           ))}
         </>
       }
+      eventId={issue.id}
       onOpen={onOpen}
       statusIcon={
         <status.icon className={`h-3.5 w-3.5 shrink-0 ${status.className}`} />
@@ -119,6 +127,10 @@ function IssueRow({
       title={issue.title}
       trailing={
         <>
+          <IssueAssigneeFacepile
+            assignees={issue.assignees}
+            profiles={profiles}
+          />
           {issue.comments.length > 0 ? (
             <button
               aria-label={`View ${issue.comments.length} comments`}
@@ -137,6 +149,13 @@ function IssueRow({
               title="View issue"
             />
           </ProjectFeedRowCluster>
+          <span
+            className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground sm:block"
+            data-testid="project-issue-row-date"
+            title={new Date(issue.createdAt * 1_000).toLocaleString()}
+          >
+            {relativeTime(issue.createdAt)}
+          </span>
         </>
       }
     />
@@ -192,7 +211,7 @@ export function ProjectIssueDetail({
         !stackMetaRail && "xl:grid-cols-[minmax(0,1fr)_18rem]",
       )}
     >
-      <div className="min-w-0 divide-y divide-border/50">
+      <div className="min-w-0">
         <header className="space-y-3 p-4">
           <div className="min-w-0">
             <p className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-muted-foreground">
@@ -208,6 +227,12 @@ export function ProjectIssueDetail({
               <span className="font-normal text-muted-foreground">
                 #{issue.id.slice(0, 8)}
               </span>
+              <ShareLinkButton
+                className="ml-1 inline-flex h-6 w-6 align-text-bottom"
+                label="Copy issue link"
+                link={issueShareLink(issue)}
+                testId="project-issue-copy-link"
+              />
             </h3>
           </div>
           {issue.content ? (
@@ -216,15 +241,16 @@ export function ProjectIssueDetail({
         </header>
 
         <section className="space-y-3 p-4">
+          <DiscussedInChannels
+            entityLabel="this issue"
+            query={entityDiscussionQuery(issue.id)}
+            testId="issue-discussed-in"
+          />
           <ProjectIssueCommentTimeline
             comments={issue.comments}
             key={issue.id}
             profiles={profiles}
           />
-          <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
-            <MessageSquare className="h-3.5 w-3.5" />
-            Add Your Comment
-          </h4>
           <div data-testid="project-issue-comment-composer">
             <ForumComposer
               className="border border-border/60 bg-background/45"
@@ -242,26 +268,40 @@ export function ProjectIssueDetail({
       <IssueMetaRail
         issue={issue}
         profiles={profiles}
+        project={project}
         stacked={stackMetaRail}
       />
     </div>
   );
 }
 
-/** Right-hand meta column for the issue detail view: status, author, labels,
- * and dates — keeps the conversation column focused. */
+/** Right-hand meta column for the issue detail view: status, assignees,
+ * author, labels, and dates — keeps the conversation column focused. */
 function IssueMetaRail({
   issue,
   profiles,
+  project,
   stacked = false,
 }: {
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
+  project: Project;
   stacked?: boolean;
 }) {
+  const identityQuery = useIdentityQuery();
   const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const status = issueStatusVisual(issue.status);
+  const viewerPubkey = identityQuery.data?.pubkey;
+  const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
+  const isAuthor = viewer === normalizePubkey(issue.author);
+  const isOwner = viewer === normalizePubkey(project.owner);
+  const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
+  // Same trust rule as parsing (assigneesForIssue): the issue author or
+  // repo owner (directly or via a managed agent) can assign anyone;
+  // everyone else who is signed in may still self-assign.
+  const canAssignOthers =
+    Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
 
   return (
     <aside
@@ -278,6 +318,18 @@ function IssueMetaRail({
           {issue.status}
         </span>
       </OverviewRailSection>
+      {issue.assignees.length > 0 || viewer ? (
+        <OverviewRailSection title="Assignees">
+          <IssueAssigneesRow
+            canAssignOthers={canAssignOthers}
+            issue={issue}
+            profiles={profiles}
+            project={project}
+            signAsManagedOwner={isManagedAgentOwner && !isOwner}
+            viewerPubkey={viewer}
+          />
+        </OverviewRailSection>
+      ) : null}
       <OverviewRailSection title="Author">
         <ProfileIdentityButton
           align="center"

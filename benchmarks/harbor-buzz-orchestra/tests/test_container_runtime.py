@@ -247,7 +247,7 @@ async def test_forwarder_bridges_the_canonical_relay_address(tmp_path):
         rt._ws_authority("http://relay")
 
 
-@pytest.mark.parametrize(("configured", "expected"), [(None, "32"), (7, "7")])
+@pytest.mark.parametrize(("configured", "expected"), [(None, "0"), (7, "7")])
 async def test_launch_wires_the_desktop_environment(tmp_path, configured, expected):
     manifest = write_manifest(tmp_path)
     agent_class = manifest.roster[0]
@@ -290,9 +290,12 @@ async def test_launch_wires_the_desktop_environment(tmp_path, configured, expect
     )
 
 
-def test_runtime_rejects_unbounded_agent_rounds(tmp_path):
-    with pytest.raises(ValueError, match="positive"):
-        runtime(tmp_path, max_agent_rounds=0)
+def test_runtime_validates_construction_bounds(tmp_path):
+    # 0 is legal and means unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial
+    # budget is the clock. Only negatives are rejected.
+    runtime(tmp_path, max_agent_rounds=0)
+    with pytest.raises(ValueError, match="unbounded"):
+        runtime(tmp_path, max_agent_rounds=-1)
     with pytest.raises(ValueError, match="positive"):
         runtime(tmp_path, readiness_timeout_seconds=0)
 

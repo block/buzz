@@ -1,5 +1,7 @@
 import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
 import { useLinkPreviewStyle } from "@/shared/lib/linkPreviewStylePreference";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
 import { CompactLinkPreviewAttachment } from "@/shared/ui/compact-link-preview-attachment";
 import {
   type LinkPreviewImageLightboxComponent,
@@ -21,6 +23,16 @@ export function LinkPreviewAttachment({
   preview: ResolvedLinkPreview;
   showControls?: boolean;
 }) {
+  useMediaProxyPort();
+  const renderedPreview = {
+    ...preview,
+    faviconDataUrl: preview.faviconDataUrl
+      ? rewriteRelayUrl(preview.faviconDataUrl)
+      : null,
+    imageDataUrl: preview.imageDataUrl
+      ? rewriteRelayUrl(preview.imageDataUrl)
+      : null,
+  };
   const style = useLinkPreviewStyle();
   if (style === "rich") {
     return (
@@ -29,7 +41,7 @@ export function LinkPreviewAttachment({
         ImageLightbox={ImageLightbox}
         onOpen={onOpen}
         onRemove={onRemove}
-        preview={preview}
+        preview={renderedPreview}
         showControls={showControls}
       />
     );
@@ -40,7 +52,7 @@ export function LinkPreviewAttachment({
       className={className}
       onOpen={onOpen}
       onRemove={onRemove}
-      preview={preview}
+      preview={renderedPreview}
       showControls={showControls}
     />
   );

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
@@ -117,6 +118,8 @@ void main() {
     TextScaler? textScaler,
     EdgeInsets mediaPadding = EdgeInsets.zero,
     ValueListenable<int>? tabReselection,
+    List<ComposeDraft> drafts = const [],
+    List<Reminder> reminders = const [],
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -135,7 +138,10 @@ void main() {
         readStateProvider.overrideWith(
           () => _FakeReadStateNotifier(readContexts),
         ),
-        remindersProvider.overrideWith(() => _FakeRemindersNotifier(const [])),
+        composeDraftsProvider.overrideWith(
+          () => _FakeComposeDraftsNotifier(drafts),
+        ),
+        remindersProvider.overrideWith(() => _FakeRemindersNotifier(reminders)),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -386,6 +392,65 @@ void main() {
     );
   });
 
+  testWidgets('filter stays indicator-free when drafts and reminders exist', (
+    tester,
+  ) async {
+    final dueReminder = Reminder(
+      id: 'reminder-1',
+      notBefore: now - 1,
+      status: 'pending',
+      target: const ReminderTarget(
+        eventId: 'm1',
+        channelId: 'ch1',
+        preview: 'Follow up',
+        authorPubkey: 'alice_pk',
+      ),
+      note: null,
+      createdAt: now - 60,
+      eventId: 'reminder-event-1',
+    );
+    final draft = ComposeDraft(
+      key: 'ch1',
+      channelId: 'ch1',
+      threadHeadId: null,
+      text: 'Unsent review note',
+      updatedAt: now,
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(drafts: [draft], reminders: [dueReminder]),
+    );
+    await tester.pumpAndSettle();
+
+    final filterTrigger = find.byKey(const ValueKey('activity-filter-menu'));
+    expect(
+      find.descendant(
+        of: filterTrigger,
+        matching: find.byWidgetPredicate((widget) {
+          if (widget is! Container) return false;
+          final constraints = widget.constraints;
+          return constraints?.minWidth == 6 && constraints?.minHeight == 6;
+        }),
+      ),
+      findsNothing,
+    );
+
+    await tester.tap(filterTrigger);
+    await tester.pumpAndSettle();
+    final filterPopover = find.byKey(const ValueKey('activity-filter-popover'));
+    expect(
+      find.descendant(of: filterPopover, matching: find.text('1')),
+      findsNothing,
+    );
+
+    await tester.tap(
+      find.descendant(of: filterPopover, matching: find.text('Drafts')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('draft-row-ch1')), findsOneWidget);
+    expect(find.text('Unsent review note'), findsOneWidget);
+  });
+
   testWidgets('rows lead with sender, contextual label, and preview', (
     tester,
   ) async {
@@ -434,8 +499,12 @@ void main() {
     expect(usernameText.style?.fontSize, messageMetadataTextStyle.fontSize);
     expect(usernameText.style?.fontWeight, FontWeight.w400);
     expect(usernameText.style?.height, messageMetadataTextStyle.height);
-    expect(timestampText.style?.fontSize, messageMetadataTextStyle.fontSize);
+    expect(timestampText.style?.fontSize, activityTimestampTextStyle.fontSize);
     expect(timestampText.style?.fontWeight, FontWeight.w400);
+    expect(
+      timestampText.style?.fontSize,
+      lessThan(usernameText.style!.fontSize!),
+    );
 
     final avatars = tester.widgetList<AvatarImage>(find.byType(AvatarImage));
     expect(avatars, isNotEmpty);
@@ -908,4 +977,12 @@ class _FakeRemindersNotifier extends RemindersNotifier {
 
   @override
   Future<List<Reminder>> build() async => _reminders;
+}
+
+class _FakeComposeDraftsNotifier extends ComposeDraftsNotifier {
+  final List<ComposeDraft> _drafts;
+  _FakeComposeDraftsNotifier(this._drafts);
+
+  @override
+  List<ComposeDraft> build() => _drafts;
 }
