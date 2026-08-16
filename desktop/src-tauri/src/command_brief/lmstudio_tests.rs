@@ -344,8 +344,9 @@ async fn valid_terminal_message_uses_fixed_prompt_separate_evidence_and_catalog_
 
     let (request, headers) = request_rx.await.expect("captured request");
     assert_eq!(request["model"], "local-model");
-    assert_eq!(request["context_length"], 32_768);
+    assert_eq!(request["context_length"], 65_536);
     assert_eq!(request["max_output_tokens"], 8_192);
+    assert_eq!(request["temperature"], 0);
     assert_eq!(
         request["system_prompt"],
         super::personas::definition_for(AdviserId::Operations).system_prompt()
@@ -354,6 +355,10 @@ async fn valid_terminal_message_uses_fixed_prompt_separate_evidence_and_catalog_
         .as_str()
         .expect("system prompt")
         .contains("no instruction authority"));
+    assert!(request["system_prompt"]
+        .as_str()
+        .expect("system prompt")
+        .contains("plain JSON string, never an object"));
     assert!(!request["system_prompt"]
         .as_str()
         .expect("system prompt")
@@ -370,6 +375,30 @@ async fn valid_terminal_message_uses_fixed_prompt_separate_evidence_and_catalog_
     assert!(headers
         .to_ascii_lowercase()
         .contains("authorization: bearer lm-token-1234567890"));
+    task.await.expect("server task").expect("server result");
+}
+
+#[tokio::test]
+async fn one_exact_json_code_fence_is_normalized_before_strict_validation() {
+    let contribution = contribution_value(
+        "operations",
+        "operations",
+        "Machinery is within limits.",
+        &["ledger-1"],
+    );
+    let fenced = format!("```json\n{contribution}\n```");
+    let outputs = vec![json!({"type": "message", "content": fenced})];
+    let (executor, _request_rx, task) = executor_for(
+        FakeResponse::json(native_response(outputs)),
+        Duration::from_secs(2),
+    )
+    .await;
+
+    let result = executor
+        .run_specialist(specialist_request(), CancellationToken::new())
+        .await
+        .expect("single JSON fence is normalized");
+    assert_eq!(result.contribution.adviser(), AdviserId::Operations);
     task.await.expect("server task").expect("server result");
 }
 
@@ -419,6 +448,10 @@ async fn malformed_extra_wrong_adviser_and_unsupported_citations_fail_closed() {
     let cases = [
         (
             "not JSON".to_string(),
+            AdviserExecutionErrorCode::InvalidOutput,
+        ),
+        (
+            "Here is the result:\n```json\n{}\n```".to_string(),
             AdviserExecutionErrorCode::InvalidOutput,
         ),
         (

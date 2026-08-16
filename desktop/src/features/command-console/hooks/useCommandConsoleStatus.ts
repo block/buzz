@@ -165,12 +165,30 @@ function lmStudioStatus(probe: {
       statusLabel: "Unavailable",
     };
   }
-  if (status.status === "ready") {
+  if (status.status === "ready" && status.admission.state === "ready") {
+    const runtime = status.admission.runtime;
     return {
       ...base,
       detail: status.detail,
       state: "connected",
       statusLabel: "Connected",
+      facts: [
+        { label: "Model", value: runtime?.modelId ?? "Unknown" },
+        { label: "Instance", value: runtime?.instanceId ?? "Unknown" },
+        {
+          label: "Admitted context",
+          value: status.admission.admittedTier?.toUpperCase() ?? "None",
+        },
+        {
+          label: "Output budget",
+          value: status.maxOutputTokens.toLocaleString(),
+        },
+        {
+          label: "Generation slots",
+          value: String(status.generationCapacity),
+        },
+        { label: "128K tier", value: "Not admitted" },
+      ],
     };
   }
   return {

@@ -160,6 +160,8 @@ pub(super) async fn discover_databricks_models(
                 is_loaded: false,
                 max_context_length: None,
                 capabilities: None,
+                loaded_context_length: None,
+                loaded_parallelism: None,
             })
             .collect(),
         agent_default_model: None,

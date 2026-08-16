@@ -317,14 +317,27 @@ test("reports a ready LM Studio route as connected, never mesh", () => {
       error: null,
       status: {
         bindExposure: "unknown",
-        configuredModel: "qwen/qwen3.6-27b",
+        configuredModel: "google/gemma-4-26b-a4b",
         detail: "Loaded model is ready; authentication is not enabled.",
-        loadedModels: ["qwen/qwen3.6-27b"],
+        loadedModels: ["google/gemma-4-26b-a4b"],
         securityWarnings: [
           "LM Studio API authentication is not enabled.",
           "LM Studio listener exposure is unverified.",
         ],
         status: "ready",
+        admission: {
+          state: "ready",
+          admittedTier: "64k",
+          runtime: {
+            modelId: "google/gemma-4-26b-a4b",
+            instanceId: "gemma4-26b-official",
+            contextLength: 65536,
+            parallel: 1,
+          },
+          reasonCodes: [],
+        },
+        maxOutputTokens: 8192,
+        generationCapacity: 1,
       },
     },
     localCompute: {
@@ -343,6 +356,14 @@ test("reports a ready LM Studio route as connected, never mesh", () => {
     label: "LM Studio",
     state: "connected",
     statusLabel: "Connected",
+    facts: [
+      { label: "Model", value: "google/gemma-4-26b-a4b" },
+      { label: "Instance", value: "gemma4-26b-official" },
+      { label: "Admitted context", value: "64K" },
+      { label: "Output budget", value: "8,192" },
+      { label: "Generation slots", value: "1" },
+      { label: "128K tier", value: "Not admitted" },
+    ],
   });
 });
 
@@ -401,11 +422,24 @@ test("does not turn an accepted listener warning into a model outage", () => {
       error: null,
       status: {
         bindExposure: "unknown",
-        configuredModel: "qwen/qwen3.6-27b",
+        configuredModel: "google/gemma-4-26b-a4b",
         detail: "Loaded LM Studio model is ready.",
-        loadedModels: ["qwen/qwen3.6-27b"],
+        loadedModels: ["google/gemma-4-26b-a4b"],
         securityWarnings: [],
         status: "ready",
+        admission: {
+          state: "ready",
+          admittedTier: "64k",
+          runtime: {
+            modelId: "google/gemma-4-26b-a4b",
+            instanceId: "gemma4-26b-official",
+            contextLength: 65536,
+            parallel: 1,
+          },
+          reasonCodes: [],
+        },
+        maxOutputTokens: 8192,
+        generationCapacity: 1,
       },
     },
     localCompute: { error: null, status: null },

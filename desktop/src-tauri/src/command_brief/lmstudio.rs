@@ -28,7 +28,7 @@ const MAX_REQUEST_IDENTITY_BYTES: usize = 1_024;
 const MAX_MODEL_ID_BYTES: usize = 512;
 const MAX_CHIEF_INPUT_BYTES: usize = 256 * 1024;
 const COMMAND_BRIEF_OUTPUT_TOKENS: u32 = 8_192;
-const COMMAND_BRIEF_CONTEXT_TOKENS: u64 = 32_768;
+const COMMAND_BRIEF_CONTEXT_TOKENS: u64 = 65_536;
 
 /// One specialist invocation assembled only from a closed adviser ID and
 /// already-validated run sources.
@@ -407,7 +407,7 @@ impl AdviserExecutor {
         )
         .await?;
         let terminal = terminal_message(&execution.response)?;
-        let value = serde_json::from_str(terminal).map_err(|_| {
+        let value = serde_json::from_str(strict_json_message(terminal)?).map_err(|_| {
             AdviserExecutionError::new(
                 AdviserExecutionErrorCode::InvalidOutput,
                 "adviser output rejected",
@@ -468,7 +468,7 @@ impl AdviserExecutor {
                 "executed tool evidence rejected",
             ));
         }
-        let terminal = terminal_message(&execution.response)?;
+        let terminal = strict_json_message(terminal_message(&execution.response)?)?;
         let consolidation = parse_chief_output(
             terminal,
             &ledger_ids,
@@ -631,6 +631,25 @@ fn terminal_message(response: &LmStudioChatResponse) -> Result<&str, AdviserExec
             AdviserExecutionErrorCode::InvalidOutput,
             "adviser output rejected",
         )),
+    }
+}
+
+fn strict_json_message(content: &str) -> Result<&str, AdviserExecutionError> {
+    let trimmed = content.trim();
+    if let Some(fenced) = trimmed.strip_prefix("```json\n") {
+        let payload = fenced.strip_suffix("```").ok_or_else(invalid_output)?;
+        if payload.contains("```") {
+            return Err(invalid_output());
+        }
+        let payload = payload.trim();
+        if payload.is_empty() {
+            return Err(invalid_output());
+        }
+        Ok(payload)
+    } else if trimmed.starts_with("```") || trimmed.ends_with("```") {
+        Err(invalid_output())
+    } else {
+        Ok(trimmed)
     }
 }
 

@@ -98,6 +98,16 @@ fn lmstudio_security_env_is_force_written_after_user_layers() {
             "openai".to_string(),
         ),
         ("LM_STUDIO_API_TOKEN".to_string(), "plaintext".to_string()),
+        (
+            "BUZZ_AGENT_MAX_CONTEXT_TOKENS".to_string(),
+            "131072".to_string(),
+        ),
+        (
+            "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+            "32768".to_string(),
+        ),
+        ("LM_STUDIO_REASONING".to_string(), "on".to_string()),
+        ("BUZZ_AGENT_LLM_TIMEOUT_SECS".to_string(), "240".to_string()),
     ]);
 
     apply_runtime_security_env(&mut env, Some(runtime));
@@ -121,6 +131,22 @@ fn lmstudio_security_env_is_force_written_after_user_layers() {
     assert!(!env.contains_key("LM_STUDIO_COMMAND_EVIDENCE_POLICY"));
     assert!(!env.contains_key("LM_STUDIO_FALLBACK_PROVIDER"));
     assert!(!env.contains_key("LM_STUDIO_API_TOKEN"));
+    assert_eq!(
+        env.get("BUZZ_AGENT_MAX_CONTEXT_TOKENS").map(String::as_str),
+        Some("65536")
+    );
+    assert_eq!(
+        env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
+        Some("8192")
+    );
+    assert_eq!(
+        env.get("LM_STUDIO_REASONING").map(String::as_str),
+        Some("off")
+    );
+    assert_eq!(
+        env.get("BUZZ_AGENT_LLM_TIMEOUT_SECS").map(String::as_str),
+        Some("900")
+    );
 }
 
 #[test]
@@ -139,6 +165,10 @@ fn lmstudio_spawn_removes_all_ambient_catalog_owned_keys_before_projection() {
             "LM_STUDIO_COMMAND_EVIDENCE_POLICY",
             "LM_STUDIO_FALLBACK_PROVIDER",
             "LM_STUDIO_API_TOKEN",
+            "BUZZ_AGENT_MAX_CONTEXT_TOKENS",
+            "BUZZ_AGENT_MAX_OUTPUT_TOKENS",
+            "LM_STUDIO_REASONING",
+            "BUZZ_AGENT_LLM_TIMEOUT_SECS",
         ]
     );
 }

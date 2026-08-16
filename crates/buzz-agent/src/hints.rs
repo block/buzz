@@ -5,6 +5,7 @@ use crate::mcp::truncate_at_boundary;
 
 const MAX_HINTS_BYTES: usize = 128 * 1024;
 pub const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
+const MAX_NATIVE_SKILL_CONTEXT_BYTES: usize = 64 * 1024;
 const SKILL_DIRS: &[&str] = &[".agents/skills", ".goose/skills", ".claude/skills"];
 
 fn home_dir() -> Option<PathBuf> {
@@ -218,6 +219,43 @@ fn discover_skills_impl(cwd: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
 
 pub fn build_hints_section(cwd: &Path) -> (String, Vec<SkillEntry>) {
     build_hints_section_impl(cwd, home_dir().as_deref())
+}
+
+/// Preloads bounded skill bodies for LM Studio's native endpoint, which can
+/// execute admitted HTTP MCP integrations but cannot accept custom tools such
+/// as the in-process `load_skill` function.
+pub fn preload_native_skills(mut hints: String, skills: &[SkillEntry]) -> String {
+    if skills.is_empty() {
+        return hints;
+    }
+    hints = hints.replace(
+        "Use the `load_skill` tool to read the full content of a skill before using it.",
+        "The full bounded skill bodies are preloaded below for this native local runtime.",
+    );
+    hints.push_str("\n## Preloaded Skill Bodies\n");
+    let start = hints.len();
+    for skill in skills {
+        let Ok(raw) = std::fs::read_to_string(&skill.path) else {
+            continue;
+        };
+        let body = strip_frontmatter(&raw);
+        let used = hints.len().saturating_sub(start);
+        let remaining = MAX_NATIVE_SKILL_CONTEXT_BYTES.saturating_sub(used);
+        if remaining == 0 {
+            break;
+        }
+        let heading = format!("\n### {}\n", skill.name);
+        if heading.len() >= remaining {
+            break;
+        }
+        hints.push_str(&heading);
+        let body_limit = remaining
+            .saturating_sub(heading.len())
+            .min(MAX_SKILL_BODY_BYTES);
+        hints.push_str(truncate_at_boundary(body, body_limit));
+        hints.push('\n');
+    }
+    hints
 }
 
 fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> (String, Vec<SkillEntry>) {
@@ -493,6 +531,25 @@ mod tests {
         // The returned skills list should contain the discovered skill.
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "buzz-cli");
+    }
+
+    #[test]
+    fn native_runtime_preloads_bounded_skill_body_without_load_tool_instruction() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join(".agents/skills/watchkeeping");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: watchkeeping\ndescription: Keep a safe watch.\n---\nUse the current log.\n",
+        )
+        .unwrap();
+
+        let (hints, skills) = build_hints_section_impl(tmp.path(), None);
+        let native = preload_native_skills(hints, &skills);
+
+        assert!(native.contains("### watchkeeping"));
+        assert!(native.contains("Use the current log."));
+        assert!(!native.contains("Use the `load_skill` tool"));
     }
 
     #[test]

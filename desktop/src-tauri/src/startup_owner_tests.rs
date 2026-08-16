@@ -1,5 +1,12 @@
 use super::*;
 
+#[test]
+fn production_runtime_identity_enforces_the_qualified_single_generation_slot() {
+    assert_eq!(crate::startup::qualified_command_brief_capacity(1), Ok(1));
+    assert_eq!(crate::startup::qualified_command_brief_capacity(2), Ok(1));
+    assert!(crate::startup::qualified_command_brief_capacity(3).is_err());
+}
+
 #[derive(Default)]
 struct ScheduledEffects {
     sources: AtomicUsize,

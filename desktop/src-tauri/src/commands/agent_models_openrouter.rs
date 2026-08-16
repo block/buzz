@@ -98,6 +98,8 @@ pub(super) fn filter_openrouter_models(
             is_loaded: false,
             max_context_length: None,
             capabilities: None,
+            loaded_context_length: None,
+            loaded_parallelism: None,
         })
         .collect();
 

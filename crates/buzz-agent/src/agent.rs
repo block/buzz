@@ -11,7 +11,7 @@ use crate::config::{
 use crate::handoff::HandoffOutcome;
 use crate::hints::SkillEntry;
 use crate::llm::{Llm, LmStudioNativeClient};
-use crate::lmstudio::{LmStudioChatRequest, LmStudioOutput};
+use crate::lmstudio::{LmStudioChatRequest, LmStudioInput, LmStudioInputItem, LmStudioOutput};
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
 
@@ -336,7 +336,7 @@ impl RunCtx<'_> {
     }
 
     async fn run_native(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
-        let user_text = prompt_to_text(prompt)?;
+        let (user_text, native_input) = prompt_to_native_input(prompt)?;
         if user_text.len() > MAX_PROMPT_BYTES {
             return Err(AgentError::InvalidParams(format!(
                 "prompt: exceeds {MAX_PROMPT_BYTES} bytes"
@@ -356,7 +356,7 @@ impl RunCtx<'_> {
         })?;
         let mut request = LmStudioChatRequest::new(
             self.effective_model,
-            user_text.as_str(),
+            native_input,
             self.system_prompt,
             runtime.wire_integrations(),
             self.cfg.lmstudio_reasoning,
@@ -1076,6 +1076,12 @@ fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
         match block {
             ContentBlock::Text { text } => parts.push(text),
             ContentBlock::ResourceLink { uri } => parts.push(format!("[resource: {uri}]")),
+            ContentBlock::Image { .. } => {
+                return Err(AgentError::InvalidParams(
+                    "prompt: image input is available only through the LM Studio native runtime"
+                        .into(),
+                ));
+            }
             ContentBlock::Unsupported => {
                 return Err(AgentError::InvalidParams(
                     "prompt: unsupported content block (only text and resource_link are advertised)".into(),
@@ -1084,6 +1090,43 @@ fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
         }
     }
     Ok(parts.join("\n"))
+}
+
+fn prompt_to_native_input(
+    prompt: Vec<ContentBlock>,
+) -> Result<(String, LmStudioInput), AgentError> {
+    let mut history_parts = Vec::with_capacity(prompt.len());
+    let mut input_items = Vec::with_capacity(prompt.len());
+    let mut has_image = false;
+    for block in prompt {
+        match block {
+            ContentBlock::Text { text } => {
+                history_parts.push(text.clone());
+                input_items.push(LmStudioInputItem::text(text));
+            }
+            ContentBlock::ResourceLink { uri } => {
+                let text = format!("[resource: {uri}]");
+                history_parts.push(text.clone());
+                input_items.push(LmStudioInputItem::text(text));
+            }
+            ContentBlock::Image { data, mime_type } => {
+                history_parts.push(format!("[image: {mime_type}, {} base64 bytes]", data.len()));
+                input_items.push(LmStudioInputItem::image(&mime_type, &data)?);
+                has_image = true;
+            }
+            ContentBlock::Unsupported => {
+                return Err(AgentError::InvalidParams(
+                    "prompt: unsupported content block".into(),
+                ));
+            }
+        }
+    }
+    let history_text = history_parts.join("\n");
+    if has_image {
+        Ok((history_text, LmStudioInput::items(input_items)?))
+    } else {
+        Ok((history_text.clone(), LmStudioInput::Text(history_text)))
+    }
 }
 
 fn n2_prefetches_for(

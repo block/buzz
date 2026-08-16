@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+url="${!#}"
+if [[ "$url" == */api/v1/models ]]; then
+  jq -n --arg model "${EXPECTED_MODEL:?}" --arg instance "${EXPECTED_INSTANCE:?}" '{
+    models: [{
+      type: "llm",
+      key: $model,
+      capabilities: {vision: true, trained_for_tool_use: true},
+      loaded_instances: [{
+        id: $instance,
+        config: {context_length: 65536, parallel: 1}
+      }]
+    }]
+  }'
+  exit 0
+fi
+
+request=""
+for argument in "$@"; do
+  if [[ "$argument" == @* ]]; then
+    request=${argument#@}
+  fi
+done
+
+if [[ -z "$request" ]] || ! jq -e --arg instance "${EXPECTED_INSTANCE:?}" '
+  .model == $instance
+  and .reasoning == "off"
+  and .context_length == 65536
+' "$request" >/dev/null; then
+  echo "offline model request did not target the admitted instance" >&2
+  exit 22
+fi
+
+jq -n --arg instance "${EXPECTED_INSTANCE:?}" '{
+  model_instance_id: $instance,
+  output: [{type: "message", content: "GEMMA64 READY"}],
+  stats: {input_tokens: 4, total_output_tokens: 3, reasoning_output_tokens: 0}
+}'

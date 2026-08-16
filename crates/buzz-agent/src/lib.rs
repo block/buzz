@@ -422,11 +422,14 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             .await;
         }
     }
-    let (hints_text, skills) = if app.cfg.hints_enabled {
+    let (mut hints_text, skills) = if app.cfg.hints_enabled {
         hints::build_hints_section(std::path::Path::new(&p.cwd))
     } else {
         (String::new(), Vec::new())
     };
+    if app.cfg.provider == Provider::LmStudioNative {
+        hints_text = hints::preload_native_skills(hints_text, &skills);
+    }
     let effective_system_prompt: Arc<str> = {
         // When the harness provides a systemPrompt (base_prompt + persona), use
         // it as the primary content and suppress the default. The default is only

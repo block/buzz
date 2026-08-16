@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use crate::managed_agents::{KnownAcpRuntime, NativeModelDiscovery};
 
 const DEFAULT_LMSTUDIO_BASE_URL: &str = "http://127.0.0.1:1234";
+pub(crate) const QUALIFIED_CONTEXT_LENGTH: u64 = 65_536;
+pub(crate) const QUALIFIED_OUTPUT_TOKENS: u32 = 8_192;
+pub(crate) const QUALIFIED_GENERATION_CAPACITY: u64 = 1;
+pub(crate) const QUALIFIED_LLM_TIMEOUT_SECS: u64 = 900;
 const LMSTUDIO_CATALOG_OWNED_ENV_KEYS: &[&str] = &[
     "BUZZ_AGENT_CLASSIFICATION",
     "BUZZ_AGENT_PROVIDER",
@@ -12,6 +16,10 @@ const LMSTUDIO_CATALOG_OWNED_ENV_KEYS: &[&str] = &[
     "LM_STUDIO_COMMAND_EVIDENCE_POLICY",
     "LM_STUDIO_FALLBACK_PROVIDER",
     "LM_STUDIO_API_TOKEN",
+    "BUZZ_AGENT_MAX_CONTEXT_TOKENS",
+    "BUZZ_AGENT_MAX_OUTPUT_TOKENS",
+    "LM_STUDIO_REASONING",
+    "BUZZ_AGENT_LLM_TIMEOUT_SECS",
 ];
 
 pub(crate) struct TrustedLmStudioRuntimeFacts {
@@ -104,4 +112,17 @@ pub(crate) fn apply_runtime_security_env(
     if let Some(policy) = crate::command_services::policy::catalog_evidence_policy_json() {
         env.insert("LM_STUDIO_COMMAND_EVIDENCE_POLICY".to_string(), policy);
     }
+    env.insert(
+        "BUZZ_AGENT_MAX_CONTEXT_TOKENS".to_string(),
+        QUALIFIED_CONTEXT_LENGTH.to_string(),
+    );
+    env.insert(
+        "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+        QUALIFIED_OUTPUT_TOKENS.to_string(),
+    );
+    env.insert("LM_STUDIO_REASONING".to_string(), "off".to_string());
+    env.insert(
+        "BUZZ_AGENT_LLM_TIMEOUT_SECS".to_string(),
+        QUALIFIED_LLM_TIMEOUT_SECS.to_string(),
+    );
 }

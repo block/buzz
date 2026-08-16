@@ -17,6 +17,9 @@ pub mod store;
 mod lmstudio_tests;
 
 #[cfg(test)]
+mod lmstudio_live_tests;
+
+#[cfg(test)]
 mod cloud_tests;
 
 #[cfg(test)]

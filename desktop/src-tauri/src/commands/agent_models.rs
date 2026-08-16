@@ -13,8 +13,15 @@ use super::agent_models_env::{
 };
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
+#[path = "agent_models/admission.rs"]
+mod admission;
 #[path = "agent_models/lmstudio.rs"]
 mod lmstudio;
+#[allow(unused_imports)]
+pub use admission::{OfflineModelAdmission, OfflineModelAdmissionState, OfflineRuntimeIdentity};
+#[cfg(test)]
+#[path = "agent_models/admission_tests.rs"]
+mod admission_tests;
 use lmstudio::discover_lmstudio_native_models;
 pub use lmstudio::{get_lmstudio_readiness, LmStudioReadinessState};
 pub(crate) use lmstudio::{read_lmstudio_readiness, LmStudioReadiness};
@@ -292,6 +299,8 @@ pub async fn discover_agent_models(
                     is_loaded: false,
                     max_context_length: None,
                     capabilities: None,
+                    loaded_context_length: None,
+                    loaded_parallelism: None,
                 })
                 .collect(),
             agent_default_model: None,
@@ -506,6 +515,8 @@ fn normalize_openai_compatible_models(
             is_loaded: false,
             max_context_length: None,
             capabilities: None,
+            loaded_context_length: None,
+            loaded_parallelism: None,
         })
         .collect()
 }
@@ -630,6 +641,8 @@ fn normalize_anthropic_models(response: AnthropicModelListResponse) -> Vec<Agent
             is_loaded: false,
             max_context_length: None,
             capabilities: None,
+            loaded_context_length: None,
+            loaded_parallelism: None,
         })
         .collect()
 }
@@ -1032,6 +1045,8 @@ pub(super) fn normalize_agent_models(
                                 is_loaded: false,
                                 max_context_length: None,
                                 capabilities: None,
+                                loaded_context_length: None,
+                                loaded_parallelism: None,
                             });
                         }
                     }
@@ -1059,6 +1074,8 @@ pub(super) fn normalize_agent_models(
                             is_loaded: false,
                             max_context_length: None,
                             capabilities: None,
+                            loaded_context_length: None,
+                            loaded_parallelism: None,
                         });
                     }
                 }

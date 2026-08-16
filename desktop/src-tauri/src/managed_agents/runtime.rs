@@ -29,6 +29,9 @@ pub(crate) use metadata::{
 mod lmstudio;
 pub(crate) use lmstudio::trusted_lmstudio_runtime_facts;
 pub(crate) use lmstudio::{apply_runtime_security_env, runtime_inherited_env_keys_to_remove};
+pub(crate) use lmstudio::{
+    QUALIFIED_CONTEXT_LENGTH, QUALIFIED_GENERATION_CAPACITY, QUALIFIED_OUTPUT_TOKENS,
+};
 
 mod command_adviser;
 

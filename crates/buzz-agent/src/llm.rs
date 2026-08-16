@@ -29,7 +29,7 @@ const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
 const STALL_NOTICE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300);
 const MAX_NATIVE_ERROR_BODY_BYTES: usize = 4 * 1024;
 const MAX_NATIVE_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-const MAX_NATIVE_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_NATIVE_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Parser for an OpenAI-family JSON response. Per-endpoint pair lives
 /// alongside its `_body` serializer.

@@ -173,6 +173,8 @@ fn every_model_prompt_spells_out_the_exact_rust_output_contract() {
     let chief = definition_for(AdviserId::ChiefOfStaff).system_prompt();
     assert!(chief.contains("no more than seven findings"));
     assert!(chief.contains("do not copy every specialist finding"));
+    assert!(chief.contains("plain JSON string, never an object"));
+    assert!(chief.contains("Do not wrap the JSON object in Markdown"));
     for field in [
         "\"classification\":\"OFFICIAL\"",
         "\"adviser\":\"chief_of_staff\"",

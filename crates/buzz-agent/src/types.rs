@@ -246,6 +246,11 @@ pub enum ContentBlock {
     ResourceLink {
         uri: String,
     },
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
     #[serde(other)]
     Unsupported,
 }

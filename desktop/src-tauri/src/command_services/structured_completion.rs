@@ -108,13 +108,13 @@ async fn complete_local(
     let model = first_loaded_model(&models)
         .ok_or_else(|| "LM Studio has no loaded chat model".to_string())?;
     let request = LmStudioChatRequest::new(
-        model,
+        model.id,
         serde_json::to_string(input).map_err(|_| "structured input is invalid".to_string())?,
         system_prompt,
         Vec::new(),
         LmStudioReasoning::Off,
         8_192,
-        32_768,
+        model.context_length,
     )
     .map_err(|_| "LM Studio request is invalid".to_string())?;
     let response = tokio::select! {
@@ -133,7 +133,12 @@ async fn complete_local(
     .map_err(|_| "LM Studio returned invalid structured JSON".to_string())
 }
 
-fn first_loaded_model(catalog: &Value) -> Option<String> {
+struct LoadedModel {
+    id: String,
+    context_length: u64,
+}
+
+fn first_loaded_model(catalog: &Value) -> Option<LoadedModel> {
     catalog
         .get("models")
         .and_then(Value::as_array)?
@@ -147,11 +152,13 @@ fn first_loaded_model(catalog: &Value) -> Option<String> {
                 .flatten()
         })
         .find_map(|instance| {
-            instance
+            let id = instance
                 .get("id")
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty() && id.len() <= 512)
-                .map(str::to_string)
+                .map(str::to_string)?;
+            let context_length = instance.get("config")?.get("context_length")?.as_u64()?;
+            Some(LoadedModel { id, context_length })
         })
 }
 
@@ -165,9 +172,14 @@ mod tests {
             "models": [
                 {"type": "embedding", "loaded_instances": [{"id": "embed"}]},
                 {"type": "llm", "loaded_instances": []},
-                {"type": "llm", "loaded_instances": [{"id": "qwen/loaded"}]}
+                {"type": "llm", "loaded_instances": [{
+                    "id": "qwen/loaded",
+                    "config": {"context_length": 65536}
+                }]}
             ]
         });
-        assert_eq!(first_loaded_model(&catalog).as_deref(), Some("qwen/loaded"));
+        let model = first_loaded_model(&catalog).expect("loaded model");
+        assert_eq!(model.id, "qwen/loaded");
+        assert_eq!(model.context_length, 65_536);
     }
 }

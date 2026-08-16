@@ -70,13 +70,23 @@ pub(crate) fn admitted_model(
     readiness: &LmStudioReadiness,
     trusted_lan_mode: bool,
 ) -> Option<String> {
-    if readiness.status != LmStudioReadinessState::Ready && !trusted_lan_mode {
-        return None;
+    if readiness.status == LmStudioReadinessState::Ready
+        && readiness.admission.state == crate::commands::OfflineModelAdmissionState::Ready
+    {
+        return readiness
+            .admission
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.instance_id.clone());
     }
-    readiness
-        .configured_model
-        .clone()
-        .or_else(|| readiness.loaded_models.first().cloned())
+    if trusted_lan_mode {
+        readiness
+            .configured_model
+            .clone()
+            .or_else(|| readiness.loaded_models.first().cloned())
+    } else {
+        None
+    }
 }
 
 pub(crate) async fn trusted_lan_mode_enabled(app: &AppHandle) -> Result<bool, String> {

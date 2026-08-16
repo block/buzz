@@ -489,7 +489,6 @@ pub struct ManagedAgentProcess {
     #[cfg(windows)]
     pub job: Option<crate::managed_agents::JobHandle>,
 }
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
     pub pubkey: String,
@@ -727,14 +726,12 @@ pub struct CommandAvailabilityInfo {
     pub resolved_path: Option<String>,
     pub available: bool,
 }
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverManagedAgentPrereqsRequest {
     pub acp_command: Option<String>,
     pub mcp_command: Option<String>,
 }
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentPrereqsInfo {
     pub acp: CommandAvailabilityInfo,
@@ -762,7 +759,6 @@ pub struct AgentModelsResponse {
     /// Whether this agent supports model switching.
     pub supports_switching: bool,
 }
-
 /// A single model available from an agent.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -779,6 +775,10 @@ pub struct AgentModelInfo {
     pub max_context_length: Option<u64>,
     /// Provider-native capability facts retained for diagnostics and UI hints.
     pub capabilities: Option<serde_json::Value>,
+    /// Context configured on the sole loaded runtime instance, when reported.
+    pub loaded_context_length: Option<u64>,
+    /// Generation parallelism configured on the sole loaded runtime instance.
+    pub loaded_parallelism: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

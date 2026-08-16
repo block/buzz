@@ -30,7 +30,33 @@ use crate::command_brief::schedule::{
 use crate::command_brief::scheduler::LocalModelScheduler;
 use crate::command_brief::sources::{FrozenSourceContext, SourceCollectionError};
 use crate::command_brief::types::{AdviserContribution, AdviserId};
-use crate::commands::{LmStudioReadiness, LmStudioReadinessState};
+use crate::commands::{
+    LmStudioReadiness, LmStudioReadinessState, OfflineModelAdmission, OfflineModelAdmissionState,
+    OfflineRuntimeIdentity,
+};
+
+fn unavailable_offline_admission() -> OfflineModelAdmission {
+    OfflineModelAdmission {
+        state: OfflineModelAdmissionState::NotLoaded,
+        admitted_tier: None,
+        runtime: None,
+        reason_codes: vec!["fixture_unavailable".to_string()],
+    }
+}
+
+fn ready_offline_admission() -> OfflineModelAdmission {
+    OfflineModelAdmission {
+        state: OfflineModelAdmissionState::Ready,
+        admitted_tier: Some("64k".to_string()),
+        runtime: Some(OfflineRuntimeIdentity {
+            model_id: "google/gemma-4-26b-a4b".to_string(),
+            instance_id: "gemma4-26b-official".to_string(),
+            context_length: 65_536,
+            parallel: 1,
+        }),
+        reason_codes: Vec::new(),
+    }
+}
 
 struct UnusedProvider;
 
@@ -38,7 +64,7 @@ struct DropSignal(Arc<AtomicUsize>);
 
 #[test]
 fn command_brief_model_timeout_matches_native_client_maximum() {
-    assert_eq!(MODEL_TIMEOUT, Duration::from_secs(300));
+    assert_eq!(MODEL_TIMEOUT, Duration::from_secs(900));
 }
 
 impl Drop for DropSignal {
@@ -150,12 +176,35 @@ fn trusted_lan_mode_can_reach_cloud_fallback_when_lm_studio_is_unavailable() {
         loaded_models: Vec::new(),
         security_warnings: Vec::new(),
         bind_exposure: "unknown",
+        admission: unavailable_offline_admission(),
+        max_output_tokens: 8_192,
+        generation_capacity: 1,
     };
 
     assert_eq!(admitted_model(&unavailable, false), None);
     assert_eq!(
         admitted_model(&unavailable, true).as_deref(),
         Some("qwen-command")
+    );
+}
+
+#[test]
+fn ready_offline_admission_routes_generation_to_admitted_instance() {
+    let ready = LmStudioReadiness {
+        status: LmStudioReadinessState::Ready,
+        detail: "ready".to_string(),
+        configured_model: Some("google/gemma-4-26b-a4b".to_string()),
+        loaded_models: vec!["google/gemma-4-26b-a4b".to_string()],
+        security_warnings: Vec::new(),
+        bind_exposure: "loopback",
+        admission: ready_offline_admission(),
+        max_output_tokens: 8_192,
+        generation_capacity: 1,
+    };
+
+    assert_eq!(
+        admitted_model(&ready, false).as_deref(),
+        Some("gemma4-26b-official")
     );
 }
 
@@ -484,6 +533,9 @@ async fn supplied_trusted_model_observation_starts_once_without_a_second_probe()
         loaded_models: vec!["qwen-command".to_string()],
         security_warnings: vec!["bind exposure unverified".to_string()],
         bind_exposure: "unknown",
+        admission: ready_offline_admission(),
+        max_output_tokens: 8_192,
+        generation_capacity: 1,
     }));
     let selected = model_readiness_for_schedule(Some(observation.clone()), {
         let probes = Arc::clone(&probes);

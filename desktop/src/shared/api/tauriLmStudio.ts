@@ -14,6 +14,25 @@ export type LmStudioReadiness = {
   securityWarnings: string[];
   /** The native API does not attest its listener bind address. */
   bindExposure: "unknown";
+  admission: {
+    state:
+      | "ready"
+      | "not_loaded"
+      | "wrong_model"
+      | "missing_capability"
+      | "insufficient_context"
+      | "invalid_runtime";
+    admittedTier: "64k" | null;
+    runtime: {
+      modelId: string;
+      instanceId: string;
+      contextLength: number;
+      parallel: number;
+    } | null;
+    reasonCodes: string[];
+  };
+  maxOutputTokens: number;
+  generationCapacity: number;
 };
 
 export function getLmStudioReadiness(): Promise<LmStudioReadiness> {

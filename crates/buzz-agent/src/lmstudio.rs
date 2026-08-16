@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -17,6 +18,7 @@ pub const MAX_NATIVE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NATIVE_OUTPUT_ITEMS: usize = 1_024;
 const MAX_DIAGNOSTIC_BYTES: usize = 512;
 const MAX_RESPONSE_ID_SUFFIX_BYTES: usize = 256;
+const MAX_NATIVE_IMAGE_BASE64_BYTES: usize = 3 * 1024 * 1024;
 
 /// Native LM Studio reasoning modes accepted by `/api/v1/chat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -84,14 +86,87 @@ impl EphemeralMcpIntegration {
 
 /// Non-streaming native LM Studio chat request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum LmStudioInput {
+    /// Compact form for text-only prompts.
+    Text(String),
+    /// Documented native input-item form used for multimodal prompts.
+    Items(Vec<LmStudioInputItem>),
+}
+
+impl LmStudioInput {
+    /// Builds a non-empty native input item list.
+    pub fn items(items: Vec<LmStudioInputItem>) -> Result<Self, AgentError> {
+        if items.is_empty() {
+            return Err(AgentError::InvalidParams(
+                "LM Studio multimodal input must not be empty".into(),
+            ));
+        }
+        Ok(Self::Items(items))
+    }
+}
+
+impl From<String> for LmStudioInput {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for LmStudioInput {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LmStudioInputItem {
+    /// User text in an item-based request.
+    Text { content: String },
+    /// A bounded JPEG, PNG, or WebP data URL.
+    Image { data_url: String },
+}
+
+impl LmStudioInputItem {
+    pub fn text(content: impl Into<String>) -> Self {
+        Self::Text {
+            content: content.into(),
+        }
+    }
+
+    pub fn image(mime_type: &str, data: &str) -> Result<Self, AgentError> {
+        if !matches!(mime_type, "image/jpeg" | "image/png" | "image/webp") {
+            return Err(AgentError::InvalidParams(
+                "LM Studio image input must be JPEG, PNG, or WebP".into(),
+            ));
+        }
+        if data.is_empty() || data.len() > MAX_NATIVE_IMAGE_BASE64_BYTES {
+            return Err(AgentError::InvalidParams(format!(
+                "LM Studio image input must contain at most {MAX_NATIVE_IMAGE_BASE64_BYTES} base64 bytes"
+            )));
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| {
+                AgentError::InvalidParams("LM Studio image input is not valid base64".into())
+            })?;
+        Ok(Self::Image {
+            data_url: format!("data:{mime_type};base64,{data}"),
+        })
+    }
+}
+
+/// Non-streaming native LM Studio chat request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LmStudioChatRequest {
     model: String,
-    input: String,
+    input: LmStudioInput,
     system_prompt: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     integrations: Vec<EphemeralMcpIntegration>,
     stream: bool,
     reasoning: LmStudioReasoning,
+    temperature: u8,
     max_output_tokens: u32,
     context_length: u64,
     store: bool,
@@ -109,7 +184,7 @@ impl LmStudioChatRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: impl Into<String>,
-        input: impl Into<String>,
+        input: impl Into<LmStudioInput>,
         system_prompt: impl Into<String>,
         integrations: Vec<EphemeralMcpIntegration>,
         reasoning: LmStudioReasoning,
@@ -134,6 +209,7 @@ impl LmStudioChatRequest {
             integrations,
             stream: false,
             reasoning,
+            temperature: 0,
             max_output_tokens,
             context_length,
             store: true,
@@ -395,8 +471,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        parse_chat_response, EphemeralMcpIntegration, LmStudioChatRequest, LmStudioOutput,
-        LmStudioReasoning, MAX_CONTEXT_TOKENS, MAX_NATIVE_RESPONSE_BYTES, MAX_OUTPUT_TOKENS,
+        parse_chat_response, EphemeralMcpIntegration, LmStudioChatRequest, LmStudioInput,
+        LmStudioInputItem, LmStudioOutput, LmStudioReasoning, MAX_CONTEXT_TOKENS,
+        MAX_NATIVE_RESPONSE_BYTES, MAX_OUTPUT_TOKENS,
     };
     use crate::types::{AgentError, ExecutedToolProvider};
 
@@ -440,6 +517,7 @@ mod tests {
                 }],
                 "stream": false,
                 "reasoning": "on",
+                "temperature": 0,
                 "max_output_tokens": MAX_OUTPUT_TOKENS,
                 "context_length": MAX_CONTEXT_TOKENS,
                 "store": true
@@ -474,6 +552,40 @@ mod tests {
         );
         assert_eq!(value.get("reasoning"), Some(&json!("off")));
         assert!(value.get("integrations").is_none());
+    }
+
+    #[test]
+    fn native_multimodal_request_uses_documented_message_and_image_items() {
+        let input = LmStudioInput::items(vec![
+            LmStudioInputItem::text("Read this chart."),
+            LmStudioInputItem::image("image/png", "aW1hZ2U=").unwrap(),
+        ])
+        .unwrap();
+        let request = LmStudioChatRequest::new(
+            "google/gemma-4-26b-a4b",
+            input,
+            "System",
+            Vec::new(),
+            LmStudioReasoning::Off,
+            8_192,
+            65_536,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["input"],
+            json!([
+                {"type": "text", "content": "Read this chart."},
+                {"type": "image", "data_url": "data:image/png;base64,aW1hZ2U="}
+            ])
+        );
+    }
+
+    #[test]
+    fn native_multimodal_input_rejects_unsupported_or_malformed_images() {
+        assert!(LmStudioInputItem::image("image/svg+xml", "aW1hZ2U=").is_err());
+        assert!(LmStudioInputItem::image("image/png", "not base64!").is_err());
+        assert!(LmStudioInput::items(Vec::new()).is_err());
     }
 
     #[test]
