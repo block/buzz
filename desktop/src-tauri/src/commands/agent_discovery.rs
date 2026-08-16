@@ -822,8 +822,9 @@ fn resolve_install_shell() -> Result<std::path::PathBuf, String> {
         if std::path::Path::new("/bin/bash").exists() {
             return Ok(std::path::PathBuf::from("/bin/bash"));
         }
-        crate::managed_agents::resolve_command("zsh")
-            .or_else(|| crate::managed_agents::resolve_command("bash"))
+        crate::managed_agents::login_shell_candidates()
+            .into_iter()
+            .next()
             .ok_or_else(|| "No zsh or bash executable was found".to_string())
     }
 

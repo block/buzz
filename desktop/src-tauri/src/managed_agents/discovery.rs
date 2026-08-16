@@ -763,7 +763,7 @@ fn path_candidates_from_env_raw(basename: &str) -> Vec<PathBuf> {
 /// on PATH. The latter supports non-FHS distributions such as NixOS.
 /// On Windows: Git Bash via `resolve_bash_path` — skips `BUZZ_SHELL` because
 /// login-shell callers use bash-only `-l -c` syntax.
-fn login_shell_candidates() -> Vec<PathBuf> {
+pub(crate) fn login_shell_candidates() -> Vec<PathBuf> {
     #[cfg(not(windows))]
     {
         let mut candidates = vec![PathBuf::from("/bin/zsh"), PathBuf::from("/bin/bash")];
