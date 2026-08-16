@@ -1,4 +1,26 @@
-# Failed deployment method — archived
+# Launchpad VPS deployment guard
+
+Use [`run.sh`](run.sh) for Launchpad VPS operations. It validates that
+`deploy/compose/.env` selects an immutable `ghcr.io/launchpad-26/buzz` relay
+image, rejects upstream Block images, checks Docker Compose compatibility, and
+then delegates to the canonical `deploy/compose/run.sh` implementation.
+
+```bash
+./launchpad/deploy/run.sh check
+./launchpad/deploy/run.sh start
+./launchpad/deploy/run.sh upgrade
+```
+
+Digest references and full 40-character `sha-...` tags are accepted for normal
+deployment. Floating tags are rejected unless
+`BUZZ_ALLOW_FLOATING_IMAGE=true` is explicitly set for development or testing.
+The override never permits `ghcr.io/block/buzz`.
+
+The guard reads exactly one `BUZZ_IMAGE` assignment from the local `.env` and
+exports that value before delegation, so an ambient shell variable cannot
+silently replace the reviewed deployment image.
+
+## Failed deployment method — archived
 
 Everything from the former Launchpad VPS deployment experiment has been moved
 to `archived/` for future reference.
