@@ -155,32 +155,39 @@ Future<bool> _showMessageActionsPopover({
     if (shouldRestoreComposerFocus) composerFocusNode!.unfocus();
 
     String? selectedActionId;
+    final dialogRoute = RawDialogRoute<String>(
+      barrierDismissible: true,
+      barrierLabel: 'Dismiss message actions',
+      barrierColor: Colors.transparent,
+      transitionDuration: reduceMotion
+          ? Duration.zero
+          : isIos
+          ? _iosMessageActionTransitionDuration
+          : _messageActionTransitionDuration,
+      transitionBuilder: (context, animation, secondaryAnimation, child) =>
+          child,
+      pageBuilder: (dialogContext, animation, secondaryAnimation) =>
+          _MessageActionsPopover(
+            anchorRect: anchorRect,
+            anchorSnapshot: snapshot,
+            animation: animation,
+            message: message,
+            pageContext: context,
+            pageRef: ref,
+            actions: actions,
+            useIosNativeActionSurface: useIosNativeActionSurface,
+          ),
+    );
+    var routePushed = false;
     try {
-      selectedActionId = await showGeneralDialog<String>(
-        context: context,
-        barrierDismissible: true,
-        barrierLabel: 'Dismiss message actions',
-        barrierColor: Colors.transparent,
-        transitionDuration: reduceMotion
-            ? Duration.zero
-            : isIos
-            ? _iosMessageActionTransitionDuration
-            : _messageActionTransitionDuration,
-        transitionBuilder: (context, animation, secondaryAnimation, child) =>
-            child,
-        pageBuilder: (dialogContext, animation, secondaryAnimation) =>
-            _MessageActionsPopover(
-              anchorRect: anchorRect,
-              anchorSnapshot: snapshot,
-              animation: animation,
-              message: message,
-              pageContext: context,
-              pageRef: ref,
-              actions: actions,
-              useIosNativeActionSurface: useIosNativeActionSurface,
-            ),
-      );
+      final popResult = Navigator.of(
+        context,
+        rootNavigator: true,
+      ).push(dialogRoute);
+      routePushed = true;
+      selectedActionId = await popResult;
     } finally {
+      if (routePushed) await dialogRoute.completed;
       snapshot.dispose();
       if (context.mounted) onPopoverDismissed?.call();
     }
@@ -447,10 +454,12 @@ class _PopoverMessageAction {
 
 class _IosNativeMessageActionSurface extends HookWidget {
   final List<_PopoverMessageAction> actions;
+  final double rowHeight;
   final ValueChanged<String> onSelected;
 
   const _IosNativeMessageActionSurface({
     required this.actions,
+    required this.rowHeight,
     required this.onSelected,
   });
 
@@ -479,6 +488,7 @@ class _IosNativeMessageActionSurface extends HookWidget {
         'separatorColor': context.colors.outlineVariant.toARGB32(),
         'errorColor': context.colors.error.toARGB32(),
         'interfaceStyle': context.colors.brightness.name,
+        'rowHeight': rowHeight,
       },
       creationParamsCodec: const StandardMessageCodec(),
       onPlatformViewCreated: (id) => viewId.value = id,
@@ -690,6 +700,7 @@ class _MessageActionsPopover extends StatelessWidget {
                 child: useIosNativeActionSurface
                     ? _IosNativeMessageActionSurface(
                         actions: actions,
+                        rowHeight: menuLayout.rowHeight,
                         onSelected: (actionId) =>
                             Navigator.of(context).pop(actionId),
                       )

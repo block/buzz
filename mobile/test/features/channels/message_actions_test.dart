@@ -215,6 +215,7 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   bool disableAnimations = false,
   EdgeInsets viewInsets = EdgeInsets.zero,
   TextScaler textScaler = TextScaler.noScaling,
+  Future<ui.Image> Function()? captureAnchorSnapshot,
   FocusNode? composerFocusNode,
   bool composerInitiallyFocused = false,
   Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
@@ -262,7 +263,8 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
                     currentPubkey: 'self',
                     isMember: true,
                     anchorRect: anchorRect,
-                    captureAnchorSnapshot: _testMessageSnapshot,
+                    captureAnchorSnapshot:
+                        captureAnchorSnapshot ?? _testMessageSnapshot,
                     onPopoverPresented: () => sourceHidden.value = true,
                     onPopoverDismissed: () => sourceHidden.value = false,
                     composerFocusNode: composerFocusNode,
@@ -880,6 +882,48 @@ void main() {
         findsOneWidget,
       );
       await _dismissMessageActionsPopover(tester);
+    });
+
+    testWidgets('keeps the snapshot alive through the reverse transition', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      ui.Image? snapshot;
+      try {
+        final prefs = await _mockPrefs();
+        await _pumpMessageActionsPopover(
+          tester,
+          message: _message(),
+          prefs: prefs,
+          captureAnchorSnapshot: () async {
+            snapshot = await _testMessageSnapshot();
+            return snapshot!;
+          },
+        );
+
+        final image = snapshot!;
+        expect(image.debugDisposed, isFalse);
+        Navigator.of(
+          tester.element(find.byKey(const ValueKey('message-action-surface'))),
+        ).pop();
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('message-action-preview')),
+          findsOneWidget,
+        );
+        expect(image.debugDisposed, isFalse);
+        await tester.pump(const Duration(milliseconds: 110));
+        expect(image.debugDisposed, isFalse);
+
+        await tester.pumpAndSettle();
+        expect(image.debugDisposed, isTrue);
+        expect(tester.takeException(), isNull);
+      } finally {
+        final image = snapshot;
+        if (image != null && !image.debugDisposed) image.dispose();
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
 
     testWidgets('shows parity actions for a regular message', (tester) async {

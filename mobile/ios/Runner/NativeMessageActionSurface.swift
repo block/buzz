@@ -34,7 +34,8 @@ struct NativeMessageActionDefinition {
 }
 
 enum NativeMessageActionSurfaceLayout {
-  static let rowHeight: CGFloat = 48
+  static let minimumRowHeight: CGFloat = 48
+  static let rowVerticalPadding: CGFloat = 4
   static let separatorHeight: CGFloat = 0.5
   static let verticalInset: CGFloat = 4
   static let horizontalInset: CGFloat = 16
@@ -62,11 +63,31 @@ enum NativeMessageActionSurfaceLayout {
     max(0, populatedGroups(actions: actions).count - 1)
   }
 
-  static func preferredHeight(
-    actions: [NativeMessageActionDefinition]
+  static func rowHeight(
+    minimumHeight: CGFloat = minimumRowHeight,
+    compatibleWith traitCollection: UITraitCollection? = nil
   ) -> CGFloat {
-    (verticalInset * 2)
-      + (CGFloat(actions.count) * rowHeight)
+    let labelHeight = UIFont.preferredFont(
+      forTextStyle: .body,
+      compatibleWith: traitCollection
+    ).lineHeight
+    return max(
+      minimumHeight,
+      ceil(labelHeight + (rowVerticalPadding * 2))
+    )
+  }
+
+  static func preferredHeight(
+    actions: [NativeMessageActionDefinition],
+    minimumRowHeight: CGFloat = minimumRowHeight,
+    compatibleWith traitCollection: UITraitCollection? = nil
+  ) -> CGFloat {
+    let resolvedRowHeight = rowHeight(
+      minimumHeight: minimumRowHeight,
+      compatibleWith: traitCollection
+    )
+    return (verticalInset * 2)
+      + (CGFloat(actions.count) * resolvedRowHeight)
       + (CGFloat(separatorCount(actions: actions)) * separatorHeight)
   }
 }
@@ -110,6 +131,8 @@ final class NativeMessageActionRowControl: UIControl {
     definition: NativeMessageActionDefinition,
     foregroundColor: UIColor,
     destructiveColor: UIColor,
+    minimumHeight: CGFloat = NativeMessageActionSurfaceLayout.minimumRowHeight,
+    compatibleWith traitCollection: UITraitCollection? = nil,
     onSelected: @escaping () -> Void
   ) {
     actionImageView = UIImageView(image: UIImage(systemName: definition.symbol))
@@ -121,11 +144,17 @@ final class NativeMessageActionRowControl: UIControl {
 
     actionTitleLabel.text = definition.title
     actionTitleLabel.textColor = color
-    actionTitleLabel.font = UIFont.preferredFont(forTextStyle: .body)
+    actionTitleLabel.font = UIFont.preferredFont(
+      forTextStyle: .body,
+      compatibleWith: traitCollection
+    )
     actionTitleLabel.adjustsFontForContentSizeCategory = true
-    actionTitleLabel.numberOfLines = 1
-    actionTitleLabel.adjustsFontSizeToFitWidth = true
-    actionTitleLabel.minimumScaleFactor = 0.8
+    actionTitleLabel.numberOfLines = 0
+    actionTitleLabel.lineBreakMode = .byWordWrapping
+    actionTitleLabel.setContentCompressionResistancePriority(
+      .required,
+      for: .vertical
+    )
 
     let iconColumn = UIView()
     iconColumn.translatesAutoresizingMaskIntoConstraints = false
@@ -159,9 +188,20 @@ final class NativeMessageActionRowControl: UIControl {
         equalTo: trailingAnchor,
         constant: -NativeMessageActionSurfaceLayout.horizontalInset
       ),
+      actionTitleLabel.topAnchor.constraint(
+        greaterThanOrEqualTo: topAnchor,
+        constant: NativeMessageActionSurfaceLayout.rowVerticalPadding
+      ),
+      actionTitleLabel.bottomAnchor.constraint(
+        lessThanOrEqualTo: bottomAnchor,
+        constant: -NativeMessageActionSurfaceLayout.rowVerticalPadding
+      ),
       actionTitleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
       heightAnchor.constraint(
-        greaterThanOrEqualToConstant: NativeMessageActionSurfaceLayout.rowHeight
+        greaterThanOrEqualToConstant: NativeMessageActionSurfaceLayout.rowHeight(
+          minimumHeight: minimumHeight,
+          compatibleWith: traitCollection
+        )
       ),
     ])
 
@@ -265,6 +305,15 @@ final class NativeMessageActionSurfacePlatformView: NSObject,
     let interfaceStyle = NativeMessageActionSurfaceAppearance.interfaceStyle(
       from: arguments?["interfaceStyle"]
     )
+    var minimumRowHeight = NativeMessageActionSurfaceLayout.minimumRowHeight
+    if let requestedRowHeight = arguments?["rowHeight"] as? NSNumber,
+      requestedRowHeight.doubleValue.isFinite
+    {
+      minimumRowHeight = max(
+        minimumRowHeight,
+        CGFloat(requestedRowHeight.doubleValue)
+      )
+    }
     let actionArguments = arguments?["actions"] as? [[String: Any]]
     let actions =
       actionArguments?.compactMap(
@@ -317,7 +366,8 @@ final class NativeMessageActionSurfacePlatformView: NSObject,
       actions: actions,
       foregroundColor: foregroundColor,
       destructiveColor: destructiveColor,
-      separatorColor: separatorColor
+      separatorColor: separatorColor,
+      minimumRowHeight: minimumRowHeight
     )
   }
 
@@ -329,7 +379,8 @@ final class NativeMessageActionSurfacePlatformView: NSObject,
     actions: [NativeMessageActionDefinition],
     foregroundColor: UIColor,
     destructiveColor: UIColor,
-    separatorColor: UIColor
+    separatorColor: UIColor,
+    minimumRowHeight: CGFloat
   ) {
     let scrollView = UIScrollView()
     scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -377,6 +428,7 @@ final class NativeMessageActionSurfacePlatformView: NSObject,
             definition: definition,
             foregroundColor: foregroundColor,
             destructiveColor: destructiveColor,
+            minimumHeight: minimumRowHeight,
             onSelected: { [weak self] in self?.select(definition) }
           )
         )

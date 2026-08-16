@@ -431,7 +431,12 @@ class RunnerTests: XCTestCase {
       2
     )
     XCTAssertEqual(
-      NativeMessageActionSurfaceLayout.preferredHeight(actions: definitions),
+      NativeMessageActionSurfaceLayout.preferredHeight(
+        actions: definitions,
+        compatibleWith: UITraitCollection(
+          preferredContentSizeCategory: .large
+        )
+      ),
       153
     )
   }
@@ -461,6 +466,52 @@ class RunnerTests: XCTestCase {
     XCTAssertNotNil(row.actionImageView.image)
     row.sendActions(for: .touchUpInside)
     XCTAssertTrue(selected)
+  }
+
+  @MainActor
+  func testNativeMessageActionRowExpandsForAccessibilityTypography() throws {
+    let traits = UITraitCollection(
+      preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge
+    )
+    let definition = try XCTUnwrap(
+      NativeMessageActionDefinition(
+        arguments: [
+          "id": "followThread", "title": "Follow thread",
+          "symbol": "bell", "group": "utility",
+        ]
+      )
+    )
+    let row = NativeMessageActionRowControl(
+      definition: definition,
+      foregroundColor: .label,
+      destructiveColor: .systemRed,
+      compatibleWith: traits,
+      onSelected: {}
+    )
+    let fittingSize = row.systemLayoutSizeFitting(
+      CGSize(width: 288, height: UIView.layoutFittingCompressedSize.height),
+      withHorizontalFittingPriority: .required,
+      verticalFittingPriority: .fittingSizeLevel
+    )
+    row.frame = CGRect(origin: .zero, size: fittingSize)
+    row.layoutIfNeeded()
+    let labelFrame = row.convert(
+      row.actionTitleLabel.bounds,
+      from: row.actionTitleLabel
+    )
+
+    XCTAssertGreaterThan(fittingSize.height, 48)
+    XCTAssertGreaterThan(labelFrame.height, 0)
+    XCTAssertGreaterThanOrEqual(
+      labelFrame.minY,
+      NativeMessageActionSurfaceLayout.rowVerticalPadding
+    )
+    XCTAssertLessThanOrEqual(
+      labelFrame.maxY,
+      fittingSize.height - NativeMessageActionSurfaceLayout.rowVerticalPadding
+    )
+    XCTAssertEqual(row.actionTitleLabel.numberOfLines, 0)
+    XCTAssertFalse(row.actionTitleLabel.adjustsFontSizeToFitWidth)
   }
 
   @MainActor
