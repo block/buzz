@@ -45,9 +45,14 @@ pub mod relay_members {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum MembershipDecision {
         /// Relay membership enforcement is disabled.
-        OpenRelay,
-        /// Caller is directly present in `relay_members`.
-        Member,
+        ///
+        /// Carries a verified NIP-OA owner when the caller presented one. The
+        /// owner relationship is independent of admission: it is proven by the
+        /// attestation's own signature, not by how the caller got in.
+        OpenRelay(Option<nostr::PublicKey>),
+        /// Caller is directly present in `relay_members`. Carries a verified
+        /// NIP-OA owner when the caller presented one, for the same reason.
+        Member(Option<nostr::PublicKey>),
         /// Caller is admitted through a NIP-OA owner that is a relay member.
         ViaOwner(nostr::PublicKey),
         /// Caller is not admitted.
@@ -64,8 +69,17 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
     ) -> Result<MembershipDecision, String> {
+        // Verify the attestation up front, independent of admission.
+        //
+        // Membership answers "may this caller connect"; the attestation answers
+        // "who owns this agent". Deriving the second from the first is what
+        // regressed: a direct member was admitted without the delegation being
+        // consulted, so a perfectly valid owner relationship was discarded and
+        // `users.agent_owner_pubkey` stayed NULL.
+        let verified_owner = extract_nip_oa_owner(pubkey_bytes, auth_tag_header);
+
         if !state.config.require_relay_membership {
-            return Ok(MembershipDecision::OpenRelay);
+            return Ok(MembershipDecision::OpenRelay(verified_owner));
         }
 
         let pubkey_hex = hex::encode(pubkey_bytes);
@@ -75,7 +89,7 @@ pub mod relay_members {
             .await
             .map_err(|e| format!("relay membership check failed: {e}"))?;
         if is_member {
-            return Ok(MembershipDecision::Member);
+            return Ok(MembershipDecision::Member(verified_owner));
         }
 
         if state.config.allow_nip_oa_auth {
@@ -112,15 +126,18 @@ pub mod relay_members {
 
     /// Enforce relay membership for a pubkey, with NIP-OA agent delegation fallback.
     ///
-    /// Returns `Ok(Some(owner_pubkey))` when the agent is not a direct member but
-    /// its NIP-OA owner *is* — access is granted via delegation.
+    /// Returns `Ok(Some(owner_pubkey))` whenever the caller is admitted AND
+    /// presented a verifying NIP-OA attestation — whether it was admitted as a
+    /// direct relay member, through owner delegation, or on an open relay.
     ///
-    /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
-    /// immediately — no membership check is performed. Callers that need NIP-OA
-    /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
+    /// The owner relationship is deliberately independent of the admission path:
+    /// it is proven by the attestation's own signature. Reporting it only for
+    /// delegated admissions left `users.agent_owner_pubkey` NULL for every
+    /// directly-enrolled agent, which is what `is_agent`, owner-managed agent
+    /// lists and `channel_add_policy = "owner_only"` all derive from.
     ///
-    /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
-    /// no NIP-OA tag is present/applicable (open relay without auth tag).
+    /// Returns `Ok(None)` when the caller presented no attestation, or one that
+    /// does not verify against its pubkey.
     pub async fn enforce_relay_membership(
         state: &AppState,
         community: CommunityId,
@@ -128,8 +145,11 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
         match check_relay_membership(state, community, pubkey_bytes, auth_tag_header).await {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
-            Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
+            Ok(
+                decision @ (MembershipDecision::OpenRelay(_)
+                | MembershipDecision::Member(_)
+                | MembershipDecision::ViaOwner(_)),
+            ) => Ok(owner_from_decision(&decision)),
             Ok(MembershipDecision::Denied) => Err((
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
@@ -141,6 +161,21 @@ pub mod relay_members {
                 tracing::error!("relay membership check errored: {e}");
                 Err(super::internal_error(&e))
             }
+        }
+    }
+
+    /// The owner relationship an admitted decision proves, if any.
+    ///
+    /// Split out from `enforce_relay_membership` so the behaviour that regressed
+    /// is testable without a database. Every admitted variant reports its
+    /// verified owner; only `Denied` has none, because a rejected caller proves
+    /// nothing. The bug was returning `None` for `Member`, which discarded a
+    /// valid attestation purely because admission had not needed it.
+    pub(crate) fn owner_from_decision(decision: &MembershipDecision) -> Option<nostr::PublicKey> {
+        match decision {
+            MembershipDecision::OpenRelay(owner) | MembershipDecision::Member(owner) => *owner,
+            MembershipDecision::ViaOwner(owner) => Some(*owner),
+            MembershipDecision::Denied => None,
         }
     }
 
@@ -261,6 +296,57 @@ pub mod relay_members {
             let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), None);
 
             assert_eq!(result, None);
+        }
+
+        /// A direct relay member that presented a valid attestation must report
+        /// its owner.
+        ///
+        /// This is the regression. `Member` previously carried no owner and the
+        /// mapping returned `None` for it, so on a closed relay a
+        /// directly-enrolled agent never had `users.agent_owner_pubkey`
+        /// materialized — leaving it rate-limited as a human, absent from
+        /// owner-managed agent lists, and unaddable to channels under its own
+        /// `channel_add_policy = "owner_only"`.
+        #[test]
+        fn direct_member_reports_its_verified_owner() {
+            let owner = Keys::generate().public_key();
+
+            assert_eq!(
+                owner_from_decision(&MembershipDecision::Member(Some(owner))),
+                Some(owner),
+                "admission path must not decide whether an owner is reported"
+            );
+        }
+
+        /// The same owner is reported no matter which admitted path produced it.
+        #[test]
+        fn every_admitted_path_reports_the_same_owner() {
+            let owner = Keys::generate().public_key();
+
+            for decision in [
+                MembershipDecision::OpenRelay(Some(owner)),
+                MembershipDecision::Member(Some(owner)),
+                MembershipDecision::ViaOwner(owner),
+            ] {
+                assert_eq!(
+                    owner_from_decision(&decision),
+                    Some(owner),
+                    "{decision:?} should report the verified owner"
+                );
+            }
+        }
+
+        /// An admitted caller that presented no attestation has no owner, and a
+        /// denied caller proves nothing regardless.
+        #[test]
+        fn no_attestation_or_denied_reports_no_owner() {
+            for decision in [
+                MembershipDecision::OpenRelay(None),
+                MembershipDecision::Member(None),
+                MembershipDecision::Denied,
+            ] {
+                assert_eq!(owner_from_decision(&decision), None, "{decision:?}");
+            }
         }
 
         /// Invalid auth tag → returns None.
