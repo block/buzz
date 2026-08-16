@@ -51,6 +51,11 @@ notify-rust = "4"
 webkit2gtk = { version = "=2.0.2", features = ["v2_22"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Safe wrapper over the platform idle-sleep APIs (IOKit here, Win32 power
+# requests on Windows). Target-gated to the two platforms that have a
+# mechanism: Linux stays a documented no-op, so pulling keepawake's zbus path
+# in there would add a runtime D-Bus requirement for behaviour we do not want.
+keepawake = "0.6"
 block2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2 = { version = "0.6.4", default-features = false }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSEvent", "NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem", "block2"] }
@@ -63,7 +68,8 @@ user-idle = { version = "0.6", default-features = false }
 plist = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
+keepawake = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
 user-idle = { version = "0.6", default-features = false }
 

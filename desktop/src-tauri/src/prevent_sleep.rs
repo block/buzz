@@ -1,27 +1,22 @@
 //! Keeps the machine awake while local managed agents are running.
 //!
-//! Two platforms have a real mechanism:
+//! macOS and Windows have a real mechanism, reached through the `keepawake`
+//! crate rather than local FFI — `AGENTS.md` forbids `unsafe` code, and a safe
+//! wrapper also retires the IOKit `extern "C"` block this module used to carry.
 //!
-//! * **macOS** — an IOKit `PreventUserIdleSystemSleep` power assertion.
-//! * **Windows** — a Win32 *power request* (`PowerCreateRequest` +
-//!   `PowerSetRequest(PowerRequestSystemRequired)`).
+//! The guard is owned by a **dedicated thread** for the lifetime of the block.
+//! Windows' underlying request is thread-local — its effect dies with the
+//! thread that set it — while [`acquire`] and [`release`] are reached from
+//! Tauri command handlers on a worker pool and from the shutdown hook,
+//! potentially three different threads. Binding the request to any of those
+//! would either evaporate (the acquiring worker retires while an agent is
+//! still running) or leak (release lands on a thread that never set it). The
+//! thread costs a wake-up channel and buys a lifetime that matches the block.
 //!
-//! The Windows side deliberately does **not** use `SetThreadExecutionState`.
-//! That API is per-thread and its effect dies with the calling thread, but
-//! [`acquire`] and [`release`] are reached from Tauri command handlers running
-//! on a worker pool and from the shutdown hook — potentially three different
-//! threads. A `SetThreadExecutionState` pair would therefore either evaporate
-//! (the acquiring worker thread retires while an agent is still running) or
-//! leak (release lands on a thread that never set the flag). A power request is
-//! a kernel object owned by the *process*: any thread may create, set, clear,
-//! and close it, and the handle can be stored in shared state. The alternative
-//! — an owned dedicated thread parked for the lifetime of the block — costs a
-//! thread plus a wake-up channel to achieve the same thing, so the power
-//! request wins.
-//!
-//! Linux is a deliberate, documented no-op: there is no portable
-//! inhibit mechanism (logind vs. elogind vs. none), so [`acquire`] succeeds
-//! without holding anything and no cap timer is armed.
+//! Linux is a deliberate, documented no-op. keepawake can inhibit there, but
+//! only through a live D-Bus session; the crate is target-gated to macOS and
+//! Windows so a Linux build gains no runtime D-Bus requirement. [`acquire`]
+//! succeeds without holding anything and no cap timer is armed.
 //!
 //! Whatever a platform hands back is stored as a [`SleepBlock`], whose `Drop`
 //! performs the matching release. Every teardown path — explicit
@@ -45,14 +40,16 @@ pub struct PreventSleepState {
 /// A live OS-level "do not idle-sleep" request. Dropping it releases the
 /// request; there is no other release path.
 enum SleepBlock {
-    /// macOS `IOPMAssertionID` for a `PreventUserIdleSystemSleep` assertion.
-    #[cfg(target_os = "macos")]
-    IoKitAssertion(u32),
-    /// Windows power-request `HANDLE`, held as an integer so the state stays
-    /// `Send` without an `unsafe impl` (the raw pointer is reconstituted only
-    /// at the call site).
-    #[cfg(windows)]
-    PowerRequest(isize),
+    /// A dedicated thread owning the `keepawake` guard for the whole lifetime
+    /// of the block. See [`platform_begin`] for why the guard cannot simply
+    /// live in this struct.
+    #[cfg(any(target_os = "macos", windows))]
+    Worker {
+        /// Dropping this disconnects the channel the worker is parked on,
+        /// which is the signal to release.
+        stop: Option<std::sync::mpsc::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    },
     /// Test-only inert block. Dropping it bumps the counter, which lets the
     /// platform-independent bookkeeping be asserted on every OS.
     #[cfg(test)]
@@ -68,27 +65,15 @@ impl Drop for SleepBlock {
     // irrefutable — which is correct, not a mistake.
     #[allow(irrefutable_let_patterns)]
     fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
-        if let Self::IoKitAssertion(id) = self {
-            unsafe {
-                macos::IOPMAssertionRelease(*id);
-            }
-        }
-
-        #[cfg(windows)]
-        if let Self::PowerRequest(handle) = self {
-            use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-            use windows_sys::Win32::System::Power::{
-                PowerClearRequest, PowerRequestSystemRequired,
-            };
-
-            let handle = *handle as HANDLE;
-            unsafe {
-                // Clear before close: closing an un-cleared request also drops
-                // it, but clearing first keeps `powercfg /requests` accurate if
-                // the close ever fails.
-                PowerClearRequest(handle, PowerRequestSystemRequired);
-                CloseHandle(handle);
+        #[cfg(any(target_os = "macos", windows))]
+        if let Self::Worker { stop, thread } = self {
+            // Dropping the sender disconnects the channel the worker is parked
+            // on. Joining afterwards is what makes this synchronous: it
+            // guarantees the guard has actually been dropped, on the thread
+            // that created it, before this `drop` returns.
+            drop(stop.take());
+            if let Some(thread) = thread.take() {
+                let _ = thread.join();
             }
         }
 
@@ -99,149 +84,79 @@ impl Drop for SleepBlock {
     }
 }
 
-// ── macOS implementation ────────────────────────────────────────────────────
-
-#[cfg(target_os = "macos")]
-mod macos {
-    #[link(name = "IOKit", kind = "framework")]
-    extern "C" {
-        pub fn IOPMAssertionCreateWithName(
-            assertion_type: *const std::ffi::c_void, // CFStringRef
-            level: u32,                              // IOPMAssertionLevel
-            name: *const std::ffi::c_void,           // CFStringRef
-            assertion_id: *mut u32,                  // IOPMAssertionID
-        ) -> i32; // IOReturn
-
-        pub fn IOPMAssertionRelease(assertion_id: u32) -> i32;
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        pub fn CFStringCreateWithCString(
-            alloc: *const std::ffi::c_void,
-            c_str: *const std::ffi::c_char,
-            encoding: u32,
-        ) -> *const std::ffi::c_void;
-        pub fn CFRelease(cf: *const std::ffi::c_void);
-    }
-}
-
-#[cfg(target_os = "macos")]
-const K_IOPM_ASSERTION_LEVEL_ON: u32 = 255;
-
-#[cfg(target_os = "macos")]
-const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
-
-/// Ask the OS for a sleep block. `Ok(None)` means this platform has no
-/// mechanism (see the module docs) — that is success, not failure.
-#[cfg(target_os = "macos")]
-fn platform_begin() -> Result<Option<SleepBlock>, String> {
-    let assertion_type = c"PreventUserIdleSystemSleep".as_ptr();
-    let reason = c"Buzz \u{2014} agents are active".as_ptr();
-
-    unsafe {
-        let cf_type = macos::CFStringCreateWithCString(
-            std::ptr::null(),
-            assertion_type,
-            K_CF_STRING_ENCODING_UTF8,
-        );
-        let cf_reason =
-            macos::CFStringCreateWithCString(std::ptr::null(), reason, K_CF_STRING_ENCODING_UTF8);
-
-        if cf_type.is_null() || cf_reason.is_null() {
-            if !cf_type.is_null() {
-                macos::CFRelease(cf_type);
-            }
-            if !cf_reason.is_null() {
-                macos::CFRelease(cf_reason);
-            }
-            return Err("Failed to create CFString for IOKit assertion".into());
-        }
-
-        let mut assertion_id: u32 = 0;
-        let ret = macos::IOPMAssertionCreateWithName(
-            cf_type,
-            K_IOPM_ASSERTION_LEVEL_ON,
-            cf_reason,
-            &mut assertion_id,
-        );
-
-        macos::CFRelease(cf_type);
-        macos::CFRelease(cf_reason);
-
-        if ret != 0 {
-            return Err(format!(
-                "IOPMAssertionCreateWithName failed with IOReturn {ret}"
-            ));
-        }
-
-        Ok(Some(SleepBlock::IoKitAssertion(assertion_id)))
-    }
-}
-
-// ── Windows implementation ──────────────────────────────────────────────────
-
-/// `POWER_REQUEST_CONTEXT_VERSION` from `winnt.h`. Not re-exported by
-/// `windows-sys`, so it is spelled out here.
-#[cfg(windows)]
-const POWER_REQUEST_CONTEXT_VERSION: u32 = 0;
+// ── Platform implementation ─────────────────────────────────────────────────
 
 /// Ask the OS for a sleep block. `Ok(None)` means this platform has no
 /// mechanism (see the module docs) — that is success, not failure.
 ///
-/// `PowerRequestSystemRequired` is the direct analogue of the macOS
-/// `PreventUserIdleSystemSleep` assertion: it blocks *idle* sleep only. It
-/// deliberately does not block a user-initiated sleep, a lid close, or the
-/// low-power transition on a Modern Standby machine, and it does not keep the
-/// display awake (that would need `PowerRequestDisplayRequired`).
-#[cfg(windows)]
+/// The guard is created on, and dropped by, a thread this function owns.
+/// Windows' underlying request is thread-local: its effect dies with the
+/// thread that set it. [`acquire`] and [`release`] are reached from Tauri
+/// command handlers on a worker pool and from the shutdown hook — potentially
+/// three different threads — so binding the request to any of those would
+/// either evaporate (the acquiring worker retires while agents still run) or
+/// leak (release lands on a thread that never set it). One dedicated thread,
+/// parked for the block's whole lifetime, is what makes the lifetime correct.
+#[cfg(any(target_os = "macos", windows))]
 fn platform_begin() -> Result<Option<SleepBlock>, String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Power::{
-        PowerCreateRequest, PowerRequestSystemRequired, PowerSetRequest,
-    };
-    use windows_sys::Win32::System::Threading::{
-        POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0,
-    };
+    use std::sync::mpsc;
 
-    // `PowerCreateRequest` copies the reason string, so a stack-local buffer
-    // that lives across the call is enough.
-    let mut reason: Vec<u16> = "Buzz \u{2014} agents are active"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
-    let context = REASON_CONTEXT {
-        Version: POWER_REQUEST_CONTEXT_VERSION,
-        Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
-        Reason: REASON_CONTEXT_0 {
-            SimpleReasonString: reason.as_mut_ptr(),
-        },
-    };
+    let thread = std::thread::Builder::new()
+        .name("buzz-prevent-sleep".to_string())
+        .spawn(move || {
+            // `idle(true)` is the direct analogue of the previous macOS
+            // `PreventUserIdleSystemSleep` assertion: block *idle* sleep only.
+            // `display(false)` keeps the screen free to blank, and
+            // `sleep(false)` leaves a user-initiated sleep or lid close alone.
+            let awake = keepawake::Builder::default()
+                .display(false)
+                .idle(true)
+                .sleep(false)
+                .reason("Agents are active")
+                .app_name("Buzz")
+                .app_reverse_domain("xyz.block.buzz.app")
+                .create();
 
-    let request: HANDLE = unsafe { PowerCreateRequest(&context) };
-    if request.is_null() || request == INVALID_HANDLE_VALUE {
-        let code = unsafe { GetLastError() };
-        return Err(format!(
-            "PowerCreateRequest failed with GetLastError {code}"
-        ));
-    }
+            match awake {
+                Ok(awake) => {
+                    if ready_tx.send(Ok(())).is_err() {
+                        // Nobody is waiting any more; drop the guard and go.
+                        return;
+                    }
+                    // Blocks until the sender is dropped by `SleepBlock::drop`.
+                    // The guard is dropped here, on the thread that made it.
+                    let _ = stop_rx.recv();
+                    drop(awake);
+                }
+                Err(error) => {
+                    let _ = ready_tx.send(Err(format!("keepawake failed: {error}")));
+                }
+            }
+        })
+        .map_err(|error| format!("failed to spawn the sleep-block thread: {error}"))?;
 
-    if unsafe { PowerSetRequest(request, PowerRequestSystemRequired) } == 0 {
-        let code = unsafe { GetLastError() };
-        unsafe {
-            CloseHandle(request);
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(Some(SleepBlock::Worker {
+            stop: Some(stop_tx),
+            thread: Some(thread),
+        })),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error)
         }
-        return Err(format!("PowerSetRequest failed with GetLastError {code}"));
+        Err(_) => {
+            let _ = thread.join();
+            Err("the sleep-block thread exited before reporting readiness".to_string())
+        }
     }
-
-    Ok(Some(SleepBlock::PowerRequest(request as isize)))
 }
 
-// ── Platforms with no mechanism ─────────────────────────────────────────────
-
 /// Ask the OS for a sleep block. Linux and friends have no portable inhibit
-/// mechanism, so this is a documented no-op that reports success without
+/// mechanism we want to depend on — keepawake's Linux path needs a live D-Bus
+/// session — so this stays a documented no-op that reports success without
 /// holding anything (and therefore without arming the cap timer).
 #[cfg(not(any(target_os = "macos", windows)))]
 fn platform_begin() -> Result<Option<SleepBlock>, String> {
@@ -426,14 +341,17 @@ mod tests {
         // Dropping the guard releases the real OS request.
     }
 
+    /// Identity of the held block — the owning worker's thread id. A second
+    /// `ensure_block` must reuse it rather than spawn a second thread and
+    /// strand the first one holding a request nothing will ever release.
     #[cfg(any(target_os = "macos", windows))]
-    fn block_identity(guard: &PreventSleepState) -> Option<isize> {
+    fn block_identity(guard: &PreventSleepState) -> Option<String> {
         guard.block.as_ref().map(|block| match block {
-            #[cfg(target_os = "macos")]
-            SleepBlock::IoKitAssertion(id) => *id as isize,
-            #[cfg(windows)]
-            SleepBlock::PowerRequest(handle) => *handle,
-            SleepBlock::Inert(_) => 0,
+            SleepBlock::Worker { thread, .. } => thread
+                .as_ref()
+                .map(|thread| format!("{:?}", thread.thread().id()))
+                .unwrap_or_else(|| "detached".to_string()),
+            SleepBlock::Inert(_) => "inert".to_string(),
         })
     }
 
