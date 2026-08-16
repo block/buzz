@@ -18,6 +18,27 @@ const NOTES_LIMITS: ReadLimits = ReadLimits {
     paging: Paging::BeforeCursor,
 };
 
+/// Count the events in a relay query response.
+///
+/// `social notes` prints the relay's body verbatim, so the count and the
+/// output come from the same bytes. A body that is not a JSON array of events
+/// cannot be counted, and must not be silently treated as an empty page: that
+/// turns an unknown result set into "safely short" and suppresses the
+/// truncation notice altogether.
+fn count_events(body: &str) -> Result<usize, CliError> {
+    let unknown = |detail: String| {
+        CliError::Other(format!(
+            "relay returned a body that is not an event array, so the result count is unknown: {detail}"
+        ))
+    };
+    let events: Vec<serde_json::Value> =
+        serde_json::from_str(body).map_err(|e| unknown(e.to_string()))?;
+    if let Some(position) = events.iter().position(|event| !event.is_object()) {
+        return Err(unknown(format!("element {position} is not an object")));
+    }
+    Ok(events.len())
+}
+
 /// A single contact entry (CLI-local, not from buzz-sdk).
 #[derive(Debug, Deserialize)]
 pub struct ContactEntry {
@@ -116,10 +137,13 @@ pub async fn cmd_get_user_notes(
     }
 
     let resp = client.query(&filter).await?;
+    // Parse before printing. This command forwards the relay's body verbatim,
+    // so a body that is not an event array is both invalid machine-readable
+    // output and a result count we cannot determine — and an undeterminable
+    // count read as 0 would report a full page as safely short, which is the
+    // exact silence this notice exists to break.
+    let returned = count_events(&resp)?;
     println!("{resp}");
-    let returned = serde_json::from_str::<Vec<serde_json::Value>>(&resp)
-        .map(|events| events.len())
-        .unwrap_or(0);
     if let Some(notice) = truncation_notice(returned, requested_limit, NOTES_LIMITS) {
         eprintln!("{notice}");
     }
@@ -300,7 +324,31 @@ mod tests {
 
 #[cfg(test)]
 mod note_count_tests {
-    use super::{truncation_notice, NOTES_LIMITS};
+    use super::{count_events, truncation_notice, NOTES_LIMITS};
+
+    #[test]
+    fn counts_the_events_in_an_array_body() {
+        assert_eq!(count_events("[]").unwrap(), 0);
+        assert_eq!(count_events(r#"[{"id":"a"},{"id":"b"}]"#).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_body_that_is_not_an_event_array_is_an_error_not_a_zero() {
+        // Reading these as 0 results suppressed the notice entirely: a full
+        // page of notes would have been reported as safely short.
+        for body in [
+            r#"{"error":"rate limited"}"#,
+            "not json at all",
+            "",
+            r#"["a","b"]"#,
+        ] {
+            let err = count_events(body).unwrap_err();
+            assert!(
+                err.to_string().contains("result count is unknown"),
+                "body {body:?} produced: {err}"
+            );
+        }
+    }
 
     #[test]
     fn a_full_page_of_notes_advertises_the_cursor_it_really_has() {
