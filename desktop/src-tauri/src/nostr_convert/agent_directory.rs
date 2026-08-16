@@ -43,6 +43,9 @@ fn relay_agents_from_legacy_events(events: &[Event]) -> Vec<RelayAgentInfo> {
             let value = agents_from_events(std::slice::from_ref(event));
             let mut agent: RelayAgentInfo =
                 serde_json::from_value(value.get("agents")?.as_array()?.first()?.clone()).ok()?;
+            // Legacy directory entries are not authenticated managed-policy
+            // coordinates, so they must not drive the live 30177 watcher.
+            agent.owner_pubkey = None;
             // Channel membership is authoritative only in relay-signed kind:39002.
             agent.channel_ids.clear();
             Some(agent)
@@ -126,6 +129,7 @@ fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<
     let content = managed_agent_content_from_event(event).ok()?;
     Some(RelayAgentInfo {
         pubkey: agent_pubkey.to_string(),
+        owner_pubkey: Some(event.pubkey.to_hex()),
         name: content.name,
         agent_type: "agent".to_string(),
         channels: Vec::new(),

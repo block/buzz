@@ -108,3 +108,46 @@ test("startPersonaSync forwards its own relay as the event arrival relay", async
   mock.reset();
   delete globalThis.window;
 });
+
+test("startPersonaSync serializes inbound reconciliation in relay order", async () => {
+  const resolvers = [];
+  const invokedIds = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: (_cmd, args) => {
+        invokedIds.push(JSON.parse(args.eventJson).id);
+        return new Promise((resolve) => resolvers.push(resolve));
+      },
+    },
+  };
+
+  let onEvent;
+  mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
+  mock.method(relayClient, "subscribeLive", (_filter, listener) => {
+    onEvent = listener;
+    return Promise.resolve(() => Promise.resolve());
+  });
+
+  startPersonaSync("owner-pubkey", "wss://community.example", () => false);
+  await new Promise((resolve) => setImmediate(resolve));
+  onEvent({ id: "broad", pubkey: "owner-pubkey", kind: KIND_MANAGED_AGENT });
+  onEvent({
+    id: "restricted",
+    pubkey: "owner-pubkey",
+    kind: KIND_MANAGED_AGENT,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    invokedIds,
+    ["broad"],
+    "newer event waits for prior deployment",
+  );
+  resolvers.shift()();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(invokedIds, ["broad", "restricted"]);
+  resolvers.shift()();
+
+  mock.reset();
+  delete globalThis.window;
+});

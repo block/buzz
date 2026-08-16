@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import type { RelayAgent, RelayEvent } from "@/shared/api/types";
 import { KIND_MANAGED_AGENT } from "@/shared/constants/kinds";
 import {
   managedAgentsQueryKey,
@@ -12,33 +13,67 @@ import {
 } from "@/features/agents/hooks";
 import { managedAgentRuntimesQueryKey } from "@/features/agents/managedAgentRuntimeHooks";
 
-// Trailing-coalesce window: a backfill burst (up to 500 inbound events fed
-// one-by-one through reconcile) fires one `agents-data-changed` per event.
-// Collapsing them into a single invalidate after the burst settles keeps the
-// refetch off React Query's implicit in-flight dedup and avoids redundant
-// disk-read IPC.
 const COALESCE_MS = 200;
+export const RELAY_POLICY_REFRESH_MIN_INTERVAL_MS = 5_000;
+
+export type RelayAgentPolicyCoordinate = {
+  agentPubkey: string;
+  ownerPubkey: string;
+};
+
+function eventDTag(event: RelayEvent): string | null {
+  return event.tags.find((tag) => tag[0] === "d")?.[1] ?? null;
+}
 
 /**
- * Subscribe to remote managed-agent policy heads. The directory query remains
- * the trust boundary; this event is only a freshness signal.
+ * Subscribe only to authenticated managed-agent coordinates already returned by
+ * the relay directory. The callback repeats the exact owner+d check because a
+ * combined Nostr filter admits the authors×d cross-product.
  */
 export function startRelayAgentPolicyRefresh(
+  coordinates: RelayAgentPolicyCoordinate[],
   onChange: () => void,
   onError: (error: unknown) => void = (error) => {
     console.warn("Couldn’t subscribe to managed agent policy updates", error);
   },
 ): () => void {
+  if (coordinates.length === 0) return () => {};
+
+  const allowed = new Set(
+    coordinates.map(
+      ({ ownerPubkey, agentPubkey }) =>
+        `${ownerPubkey.toLowerCase()}:${agentPubkey.toLowerCase()}`,
+    ),
+  );
+  const authors = [
+    ...new Set(coordinates.map(({ ownerPubkey }) => ownerPubkey)),
+  ];
+  const agentPubkeys = [
+    ...new Set(coordinates.map(({ agentPubkey }) => agentPubkey)),
+  ];
   let disposed = false;
   let unsubscribe: (() => Promise<void>) | null = null;
   void relayClient
-    .subscribeLive({ kinds: [KIND_MANAGED_AGENT], limit: 0 }, onChange)
+    .subscribeLive(
+      {
+        kinds: [KIND_MANAGED_AGENT],
+        authors,
+        "#d": agentPubkeys,
+        limit: 0,
+      },
+      (event) => {
+        const dTag = eventDTag(event);
+        if (
+          dTag &&
+          allowed.has(`${event.pubkey.toLowerCase()}:${dTag.toLowerCase()}`)
+        ) {
+          onChange();
+        }
+      },
+    )
     .then((nextUnsubscribe) => {
-      if (disposed) {
-        void nextUnsubscribe();
-      } else {
-        unsubscribe = nextUnsubscribe;
-      }
+      if (disposed) void nextUnsubscribe();
+      else unsubscribe = nextUnsubscribe;
     })
     .catch(onError);
 
@@ -48,11 +83,14 @@ export function startRelayAgentPolicyRefresh(
   };
 }
 
-// Invalidate the live Agents-tab queries when the backend signals that inbound
-// relay events changed the on-disk agents data. Mounted once at the app root
-// with empty deps — invalidation is global and has no reason to be
-// pubkey-scoped, so it must NOT live inside the pubkey-keyed `usePersonaSync`
-// (re-registering per identity switch would leak a listener each time).
+function relayPolicyCoordinates(agents: RelayAgent[] | undefined) {
+  return (agents ?? []).flatMap((agent) =>
+    agent.ownerPubkey
+      ? [{ agentPubkey: agent.pubkey, ownerPubkey: agent.ownerPubkey }]
+      : [],
+  );
+}
+
 export function useAgentsDataRefresh(): void {
   const queryClient = useQueryClient();
 
@@ -63,8 +101,6 @@ export function useAgentsDataRefresh(): void {
       void queryClient.invalidateQueries({
         queryKey: managedAgentRuntimesQueryKey,
       });
-      // Pair startup also changes the legacy managed-agent scalar status.
-      // Keep that cache synchronized for consumers outside pair-runtime UI.
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     });
 
@@ -78,27 +114,73 @@ export function useAgentsDataRefresh(): void {
       }, COALESCE_MS);
     });
 
-    // Remote owners publish access changes as replacement kind:30177 events.
-    // The local owner sync intentionally subscribes only to the current
-    // identity's author, so it cannot refresh another owner's autocomplete
-    // policy. Watch the managed-policy kind globally and re-read the bounded,
-    // trust-checked relay directory when any head changes.
-    let relayAgentPolicyTimer: ReturnType<typeof setTimeout> | undefined;
-    const stopRelayAgentPolicyRefresh = startRelayAgentPolicyRefresh(() => {
-      if (relayAgentPolicyTimer !== undefined) return;
-      relayAgentPolicyTimer = setTimeout(() => {
-        relayAgentPolicyTimer = undefined;
-        void queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
-      }, COALESCE_MS);
-    });
+    let policyStop = () => {};
+    let policyTimer: ReturnType<typeof setTimeout> | undefined;
+    let policyDirty = false;
+    let policyRefreshInFlight = false;
+    let policyDisposed = false;
+    let coordinateKey = "";
+
+    const refreshPolicyDirectory = () => {
+      if (policyRefreshInFlight || policyTimer !== undefined) {
+        policyDirty = true;
+        return;
+      }
+      policyRefreshInFlight = true;
+      void queryClient
+        .invalidateQueries({ queryKey: relayAgentsQueryKey })
+        .finally(() => {
+          policyRefreshInFlight = false;
+          if (policyDisposed) return;
+          policyTimer = setTimeout(() => {
+            policyTimer = undefined;
+            if (policyDirty) {
+              policyDirty = false;
+              refreshPolicyDirectory();
+            }
+          }, RELAY_POLICY_REFRESH_MIN_INTERVAL_MS);
+        });
+    };
+
+    const resubscribePolicy = () => {
+      const coordinates = relayPolicyCoordinates(
+        queryClient.getQueryData<RelayAgent[]>(relayAgentsQueryKey),
+      );
+      const nextKey = coordinates
+        .map(({ ownerPubkey, agentPubkey }) => `${ownerPubkey}:${agentPubkey}`)
+        .sort()
+        .join("|");
+      if (nextKey === coordinateKey) return;
+      coordinateKey = nextKey;
+      policyStop();
+      policyStop = startRelayAgentPolicyRefresh(
+        coordinates,
+        refreshPolicyDirectory,
+      );
+    };
+    resubscribePolicy();
+    const unsubscribeQueryCache = queryClient
+      .getQueryCache()
+      .subscribe((event) => {
+        if (
+          event.query.queryKey.length === relayAgentsQueryKey.length &&
+          event.query.queryKey.every(
+            (value: unknown, index: number) =>
+              value === relayAgentsQueryKey[index],
+          )
+        ) {
+          resubscribePolicy();
+        }
+      });
 
     return () => {
+      policyDisposed = true;
       if (timer !== undefined) clearTimeout(timer);
-      if (relayAgentPolicyTimer !== undefined)
-        clearTimeout(relayAgentPolicyTimer);
+      if (policyTimer !== undefined) clearTimeout(policyTimer);
       void unlisten.then((fn) => fn());
       void unlistenRuntime.then((fn) => fn());
-      stopRelayAgentPolicyRefresh();
+      unsubscribeQueryCache();
+      policyStop();
     };
   }, [queryClient]);
 }

@@ -78,7 +78,6 @@ import {
 import {
   agentAiConfigurationModeSatisfied,
   agentAiConfigurationPairForMode,
-  agentAiConfigurationSubmitBlockReason,
   initialAgentAiConfigurationMode,
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
@@ -490,11 +489,6 @@ export function AgentDefinitionDialog({
     { provider, model },
     runtimeCanChooseLlmProvider,
   );
-  const submitBlockReason = agentAiConfigurationSubmitBlockReason(
-    aiConfigurationMode,
-    { provider, model },
-    runtimeCanChooseLlmProvider,
-  );
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
     selectedRuntime?.availability === "available";
@@ -739,7 +733,6 @@ export function AgentDefinitionDialog({
       isPending={isPending}
       onCancel={() => handleOpenChange(false)}
       publishesCatalogUpdates={publishCatalogUpdatesOnSave && hasUserChanges}
-      submitBlockReason={submitBlockReason}
       submitLabel={submitLabel}
     />
   );

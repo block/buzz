@@ -146,7 +146,10 @@ fn reconcile_inbound_persona_event_blocking(
         agent_events::managed_agent_content_from_event,
         load_managed_agents, load_teams,
         persona_events::persona_from_event,
-        retention::{open_retention_db, retain_inbound_event, InboundOutcome, RetainedEvent},
+        retention::{
+            inbound_event_outcome, open_retention_db, retain_inbound_event, InboundOutcome,
+            RetainedEvent,
+        },
         save_managed_agents, save_teams,
         team_events::team_content_from_event,
     };
@@ -214,19 +217,28 @@ fn reconcile_inbound_persona_event_blocking(
         return Ok(None);
     };
     let conn = open_retention_db(&scope.db_path)?;
-    let outcome = retain_inbound_event(
-        &conn,
-        &RetainedEvent {
-            kind,
-            pubkey: event.pubkey.to_hex(),
-            d_tag: d_tag.clone(),
-            content: event.content.to_string(),
-            created_at: event.created_at.as_secs() as i64,
-            raw_event: event.as_json(),
-            pending_sync: false,
-        },
-    )?;
-    if outcome == InboundOutcome::Skipped {
+    let inbound_retained_event = RetainedEvent {
+        kind,
+        pubkey: event.pubkey.to_hex(),
+        d_tag: d_tag.clone(),
+        content: event.content.to_string(),
+        created_at: event.created_at.as_secs() as i64,
+        raw_event: event.as_json(),
+        pending_sync: false,
+    };
+    // Managed-agent access changes can fail while stopping a runtime. Preflight
+    // the retention decision now, but do not advance the durable head until the
+    // local store has been saved; otherwise replay sees the failed revocation as
+    // already consumed and can never retry it. Persona/team paths retain first
+    // as before because they have no fallible runtime transition.
+    if kind == KIND_MANAGED_AGENT
+        && inbound_event_outcome(&conn, &inbound_retained_event)? == InboundOutcome::Skipped
+    {
+        return Ok(None);
+    }
+    if kind != KIND_MANAGED_AGENT
+        && retain_inbound_event(&conn, &inbound_retained_event)? == InboundOutcome::Skipped
+    {
         return Ok(None);
     }
 
@@ -303,6 +315,8 @@ fn reconcile_inbound_persona_event_blocking(
                 }
             }
             save_managed_agents(&app, &agents)?;
+            let outcome = retain_inbound_event(&conn, &inbound_retained_event)?;
+            debug_assert_eq!(outcome, InboundOutcome::Applied);
         }
         _ => unreachable!("kind gated above"),
     }

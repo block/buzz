@@ -11,7 +11,6 @@ export function useCanonicalManagedAgentProfile(input: {
   currentPubkey: string | undefined;
   managedAgents: readonly ManagedAgent[] | undefined;
   personaId: string | undefined;
-  preferDirectManagedAgent?: boolean;
   preserveRequestedInstance?: boolean;
   pubkey: string | undefined;
 }) {
@@ -19,7 +18,6 @@ export function useCanonicalManagedAgentProfile(input: {
     currentPubkey,
     managedAgents,
     personaId,
-    preferDirectManagedAgent = false,
     preserveRequestedInstance = false,
     pubkey,
   } = input;
@@ -52,16 +50,10 @@ export function useCanonicalManagedAgentProfile(input: {
   }, [directManagedAgent, linkedPersonaId, managedAgents]);
   const managedAgent = React.useMemo(
     () =>
-      (preserveRequestedInstance || preferDirectManagedAgent) &&
-      directManagedAgent
+      preserveRequestedInstance && directManagedAgent
         ? directManagedAgent
         : (pickProfileAgent(personaInstances) ?? directManagedAgent),
-    [
-      directManagedAgent,
-      personaInstances,
-      preferDirectManagedAgent,
-      preserveRequestedInstance,
-    ],
+    [directManagedAgent, personaInstances, preserveRequestedInstance],
   );
 
   return { linkedPersonaId, managedAgent, personaInstances };
