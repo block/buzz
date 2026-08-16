@@ -579,6 +579,31 @@ test("starter matching never absorbs a user agent that shares the Fizz persona",
   }
 });
 
+test("the retired built-in Fizz match pins the exact stock name", () => {
+  // Mutation-sensitive: the identity check is `name === stockName`. A
+  // case-folded or whitespace-padded comparison would absorb user-customized
+  // records in a demoted retired team — both mutations must go red here.
+  const fizz = WELCOME_TEAM_STARTERS[0];
+  const caseFolded = makeAgent({
+    name: WELCOME_GUIDE_AGENT_NAME.toUpperCase(),
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    teamId: RETIRED_WELCOME_FIZZ_TEAM_ID,
+  });
+  const padded = makeAgent({
+    name: ` ${WELCOME_GUIDE_AGENT_NAME} `,
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    teamId: RETIRED_WELCOME_FIZZ_TEAM_ID,
+  });
+
+  for (const customized of [caseFolded, padded]) {
+    assert.equal(
+      pickWelcomeTeamStarterAgentForRelay([customized], fizz, RELAY_A),
+      null,
+      `${JSON.stringify(customized.name)} must not be absorbed as the retired built-in Fizz`,
+    );
+  }
+});
+
 test("a credentialed or fragmented pin takes the malformed fallback, not an exact match", () => {
   // buzz-core rejects credentials and fragments outright; if the desktop
   // helper silently stripped them, `wss://user@relay.example` would

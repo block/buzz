@@ -124,7 +124,7 @@ function isRetiredWelcomeFizzAgent(agent: ManagedAgent) {
   return (
     agent.teamId === RETIRED_WELCOME_FIZZ_TEAM_ID &&
     agent.personaId === WELCOME_GUIDE_PERSONA_ID &&
-    agent.name.trim().toLowerCase() === WELCOME_GUIDE_AGENT_NAME.toLowerCase()
+    agent.name === WELCOME_GUIDE_AGENT_NAME
   );
 }
 
