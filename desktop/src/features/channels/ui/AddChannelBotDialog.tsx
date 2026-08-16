@@ -16,7 +16,10 @@ import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
 import { AddChannelBotRelayAgentsSection } from "@/features/channels/ui/AddChannelBotRelayAgentsSection";
 import { AddChannelBotTeamsSection } from "@/features/channels/ui/AddChannelBotTeamsSection";
-import { useAddChannelMembersMutation, useChannelMembersQuery } from "@/features/channels/hooks";
+import {
+  useAddChannelMembersMutation,
+  useChannelMembersQuery,
+} from "@/features/channels/hooks";
 import { useInChannelPersonaIds } from "@/features/channels/ui/useInChannelPersonaIds";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -119,20 +122,40 @@ export function AddChannelBotDialog({
     (relayAgentsQuery.data ?? []).map((agent) => agent.pubkey),
     { enabled: open && (relayAgentsQuery.data?.length ?? 0) > 0 },
   );
+  const relaySourceError =
+    identityQuery.error ??
+    managedAgentsQuery.error ??
+    relayAgentsQuery.error ??
+    relayAgentProfilesQuery.error ??
+    channelMembersQuery.error;
+  const relaySourcesReady =
+    relaySourceError === null &&
+    identityQuery.data !== undefined &&
+    managedAgentsQuery.data !== undefined &&
+    relayAgentsQuery.data !== undefined &&
+    ((relayAgentsQuery.data?.length ?? 0) === 0 ||
+      relayAgentProfilesQuery.data !== undefined) &&
+    channelMembersQuery.data !== undefined;
   const relayAgents = React.useMemo(
     () =>
-      getRelayAgentPickerCandidates({
-        currentPubkey: identityQuery.data?.pubkey,
-        managedAgentPubkeys: localManagedAgentPubkeys,
-        memberPubkeys: [],
-        profiles: relayAgentProfilesQuery.data?.profiles ?? {},
-        relayAgents: relayAgentsQuery.data ?? [],
-      }).map((candidate) => candidate.agent),
+      !relaySourcesReady
+        ? []
+        : getRelayAgentPickerCandidates({
+            currentPubkey: identityQuery.data?.pubkey,
+            managedAgentPubkeys: localManagedAgentPubkeys,
+            memberPubkeys: (channelMembersQuery.data ?? []).map(
+              (member) => member.pubkey,
+            ),
+            profiles: relayAgentProfilesQuery.data?.profiles ?? {},
+            relayAgents: relayAgentsQuery.data ?? [],
+          }).map((candidate) => candidate.agent),
     [
+      channelMembersQuery.data,
       identityQuery.data?.pubkey,
       localManagedAgentPubkeys,
       relayAgentProfilesQuery.data,
       relayAgentsQuery.data,
+      relaySourcesReady,
     ],
   );
   const inChannelPubkeys = React.useMemo(
@@ -169,7 +192,8 @@ export function AddChannelBotDialog({
     );
     setSelectedRelayAgentPubkeys((current) =>
       current.filter(
-        (pubkey) => eligiblePubkeys.has(pubkey) && !inChannelPubkeys.has(pubkey),
+        (pubkey) =>
+          eligiblePubkeys.has(pubkey) && !inChannelPubkeys.has(pubkey),
       ),
     );
   }, [inChannelPubkeys, relayAgents]);
@@ -209,7 +233,8 @@ export function AddChannelBotDialog({
   }
 
   async function handleSubmit() {
-    if (selectedPersonas.length === 0 && selectedRelayAgents.length === 0) return;
+    if (selectedPersonas.length === 0 && selectedRelayAgents.length === 0)
+      return;
     if (selectedPersonas.length > 0 && providers.length === 0) return;
 
     const inputs = selectedPersonas.map((persona) => {
@@ -235,56 +260,93 @@ export function AddChannelBotDialog({
     setSubmissionNotice(null);
     setSubmissionError(null);
 
-    try {
-      const relayResult =
-        selectedRelayAgents.length > 0
-          ? await addMembersMutation.mutateAsync({
-              pubkeys: selectedRelayAgents.map((agent) => agent.pubkey),
-              role: "bot",
-            })
-          : { added: [], errors: [] };
-      const result =
-        inputs.length > 0
-          ? await createBotsMutation.mutateAsync(inputs)
-          : { successes: [], failures: [] };
-      const relayAgentsByPubkey = new Map<string, RelayAgent>(
-        selectedRelayAgents.map((agent) => [normalizePubkey(agent.pubkey), agent]),
-      );
-      const relayFailures = relayResult.errors.map(({ pubkey, error }) => ({
-        name: relayAgentsByPubkey.get(normalizePubkey(pubkey))?.name ?? pubkey,
-        error,
-      }));
-      const failures = [...result.failures, ...relayFailures];
-      if (failures.length === 0) {
-        if (result.successes[0]) onAdded?.(result.successes[0]);
-        handleOpenChange(false);
-        return;
-      }
+    let relayResult: {
+      added: string[];
+      errors: { pubkey: string; error: string }[];
+    } = { added: [], errors: [] };
+    let result: Awaited<ReturnType<typeof createBotsMutation.mutateAsync>> = {
+      successes: [],
+      failures: [],
+    };
+    let relayTransportError: string | null = null;
+    let managedTransportError: string | null = null;
 
-      const failedPersonaIds = new Set(
-        result.failures
-          .map((failure) => failure.personaId)
-          .filter((personaId): personaId is string => Boolean(personaId)),
-      );
-      setSelectedPersonaIds((current) =>
-        current.filter((personaId) => failedPersonaIds.has(personaId)),
-      );
-      const failedRelayPubkeys = new Set(
-        relayResult.errors.map(({ pubkey }) => normalizePubkey(pubkey)),
-      );
-      setSelectedRelayAgentPubkeys((current) =>
-        current.filter((pubkey) => failedRelayPubkeys.has(pubkey)),
-      );
-      const successCount = result.successes.length + relayResult.added.length;
-      if (successCount > 0) {
-        setSubmissionNotice(
-          `Added ${successCount} ${formatAgentCountLabel(successCount)}.`,
-        );
+    if (selectedRelayAgents.length > 0) {
+      try {
+        relayResult = await addMembersMutation.mutateAsync({
+          pubkeys: selectedRelayAgents.map((agent) => agent.pubkey),
+          role: "bot",
+        });
+      } catch (error) {
+        relayTransportError =
+          error instanceof Error ? error.message : "Failed to add relay agents";
       }
-      setSubmissionError(formatBatchFailureSummary(failures));
-    } catch {
-      // The mutation error is rendered inline.
     }
+    if (inputs.length > 0) {
+      try {
+        result = await createBotsMutation.mutateAsync(inputs);
+      } catch (error) {
+        managedTransportError =
+          error instanceof Error
+            ? error.message
+            : "Failed to add managed agents";
+      }
+    }
+
+    const relayAgentsByPubkey = new Map<string, RelayAgent>(
+      selectedRelayAgents.map((agent) => [
+        normalizePubkey(agent.pubkey),
+        agent,
+      ]),
+    );
+    const relayFailures = relayResult.errors.map(({ pubkey, error }) => ({
+      name: relayAgentsByPubkey.get(normalizePubkey(pubkey))?.name ?? pubkey,
+      error,
+    }));
+    const failures = [...result.failures, ...relayFailures];
+    if (
+      failures.length === 0 &&
+      relayTransportError === null &&
+      managedTransportError === null
+    ) {
+      if (result.successes[0]) onAdded?.(result.successes[0]);
+      handleOpenChange(false);
+      return;
+    }
+
+    const failedPersonaIds = new Set(
+      managedTransportError
+        ? selectedPersonaIds
+        : result.failures
+            .map((failure) => failure.personaId)
+            .filter((personaId): personaId is string => Boolean(personaId)),
+    );
+    setSelectedPersonaIds((current) =>
+      current.filter((personaId) => failedPersonaIds.has(personaId)),
+    );
+    const failedRelayPubkeys = new Set(
+      relayTransportError
+        ? selectedRelayAgentPubkeys
+        : relayResult.errors.map(({ pubkey }) => normalizePubkey(pubkey)),
+    );
+    setSelectedRelayAgentPubkeys((current) =>
+      current.filter((pubkey) => failedRelayPubkeys.has(pubkey)),
+    );
+    const successCount = result.successes.length + relayResult.added.length;
+    if (successCount > 0) {
+      setSubmissionNotice(
+        `Added ${successCount} ${formatAgentCountLabel(successCount)}.`,
+      );
+    }
+    setSubmissionError(
+      [
+        failures.length > 0 ? formatBatchFailureSummary(failures) : null,
+        relayTransportError,
+        managedTransportError,
+      ]
+        .filter((message): message is string => Boolean(message))
+        .join("; "),
+    );
   }
 
   const canSubmit =
@@ -294,7 +356,8 @@ export function AddChannelBotDialog({
     !createBotsMutation.isPending &&
     !addMembersMutation.isPending;
   const selectionCount = selectedPersonas.length + selectedRelayAgents.length;
-  const isSubmitting = createBotsMutation.isPending || addMembersMutation.isPending;
+  const isSubmitting =
+    createBotsMutation.isPending || addMembersMutation.isPending;
   const addButtonLabel = isSubmitting
     ? selectionCount > 1
       ? `Adding ${selectionCount}…`
@@ -353,13 +416,11 @@ export function AddChannelBotDialog({
         <AddChannelBotRelayAgentsSection
           canToggleSelections={!isSubmitting}
           inChannelPubkeys={inChannelPubkeys}
-          isLoading={
-            relayAgentsQuery.isLoading ||
-            relayAgentProfilesQuery.isLoading ||
-            channelMembersQuery.isLoading
-          }
+          isLoading={!relaySourcesReady && relaySourceError === null}
           onToggleAgent={(pubkey) => {
-            setSelectedRelayAgentPubkeys((current) => toggleValue(current, pubkey));
+            setSelectedRelayAgentPubkeys((current) =>
+              toggleValue(current, pubkey),
+            );
             setSubmissionNotice(null);
             setSubmissionError(null);
           }}
@@ -370,7 +431,7 @@ export function AddChannelBotDialog({
 
         {teams.length > 0 ? (
           <AddChannelBotTeamsSection
-            canToggleSelections={!createBotsMutation.isPending}
+            canToggleSelections={!isSubmitting}
             inChannelPersonaIds={inChannelPersonaIds}
             isLoading={teamsQuery.isLoading}
             onToggleTeam={handleToggleTeam}
@@ -380,7 +441,9 @@ export function AddChannelBotDialog({
           />
         ) : null}
 
-        {providers.length === 0 && selectedPersonas.length > 0 && !providersLoading ? (
+        {providers.length === 0 &&
+        selectedPersonas.length > 0 &&
+        !providersLoading ? (
           <div className="flex gap-3 rounded-lg border border-warning/30 bg-warning-bg px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <p className="text-sm text-warning">
@@ -399,6 +462,11 @@ export function AddChannelBotDialog({
             {personasQuery.error.message}
           </p>
         ) : null}
+        {relaySourceError instanceof Error ? (
+          <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            Relay agents are unavailable: {relaySourceError.message}
+          </p>
+        ) : null}
         {submissionNotice ? (
           <p className="rounded-lg bg-muted px-4 py-3 text-sm text-foreground">
             {submissionNotice}
@@ -408,13 +476,11 @@ export function AddChannelBotDialog({
           <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {submissionError}
           </p>
-        ) : null}
-        {createBotsMutation.error instanceof Error ? (
+        ) : createBotsMutation.error instanceof Error ? (
           <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {createBotsMutation.error.message}
           </p>
-        ) : null}
-        {addMembersMutation.error instanceof Error ? (
+        ) : addMembersMutation.error instanceof Error ? (
           <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {addMembersMutation.error.message}
           </p>

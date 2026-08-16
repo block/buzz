@@ -925,6 +925,7 @@ mod tests {
         assert_eq!(parsed[0].channels, Vec::<String>::new());
         assert_eq!(parsed[0].capabilities, Vec::<String>::new());
         assert_eq!(parsed[0].status, "offline");
+        assert_eq!(parsed[0].channel_add_policy.as_deref(), Some("owner-only"));
         assert_eq!(parsed[0].respond_to, None);
     }
 

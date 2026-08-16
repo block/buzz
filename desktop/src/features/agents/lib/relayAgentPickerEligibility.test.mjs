@@ -19,6 +19,7 @@ function agent(pubkey, name) {
     channelIds: [],
     capabilities: ["messages", "channels", "tools"],
     status: "online",
+    channelAddPolicy: null,
     respondTo: "anyone",
     respondToAllowlist: [],
   };
@@ -112,6 +113,22 @@ test("returns no candidates until identity and ownership profiles resolve", () =
       memberPubkeys: [],
       profiles: {},
       relayAgents: [agent(OWNED, "Sigma")],
+    }),
+    [],
+  );
+});
+
+test("excludes agents whose channel-add policy is nobody", () => {
+  const blocked = agent(OWNED, "Sigma");
+  blocked.channelAddPolicy = "nobody";
+
+  assert.deepEqual(
+    getRelayAgentPickerCandidates({
+      currentPubkey: OWNER,
+      managedAgentPubkeys: [],
+      memberPubkeys: [],
+      profiles: { [OWNED]: profile(OWNER, "Sigma") },
+      relayAgents: [blocked],
     }),
     [],
   );

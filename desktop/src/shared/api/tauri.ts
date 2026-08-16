@@ -106,6 +106,7 @@ type RawRelayAgent = {
   channel_ids: string[];
   capabilities: string[];
   status: RelayAgent["status"];
+  channel_add_policy?: string;
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
@@ -662,6 +663,7 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
     channelIds: agent.channel_ids ?? [],
     capabilities: agent.capabilities,
     status: agent.status,
+    channelAddPolicy: agent.channel_add_policy ?? null,
     respondTo: agent.respond_to ?? null,
     respondToAllowlist: agent.respond_to_allowlist ?? [],
   };

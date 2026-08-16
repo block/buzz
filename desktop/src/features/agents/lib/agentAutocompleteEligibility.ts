@@ -83,11 +83,12 @@ export function getMentionableAgentPubkeys({
 }
 
 export function isAgentIdentityInAllowedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
   allowedAgentPubkeys: ReadonlySet<string>,
 ) {
   return (
     candidate.isAgent !== true ||
+    candidate.isMember === true ||
     allowedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
   );
 }
@@ -96,6 +97,7 @@ export type AgentMentionAdmission = "allow" | "deny" | "unknown";
 
 export function getAgentMentionAdmission({
   isAgent,
+  isMember,
   isManagedAgent,
   pubkey,
   ownerPubkey,
@@ -105,6 +107,7 @@ export function getAgentMentionAdmission({
   ownerOnly,
 }: {
   isAgent: boolean;
+  isMember?: boolean;
   isManagedAgent: boolean;
   pubkey: string;
   ownerPubkey?: string | null;
@@ -114,6 +117,9 @@ export function getAgentMentionAdmission({
   ownerOnly: boolean | undefined;
 }): AgentMentionAdmission {
   if (!isAgent) return "allow";
+  // Authoritative room membership is the invitation boundary. Once an agent
+  // has been added here it remains addressable while directory metadata catches up.
+  if (isMember === true) return "allow";
   if (!directoryReady || ownerOnly === undefined) return "unknown";
 
   const normalized = normalizePubkey(pubkey);
@@ -128,6 +134,7 @@ export function getAgentMentionAdmission({
 
 export function shouldHideAgentFromMentions({
   isAgent,
+  isMember = false,
   isManagedAgent = false,
   pubkey,
   ownerPubkey,
@@ -137,6 +144,7 @@ export function shouldHideAgentFromMentions({
   ownerOnly,
 }: {
   isAgent: boolean;
+  isMember?: boolean;
   isManagedAgent?: boolean;
   pubkey: string;
   ownerPubkey?: string | null;
@@ -148,6 +156,7 @@ export function shouldHideAgentFromMentions({
   return (
     getAgentMentionAdmission({
       isAgent,
+      isMember,
       isManagedAgent,
       pubkey,
       ownerPubkey,

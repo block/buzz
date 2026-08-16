@@ -1,7 +1,4 @@
-import type {
-  RelayAgent,
-  UserProfileSummary,
-} from "@/shared/api/types";
+import type { RelayAgent, UserProfileSummary } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type RelayAgentPickerCandidate = {
@@ -55,6 +52,7 @@ export function getRelayAgentPickerCandidates({
       seen.has(pubkey) ||
       managed.has(pubkey) ||
       members.has(pubkey) ||
+      agent.channelAddPolicy?.replaceAll("-", "_").toLowerCase() === "nobody" ||
       ownerPubkey !== normalizedCurrentPubkey
     ) {
       continue;
@@ -69,5 +67,9 @@ export function getRelayAgentPickerCandidates({
     });
   }
 
-  return candidates;
+  return candidates.sort((left, right) =>
+    left.displayName.localeCompare(right.displayName, undefined, {
+      sensitivity: "base",
+    }),
+  );
 }
