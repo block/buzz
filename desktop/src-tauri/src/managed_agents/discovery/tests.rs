@@ -139,6 +139,32 @@ fn explicit_path_resolution_ignores_non_executable_files() {
 }
 
 #[test]
+fn release_command_search_prefers_bundled_sidecars_over_workspace_outputs() {
+    let workspace = PathBuf::from("/source/buzz");
+    let current_dir = PathBuf::from("/working/directory");
+    let bundle_dir = PathBuf::from("/Applications/Command Adviser.app/Contents/MacOS");
+
+    let dirs = super::command_search_dirs_for(
+        &workspace,
+        Some(current_dir.as_path()),
+        Some(bundle_dir.as_path()),
+        false,
+    );
+
+    assert_eq!(dirs.first(), Some(&bundle_dir));
+    assert!(
+        dirs.iter()
+            .position(|dir| dir == &bundle_dir)
+            .expect("bundle directory")
+            < dirs
+                .iter()
+                .position(|dir| dir == &workspace.join("target/debug"))
+                .expect("workspace debug directory"),
+        "a release app must not launch a debug sidecar from its build worktree"
+    );
+}
+
+#[test]
 fn classifies_available_when_adapter_found() {
     let (status, cmd, path) = classify_runtime(
         Some(("goose", PathBuf::from("/usr/local/bin/goose"))),
