@@ -256,6 +256,7 @@ export function useMentions(
       if (
         shouldHideAgentFromMentions({
           isAgent: candidate.isAgent === true,
+          isMember: candidate.isMember === true,
           isManagedAgent: candidate.isManagedAgent === true,
           pubkey,
           ownerPubkey: candidate.ownerPubkey,

@@ -111,6 +111,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
             agent.status === "running" || agent.status === "deployed"
               ? "online"
               : "offline",
+          channelAddPolicy: null,
           respondTo: agent.respondTo,
           respondToAllowlist: agent.respondToAllowlist,
         });

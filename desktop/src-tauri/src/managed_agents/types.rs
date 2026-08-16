@@ -204,6 +204,8 @@ pub struct RelayAgentInfo {
     pub capabilities: Vec<String>,
     pub status: String,
     #[serde(default)]
+    pub channel_add_policy: Option<String>,
+    #[serde(default)]
     pub respond_to: Option<RespondTo>,
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,

@@ -255,6 +255,13 @@ test("isAgentIdentityInAllowedList: keeps people and only explicitly allowed age
     ),
     false,
   );
+  assert.equal(
+    isAgentIdentityInAllowedList(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      allowedAgentPubkeys,
+    ),
+    true,
+  );
 });
 
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
@@ -299,7 +306,7 @@ test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () =>
   );
 });
 
-test("shouldHideAgentFromMentions: hides member agents with an explicit not-invocable directory entry (Fizz)", () => {
+test("shouldHideAgentFromMentions: room membership overrides stale directory exclusion", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       ownerOnly: false,
@@ -309,11 +316,11 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
       mentionableAgentPubkeys: new Set(),
       directoryAgentPubkeys: new Set([PUB_A]),
     }),
-    true,
+    false,
   );
 });
 
-test("shouldHideAgentFromMentions: hides member agents without an affirmative directory grant", () => {
+test("shouldHideAgentFromMentions: room membership is sufficient without a directory grant", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       ownerOnly: false,
@@ -323,11 +330,11 @@ test("shouldHideAgentFromMentions: hides member agents without an affirmative di
       mentionableAgentPubkeys: new Set(),
       directoryAgentPubkeys: new Set(),
     }),
-    true,
+    false,
   );
 });
 
-test("shouldHideAgentFromMentions: hides unknown member agents while directories load", () => {
+test("shouldHideAgentFromMentions: room members remain available while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       ownerOnly: false,
@@ -338,11 +345,11 @@ test("shouldHideAgentFromMentions: hides unknown member agents while directories
       directoryAgentPubkeys: new Set(),
       directoryReady: false,
     }),
-    true,
+    false,
   );
 });
 
-test("shouldHideAgentFromMentions: hides mentionable member agents while directories load", () => {
+test("shouldHideAgentFromMentions: mentionable room members remain available while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       ownerOnly: false,
@@ -353,7 +360,7 @@ test("shouldHideAgentFromMentions: hides mentionable member agents while directo
       directoryAgentPubkeys: new Set(),
       directoryReady: false,
     }),
-    true,
+    false,
   );
 });
 
@@ -372,7 +379,7 @@ test("shouldHideAgentFromMentions: shows non-agent members while directories loa
   );
 });
 
-test("shouldHideAgentFromMentions: hides unknown member agents after empty directories settle", () => {
+test("shouldHideAgentFromMentions: room members remain available after empty directories settle", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       ownerOnly: false,
@@ -383,7 +390,7 @@ test("shouldHideAgentFromMentions: hides unknown member agents after empty direc
       directoryAgentPubkeys: new Set(),
       directoryReady: true,
     }),
-    true,
+    false,
   );
 });
 
@@ -408,12 +415,12 @@ test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
     shouldHideAgentFromMentions({
       ownerOnly: false,
       isAgent: true,
-      isMember: true,
+      isMember: false,
       pubkey: mixedCase,
-      mentionableAgentPubkeys: new Set(),
+      mentionableAgentPubkeys: new Set([normalized]),
       directoryAgentPubkeys: new Set([normalized]),
     }),
-    true,
+    false,
   );
 });
 
