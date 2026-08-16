@@ -38,6 +38,7 @@ pub enum McpHttpError {
 pub struct McpHttpClient {
     endpoint: Url,
     oauth: Option<WorldMonitorOAuthStore>,
+    sessioned: bool,
     client: reqwest::Client,
 }
 
@@ -47,6 +48,7 @@ impl fmt::Debug for McpHttpClient {
             .debug_struct("McpHttpClient")
             .field("endpoint", &self.endpoint)
             .field("oauth", &self.oauth.as_ref().map(|_| "configured"))
+            .field("sessioned", &self.sessioned)
             .finish_non_exhaustive()
     }
 }
@@ -65,16 +67,17 @@ impl McpHttpClient {
         {
             return Err(McpHttpError::InvalidEndpoint);
         }
-        Self::new_with_oauth(endpoint, Some(oauth))
+        Self::new_with_oauth(endpoint, Some(oauth), false)
     }
 
     pub fn new(endpoint: Url) -> Result<Self, McpHttpError> {
-        Self::new_with_oauth(endpoint, None)
+        Self::new_with_oauth(endpoint, None, true)
     }
 
     fn new_with_oauth(
         endpoint: Url,
         oauth: Option<WorldMonitorOAuthStore>,
+        sessioned: bool,
     ) -> Result<Self, McpHttpError> {
         let client = reqwest::Client::builder()
             .redirect(Policy::none())
@@ -84,6 +87,7 @@ impl McpHttpClient {
         Ok(Self {
             endpoint,
             oauth,
+            sessioned,
             client,
         })
     }
@@ -106,6 +110,60 @@ impl McpHttpClient {
             Some(store) => Some(store.bearer_token().await.map_err(map_oauth_error)?),
             None => None,
         };
+        if self.sessioned {
+            return self
+                .session_request(id, method, params, bearer.as_ref())
+                .await;
+        }
+        self.send_request(id, method, params, bearer.as_ref(), None)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    async fn session_request(
+        &self,
+        id: u64,
+        method: &str,
+        params: Value,
+        bearer: Option<&zeroize::Zeroizing<String>>,
+    ) -> Result<Value, McpHttpError> {
+        let (_, session_id) = self
+            .send_request(
+                1,
+                "initialize",
+                json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "buzz", "version": env!("CARGO_PKG_VERSION")}
+                }),
+                bearer,
+                None,
+            )
+            .await?;
+        let Some(session_id) = session_id else {
+            return self
+                .send_request(id, method, params, bearer, None)
+                .await
+                .map(|(result, _)| result);
+        };
+        self.send_notification("notifications/initialized", bearer, &session_id)
+            .await?;
+        let result = self
+            .send_request(id, method, params, bearer, Some(&session_id))
+            .await
+            .map(|(result, _)| result);
+        self.close_session(bearer, &session_id).await;
+        result
+    }
+
+    async fn send_request(
+        &self,
+        id: u64,
+        method: &str,
+        params: Value,
+        bearer: Option<&zeroize::Zeroizing<String>>,
+        session_id: Option<&str>,
+    ) -> Result<(Value, Option<String>), McpHttpError> {
         let mut request = self
             .client
             .post(self.endpoint.clone())
@@ -119,6 +177,9 @@ impl McpHttpClient {
             }));
         if let Some(bearer) = &bearer {
             request = request.header(AUTHORIZATION, format!("Bearer {}", bearer.as_str()));
+        }
+        if let Some(session_id) = session_id {
+            request = request.header("mcp-session-id", session_id);
         }
         let response = request.send().await.map_err(|error| {
             if error.is_timeout() {
@@ -138,6 +199,11 @@ impl McpHttpClient {
             status if !status.is_success() => return Err(McpHttpError::Unavailable),
             _ => {}
         }
+        let response_session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         if response
             .content_length()
             .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -167,7 +233,48 @@ impl McpHttpClient {
         } else {
             return Err(McpHttpError::InvalidResponse);
         };
-        parse_envelope(envelope, id)
+        parse_envelope(envelope, id).map(|result| (result, response_session_id))
+    }
+
+    async fn send_notification(
+        &self,
+        method: &str,
+        bearer: Option<&zeroize::Zeroizing<String>>,
+        session_id: &str,
+    ) -> Result<(), McpHttpError> {
+        let mut request = self
+            .client
+            .post(self.endpoint.clone())
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header(CONTENT_TYPE, "application/json")
+            .header("mcp-session-id", session_id)
+            .json(&json!({"jsonrpc": "2.0", "method": method, "params": {}}));
+        if let Some(bearer) = bearer {
+            request = request.header(AUTHORIZATION, format!("Bearer {}", bearer.as_str()));
+        }
+        let response = request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                McpHttpError::Timeout
+            } else {
+                McpHttpError::Unavailable
+            }
+        })?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(McpHttpError::Unavailable)
+        }
+    }
+
+    async fn close_session(&self, bearer: Option<&zeroize::Zeroizing<String>>, session_id: &str) {
+        let mut request = self
+            .client
+            .delete(self.endpoint.clone())
+            .header("mcp-session-id", session_id);
+        if let Some(bearer) = bearer {
+            request = request.header(AUTHORIZATION, format!("Bearer {}", bearer.as_str()));
+        }
+        let _ = request.send().await;
     }
 }
 
@@ -217,7 +324,101 @@ fn parse_envelope(envelope: Value, id: u64) -> Result<Value, McpHttpError> {
 mod tests {
     use super::*;
     use crate::oauth::{WorldMonitorOAuthCredentials, WorldMonitorOAuthStore};
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Json, Router,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use tempfile::tempdir;
+
+    async fn session_mcp_post(
+        State(stage): State<Arc<AtomicUsize>>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> axum::response::Response {
+        let method = body.get("method").and_then(Value::as_str);
+        let has_session = headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            == Some("test-session");
+        match (method, stage.load(Ordering::SeqCst), has_session) {
+            (Some("initialize"), 0, false) => {
+                stage.store(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [("mcp-session-id", "test-session")],
+                    Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "serverInfo": {"name": "session-test", "version": "1"}
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+            (Some("notifications/initialized"), 1, true) => {
+                stage.store(2, Ordering::SeqCst);
+                StatusCode::ACCEPTED.into_response()
+            }
+            (Some("tools/call"), 2, true) => {
+                stage.store(3, Ordering::SeqCst);
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"content": [{"type": "text", "text": "projected"}]}
+                }))
+                .into_response()
+            }
+            _ => StatusCode::BAD_REQUEST.into_response(),
+        }
+    }
+
+    async fn session_mcp_delete(
+        State(stage): State<Arc<AtomicUsize>>,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        let has_session = headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            == Some("test-session");
+        if stage.load(Ordering::SeqCst) == 3 && has_session {
+            stage.store(4, Ordering::SeqCst);
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        }
+    }
+
+    async fn stateless_mcp_post(Json(body): Json<Value>) -> axum::response::Response {
+        match body.get("method").and_then(Value::as_str) {
+            Some("initialize") => Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "serverInfo": {"name": "stateless-test", "version": "1"}
+                }
+            }))
+            .into_response(),
+            Some("tools/call") => Json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"content": [{"type": "text", "text": "retrieved"}]}
+            }))
+            .into_response(),
+            _ => StatusCode::BAD_REQUEST.into_response(),
+        }
+    }
 
     #[test]
     fn endpoint_accepts_only_https_world_monitor_mcp() {
@@ -273,6 +474,65 @@ mod tests {
         assert!(parse_envelope(parse_sse(sse).expect("SSE"), 2).is_ok());
         assert!(
             parse_envelope(json!({"jsonrpc":"2.0","id":2,"result":{"isError":true}}), 2).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_client_completes_streamable_http_session_before_tool_call() {
+        let stage = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/mcp", post(session_mcp_post).delete(session_mcp_delete))
+            .with_state(Arc::clone(&stage));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind session test server");
+        let address = listener.local_addr().expect("session test address");
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve session test server");
+        });
+        let endpoint = Url::parse(&format!("http://{address}/mcp")).expect("endpoint");
+        let client = McpHttpClient::new(endpoint).expect("local MCP client");
+
+        let result = client
+            .call_tool(
+                "record_projected_event",
+                json!({"source_event_id": "event-1"}),
+            )
+            .await
+            .expect("session-aware tool call");
+
+        assert_eq!(
+            result["content"][0]["text"],
+            Value::String("projected".to_string())
+        );
+        assert_eq!(stage.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn local_client_supports_stateless_mcp_servers_without_session_header() {
+        let router = Router::new().route("/mcp", post(stateless_mcp_post));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stateless test server");
+        let address = listener.local_addr().expect("stateless test address");
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve stateless test server");
+        });
+        let endpoint = Url::parse(&format!("http://{address}/mcp")).expect("endpoint");
+        let client = McpHttpClient::new(endpoint).expect("local MCP client");
+
+        let result = client
+            .call_tool("search_knowledge_base", json!({"query": "command"}))
+            .await
+            .expect("stateless tool call");
+
+        assert_eq!(
+            result["content"][0]["text"],
+            Value::String("retrieved".to_string())
         );
     }
 }
