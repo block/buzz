@@ -2757,6 +2757,55 @@ async fn tokio_main() -> Result<()> {
                                 // contain "!shutdown" from a non-owner.
                             }
 
+                            // Owner-only, mode-independent status lane. Exact
+                            // commands are answered by the harness so checking
+                            // progress never cancels, steers, or queues behind
+                            // the active model turn.
+                            let is_status = ["!status", "status", "status?"]
+                                .iter()
+                                .any(|command| {
+                                    is_owner_control_phrase(
+                                        &buzz_event.event,
+                                        kind_u32,
+                                        command,
+                                        &pubkey_hex,
+                                    )
+                                });
+                            if is_status {
+                                if let Some(owner) = owner_cache.get() {
+                                    if buzz_event.event.pubkey.to_hex() == *owner {
+                                        let active = queue
+                                            .is_channel_in_flight(buzz_event.channel_id);
+                                        let queued =
+                                            queue.queued_event_count(&buzz_event.channel_id);
+                                        let content = if active {
+                                            format!(
+                                                "Status: the current task is still running; {queued} follow-up request(s) are durably queued. Send !stop to stop the active task."
+                                            )
+                                        } else {
+                                            format!(
+                                                "Status: no task is currently running; {queued} request(s) are durably queued."
+                                            )
+                                        };
+                                        let thread_tags =
+                                            queue::parse_thread_tags(&buzz_event.event);
+                                        let rest = ctx.rest_client.clone();
+                                        let channel_id = buzz_event.channel_id;
+                                        tokio::spawn(async move {
+                                            pool::post_failure_notice(
+                                                &rest,
+                                                channel_id,
+                                                &thread_tags,
+                                                &content,
+                                            )
+                                            .await;
+                                        });
+                                        continue;
+                                    }
+                                }
+                                // Not from owner — fall through to normal prompt handling.
+                            }
+
                             // Mirrors !shutdown: kind:9, content "!cancel", from
                             // owner, mentions THIS agent. Must be BEFORE
                             // queue.push() — the event content is moved by push.
@@ -2764,12 +2813,16 @@ async fn tokio_main() -> Result<()> {
                             // Mode-independent: !cancel fires regardless of
                             // --multiple-event-handling. It is explicit user
                             // intent, not an automatic policy decision.
-                            let is_cancel = is_owner_control_command(
-                                &buzz_event.event,
-                                kind_u32,
-                                "!cancel",
-                                &pubkey_hex,
-                            );
+                            let is_cancel = ["!cancel", "!stop", "stop"]
+                                .iter()
+                                .any(|command| {
+                                    is_owner_control_phrase(
+                                        &buzz_event.event,
+                                        kind_u32,
+                                        command,
+                                        &pubkey_hex,
+                                    )
+                                });
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
@@ -2781,7 +2834,7 @@ async fn tokio_main() -> Result<()> {
                                         if !fired {
                                             tracing::warn!(
                                                 channel_id = %buzz_event.channel_id,
-                                                "!cancel received but no in-flight task — no-op"
+                                                "stop command received but no in-flight task — no-op"
                                             );
                                         }
                                         continue; // consume event — do NOT push to queue
@@ -3558,6 +3611,27 @@ fn is_owner_control_command(
         && event_mentions_agent(event, agent_pubkey_hex)
 }
 
+fn is_owner_control_phrase(
+    event: &nostr::Event,
+    kind_u32: u32,
+    command: &str,
+    agent_pubkey_hex: &str,
+) -> bool {
+    if kind_u32 != KIND_STREAM_MESSAGE || !event_mentions_agent(event, agent_pubkey_hex) {
+        return false;
+    }
+    let content = event.content.trim();
+    if content.eq_ignore_ascii_case(command) {
+        return true;
+    }
+    let mut words = content.split_whitespace();
+    matches!(
+        (words.next(), words.next(), words.next()),
+        (Some(mention), Some(candidate), None)
+            if mention.starts_with('@') && candidate.eq_ignore_ascii_case(command)
+    )
+}
+
 // ── signal_in_flight_task ─────────────────────────────────────────────────────
 
 /// Decide which [`ControlSignal`] (if any) to send to an in-flight turn when a
@@ -3959,7 +4033,7 @@ fn handle_prompt_result(
                 tracing::error!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
-                    "dead-lettering batch after hard-cap timeout (no recent activity) — discarding {} events",
+                    "dead-lettering batch after hard-cap timeout (no recent activity) — retaining {} events in durable dead-letter storage",
                     batch.events.len(),
                 );
                 let content = format!(
@@ -3967,7 +4041,7 @@ fn handle_prompt_result(
                     config.max_turn_duration_secs
                 );
                 spawn_failure_notice(rest_client, &batch, content);
-                queue.finish_batch(&batch);
+                queue.dead_letter_batch(&batch, "hard-cap timeout without recent activity");
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
             } else if matches!(
                 result.outcome,
@@ -3986,7 +4060,7 @@ fn handle_prompt_result(
                         config.max_turn_duration_secs
                     );
                     spawn_failure_notice(rest_client, &dead, content);
-                    queue.finish_batch(&dead);
+                    queue.dead_letter_batch(&dead, "retry budget exhausted after hard-cap timeout");
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
@@ -4006,7 +4080,7 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
-                queue.finish_batch(&batch);
+                queue.dead_letter_batch(&batch, "non-retryable authentication error");
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -4021,7 +4095,7 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
-                queue.finish_batch(&dead);
+                queue.dead_letter_batch(&dead, "retry budget exhausted");
             }
         } else {
             tracing::debug!(
@@ -5326,6 +5400,26 @@ mod owner_control_command_tests {
             &keys,
         );
         assert!(unaddressed.is_err());
+    }
+
+    #[test]
+    fn owner_control_phrase_accepts_a_single_display_mention_prefix() {
+        let agent = "ab".repeat(32);
+        let prefixed = make_event(KIND_STREAM_MESSAGE, "@Jarvis status?", Some(&agent));
+        assert!(is_owner_control_phrase(
+            &prefixed,
+            KIND_STREAM_MESSAGE,
+            "status?",
+            &agent
+        ));
+
+        let conversational = make_event(KIND_STREAM_MESSAGE, "@Jarvis please stop", Some(&agent));
+        assert!(!is_owner_control_phrase(
+            &conversational,
+            KIND_STREAM_MESSAGE,
+            "stop",
+            &agent
+        ));
     }
 }
 

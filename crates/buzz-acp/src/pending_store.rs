@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredPendingEvent {
@@ -26,12 +26,23 @@ pub(crate) struct StoredPendingEvent {
 #[derive(Debug, Serialize, Deserialize)]
 struct StoreFile {
     version: u32,
-    events: BTreeMap<String, StoredPendingEvent>,
+    #[serde(default, alias = "events")]
+    pending: BTreeMap<String, StoredPendingEvent>,
+    #[serde(default)]
+    dead_letters: BTreeMap<String, StoredDeadLetter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredDeadLetter {
+    pending: StoredPendingEvent,
+    reason: String,
+    dead_lettered_at_nanos: u64,
 }
 
 pub(crate) struct PendingStore {
     path: PathBuf,
-    events: BTreeMap<String, StoredPendingEvent>,
+    pending: BTreeMap<String, StoredPendingEvent>,
+    dead_letters: BTreeMap<String, StoredDeadLetter>,
 }
 
 impl PendingStore {
@@ -41,7 +52,7 @@ impl PendingStore {
     }
 
     pub(crate) fn open_path(path: PathBuf) -> io::Result<Self> {
-        let events = match std::fs::read(&path) {
+        let (pending, dead_letters) = match std::fs::read(&path) {
             Ok(bytes) => {
                 let stored: StoreFile = serde_json::from_slice(&bytes).map_err(|error| {
                     io::Error::new(
@@ -49,7 +60,7 @@ impl PendingStore {
                         format!("invalid pending-work journal {}: {error}", path.display()),
                     )
                 })?;
-                if stored.version != STORE_VERSION {
+                if !matches!(stored.version, 1 | STORE_VERSION) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
@@ -59,30 +70,58 @@ impl PendingStore {
                         ),
                     ));
                 }
-                stored.events
+                let pending = stored
+                    .pending
+                    .into_iter()
+                    .map(|(id, event)| validate_stored_event(&path, id, event))
+                    .collect::<io::Result<BTreeMap<_, _>>>()?;
+                let dead_letters = stored
+                    .dead_letters
+                    .into_iter()
+                    .map(|(id, mut dead_letter)| {
+                        let (id, pending) = validate_stored_event(&path, id, dead_letter.pending)?;
+                        dead_letter.pending = pending;
+                        Ok((id, dead_letter))
+                    })
+                    .collect::<io::Result<BTreeMap<_, _>>>()?;
+                (pending, dead_letters)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                (BTreeMap::new(), BTreeMap::new())
+            }
             Err(error) => return Err(error),
         };
-        Ok(Self { path, events })
+        let mut store = Self {
+            path,
+            pending,
+            dead_letters,
+        };
+        if replay_dead_letters_requested() && !store.dead_letters.is_empty() {
+            let replayed = store.replay_all_dead_letters()?;
+            tracing::warn!(
+                replayed,
+                "replayed durable dead letters because BUZZ_ACP_REPLAY_DEAD_LETTERS is enabled"
+            );
+        }
+        Ok(store)
     }
 
     pub(crate) fn restored(&self) -> Vec<StoredPendingEvent> {
-        let mut events = self.events.values().cloned().collect::<Vec<_>>();
+        let mut events = self.pending.values().cloned().collect::<Vec<_>>();
         events.sort_by_key(|event| event.accepted_at_nanos);
         events
     }
 
     pub(crate) fn record(&mut self, event: StoredPendingEvent) -> io::Result<()> {
         let id = event.event.id.to_hex();
-        let previous = self.events.insert(id.clone(), event);
+        let previous = self.pending.insert(id.clone(), event);
         if let Err(error) = self.persist() {
             match previous {
                 Some(previous) => {
-                    self.events.insert(id, previous);
+                    self.pending.insert(id, previous);
                 }
                 None => {
-                    self.events.remove(&id);
+                    self.pending.remove(&id);
                 }
             }
             return Err(error);
@@ -93,16 +132,63 @@ impl PendingStore {
     pub(crate) fn remove<'a>(&mut self, ids: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
         let removed: Vec<(String, StoredPendingEvent)> = ids
             .into_iter()
-            .filter_map(|id| self.events.remove_entry(id))
+            .filter_map(|id| self.pending.remove_entry(id))
             .collect();
         if removed.is_empty() {
             return Ok(());
         }
         if let Err(error) = self.persist() {
-            self.events.extend(removed);
+            self.pending.extend(removed);
             return Err(error);
         }
         Ok(())
+    }
+
+    pub(crate) fn dead_letter<'a>(
+        &mut self,
+        ids: impl IntoIterator<Item = &'a str>,
+        reason: &str,
+    ) -> io::Result<usize> {
+        let old_pending = self.pending.clone();
+        let old_dead_letters = self.dead_letters.clone();
+        let now = unix_time_nanos();
+        let mut moved = 0;
+        for id in ids {
+            if let Some(pending) = self.pending.remove(id) {
+                self.dead_letters.insert(
+                    id.to_string(),
+                    StoredDeadLetter {
+                        pending,
+                        reason: reason.to_string(),
+                        dead_lettered_at_nanos: now,
+                    },
+                );
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            if let Err(error) = self.persist() {
+                self.pending = old_pending;
+                self.dead_letters = old_dead_letters;
+                return Err(error);
+            }
+        }
+        Ok(moved)
+    }
+
+    fn replay_all_dead_letters(&mut self) -> io::Result<usize> {
+        let old_pending = self.pending.clone();
+        let old_dead_letters = self.dead_letters.clone();
+        let replayed = self.dead_letters.len();
+        for (id, dead_letter) in std::mem::take(&mut self.dead_letters) {
+            self.pending.entry(id).or_insert(dead_letter.pending);
+        }
+        if let Err(error) = self.persist() {
+            self.pending = old_pending;
+            self.dead_letters = old_dead_letters;
+            return Err(error);
+        }
+        Ok(replayed)
     }
 
     fn persist(&self) -> io::Result<()> {
@@ -117,7 +203,8 @@ impl PendingStore {
         }
         let bytes = serde_json::to_vec(&StoreFile {
             version: STORE_VERSION,
-            events: self.events.clone(),
+            pending: self.pending.clone(),
+            dead_letters: self.dead_letters.clone(),
         })
         .map_err(io::Error::other)?;
         let temp = self.path.with_extension("json.tmp");
@@ -131,8 +218,54 @@ impl PendingStore {
         let mut file = options.open(&temp)?;
         std::io::Write::write_all(&mut file, &bytes)?;
         file.sync_all()?;
-        std::fs::rename(temp, &self.path)
+        std::fs::rename(temp, &self.path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
     }
+}
+
+fn validate_stored_event(
+    path: &Path,
+    id: String,
+    event: StoredPendingEvent,
+) -> io::Result<(String, StoredPendingEvent)> {
+    if id != event.event.id.to_hex() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "pending-work journal {} contains mismatched event id",
+                path.display()
+            ),
+        ));
+    }
+    event.event.verify().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "pending-work journal {} contains an invalid signed event: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    Ok((id, event))
+}
+
+fn unix_time_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
+fn replay_dead_letters_requested() -> bool {
+    std::env::var("BUZZ_ACP_REPLAY_DEAD_LETTERS").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
 fn pending_store_path(agent_pubkey: &str) -> io::Result<PathBuf> {
@@ -189,6 +322,48 @@ mod tests {
                 .restored()
                 .len(),
             0
+        );
+        std::fs::remove_dir_all(dir).expect("remove tempdir");
+    }
+
+    #[test]
+    fn dead_letters_are_retained_and_replayable() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-dead-letters-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        let path = dir.join("pending.json");
+        let mut store = PendingStore::open_path(path.clone()).expect("open");
+        let event = event("retry me later");
+        let id = event.id.to_hex();
+        store
+            .record(StoredPendingEvent {
+                channel_id: Uuid::new_v4(),
+                event,
+                prompt_tag: "@mention".into(),
+                accepted_at_nanos: 1,
+            })
+            .expect("record");
+
+        assert_eq!(
+            store
+                .dead_letter([id.as_str()], "retry budget exhausted")
+                .expect("dead letter"),
+            1
+        );
+        assert!(store.restored().is_empty());
+        drop(store);
+
+        let mut reopened = PendingStore::open_path(path.clone()).expect("reopen");
+        assert!(reopened.restored().is_empty());
+        assert_eq!(reopened.replay_all_dead_letters().expect("replay"), 1);
+        assert_eq!(reopened.restored().len(), 1);
+        drop(reopened);
+
+        assert_eq!(
+            PendingStore::open_path(path)
+                .expect("final reopen")
+                .restored()
+                .len(),
+            1
         );
         std::fs::remove_dir_all(dir).expect("remove tempdir");
     }

@@ -100,7 +100,7 @@ treats both Claude ACP command names as the same zero-arg runtime.
 
 ## Configuration
 
-All configuration is via environment variables (or CLI flags — every env var has a matching flag).
+Configuration is via environment variables and CLI flags. Runtime queue-journal overrides are environment-only because they are operational recovery controls, not normal launch policy.
 
 ### Core
 
@@ -113,6 +113,8 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
+| `BUZZ_ACP_PENDING_STORE` | no | `$HOME/.local/state/buzz-acp/pending-<agent-pubkey>.json` | Override the per-agent durable pending/dead-letter journal path. |
+| `BUZZ_ACP_REPLAY_DEAD_LETTERS` | no | `false` | Move all retained dead letters back to pending work at startup. Enable for a deliberate replay, then unset it. |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
@@ -152,10 +154,11 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 | Command | Effect |
 |---------|--------|
 | `!shutdown` | Gracefully exits the harness. |
-| `!cancel` | Cancels the current in-flight turn for that channel, if any. |
+| `!status`, `status`, or `status?` | Reports whether a turn is active and how many follow-ups are queued without disturbing the active turn. A single leading display mention is accepted. |
+| `!cancel`, `!stop`, or `stop` | Cancels the current in-flight turn for that channel, if any. A single leading display mention is accepted. |
 | `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session. |
 
-Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
+Use `!cancel` or `!stop` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
 
 Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
 
@@ -255,11 +258,11 @@ Forum event kinds:
 3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
-6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
+6. **Recovery** — Accepted events are atomically journaled before the harness acknowledges them. A process restart restores unfinished work from that journal. Terminal failures remain in durable dead-letter storage for audit or deliberate replay. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events that were not yet accepted.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
 
-> **Note:** On startup, the harness replays all unprocessed @mentions since the last run. Expect a burst of activity if there are stale events in the channel.
+> **Note:** On startup, the harness replays unfinished accepted work from its per-agent journal. Set `BUZZ_ACP_REPLAY_DEAD_LETTERS=1` only for a deliberate dead-letter replay, then unset it to avoid replaying future failures after every restart.
 
 ## Bring Your Own Harness (BYOH)
 

@@ -315,6 +315,35 @@ impl EventQueue {
         self.remove_pending_ids(ids);
     }
 
+    /// Move every event in a terminally failed batch to durable dead-letter
+    /// storage. Dead letters are retained for audit and can be replayed on a
+    /// later startup with `BUZZ_ACP_REPLAY_DEAD_LETTERS=1`.
+    pub fn dead_letter_batch(&mut self, batch: &FlushBatch, reason: &str) {
+        let ids = batch
+            .events
+            .iter()
+            .chain(batch.cancelled_events.iter())
+            .map(|event| event.event.id.to_hex())
+            .collect::<Vec<_>>();
+        if let Some(store) = self.pending_store.as_mut() {
+            match store.dead_letter(ids.iter().map(String::as_str), reason) {
+                Ok(moved) => tracing::error!(
+                    channel_id = %batch.channel_id,
+                    events = moved,
+                    reason,
+                    "moved terminally failed events to durable dead-letter storage"
+                ),
+                Err(error) => tracing::error!(
+                    channel_id = %batch.channel_id,
+                    events = ids.len(),
+                    reason,
+                    %error,
+                    "failed to move terminally failed events to durable dead-letter storage; keeping them pending for restart recovery"
+                ),
+            }
+        }
+    }
+
     fn remove_pending_ids(&mut self, ids: impl IntoIterator<Item = String>) {
         let ids = ids.into_iter().collect::<Vec<_>>();
         if let Some(store) = self.pending_store.as_mut() {
@@ -512,7 +541,7 @@ impl EventQueue {
                 channel_id = %channel_id,
                 attempt,
                 events = batch.events.len(),
-                "dead-lettering batch after {} retries — discarding {} events",
+                "retry budget exhausted after {} retries — returning {} events for durable dead-letter handling",
                 MAX_RETRIES,
                 batch.events.len(),
             );
@@ -718,10 +747,15 @@ impl EventQueue {
             .collect()
     }
 
-    /// Number of queued events for a specific channel. Test-only.
-    #[cfg(test)]
+    /// Number of undispatched events for a specific channel across every
+    /// queue side table. Used by the owner `!status` control command and tests.
     pub fn queued_event_count(&self, channel_id: &Uuid) -> usize {
         self.queues.get(channel_id).map_or(0, |q| q.len())
+            + self.cancelled_batches.get(channel_id).map_or(0, Vec::len)
+            + self
+                .withheld_native_steer
+                .get(channel_id)
+                .map_or(0, Vec::len)
     }
 
     /// Force a channel's retry-attempt counter to `count`, simulating `count`
