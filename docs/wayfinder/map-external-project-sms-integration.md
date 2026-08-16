@@ -401,3 +401,75 @@ is inherited (`Claude Code cannot be launched inside another Claude Code
 session`). A harness launched from inside a Claude Code session must clear it,
 otherwise every `session/new` fails with a `-32603 Internal error` that looks
 like an ACP protocol fault rather than an environment guard.
+
+---
+
+## 2026-08-15: staging-infra durability + registration status
+
+### `sms-postgres` had no volume — fixed, with the dump/restore dance it required
+
+The Railway `sms-postgres` service stored `PGDATA` on the container's writable
+layer, so **any redeploy destroyed the allow-list, community, and channel rows**
+the whole SMS loop depends on. It now has `sms-postgres-volume` mounted at
+`/var/lib/postgresql/data` (`PGDATA=/var/lib/postgresql/data/pgdata`, i.e. the
+volume is the *parent* of the data directory — same shape as the project's other
+Postgres service).
+
+Attaching a volume cannot preserve the old data: Railway redeploys into a fresh
+container, and the empty volume masks the old path, so Postgres runs `initdb`
+and comes up blank. The data must leave the container first. Sequence that
+worked:
+
+1. `pg_dump -Fc` **inside** the container, then `base64 -w0` it to stdout and
+   decode locally — `sha256sum` on both ends to prove the transfer.
+2. Attach the volume (redeploy → empty database).
+3. Restore over a TCP proxy from the workstation.
+4. Verify by comparing a per-table row-count fingerprint before and after.
+
+Verified: `railway restart -s sms-postgres` now leaves all 62 tables, 34 events,
+and the single `sms_identities` row intact (`pg_postmaster_start_time()` confirms
+the process actually cycled — check that, not just that the query succeeded).
+
+### Gotchas hit while doing it
+
+- **`railway ssh` hangs on a piped command.** `railway ssh … cmd | head -40`
+  never returns. Redirect to a file instead. Separately, `psql` over `ssh` opens
+  its pager and blocks at `(END)` — always pass `-P pager=off`.
+- **Git Bash mangles POSIX mount paths.** `railway volume add -m
+  /var/lib/postgresql/data` fails with "Mount path must start with a `/`"
+  because MSYS rewrites the argument. Run it from PowerShell.
+- **`pg_restore` 18 cannot restore into a PG 16 server.** It emits
+  `SET transaction_timeout = 0`, which PG 16 rejects. Convert the archive to
+  plain SQL (`pg_restore -f`), drop that one line, and apply with
+  `psql --single-transaction -v ON_ERROR_STOP=1`.
+- **The service had no TCP proxy**, only an HTTP service domain — which cannot
+  carry the Postgres wire protocol, so `psql`/`pg_restore` had no route in. A
+  TCP proxy on 5432 now exists; the host/port land in the service's own
+  `RAILWAY_TCP_PROXY_DOMAIN` / `RAILWAY_TCP_PROXY_PORT` variables. Read
+  credentials from `railway variables --service sms-postgres --json` rather than
+  writing them to a file.
+- Creating the proxy through Railway's agent committed *environment-wide*
+  staged changes, which redeployed `buzz-relay-sms` as a side effect. Harmless
+  here (the relay is stateless), but do not assume the blast radius is one
+  service.
+
+### Registration status
+
+- **Toll-Free Verification** (`HHc479ad7cc921793b6ff255cdefc13ecd`, for
+  `+18449504722`): `IN_REVIEW`, no `error_code`, no `rejection_reason`.
+  `date_updated` is 3s after `date_created`, so no reviewer has acted yet. On
+  approval, set `TWILIO_FROM_NUMBER=+18449504722` — no code change.
+- **A2P 10DLC campaign** (`QE2c6890da8086d771620e9b13fadeba0b`): still `FAILED`,
+  error **30909** on `MESSAGE_FLOW`, and `date_updated == date_created`, meaning
+  it was never actually resubmitted after May. Twilio does not allow editing a
+  `FAILED` campaign — it must be deleted and re-created against the (already
+  `APPROVED`) brand `BNd246bfb461d29bb62e632bdcc9351434`.
+
+  **Why it failed:** the submitted message flow cited
+  `https://www.protelynx.ai/privacy` and `/sms-terms` but never a page showing
+  the call-to-action itself, so the reviewer had no artifact to verify.
+  `https://www.protelynx.ai/sms-opt-in` was published in July and now returns
+  200 — it is the missing evidence. Secondary drift worth correcting in the
+  same pass: the opt-in reply and message samples referenced "Hermes" and
+  "lenny" (internal names) while the brand and DBA say BuildBid, and the HELP
+  reply carried no brand name or support contact.
