@@ -5034,7 +5034,7 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
     }
-    vec![McpServer {
+    let mut servers = vec![McpServer {
         name: std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -5084,7 +5084,32 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             }
             env
         },
-    }]
+    }];
+
+    // Append extra MCP servers from BUZZ_ACP_EXTRA_MCP_COMMANDS.
+    // Each entry is split on whitespace into command + args.
+    // Extra servers do not receive Buzz relay credentials or auth tags —
+    // they are third-party tools, not Buzz-native MCP servers.
+    for extra in &config.extra_mcp_commands {
+        let parts: Vec<&str> = extra.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let command = parts[0].to_string();
+        let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+        servers.push(McpServer {
+            name: std::path::Path::new(&command)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("extra-mcp")
+                .to_string(),
+            command,
+            args,
+            env: vec![],
+        });
+    }
+
+    servers
 }
 
 #[cfg(test)]
@@ -6760,6 +6785,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            extra_mcp_commands: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -6947,6 +6973,85 @@ mod build_mcp_servers_tests {
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
     }
+
+    #[test]
+    fn extra_mcp_commands_append_additional_servers() {
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![
+            "npx -y mcp-remote https://mcp.tavily.com/mcp/?tavilyApiKey=test-key".into(),
+        ];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2, "primary + 1 extra = 2 servers");
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "npx");
+        assert_eq!(servers[1].command, "npx");
+        assert_eq!(
+            servers[1].args,
+            vec![
+                "-y",
+                "mcp-remote",
+                "https://mcp.tavily.com/mcp/?tavilyApiKey=test-key"
+            ]
+        );
+        // Extra servers should not receive Buzz relay credentials.
+        let env_names: Vec<&str> = servers[1].env.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !env_names.contains(&"BUZZ_RELAY_URL"),
+            "extra MCP servers should not get BUZZ_RELAY_URL"
+        );
+        assert!(
+            !env_names.contains(&"BUZZ_PRIVATE_KEY"),
+            "extra MCP servers should not get BUZZ_PRIVATE_KEY"
+        );
+    }
+
+    #[test]
+    fn multiple_extra_mcp_commands_append_in_order() {
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![
+            "brave-search-mcp".into(),
+            "npx -y mcp-remote https://mcp.tavily.com/mcp/".into(),
+        ];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 3, "primary + 2 extra = 3 servers");
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "brave-search-mcp");
+        assert_eq!(servers[2].name, "npx");
+    }
+
+    #[test]
+    fn empty_extra_mcp_commands_are_skipped() {
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![
+            "valid-server".into(),
+            "".into(),
+            "   ".into(),
+            "another-server arg1".into(),
+        ];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(
+            servers.len(),
+            3,
+            "primary + 2 valid extras (empty and whitespace-only skipped)"
+        );
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "valid-server");
+        assert_eq!(servers[1].args.len(), 0);
+        assert_eq!(servers[2].name, "another-server");
+        assert_eq!(servers[2].args, vec!["arg1"]);
+    }
+
+    #[test]
+    fn extra_mcp_commands_with_empty_mcp_command_returns_no_servers() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        config.extra_mcp_commands = vec!["some-extra-server".into()];
+        let servers = build_mcp_servers(&config);
+        assert!(
+            servers.is_empty(),
+            "empty primary mcp_command should still short-circuit even with extras"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6984,6 +7089,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            extra_mcp_commands: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
