@@ -25,12 +25,12 @@ async function withStorage(storage, run) {
   }
 }
 
-test("missing, malformed, and unreadable preferences default to split", async () => {
+test("missing, malformed, and unreadable preferences default to full", async () => {
   for (const stored of [null, "side-by-side", "{bad-json"]) {
     await withStorage(
       { getItem: (key) => (key === KEY ? stored : null), setItem() {} },
       ({ getThreadViewMode }) => {
-        assert.equal(getThreadViewMode(), "split");
+        assert.equal(getThreadViewMode(), "full");
       },
     );
   }
@@ -43,7 +43,7 @@ test("missing, malformed, and unreadable preferences default to split", async ()
       setItem() {},
     },
     ({ getThreadViewMode }) => {
-      assert.equal(getThreadViewMode(), "split");
+      assert.equal(getThreadViewMode(), "full");
     },
   );
 });

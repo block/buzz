@@ -7,25 +7,29 @@ import * as React from "react";
  *   leaving a narrow scrim-dimmed sliver of the channel visible as an
  *   orientation cue and a click-target back to the channel.
  * - `split` — the thread opens in a resizable side panel next to the channel.
+ * - `full` — the thread replaces the channel timeline in the main column
+ *   (the channel sidebar lives outside the pane, so it always stays visible).
+ *   The timeline stays mounted but hidden, so its scroll and composer state
+ *   survive closing the thread.
  *
  * Persisted in localStorage. This is a device-level UI preference, not
  * community-scoped data, so it is intentionally not reset on community switch.
  * Only applies at viewport widths wide enough for a two-pane channel view;
  * narrow viewports keep their single-panel/floating-overlay behavior.
  */
-export type ThreadViewMode = "focus" | "split";
+export type ThreadViewMode = "focus" | "split" | "full";
 
 const STORAGE_KEY = "buzz.channels.threadViewMode";
 
 /** Layout used when nothing is stored, or the stored value is unrecognized. */
-const DEFAULT_THREAD_VIEW_MODE: ThreadViewMode = "split";
+const DEFAULT_THREAD_VIEW_MODE: ThreadViewMode = "full";
 
 const listeners = new Set<() => void>();
 
 let threadViewMode = readStoredThreadViewMode();
 
 function parseThreadViewMode(value: string | null | undefined): ThreadViewMode {
-  return value === "focus" || value === "split"
+  return value === "focus" || value === "split" || value === "full"
     ? value
     : DEFAULT_THREAD_VIEW_MODE;
 }
@@ -73,7 +77,7 @@ export function setThreadViewMode(mode: ThreadViewMode): void {
   }
 }
 
-/** How threads should open in a channel: as a focus drawer or a split pane. */
+/** How threads should open in a channel: focus drawer, split pane, or full panel. */
 export function useThreadViewMode(): ThreadViewMode {
   return React.useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }

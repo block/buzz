@@ -666,6 +666,11 @@ const THREAD_VIEW_MODE_OPTIONS: {
   description: string;
 }[] = [
   {
+    value: "full",
+    label: "Full panel",
+    description: "Threads fill the whole panel; channels stay on the left",
+  },
+  {
     value: "focus",
     label: "Focus",
     description: "Threads open over the channel, full width",

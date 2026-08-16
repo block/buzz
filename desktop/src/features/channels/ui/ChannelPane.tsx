@@ -214,10 +214,22 @@ export const ChannelPane = React.memo(function ChannelPane({
     agentPubkeysPending && hasOtherDmParticipant(activeChannel, currentPubkey);
   const isActiveWelcomeChannel =
     activeChannel !== null && isWelcomeExperience(activeChannel);
+  const isOverlay = useIsThreadPanelOverlay();
+  const threadViewMode = useThreadViewMode();
+  // "full" thread mode: the open thread replaces the channel timeline in the
+  // main column (the channel sidebar lives outside ChannelPane, so it always
+  // stays visible). The timeline stays mounted but hidden, so its scroll and
+  // composer state survive closing the thread. Narrow viewports keep their
+  // overlay behavior regardless of this preference.
+  const threadFullPanel =
+    threadViewMode === "full" &&
+    !isOverlay &&
+    (threadHeadMessage != null || shouldShowThreadSkeleton);
+  const singlePanelLayout = isSinglePanelView || threadFullPanel;
   useComposerHeightPadding(
     timelineScrollRef,
     composerWrapperRef,
-    `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
+    `${activeChannelId}:${singlePanelLayout}:${hasMainComposerOverlay}`,
     "css-variable",
     () => messageTimelineRef.current?.settleAtBottom() ?? false,
   );
@@ -396,7 +408,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     hasMainComposerOverlay &&
     !isComposerDisabled &&
     !isMainDeferredEditPending &&
-    !isSinglePanelView;
+    !singlePanelLayout;
   const hasTypingActivity = typingPubkeys.length > 0;
   // Unified working set for the composer bar: observer-derived turns primary,
   // bot typing fallback (both folded together by agentWorkingSignal). This is
@@ -496,9 +508,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     threadHeadMessage,
   ]);
 
-  const isOverlay = useIsThreadPanelOverlay();
-  const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
-  const threadViewMode = useThreadViewMode();
+  const useSplitAuxiliaryPane = !singlePanelLayout && !isOverlay;
   const useFocusThreadDrawer =
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
@@ -562,13 +572,14 @@ export const ChannelPane = React.memo(function ChannelPane({
     ) : (
       wrapAux(panel, "message-thread-panel", { key: THREAD_SURFACE_KEY })
     );
-  const threadHeaderLeading = useSplitAuxiliaryPane ? (
-    <ThreadViewModeToggle onChange={changeThreadViewMode} />
-  ) : undefined;
+  const threadHeaderLeading =
+    useSplitAuxiliaryPane || (threadFullPanel && !isSinglePanelView) ? (
+      <ThreadViewModeToggle onChange={changeThreadViewMode} />
+    ) : undefined;
   const threadLayoutProps = getThreadPanelLayout({
     headerLeading: threadHeaderLeading,
     isFocusDrawer: useFocusThreadDrawer,
-    isSinglePanelView,
+    isSinglePanelView: singlePanelLayout,
     useSplitAuxiliaryPane,
   });
   const timelineReplyHandler =
@@ -584,15 +595,21 @@ export const ChannelPane = React.memo(function ChannelPane({
           className={cn(
             "pointer-events-none absolute inset-x-0 top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
             channelChrome.headerHeight,
+            threadFullPanel && "hidden",
           )}
           data-testid="channel-shared-header-backdrop"
         />
       ) : null}
 
+      {/* In "full" thread mode the timeline stays mounted (hidden) so its
+          scroll position and composer state survive closing the thread. */}
       {!isSinglePanelView ? (
         <section
           aria-label="Channel messages and composer"
-          className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+          className={cn(
+            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+            threadFullPanel && "hidden",
+          )}
           inert={channelIsCovered ? true : undefined}
           data-testid="channel-drop-zone"
           onDragEnter={
@@ -955,7 +972,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 }
                 channelId={effectiveAgentSessionChannelId}
                 isSinglePanelView={
-                  useSplitAuxiliaryPane ? false : isSinglePanelView
+                  useSplitAuxiliaryPane ? false : singlePanelLayout
                 }
                 layout={useSplitAuxiliaryPane ? "split" : "standalone"}
                 transparentChrome={useSplitAuxiliaryPane}
@@ -974,7 +991,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 currentPubkey={currentPubkey}
                 callerChannelId={activeChannelId}
                 isSinglePanelView={
-                  useSplitAuxiliaryPane ? false : isSinglePanelView
+                  useSplitAuxiliaryPane ? false : singlePanelLayout
                 }
                 layout={useSplitAuxiliaryPane ? "split" : "standalone"}
                 transparentChrome={useSplitAuxiliaryPane}

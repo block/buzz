@@ -1,4 +1,4 @@
-import { Columns2, PanelRightOpen } from "lucide-react";
+import { Columns2, PanelRightOpen, Square } from "lucide-react";
 
 import {
   type ThreadViewMode,
@@ -16,20 +16,27 @@ export function shouldRestoreThreadToggleFocus(clickDetail: number): boolean {
  * Both glyphs depict the layout the button switches *to*, never the current one.
  *
  * They also come from one family — each is a picture of a destination, not a verb
- * — because the user watches these two alternate in the same 28px slot. A diagram
+ * — because the user watches the cycle advance in the same 28px slot. A diagram
  * flipping to an action icon reads as two different controls sharing a position.
  *
- * `columns-2` depicts the split destination, while `panel-right-open` depicts
- * the thread expanding from its right-hand pane into the larger focus surface.
- * The latter preserves the thread's spatial origin without implying browser
- * fullscreen or a separate app window.
+ * `panel-right-open` depicts the thread expanding from its right-hand pane into
+ * the larger focus surface, `square` depicts the thread filling the whole main
+ * panel, and `columns-2` depicts the split destination. The first two preserve
+ * the thread's spatial origin without implying browser fullscreen or a separate
+ * app window.
  */
 const THREAD_VIEW_MODE_TOGGLE = {
-  focus: {
-    // Viewing the drawer → offer the pane.
+  full: {
+    // Viewing the full panel → offer the pane.
     icon: Columns2,
     label: "Show thread beside channel",
     target: "split",
+  },
+  focus: {
+    // Viewing the drawer → offer the full panel.
+    icon: Square,
+    label: "Fill the panel with the thread",
+    target: "full",
   },
   split: {
     // Viewing the pane → offer the drawer.

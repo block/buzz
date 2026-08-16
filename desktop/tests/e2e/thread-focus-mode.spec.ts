@@ -187,25 +187,50 @@ test("focus and split preserve reading context and interaction ownership", async
   });
   const anchorId = await topVisibleMessageId(body);
 
+  // The toggle cycles split → focus → full → split. From the focus drawer it
+  // offers the full panel first.
   const focusModeToggle = page.getByRole("button", {
-    name: "Show thread beside channel",
+    name: "Fill the panel with the thread",
   });
   await focusModeToggle.hover();
   await expect(
-    page.getByRole("tooltip", { name: "Show thread beside channel" }),
+    page.getByRole("tooltip", { name: "Fill the panel with the thread" }),
   ).toBeVisible();
   await focusModeToggle.click();
+
+  // Full mode: the drawer is gone, the channel timeline stays mounted but
+  // hidden, and the thread panel fills the main column.
   await expect(drawer).toHaveCount(0);
+  await expect(channel).toBeHidden();
+  await expect(channel).not.toHaveAttribute("inert", "");
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await expect(
+    body.locator(`[data-message-id="${anchorId}"]`),
+  ).toBeInViewport();
+
+  // The per-switch contract is "the reply being read stays visible": each
+  // switch preserves the top-visible row and centers it, so the reading
+  // anchor walks up a few rows per hop. Re-capture the top-visible row in
+  // the full panel — that is the row the split pane must preserve.
+  const fullAnchorId = await topVisibleMessageId(body);
+
+  // From the full panel the toggle offers the split pane.
+  const fullModeToggle = page.getByRole("button", {
+    name: "Show thread beside channel",
+  });
+  await fullModeToggle.click();
+  await expect(channel).toBeVisible();
   await expect(channel).not.toHaveAttribute("inert", "");
   await expectChannelHeaderUnobscured(page);
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   await expect(page.getByTestId("message-thread-body")).toBeFocused();
   await expect(summary).not.toBeFocused();
   await expect(
-    body.locator(`[data-message-id="${anchorId}"]`),
+    body.locator(`[data-message-id="${fullAnchorId}"]`),
   ).toBeInViewport();
   await expect(
-    body.locator(`[data-message-id="${anchorId}"]`),
+    body.locator(`[data-message-id="${fullAnchorId}"]`),
   ).not.toHaveAttribute("data-highlighted", "true");
 
   // Sidebar background dismissal belongs to the overlay presentation only.
@@ -214,6 +239,7 @@ test("focus and split preserve reading context and interaction ownership", async
     .evaluate((element) => (element as HTMLElement).click());
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
+  const splitAnchorId = await topVisibleMessageId(body);
   const splitModeToggle = page.getByRole("button", { name: "Expand thread" });
   await splitModeToggle.focus();
   await splitModeToggle.press("Enter");
@@ -221,7 +247,7 @@ test("focus and split preserve reading context and interaction ownership", async
   await expect(channel).toHaveAttribute("inert", "");
   await expect(page.getByTestId("thread-view-mode-toggle")).toBeFocused();
   await expect(
-    body.locator(`[data-message-id="${anchorId}"]`),
+    body.locator(`[data-message-id="${splitAnchorId}"]`),
   ).toBeInViewport();
 
   // Focus mode owns Escape even while the rich-text composer and one of its
