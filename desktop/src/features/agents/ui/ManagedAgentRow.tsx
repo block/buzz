@@ -24,6 +24,7 @@ import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { RestartDiffBadge } from "./RestartDiffBadge";
 
 export function ManagedAgentRow({
@@ -365,24 +366,52 @@ function CircuitOpenBadge({
   message: string | null;
 }) {
   const { goChannel } = useAppNavigation();
-  return (
-    <Badge
-      className={cn("gap-1", channelId && "cursor-pointer hover:opacity-80")}
-      data-testid="managed-agent-circuit-open"
-      title={message ?? undefined}
-      variant="destructive"
-      onClick={
-        channelId
-          ? (e) => {
-              e.stopPropagation();
-              void goChannel(channelId);
-            }
-          : undefined
+  const activate = channelId
+    ? () => {
+        void goChannel(channelId);
       }
-    >
-      <AlertTriangle className="h-3 w-3" />
-      Suspended — repeated crashes
-    </Badge>
+    : undefined;
+
+  return (
+    <Tooltip>
+      {/* asChild renders the trigger as the Badge's <span> — see
+          RestartDiffBadge for why this must stay a non-nested-interactive
+          element rather than a real <button>. */}
+      <TooltipTrigger asChild>
+        <Badge
+          className={cn("gap-1", activate && "cursor-pointer hover:opacity-80")}
+          data-testid="managed-agent-circuit-open"
+          role={activate ? "button" : undefined}
+          tabIndex={0}
+          variant="destructive"
+          onClick={
+            activate
+              ? (e) => {
+                  e.stopPropagation();
+                  activate();
+                }
+              : undefined
+          }
+          onKeyDown={
+            activate
+              ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    activate();
+                  }
+                }
+              : undefined
+          }
+        >
+          <AlertTriangle className="h-3 w-3" />
+          Suspended — repeated crashes
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72 text-xs" side="bottom">
+        {message ?? "Agent suspended (repeated crashes)."}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

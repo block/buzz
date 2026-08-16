@@ -17,6 +17,7 @@ import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelConte
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { Badge } from "@/shared/ui/badge";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
@@ -220,6 +221,39 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   );
 }
 
+/**
+ * Purely informational (no click action — the card itself already opens the
+ * agent's profile), so unlike ManagedAgentRow's CircuitOpenBadge this has no
+ * role="button"/onKeyDown. tabIndex={0} still makes the tooltip keyboard-
+ * reachable, mirroring RestartDiffBadge's non-interactive tooltip pattern.
+ */
+function CircuitOpenStatusBadge({
+  dataTestId,
+  message,
+}: {
+  dataTestId: string | undefined;
+  message: string | null;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge
+          className="gap-1"
+          data-testid={dataTestId}
+          tabIndex={0}
+          variant="destructive"
+        >
+          <AlertTriangle className="h-3 w-3" />
+          Suspended — repeated crashes
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72 text-xs" side="bottom">
+        {message ?? "Agent suspended (repeated crashes)."}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function AgentPersonaCard({
   actions,
   agent,
@@ -329,17 +363,12 @@ function AgentPersonaCard({
       }}
       statusBadge={
         circuitStatus.isOpen ? (
-          <Badge
-            className="gap-1"
-            data-testid={
+          <CircuitOpenStatusBadge
+            dataTestId={
               agent ? `managed-agent-circuit-open-${agent.pubkey}` : undefined
             }
-            title={circuitStatus.message ?? undefined}
-            variant="destructive"
-          >
-            <AlertTriangle className="h-3 w-3" />
-            Suspended — repeated crashes
-          </Badge>
+            message={circuitStatus.message}
+          />
         ) : agent?.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
             <AlertTriangle className="h-3 w-3" />
@@ -423,15 +452,10 @@ function StandaloneAgentCard({
       }}
       statusBadge={
         circuitStatus.isOpen ? (
-          <Badge
-            className="gap-1"
-            data-testid={`managed-agent-circuit-open-${agent.pubkey}`}
-            title={circuitStatus.message ?? undefined}
-            variant="destructive"
-          >
-            <AlertTriangle className="h-3 w-3" />
-            Suspended — repeated crashes
-          </Badge>
+          <CircuitOpenStatusBadge
+            dataTestId={`managed-agent-circuit-open-${agent.pubkey}`}
+            message={circuitStatus.message}
+          />
         ) : agent.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
             <AlertTriangle className="h-3 w-3" />
