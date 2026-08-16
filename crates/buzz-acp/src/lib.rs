@@ -4375,12 +4375,16 @@ fn recover_panicked_agent(
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
                 if let Some(dead) = queue.requeue(batch) {
-                    queue.finish_batch(&dead);
+                    queue.dead_letter_batch(&dead, "retry budget exhausted after agent panic");
+                    tracing::error!(
+                        agent = i,
+                        channel_id = %ch,
+                        "dead-lettered panicked batch after retry budget exhaustion"
+                    );
+                } else {
+                    tracing::warn!("requeued batch for panicked agent {i}");
                 }
-                tracing::warn!("requeued batch for panicked agent {i}");
             } else {
                 tracing::debug!(
                     channel_id = %ch,
@@ -7575,6 +7579,86 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+    }
+
+    #[tokio::test]
+    async fn panic_retry_exhaustion_retains_accepted_work_as_dead_letter() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-panic-dead-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        let journal_path = dir.join("pending.json");
+        let store = crate::pending_store::PendingStore::open_path(journal_path.clone())
+            .expect("open pending store");
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "survive panic exhaustion")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        let event_id = event.id.to_hex();
+        let mut queue = EventQueue::new(config::DedupMode::Queue).with_pending_store(store);
+        assert!(queue.push(crate::queue::QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        let batch = queue.flush_next().expect("flush accepted event");
+        queue.set_retry_count_for_test(channel_id, crate::queue::MAX_RETRIES);
+
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let task_id = abort_handle.id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "panic-dead-letter-turn".to_string(),
+                recoverable_batch: Some(batch),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        started_rx.await.expect("task started");
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+        );
+
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).expect("read pending journal"))
+                .expect("parse pending journal");
+        assert!(journal["pending"].as_object().unwrap().is_empty());
+        assert!(journal["dead_letters"].get(&event_id).is_some());
+
+        std::fs::remove_dir_all(dir).expect("remove tempdir");
     }
 
     #[tokio::test]

@@ -113,7 +113,7 @@ Configuration is via environment variables and CLI flags. Runtime queue-journal 
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
-| `BUZZ_ACP_PENDING_STORE` | no | `$HOME/.local/state/buzz-acp/pending-<agent-pubkey>.json` | Override the per-agent durable pending/dead-letter journal path. |
+| `BUZZ_ACP_PENDING_STORE` | no | Unix: `$HOME/.local/state/buzz-acp/pending-<agent-pubkey>.json`; Windows: `%LOCALAPPDATA%\buzz-acp\pending-<agent-pubkey>.json` | Override the per-agent durable pending/dead-letter journal path. Windows falls back to `%APPDATA%`, then `%USERPROFILE%\AppData\Local`. |
 | `BUZZ_ACP_REPLAY_DEAD_LETTERS` | no | `false` | Move all retained dead letters back to pending work at startup. Enable for a deliberate replay, then unset it. |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 

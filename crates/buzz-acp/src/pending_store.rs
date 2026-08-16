@@ -272,15 +272,45 @@ fn pending_store_path(agent_pubkey: &str) -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os("BUZZ_ACP_PENDING_STORE") {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "HOME is unset and BUZZ_ACP_PENDING_STORE was not provided",
-        )
-    })?;
-    Ok(Path::new(&home)
+    default_pending_store_path(
+        agent_pubkey,
+        cfg!(windows),
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+        std::env::var_os("APPDATA").map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
+    )
+}
+
+fn default_pending_store_path(
+    agent_pubkey: &str,
+    windows: bool,
+    home: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    app_data: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+) -> io::Result<PathBuf> {
+    let state_dir = if windows {
+        local_app_data
+            .or(app_data)
+            .or_else(|| user_profile.map(|profile| profile.join("AppData").join("Local")))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "LOCALAPPDATA, APPDATA, and USERPROFILE are unset and BUZZ_ACP_PENDING_STORE was not provided",
+                )
+            })?
+            .join("buzz-acp")
+    } else {
+        home.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "HOME is unset and BUZZ_ACP_PENDING_STORE was not provided",
+            )
+        })?
         .join(".local/state/buzz-acp")
-        .join(format!("pending-{agent_pubkey}.json")))
+    };
+    Ok(state_dir.join(format!("pending-{agent_pubkey}.json")))
 }
 
 #[cfg(test)]
@@ -292,6 +322,79 @@ mod tests {
         EventBuilder::text_note(content)
             .sign_with_keys(&Keys::generate())
             .expect("sign event")
+    }
+
+    #[test]
+    fn default_path_uses_unix_home() {
+        let path = default_pending_store_path(
+            "agent",
+            false,
+            Some(PathBuf::from("/home/tester")),
+            None,
+            None,
+            None,
+        )
+        .expect("Unix path");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/tester/.local/state/buzz-acp/pending-agent.json")
+        );
+    }
+
+    #[test]
+    fn default_windows_path_prefers_local_app_data() {
+        let path = default_pending_store_path(
+            "agent",
+            true,
+            None,
+            Some(PathBuf::from(r"C:\Users\tester\AppData\Local")),
+            Some(PathBuf::from(r"C:\Users\tester\AppData\Roaming")),
+            Some(PathBuf::from(r"C:\Users\tester")),
+        )
+        .expect("Windows local app data path");
+        assert_eq!(
+            path,
+            PathBuf::from(r"C:\Users\tester\AppData\Local")
+                .join("buzz-acp")
+                .join("pending-agent.json")
+        );
+    }
+
+    #[test]
+    fn default_windows_path_falls_back_to_app_data_then_profile() {
+        let app_data = default_pending_store_path(
+            "agent",
+            true,
+            None,
+            None,
+            Some(PathBuf::from(r"C:\Users\tester\AppData\Roaming")),
+            Some(PathBuf::from(r"C:\Users\tester")),
+        )
+        .expect("Windows app data path");
+        assert_eq!(
+            app_data,
+            PathBuf::from(r"C:\Users\tester\AppData\Roaming")
+                .join("buzz-acp")
+                .join("pending-agent.json")
+        );
+
+        let profile = default_pending_store_path(
+            "agent",
+            true,
+            None,
+            None,
+            None,
+            Some(PathBuf::from(r"C:\Users\tester")),
+        )
+        .expect("Windows profile fallback");
+        assert_eq!(
+            profile,
+            PathBuf::from(r"C:\Users\tester")
+                .join("AppData")
+                .join("Local")
+                .join("buzz-acp")
+                .join("pending-agent.json")
+        );
     }
 
     #[test]
