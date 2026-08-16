@@ -535,6 +535,59 @@ async fn test_subscription_filters_by_kind() {
 
 #[tokio::test]
 #[ignore]
+async fn test_multi_channel_subscription_receives_live_events_in_every_channel() {
+    // Regression: a REQ whose filters name several `#h` channels used to be
+    // routed as a community-global subscription, and channel events are never
+    // fanned out globally — so the subscription got history, EOSE, then
+    // silence. Each named channel is now a first-class scope.
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys = Keys::generate();
+    let channel_a = create_test_channel(&keys).await;
+    let channel_b = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("multi-h-live");
+    let filter = Filter::new().kind(Kind::Custom(kind)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::H),
+        [channel_a.as_str(), channel_b.as_str()],
+    );
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    let mut sender = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect sender");
+    for (channel, text) in [(&channel_a, "live in a"), (&channel_b, "live in b")] {
+        let ok = sender
+            .send_text_message(&keys, channel, text, kind)
+            .await
+            .expect("send");
+        assert!(ok.accepted, "event rejected: {}", ok.message);
+
+        let msg = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|e| panic!("no live delivery for {text:?}: {e}"));
+        match msg {
+            RelayMessage::Event { event, .. } => assert_eq!(event.content, text),
+            other => panic!("Expected Event, got {other:?}"),
+        }
+    }
+
+    sender.disconnect().await.expect("disconnect sender");
+    client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
 async fn test_close_subscription_stops_delivery() {
     let url = relay_url();
     let kind: u16 = 9;

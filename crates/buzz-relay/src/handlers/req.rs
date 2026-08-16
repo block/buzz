@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
+use crate::subscription::topics_for_subscription;
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
     is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
@@ -12,7 +13,6 @@ use buzz_core::kind::{
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
-use buzz_pubsub::EventTopic;
 use hex;
 use nostr::Filter;
 
@@ -106,7 +106,7 @@ pub async fn handle_req(
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
 
-    let channel_id = extract_channel_id_from_filters(&filters);
+    let channel_ids = extract_channel_ids_from_filters(&filters);
 
     // Build the conformance `AbstractState` once at request entry. The
     // `Option` only goes `None` on malformed pubkey bytes (already a
@@ -126,7 +126,7 @@ pub async fn handle_req(
     // `resolve_request_local_access`). Running this ahead of the search branch
     // is what fixes the search false-miss: a `#h=<just-added>` search would
     // otherwise be scoped against the stale vector and return empty.
-    if let Some(ch_id) = channel_id {
+    for &ch_id in channel_ids.as_deref().unwrap_or_default() {
         let token_allows = token_channel_ids
             .as_deref()
             .is_none_or(|allowed| allowed.contains(&ch_id));
@@ -175,10 +175,10 @@ pub async fn handle_req(
     // kinds) to harvest indexed-but-globally-stored sensitive events. Search
     // hits are looked up by event id and returned without the per-filter
     // post-check the historical-delivery branch applies, so the gate must run
-    // here, up front. Only applies to GLOBAL subscriptions (channel_id = None):
+    // here, up front. Only applies to GLOBAL subscriptions (channel_ids = None):
     // channel-scoped subs can never receive globally-stored events because of
     // the fan_out() invariant in subscription.rs.
-    if channel_id.is_none() {
+    if channel_ids.is_none() {
         let authed_pubkey_hex = hex::encode(&pubkey_bytes);
         if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
             conn.send(RelayMessage::closed(
@@ -241,18 +241,16 @@ pub async fn handle_req(
         conn_id,
         sub_id.clone(),
         filters.clone(),
-        channel_id,
+        channel_ids.clone(),
     );
     if let Some(replaced) = replaced {
-        state
-            .pubsub
-            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
-            .await;
+        for topic in topics_for_subscription(replaced.channel_ids.as_deref()) {
+            state.pubsub.release_topic(&conn.tenant, topic).await;
+        }
     }
-    state
-        .pubsub
-        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
-        .await;
+    for topic in topics_for_subscription(channel_ids.as_deref()) {
+        state.pubsub.retain_topic(&conn.tenant, topic).await;
+    }
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
 
@@ -262,6 +260,14 @@ pub async fn handle_req(
     // per-filter limits or non-overlapping time windows.
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
     let mut total_sent: usize = 0;
+
+    // A single-channel subscription still provides the historical fallback
+    // scope. Filters of a multi-channel subscription are each channel
+    // constrained by construction, so they resolve per filter or fall back to
+    // the access-scoped query exactly as global subscriptions always have.
+    let sub_single_channel = channel_ids
+        .as_ref()
+        .and_then(|ids| (ids.len() == 1).then(|| ids[0]));
 
     // Phase 1 — pure query construction, in filter order.
     let filter_queries: Vec<(usize, Option<uuid::Uuid>, EventQuery)> = filters
@@ -284,7 +290,7 @@ pub async fn handle_req(
                             None
                         }
                     })
-                    .or(channel_id)
+                    .or(sub_single_channel)
             };
             let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
@@ -1026,8 +1032,17 @@ pub(crate) fn apply_access_scope_to_query(
 /// - Multiple distinct channel UUIDs appear across filters (can't index under one channel).
 ///
 /// Callers that receive `None` treat the subscription as global (slow-path fan-out).
-fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
-    let mut found_id: Option<uuid::Uuid> = None;
+/// Resolve the channel scope of a subscription from its filters.
+///
+/// Returns `Some(ids)` (the deduplicated union of every `#h` channel named
+/// across the filters) when EVERY filter names at least one channel, and
+/// `None` — a community-global subscription — when any filter carries no
+/// channel constraint. Multiple distinct channels used to collapse to `None`
+/// here, which silently parked a member's multi-channel subscription on the
+/// global topic, where channel events never arrive (the fan_out() invariant);
+/// now each named channel is membership-checked and subscribed individually.
+fn extract_channel_ids_from_filters(filters: &[Filter]) -> Option<Vec<uuid::Uuid>> {
+    let mut found: Vec<uuid::Uuid> = Vec::new();
     for f in filters {
         let mut filter_has_channel = false;
         for (tag_key, tag_values) in f.generic_tags.iter() {
@@ -1036,12 +1051,8 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
                 for val in tag_values {
                     if let Ok(id) = val.parse::<uuid::Uuid>() {
                         filter_has_channel = true;
-                        match found_id {
-                            Some(existing) if existing != id => {
-                                // Multiple distinct channel IDs — fall back to global.
-                                return None;
-                            }
-                            _ => found_id = Some(id),
+                        if !found.contains(&id) {
+                            found.push(id);
                         }
                     }
                 }
@@ -1052,7 +1063,11 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
             return None;
         }
     }
-    found_id
+    if found.is_empty() {
+        None
+    } else {
+        Some(found)
+    }
 }
 
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
@@ -1287,13 +1302,6 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
                     .all(|a| a.to_hex().eq_ignore_ascii_case(authed_pubkey_hex))
         })
     })
-}
-
-fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
-    match channel_id {
-        Some(channel_id) => EventTopic::Channel(channel_id),
-        None => EventTopic::Global,
-    }
 }
 
 #[cfg(test)]
@@ -1545,45 +1553,68 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_channel_id_single_channel() {
+    fn test_extract_channel_ids_single_channel() {
         let channel_id = uuid::Uuid::new_v4();
         let filters = vec![filter_with_channel(channel_id)];
-        assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+        assert_eq!(
+            extract_channel_ids_from_filters(&filters),
+            Some(vec![channel_id])
+        );
     }
 
     #[test]
-    fn test_extract_channel_id_mixed_channels_returns_none() {
+    fn test_extract_channel_ids_mixed_channels_returns_all() {
+        // Distinct channels across filters used to collapse the subscription
+        // to global; now each is a first-class scope.
         let channel_a = uuid::Uuid::new_v4();
         let channel_b = uuid::Uuid::new_v4();
         let filters = vec![
             filter_with_channel(channel_a),
             filter_with_channel(channel_b),
         ];
-        assert_eq!(extract_channel_id_from_filters(&filters), None);
+        assert_eq!(
+            extract_channel_ids_from_filters(&filters),
+            Some(vec![channel_a, channel_b])
+        );
     }
 
     #[test]
-    fn test_extract_channel_id_no_channel_tag_returns_none() {
+    fn test_extract_channel_ids_multiple_channels_one_filter() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+        let filters =
+            vec![Filter::new().custom_tags(h, [channel_a.to_string(), channel_b.to_string()])];
+        let got = extract_channel_ids_from_filters(&filters).expect("channel scoped");
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&channel_a) && got.contains(&channel_b));
+    }
+
+    #[test]
+    fn test_extract_channel_ids_no_channel_tag_returns_none() {
         let filters = vec![Filter::new()];
-        assert_eq!(extract_channel_id_from_filters(&filters), None);
+        assert_eq!(extract_channel_ids_from_filters(&filters), None);
     }
 
     #[test]
-    fn test_extract_channel_id_one_filter_missing_channel_returns_none() {
+    fn test_extract_channel_ids_one_filter_missing_channel_returns_none() {
         // Even if one filter has a channel, a second filter without one makes it global.
         let channel_id = uuid::Uuid::new_v4();
         let filters = vec![filter_with_channel(channel_id), Filter::new()];
-        assert_eq!(extract_channel_id_from_filters(&filters), None);
+        assert_eq!(extract_channel_ids_from_filters(&filters), None);
     }
 
     #[test]
-    fn test_extract_channel_id_same_channel_multiple_filters() {
+    fn test_extract_channel_ids_same_channel_multiple_filters_dedupes() {
         let channel_id = uuid::Uuid::new_v4();
         let filters = vec![
             filter_with_channel(channel_id),
             filter_with_channel(channel_id),
         ];
-        assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+        assert_eq!(
+            extract_channel_ids_from_filters(&filters),
+            Some(vec![channel_id])
+        );
     }
 
     #[test]
