@@ -800,7 +800,7 @@ fn shell_split_single_agent_arg(arg: &str) -> Vec<String> {
         Some(parts) => parts,
         None => {
             tracing::warn!(
-                agent_args = %trimmed,
+                agent_args = ?trimmed,
                 "BUZZ_ACP_AGENT_ARGS shell split failed — preserving the original value; \
                  fix quoting or switch to comma-separated args"
             );
@@ -818,24 +818,34 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     // Detect this: when clap produced exactly one element that contains
     // whitespace, shell-split it so the agent receives individual arguments.
     // Comma-separated input is already correctly split by clap and is left alone.
-    let pre_split = if agent_args.len() == 1 {
+    // Empty tokens from a successful shell split are real argv values
+    // (`--flag "" tail` → ["--flag", "", "tail"]) and must be kept. Empty
+    // raw/comma-separated entries are still dropped as unset config.
+    let (pre_split, keep_empty_tokens) = if agent_args.len() == 1 {
         let arg = &agent_args[0];
         if arg.chars().any(char::is_whitespace) {
-            shell_split_single_agent_arg(arg)
+            (shell_split_single_agent_arg(arg), true)
         } else {
-            vec![arg.trim().to_string()]
+            (vec![arg.trim().to_string()], false)
         }
     } else {
-        agent_args
-            .into_iter()
-            .map(|arg| arg.trim().to_string())
-            .collect::<Vec<_>>()
+        (
+            agent_args
+                .into_iter()
+                .map(|arg| arg.trim().to_string())
+                .collect::<Vec<_>>(),
+            false,
+        )
     };
 
-    let normalized = pre_split
-        .into_iter()
-        .filter(|arg| !arg.is_empty())
-        .collect::<Vec<_>>();
+    let normalized = if keep_empty_tokens {
+        pre_split
+    } else {
+        pre_split
+            .into_iter()
+            .filter(|arg| !arg.is_empty())
+            .collect::<Vec<_>>()
+    };
 
     let Some(default_args) = default_agent_args(command) else {
         return normalized;
@@ -1664,6 +1674,18 @@ mod tests {
                 vec!["--model \"gpt-5\" --flag value".into()]
             ),
             vec!["--model", "gpt-5", "--flag", "value"]
+        );
+    }
+
+    #[test]
+    fn shell_split_preserves_quoted_empty_argument() {
+        assert_eq!(
+            normalize_agent_args("custom-agent", vec!["--flag \"\" tail".into()]),
+            vec!["--flag", "", "tail"]
+        );
+        assert_eq!(
+            normalize_agent_args("custom-agent", vec!["--flag '' tail".into()]),
+            vec!["--flag", "", "tail"]
         );
     }
 
