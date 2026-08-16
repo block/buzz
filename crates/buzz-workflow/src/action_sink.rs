@@ -29,6 +29,13 @@ pub enum ActionSinkError {
     /// Message content is empty or whitespace-only.
     #[error("empty message content")]
     EmptyContent,
+    /// The target agent is not a member of the destination channel.
+    ///
+    /// `assign_agent` is fail-closed: the agent must already be a channel
+    /// member. Silently adding them would let a workflow escalate authority
+    /// beyond what the owner granted at save time.
+    #[error("assignee is not a channel member: {0}")]
+    AssigneeNotMember(String),
 }
 
 impl From<ActionSinkError> for crate::WorkflowError {
@@ -65,5 +72,37 @@ pub trait ActionSink: Send + Sync {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Dispatch a task to exactly one agent by immutable pubkey.
+    ///
+    /// The relay-side implementation emits exactly two `p` tags on the
+    /// resulting `kind:9` message: `author_pubkey` (owner attribution) and
+    /// `agent_pubkey` (wake). The `text` is **not** scanned for `@Name`
+    /// mentions — that reverse-parse is the failure mode `assign_agent`
+    /// exists to avoid.
+    ///
+    /// Fails with [`ActionSinkError::AssigneeNotMember`] if `agent_pubkey`
+    /// is not a current member of `channel_id`. Adding them silently would
+    /// let a workflow escalate beyond the owner's saved authority.
+    ///
+    /// - `agent_pubkey`: hex-encoded pubkey of the sole assignee.
+    /// - `task_id`: optional caller-supplied correlation UUID emitted as a
+    ///   `task` tag. Preserved verbatim; not validated as a UUID here — the
+    ///   executor performs shape validation before calling.
+    ///
+    /// Returns the event ID hex string on success.
+    ///
+    /// No default implementation is provided intentionally: there is only
+    /// one production sink, and a runtime "unimplemented" would defeat the
+    /// identity-safety guarantees this method is being added to enforce.
+    fn assign_agent(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        text: &str,
+        author_pubkey: &str,
+        agent_pubkey: &str,
+        task_id: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
