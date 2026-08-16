@@ -9,7 +9,8 @@
 //! This binary binds **loopback only** and MUST run behind a reverse proxy
 //! (nginx, caddy, etc.) that:
 //! - Routes only `/pair` to this sidecar
-//! - Enforces HTTP read timeouts (mitigates slowloris at the TCP layer)
+//! - Enforces HTTP read/idle timeouts of **at least 140 seconds** (must not
+//!   preempt [`CONN_TIMEOUT`] or the desktop pairing hard timeout)
 //! - Terminates TLS
 //!
 //! The relay does not enforce path restrictions or pre-upgrade connection
@@ -57,8 +58,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Hard per-connection lifetime.
 ///
-/// Must outlive the desktop pairing hard timeout (130s in
-/// `desktop/src-tauri/src/commands/pairing.rs`). If this sidecar closes first,
+/// Must outlive desktop `PAIRING_HARD_TIMEOUT` in
+/// `desktop/src-tauri/src/commands/pairing.rs`. If this sidecar closes first,
 /// the desktop surfaces the transport string "relay connection closed" instead
 /// of its own "Session timed out" expired state.
 pub const CONN_TIMEOUT: Duration = Duration::from_secs(140);
@@ -1026,20 +1027,5 @@ pub async fn run_server(listener: TcpListener, relay: Arc<Relay>) {
                 eprintln!("http error: {e}");
             }
         });
-    }
-}
-
-#[cfg(test)]
-mod conn_timeout_tests {
-    use super::*;
-
-    /// Desktop pairing.rs uses a 130s hard timeout and maps it to
-    /// "Session timed out". The sidecar must not win that race.
-    #[test]
-    fn conn_timeout_outlives_desktop_pairing_hard_timeout() {
-        assert!(
-            CONN_TIMEOUT > Duration::from_secs(130),
-            "CONN_TIMEOUT ({CONN_TIMEOUT:?}) must exceed the desktop pairing hard timeout (130s)"
-        );
     }
 }

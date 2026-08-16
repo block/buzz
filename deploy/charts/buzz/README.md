@@ -167,6 +167,10 @@ clients connect directly to the dedicated endpoint. The chart does not create
 an Ingress or HTTPRoute for the pairing Service; route the public hostname to
 `<release>-buzz-pairing:5000` with your platform's ingress configuration.
 
+Configure the ingress/proxy idle and read timeouts to **at least 140 seconds**
+so the sidecar's `CONN_TIMEOUT` and the desktop pairing hard timeout are not
+preempted by the platform layer.
+
 ## HA (production)
 
 `replicaCount > 1` hard-requires Redis:

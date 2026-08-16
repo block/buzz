@@ -18,6 +18,10 @@ use zeroize::Zeroizing;
 use crate::app_state::AppState;
 use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override};
 
+/// Wall-clock cap for an active pairing WebSocket session. Starts when the
+/// socket is accepted (immediately after split), not after NIP-42/EOSE setup.
+pub const PAIRING_HARD_TIMEOUT: Duration = Duration::from_secs(130);
+
 #[derive(Serialize, Clone)]
 struct PairingSasPayload {
     sas: String,
@@ -308,6 +312,12 @@ async fn pairing_ws_task_inner(
         .map_err(|e| format!("WebSocket connection failed: {e}"))?;
     let (mut write, mut read) = ws.split();
 
+    // Start the hard timeout as soon as the transport is live so NIP-42 and
+    // EOSE setup cannot consume the desktop budget before the relay's
+    // CONN_TIMEOUT fires.
+    let hard_timeout = tokio::time::sleep(PAIRING_HARD_TIMEOUT);
+    tokio::pin!(hard_timeout);
+
     handle_nip42_auth(&mut read, &mut write, session, relay_url).await?;
 
     let our_pk = {
@@ -324,9 +334,6 @@ async fn pairing_ws_task_inner(
         .map_err(|e| format!("subscribe failed: {e}"))?;
 
     wait_for_eose(&mut read, "pair", Duration::from_secs(10)).await?;
-
-    let hard_timeout = tokio::time::sleep(Duration::from_secs(130));
-    tokio::pin!(hard_timeout);
 
     loop {
         if !pairing_task_is_current(&context.generation, context.task_generation) {
@@ -791,3 +798,7 @@ mod pairing_generation_tests;
 #[cfg(test)]
 #[path = "pairing_relay_tests.rs"]
 mod pairing_relay_tests;
+
+#[cfg(test)]
+#[path = "pairing_timeout_contract_tests.rs"]
+mod pairing_timeout_contract_tests;
