@@ -10,6 +10,7 @@ import {
   useManagedAgentsQuery,
   usePersonasQuery,
 } from "@/features/agents/hooks";
+import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
 import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -294,9 +295,11 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
  * — for custom harnesses — edit and delete with the blast-radius guard.
  */
 export function HarnessRow({
+  embedded = false,
   resetEpoch,
   runtime,
 }: {
+  embedded?: boolean;
   resetEpoch: number;
   runtime: AcpRuntimeCatalogEntry;
 }) {
@@ -324,6 +327,7 @@ export function HarnessRow({
   }, [resetEpoch]);
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
+  const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
 
   const del = useDeleteCustomHarnessMutation();
   // Blast-radius data for the delete confirmation — only fetched while the
@@ -348,7 +352,7 @@ export function HarnessRow({
         } else {
           setInstallResult({
             success: false,
-            error: getInstallErrorMessage(result.steps),
+            error: getInstallErrorMessage(result),
           });
         }
       },
@@ -398,7 +402,10 @@ export function HarnessRow({
 
   return (
     <div
-      className="min-h-16 rounded-2xl border border-border/60 bg-muted/20 px-4 py-3.5 text-sm"
+      className={cn(
+        "min-h-16 px-4 py-3.5 text-sm",
+        !embedded && "rounded-2xl border border-border/60 bg-muted/20",
+      )}
       data-testid={`doctor-runtime-${runtime.id}`}
     >
       <div className="min-w-0">
@@ -451,25 +458,6 @@ export function HarnessRow({
           />
         </div>
 
-        {runtime.availability !== "available" ? (
-          <div
-            className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground"
-            data-testid={`doctor-runtime-guidance-${runtime.id}`}
-          >
-            <p>{runtime.installHint}</p>
-            {runtime.installInstructionsUrl.trim().length > 0 ? (
-              <button
-                className="inline-flex shrink-0 items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
-                onClick={() => void openUrl(runtime.installInstructionsUrl)}
-                type="button"
-              >
-                <ExternalLink className="h-4 w-4" />
-                {runtimeInstallGuideLabel(runtime)}
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-
         {runtime.authStatus.status === "config_invalid" ? (
           <p
             className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
@@ -479,6 +467,15 @@ export function HarnessRow({
           </p>
         ) : null}
 
+        {isInstalling && installOutputLine ? (
+          <p
+            aria-live="polite"
+            className="mt-2 truncate rounded-lg border border-border/60 bg-background/60 px-3 py-1.5 font-mono text-xs text-muted-foreground"
+            data-testid={`doctor-runtime-install-output-${runtime.id}`}
+          >
+            {installOutputLine}
+          </p>
+        ) : null}
         {installError ? (
           <p
             className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"

@@ -8,8 +8,6 @@ from pathlib import Path
 import pytest
 from harbor.environments.base import ExecResult
 
-from harbor_buzz_orchestra.manifest import ExperimentManifest
-from harbor_buzz_orchestra.provisioning import AgentCredential, TrialHandle
 from harbor_buzz_orchestra.container_runtime import (
     REMOTE_BIN,
     REMOTE_LOGS,
@@ -17,6 +15,8 @@ from harbor_buzz_orchestra.container_runtime import (
     EndpointLaunchConfig,
     RuntimeLaunchError,
 )
+from harbor_buzz_orchestra.manifest import ExperimentManifest
+from harbor_buzz_orchestra.provisioning import AgentCredential, TrialHandle
 
 
 def write_manifest(tmp_path: Path) -> ExperimentManifest:
@@ -33,10 +33,20 @@ def write_manifest(tmp_path: Path) -> ExperimentManifest:
         {
             "condition": "test",
             "roster": [
-                {"id": "orch", "kind": "orchestrator", "role": "lead",
-                 "endpoint": "orch-model", **roster_entry},
-                {"id": "worker", "kind": "worker", "role": "implementer",
-                 "endpoint": "worker-model", **roster_entry},
+                {
+                    "id": "orch",
+                    "kind": "orchestrator",
+                    "role": "lead",
+                    "endpoint": "orch-model",
+                    **roster_entry,
+                },
+                {
+                    "id": "worker",
+                    "kind": "worker",
+                    "role": "implementer",
+                    "endpoint": "worker-model",
+                    **roster_entry,
+                },
             ],
             "prices": {
                 name: {
@@ -162,10 +172,7 @@ def test_user_relay_url_prefers_host_view(tmp_path):
         == "http://localhost:3600"
     )
     # pre-v1.2 handles fall back to deriving http from the agents' ws view.
-    assert (
-        rt._user_relay_url(trial_handle(()))
-        == "http://host.docker.internal:3600"
-    )
+    assert rt._user_relay_url(trial_handle(())) == "http://host.docker.internal:3600"
     with pytest.raises(RuntimeLaunchError, match="ws://"):
         rt._cli_relay_url("http://relay")
 
@@ -209,16 +216,21 @@ async def test_forwarder_bridges_the_canonical_relay_address(tmp_path):
         forwarder_binary=str(forwarder),
     )
     trial = TrialHandle(
-        run_id="run", trial_id="trial", manifest_hash="hash",
-        relay_ws_url="ws://localhost:3600", channel_id="channel",
-        credentials=(), user=user_credential(),
+        run_id="run",
+        trial_id="trial",
+        manifest_hash="hash",
+        relay_ws_url="ws://localhost:3600",
+        channel_id="channel",
+        credentials=(),
+        user=user_credential(),
     )
     environment = Environment(
         responses={
             FORWARDER: ExecResult(stdout="99\n", stderr="", return_code=0),
             "cat ": ExecResult(
                 stdout="forwarding 127.0.0.1:3600 -> host.docker.internal:3600",
-                stderr="", return_code=0,
+                stderr="",
+                return_code=0,
             ),
         }
     )
@@ -235,7 +247,7 @@ async def test_forwarder_bridges_the_canonical_relay_address(tmp_path):
         rt._ws_authority("http://relay")
 
 
-@pytest.mark.parametrize(("configured", "expected"), [(None, "32"), (7, "7")])
+@pytest.mark.parametrize(("configured", "expected"), [(None, "0"), (7, "7")])
 async def test_launch_wires_the_desktop_environment(tmp_path, configured, expected):
     manifest = write_manifest(tmp_path)
     agent_class = manifest.roster[0]
@@ -278,9 +290,12 @@ async def test_launch_wires_the_desktop_environment(tmp_path, configured, expect
     )
 
 
-def test_runtime_rejects_unbounded_agent_rounds(tmp_path):
-    with pytest.raises(ValueError, match="positive"):
-        runtime(tmp_path, max_agent_rounds=0)
+def test_runtime_validates_construction_bounds(tmp_path):
+    # 0 is legal and means unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial
+    # budget is the clock. Only negatives are rejected.
+    runtime(tmp_path, max_agent_rounds=0)
+    with pytest.raises(ValueError, match="unbounded"):
+        runtime(tmp_path, max_agent_rounds=-1)
     with pytest.raises(ValueError, match="positive"):
         runtime(tmp_path, readiness_timeout_seconds=0)
 
@@ -295,9 +310,7 @@ async def test_wait_for_agents_ready_requires_every_channel_subscription(tmp_pat
         async def exec(self, command, env=None, **kwargs):
             if command.startswith("cat "):
                 agent_id = re.search(r"([\w-]+)\.stdout\.log", command).group(1)
-                return ExecResult(
-                    stdout=logs[agent_id], stderr="", return_code=0
-                )
+                return ExecResult(stdout=logs[agent_id], stderr="", return_code=0)
             return ExecResult(stdout="", stderr="", return_code=0)
 
     from harbor_buzz_orchestra.container_runtime import _Agent
@@ -326,9 +339,7 @@ async def test_wait_for_agents_ready_requires_every_channel_subscription(tmp_pat
 async def test_dead_agent_processes_fail_the_trial(tmp_path):
     from harbor_buzz_orchestra.container_runtime import _Agent
 
-    agents = [
-        _Agent(credential("worker-1", "worker", "worker-model"), 7, "o", "e")
-    ]
+    agents = [_Agent(credential("worker-1", "worker", "worker-model"), 7, "o", "e")]
     environment = Environment(
         responses={
             "kill -0": ExecResult(stdout="DEAD:worker-1\n", stderr="", return_code=0)
@@ -362,6 +373,37 @@ async def test_m1_output_probe_matches_grader_and_is_condition_scoped(
         await runtime(tmp_path)._verify_m1_output(environment, manifest)
     probed = [cmd for cmd, _ in environment.commands if "hello.txt" in cmd]
     assert bool(probed) == (condition == "M1-hello-world")
+
+
+async def test_send_mentions_by_pubkey_so_task_text_stays_inert(
+    tmp_path, monkeypatch
+):
+    """Task text is untrusted payload: `:%normal! @a` in a task statement must
+    not be fed to member-name resolution (it would fail and kill the trial).
+    An explicit --mention pins delivery to the orchestrator's pubkey."""
+    rt = runtime(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    calls = []
+
+    async def buzz_json(credential, trial, *args):
+        calls.append(args)
+        return {}
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+
+    await rt._send(
+        trial.user,
+        trial,
+        "@orch-1 run `:%normal! @a` on the file",
+        mention=orch.nostr_pubkey,
+    )
+    assert calls[-1][-2:] == ("--mention", "pubkey-orch-1")
+
+    # Without an explicit mention the send is unchanged (name resolution).
+    await rt._send(trial.user, trial, "plain content")
+    assert "--mention" not in calls[-1]
+    assert calls[-1][-2:] == ("--content", "plain content")
 
 
 async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypatch):

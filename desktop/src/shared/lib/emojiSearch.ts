@@ -114,6 +114,33 @@ export function rankByShortcode<T>(
   return scored.slice(0, limit).map((s) => s.item);
 }
 
+/**
+ * Place exact and prefix shortcode matches ahead of items that only matched an
+ * emoji name or keyword. This lets an exact standard emoji like `joy` beat a
+ * weaker custom shortcode match such as `bufo_joy`, while retaining emoji-mart's
+ * order for name- and keyword-only results ahead of loose shortcode matches.
+ */
+export function rankShortcodeMatchesFirst<T>(
+  query: string,
+  items: readonly T[],
+  shortcodeOf: (item: T) => string,
+): T[] {
+  const strongShortcodeMatches = rankByShortcode(
+    query,
+    items,
+    shortcodeOf,
+    Number.POSITIVE_INFINITY,
+  ).filter((item) => {
+    const match = scoreShortcodeMatch(query, shortcodeOf(item));
+    return match !== null && match.tier <= TIER_PREFIX;
+  });
+  const matchedItems = new Set(strongShortcodeMatches);
+  return [
+    ...strongShortcodeMatches,
+    ...items.filter((item) => !matchedItems.has(item)),
+  ];
+}
+
 export interface StandardEmoji {
   id: string;
   name: string;

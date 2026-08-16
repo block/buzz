@@ -1,48 +1,5 @@
 part of '../compose_bar.dart';
 
-class _SuggestionPanelMotion extends StatelessWidget {
-  final Duration duration;
-  final Widget child;
-
-  const _SuggestionPanelMotion({required this.duration, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: duration,
-      reverseDuration: duration,
-      layoutBuilder: (currentChild, previousChildren) => Stack(
-        alignment: Alignment.bottomLeft,
-        clipBehavior: Clip.none,
-        children: [...previousChildren, ?currentChild],
-      ),
-      transitionBuilder: (child, animation) {
-        final curvedAnimation = CurvedAnimation(
-          parent: animation,
-          curve: Curves.easeOutCubic,
-          reverseCurve: Curves.easeInCubic,
-        );
-
-        return AnimatedBuilder(
-          animation: curvedAnimation,
-          child: child,
-          builder: (context, child) => IgnorePointer(
-            ignoring: animation.status == AnimationStatus.reverse,
-            child: Opacity(
-              opacity: curvedAnimation.value,
-              child: Transform.translate(
-                offset: Offset(0, Grid.xs * (1 - curvedAnimation.value)),
-                child: child,
-              ),
-            ),
-          ),
-        );
-      },
-      child: child,
-    );
-  }
-}
-
 class _MentionSuggestions extends StatelessWidget {
   final List<MentionCandidate> suggestions;
   final Map<String, UserProfile> userCache;
@@ -60,54 +17,55 @@ class _MentionSuggestions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 240),
+    return Material(
+      key: const ValueKey('mention-suggestions-popover'),
+      type: MaterialType.card,
+      color: appPopoverColor(context),
+      surfaceTintColor: Colors.transparent,
+      elevation: appPopoverElevation,
+      shadowColor: appPopoverShadowColor(context),
+      shape: appPopoverShape(context),
       clipBehavior: Clip.hardEdge,
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.dialog),
-        border: Border.all(
-          color: Colors.black.withValues(alpha: 0.04),
-          width: 1,
-        ),
-      ),
-      child: ListView.separated(
-        shrinkWrap: true,
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-        itemCount: suggestions.length,
-        separatorBuilder: (_, _) => const SizedBox.shrink(),
-        itemBuilder: (context, index) {
-          final candidate = suggestions[index];
-          final name = candidate.label;
-          final avatarUrl =
-              candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 240),
+        child: ListView.separated(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          itemCount: suggestions.length,
+          separatorBuilder: (_, _) => const SizedBox.shrink(),
+          itemBuilder: (context, index) {
+            final candidate = suggestions[index];
+            final name = candidate.label;
+            final avatarUrl =
+                candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 
-          return ListTile(
-            dense: true,
-            visualDensity: VisualDensity.compact,
-            leading: AvatarImage(
-              imageUrl: avatarUrl,
-              radius: 18,
-              backgroundColor: context.colors.primaryContainer,
-              fallback: Text(
-                name[0].toUpperCase(),
-                style: context.textTheme.labelMedium?.copyWith(
-                  color: context.colors.onPrimaryContainer,
-                  fontWeight: FontWeight.w600,
+            return ListTile(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              leading: AvatarImage(
+                imageUrl: avatarUrl,
+                radius: 18,
+                backgroundColor: context.colors.primaryContainer,
+                fallback: Text(
+                  name[0].toUpperCase(),
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onPrimaryContainer,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-            ),
-            title: Text(name, style: context.textTheme.titleSmall),
-            subtitle: _MentionSuggestionInfo.build(
-              context,
-              candidate: candidate,
-              currentPubkey: currentPubkey,
-              isDmChannel: isDmChannel,
-              userCache: userCache,
-            ),
-            onTap: () => onSelect(candidate),
-          );
-        },
+              title: Text(name, style: context.textTheme.titleSmall),
+              subtitle: _MentionSuggestionInfo.build(
+                context,
+                candidate: candidate,
+                currentPubkey: currentPubkey,
+                isDmChannel: isDmChannel,
+                userCache: userCache,
+              ),
+              onTap: () => _runComposerAction(() => onSelect(candidate)),
+            );
+          },
+        ),
       ),
     );
   }
@@ -210,40 +168,41 @@ class _ChannelSuggestions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 240),
+    return Material(
+      key: const ValueKey('channel-suggestions-popover'),
+      type: MaterialType.card,
+      color: appPopoverColor(context),
+      surfaceTintColor: Colors.transparent,
+      elevation: appPopoverElevation,
+      shadowColor: appPopoverShadowColor(context),
+      shape: appPopoverShape(context),
       clipBehavior: Clip.hardEdge,
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.dialog),
-        border: Border.all(
-          color: Colors.black.withValues(alpha: 0.04),
-          width: 1,
-        ),
-      ),
-      child: ListView.separated(
-        shrinkWrap: true,
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-        itemCount: suggestions.length,
-        separatorBuilder: (_, _) => const SizedBox.shrink(),
-        itemBuilder: (context, index) {
-          final channel = suggestions[index];
-          return ListTile(
-            dense: true,
-            visualDensity: VisualDensity.compact,
-            horizontalTitleGap: 0,
-            leading: SizedBox.square(
-              dimension: 36,
-              child: Icon(
-                LucideIcons.hash,
-                size: 20,
-                color: context.colors.onSurfaceVariant,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 240),
+        child: ListView.separated(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          itemCount: suggestions.length,
+          separatorBuilder: (_, _) => const SizedBox.shrink(),
+          itemBuilder: (context, index) {
+            final channel = suggestions[index];
+            return ListTile(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              horizontalTitleGap: 0,
+              leading: SizedBox.square(
+                dimension: 36,
+                child: Icon(
+                  LucideIcons.hash,
+                  size: 20,
+                  color: context.colors.onSurfaceVariant,
+                ),
               ),
-            ),
-            title: Text(channel.name, style: context.textTheme.bodyLarge),
-            onTap: () => onSelect(channel),
-          );
-        },
+              title: Text(channel.name, style: context.textTheme.bodyLarge),
+              onTap: () => _runComposerAction(() => onSelect(channel)),
+            );
+          },
+        ),
       ),
     );
   }

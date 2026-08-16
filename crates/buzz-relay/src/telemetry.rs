@@ -23,9 +23,157 @@
 //! - `OTEL_TRACES_SAMPLER` (default: `parentbased_always_on`)
 //! - `OTEL_TRACES_SAMPLER_ARG`
 
+use std::{
+    fmt,
+    sync::{Arc, OnceLock},
+};
+
+use opentelemetry::trace::{SpanId, TraceContextExt as _, TraceId};
 use opentelemetry_otlp::ExporterBuildError;
 use opentelemetry_sdk::{resource::EnvResourceDetector, trace::SdkTracerProvider, Resource};
-use tracing_subscriber::EnvFilter;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::{
+    fmt::{
+        format::{Format, FormatEvent, FormatFields, Json, Writer},
+        FmtContext,
+    },
+    registry::LookupSpan,
+    EnvFilter, Layer,
+};
+
+/// Captures the subscriber dispatch used to resolve tracing span IDs to their
+/// OpenTelemetry contexts.
+#[derive(Clone, Default)]
+pub struct TraceContextLookup {
+    dispatch: Arc<OnceLock<tracing::dispatcher::WeakDispatch>>,
+}
+
+impl TraceContextLookup {
+    /// Build a JSON formatter backed by this subscriber dispatch lookup.
+    pub fn json_formatter(&self, enabled: bool) -> TraceContextJson {
+        TraceContextJson {
+            inner: tracing_subscriber::fmt::format().json().flatten_event(true),
+            enabled,
+            context_lookup: self.clone(),
+        }
+    }
+
+    fn nearest_otel_context(&self, span_id: &tracing::span::Id) -> Option<opentelemetry::Context> {
+        let dispatch = self.dispatch.get()?.upgrade()?;
+        let registry = dispatch.downcast_ref::<tracing_subscriber::Registry>()?;
+
+        let context = registry.span(span_id)?.scope().find_map(|span| {
+            let context = tracing_opentelemetry::get_otel_context(&span.id(), &dispatch)?;
+            context.span().span_context().is_valid().then_some(context)
+        });
+        context
+    }
+}
+
+impl<S: Subscriber> Layer<S> for TraceContextLookup {
+    fn on_register_dispatch(&self, subscriber: &tracing::Dispatch) {
+        let _ = self.dispatch.set(subscriber.downgrade());
+    }
+}
+
+/// JSON event formatter that adds the active OpenTelemetry trace context.
+///
+/// Datadog recognizes the OpenTelemetry-standard `trace_id` and `span_id`
+/// fields when they are lowercase hexadecimal strings. Events outside a valid
+/// OpenTelemetry span retain the standard `tracing-subscriber` JSON format.
+pub struct TraceContextJson {
+    inner: Format<Json>,
+    enabled: bool,
+    context_lookup: TraceContextLookup,
+}
+
+struct CorrelationWriter<'writer> {
+    inner: Writer<'writer>,
+    trace_id: TraceId,
+    span_id: SpanId,
+    injected: bool,
+}
+
+impl fmt::Write for CorrelationWriter<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self.injected {
+            return self.inner.write_str(value);
+        }
+
+        let Some(object_start) = value.find('{') else {
+            return self.inner.write_str(value);
+        };
+        self.inner.write_str(&value[..=object_start])?;
+        write!(
+            self.inner,
+            "\"trace_id\":\"{}\",\"span_id\":\"{}\",",
+            self.trace_id, self.span_id
+        )?;
+        self.injected = true;
+        self.inner.write_str(&value[object_start + 1..])
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for TraceContextJson
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        if !self.enabled {
+            return self.inner.format_event(ctx, writer, event);
+        }
+
+        let otel_context = match event.parent() {
+            Some(span_id) => self.context_lookup.nearest_otel_context(span_id),
+            None if event.is_contextual() => Some(opentelemetry::Context::current()),
+            None => None,
+        };
+        let Some(otel_context) = otel_context else {
+            return self.inner.format_event(ctx, writer, event);
+        };
+        let otel_span = otel_context.span();
+        let span_context = otel_span.span_context();
+
+        if !span_context.is_valid() {
+            return self.inner.format_event(ctx, writer, event);
+        }
+
+        let trace_id = span_context.trace_id();
+        let span_id = span_context.span_id();
+
+        // Events may define fields with the correlation names themselves. In
+        // that uncommon case, overwrite them rather than emitting duplicate
+        // JSON keys. Preserve the allocation-free streaming path for ordinary
+        // events.
+        let fields = event.metadata().fields();
+        if fields.field("trace_id").is_some() || fields.field("span_id").is_some() {
+            let mut json = String::new();
+            self.inner
+                .format_event(ctx, Writer::new(&mut json), event)?;
+            let mut object: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(json.trim_end()).map_err(|_| fmt::Error)?;
+            object.insert("trace_id".into(), trace_id.to_string().into());
+            object.insert("span_id".into(), span_id.to_string().into());
+            writer.write_str(&serde_json::to_string(&object).map_err(|_| fmt::Error)?)?;
+            return writeln!(writer);
+        }
+
+        let mut writer = CorrelationWriter {
+            inner: writer,
+            trace_id,
+            span_id,
+            injected: false,
+        };
+        self.inner
+            .format_event(ctx, Writer::new(&mut writer), event)
+    }
+}
 
 /// Build the filter for spans exported through OpenTelemetry.
 ///
@@ -122,8 +270,13 @@ fn classify_exporter_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry::KeyValue;
-    use std::sync::Mutex;
+    use opentelemetry::{trace::TracerProvider as _, KeyValue};
+    use opentelemetry_sdk::trace::InMemorySpanExporter;
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
+    use tracing_subscriber::prelude::*;
 
     // Env vars are process-global — serialize tests that mutate them to prevent
     // cross-test races when the suite runs with multiple threads.
@@ -135,6 +288,209 @@ mod tests {
             .iter()
             .find(|(k, _)| k.as_str() == "service.name")
             .map(|(_, v)| v.to_string())
+    }
+
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn trace_context_json_correlates_nested_span_logs() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let output_writer = Arc::clone(&output);
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = provider.tracer("trace-context-json-test");
+        let context_lookup = TraceContextLookup::default();
+
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .event_format(context_lookup.json_formatter(true))
+                    .with_writer(move || CapturingWriter(Arc::clone(&output_writer)))
+                    .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                        metadata.target() != "stdout_filtered"
+                    })),
+            )
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(tracer)
+                    .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                        !matches!(metadata.target(), "filtered" | "otel_event_filtered")
+                    })),
+            )
+            .with(
+                context_lookup
+                    .clone()
+                    .with_filter(tracing_subscriber::filter::LevelFilter::OFF),
+            );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let explicit = tracing::info_span!("explicit");
+            let root = tracing::info_span!("root");
+            root.in_scope(|| {
+                tracing::info!(answer = 42, "root event");
+                tracing::info!(
+                    trace_id = "event-provided-trace",
+                    span_id = "event-provided-span",
+                    "colliding-fields event"
+                );
+                tracing::info!(parent: &explicit, "explicit-parent event");
+                tracing::info!(parent: None, "explicit-root event");
+                let child = tracing::info_span!("child");
+                child.in_scope(|| tracing::info!("child event"));
+
+                let filtered_child = tracing::info_span!(target: "filtered", "filtered-child");
+                filtered_child.in_scope(|| tracing::info!("filtered-child event"));
+                tracing::info!(
+                    parent: &filtered_child,
+                    "explicit-filtered-child event"
+                );
+
+                let stdout_filtered_child =
+                    tracing::info_span!(target: "stdout_filtered", "stdout-filtered-child");
+                stdout_filtered_child.in_scope(|| tracing::info!("stdout-filtered-child event"));
+
+                tracing::info!(target: "otel_event_filtered", "otel-filtered event");
+            });
+            let filtered = tracing::info_span!(target: "filtered", "filtered");
+            filtered.in_scope(|| tracing::info!("filtered-span event"));
+            tracing::info!("unscoped event");
+        });
+
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        let root = spans.iter().find(|span| span.name == "root").unwrap();
+        let explicit = spans.iter().find(|span| span.name == "explicit").unwrap();
+        let child = spans.iter().find(|span| span.name == "child").unwrap();
+        let stdout_filtered_child = spans
+            .iter()
+            .find(|span| span.name == "stdout-filtered-child")
+            .unwrap();
+
+        let bytes = output.lock().unwrap().clone();
+        let output = String::from_utf8(bytes).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        let logs: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(logs.len(), 11);
+
+        assert_eq!(logs[0]["message"], "root event");
+        assert_eq!(logs[0]["answer"], 42);
+        assert_eq!(
+            logs[0]["trace_id"],
+            root.span_context.trace_id().to_string()
+        );
+        assert_eq!(logs[0]["span_id"], root.span_context.span_id().to_string());
+        assert_eq!(logs[0]["trace_id"].as_str().unwrap().len(), 32);
+        assert_eq!(logs[0]["span_id"].as_str().unwrap().len(), 16);
+
+        assert_eq!(logs[1]["message"], "colliding-fields event");
+        assert_eq!(
+            logs[1]["trace_id"],
+            root.span_context.trace_id().to_string()
+        );
+        assert_eq!(logs[1]["span_id"], root.span_context.span_id().to_string());
+        assert_eq!(lines[1].matches("\"trace_id\":").count(), 1);
+        assert_eq!(lines[1].matches("\"span_id\":").count(), 1);
+
+        assert_eq!(logs[2]["message"], "explicit-parent event");
+        assert_eq!(
+            logs[2]["trace_id"],
+            explicit.span_context.trace_id().to_string()
+        );
+        assert_eq!(
+            logs[2]["span_id"],
+            explicit.span_context.span_id().to_string()
+        );
+
+        assert_eq!(logs[3]["message"], "explicit-root event");
+        assert!(logs[3].get("trace_id").is_none());
+        assert!(logs[3].get("span_id").is_none());
+
+        assert_eq!(logs[4]["message"], "child event");
+        assert_eq!(
+            logs[4]["trace_id"],
+            child.span_context.trace_id().to_string()
+        );
+        assert_eq!(logs[4]["span_id"], child.span_context.span_id().to_string());
+        assert_eq!(logs[0]["trace_id"], logs[4]["trace_id"]);
+
+        assert_eq!(logs[5]["message"], "filtered-child event");
+        assert_eq!(
+            logs[5]["trace_id"],
+            root.span_context.trace_id().to_string()
+        );
+        assert_eq!(logs[5]["span_id"], root.span_context.span_id().to_string());
+
+        assert_eq!(logs[6]["message"], "explicit-filtered-child event");
+        assert_eq!(
+            logs[6]["trace_id"],
+            root.span_context.trace_id().to_string()
+        );
+        assert_eq!(logs[6]["span_id"], root.span_context.span_id().to_string());
+
+        assert_eq!(logs[7]["message"], "stdout-filtered-child event");
+        assert_eq!(
+            logs[7]["trace_id"],
+            stdout_filtered_child.span_context.trace_id().to_string()
+        );
+        assert_eq!(
+            logs[7]["span_id"],
+            stdout_filtered_child.span_context.span_id().to_string()
+        );
+
+        assert_eq!(logs[8]["message"], "otel-filtered event");
+        assert_eq!(
+            logs[8]["trace_id"],
+            root.span_context.trace_id().to_string()
+        );
+        assert_eq!(logs[8]["span_id"], root.span_context.span_id().to_string());
+
+        assert_eq!(logs[9]["message"], "filtered-span event");
+        assert!(logs[9].get("trace_id").is_none());
+        assert!(logs[9].get("span_id").is_none());
+
+        assert_eq!(logs[10]["message"], "unscoped event");
+        assert!(logs[10].get("trace_id").is_none());
+        assert!(logs[10].get("span_id").is_none());
+    }
+
+    #[test]
+    fn trace_context_lookup_does_not_enable_callsites() {
+        let context_lookup = TraceContextLookup::default();
+        let subscriber = tracing_subscriber::registry().with(
+            context_lookup
+                .clone()
+                .with_filter(tracing_subscriber::filter::LevelFilter::OFF),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(context_lookup
+                .dispatch
+                .get()
+                .and_then(tracing::dispatcher::WeakDispatch::upgrade)
+                .is_some());
+            assert!(!tracing::enabled!(
+                target: "trace_context_lookup_filter_test",
+                tracing::Level::ERROR
+            ));
+        });
     }
 
     #[test]

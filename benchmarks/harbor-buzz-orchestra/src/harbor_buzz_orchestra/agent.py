@@ -9,10 +9,10 @@ from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from .container_runtime import BuzzContainerRuntime, EndpointLaunchConfig
 from .manifest import ExperimentManifest
 from .provisioning import TrialProvisioner
 from .runtime import OrchestraRuntime
-from .container_runtime import BuzzContainerRuntime, EndpointLaunchConfig
 
 
 class BuzzOrchestraAgent(BaseAgent):
@@ -83,7 +83,7 @@ class BuzzOrchestraAgent(BaseAgent):
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(f"cannot load JSON config {path}: {error}") from error
         if not isinstance(value, dict):
-            raise ValueError(f"JSON config {path} must contain an object")
+            raise TypeError(f"JSON config {path} must contain an object")
         return value
 
     @classmethod

@@ -27,6 +27,42 @@ test("mediaProxyUrl: uses the IPv4 loopback literal for the localhost proxy", ()
   );
 });
 
+test("media-proxy port store: resolved port publishes and reset notifies subscribers", async () => {
+  const previousWindow = globalThis.window;
+  let notifications = 0;
+
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_http_url") {
+          return Promise.resolve("https://relay.example");
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?portStore=${Date.now()}`);
+    const unsubscribe = mediaUrl.subscribeMediaProxyPort(() => notifications++);
+
+    mediaUrl.rewriteRelayUrl(`https://relay.example/media/${HASH}.png`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(mediaUrl.getCachedMediaProxyPort(), 54321);
+    assert.equal(notifications, 1);
+
+    mediaUrl.resetMediaCaches();
+    assert.equal(mediaUrl.getCachedMediaProxyPort(), null);
+    assert.equal(notifications, 2);
+
+    unsubscribe();
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
 test("relay-origin store: publishes are canonicalized at the store boundary", () => {
   // The store must hold the invariant that `cachedRelayOrigin` is always a
   // canonical URL origin — consumers compare `new URL(src).origin` against it
