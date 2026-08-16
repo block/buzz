@@ -21,7 +21,7 @@ pub(crate) struct TrustedLanEndpoint(String);
 
 impl TrustedLanEndpoint {
     pub(crate) fn parse_memory(value: &str) -> Result<Self, TrustedLanError> {
-        Self::parse(value, "/mcp", false)
+        Self::parse(value, "/mcp", true)
     }
 
     pub(crate) fn parse_rag(value: &str) -> Result<Self, TrustedLanError> {
