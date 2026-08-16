@@ -22,11 +22,10 @@ import {
   getDmHuddleMemberPubkeys,
   hasOtherDmParticipant,
 } from "@/features/channels/lib/dmHuddleMembers";
-import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
+import { buildVideoReviewPresentationByMessageId } from "@/features/messages/lib/videoReviewContext";
 import { cancelAgentJobFromTimeline } from "@/features/messages/lib/cancelAgentJobFromTimeline";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
-import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
@@ -43,18 +42,10 @@ import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
   containsWelcomePersonaMention,
-  WelcomeComposerBanner,
-  WELCOME_COMPOSER_BANNER_DISMISS_DURATION_SECONDS,
-  WELCOME_COMPOSER_BANNER_HIDE_BUFFER_MS,
-  WELCOME_COMPOSER_BANNER_SUCCESS_SETTLE_MS,
-  WELCOME_PERSONA_ROTATION_MS,
-  type WelcomeComposerBannerState,
+  WelcomeComposerGuidanceLayer,
 } from "@/features/channels/ui/WelcomeComposerBanner";
-import {
-  channelTimelineEmptyDescription,
-  channelTimelineEmptyTitle,
-  mentionsKnownAgent,
-} from "@/features/channels/ui/ChannelPane.helpers";
+import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
+import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
@@ -82,7 +73,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   autoSendDraftKey = null,
   onAutoSendComplete = null,
   botTypingEntries,
-  channelFind,
   channelManagementOpen = false,
   currentPubkey,
   editTarget = null,
@@ -136,6 +126,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onResetThreadPanelWidth,
   onSelectThreadReplyTarget,
   onSendMessage,
+  onSendToChannel,
   onSendVideoReviewComment,
   onSendThreadReply,
   onThreadScrollTargetResolved,
@@ -173,11 +164,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
-  const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
-  const welcomeComposerDismissTimerRef = React.useRef<number | null>(null);
-  const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
-  const [welcomeComposerBannerState, setWelcomeComposerBannerState] =
-    React.useState<WelcomeComposerBannerState>("prompt");
   const { goChannel } = useAppNavigation();
   const prepareDmSendChannel = usePrepareDmSendChannel(
     activeChannel,
@@ -226,36 +212,15 @@ export const ChannelPane = React.memo(function ChannelPane({
     "css-variable",
     () => messageTimelineRef.current?.settleAtBottom() ?? false,
   );
-  const clearWelcomeComposerDismissTimer = React.useCallback(() => {
-    if (welcomeComposerDismissTimerRef.current !== null) {
-      window.clearTimeout(welcomeComposerDismissTimerRef.current);
-      welcomeComposerDismissTimerRef.current = null;
-    }
-    if (welcomeComposerHideTimerRef.current !== null) {
-      window.clearTimeout(welcomeComposerHideTimerRef.current);
-      welcomeComposerHideTimerRef.current = null;
-    }
-  }, []);
-  React.useEffect(
-    () => () => clearWelcomeComposerDismissTimer(),
-    [clearWelcomeComposerDismissTimer],
-  );
-  React.useEffect(() => {
-    clearWelcomeComposerDismissTimer();
-    if (
-      activeChannelId &&
-      isActiveWelcomeChannel &&
-      completedWelcomeBannerChannelIdsRef.current.has(activeChannelId)
-    ) {
-      setWelcomeComposerBannerState("hidden");
-      return;
-    }
-    setWelcomeComposerBannerState("prompt");
-  }, [
+  const {
+    bannerState: welcomeComposerBannerState,
+    completeBanner: completeWelcomeComposerBanner,
+    dismissBanner: handleDismissWelcomeBanner,
+  } = useWelcomeComposerBanner(
     activeChannelId,
-    clearWelcomeComposerDismissTimer,
     isActiveWelcomeChannel,
-  ]);
+    currentPubkey ?? null,
+  );
   const isEditInThread =
     editTarget != null &&
     threadHeadMessage != null &&
@@ -300,9 +265,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     onEdit(target);
     return true;
   }, [findLastOwnEditable, onEdit, threadHeadMessage, threadMessages]);
-
   const timeoutState = useTimeoutState();
-
   // A moderation DM (1:1 with the relay identity) is read-only for the member;
   // only DMs pay for the NIP-11 `self` lookup. Fails open: no `relaySelf` →
   // ordinary DM, composer enabled.
@@ -335,37 +298,17 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     return pubkeys;
   }, [activityAgents, agentPubkeys, agentSessionAgents]);
-  const completeWelcomeComposerBanner = React.useCallback(() => {
-    if (!activeChannelId || !isActiveWelcomeChannel) {
-      return;
-    }
-
-    clearWelcomeComposerDismissTimer();
-    completedWelcomeBannerChannelIdsRef.current.add(activeChannelId);
-    setWelcomeComposerBannerState("complete");
-    welcomeComposerDismissTimerRef.current = window.setTimeout(() => {
-      setWelcomeComposerBannerState("dismissing");
-      welcomeComposerDismissTimerRef.current = null;
-      welcomeComposerHideTimerRef.current = window.setTimeout(
-        () => {
-          setWelcomeComposerBannerState("hidden");
-          welcomeComposerHideTimerRef.current = null;
-        },
-        WELCOME_COMPOSER_BANNER_DISMISS_DURATION_SECONDS * 1000 +
-          WELCOME_COMPOSER_BANNER_HIDE_BUFFER_MS,
-      );
-    }, WELCOME_PERSONA_ROTATION_MS + WELCOME_COMPOSER_BANNER_SUCCESS_SETTLE_MS);
-  }, [
-    activeChannelId,
-    clearWelcomeComposerDismissTimer,
-    isActiveWelcomeChannel,
-  ]);
   const handleSendMessage = React.useCallback(
     async (
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
+      threadContext?: {
+        parentEventId: string | null;
+        threadHeadId: string | null;
+      } | null,
+      forceRest?: boolean,
     ) => {
       const shouldCompleteWelcomeBanner =
         isActiveWelcomeChannel &&
@@ -373,7 +316,14 @@ export const ChannelPane = React.memo(function ChannelPane({
           mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
 
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
-      await onSendMessage(content, mentionPubkeys, mediaTags, channelId);
+      await onSendMessage(
+        content,
+        mentionPubkeys,
+        mediaTags,
+        channelId,
+        threadContext,
+        forceRest,
+      );
 
       if (
         channelId &&
@@ -469,7 +419,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const activeVideoReviewCommentSender = activeChannel?.archivedAt
     ? undefined
     : onSendVideoReviewComment;
-  const threadVideoReviewContextsByMessageId = React.useMemo(() => {
+  const threadVideoReviewPresentation = React.useMemo(() => {
     const messagesById = new Map(
       messages.map((message) => [message.id, message]),
     );
@@ -480,7 +430,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       messagesById.set(message.id, message);
     }
 
-    return buildVideoReviewContextsByMessageId({
+    return buildVideoReviewPresentationByMessageId({
       channelId: activeChannel?.id ?? null,
       channelName: activeChannel?.name,
       channelType: activeChannel?.channelType ?? null,
@@ -618,19 +568,6 @@ export const ChannelPane = React.memo(function ChannelPane({
           }
         >
           {isHuddleTranscript ? null : header}
-          {channelFind.isOpen ? (
-            <div className={cn("absolute inset-x-0 z-40", channelChrome.top)}>
-              <ChannelFindBar
-                matchCount={channelFind.matchCount}
-                matchIndex={channelFind.activeIndex}
-                onClose={channelFind.close}
-                onNext={channelFind.goToNext}
-                onPrevious={channelFind.goToPrevious}
-                onQueryChange={channelFind.setQuery}
-                query={channelFind.query}
-              />
-            </div>
-          ) : null}
           <MessageTimeline
             ref={messageTimelineRef}
             channelId={activeChannel?.id}
@@ -683,9 +620,6 @@ export const ChannelPane = React.memo(function ChannelPane({
             }
             onTargetReached={onTargetReached}
             onToggleReaction={onToggleReaction}
-            searchActiveMessageId={channelFind.activeMatch?.messageId ?? null}
-            searchMatchingMessageIds={channelFind.matchingMessageIds}
-            searchQuery={channelFind.query}
             targetMessageId={targetMessageId}
             splitThreadPanelOpen={
               useSplitAuxiliaryPane &&
@@ -733,18 +667,19 @@ export const ChannelPane = React.memo(function ChannelPane({
                   hasComposerBottomActivity && "composer-dock--with-activity",
                 )}
               >
+                {isActiveWelcomeChannel && !timeoutState.active ? (
+                  <WelcomeComposerGuidanceLayer
+                    onDismiss={handleDismissWelcomeBanner}
+                    settingUp={welcomeKickoffSettingUp}
+                    state={welcomeComposerBannerState}
+                  >
+                    {welcomeKickoffStage}
+                  </WelcomeComposerGuidanceLayer>
+                ) : null}
                 {timeoutState.active ? (
                   <ComposerTimeoutBanner
                     expiresAtMs={timeoutState.expiresAtMs}
                   />
-                ) : isActiveWelcomeChannel ? (
-                  <div className="relative">
-                    {welcomeKickoffStage}
-                    <WelcomeComposerBanner
-                      settingUp={welcomeKickoffSettingUp}
-                      state={welcomeComposerBannerState}
-                    />
-                  </div>
                 ) : null}
                 <ComposerDockBackdrop gutterClassName="inset-x-5" />
                 <MessageComposer
@@ -831,6 +766,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             key="channel-management-panel"
             onChannelManagementDeleted={onChannelManagementDeleted}
             onCloseChannelManagement={onCloseChannelManagement}
+            onOpenMembers={onOpenMembers}
             onResetThreadPanelWidth={onResetThreadPanelWidth}
             onThreadPanelResizeStart={onThreadPanelResizeStart}
             threadPanelWidthPx={threadPanelWidthPx}
@@ -871,6 +807,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onExpandReplies={onExpandThreadReplies}
                 onSelectReplyTarget={onSelectThreadReplyTarget}
                 onSend={onSendThreadReply}
+                onSendToChannel={
+                  isComposerDisabled ? undefined : onSendToChannel
+                }
                 onScrollTargetResolved={() => resolveScrollTarget()}
                 onScrollTargetSettled={resolveScrollTarget}
                 onToggleReaction={onToggleReaction}
@@ -880,9 +819,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
                 threadHead={threadHeadMessage}
-                videoReviewContextsByMessageId={
-                  threadVideoReviewContextsByMessageId
-                }
+                videoReviewPresentation={threadVideoReviewPresentation}
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}
                 threadRepliesPending={threadMessagesPending}
@@ -969,7 +906,6 @@ export const ChannelPane = React.memo(function ChannelPane({
             const panel = (
               <UserProfilePanel
                 currentPubkey={currentPubkey}
-                callerChannelId={activeChannelId}
                 isSinglePanelView={
                   useSplitAuxiliaryPane ? false : isSinglePanelView
                 }

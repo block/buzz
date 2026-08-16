@@ -7,7 +7,10 @@ import type {
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
 import { resolveThreadReplyTarget } from "@/features/messages/hooks";
+import { getSendToChannelSemantics } from "@/features/messages/lib/sendToChannelSemantics";
+import { summarizeThreadRoot } from "@/features/messages/lib/sentFromThread";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -25,6 +28,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
   markRevealedRepliesRead,
+  profiles,
   recordThreadInteraction,
   onOptimisticOpenThreadHeadIdChange,
   onRequestEmptyEditDelete,
@@ -45,6 +49,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
   markRevealedRepliesRead: (messageId: string) => void;
+  profiles: UserProfileLookup | undefined;
   recordThreadInteraction: (rootId: string) => void;
   onOptimisticOpenThreadHeadIdChange: React.Dispatch<
     React.SetStateAction<string | null | undefined>
@@ -72,6 +77,9 @@ export function useChannelPaneHandlers({
 
   const expandedThreadReplyIdsRef = React.useRef(expandedThreadReplyIds);
   expandedThreadReplyIdsRef.current = expandedThreadReplyIds;
+
+  const profilesRef = React.useRef(profiles);
+  profilesRef.current = profiles;
 
   const sendMutateRef = React.useRef(sendMessageMutation.mutateAsync);
   sendMutateRef.current = sendMessageMutation.mutateAsync;
@@ -276,12 +284,40 @@ export function useChannelPaneHandlers({
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
+      _threadContext?: {
+        parentEventId: string | null;
+        threadHeadId: string | null;
+      } | null,
+      forceRest?: boolean,
     ) => {
       await sendMutateRef.current({
         content,
         mentionPubkeys,
         mediaTags,
         channelId: channelId ?? undefined,
+        forceRest,
+      });
+    },
+    [],
+  );
+
+  const handleSendToChannel = React.useCallback(
+    async (
+      message: TimelineMessage,
+      threadRoot: TimelineMessage,
+      channelId: string,
+    ) => {
+      const { mentionPubkeys, semanticTags } = getSendToChannelSemantics(
+        message,
+        profilesRef.current,
+      );
+      await sendMutateRef.current({
+        channelId,
+        content: message.body,
+        mediaTags: semanticTags,
+        mentionPubkeys,
+        sentFromThreadRootExcerpt: summarizeThreadRoot(threadRoot.body),
+        sentFromThreadRootId: threadRoot.id,
       });
     },
     [],
@@ -297,6 +333,7 @@ export function useChannelPaneHandlers({
         parentEventId: string | null;
         threadHeadId: string | null;
       } | null,
+      forceRest?: boolean,
     ) => {
       // Resolve target using captured submit-time context (race-free) or live
       // refs (legacy path). When threadContext is supplied, no live-ref reads
@@ -329,6 +366,7 @@ export function useChannelPaneHandlers({
         parentEventId,
         mediaTags,
         channelId: channelId ?? undefined,
+        forceRest,
       });
 
       // Only update thread UI state if the user is still viewing the same
@@ -376,6 +414,7 @@ export function useChannelPaneHandlers({
     handleExpandThreadReplies,
     handleOpenThread,
     handleSendMessage,
+    handleSendToChannel,
     handleSendThreadReply,
     handleSelectThreadReplyTarget,
     handleToggleReaction,

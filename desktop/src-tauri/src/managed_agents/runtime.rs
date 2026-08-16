@@ -49,6 +49,11 @@ pub(crate) use environment::{
     effective_acp_turn_limits, ManagedRuntimeFeatureGates,
 };
 
+#[cfg(test)]
+mod test_fixtures;
+#[cfg(test)]
+pub(crate) use crate::managed_agents::access_policy::build_respond_to_env_with_policy;
+
 mod process;
 #[cfg(any(test, feature = "mesh-llm"))]
 pub(crate) use process::process_is_running;

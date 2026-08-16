@@ -5,8 +5,15 @@ import type {
   ProjectActivitySummary,
   Repository,
 } from "@/features/projects/hooks";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import { projectRepoHostForRepository } from "@/features/projects/lib/projectRepoHost";
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
+import {
+  projectRepoHostForRepository,
+  repositoryDisplayPath,
+} from "@/features/projects/lib/projectRepoHost";
+import { repositoryShareLink } from "@/features/projects/lib/projectShareLinks";
 import {
   formatExactTimestamp,
   relativeTime,
@@ -30,6 +37,7 @@ import {
   ProjectPeopleStack,
   ProjectStatsRow,
 } from "./ProjectCards";
+import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { GitHubMark } from "./GitHubMark";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import { projectTerminalLabel } from "./useOpenProjectTerminal";
@@ -99,11 +107,20 @@ function RepositoryOpenButton({
 
 function RepositoryIdentity({
   inlineBranch = false,
+  profiles,
   project,
   repository,
-}: Pick<RepositoryItemProps, "project" | "repository"> & {
+}: Pick<RepositoryItemProps, "profiles" | "project" | "repository"> & {
   inlineBranch?: boolean;
 }) {
+  // Where the git data lives beats repeating the (often identical) project
+  // name — "github.com/block/buzz" for external repos, "owner/repo" for
+  // Buzz-hosted ones.
+  const displayPath = repositoryDisplayPath(
+    repository,
+    useRelayOrigin(),
+    resolveUserLabel({ pubkey: repository.owner, profiles }),
+  );
   return (
     <>
       <RepositoryHostIcon repository={repository} />
@@ -114,7 +131,7 @@ function RepositoryIdentity({
           </span>
         </div>
         <p className={PROJECT_LIST_ROW_PREVIEW_CLASS}>
-          {project.name}
+          {displayPath ?? project.name}
           {inlineBranch ? ` · ${repository.defaultBranch}` : ""}
         </p>
       </div>
@@ -165,6 +182,10 @@ function RepositoryActionsMenu({
 }: Pick<RepositoryItemProps, "hasLocal" | "onOpenTerminal" | "repository">) {
   return (
     <ProjectListRowMenu label={`More options for ${repository.name}`}>
+      <CopyShareLinkMenuItem
+        link={repositoryShareLink(repository)}
+        testId={`repository-copy-link-${repository.dtag}`}
+      />
       <DropdownMenuItem
         onSelect={(event) => {
           event.preventDefault();
@@ -203,6 +224,7 @@ export function RepositoryGridCard(props: RepositoryItemProps) {
         <div className="flex min-w-0 items-start gap-2.5">
           <RepositoryIdentity
             inlineBranch
+            profiles={profiles}
             project={project}
             repository={repository}
           />
@@ -258,7 +280,11 @@ export function RepositoryListRow(props: RepositoryItemProps) {
       />
       <div className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-2.5">
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
-          <RepositoryIdentity project={project} repository={repository} />
+          <RepositoryIdentity
+            profiles={profiles}
+            project={project}
+            repository={repository}
+          />
         </div>
         <div
           className={cn(PROJECT_LIST_ROW_TRAILING_CLASS, "pointer-events-auto")}

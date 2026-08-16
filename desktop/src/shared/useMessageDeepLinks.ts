@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { listenForMessageDeepLinks } from "@/shared/deep-link";
+import { listenForNavigationDeepLinks } from "@/shared/deep-link";
 
 /**
  * Subscribe to `buzz://message` deep links emitted by the Tauri backend
@@ -24,16 +24,24 @@ export function useMessageDeepLinks(enabled = true) {
     if (!enabled) return;
 
     let cancelled = false;
-    const unlistenPromise = listenForMessageDeepLinks((payload) => {
-      if (cancelled) return;
-      void goChannel(payload.channelId, {
-        messageId: payload.messageId,
-        threadRootId: payload.threadRootId,
-      });
-    });
+    const unlistenPromise = listenForNavigationDeepLinks(
+      async (payload) => {
+        if (cancelled) return false;
+        await goChannel(payload.channelId);
+        return true;
+      },
+      async (payload) => {
+        if (cancelled) return false;
+        await goChannel(payload.channelId, {
+          messageId: payload.messageId,
+          threadRootId: payload.threadRootId,
+        });
+        return true;
+      },
+    );
     return () => {
       cancelled = true;
-      void unlistenPromise.then((fn) => fn());
+      void unlistenPromise.then((unlisten) => unlisten());
     };
   }, [enabled, goChannel]);
 }

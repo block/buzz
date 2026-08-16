@@ -6,6 +6,25 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
+## Product Contract
+
+Before planning or reviewing a non-trivial change:
+
+1. Read [VISION.md](VISION.md).
+2. Read the `VISION_*.md` documents relevant to the affected product surface.
+3. Read the applicable guidance in [TESTING.md](TESTING.md) and any
+   package-local `TESTING.md`.
+4. Check that the proposed design advances, or at least does not contradict,
+   that product intent. Call out any intentional tension explicitly.
+
+Implementation describes the product today; the vision documents describe the
+product it is becoming. A locally correct change can still be wrong if it works
+against that direction. Scale validation to the change's risk and exercise the
+real workflow for user-visible or integration behavior when practical; green CI
+and runtime evidence answer different questions.
+
+---
+
 ## Ecosystem
 
 Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
@@ -101,10 +120,11 @@ Run `just test` for integration tests if you touched `buzz-relay`,
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
 fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
 Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
-commit. **Pre-push hooks** run clippy (workspace + Tauri) and fast unit tests
-in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter) — no overlap with
-pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix all formatting
-in one shot. Run `just ci` for the full local gate. Run `just hooks` to
+commit. **Pre-push hooks** run clippy (workspace + Tauri), desktop TypeScript
+typechecking (`tsc --noEmit`), and fast unit tests in parallel (Rust, desktop
+JS, Tauri Rust, mobile Flutter) — no overlap with pre-commit. Builds are
+CI-only. Run `just fix-all` to auto-fix all formatting in one shot. Run
+`just ci` for the full local gate. Run `just hooks` to
 re-install hooks after env changes. Before agents run Git or hooks, activate the
 repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
 commands to compensate for an unconfigured shell `PATH`.

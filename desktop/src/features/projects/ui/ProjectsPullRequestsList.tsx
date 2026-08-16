@@ -6,8 +6,10 @@ import type {
   ProjectPullRequestListItem,
   Repository,
 } from "@/features/projects/hooks";
+import { pullRequestShareLink } from "@/features/projects/lib/projectShareLinks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
+import { cn } from "@/shared/lib/cn";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -15,6 +17,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
+import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { ProjectAuthorIdentity } from "./ProjectAuthorIdentity";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
@@ -31,6 +34,8 @@ import {
 } from "./projectListRowStyles";
 
 type ProjectsPullRequestsListProps = {
+  /** Render without container chrome — a parent table container provides border and rounding. */
+  embedded?: boolean;
   error: unknown;
   failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
@@ -53,15 +58,77 @@ function nextStepLabel(status: ProjectPullRequest["status"]) {
   return "Review PR";
 }
 
+function PullRequestContext({
+  authorLabel,
+  authorTestId,
+  className,
+  profiles,
+  pullRequest,
+  repository,
+  showMobileStatus = false,
+}: {
+  authorLabel: string;
+  authorTestId?: string;
+  className?: string;
+  profiles?: UserProfileLookup;
+  pullRequest: ProjectPullRequest;
+  repository: Repository;
+  showMobileStatus?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 items-center gap-x-1 overflow-hidden whitespace-nowrap",
+        className,
+      )}
+    >
+      <ProjectAuthorIdentity
+        label={authorLabel}
+        profiles={profiles}
+        pubkey={pullRequest.author}
+        testId={authorTestId}
+      />
+      <span>opened this in</span>
+      <span className="truncate">{repository.name}</span>
+      {pullRequest.branchName && pullRequest.targetBranch ? (
+        <>
+          <span>to merge</span>
+          <span className="truncate">{pullRequest.branchName}</span>
+          <span>into</span>
+          <span className="truncate">{pullRequest.targetBranch}</span>
+        </>
+      ) : pullRequest.branchName ? (
+        <>
+          <span>from</span>
+          <span className="truncate">{pullRequest.branchName}</span>
+        </>
+      ) : pullRequest.targetBranch ? (
+        <>
+          <span>targeting</span>
+          <span className="truncate">{pullRequest.targetBranch}</span>
+        </>
+      ) : null}
+      <span className="-ml-1">.</span>
+      {showMobileStatus ? (
+        <span className="md:hidden">
+          It is {pullRequest.status.toLowerCase()}.
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function PullRequestGridCard({
   project,
   profiles,
   pullRequest,
+  repository,
   onOpen,
 }: {
   project: Project;
   profiles?: UserProfileLookup;
   pullRequest: ProjectPullRequest;
+  repository: Repository;
   onOpen: (project: Project, pullRequest: ProjectPullRequest) => void;
 }) {
   const authorLabel = resolveUserLabel({
@@ -79,7 +146,10 @@ function PullRequestGridCard({
         onClick={() => onOpen(project, pullRequest)}
         type="button"
       >
-        <span className="sr-only">View {pullRequest.title}</span>
+        <span className="sr-only">
+          View pull request {pullRequest.title} by {authorLabel} in{" "}
+          {repository.name}
+        </span>
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex min-w-0 items-start gap-3">
@@ -90,9 +160,13 @@ function PullRequestGridCard({
                 {pullRequest.title}
               </p>
             </div>
-            <p className="truncate text-xs text-muted-foreground">
-              {project.name}
-            </p>
+            <PullRequestContext
+              authorLabel={authorLabel}
+              className="text-xs leading-4 text-muted-foreground"
+              profiles={profiles}
+              pullRequest={pullRequest}
+              repository={repository}
+            />
           </div>
           <Button
             className="relative z-10 h-7 shrink-0 px-2.5"
@@ -116,21 +190,10 @@ function PullRequestGridCard({
 
         <div className="mt-auto border border-border/60 bg-muted/30 px-2.5 py-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-foreground/80">
-            <span className="font-mono text-foreground">
-              #{pullRequest.id.slice(0, 8)}
-            </span>
             <span className="font-medium text-foreground">
               {pullRequest.status}
             </span>
             <span>created {relativeTime(pullRequest.createdAt)}</span>
-            <span>
-              by{" "}
-              <ProjectAuthorIdentity
-                label={authorLabel}
-                profiles={profiles}
-                pubkey={pullRequest.author}
-              />
-            </span>
             {pullRequest.comments.length > 0 ? (
               <span className="flex items-center gap-1">
                 <MessageSquare className="h-3.5 w-3.5" />
@@ -148,11 +211,13 @@ function PullRequestListRow({
   project,
   profiles,
   pullRequest,
+  repository,
   onOpen,
 }: {
   project: Project;
   profiles?: UserProfileLookup;
   pullRequest: ProjectPullRequest;
+  repository: Repository;
   onOpen: (project: Project, pullRequest: ProjectPullRequest) => void;
 }) {
   const authorLabel = resolveUserLabel({
@@ -170,7 +235,10 @@ function PullRequestListRow({
         onClick={() => onOpen(project, pullRequest)}
         type="button"
       >
-        <span className="sr-only">View {pullRequest.title}</span>
+        <span className="sr-only">
+          View pull request {pullRequest.title} by {authorLabel} in{" "}
+          {repository.name}
+        </span>
       </button>
       <div className={PROJECT_LIST_ROW_CONTENT_CLASS}>
         <ProjectEventTypeIcon className="h-5 w-5" kind="pull-request" />
@@ -178,26 +246,15 @@ function PullRequestListRow({
           <div className="flex min-w-0 items-center gap-1.5">
             <p className={PROJECT_LIST_ROW_TITLE_CLASS}>{pullRequest.title}</p>
           </div>
-          <div
-            className={`flex min-w-0 items-center gap-x-1.5 overflow-hidden whitespace-nowrap ${PROJECT_LIST_ROW_SUBTEXT_CLASS}`}
-          >
-            <span>{project.name}</span>
-            <span>·</span>
-            <span className="font-mono text-foreground">
-              #{pullRequest.id.slice(0, 8)}
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span>by</span>
-              <ProjectAuthorIdentity
-                label={authorLabel}
-                profiles={profiles}
-                pubkey={pullRequest.author}
-                testId="projects-pr-author"
-              />
-            </span>
-            <span className="md:hidden">·</span>
-            <span className="md:hidden">{pullRequest.status}</span>
-          </div>
+          <PullRequestContext
+            authorLabel={authorLabel}
+            authorTestId="projects-pr-author"
+            className={PROJECT_LIST_ROW_SUBTEXT_CLASS}
+            profiles={profiles}
+            pullRequest={pullRequest}
+            repository={repository}
+            showMobileStatus
+          />
         </div>
         <div className={PROJECT_LIST_ROW_TRAILING_CLASS}>
           <span className={PROJECT_LIST_ROW_STATUS_CLASS}>
@@ -223,6 +280,10 @@ function PullRequestListRow({
               <GitPullRequest className="h-4 w-4" />
               {nextStepLabel(pullRequest.status)}
             </DropdownMenuItem>
+            <CopyShareLinkMenuItem
+              link={pullRequestShareLink(pullRequest)}
+              testId={`projects-pull-request-copy-link-${pullRequest.id}`}
+            />
           </ProjectListRowMenu>
         </div>
       </div>
@@ -231,6 +292,7 @@ function PullRequestListRow({
 }
 
 export function ProjectsPullRequestsList({
+  embedded,
   error,
   failedSections,
   isLoading,
@@ -243,7 +305,12 @@ export function ProjectsPullRequestsList({
 }: ProjectsPullRequestsListProps) {
   if (isLoading) {
     return (
-      <div className="border border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+      <div
+        className={cn(
+          "px-4 py-12 text-center text-sm text-muted-foreground",
+          !embedded && "border border-border/60",
+        )}
+      >
         Loading pull requests...
       </div>
     );
@@ -267,7 +334,12 @@ export function ProjectsPullRequestsList({
     return (
       <div className="space-y-3">
         {loadNotice}
-        <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+        <div
+          className={cn(
+            "px-4 py-12 text-center text-sm text-muted-foreground",
+            !embedded && "border border-dashed border-border/60",
+          )}
+        >
           No pull requests yet.
         </div>
       </div>
@@ -288,6 +360,7 @@ export function ProjectsPullRequestsList({
               profiles={profiles}
               project={project}
               pullRequest={pullRequest}
+              repository={repository}
             />
           ))}
         </div>
@@ -299,7 +372,9 @@ export function ProjectsPullRequestsList({
     <div className="space-y-3">
       {loadNotice}
       <div
-        className={PROJECT_LIST_CONTAINER_CLASS}
+        className={
+          embedded ? "divide-y divide-border/60" : PROJECT_LIST_CONTAINER_CLASS
+        }
         data-testid="projects-list-container"
       >
         {pullRequests.map(({ project, pullRequest, repository }) => (
@@ -311,6 +386,7 @@ export function ProjectsPullRequestsList({
             profiles={profiles}
             project={project}
             pullRequest={pullRequest}
+            repository={repository}
           />
         ))}
       </div>

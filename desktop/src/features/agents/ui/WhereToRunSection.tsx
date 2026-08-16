@@ -5,6 +5,7 @@ import { useBackendProvidersQuery } from "@/features/agents/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
+import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   applyProbeResult,
   emptyWhereToRunDraft,
@@ -23,6 +24,16 @@ export function WhereToRunSection({
 }) {
   const backendProviders = useBackendProvidersQuery().data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
+  const runOnOptions = React.useMemo(
+    () => [
+      { label: "This computer", value: "local" },
+      ...backendProviders.map((provider) => ({
+        label: provider.id,
+        value: provider.id,
+      })),
+    ],
+    [backendProviders],
+  );
   const isProviderMode = draft.runOn !== "local";
   const selectedBackendProvider = React.useMemo(
     () =>
@@ -51,7 +62,7 @@ export function WhereToRunSection({
     ? (selectedBackendProvider?.binaryPath ?? null)
     : null;
   React.useEffect(() => {
-    if (!selectedBinaryPath) {
+    if (!selectedBinaryPath || draft.probedProvider) {
       setProbeError(null);
       return;
     }
@@ -70,7 +81,7 @@ export function WhereToRunSection({
     return () => {
       cancelled = true;
     };
-  }, [selectedBinaryPath]);
+  }, [selectedBinaryPath, draft.probedProvider]);
 
   if (backendProviders.length === 0) return null;
 
@@ -80,25 +91,19 @@ export function WhereToRunSection({
         <label className="text-sm font-medium" htmlFor="agent-run-on">
           Run on
         </label>
-        <select
-          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+        <PersonaDropdownField
           disabled={isPending}
           id="agent-run-on"
-          onChange={(event) =>
+          onValueChange={(runOn) =>
             onDraftChange({
               ...emptyWhereToRunDraft,
-              runOn: event.target.value,
+              runOn,
             })
           }
+          options={runOnOptions}
+          placeholder="Choose where to run"
           value={draft.runOn}
-        >
-          <option value="local">This computer</option>
-          {backendProviders.map((provider) => (
-            <option key={provider.id} value={provider.id}>
-              {provider.id}
-            </option>
-          ))}
-        </select>
+        />
       </div>
 
       {isProviderMode && selectedBackendProvider ? (

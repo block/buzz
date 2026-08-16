@@ -7,10 +7,20 @@ import 'app_list_inset.dart';
 /// it. Rows inside are hairline-separated and inset to the card rather than the
 /// page, via [AppListInset].
 class AppListCard extends StatelessWidget {
-  const AppListCard({super.key, this.label, required this.children});
+  const AppListCard({
+    super.key,
+    this.label,
+    this.dividerIndent,
+    required this.children,
+  });
 
   /// Rendered above the card in sentence case, as written — no uppercasing.
   final String? label;
+
+  /// Separator inset from the card edge. Defaults to the standard row label
+  /// column, clearing a leading icon. Icon-free cards can pass [_inset] so
+  /// separators align with their row content on both sides.
+  final double? dividerIndent;
 
   final List<Widget> children;
 
@@ -29,7 +39,7 @@ class AppListCard extends StatelessWidget {
           Divider(
             height: 1,
             thickness: 1,
-            indent: _dividerIndent,
+            indent: dividerIndent ?? _dividerIndent,
             endIndent: _inset,
             // The scheme's own border tokens are derived from the page surface,
             // which lands them within a few levels of the card fill — invisible.

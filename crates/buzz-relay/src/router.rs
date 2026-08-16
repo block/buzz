@@ -76,6 +76,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/jobs", get(api::jobs::list_jobs))
         .route("/jobs/{job_id}", get(api::jobs::get_job))
         .route(
+            "/workflows/{workflow_id}/runs",
+            get(api::workflows::workflow_runs),
+        )
+        .route(
+            "/workflows/{workflow_id}/runs/{run_id}/approvals",
+            get(api::workflows::run_approvals),
+        )
+        .route(
             "/operator/communities",
             get(api::operator::list_owned_communities).post(api::operator::provision_community),
         )
@@ -379,22 +387,30 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 
     let check = async {
-        let (pg_ok, redis_ok) = tokio::join!(state.db.ping(), async {
-            state.redis_pool.get().await.is_ok()
-        },);
-        (pg_ok, redis_ok)
+        let (pg_ok, redis_ok, deletion_catalog_ok) = tokio::join!(
+            state.db.ping(),
+            async { state.redis_pool.get().await.is_ok() },
+            async { state.db.validate_deletion_serving_catalog().await.is_ok() },
+        );
+        (pg_ok, redis_ok, deletion_catalog_ok)
     };
 
-    let (pg_ok, redis_ok) = tokio::time::timeout(Duration::from_secs(2), check)
-        .await
-        .unwrap_or((false, false));
+    let (pg_ok, redis_ok, deletion_catalog_ok) =
+        tokio::time::timeout(Duration::from_secs(2), check)
+            .await
+            .unwrap_or((false, false, false));
 
-    if pg_ok && redis_ok {
+    if pg_ok && redis_ok && deletion_catalog_ok {
         (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"status": "not_ready", "postgres": pg_ok, "redis": redis_ok})),
+            Json(json!({
+                "status": "not_ready",
+                "postgres": pg_ok,
+                "redis": redis_ok,
+                "deletion_catalog": deletion_catalog_ok
+            })),
         )
             .into_response()
     }
