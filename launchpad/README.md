@@ -115,6 +115,13 @@ or the CLI.
 Branch from `launchpad`, commit with `-s` (the DCO check is not optional), and expect to
 need one approving review — the branch is protected and you can't approve your own.
 
+**Run `gh repo set-default launchpad-26/buzz` once per clone.** This fork's default
+branch resolution otherwise targets `block/buzz` — the parent repository — for any `gh`
+command with no explicit `--repo`, including `gh issue create` and `gh pr comment`. A
+command aimed at this fork silently lands on upstream's public tracker instead. The
+setting lands in the shared `.git/config`, so one invocation covers every worktree of
+the clone too.
+
 ---
 
 ## What's in this directory
