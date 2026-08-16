@@ -252,6 +252,42 @@ pub fn build_experience_event(
     )?)
 }
 
+/// Build the deterministic Memory MCP projection arguments for a signed record.
+pub fn experience_projection_payload(
+    event: &Event,
+    owner_pubkey: &PublicKey,
+    record: &ExperienceRecordV1,
+) -> Result<serde_json::Value, ExperienceError> {
+    record.validate()?;
+    let status = if matches!(
+        record.outcome,
+        ExperienceOutcome::Succeeded | ExperienceOutcome::Corrected
+    ) {
+        "active"
+    } else {
+        "inactive"
+    };
+    Ok(serde_json::json!({
+        "source_event_id": event.id.to_hex(),
+        "timestamp": record.occurred_at,
+        "agent": record.specialist_id,
+        "event_type": "command_experience",
+        "content": record.task_summary,
+        "metadata": {
+            "memory_key": record.memory_key,
+            "status": status,
+            "scope": record.scope,
+            "owner_id": owner_pubkey.to_hex(),
+            "team_id": record.team_id,
+            "specialist_id": record.specialist_id,
+            "confidence": record.confidence,
+            "supersedes": record.supersedes,
+            "source_event_id": event.id.to_hex(),
+            "source_created_at": event.created_at.as_secs()
+        }
+    }))
+}
+
 fn experience_slug(record_id: &str) -> Result<String, ExperienceError> {
     if !valid_record_id(record_id) {
         return Err(ExperienceError::Invalid);

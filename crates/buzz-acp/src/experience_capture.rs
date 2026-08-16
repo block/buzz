@@ -7,12 +7,14 @@ use std::{
 };
 
 use buzz_core::agent_experience::{
-    build_experience_event, ExperienceError, ExperienceOutcome, ExperienceRecordV1, MemoryScope,
+    build_experience_event, experience_projection_payload, ExperienceError, ExperienceOutcome,
+    ExperienceRecordV1, MemoryScope,
 };
 use nostr::{Keys, PublicKey};
 
 use crate::{
     experience_outbox::{ExperienceOutbox, ExperienceOutboxError},
+    experience_projection::ExperienceProjector,
     pool::{PromptOutcome, PromptSource, TimeoutKind},
     relay::RestClient,
 };
@@ -127,6 +129,7 @@ pub(crate) struct ExperienceRuntime {
     agent_keys: Keys,
     owner_pubkey: PublicKey,
     rest_client: RestClient,
+    projector: Option<ExperienceProjector>,
     active_turns: Mutex<HashMap<String, RuntimeEvidence>>,
 }
 
@@ -139,11 +142,22 @@ pub(crate) fn initialize_experience_runtime(
     if EXPERIENCE_RUNTIME.get().is_some() {
         return Ok(());
     }
+    let projector = std::env::var("COMMAND_ADVISER_MEMORY_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .and_then(|endpoint| match ExperienceProjector::from_endpoint(&endpoint) {
+            Ok(projector) => Some(projector),
+            Err(error) => {
+                tracing::warn!(%error, "experience_learning_degraded: Memory MCP endpoint rejected");
+                None
+            }
+        });
     let runtime = Arc::new(ExperienceRuntime {
         outbox: ExperienceOutbox::open(path)?,
         agent_keys,
         owner_pubkey,
         rest_client,
+        projector,
         active_turns: Mutex::new(HashMap::new()),
     });
     if EXPERIENCE_RUNTIME.set(Arc::clone(&runtime)).is_ok() {
@@ -260,33 +274,7 @@ impl ExperienceRuntime {
         let created_at = chrono::Utc::now().timestamp().max(0) as u64;
         let event =
             build_experience_event(&self.agent_keys, &self.owner_pubkey, record, created_at)?;
-        let status = if matches!(
-            record.outcome,
-            ExperienceOutcome::Succeeded | ExperienceOutcome::Corrected
-        ) {
-            "active"
-        } else {
-            "inactive"
-        };
-        let projection = serde_json::json!({
-            "source_event_id": event.id.to_hex(),
-            "timestamp": record.occurred_at,
-            "agent": record.specialist_id,
-            "event_type": "command_experience",
-            "content": record.task_summary,
-            "metadata": {
-                "memory_key": record.memory_key,
-                "status": status,
-                "scope": record.scope,
-                "owner_id": self.owner_pubkey.to_hex(),
-                "team_id": record.team_id,
-                "specialist_id": record.specialist_id,
-                "confidence": record.confidence,
-                "supersedes": record.supersedes,
-                "source_event_id": event.id.to_hex(),
-                "source_created_at": created_at
-            }
-        });
+        let projection = experience_projection_payload(&event, &self.owner_pubkey, record)?;
         self.outbox
             .enqueue(&record.record_id, &event, &projection)?;
         Ok(())
@@ -317,6 +305,17 @@ impl ExperienceRuntime {
                     %error,
                     "experience_learning_degraded: experience publish delayed"
                 ),
+            }
+        }
+        if let Some(projector) = &self.projector {
+            let report = projector.project_pending(&self.outbox).await;
+            if report.delayed > 0 || report.poisoned > 0 {
+                tracing::warn!(
+                    projected = report.projected,
+                    delayed = report.delayed,
+                    poisoned = report.poisoned,
+                    "experience_learning_degraded: Memory MCP projection incomplete"
+                );
             }
         }
         if let Ok(health) = self.outbox.health() {

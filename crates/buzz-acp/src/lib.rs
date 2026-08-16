@@ -5,6 +5,7 @@ mod config;
 mod engram_fetch;
 mod experience_capture;
 mod experience_outbox;
+mod experience_projection;
 mod filter;
 mod observer;
 mod pool;
@@ -16,6 +17,8 @@ mod usage;
 
 #[cfg(test)]
 mod experience_capture_tests;
+#[cfg(test)]
+mod experience_projection_tests;
 
 pub use usage::TurnUsage;
 
@@ -4544,6 +4547,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     const COMMAND_ADVISER_SOURCE_ENV: &[&str] = &[
         "COMMAND_ADVISER_PERSONA_ID",
+        "COMMAND_ADVISER_MEMORY_URL",
         "COMMAND_ADVISER_RAG_URL",
         "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
         "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
@@ -6318,6 +6322,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let expected = [
             ("COMMAND_ADVISER_PERSONA_ID", "builtin:command-intelligence"),
+            ("COMMAND_ADVISER_MEMORY_URL", "http://127.0.0.1:8006/mcp/"),
             ("COMMAND_ADVISER_RAG_URL", "http://192.168.1.107:8005/mcp/"),
             (
                 "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",

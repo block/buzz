@@ -2,8 +2,8 @@ use nostr::Keys;
 use serde_json::json;
 
 use crate::agent_experience::{
-    build_experience_event, from_engram_body, ExperienceOutcome, ExperienceRecordV1, MemoryScope,
-    SkillVersionV1, ToolEvidenceV1, ValidationResultV1,
+    build_experience_event, experience_projection_payload, from_engram_body, ExperienceOutcome,
+    ExperienceRecordV1, MemoryScope, SkillVersionV1, ToolEvidenceV1, ValidationResultV1,
 };
 use crate::engram::{validate_and_decrypt, Body};
 
@@ -138,4 +138,28 @@ fn agent_experience_redacts_obvious_free_text_secrets_before_storage() {
 
     assert!(!value.contains("Farout23"));
     assert!(value.contains("password=[REDACTED]"));
+}
+
+#[test]
+fn experience_projection_is_bound_to_the_signed_event_and_owner() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let expected = record();
+    let event = build_experience_event(&agent, &owner.public_key(), &expected, 1_777_777_777)
+        .expect("event");
+
+    let projection =
+        experience_projection_payload(&event, &owner.public_key(), &expected).expect("projection");
+
+    assert_eq!(projection["source_event_id"], event.id.to_hex());
+    assert_eq!(projection["metadata"]["source_event_id"], event.id.to_hex());
+    assert_eq!(
+        projection["metadata"]["owner_id"],
+        owner.public_key().to_hex()
+    );
+    assert_eq!(
+        projection["metadata"]["source_created_at"],
+        1_777_777_777_u64
+    );
+    assert_eq!(projection["metadata"]["status"], "active");
 }

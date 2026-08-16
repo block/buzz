@@ -841,7 +841,12 @@ pub fn spawn_agent_child(
             command.env("LM_STUDIO_API_TOKEN", token);
         }
     }
-    command_adviser::apply_source_env(&mut command, app, record.persona_id.as_deref());
+    command_adviser::apply_source_env(
+        &mut command,
+        app,
+        record.persona_id.as_deref(),
+        &record.pubkey,
+    );
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible

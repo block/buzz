@@ -157,7 +157,6 @@ impl TrustedLanConfig {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn memory_url(&self) -> &TrustedLanEndpoint {
         &self.memory_url
     }

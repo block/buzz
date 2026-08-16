@@ -1794,6 +1794,33 @@ pub enum MemCmd {
         #[arg(long)]
         owner: Option<String>,
     },
+    /// Read the complete derived lineage for one experience memory key.
+    History {
+        /// Stable experience memory key.
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        owner: Option<String>,
+        /// Memory MCP HTTP endpoint.
+        #[arg(long, env = "COMMAND_ADVISER_MEMORY_URL")]
+        memory_url: String,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Idempotently replay encrypted Buzz experience history into Memory MCP.
+    RebuildIndex {
+        #[arg(long)]
+        owner: Option<String>,
+        /// Memory MCP HTTP endpoint.
+        #[arg(long, env = "COMMAND_ADVISER_MEMORY_URL")]
+        memory_url: String,
+        /// Earliest Nostr timestamp to replay (Unix seconds).
+        #[arg(long)]
+        from: Option<u64>,
+        /// Number of records processed before a progress checkpoint.
+        #[arg(long, default_value_t = 100)]
+        batch_size: u32,
+    },
 }
 
 /// Subcommands for `buzz pack`.
