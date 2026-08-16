@@ -280,6 +280,7 @@ fn test_resolve_adapter_path_returns_none_when_binary_absent() {
 #[test]
 fn test_probe_node_descendant_holds_stdout_returns_promptly_and_kills_group() {
     use std::os::unix::fs::PermissionsExt;
+    let _path_guard = crate::managed_agents::lock_path_mutex();
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let script = tmp_dir.path().join("probe.sh");
     let pgid_file = tmp_dir.path().join("pgid");
@@ -290,7 +291,7 @@ fn test_probe_node_descendant_holds_stdout_returns_promptly_and_kills_group() {
     // Line 2: background the sleep and record its PID.
     // Line 3: emit the expected version and exit so the direct child exits promptly.
     let script_content = format!(
-        "#!/bin/sh\necho $$ > {pgid_file_path}\n/bin/sleep 60 &\necho $! > {desc_pid_file_path}\necho v24.18.0\nexit 0\n"
+        "#!/bin/sh\necho $$ > {pgid_file_path}\nsleep 60 &\necho $! > {desc_pid_file_path}\necho v24.18.0\nexit 0\n"
     );
     std::fs::write(&script, script_content.as_bytes()).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -361,9 +362,10 @@ fn test_probe_node_descendant_holds_stdout_returns_promptly_and_kills_group() {
 #[test]
 fn test_probe_node_times_out_on_hung_binary() {
     use std::os::unix::fs::PermissionsExt;
+    let _path_guard = crate::managed_agents::lock_path_mutex();
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let script = tmp_dir.path().join("hung.sh");
-    std::fs::write(&script, b"#!/bin/sh\n/bin/sleep 30\n").unwrap();
+    std::fs::write(&script, b"#!/bin/sh\nsleep 30\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let probe_timeout = std::time::Duration::from_secs(3);

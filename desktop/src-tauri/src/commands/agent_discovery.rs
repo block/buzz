@@ -808,7 +808,8 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
 
 /// Resolve the shell binary for install commands.
 ///
-/// Unix: `/bin/zsh` if present, else `/bin/bash`.
+/// Unix: zsh if available, else bash. The PATH fallback supports distributions
+/// such as NixOS that do not expose shells below `/bin`.
 /// Windows: Git Bash via `resolve_bash_path` — skips `BUZZ_SHELL` because install
 /// commands use bash-only `-l -c` syntax. A `BUZZ_SHELL=pwsh` user gets a green
 /// Doctor prereq (their agents work) but installs use the Git Bash fallback chain.
@@ -818,7 +819,12 @@ fn resolve_install_shell() -> Result<std::path::PathBuf, String> {
         if std::path::Path::new("/bin/zsh").exists() {
             return Ok(std::path::PathBuf::from("/bin/zsh"));
         }
-        Ok(std::path::PathBuf::from("/bin/bash"))
+        if std::path::Path::new("/bin/bash").exists() {
+            return Ok(std::path::PathBuf::from("/bin/bash"));
+        }
+        crate::managed_agents::resolve_command("zsh")
+            .or_else(|| crate::managed_agents::resolve_command("bash"))
+            .ok_or_else(|| "No zsh or bash executable was found".to_string())
     }
 
     #[cfg(windows)]
@@ -1368,16 +1374,19 @@ mod tests {
 
     // ── Phase A: install shell selection ─────────────────────────────────────
 
-    /// On Unix, resolve_install_shell always succeeds (returns zsh or bash).
+    /// On Unix, resolve_install_shell succeeds when zsh or bash is available.
     #[cfg(unix)]
     #[test]
     fn test_resolve_install_shell_succeeds_on_unix() {
         let result = super::resolve_install_shell();
-        assert!(result.is_ok(), "Unix must always resolve a shell");
+        assert!(result.is_ok(), "Unix must resolve an available shell");
         let shell = result.unwrap();
         assert!(
-            shell == std::path::Path::new("/bin/zsh") || shell == std::path::Path::new("/bin/bash"),
-            "expected /bin/zsh or /bin/bash, got {shell:?}"
+            matches!(
+                shell.file_name().and_then(std::ffi::OsStr::to_str),
+                Some("zsh" | "bash")
+            ),
+            "expected zsh or bash, got {shell:?}"
         );
     }
 
@@ -1452,19 +1461,21 @@ mod tests {
 
     /// Regression for the login-startup-file overwrite: `cmd.env("PATH", …)` is
     /// installed *before* `-l` sources the user's profile, so a profile that
-    /// assigns PATH silently discards the composed one. Uses `/bin/bash`
-    /// explicitly — the planted profile is bash-specific, so resolving the host
-    /// shell (which prefers zsh) would make this vacuous.
+    /// assigns PATH silently discards the composed one. Resolves bash explicitly
+    /// — the planted profile is bash-specific, so resolving the host shell
+    /// (which prefers zsh) would make this vacuous.
     #[cfg(unix)]
     #[test]
     fn test_composed_path_survives_a_profile_that_clears_it() {
+        let _guard = crate::managed_agents::lock_path_mutex();
         let home = tempfile::tempdir().expect("temp HOME");
         std::fs::write(home.path().join(".bash_profile"), "export PATH=\n")
             .expect("plant a hostile login profile");
         let composed = std::ffi::OsString::from("/buzz/sentinel/bin:/usr/bin:/bin");
 
         // `echo` is a shell builtin, so the child needs no PATH to report one.
-        let out = std::process::Command::new("/bin/bash")
+        let bash = crate::managed_agents::resolve_command("bash").expect("bash must resolve");
+        let out = std::process::Command::new(bash)
             .args(super::install_shell_args(
                 "echo \"$PATH\"",
                 Some(&composed),
@@ -1490,6 +1501,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_install_shell_pipeline_status_follows_left_side() {
+        let _guard = crate::managed_agents::lock_path_mutex();
         for (command, expect_success) in [("false | true", false), ("echo ok | cat", true)] {
             let status = super::install_shell_command(command)
                 .expect("Unix must always resolve an install shell")

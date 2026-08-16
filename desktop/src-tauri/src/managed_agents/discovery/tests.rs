@@ -1258,16 +1258,21 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
 #[cfg(unix)]
 #[test]
 fn test_login_shell_candidates_non_empty_on_unix() {
+    let _guard = crate::managed_agents::lock_path_mutex();
     let candidates = super::login_shell_candidates();
     assert!(
         !candidates.is_empty(),
         "Unix must have at least one login shell candidate"
     );
-    // The first candidate should be /bin/zsh or /bin/bash.
+    // The first candidate should resolve to zsh or bash, including on non-FHS
+    // distributions where the executable lives in a store path.
     let first = &candidates[0];
     assert!(
-        first == std::path::Path::new("/bin/zsh") || first == std::path::Path::new("/bin/bash"),
-        "expected /bin/zsh or /bin/bash, got {first:?}"
+        matches!(
+            first.file_name().and_then(std::ffi::OsStr::to_str),
+            Some("zsh" | "bash")
+        ),
+        "expected zsh or bash, got {first:?}"
     );
 }
 

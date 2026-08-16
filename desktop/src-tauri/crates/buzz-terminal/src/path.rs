@@ -34,7 +34,31 @@ pub fn user_shell_path() -> String {
     // binaries only. `/usr/local/bin` is included because it is the
     // conventional prefix on both macOS and Linux for user-installed tools
     // that rc files expect to already be present.
-    "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()
+    let mut paths = Vec::new();
+
+    // Nix and NixOS keep user/system commands outside the FHS locations below.
+    // Include only profiles that exist so other Unix hosts keep their historical
+    // PATH shape.
+    if let Some(home) = std::env::var_os("HOME") {
+        let user_profile = std::path::PathBuf::from(home).join(".nix-profile/bin");
+        if user_profile.is_dir() {
+            paths.push(user_profile);
+        }
+    }
+    let nixos_system_profile = std::path::PathBuf::from("/run/current-system/sw/bin");
+    if nixos_system_profile.is_dir() {
+        paths.push(nixos_system_profile);
+    }
+
+    paths.extend(
+        ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            .into_iter()
+            .map(std::path::PathBuf::from),
+    );
+    match std::env::join_paths(paths) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(_) => "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+    }
 }
 
 #[cfg(windows)]

@@ -97,6 +97,7 @@
             cargo-nextest
             cmake
             curl
+            ffmpeg
             file
             git
             just
@@ -117,7 +118,6 @@
           ];
 
           occasionalPackages = with pkgs; [
-            ffmpeg
             gh
             uv
           ];
