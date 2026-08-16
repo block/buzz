@@ -106,9 +106,9 @@ versions in the table above.
 
 #### Nix development shells (optional)
 
-If you already use [Nix](https://nixos.org/), the repository flake provides a
-complete development environment without requiring Hermit or system-wide Tauri
-libraries:
+If you already use [Nix](https://nixos.org/) with flakes enabled, the repository
+flake provides the Buzz toolchain and native Tauri libraries without requiring
+Hermit or distro-specific library installation:
 
 ```bash
 nix develop          # Rust, relay, desktop, and web development
@@ -116,10 +116,12 @@ nix develop .#mobile # default environment plus Flutter
 nix develop .#full   # mobile environment plus occasional tools such as gh and uv
 ```
 
-With [direnv](https://direnv.net/) installed, `direnv allow` loads the default
-desktop/web shell through the committed `.envrc`. Direnv is optional; agents
-and scripts should not assume it has loaded in a non-interactive shell. Use an
-explicit command in that case:
+With a current [direnv](https://direnv.net/) release whose standard library
+provides `use flake`, `direnv allow` loads the default desktop/web shell through
+the committed `.envrc`. Older direnv installations may need
+[nix-direnv](https://github.com/nix-community/nix-direnv). Direnv is optional;
+agents and scripts should not assume it has loaded in a non-interactive shell.
+Use an explicit command in that case:
 
 ```bash
 nix develop .#mobile --command just ci
@@ -136,6 +138,10 @@ use the Nix-provided tools instead of the Hermit shims.
 Hermit pins Flutter 3.41.7 exactly. The mobile Nix shell currently uses Flutter
 3.41.9, the closest packaged release in the same stable line; `flake.lock` pins
 the package set used by the Nix path.
+
+Docker remains a host prerequisite for local services. Android SDK/Xcode are
+also host prerequisites when building for their respective mobile platforms;
+the mobile shell supplies Flutter and the tools used by repository checks.
 
 #### Linux: Tauri system libraries
 
