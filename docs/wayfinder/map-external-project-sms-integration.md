@@ -515,3 +515,25 @@ Other traps from the same pass:
   consent checkbox. An earlier draft of the message flow described a checkbox
   form that is not on the page; a reviewer who cannot find the mechanism you
   describe has grounds to reject.
+
+### ✅ 2026-08-16: campaign APPROVED — the outbound block is lifting
+
+Attempt 2 (with `PrivacyPolicyUrl` + `TermsAndConditionsUrl`) was approved about
+35 minutes after submission: `campaign_status: VERIFIED`, `campaign_id:
+CMJEWEC`, no errors. For contrast, attempt 1 was auto-rejected in under two
+minutes — so surviving the first few minutes is itself the signal that a
+submission has entered real review.
+
+A direct send to the test handset from `+13173155284` **no longer returns
+30034**, the error that blocked the entire outbound leg since the beginning. It
+now returns **30024 — "numeric sender ID not provisioned on carrier"**, which
+is a timing error: carrier provisioning after campaign approval is still
+propagating, and it clears on its own. Nothing to change in code or config —
+`TWILIO_FROM_NUMBER` is already the approved number and is attached to the
+messaging service.
+
+Escalation path if 30024 persists for hours: collect at least three
+`undelivered` Message SIDs and ask Twilio Support for a provisioning review.
+
+This also demotes Toll-Free Verification from the critical path to a redundant
+second route. It remains `IN_REVIEW`.
