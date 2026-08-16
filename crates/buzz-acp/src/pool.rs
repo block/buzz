@@ -564,6 +564,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Optional derived active-memory service. Failure always degrades to core and context.
+    pub active_memory: Option<crate::engram_recall::ActiveMemoryClient>,
 }
 
 impl AgentPool {
@@ -1397,6 +1399,16 @@ pub async fn run_prompt_task(
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
 ) {
+    let recall_query = prompt_text
+        .as_deref()
+        .map(str::to_owned)
+        .or_else(|| {
+            batch
+                .as_ref()
+                .and_then(|batch| batch.events.last())
+                .map(|event| event.event.content.clone())
+        })
+        .unwrap_or_default();
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
@@ -1871,7 +1883,7 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
-    let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
+    let mut prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
         let text = prepend_base_for_legacy(
@@ -1942,6 +1954,37 @@ pub async fn run_prompt_task(
         );
         return;
     };
+
+    if let (Some(memory), Some(owner_pubkey)) =
+        (&ctx.active_memory, ctx.agent_owner_pubkey.as_ref())
+    {
+        let team_id = match &source {
+            PromptSource::Channel(channel_id) => channel_id.to_string(),
+            PromptSource::Heartbeat => "heartbeat".to_string(),
+        };
+        let budget = crate::engram_recall::RecallBudget::default();
+        match memory
+            .recall(
+                &recall_query,
+                &owner_pubkey.to_hex(),
+                &team_id,
+                &ctx.agent_keys.public_key().to_hex(),
+                budget,
+            )
+            .await
+        {
+            Ok(records) if !records.is_empty() => {
+                let rendered = crate::engram_recall::render_active_memory(&records);
+                let position = prompt_sections.len().saturating_sub(1);
+                prompt_sections.insert(position, rendered);
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "experience_recall_degraded: continuing without active memory"
+            ),
+        }
+    }
 
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
@@ -6552,6 +6595,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            active_memory: None,
         }
     }
 

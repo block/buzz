@@ -283,7 +283,7 @@ pub fn experience_projection_payload(
             "confidence": record.confidence,
             "supersedes": record.supersedes,
             "source_event_id": event.id.to_hex(),
-            "source_created_at": event.created_at.as_secs()
+            "source_created_at": record.occurred_at
         }
     }))
 }

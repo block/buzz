@@ -159,7 +159,7 @@ fn experience_projection_is_bound_to_the_signed_event_and_owner() {
     );
     assert_eq!(
         projection["metadata"]["source_created_at"],
-        1_777_777_777_u64
+        "2026-08-16T10:00:00Z"
     );
     assert_eq!(projection["metadata"]["status"], "active");
 }

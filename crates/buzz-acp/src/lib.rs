@@ -3,6 +3,7 @@
 mod acp;
 mod config;
 mod engram_fetch;
+mod engram_recall;
 mod experience_capture;
 mod experience_outbox;
 mod experience_projection;
@@ -15,6 +16,8 @@ mod relay;
 mod setup_mode;
 mod usage;
 
+#[cfg(test)]
+mod engram_recall_tests;
 #[cfg(test)]
 mod experience_capture_tests;
 #[cfg(test)]
@@ -1879,6 +1882,10 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        active_memory: std::env::var("COMMAND_ADVISER_MEMORY_URL")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .and_then(|endpoint| engram_recall::ActiveMemoryClient::from_endpoint(&endpoint).ok()),
     });
 
     if !config.memory_enabled {
