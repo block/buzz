@@ -26,6 +26,13 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 export const WELCOME_GUIDE_AGENT_NAME = "Fizz";
 export const WELCOME_GUIDE_PERSONA_ID = "builtin:fizz";
 export const WELCOME_TEAM_ID = "builtin-team:welcome";
+/**
+ * Team id of the retired built-in single-member Fizz team (#1718). Agent
+ * records provisioned while that team existed still carry this `teamId`;
+ * they are the same built-in Welcome identity and must be reused rather
+ * than re-minted.
+ */
+export const RETIRED_WELCOME_FIZZ_TEAM_ID = "builtin-team:fizz";
 export const WELCOME_GUIDE_INTRO_MARKER = "buzz-welcome-intro.v1";
 const LEGACY_WELCOME_GUIDE_AGENT_NAME = "Kit";
 export const LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT =
@@ -105,6 +112,37 @@ function isBuiltInWelcomeGuideAgent(agent: ManagedAgent) {
   return agent.personaId === WELCOME_GUIDE_PERSONA_ID;
 }
 
+/**
+ * The exact retired built-in Fizz identity: the record the retired
+ * single-member built-in team (#1718) provisioned. Team id + persona + the
+ * stock name together pin that one record, so a user-created agent that
+ * merely shares the Fizz persona — or a customized agent left behind in a
+ * demoted copy of the retired team — is never absorbed into the Welcome
+ * Team and silently reconfigured.
+ */
+function isRetiredWelcomeFizzAgent(agent: ManagedAgent) {
+  return (
+    agent.teamId === RETIRED_WELCOME_FIZZ_TEAM_ID &&
+    agent.personaId === WELCOME_GUIDE_PERSONA_ID &&
+    agent.name.trim().toLowerCase() === WELCOME_GUIDE_AGENT_NAME.toLowerCase()
+  );
+}
+
+/**
+ * True when `agent` is a Welcome Team record for `starter` — either a
+ * current `builtin-team:welcome` record or the exact retired built-in Fizz
+ * record for the lead starter.
+ */
+function isWelcomeTeamStarterAgent(
+  agent: ManagedAgent,
+  starter: WelcomeTeamStarterDefinition,
+) {
+  return (
+    agent.personaId === starter.personaId &&
+    (agent.teamId === WELCOME_TEAM_ID || isRetiredWelcomeFizzAgent(agent))
+  );
+}
+
 function isLegacyKitWelcomeGuideAgent(agent: ManagedAgent) {
   return (
     agent.name.trim().toLowerCase() ===
@@ -167,11 +205,7 @@ export function pickWelcomeTeamStarterAgentForRelay(
   relayUrl?: string | null,
 ) {
   return pickAgentForRelay(
-    agents.filter(
-      (agent) =>
-        agent.teamId === WELCOME_TEAM_ID &&
-        agent.personaId === starter.personaId,
-    ),
+    agents.filter((agent) => isWelcomeTeamStarterAgent(agent, starter)),
     relayUrl,
   );
 }
@@ -179,17 +213,16 @@ export function pickWelcomeTeamStarterAgentForRelay(
 /**
  * Pubkeys belonging to any managed Welcome Team persona. Relay-agnostic, to
  * match how the backend resolves an agent's relay — see {@link relayPinRank}.
+ * Shares the team-scope predicate with
+ * {@link pickWelcomeTeamStarterAgentForRelay} so the retired built-in Fizz
+ * record counts here exactly when it is eligible for reuse there.
  */
 export async function getWelcomeTeamAgentPubkeys() {
-  const personaIds = new Set<string>(
-    WELCOME_TEAM_STARTERS.map(({ personaId }) => personaId),
-  );
   return (await listManagedAgents())
-    .filter(
-      (agent) =>
-        agent.teamId === WELCOME_TEAM_ID &&
-        agent.personaId !== null &&
-        personaIds.has(agent.personaId),
+    .filter((agent) =>
+      WELCOME_TEAM_STARTERS.some((starter) =>
+        isWelcomeTeamStarterAgent(agent, starter),
+      ),
     )
     .map((agent) => agent.pubkey);
 }

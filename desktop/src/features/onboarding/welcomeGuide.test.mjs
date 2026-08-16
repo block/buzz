@@ -8,6 +8,7 @@ import {
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
   pickWelcomeTeamStarterAgentForRelay,
+  RETIRED_WELCOME_FIZZ_TEAM_ID,
   welcomeStarterRuntimeUpdate,
   welcomeTeammateAccessUpdate,
   welcomeTeammateHasExpectedAccess,
@@ -517,6 +518,108 @@ test("relay preference never overrides the Welcome Team scope", () => {
     pickWelcomeTeamStarterAgentForRelay([userHoney], honey, RELAY_A),
     null,
   );
+});
+
+test("starter matching reuses the retired built-in Fizz in a second community", () => {
+  // Regression: records provisioned under the retired single-member built-in
+  // Fizz team (#1718) carry teamId "builtin-team:fizz", not WELCOME_TEAM_ID,
+  // so joining a second community fell through to createManagedAgent and
+  // minted a duplicate Fizz keypair. A non-null pick here is what suppresses
+  // the createManagedAgent call in provisionWelcomeTeam — if the retired
+  // record stops matching, this assertion goes red.
+  const fizz = WELCOME_TEAM_STARTERS[0];
+  const retiredFizz = makeAgent({
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    teamId: RETIRED_WELCOME_FIZZ_TEAM_ID,
+    relayUrl: RELAY_A,
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([retiredFizz], fizz, RELAY_B),
+    retiredFizz,
+  );
+});
+
+test("the retired built-in Fizz record never satisfies a teammate starter", () => {
+  const honey = WELCOME_TEAM_STARTERS[1];
+  const retiredFizz = makeAgent({
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    teamId: RETIRED_WELCOME_FIZZ_TEAM_ID,
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([retiredFizz], honey, RELAY_A),
+    null,
+  );
+});
+
+test("starter matching never absorbs a user agent that shares the Fizz persona", () => {
+  // The retired-team match pins team id + persona + the stock name, so the
+  // two ways a user-owned Fizz-persona agent can look similar both miss:
+  // a renamed agent left in a demoted copy of the retired team, and an
+  // agent named "Fizz" outside any built-in team.
+  const fizz = WELCOME_TEAM_STARTERS[0];
+  const renamedInRetiredTeam = makeAgent({
+    name: "My Fizz",
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    teamId: RETIRED_WELCOME_FIZZ_TEAM_ID,
+  });
+  const stockNameOutsideTeam = makeAgent({
+    name: WELCOME_GUIDE_AGENT_NAME,
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    teamId: null,
+  });
+
+  for (const lookalike of [renamedInRetiredTeam, stockNameOutsideTeam]) {
+    assert.equal(
+      pickWelcomeTeamStarterAgentForRelay([lookalike], fizz, RELAY_A),
+      null,
+      `${lookalike.name} (teamId ${lookalike.teamId}) must not be reused`,
+    );
+  }
+});
+
+test("a credentialed or fragmented pin takes the malformed fallback, not an exact match", () => {
+  // buzz-core rejects credentials and fragments outright; if the desktop
+  // helper silently stripped them, `wss://user@relay.example` would
+  // canonicalize to `wss://relay.example` and rank as pinned to that
+  // community. The ambiguous record is listed first, so it wins on array
+  // order the moment it is mis-ranked as an exact match.
+  const ambiguousPins = ["wss://user@relay.example", "wss://relay.example/#x"];
+
+  for (const pin of ambiguousPins) {
+    const ambiguous = makeAgent({
+      pubkey: PUB_A,
+      personaId: WELCOME_GUIDE_PERSONA_ID,
+      relayUrl: pin,
+    });
+    const unbound = makeAgent({
+      pubkey: PUB_B,
+      personaId: WELCOME_GUIDE_PERSONA_ID,
+      relayUrl: "",
+    });
+
+    assert.equal(
+      pickWelcomeGuideAgentForRelay(
+        [ambiguous, unbound],
+        "wss://relay.example",
+      ),
+      unbound,
+      `${pin} must not rank as pinned to wss://relay.example`,
+    );
+
+    // The same malformed pin still matches itself via the stable fallback.
+    const decoy = makeAgent({
+      pubkey: PUB_C,
+      personaId: WELCOME_GUIDE_PERSONA_ID,
+      relayUrl: "wss://unrelated.example",
+    });
+    assert.equal(
+      pickWelcomeGuideAgentForRelay([decoy, ambiguous], pin),
+      ambiguous,
+      `${pin} should still match its own spelling`,
+    );
+  }
 });
 
 test("starter matching prefers running, then deployed instances", () => {
