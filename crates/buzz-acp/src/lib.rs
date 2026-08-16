@@ -3833,9 +3833,10 @@ fn is_session_limit_error(error: &acp::AcpError) -> bool {
 /// How long to park a batch after a session-limit error.
 ///
 /// Prefers an explicit relative delay in the message (`resets in 2h`,
-/// `retry in 90s`). Falls back to wall-clock `resets 1:50pm` interpreted in
-/// the host local timezone (best-effort without a tz database dependency).
-/// Otherwise [`queue::SESSION_LIMIT_FALLBACK_DELAY`] (1h).
+/// `retry in 90s`). Falls back to wall-clock `resets 1:50pm` **only when no
+/// explicit timezone is named** (host-local, best-effort without tzdb).
+/// Named zones (e.g. `America/Buenos_Aires`) and unparseable messages use
+/// [`queue::SESSION_LIMIT_FALLBACK_DELAY`] (1h).
 fn session_limit_park_delay(error: &acp::AcpError) -> std::time::Duration {
     let message = match error {
         acp::AcpError::AgentError { message, .. } => message.as_str(),
@@ -3906,19 +3907,56 @@ fn parse_leading_duration_token(rest: &str) -> Option<std::time::Duration> {
     if !value.is_finite() || value < 0.0 {
         return None;
     }
+    // Clamp before unit scale — untrusted provider text can carry huge numbers
+    // that overflow f64 multiply to +inf and panic Duration::from_secs_f64.
+    let max_secs = queue::SESSION_LIMIT_MAX_PARK.as_secs_f64();
     let secs = if unit.starts_with('h') {
-        value * 3600.0
+        value.saturating_mul_checked_secs(3600.0, max_secs)
     } else if unit.starts_with('m') {
-        value * 60.0
+        value.saturating_mul_checked_secs(60.0, max_secs)
     } else if unit.starts_with('s') {
-        value
+        value.min(max_secs)
     } else {
         return None;
     };
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
     Some(std::time::Duration::from_secs_f64(secs))
 }
 
-/// Parse `resets 1:50pm` (optional timezone parenthetical ignored without tzdb).
+/// Scale `value * factor` without producing non-finite seconds.
+trait SaturatingMulSecs {
+    fn saturating_mul_checked_secs(self, factor: f64, max_secs: f64) -> f64;
+}
+
+impl SaturatingMulSecs for f64 {
+    fn saturating_mul_checked_secs(self, factor: f64, max_secs: f64) -> f64 {
+        if !self.is_finite() || self < 0.0 || !factor.is_finite() || factor <= 0.0 {
+            return f64::NAN;
+        }
+        // Avoid inf: if value alone already exceeds max/factor, clamp.
+        let bound = max_secs / factor;
+        if self >= bound {
+            max_secs
+        } else {
+            let product = self * factor;
+            if product.is_finite() {
+                product.min(max_secs)
+            } else {
+                max_secs
+            }
+        }
+    }
+}
+
+/// Parse `resets 1:50pm` wall-clock forms.
+///
+/// Host-local interpretation is only used when the message does **not** name an
+/// explicit IANA timezone. Named zones (e.g. `America/Buenos_Aires`) cannot be
+/// applied without a tz database dependency — returning a wrong host-local
+/// instant can retry before the real reset. Those messages fall through to the
+/// one-hour fallback via [`parse_session_limit_park_delay`].
 fn parse_wall_clock_reset_delay(lower: &str) -> Option<std::time::Duration> {
     let idx = lower.find("resets ")?;
     let mut rest = lower[idx + "resets ".len()..].trim_start();
@@ -3928,6 +3966,10 @@ fn parse_wall_clock_reset_delay(lower: &str) -> Option<std::time::Duration> {
     // optional "at "
     if let Some(stripped) = rest.strip_prefix("at ") {
         rest = stripped.trim_start();
+    }
+    // Explicit named timezone → do not guess host local.
+    if wall_clock_names_explicit_timezone(rest) {
+        return None;
     }
     // time token until whitespace or '('
     let token: String = rest
@@ -3951,6 +3993,46 @@ fn parse_wall_clock_reset_delay(lower: &str) -> Option<std::time::Duration> {
     let delta = candidate - now;
     let secs = delta.num_seconds().max(0) as u64;
     Some(std::time::Duration::from_secs(secs))
+}
+
+/// True when the wall-clock tail carries an explicit zone we cannot honor
+/// without tzdb (`(America/Buenos_Aires)`, `UTC`, `GMT+3`, etc.).
+fn wall_clock_names_explicit_timezone(rest_after_resets: &str) -> bool {
+    let r = rest_after_resets;
+    // Parenthetical IANA / label: resets 1:50pm (America/Buenos_Aires)
+    if let Some(open) = r.find('(') {
+        let inner = r[open + 1..].split(')').next().unwrap_or("").trim();
+        if !inner.is_empty() {
+            // Anything inside parens after the clock is treated as a zone label.
+            return true;
+        }
+    }
+    // Trailing bare zone tokens after the time: "resets 1:50pm utc"
+    let after_time = r
+        .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == ':' || c == '.')
+        .trim_start();
+    if after_time.is_empty() {
+        return false;
+    }
+    let token = after_time
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| c == ',' || c == ';' || c == '.');
+    if token.is_empty() {
+        return false;
+    }
+    token.contains('/')
+        || token.starts_with("utc")
+        || token.starts_with("gmt")
+        || token.starts_with('+')
+        || token.starts_with('-')
+        || token.contains("america")
+        || token.contains("europe")
+        || token.contains("asia")
+        || token.contains("africa")
+        || token.contains("pacific")
+        || token.contains("australia")
 }
 
 fn parse_clock_token(token: &str) -> Option<(u32, u32)> {
@@ -8478,11 +8560,25 @@ mod error_outcome_emission_tests {
     }
 
     #[test]
-    fn parse_session_limit_park_delay_wall_clock_is_positive_and_capped() {
-        // Host-local interpretation; just assert we get a sane park window.
+    fn parse_session_limit_park_delay_wall_clock_with_named_tz_uses_fallback() {
+        // Named zone cannot be applied without tzdb — do not host-local guess.
         let d = parse_session_limit_park_delay(
             "You've hit your session limit · resets 1:50pm (America/Buenos_Aires)",
         );
+        assert_eq!(d, queue::SESSION_LIMIT_FALLBACK_DELAY);
+    }
+
+    #[test]
+    fn parse_session_limit_park_delay_relative_overflow_clamps_not_panic() {
+        // Untrusted huge number must not panic Duration::from_secs_f64(inf).
+        let d = parse_session_limit_park_delay("session limit resets in 999999999999999h");
+        assert_eq!(d, queue::SESSION_LIMIT_MAX_PARK);
+    }
+
+    #[test]
+    fn parse_session_limit_park_delay_wall_clock_without_tz_is_positive_and_capped() {
+        // Host-local interpretation only when no explicit zone is named.
+        let d = parse_session_limit_park_delay("You've hit your session limit · resets 1:50pm");
         assert!(d >= std::time::Duration::from_secs(60));
         assert!(d <= queue::SESSION_LIMIT_MAX_PARK);
     }

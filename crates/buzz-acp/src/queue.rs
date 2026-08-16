@@ -548,7 +548,8 @@ impl EventQueue {
         let channel_id = batch.channel_id;
         let event_count = batch.events.len();
         let queue = self.queues.entry(channel_id).or_default();
-        // Push to front in reverse order so original order is preserved.
+        // Push to front in reverse order so original order is preserved
+        // (front = next to process = oldest of this batch).
         for be in batch.events.into_iter().rev() {
             queue.push_front(QueuedEvent {
                 channel_id,
@@ -557,12 +558,15 @@ impl EventQueue {
                 received_at: be.received_at,
             });
         }
+        // Cap enforcement: pop_back drops from the back of the deque.
+        // After push_front, the back holds the newest arrivals of this batch
+        // (and any still-newer events already queued behind prior fronts).
         while queue.len() > MAX_PENDING_PER_CHANNEL {
             queue.pop_back();
             tracing::warn!(
                 channel_id = %channel_id,
                 limit = MAX_PENDING_PER_CHANNEL,
-                "requeue_until overflow — dropped oldest event to enforce cap"
+                "requeue_until overflow — dropped newest-at-back event to enforce cap"
             );
         }
         self.retry_after.insert(channel_id, ready_at);
