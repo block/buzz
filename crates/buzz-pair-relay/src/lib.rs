@@ -20,7 +20,7 @@
 //! - **Signature verification** — Schnorr signatures are verified against the
 //!   NIP-01 event ID hash. Events with invalid signatures are rejected.
 //! - **No persistence** — events exist only in-flight between matched pub/sub.
-//! - **Bounded resources** — 128 max WS connections, 4 KiB max frame, 120s TTL.
+//! - **Bounded resources** — 128 max WS connections, 4 KiB max frame, 140s TTL.
 //! - **Session cap** — at most 6 accepted EVENTs per connection.
 //! - **Freshness** — `created_at` must be within ±120 s of relay wall-clock.
 //! - **Deduplication** — duplicate event IDs are rejected; dedup entries expire after 300 s.
@@ -55,8 +55,13 @@ use tokio_tungstenite::tungstenite::protocol::{Message, Role, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
 
-/// Hard per-connection lifetime. `pub(crate)` for test access.
-pub(crate) const CONN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Hard per-connection lifetime.
+///
+/// Must outlive the desktop pairing hard timeout (130s in
+/// `desktop/src-tauri/src/commands/pairing.rs`). If this sidecar closes first,
+/// the desktop surfaces the transport string "relay connection closed" instead
+/// of its own "Session timed out" expired state.
+pub const CONN_TIMEOUT: Duration = Duration::from_secs(140);
 
 const MAX_CONNS: u32 = 128;
 const CHANNEL_CAP: usize = 4;
@@ -1021,5 +1026,20 @@ pub async fn run_server(listener: TcpListener, relay: Arc<Relay>) {
                 eprintln!("http error: {e}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod conn_timeout_tests {
+    use super::*;
+
+    /// Desktop pairing.rs uses a 130s hard timeout and maps it to
+    /// "Session timed out". The sidecar must not win that race.
+    #[test]
+    fn conn_timeout_outlives_desktop_pairing_hard_timeout() {
+        assert!(
+            CONN_TIMEOUT > Duration::from_secs(130),
+            "CONN_TIMEOUT ({CONN_TIMEOUT:?}) must exceed the desktop pairing hard timeout (130s)"
+        );
     }
 }
