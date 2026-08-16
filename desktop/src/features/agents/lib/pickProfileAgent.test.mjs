@@ -85,10 +85,7 @@ test("opening a renamed instance opens that instance, not the persona's", () => 
   };
   const instances = [claude, fizz];
 
-  assert.equal(
-    pickCanonicalProfileAgent(instances, fizz, NONE_ARCHIVED),
-    fizz,
-  );
+  assert.equal(pickCanonicalProfileAgent(instances, fizz, NONE_ARCHIVED), fizz);
   assert.equal(
     pickCanonicalProfileAgent(instances, claude, NONE_ARCHIVED),
     claude,
@@ -159,6 +156,67 @@ test("a requested instance survives when every candidate is archived", () => {
   assert.equal(
     pickCanonicalProfileAgent([requested], requested, () => true),
     requested,
+  );
+});
+
+test("a renamed instance canonicalises within its own name, not the persona", () => {
+  // The message-avatar path: `builtin:fizz` holds two "Claude" and one "Fizz".
+  // Clicking an old "Claude" message must land on the running Claude, never on
+  // the persona-wide winner, or the profile panel and the library card that
+  // now exists for "Claude" disagree.
+  const claudeStopped = {
+    name: "Claude",
+    personaId: "builtin:fizz",
+    pubkey: "a".repeat(64),
+    status: "stopped",
+  };
+  const claudeRunning = {
+    name: "Claude",
+    personaId: "builtin:fizz",
+    pubkey: "b".repeat(64),
+    status: "running",
+  };
+  const fizzRunning = {
+    name: "Fizz",
+    personaId: "builtin:fizz",
+    pubkey: "c".repeat(64),
+    status: "running",
+  };
+  const instances = [claudeStopped, claudeRunning, fizzRunning];
+
+  assert.equal(
+    pickCanonicalProfileAgent(instances, claudeStopped, NONE_ARCHIVED),
+    claudeRunning,
+  );
+  assert.equal(
+    pickCanonicalProfileAgent(instances, fizzRunning, NONE_ARCHIVED),
+    fizzRunning,
+  );
+});
+
+test("an instance missing from the persona list still resolves", () => {
+  // A historical agent read off an old message may no longer be in the
+  // persona's instance list; the request must not resolve to nothing.
+  const current = {
+    name: "Current",
+    personaId: "builtin:fizz",
+    pubkey: "a".repeat(64),
+    status: "running",
+  };
+  const historical = {
+    name: "Retired",
+    personaId: "builtin:fizz",
+    pubkey: "b".repeat(64),
+    status: "stopped",
+  };
+
+  assert.equal(
+    pickCanonicalProfileAgent([current], historical, NONE_ARCHIVED),
+    current,
+  );
+  assert.equal(
+    pickCanonicalProfileAgent([], historical, NONE_ARCHIVED),
+    historical,
   );
 });
 
