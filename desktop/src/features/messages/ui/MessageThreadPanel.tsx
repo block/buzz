@@ -509,7 +509,8 @@ export function MessageThreadPanel({
   } = useAnchoredScroll({
     channelId: threadHeadId,
     contentRef: threadContentRef,
-    isLoading: threadRepliesPending || repliesRenderState === "pending",
+    // A committed deferred list is ready to position even while its query refetches.
+    isLoading: repliesRenderState === "pending",
     messages: threadMessages,
     highlightTargetMessage: scrollTargetHighlights,
     onTargetReached: onScrollTargetResolved,
@@ -648,7 +649,9 @@ export function MessageThreadPanel({
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
           data-testid="message-thread-replies"
         >
-          {threadRepliesPending && !isHuddleTranscript ? (
+          {threadRepliesPending &&
+          repliesRenderState !== "list" &&
+          !isHuddleTranscript ? (
             <div
               className="space-y-2.5 pt-1"
               data-testid="message-thread-replies-loading"
