@@ -1245,3 +1245,32 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
 }
+
+// ── child_rust_log_filter tests ─────────────────────────────────────────
+
+#[test]
+fn default_child_filter_covers_every_harness_target_family() {
+    // buzz-acp logs on `acp::*`, `pool::*`, `canvas::*`, `engram::*` and
+    // `observer`. EnvFilter matches by target prefix, so a directive naming
+    // only `buzz_acp` hides all of them — including warn and error events.
+    let filter = super::child_rust_log_filter_from(None);
+    for family in ["buzz_acp", "acp", "pool", "canvas", "engram", "observer"] {
+        assert!(
+            filter.contains(&format!("{family}=info")),
+            "default harness filter drops the `{family}` target family: {filter}"
+        );
+    }
+}
+
+#[test]
+fn explicit_rust_log_naming_buzz_acp_is_passed_through_untouched() {
+    let filter = super::child_rust_log_filter_from(Some("buzz_acp=debug".to_string()));
+    assert_eq!(filter, "buzz_acp=debug");
+}
+
+#[test]
+fn unrelated_rust_log_is_extended_rather_than_replaced() {
+    let filter = super::child_rust_log_filter_from(Some("hyper=warn".to_string()));
+    assert!(filter.starts_with("hyper=warn,"));
+    assert!(filter.contains("pool=info"));
+}

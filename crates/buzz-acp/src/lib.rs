@@ -82,6 +82,16 @@ fn current_working_directory() -> Result<String> {
     Ok(cwd.to_string_lossy().into_owned())
 }
 
+/// Fallback log filter when `RUST_LOG` is unset.
+///
+/// Nearly every event in this crate is emitted on one of its own target
+/// families — `acp::*`, `pool::*`, `canvas::*`, `engram::*`, `observer` — not
+/// under the crate path. `EnvFilter` matches directives by target prefix, so
+/// `buzz_acp=info` alone silences all of them, including 26 warn/error
+/// statements, and leaves a log holding little more than the startup line.
+/// The debug-level targets (`acp::wire` and friends) stay off at `info`.
+const LOG_FILTER: &str = "buzz_acp=info,acp=info,pool=info,canvas=info,engram=info,observer=info";
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -1937,7 +1947,7 @@ async fn tokio_main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(LOG_FILTER)),
         )
         .compact()
         .init();

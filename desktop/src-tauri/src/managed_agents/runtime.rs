@@ -928,11 +928,29 @@ pub fn spawn_agent_child(
     })
 }
 
+/// Default `RUST_LOG` for the spawned harness.
+///
+/// `buzz-acp` emits almost everything on its own target families — `acp::*`,
+/// `pool::*`, `canvas::*`, `engram::*`, `observer` — rather than under the
+/// crate path. `EnvFilter` matches those directives by target prefix, so a bare
+/// `buzz_acp=info` matches none of them and the harness log retains only the
+/// startup and reconnect lines that do use the crate target. That silently
+/// drops 26 warn/error statements, so an agent can log an error the owner can
+/// never see. Keep in sync with the crate's own fallback in
+/// `crates/buzz-acp/src/lib.rs`.
+const LOG_FILTER: &str = "buzz_acp=info,acp=info,pool=info,canvas=info,engram=info,observer=info";
+
 fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
+    child_rust_log_filter_from(std::env::var("RUST_LOG").ok())
+}
+
+/// Taking the ambient value as an argument keeps the default testable without
+/// mutating process environment from a test.
+fn child_rust_log_filter_from(existing: Option<String>) -> String {
+    match existing {
+        Some(existing) if existing.contains("buzz_acp") => existing,
+        Some(existing) if !existing.trim().is_empty() => format!("{existing},{LOG_FILTER}"),
+        _ => LOG_FILTER.to_string(),
     }
 }
 
