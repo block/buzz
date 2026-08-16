@@ -494,8 +494,13 @@ pilot host stop and remove the stale pair by hand:
 
 ## Env file contract
 
-The local spawn contract from `runtime.rs`, transcribed. Values resolved on the host — the absolute
-harness path, `git-credential-nostr`, `PATH` — are appended by the remote script.
+The provider consumes the desktop-resolved `agent.launch` block, not the raw legacy command,
+model, provider, or env fields. `launch.command` and `launch.args` select the remote harness;
+`launch.policy_env` is written first and `launch.env` second, preserving the same override order
+as local spawn. The provider then adds identity and access-control values plus values that must be
+resolved on the host — the absolute harness path, `git-credential-nostr`, `PATH`, and the native
+Claude launcher. Payloads without `launch` retain the legacy mapping for compatibility with older
+Desktop versions.
 
 | var | value |
 |---|---|
@@ -504,19 +509,13 @@ harness path, `git-credential-nostr`, `PATH` — are appended by the remote scri
 | `PATH` | the deploy script's own `$PATH`, which already leads with `$HOME/.local/bin`; **expanded by the host's shell at deploy time** — see below |
 | `BUZZ_PRIVATE_KEY` | payload `private_key_nsec` |
 | `BUZZ_RELAY_URL`, `BUZZ_AUTH_TAG` | payload (auth tag omitted when absent) |
-| `BUZZ_ACP_AGENT_ARGS` | comma-joined |
+| `BUZZ_ACP_AGENT_ARGS` | comma-joined `launch.args` |
 | `BUZZ_ACP_MCP_COMMAND` | empty |
-| `BUZZ_ACP_LAZY_POOL` | `true` — the pool warms on the first accepted event instead of at startup; queued work is not dropped, and a restarted or idle unit does not hold N harness subprocesses |
-| `BUZZ_ACP_AGENTS` | payload `parallelism` |
-| `BUZZ_ACP_MULTIPLE_EVENT_HANDLING` | `steer` |
-| `BUZZ_ACP_DEDUP` | `queue` |
-| `BUZZ_ACP_RELAY_OBSERVER` | `true` |
+| `launch.policy_env` | desktop-resolved behavior defaults, including effective parallelism and lazy-pool policy |
+| `launch.env` | desktop-resolved six-layer runtime/user env, written after policy defaults |
 | `BUZZ_ACP_RESPOND_TO` (+ `_ALLOWLIST`) | payload; `allowlist` mode with an empty list is refused |
-| `BUZZ_ACP_SYSTEM_PROMPT`, `BUZZ_ACP_MODEL` | payload, omitted when empty |
-| runtime model/provider env | payload `model` / `provider`, under the runtime's own names — see below |
-| `BUZZ_ACP_IDLE_TIMEOUT`, `BUZZ_ACP_MAX_TURN_DURATION` | emitted only when set, so the harness's own defaults win |
+| `BUZZ_ACP_AGENT_OWNER` | `launch.owner_pubkey` when present; required if no auth tag is available |
 | `NOSTR_PRIVATE_KEY`, `GIT_TERMINAL_PROMPT`, `GIT_CONFIG_*` | only when `git-credential-nostr` is on the host |
-| user `env_vars` | written last, so they override — matching the local layering |
 
 **The `PATH` line is the remote half of the desktop's own PATH contract.** Local spawn prepends
 `<home>/.local/bin` (and the bundled sidecar directory) to the spawned harness's `PATH`
@@ -542,32 +541,15 @@ catalog as absent, and the deploy that follows refuses the pin with exit 91 on a
 adapter is installed and runnable. `scripts/provision-buzz-host.sh` does the same, so its report and
 the deploy's behavior cannot disagree.
 
-**`BUZZ_ACP_RELAY_OBSERVER` is pinned `true`, but it only does anything once an owner resolves.**
-Observer frames are addressed and encrypted to the owner's pubkey, so `buzz-acp` resolves one at
-startup — from `BUZZ_AUTH_TAG` (the NIP-OA attestation, verified against the agent's own key) or
-from `--agent-owner` — and logs `relay observer requested but no agent owner was resolved at
-startup` and publishes nothing when it has neither. This is worth stating because dropping the
-NIP-OA identity is the current workaround for the cross-machine mention gate (#3277, #2987): a
-deploy with no `auth_tag` and `respond_to=allowlist` is a perfectly working agent that answers
-mentions and pushes to repositories, and the only thing quietly missing is its observer telemetry.
-Deploy does not warn, since a payload without an auth tag is a legitimate configuration; the
-harness's own log is the place that says so.
+**Observer ownership fails closed.** Observer frames are addressed and encrypted to the owner's
+pubkey. A current Desktop supplies both `BUZZ_ACP_RELAY_OBSERVER=true` in `launch.policy_env` and
+the resolved owner in `launch.owner_pubkey`; the provider writes the latter as
+`BUZZ_ACP_AGENT_OWNER`. A launch payload with neither `auth_tag` nor `owner_pubkey` is refused.
 
-The runtime model/provider pair is the remote half of `runtime_metadata_env_vars`. `BUZZ_ACP_MODEL`
-is what `buzz-acp` reads; these are what the harness underneath it reads, and local spawn writes
-both. Without them a remote Goose would fall back to whatever `~/.config/goose/config.yaml` on the
-host says, with the user's model pick silently ignored.
-
-| pinned command | model var | provider var |
-|---|---|---|
-| `goose` | `GOOSE_MODEL` | `GOOSE_PROVIDER` |
-| `buzz-agent` | `BUZZ_AGENT_MODEL` | `BUZZ_AGENT_PROVIDER` |
-
-The lookup is keyed on the command's file name, so an absolute pin
-(`/home/ubuntu/.local/bin/goose`) resolves to the same runtime — matching `known_acp_runtime`
-locally. Runtimes absent from the table declare no such vars in `KNOWN_ACP_RUNTIMES` either:
-Claude is `provider_locked`, and neither Claude nor Codex has a model env var. An unset payload
-field writes no key at all.
+Runtime-specific model/provider variables are already resolved in `launch.env` by the Desktop's
+runtime metadata table. The SSH provider deliberately does not maintain a second command-to-env
+mapping: doing so would drift for provider-locked runtimes and could silently ignore a user's model
+selection. Host paths remain the only runtime detail resolved by this provider.
 
 Claude has one additional executable binding. When the pinned harness is
 `claude-agent-acp` or `claude-code-acp`, deploy prefers the stable

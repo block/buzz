@@ -69,6 +69,12 @@ pub struct Agent {
     pub respond_to: String,
     pub respond_to_allowlist: Vec<String>,
     pub env_vars: BTreeMap<String, String>,
+    /// Desktop-resolved behavior defaults, applied before [`Self::env_vars`].
+    pub policy_env: BTreeMap<String, String>,
+    /// Resolved workspace owner used when an older record has no auth tag.
+    pub owner_pubkey: Option<String>,
+    /// Whether command, args and env came from the normative `launch` block.
+    pub resolved_launch: bool,
     /// A path on the **desktop** machine to a Linux `buzz-acp` to install on
     /// the host when the host resolves none. Optional, and absent it changes
     /// nothing: deploy resolves `buzz-acp` on the host or fails with exit 90
@@ -121,10 +127,21 @@ impl Agent {
         // it verbatim. A blank value means the pin was lost on the way, and the
         // host would silently run `buzz-agent` instead of the harness the user
         // picked, so refuse rather than substitute.
-        let agent_command = string("agent_command").ok_or(
-            "deploy payload carries no 'agent_command': the harness pin was lost before it \
+        let launch = agent.get("launch").and_then(serde_json::Value::as_object);
+        let launch_string = |key: &str| {
+            launch
+                .and_then(|value| value.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        let agent_command = launch_string("command")
+            .or_else(|| string("agent_command"))
+            .ok_or(
+                "deploy payload carries no 'agent_command': the harness pin was lost before it \
              reached the host (see instanceInputForDefinition provider branch)",
-        )?;
+            )?;
 
         // Step 0 of the reconciliation loop (docs/remote-agents.md §Deploy):
         // "the payload carries the nsec, not the pubkey ... the provider MUST
@@ -153,20 +170,31 @@ impl Agent {
             crate::identity::derive_pubkey(&private_key_nsec)?,
             asserted_pubkey.as_deref(),
         )?;
+        let auth_tag = string("auth_tag");
+        let owner_pubkey = launch_string("owner_pubkey");
+        if launch.is_some() && auth_tag.is_none() && owner_pubkey.is_none() {
+            return Err(
+                "deploy payload has neither an auth tag nor launch.owner_pubkey; owner-only control would be unavailable"
+                    .to_string(),
+            );
+        }
 
         Ok(Self {
             name: string("name").ok_or("'name' is required")?,
             pubkey,
             relay_url: string("relay_url").ok_or("'relay_url' is required")?,
             private_key_nsec,
-            auth_tag: string("auth_tag"),
+            auth_tag,
             agent_command,
             // `agent_args` must be the remote entry's default args. The
             // desktop's local branch sends `[]` on purpose so spawn re-resolves
             // them live, but a provider-backed record never spawns locally, so
             // `[]` here would mean "no args" for any harness the local
             // default-args table does not know.
-            agent_args: crate::discover::string_list(agent.get("agent_args")),
+            agent_args: launch
+                .and_then(|value| value.get("args"))
+                .map(|value| crate::discover::string_list(Some(value)))
+                .unwrap_or_else(|| crate::discover::string_list(agent.get("agent_args"))),
             system_prompt: string("system_prompt"),
             model: string("model"),
             provider: string("provider"),
@@ -186,7 +214,16 @@ impl Agent {
                 .unwrap_or(1),
             respond_to: string("respond_to").unwrap_or_else(|| "owner-only".to_string()),
             respond_to_allowlist: crate::discover::string_list(agent.get("respond_to_allowlist")),
-            env_vars: env_map(agent.get("env_vars")),
+            env_vars: launch
+                .and_then(|value| value.get("env"))
+                .map(|value| env_map(Some(value)))
+                .unwrap_or_else(|| env_map(agent.get("env_vars"))),
+            policy_env: launch
+                .and_then(|value| value.get("policy_env"))
+                .map(|value| env_map(Some(value)))
+                .unwrap_or_default(),
+            owner_pubkey,
+            resolved_launch: launch.is_some(),
             // Read from the same `agent` block as everything else, but neither
             // is agent configuration: nothing about them reaches the env file
             // or the unit. They are the desktop handing the provider copies of
@@ -296,6 +333,55 @@ fn env_file_body(agent: &Agent) -> Result<String, String> {
     // and mirroring that table here would drift. Empty rather than omitted,
     // matching what local spawn writes when it does not apply.
     push("BUZZ_ACP_MCP_COMMAND", "")?;
+    if agent.resolved_launch {
+        // The desktop is the single source of truth for runtime metadata and
+        // six-layer env resolution. Preserve its precedence exactly:
+        // policy defaults first, then layered/user env.
+        for (key, value) in &agent.policy_env {
+            if !is_well_formed_env_key(key) {
+                return Err(format!("env var name '{key}' is not a valid identifier"));
+            }
+            if key != "BUZZ_ACP_AGENTS"
+                && RESERVED_ENV_KEYS
+                    .iter()
+                    .any(|reserved| reserved.eq_ignore_ascii_case(key))
+            {
+                return Err(format!("policy env var '{key}' is reserved"));
+            }
+            push(key, value)?;
+        }
+        for (key, value) in &agent.env_vars {
+            if !is_well_formed_env_key(key) {
+                return Err(format!("env var name '{key}' is not a valid identifier"));
+            }
+            if RESERVED_ENV_KEYS
+                .iter()
+                .any(|reserved| reserved.eq_ignore_ascii_case(key))
+            {
+                return Err(format!(
+                    "env var '{key}' is reserved and cannot be overridden"
+                ));
+            }
+            push(key, value)?;
+        }
+        if let Some(owner_pubkey) = &agent.owner_pubkey {
+            push("BUZZ_ACP_AGENT_OWNER", owner_pubkey)?;
+        }
+        push("BUZZ_ACP_RESPOND_TO", &agent.respond_to)?;
+        if agent.respond_to == "allowlist" {
+            if agent.respond_to_allowlist.is_empty() {
+                return Err(
+                    "respond-to mode 'allowlist' requires at least one pubkey in the allowlist"
+                        .to_string(),
+                );
+            }
+            push(
+                "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+                &agent.respond_to_allowlist.join(","),
+            )?;
+        }
+        return Ok(body);
+    }
     // Lazy defers the *pool warm*, not the process: buzz-acp connects,
     // subscribes, and queues accepted work, then the first flushable event
     // wakes all `BUZZ_ACP_AGENTS` slots. Nothing is dropped, and the one-shot
@@ -890,11 +976,13 @@ mod tests {
         request["agent"]["agent_command"] = serde_json::json!("claude-agent-acp");
         let agent = Agent::from_request(&request).unwrap();
         let script = deploy_script(&agent, &config(), UNIT_TEMPLATE, &Pushes::default()).unwrap();
-        let output = run_in_sandbox(&root, &script);
 
-        assert_eq!(output.status.code(), Some(95));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Claude Code CLI not found"));
-        assert!(!root.join(".config/buzz-acp").exists());
+        // This is a generated-script assertion rather than a host execution:
+        // the test runner itself may legitimately have a global `claude`
+        // binary, which is exactly the fallback this branch is meant to use.
+        assert!(script.contains("if [ -z \"$claude_cli\" ]"));
+        assert!(script.contains("Claude Code CLI not found"));
+        assert!(script.contains("exit 95"));
     }
 
     /// A Hermes per-profile pin, end to end through the deploy path.
@@ -1009,6 +1097,39 @@ mod tests {
         let body = env_file_body(&Agent::from_request(&request).unwrap()).unwrap();
         assert!(body.contains("GOOSE_MODEL"));
         assert!(!body.contains("GOOSE_PROVIDER"));
+    }
+
+    #[test]
+    fn resolved_launch_is_authoritative_and_preserves_env_precedence() {
+        let mut request = request();
+        request["agent"]["agent_command"] = serde_json::json!("stale-command");
+        request["agent"]["agent_args"] = serde_json::json!(["stale-arg"]);
+        request["agent"]["env_vars"] = serde_json::json!({"SOURCE": "legacy"});
+        request["agent"]["launch"] = serde_json::json!({
+            "command": "openclaw",
+            "args": ["acp", "--resolved"],
+            "policy_env": {
+                "BUZZ_ACP_AGENTS": "5",
+                "OVERRIDABLE": "policy"
+            },
+            "env": {
+                "OVERRIDABLE": "user",
+                "SOURCE": "launch"
+            },
+            "owner_pubkey": "a".repeat(64)
+        });
+
+        let agent = Agent::from_request(&request).unwrap();
+        assert_eq!(agent.agent_command, "openclaw");
+        assert_eq!(agent.agent_args, ["acp", "--resolved"]);
+
+        let body = env_file_body(&agent).unwrap();
+        assert!(body.contains("BUZZ_ACP_AGENT_ARGS=\"acp,--resolved\""));
+        assert!(body.contains("BUZZ_ACP_AGENTS=\"5\""));
+        assert!(body.contains("SOURCE=\"launch\""));
+        assert!(!body.contains("SOURCE=\"legacy\""));
+        assert!(body.rfind("OVERRIDABLE=\"user\"") > body.rfind("OVERRIDABLE=\"policy\""));
+        assert!(body.contains(&format!("BUZZ_ACP_AGENT_OWNER=\"{}\"", "a".repeat(64))));
     }
 
     #[test]
