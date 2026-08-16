@@ -64,6 +64,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/", get(nip11_or_ws_handler))
         .route("/info", get(relay_info_handler))
         .route("/.well-known/nostr.json", get(api::nip05::nostr_nip05))
+        .route(
+            "/.well-known/buzz/channels/{channel_id}/community",
+            get(api::community_identity::channel_community),
+        )
         // Health endpoints
         .route("/health", get(health_handler))
         .route("/_liveness", get(liveness_handler))
