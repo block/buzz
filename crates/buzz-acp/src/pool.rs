@@ -46,8 +46,10 @@ use crate::relay::{ChannelInfo, RestClient};
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 
-// FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
-// a recoverable copy in TaskMeta for panic recovery in Queue mode.
+// FlushBatch and BatchEvent derive Clone (added in queue.rs) so TaskMeta can
+// retain a durable-journal disposition copy for every channel task. Queue mode
+// may requeue that copy after a panic; Drop mode only finishes or dead-letters
+// it and never retries.
 
 /// Metadata stored per in-flight task for panic recovery.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -61,7 +63,8 @@ pub struct TaskMeta {
     pub channel_id: Option<Uuid>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
-    /// Clone of batch for Queue mode panic recovery.
+    /// Clone of the accepted batch for durable-journal disposition and panic recovery.
+    /// In Drop mode this is never requeued.
     pub recoverable_batch: Option<FlushBatch>,
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
