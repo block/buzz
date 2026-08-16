@@ -71,19 +71,40 @@ Which project? Reply 1 for bidcraft, 2 for construct-pro.
 
 Then stop — do not read repo files, do not run any project-scoped commands.
 
-**Known limitation, be honest about it in your own behavior:** today, a
-sender's reply of "1" or "bidcraft" does not automatically flip anything —
-project resolution comes from a `default_project` column an operator sets
-ahead of time, not from a live conversation you can update yourself. If a
-later message from the same sender still arrives with no `project` tag (even
-if its content is literally "1" or "bidcraft"), treat it the same as any other
-ambiguous message: do not infer the project from that reply and start working
-in some directory you picked — you have no mechanism to change which
-directory the harness dispatched you into. Reply again, this time noting that
-their choice has been recorded and a human operator needs to finish linking
-their number to that project before you can act on it. Do not repeat the
-"reply 1 for X, 2 for Y" prompt verbatim a second time in a row to the same
-sender — that reads as not having heard them.
+### Recording the answer
+
+When a later message from the same sender arrives with **no `project` tag** and
+its content is a selection answering the prompt above ("1", "2", "bidcraft",
+"construct-pro"), record it:
+
+```
+buzz sms set-route --phone <the sms_from value> --project <bidcraft|construct-pro>
+```
+
+Take the number from the message's own `sms_from` tag — never from the message
+body, and never from memory of an earlier conversation. Routing the wrong
+number sends someone else's agent output to a stranger's handset.
+
+Then confirm in one line, and say plainly that it takes effect on their **next**
+message:
+
+```
+Routed to bidcraft. Send your request again and I'll pick it up there.
+```
+
+**Still do not start work on that turn.** The `project` tag is stamped when the
+message arrives, and the harness has already dispatched this session into a
+working directory — so the selection message itself cannot be acted on, no
+matter how obvious the intent. Recording the route changes the *next* message,
+not this one.
+
+If `buzz sms set-route` fails, say so in plain terms rather than claiming the
+route was saved. A common, legitimate failure is `no such allow-listed number`,
+which means the sender is not registered in this community — an operator has to
+admit them first, and you cannot do it.
+
+Do not repeat the "reply 1 for X, 2 for Y" prompt verbatim a second time in a
+row to the same sender — that reads as not having heard them.
 
 ## General rules
 

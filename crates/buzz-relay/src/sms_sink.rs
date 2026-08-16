@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use buzz_core::event::StoredEvent;
+use buzz_core::kind::KIND_STREAM_MESSAGE;
 use buzz_core::tenant::TenantContext;
 use tracing::{info, warn};
 
@@ -70,6 +71,34 @@ fn twilio_messages_url(base_url: &str, account_sid: &str) -> String {
     format!("{base_url}/2010-04-01/Accounts/{account_sid}/Messages.json")
 }
 
+/// Whether an event is even worth a database lookup, decided from the event
+/// alone. Split out from [`maybe_send_outbound_sms`] so the cases that matter
+/// are testable without an `AppState` or a live Postgres.
+///
+/// The kind check is load-bearing, not defensive tidiness. Every other
+/// condition here is satisfied by the agent harness's own bookkeeping events:
+/// it reacts to a message it is picking up (kind:7 `👀`) and again while it
+/// works (kind:7 `💬`), and those reactions carry an `e` tag pointing at the
+/// inbound SMS. Without a kind filter each one resolved to the sender's phone
+/// number and went out as a text, so a single inbound message produced two
+/// emoji-only SMS before the real reply. The harness deletes those reactions
+/// a moment later (kind:5), but a delivered SMS cannot be recalled.
+fn is_outbound_candidate(
+    event: &nostr::Event,
+    channel_id: Option<uuid::Uuid>,
+    inbox_channel: uuid::Uuid,
+) -> bool {
+    if channel_id != Some(inbox_channel) {
+        return false;
+    }
+    if event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE {
+        return false;
+    }
+    // The inbound event itself already carries sms_from — it is not a reply
+    // to anything, and must never be echoed back to Twilio as if it were.
+    tag_value(event, "sms_from").is_none()
+}
+
 /// If `stored_event` is a reply inside the configured SMS-inbox channel
 /// whose `e` tag resolves to an inbound-SMS event, send its content back to
 /// that sender via Twilio.
@@ -81,12 +110,7 @@ pub(crate) async fn maybe_send_outbound_sms(
     let Some(inbox_channel) = state.config.twilio_sms_inbox_channel else {
         return SendOutcome::NotApplicable;
     };
-    if stored_event.channel_id != Some(inbox_channel) {
-        return SendOutcome::NotApplicable;
-    }
-    // The inbound event itself already carries sms_from — it is not a reply
-    // to anything, and must never be echoed back to Twilio as if it were.
-    if tag_value(&stored_event.event, "sms_from").is_some() {
+    if !is_outbound_candidate(&stored_event.event, stored_event.channel_id, inbox_channel) {
         return SendOutcome::NotApplicable;
     }
 
@@ -194,15 +218,76 @@ mod tests {
     use tokio::net::TcpListener;
 
     fn event_with_tags(tags: Vec<Vec<&str>>, content: &str) -> nostr::Event {
+        event_of_kind(9, tags, content)
+    }
+
+    fn event_of_kind(kind: u16, tags: Vec<Vec<&str>>, content: &str) -> nostr::Event {
         let keys = nostr::Keys::generate();
         let tags: Vec<nostr::Tag> = tags
             .into_iter()
             .map(|t| nostr::Tag::parse(t).expect("valid tag"))
             .collect();
-        nostr::EventBuilder::new(nostr::Kind::from(9u16), content)
+        nostr::EventBuilder::new(nostr::Kind::from(kind), content)
             .tags(tags)
             .sign_with_keys(&keys)
             .expect("sign test event")
+    }
+
+    // ── is_outbound_candidate ───────────────────────────────────────────────
+
+    /// A reply the sms-operator persona posts: kind:9, in the inbox channel,
+    /// threading back to the inbound SMS. The one shape that should send.
+    #[test]
+    fn outbound_candidate_accepts_a_message_reply_in_the_inbox_channel() {
+        let inbox = uuid::Uuid::new_v4();
+        let event = event_with_tags(vec![vec!["e", "abc123", "", "reply"]], "Which project?");
+        assert!(is_outbound_candidate(&event, Some(inbox), inbox));
+    }
+
+    /// Regression: the agent harness reacts to an inbound message with 👀 and
+    /// 💬 (kind:7), each carrying an `e` tag back to it. Those satisfied every
+    /// other condition and were texted to the sender as two junk messages
+    /// ahead of the real reply. See the doc comment on is_outbound_candidate.
+    #[test]
+    fn outbound_candidate_rejects_agent_reactions() {
+        let inbox = uuid::Uuid::new_v4();
+        for emoji in ["👀", "💬", "+"] {
+            let reaction = event_of_kind(7, vec![vec!["e", "abc123"]], emoji);
+            assert!(
+                !is_outbound_candidate(&reaction, Some(inbox), inbox),
+                "kind:7 reaction {emoji} must never be sent as an SMS"
+            );
+        }
+    }
+
+    /// The harness deletes its own reactions once it has replied. A deletion
+    /// also carries `e` tags, so it must be filtered on kind too.
+    #[test]
+    fn outbound_candidate_rejects_deletions() {
+        let inbox = uuid::Uuid::new_v4();
+        let deletion = event_of_kind(5, vec![vec!["e", "abc123"]], "");
+        assert!(!is_outbound_candidate(&deletion, Some(inbox), inbox));
+    }
+
+    #[test]
+    fn outbound_candidate_rejects_the_inbound_event_itself() {
+        let inbox = uuid::Uuid::new_v4();
+        // Synthesized inbound SMS: kind:9 in the inbox channel, but tagged
+        // sms_from. Echoing it would text the sender their own message back.
+        let inbound = event_with_tags(
+            vec![vec!["sms_from", "+15551234567"], vec!["e", "abc123"]],
+            "Hi",
+        );
+        assert!(!is_outbound_candidate(&inbound, Some(inbox), inbox));
+    }
+
+    #[test]
+    fn outbound_candidate_rejects_events_in_other_channels() {
+        let inbox = uuid::Uuid::new_v4();
+        let elsewhere = uuid::Uuid::new_v4();
+        let event = event_with_tags(vec![vec!["e", "abc123", "", "reply"]], "unrelated reply");
+        assert!(!is_outbound_candidate(&event, Some(elsewhere), inbox));
+        assert!(!is_outbound_candidate(&event, None, inbox));
     }
 
     // ── tag_value / first_e_tag_event_id ────────────────────────────────────
