@@ -727,13 +727,15 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
 
     // Read diff from stdin if "--diff -"
     let diff_content = read_or_stdin(&p.diff)?;
-    validate_content_no_nul(&diff_content)?;
     if let Some(ref description) = p.description {
+        // Description is sent as-is (no size truncation path).
         validate_content_no_nul(description)?;
     }
 
-    // Truncate at 60 KiB hunk boundary
+    // Truncate at 60 KiB hunk boundary, then validate the **persisted** text.
+    // Checking pre-truncation would reject a NUL only in a discarded tail.
     let (diff, truncated) = truncate_diff(&diff_content, MAX_DIFF_BYTES);
+    validate_content_no_nul(&diff)?;
 
     // Language inference: explicit flag wins, then infer from file path
     let language = p

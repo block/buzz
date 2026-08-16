@@ -74,14 +74,20 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
 
 /// Reject content containing an embedded NUL byte (0x00).
 ///
-/// Interior NULs can be silently truncated at C-string boundaries on some
-/// paths; fail closed rather than publish `accepted:true` with truncated data.
+/// Contract: validates the **Rust-visible** string the CLI will persist/send.
+/// This catches stdin (`--content -`), edit bodies, and any path that still
+/// carries an interior NUL into process memory. It cannot detect Windows argv
+/// truncation (`CreateProcessW` / `CommandLineToArgvW`) that drops a NUL tail
+/// before `buzz.exe` starts — that loss never appears in the Clap `String`.
+/// Prefer PowerShell literal here-strings `@'...'@` or pipe UTF-8 via
+/// `--content -` without `` `0 `` escapes when the shell might inject NUL.
 pub fn validate_content_no_nul(content: &str) -> Result<(), CliError> {
     if content.contains('\0') {
         return Err(CliError::Usage(
-            "content contains a NUL byte (0x00); refusing to send truncated/binary content. \
-             If this came from PowerShell, use a literal here-string @'...'@ or pipe UTF-8 \
-             via --content - without `0 escapes."
+            "content contains a NUL byte (0x00); refusing to send binary/NUL-bearing text. \
+             Prefer a PowerShell literal here-string @'...'@ or pipe UTF-8 via --content - \
+             without `0 escapes. Note: Windows argv truncation before process start is not \
+             detectable here."
                 .into(),
         ));
     }
@@ -89,6 +95,9 @@ pub fn validate_content_no_nul(content: &str) -> Result<(), CliError> {
 }
 
 /// Validate message body content: size limit and no interior NUL bytes.
+///
+/// Applies to the resolved body after stdin expansion — the text that would
+/// actually be published — not pre-truncation intermediates on other paths.
 pub fn validate_message_content(content: &str) -> Result<(), CliError> {
     validate_content_size(content)?;
     validate_content_no_nul(content)?;
