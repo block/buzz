@@ -114,11 +114,12 @@ ADR ───────────────────────  stand
 
 1. **An ADR is never a work item and never has children.** Work a decision creates is
    filed separately afterwards and linked back.
-2. **A PRD's open questions are raised as ADR issues, parented to that PRD.** Use
-   `--parent`, exactly as for a Task. An open question that stays in a PRD body is
-   invisible on the board, and gets decided by accident inside whichever task hits it
-   first — which buries a decision with real consequences in a task nobody reads again.
-   An ADR that no PRD raised is filed standalone.
+2. **A PRD's open questions are raised as ADR issues, parented to that PRD.** Link it
+   the same way as for a Task — see §5's "Filing an issue" for the actual mechanism,
+   since `gh issue create` has no `--parent` flag. An open question that stays in a PRD
+   body is invisible on the board, and gets decided by accident inside whichever task
+   hits it first — which buries a decision with real consequences in a task nobody reads
+   again. An ADR that no PRD raised is filed standalone.
 3. **A resolved ADR is written to `launchpad/decisions/ADR-XXXX-slug.md` in the same PR
    that closes its issue.** A decision that exists only in a closed issue is lost to the
    noise. Closing the issue without writing the document is not done. This does not make
@@ -173,13 +174,35 @@ an `AGENT INSTRUCTIONS` comment block — read it.
 gh issue create \
   --title "task: add Redis role to the relay playbook" \
   --body-file /tmp/issue.md \
-  --label type:task --label area:deploy --label by:agent \
-  --parent 4
+  --label type:task --label area:deploy --label by:agent
 ```
 
-Note `--parent` — that creates a real GitHub sub-issue link. Use it for every Task under
-a PRD, and for every ADR raised from a PRD's open questions. Only an ADR that no PRD
-raised is filed without one.
+**`gh issue create` has no `--parent` flag** — confirmed absent from `gh issue create
+--help` in gh 2.93.0, and passing it aborts at argument parsing before the issue is
+created. To create a real GitHub sub-issue link, create the issue first, then link it
+in a second step using the REST sub-issues endpoint. It takes the child's **database
+`id`** (not its issue number) as a typed integer — `gh api -F`, not `-f`:
+
+```bash
+link_child() {  # $1 = child issue number, $2 = parent issue number
+  local sub_id
+  sub_id=$(gh api "repos/launchpad-26/buzz/issues/$1" --jq .id)
+  gh api -X POST "repos/launchpad-26/buzz/issues/$2/sub_issues" -F "sub_issue_id=$sub_id"
+}
+```
+
+The POST response is the **parent** issue, so reading `.number` off it reports the parent
+for every child and looks identical whichever child was passed — verify the link by
+listing sub-issues afterwards instead: `gh api repos/launchpad-26/buzz/issues/<parent>/sub_issues --jq '.[].number'`.
+
+Use this for every Task under a PRD, and for every ADR raised from a PRD's open
+questions. Only an ADR that no PRD raised is filed without one.
+
+**Filing an ADR from the CLI does not apply its template's `needs-decision` label.**
+`.github/ISSUE_TEMPLATE/05-adr.yml` declares it, but issue-form template labels apply
+only when the form is submitted through the web UI — a `gh issue create --label
+type:adr` issue does not receive it. Add it explicitly:
+`gh issue edit <n> --add-label needs-decision`.
 
 Do **not** pass `--type`; that is GitHub's org-level Issue Types feature, which this org
 has not configured. **Type is a label.**
