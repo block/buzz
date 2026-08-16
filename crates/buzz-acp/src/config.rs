@@ -790,9 +790,30 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
-    let normalized = agent_args
+    // clap splits BUZZ_ACP_AGENT_ARGS on commas (value_delimiter = ',').
+    // A space-separated value (the form every shell user reaches for first)
+    // arrives as a single element containing spaces, e.g.
+    //   BUZZ_ACP_AGENT_ARGS="-m my-model --reasoning low acp"
+    // becomes vec!["-m my-model --reasoning low acp"].
+    // Detect this: when clap produced exactly one element that contains spaces,
+    // shell-split it so the agent receives individual arguments.
+    // Comma-separated input is already correctly split by clap and is left alone.
+    let pre_split = if agent_args.len() == 1 {
+        let arg = &agent_args[0];
+        if arg.contains(' ') {
+            shlex::split(arg).unwrap_or_else(|| vec![arg.trim().to_string()])
+        } else {
+            vec![arg.trim().to_string()]
+        }
+    } else {
+        agent_args
+            .into_iter()
+            .map(|arg| arg.trim().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let normalized = pre_split
         .into_iter()
-        .map(|arg| arg.trim().to_string())
         .filter(|arg| !arg.is_empty())
         .collect::<Vec<_>>();
 
@@ -1147,7 +1168,7 @@ impl Config {
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
-            self.agent_args.join(" "),
+            format_args!("[{}]", self.agent_args.iter().map(|a| format!("\"{}\"", a)).collect::<Vec<_>>().join(", ")),
             self.mcp_command,
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
@@ -1599,6 +1620,61 @@ mod tests {
         assert_eq!(
             normalize_agent_args("custom-agent", vec!["".into(), "serve".into()]),
             vec!["serve"]
+        );
+    }
+
+    #[test]
+    fn shell_splits_single_space_separated_agent_args() {
+        // clap produces a single element when the env var has no commas.
+        // normalize_agent_args should shell-split it into individual arguments.
+        assert_eq!(
+            normalize_agent_args(
+                "custom-agent",
+                vec!["-m my-model --reasoning low acp".into()]
+            ),
+            vec!["-m", "my-model", "--reasoning", "low", "acp"]
+        );
+    }
+
+    #[test]
+    fn shell_splits_single_arg_with_quoted_values() {
+        assert_eq!(
+            normalize_agent_args(
+                "custom-agent",
+                vec!["--model \"gpt-5\" --flag value".into()]
+            ),
+            vec!["--model", "gpt-5", "--flag", "value"]
+        );
+    }
+
+    #[test]
+    fn does_not_re_split_comma_separated_args() {
+        // Comma-separated input is already correctly split by clap.
+        // normalize_agent_args must leave multi-element results alone.
+        assert_eq!(
+            normalize_agent_args(
+                "custom-agent",
+                vec!["-m".into(), "my-model".into(), "--flag".into()]
+            ),
+            vec!["-m", "my-model", "--flag"]
+        );
+    }
+
+    #[test]
+    fn shell_split_preserves_default_single_token() {
+        // Default value "acp" is a single element with no spaces.
+        // Must remain as-is, not trigger shell-splitting.
+        assert_eq!(
+            normalize_agent_args("goose", vec!["acp".into()]),
+            vec!["acp"]
+        );
+    }
+
+    #[test]
+    fn shell_split_empty_args_stays_empty() {
+        assert_eq!(
+            normalize_agent_args("custom-agent", vec!["".into()]),
+            Vec::<String>::new()
         );
     }
 
