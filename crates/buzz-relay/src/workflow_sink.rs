@@ -362,6 +362,194 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn assign_agent(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        text: &str,
+        author_pubkey: &str,
+        agent_pubkey: &str,
+        task_id: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let channel_id = channel_id.to_owned();
+        let text = text.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+        let agent_pubkey = agent_pubkey.to_owned();
+        let task_id = task_id.map(str::to_owned);
+
+        Box::pin(async move {
+            // 0. Upgrade weak reference — fails only during shutdown.
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // 1. Resolve tenant for the run's community (see send_message for
+            //    rationale). Fail closed if the community is no longer mapped.
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            // 2. Validate text.
+            if text.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+
+            // 3. Parse/canonicalize channel UUID and look up channel.
+            let channel_uuid = Uuid::parse_str(&channel_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
+            let channel_id_canonical = channel_uuid.to_string();
+
+            let channel = state
+                .db
+                .get_channel(tenant.community(), channel_uuid)
+                .await
+                .map_err(|e| match &e {
+                    buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
+                        ActionSinkError::ChannelNotFound(channel_id_canonical.clone())
+                    }
+                    _ => ActionSinkError::Database(e.to_string()),
+                })?;
+
+            if channel.archived_at.is_some() {
+                return Err(ActionSinkError::ChannelArchived(
+                    channel_id_canonical.clone(),
+                ));
+            }
+
+            // 4. Parse author (workflow owner) and verify their access.
+            let author_pubkey = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+            let author_pubkey_bytes = author_pubkey.to_bytes().to_vec();
+            let author_pubkey_hex = author_pubkey.to_hex();
+            let owner_is_member = state
+                .is_member_cached(tenant.community(), channel_uuid, &author_pubkey_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !owner_is_member && channel.visibility != "open" {
+                return Err(ActionSinkError::InvalidInput(
+                    "workflow owner does not have access to destination channel".into(),
+                ));
+            }
+
+            // 5. Parse assignee and enforce membership (fail-closed).
+            //    The assignee must already be a channel member; silently
+            //    adding them would let a workflow escalate authority beyond
+            //    what the owner granted at save time.
+            let agent_pk = nostr::PublicKey::from_hex(&agent_pubkey)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid agent pubkey: {e}")))?;
+            let agent_pk_bytes = agent_pk.to_bytes().to_vec();
+            let agent_pk_hex = agent_pk.to_hex();
+            let agent_is_member = state
+                .is_member_cached(tenant.community(), channel_uuid, &agent_pk_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !agent_is_member {
+                return Err(ActionSinkError::AssigneeNotMember(agent_pk_hex));
+            }
+
+            // 6. Build the kind:9 event.
+            //    - Owner attribution `p` tag (same as send_message)
+            //    - Assignee wake `p` tag (dedup against owner)
+            //    - No reverse-parse of `@Name` mentions in `text` — that is
+            //      the failure mode assign_agent exists to avoid.
+            //    - Optional `task` tag with the caller's correlation id.
+            let mut tags = vec![
+                Tag::parse(["p", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["h", &channel_id_canonical])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+            if agent_pk_hex != author_pubkey_hex {
+                tags.push(
+                    Tag::parse(["p", &agent_pk_hex])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("assignee p tag: {e}")))?,
+                );
+            }
+            if let Some(tid) = task_id.as_deref() {
+                if !tid.trim().is_empty() {
+                    tags.push(
+                        Tag::parse(["task", tid])
+                            .map_err(|e| ActionSinkError::EventBuild(format!("task tag: {e}")))?,
+                    );
+                }
+            }
+
+            let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
+            let event = EventBuilder::new(kind, &text)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+            let event_id_bytes = event.id.as_bytes().to_vec();
+            let kind_u32 = KIND_STREAM_MESSAGE;
+
+            let event_created_at = {
+                let ts = event.created_at.as_secs() as i64;
+                chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
+            };
+
+            info!(
+                event_id = %event_id_hex,
+                channel_id = %channel_id_canonical,
+                author = %author_pubkey,
+                agent = %agent_pk_hex,
+                "Workflow AssignAgent: posting kind {kind_u32} event"
+            );
+
+            // 7. Persist with thread metadata (top-level, same as send_message).
+            let thread_meta = Some(buzz_db::event::ThreadMetadataParams {
+                event_id: &event_id_bytes,
+                event_created_at,
+                channel_id: channel_uuid,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: false,
+            });
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    Some(channel_uuid),
+                    thread_meta,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            // 8. Post-persist fan-out (only on real insert).
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    kind_u32,
+                    &author_pubkey_hex,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -707,5 +895,203 @@ mod integration_tests {
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
         );
+    }
+
+    /// The identity-safety contract for `assign_agent`, exercised end to end
+    /// against real Postgres. The three assertions map directly to Airy's
+    /// review corrections (singular assignee, no prose parsing, membership
+    /// fail-closed):
+    ///
+    /// 1. Two channel members share the display name "Winnie" (the exact
+    ///    duplicate-name repro from #4108b496). Dispatching by pubkey wakes
+    ///    exactly the selected pubkey — never the other, never both.
+    /// 2. The message text contains `@Winnie`, which under `send_message`
+    ///    would be dropped as ambiguous. `assign_agent` must NOT reverse-parse
+    ///    that name; the `p`-tag set must be exactly `{owner, selected agent}`.
+    /// 3. A non-member assignee is rejected with `AssigneeNotMember` — never
+    ///    silently added, never posted-but-unwaked.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_assign_agent_wakes_exact_pubkey_and_ignores_prose() {
+        let state = test_state().await;
+
+        let author = nostr::Keys::generate();
+        let author_hex = author.public_key().to_hex();
+
+        // Two agents sharing the display name "Winnie" (the duplicate-name
+        // hazard driving Slice 1). One is chosen; the other must not wake.
+        let winnie_a = nostr::Keys::generate();
+        let winnie_a_bytes = winnie_a.public_key().to_bytes().to_vec();
+        let winnie_a_hex = winnie_a.public_key().to_hex();
+        let winnie_b = nostr::Keys::generate();
+        let winnie_b_bytes = winnie_b.public_key().to_bytes().to_vec();
+        let winnie_b_hex = winnie_b.public_key().to_hex();
+
+        let host = format!("wf-assign-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &author_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-assign",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &author.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+
+        for bytes in [&winnie_a_bytes, &winnie_b_bytes] {
+            state
+                .db
+                .ensure_user(community, bytes)
+                .await
+                .expect("ensure user row");
+            state
+                .db
+                .update_user_profile(community, bytes, Some("Winnie"), None, None, None)
+                .await
+                .expect("set display name");
+            state
+                .db
+                .add_member(
+                    community,
+                    channel.id,
+                    bytes,
+                    MemberRole::Bot,
+                    Some(&author.public_key().to_bytes()),
+                )
+                .await
+                .expect("add member");
+        }
+
+        let sink = RelayActionSink::new(&state);
+        let event_id_hex = sink
+            .assign_agent(
+                community,
+                &channel.id.to_string(),
+                // Prose contains `@Winnie` — under send_message this is
+                // ambiguous and drops. assign_agent must NOT reverse-parse it.
+                "@Winnie please pick this up",
+                &author_hex,
+                &winnie_a_hex,
+                Some("11111111-2222-3333-4444-555555555555"),
+            )
+            .await
+            .expect("assign_agent");
+
+        let id_bytes = nostr::EventId::from_hex(&event_id_hex)
+            .expect("event id")
+            .as_bytes()
+            .to_vec();
+        let stored = state
+            .db
+            .get_event_by_id(community, &id_bytes)
+            .await
+            .expect("query event")
+            .expect("event persisted");
+
+        let p_tag_targets: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
+
+        // Exactly two `p` tags — owner + selected agent — in that order.
+        assert_eq!(
+            p_tag_targets,
+            vec![author_hex.as_str(), winnie_a_hex.as_str()],
+            "p-tag set must be exactly {{owner, selected}}; got {p_tag_targets:?}"
+        );
+        // The other same-name member must NOT wake.
+        assert!(
+            !p_tag_targets.contains(&winnie_b_hex.as_str()),
+            "second same-name member {winnie_b_hex} must NOT be p-tagged"
+        );
+
+        // The `task` correlation id is present.
+        let task_tag = stored
+            .event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("task"))
+            .expect("task tag present");
+        assert_eq!(
+            task_tag.as_slice().get(1).map(|s| s.as_str()),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+    }
+
+    /// A non-member assignee must be rejected fail-closed — the workflow
+    /// owner's authority cannot be silently extended by mid-run membership
+    /// changes.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_assign_agent_rejects_non_member() {
+        let state = test_state().await;
+
+        let author = nostr::Keys::generate();
+        let author_hex = author.public_key().to_hex();
+        let stranger = nostr::Keys::generate();
+        let stranger_hex = stranger.public_key().to_hex();
+
+        let host = format!("wf-nonmember-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &author_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-nonmember",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &author.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+
+        // stranger is deliberately NOT added as a channel member.
+        let sink = RelayActionSink::new(&state);
+        let err = sink
+            .assign_agent(
+                community,
+                &channel.id.to_string(),
+                "please pick this up",
+                &author_hex,
+                &stranger_hex,
+                None,
+            )
+            .await
+            .expect_err("assign_agent must fail when assignee is not a member");
+
+        match err {
+            ActionSinkError::AssigneeNotMember(pk) => {
+                assert_eq!(pk, stranger_hex);
+            }
+            other => panic!("expected AssigneeNotMember, got: {other}"),
+        }
     }
 }

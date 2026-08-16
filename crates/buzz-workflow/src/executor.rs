@@ -448,6 +448,17 @@ pub fn resolve_step_templates(
         Delay { duration } => Ok(Delay {
             duration: duration.clone(),
         }),
+        AssignAgent {
+            agent_pubkey,
+            text,
+            channel,
+            task_id,
+        } => Ok(AssignAgent {
+            agent_pubkey: t(agent_pubkey)?,
+            text: t(text)?,
+            channel: t_opt(channel)?,
+            task_id: t_opt(task_id)?,
+        }),
     }
 }
 
@@ -593,6 +604,82 @@ pub async fn dispatch_action(
                     Ok(StepResult::Completed(serde_json::json!({
                         "sent": true,
                         "event_id": event_id,
+                    })))
+                }
+
+                AssignAgent {
+                    agent_pubkey,
+                    text,
+                    channel,
+                    task_id,
+                } => {
+                    // Re-validate the *resolved* agent_pubkey. Schema
+                    // validation accepts either static 64-hex or a single
+                    // `{{...}}` template; only after template resolution do we
+                    // know what pubkey the run will actually wake. A resolved
+                    // non-hex string is a definition/data error surfaced as a
+                    // run failure — never a silent misroute or wrong-agent
+                    // wake (an unknown template also passes through unchanged,
+                    // so this catches both).
+                    if !crate::schema::is_lowercase_hex_pubkey(agent_pubkey) {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "AssignAgent: resolved agent_pubkey '{agent_pubkey}' is not a \
+                             64-char lowercase hex pubkey"
+                        )));
+                    }
+
+                    let wf_run = engine
+                        .db
+                        .get_workflow_run(community_id, run_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "AssignAgent: failed to load workflow run {run_id}: {e}"
+                            ))
+                        })?;
+                    let workflow = engine
+                        .db
+                        .get_workflow(community_id, wf_run.workflow_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "AssignAgent: failed to load workflow {}: {e}",
+                                wf_run.workflow_id
+                            ))
+                        })?;
+                    let channel_id = resolve_send_message_channel(
+                        channel.as_deref(),
+                        &trigger_ctx.channel_id,
+                        workflow.channel_id,
+                    )?;
+                    let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+                    info!(
+                        run_id = %run_id,
+                        step = step_id,
+                        channel = %channel_id,
+                        agent = %agent_pubkey,
+                        "AssignAgent → {channel_id}: {text}"
+                    );
+
+                    let event_id = engine
+                        .action_sink()?
+                        .assign_agent(
+                            community_id,
+                            &channel_id,
+                            text,
+                            &owner_pubkey_hex,
+                            agent_pubkey,
+                            task_id.as_deref(),
+                        )
+                        .await
+                        .map_err(WorkflowError::from)?;
+
+                    Ok(StepResult::Completed(serde_json::json!({
+                        "assigned": true,
+                        "agent_pubkey": agent_pubkey,
+                        "event_id": event_id,
+                        "task_id": task_id,
                     })))
                 }
 
@@ -1870,5 +1957,90 @@ mod tests {
             resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
                 .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+
+    // --- assign_agent template resolution ----------------------------------
+
+    /// A 64-char lowercase hex pubkey fixture used across the assign_agent
+    /// executor tests.
+    const AGENT_HEX_FIXTURE: &str =
+        "dcd584bd8bbd49fd62caf3a8a0a43afd38b9a91dcbd3a1c9dba7d082ca024e66";
+
+    fn assign_step(agent_pubkey: &str, text: &str, task_id: Option<&str>) -> Step {
+        Step {
+            id: "assign".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::AssignAgent {
+                agent_pubkey: agent_pubkey.to_owned(),
+                text: text.to_owned(),
+                channel: None,
+                task_id: task_id.map(str::to_owned),
+            },
+        }
+    }
+
+    #[test]
+    fn assign_agent_resolves_text_and_task_id_templates() {
+        let mut ctx = make_trigger();
+        ctx.text = "P1 in prod".to_owned();
+        let outputs = HashMap::new();
+        let step = assign_step(
+            AGENT_HEX_FIXTURE,
+            "New incident: {{trigger.text}}",
+            Some("{{trigger.message_id}}"),
+        );
+        let resolved = resolve_step_templates(&step, &ctx, &outputs).unwrap();
+        match resolved {
+            ActionDef::AssignAgent {
+                agent_pubkey,
+                text,
+                task_id,
+                ..
+            } => {
+                // Static agent_pubkey is preserved verbatim.
+                assert_eq!(agent_pubkey, AGENT_HEX_FIXTURE);
+                assert_eq!(text, "New incident: P1 in prod");
+                assert_eq!(task_id.as_deref(), Some("event-id-hex"));
+            }
+            other => panic!("unexpected resolved action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assign_agent_resolves_agent_pubkey_template_through_trigger_author() {
+        // `{{trigger.author}}` is the "reply to the sender" pattern — the
+        // executor must template-resolve agent_pubkey so this works.
+        let mut ctx = make_trigger();
+        ctx.author = AGENT_HEX_FIXTURE.to_owned();
+        let outputs = HashMap::new();
+        let step = assign_step("{{trigger.author}}", "please respond", None);
+        let resolved = resolve_step_templates(&step, &ctx, &outputs).unwrap();
+        match resolved {
+            ActionDef::AssignAgent { agent_pubkey, .. } => {
+                assert_eq!(agent_pubkey, AGENT_HEX_FIXTURE);
+            }
+            other => panic!("unexpected resolved action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_lowercase_hex_pubkey_accepts_canonical_and_rejects_case_length_or_symbols() {
+        use crate::schema::is_lowercase_hex_pubkey;
+
+        assert!(is_lowercase_hex_pubkey(AGENT_HEX_FIXTURE));
+
+        // Uppercase, short, long, and non-hex all fail.
+        assert!(!is_lowercase_hex_pubkey(&AGENT_HEX_FIXTURE.to_uppercase()));
+        assert!(!is_lowercase_hex_pubkey(&AGENT_HEX_FIXTURE[..63]));
+        assert!(!is_lowercase_hex_pubkey(&format!("{AGENT_HEX_FIXTURE}0")));
+        let non_hex = format!("{}z", &AGENT_HEX_FIXTURE[..63]);
+        assert!(!is_lowercase_hex_pubkey(&non_hex));
+
+        // An unresolved template that passed through resolution unchanged must
+        // NOT pass as a hex pubkey — this is what protects against silent
+        // misroutes when a template variable name is misspelled.
+        assert!(!is_lowercase_hex_pubkey("{{trigger.author}}"));
     }
 }
