@@ -9,6 +9,7 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
+import { useAgentCircuitStatus } from "@/features/agents/observerRelayStore";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
@@ -261,6 +262,7 @@ function AgentPersonaCard({
   });
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
+  const circuitStatus = useAgentCircuitStatus(agent?.pubkey);
   const avatarUrl = agent
     ? resolveAgentCardAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
     : persona.avatarUrl;
@@ -326,7 +328,19 @@ function AgentPersonaCard({
         onOpenPersonaProfile(persona);
       }}
       statusBadge={
-        agent?.personaOrphaned ? (
+        circuitStatus.isOpen ? (
+          <Badge
+            className="gap-1"
+            data-testid={
+              agent ? `managed-agent-circuit-open-${agent.pubkey}` : undefined
+            }
+            title={circuitStatus.message ?? undefined}
+            variant="destructive"
+          >
+            <AlertTriangle className="h-3 w-3" />
+            Suspended — repeated crashes
+          </Badge>
+        ) : agent?.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
             <AlertTriangle className="h-3 w-3" />
             Configuration missing
@@ -359,6 +373,7 @@ function StandaloneAgentCard({
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
+  const circuitStatus = useAgentCircuitStatus(agent.pubkey);
   const friendlyError = friendlyAgentLastError(
     agent.lastError,
     agent.lastErrorCode,
@@ -407,7 +422,17 @@ function StandaloneAgentCard({
         );
       }}
       statusBadge={
-        agent.personaOrphaned ? (
+        circuitStatus.isOpen ? (
+          <Badge
+            className="gap-1"
+            data-testid={`managed-agent-circuit-open-${agent.pubkey}`}
+            title={circuitStatus.message ?? undefined}
+            variant="destructive"
+          >
+            <AlertTriangle className="h-3 w-3" />
+            Suspended — repeated crashes
+          </Badge>
+        ) : agent.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
             <AlertTriangle className="h-3 w-3" />
             Configuration missing

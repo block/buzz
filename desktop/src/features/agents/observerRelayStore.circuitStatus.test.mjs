@@ -4,6 +4,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import {
   getAgentCircuitStatus,
   resetAgentObserverStore,
+  subscribeAgentObserverStore,
   _testProcessLiveObserverEvents,
 } from "./observerRelayStore.ts";
 
@@ -205,6 +206,56 @@ describe("getAgentCircuitStatus", () => {
       "must return the cached object reference when nothing changed — a " +
         "regression here would cause an infinite useSyncExternalStore render loop",
     );
+  });
+
+  it("notifies subscribers on a circuit change even when appendAgentEvents rejects the raw event as a dedup collision", () => {
+    // appendAgentEvents dedups purely on (timestamp, seq), independent of
+    // kind — so a circuit_open event that happens to share its (timestamp,
+    // seq) with an already-appended, unrelated event is treated as a
+    // duplicate by the raw journal (appendAgentEvents returns false) even
+    // though it is the first-ever circuit event for its own slot, so
+    // applyCircuitEvent legitimately applies it (returns true). Regression
+    // guard for the case where only appendAgentEvents' return value gated
+    // notifyListeners(): the circuit state would update silently with no
+    // subscriber ever told, so useAgentCircuitStatus consumers (the
+    // suspended-agent badge) would not re-render until unrelated traffic
+    // happened to touch the same agent.
+    _testProcessLiveObserverEvents(AGENT, [
+      makeEvent({
+        seq: 7,
+        timestamp: "2024-01-01T00:00:00Z",
+        kind: "acp_read",
+        agentIndex: null,
+        channelId: "chan-uuid-1",
+        payload: {},
+      }),
+    ]);
+
+    let notifyCount = 0;
+    const unsubscribe = subscribeAgentObserverStore(() => {
+      notifyCount += 1;
+    });
+    try {
+      _testProcessLiveObserverEvents(AGENT, [
+        makeEvent({
+          seq: 7,
+          timestamp: "2024-01-01T00:00:00Z",
+          kind: "circuit_open",
+          agentIndex: 2,
+          channelId: "chan-uuid-2",
+          payload: { error: "slot 2 opened" },
+        }),
+      ]);
+    } finally {
+      unsubscribe();
+    }
+
+    assert.equal(
+      notifyCount,
+      1,
+      "a circuit-only state change must still notify useSyncExternalStore subscribers",
+    );
+    assert.equal(getAgentCircuitStatus(AGENT).isOpen, true);
   });
 
   it("resetAgentObserverStore clears circuit state back to isOpen:false", () => {

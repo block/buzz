@@ -447,9 +447,20 @@ function processLiveObserverEvents(
   // in the raw/transcript stores; batching must preserve that visibility while
   // deferring only the global external-store publication.
   const addedEvents = appendAgentEvents(agentPubkey, events);
+  let observerChanged = addedEvents !== null;
 
   for (const parsed of events) {
-    applyCircuitEvent(agentPubkey, parsed);
+    // appendAgentEvents' per-agent eviction floor and applyCircuitEvent's
+    // per-slot ordering gate compare against different reference points, so a
+    // circuit event can be rejected by one and accepted by the other (e.g. a
+    // late-delivered frame after a relay reconnect, at/before the agent's
+    // floor but the first event ever seen for its slot). OR the two signals
+    // so a circuit-only change still notifies subscribers — matches every
+    // other ingestion path in this file (ingestArchivedObserverEvents,
+    // injectObserverEventsForE2E, syncAgentObserverEvents).
+    if (applyCircuitEvent(agentPubkey, parsed)) {
+      observerChanged = true;
+    }
 
     // Track the latest-live-session-id per (agent, channel) on the live path.
     // Only set when the parsed event carries both a sessionId and channelId,
@@ -494,6 +505,10 @@ function processLiveObserverEvents(
   // before specialized callbacks, but external-store subscribers publish once.
   if (addedEvents) {
     notifyListeners({ agentPubkey, events: addedEvents });
+  } else if (observerChanged) {
+    // Circuit-only change: no events were retained, so there is no targeted
+    // payload to publish, but circuit subscribers still need waking.
+    notifyListeners();
   }
 }
 
