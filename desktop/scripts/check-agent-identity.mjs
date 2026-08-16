@@ -38,26 +38,33 @@ const CANONICAL_MODULE = "src/features/agents/lib/agentIdentity.ts";
 const SCAN_ROOT = "src";
 const EXTENSIONS = new Set([".ts", ".tsx"]);
 
-// A quote or backtick immediately followed by an identity namespace. Matching
-// the opening delimiter is what keeps `builtin:fizz`, `"persona"`, or a
-// sentence containing "persona:" from tripping it.
-const IDENTITY_KEY_RE = /[`"'](?:pubkey|persona):/g;
+// A quote or backtick immediately followed by an identity namespace, plus the
+// first interpolation or word after it. Matching the opening delimiter keeps
+// `builtin:fizz`, `"persona"`, and prose containing "persona:" from tripping
+// it; capturing what FOLLOWS the namespace is what makes an allowlist entry
+// specific to one key rather than to the whole file (see `overrides`).
+const IDENTITY_KEY_RE = /[`"'](?:pubkey|persona):(?:\$\{[^}]*\}|[\w.-]*)/g;
 
-// Allowlisted `relativePath:matchedLiteral` pairs. Matching the literal rather
-// than a line number keeps these stable when unrelated edits move code.
-const overrides = new Set([
-  // A radio-group selection token for the persona catalog dialog: it addresses
-  // a row in that dialog's own list, is never compared against an agent, and
-  // never leaves the component.
-  'src/features/agents/ui/PersonaCatalogDialog.tsx:"persona:',
-  "src/features/agents/ui/PersonaCatalogDialog.tsx:`persona:",
-  // React render key for the profile panel when there is no pubkey to key on
-  // (an uninstantiated persona has no agent identity yet). Adjacent to the
-  // real thing — if this ever starts being compared against an agent key,
-  // route it through `agentIdentity` instead of widening this exception.
-  "src/features/profile/ui/UserProfilePanel.tsx:`persona:",
-  "src/features/profile/ui/UserProfilePanelUtils.ts:`persona:",
-]);
+/**
+ * Allowlisted `relativePath:matchedLiteral` pairs.
+ *
+ * **Empty on purpose, and worth keeping that way.** The first version of this
+ * guard carried four entries and matched only the bare `persona:` prefix, so
+ * each entry exempted *every* occurrence of that prefix in the file — and the
+ * exempted files were the agent-adjacent ones, i.e. exactly the code most
+ * likely to drift. The guard was theatre over its highest-risk surface.
+ *
+ * The fix was not a tighter allowlist but removing the need for one: the two
+ * legitimate non-identity uses now carry their own namespaces
+ * (`catalog-persona:` for the persona catalog dialog's selection token,
+ * `profile:` for the profile panel's render key), so neither looks like an
+ * agent identity to this guard or to a reader.
+ *
+ * Prefer that route. If an entry is ever genuinely unavoidable, note that the
+ * key now includes the text after the namespace, so it scopes to one literal —
+ * but a namespace of its own is still the better answer.
+ */
+const overrides = new Set([]);
 
 /**
  * Whether a line is wholly a comment. Deliberately a heuristic over the common

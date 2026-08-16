@@ -219,7 +219,7 @@ export function UserProfilePanel({
     );
   }, [linkedPersonaId, managedAgent?.personaId, persona, personasQuery.data]);
   const profileIdentityKey =
-    managedAgent?.pubkey ?? pubkey ?? `persona:${persona?.id ?? "unknown"}`;
+    managedAgent?.pubkey ?? pubkey ?? `profile:${persona?.id ?? "unknown"}`;
   const resolvedPersona = useRetainedPersona(
     resolvedPersonaFromSource,
     profileIdentityKey,
