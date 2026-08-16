@@ -417,6 +417,7 @@ pub async fn cmd_get_thread(
     }
     let root_filter = serde_json::json!({
         "ids": [event_id],
+        "#h": [channel_id],
         "limit": 1
     });
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
