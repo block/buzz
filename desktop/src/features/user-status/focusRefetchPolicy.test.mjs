@@ -54,12 +54,12 @@ test("user-status: skips fresh focus refetch", async () => {
   );
 });
 
-test("user-status: refetches genuinely stale data on focus", async () => {
+test("user-status: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: userStatusFocusRefetchPolicy.staleTime + 1,
       policy: userStatusFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });

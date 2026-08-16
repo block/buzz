@@ -1071,6 +1071,7 @@ fn handle_relay_observer_control_event(
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
+    event_publisher: RelayEventPublisher,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -1116,10 +1117,160 @@ fn handle_relay_observer_control_event(
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
         }
+        Some("publish_project_owner_announcements") => {
+            handle_publish_project_owner_announcements_control(
+                &payload,
+                keys,
+                observer,
+                event_publisher,
+            );
+        }
         _ => {
             tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectOwnerAnnouncementControl {
+    request_id: String,
+    announcements: Vec<ProjectOwnerAnnouncementTemplate>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectOwnerAnnouncementTemplate {
+    kind: u16,
+    content: String,
+    created_at: Option<u64>,
+    tags: Vec<Vec<String>>,
+}
+
+fn handle_publish_project_owner_announcements_control(
+    payload: &serde_json::Value,
+    keys: &nostr::Keys,
+    observer: Option<&observer::ObserverHandle>,
+    publisher: RelayEventPublisher,
+) {
+    let Ok(control) = serde_json::from_value::<ProjectOwnerAnnouncementControl>(payload.clone())
+    else {
+        tracing::warn!("project announcement control frame has an invalid payload");
+        return;
+    };
+    if Uuid::parse_str(&control.request_id).is_err()
+        || control.announcements.is_empty()
+        || control.announcements.len() > 2
+    {
+        tracing::warn!("project announcement control frame has invalid request metadata");
+        return;
+    }
+
+    let keys = keys.clone();
+    let observer = observer.cloned();
+    tokio::spawn(async move {
+        let events = match build_project_owner_announcement_events(control.announcements, &keys) {
+            Ok(events) => events,
+            Err(error) => {
+                emit_project_owner_control_result(
+                    observer.as_ref(),
+                    &control.request_id,
+                    "error",
+                    &[],
+                    Some(error.to_string()),
+                );
+                return;
+            }
+        };
+        let mut published_events = Vec::with_capacity(events.len());
+        for event in events {
+            if let Err(error) = publisher.publish_event(event.clone()).await {
+                emit_project_owner_control_result(
+                    observer.as_ref(),
+                    &control.request_id,
+                    "error",
+                    &published_events,
+                    Some(format!("publish project announcement: {error}")),
+                );
+                return;
+            }
+            published_events.push(event);
+        }
+        emit_project_owner_control_result(
+            observer.as_ref(),
+            &control.request_id,
+            "ok",
+            &published_events,
+            None,
+        );
+    });
+}
+
+fn build_project_owner_announcement_events(
+    announcements: Vec<ProjectOwnerAnnouncementTemplate>,
+    keys: &nostr::Keys,
+) -> Result<Vec<nostr::Event>> {
+    let now = nostr::Timestamp::now().as_secs();
+    announcements
+        .into_iter()
+        .map(|template| {
+            if !matches!(template.kind, 30_617 | 30_621) {
+                anyhow::bail!("unsupported project announcement kind");
+            }
+            if !template.tags.iter().any(|tag| {
+                tag.first().is_some_and(|value| value == "d")
+                    && tag.get(1).is_some_and(|value| !value.trim().is_empty())
+            }) {
+                anyhow::bail!("project announcement is missing its address");
+            }
+            let tags = template
+                .tags
+                .into_iter()
+                .map(|tag| {
+                    nostr::Tag::parse(tag)
+                        .map_err(|error| anyhow::anyhow!("invalid project tag: {error}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let created_at = template.created_at.unwrap_or(now);
+            if created_at > now.saturating_add(300) {
+                anyhow::bail!("project announcement timestamp is too far in the future");
+            }
+            nostr::EventBuilder::new(nostr::Kind::Custom(template.kind), template.content)
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(keys)
+                .map_err(|error| anyhow::anyhow!("sign project announcement: {error}"))
+        })
+        .collect()
+}
+
+fn emit_project_owner_control_result(
+    observer: Option<&observer::ObserverHandle>,
+    request_id: &str,
+    status: &str,
+    events: &[nostr::Event],
+    error: Option<String>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    observer.emit(
+        "control_result",
+        None,
+        &observer::ObserverContext {
+            channel_id: None,
+            session_id: None,
+            turn_id: None,
+            started_at: None,
+        },
+        serde_json::json!({
+            "type": "publish_project_owner_announcements",
+            "requestId": request_id,
+            "status": status,
+            "events": events,
+            "error": error,
+        }),
+    );
 }
 
 /// Handle a `cancel_turn` control frame: signal the in-flight task to cancel.
@@ -1468,6 +1619,33 @@ fn inactivity_expired(
     !bound.is_zero() && !turn_in_flight && now.duration_since(last_activity) >= bound
 }
 
+/// Whether a woken lazy pool may be torn back down to the empty-slot state.
+///
+/// True only when the pool is ready, the idle bound has elapsed with no
+/// dispatched turn or heartbeat in flight and no in-flight prompt tasks, no
+/// work is queued, and no wake/respawn task is running. The queue and task
+/// gates make teardown race-safe with enqueue/wake: an event that landed in
+/// the queue (or a wake/respawn already in flight) blocks this decision, so a
+/// queued batch is never stranded — the caller's next loop iteration will
+/// dispatch or wake it instead.
+#[allow(clippy::too_many_arguments)]
+fn idle_pool_sleep_due(
+    pool_ready: bool,
+    last_activity: tokio::time::Instant,
+    now: tokio::time::Instant,
+    bound: Duration,
+    turn_in_flight: bool,
+    prompt_tasks_in_flight: bool,
+    work_queued: bool,
+    wake_or_respawn_in_flight: bool,
+) -> bool {
+    pool_ready
+        && !work_queued
+        && !prompt_tasks_in_flight
+        && !wake_or_respawn_in_flight
+        && inactivity_expired(last_activity, now, bound, turn_in_flight)
+}
+
 #[cfg(test)]
 mod inactivity_tests {
     use super::*;
@@ -1509,6 +1687,179 @@ mod inactivity_tests {
             Duration::from_secs(60),
             false
         ));
+    }
+}
+
+#[cfg(test)]
+mod idle_pool_sleep_tests {
+    use super::*;
+
+    // The all-clear baseline: pool ready, bound elapsed, nothing busy or
+    // queued. Every negative case below flips exactly one gate off this.
+    fn ready_after_bound() -> (tokio::time::Instant, tokio::time::Instant, Duration) {
+        let started = tokio::time::Instant::now();
+        (
+            started,
+            started + Duration::from_secs(61),
+            Duration::from_secs(60),
+        )
+    }
+
+    #[test]
+    fn sleeps_when_ready_idle_and_quiet() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(idle_pool_sleep_due(
+            true, last, now, bound, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn zero_bound_never_sleeps() {
+        let (last, now, _) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            Duration::ZERO,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn not_ready_never_sleeps() {
+        // A still-sleeping (or waking) pool must not "re-sleep".
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            false, last, now, bound, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn active_turn_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, true, false, false, false
+        ));
+    }
+
+    #[test]
+    fn in_flight_prompt_task_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, true, false, false
+        ));
+    }
+
+    #[test]
+    fn queued_work_at_boundary_defers_sleep() {
+        // Enqueue-at-teardown protection: a batch sitting in the queue blocks
+        // teardown so it is never stranded — the loop dispatches it instead.
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, false, true, false
+        ));
+    }
+
+    #[test]
+    fn wake_or_respawn_in_flight_defers_sleep() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(!idle_pool_sleep_due(
+            true, last, now, bound, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn recent_activity_defers_sleep() {
+        // Activity 50s ago under a 60s bound: not yet idle.
+        let started = tokio::time::Instant::now();
+        let recent = started + Duration::from_secs(50);
+        let now = started + Duration::from_secs(59);
+        assert!(!idle_pool_sleep_due(
+            true,
+            recent,
+            now,
+            Duration::from_secs(60),
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    fn slot(respawn_in_flight: bool) -> SlotCircuit {
+        SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight,
+        }
+    }
+
+    // The call-site signal for the `wake_or_respawn_in_flight` gate is
+    // `any_respawn_in_flight(&crash_history)`, NOT `!respawn_tasks.is_empty()`.
+    // Regression for the PR #5682 review blocker: completed respawn tasks are
+    // never joined from the `respawn_tasks` JoinSet (their payloads arrive
+    // out-of-band via `respawn_rx`), so `!is_empty()` stays true forever after
+    // the first refill/crash recovery and the pool could never re-sleep. The
+    // authoritative signal clears per-slot when the payload is received.
+    #[test]
+    fn respawn_in_flight_signal_gates_then_clears_for_sleep() {
+        let (last, now, bound) = ready_after_bound();
+
+        // A respawn in flight for any slot defers sleep.
+        let busy = [slot(false), slot(true), slot(false)];
+        assert!(any_respawn_in_flight(&busy));
+        assert!(!idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            bound,
+            false,
+            false,
+            false,
+            any_respawn_in_flight(&busy),
+        ));
+
+        // Once the respawn completes (payload received → flag cleared), the
+        // signal goes false and the otherwise-quiet pool becomes sleep-eligible
+        // — even though a naive `!JoinSet.is_empty()` would still be stuck true.
+        let quiet = [slot(false), slot(false), slot(false)];
+        assert!(!any_respawn_in_flight(&quiet));
+        assert!(idle_pool_sleep_due(
+            true,
+            last,
+            now,
+            bound,
+            false,
+            false,
+            false,
+            any_respawn_in_flight(&quiet),
+        ));
+    }
+
+    // The reaper (`respawn_tasks.join_next().now_or_never()` loop) must drain
+    // completed handles so the JoinSet does not grow without bound and so
+    // `!respawn_tasks.is_empty()` cannot become a permanent busy bit if anyone
+    // ever reintroduces it as the gate signal.
+    #[tokio::test]
+    async fn completed_respawn_tasks_are_reaped_from_the_joinset() {
+        let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        respawn_tasks.spawn(async {});
+        respawn_tasks.spawn(async {});
+        // Let both tasks run to completion.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // The reaper drains finished handles non-blockingly.
+        while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
+
+        assert!(
+            respawn_tasks.is_empty(),
+            "completed respawn tasks must be reaped so the set does not wedge \
+             the idle-sleep gate or grow unbounded"
+        );
     }
 }
 
@@ -1900,6 +2251,27 @@ async fn tokio_main() -> Result<()> {
         ))
     };
 
+    // Idle pool re-sleep: tear a woken lazy pool back down to the empty-slot
+    // state after `idle_pool_sleep_bound` of quiet, releasing worker
+    // subprocesses. The next accepted event re-wakes it through the same lazy
+    // path. Only meaningful under `lazy_pool`; the tick arm additionally gates
+    // on `pool_ready`, so a still-sleeping pool never re-sleeps. Reuses the
+    // `last_activity` clock the dispatch path already maintains.
+    let idle_pool_sleep_bound = if config.lazy_pool {
+        Duration::from_secs(config.idle_pool_sleep_secs)
+    } else {
+        Duration::ZERO
+    };
+    let mut idle_pool_sleep_reaper = if idle_pool_sleep_bound.is_zero() {
+        None
+    } else {
+        let interval = idle_pool_sleep_bound.min(Duration::from_secs(30));
+        Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + interval,
+            interval,
+        ))
+    };
+
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
     // spawn_and_init never blocks the main loop.
@@ -2107,6 +2479,17 @@ async fn tokio_main() -> Result<()> {
                 }
             }
         }
+        // Reap completed respawn handles from the JoinSet. Payloads are
+        // delivered out-of-band through `respawn_rx` (drained above), so the
+        // JoinSet is never joined by the normal flow — Tokio retains finished
+        // tasks until `join_next`, so without this the set grows on every
+        // refill/crash recovery and `!respawn_tasks.is_empty()` would stay true
+        // forever. Non-blocking (`now_or_never`), same pattern as
+        // `drain_ready_join_results` for `pool.join_set`. The authoritative
+        // in-flight signal is `any_respawn_in_flight(&crash_history)` (each
+        // slot's `respawn_in_flight` is cleared when its payload is received),
+        // not JoinSet occupancy.
+        while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
         // Flush requeued events that were waiting for a live agent. Without
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
@@ -2191,7 +2574,14 @@ async fn tokio_main() -> Result<()> {
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
-                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
+                                handle_relay_observer_control_event(
+                                    &config.keys,
+                                    event,
+                                    &mut pool,
+                                    observer.as_ref(),
+                                    owner_hex,
+                                    relay.event_publisher(),
+                                );
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -2596,6 +2986,56 @@ async fn tokio_main() -> Result<()> {
                             "inactivity bound reached — exiting gracefully"
                         );
                         let _ = shutdown_tx.send(());
+                    }
+                    None
+                }
+                _ = async {
+                    match idle_pool_sleep_reaper.as_mut() {
+                        Some(timer) => timer.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx; // end split borrow before touching pool
+                    // A wake in flight (pool not yet ready) is covered by the
+                    // pool_ready gate; respawn tasks and in-flight prompt tasks
+                    // are the remaining "busy" signals. Never sleep mid-work:
+                    // `has_undispatched_work()` (not `has_flushable_work()`)
+                    // keeps `work_queued` true for a retry-throttled batch too,
+                    // so a failed turn awaiting backoff is never stranded — the
+                    // next iteration dispatches or re-wakes it.
+                    if idle_pool_sleep_due(
+                        pool_ready,
+                        last_activity,
+                        tokio::time::Instant::now(),
+                        idle_pool_sleep_bound,
+                        queue.has_in_flight() || heartbeat_in_flight,
+                        !pool.join_set.is_empty(),
+                        queue.has_undispatched_work(),
+                        !wake_tasks.is_empty()
+                            || any_respawn_in_flight(&crash_history),
+                    ) {
+                        tracing::info!(
+                            idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
+                            "idle pool sleep bound reached — tearing pool back to lazy state"
+                        );
+                        shutdown_agent_pool(&mut pool).await;
+                        // Return to the exact pre-wake lazy state: empty slots,
+                        // Listening lifecycle. The top-of-loop wake path re-wakes
+                        // on the next accepted event. No second lifecycle.
+                        pool = AgentPool::from_slots(
+                            (0..config.agents).map(|_| None).collect(),
+                        );
+                        pool_ready = false;
+                        pool_lifecycle = PoolLifecycle::listening();
+                        last_activity = tokio::time::Instant::now();
+                        emit_runtime_lifecycle(
+                            observer.as_ref(),
+                            &runtime_start_nonce,
+                            &pubkey_hex,
+                            &config.relay_url,
+                            "listening",
+                            None,
+                        );
                     }
                     None
                 }
@@ -3993,8 +4433,24 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_teaches_repo_context_and_learning_loop() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("read its root `AGENTS.md`"));
+        assert!(prompt.contains("path-local `AGENTS.md`"));
+        assert!(
+            prompt.contains("product, architecture, and vision documents as design constraints")
+        );
+        assert!(prompt.contains("CI and live workflow evidence answer different questions"));
+        assert!(prompt.contains("record the invariant in the same session"));
+        assert!(prompt.contains("update the team's shared guidance"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("use the person's **exact display name as shown in Buzz**"));
+        assert!(prompt.contains("Do not expand a short display name, infer a surname"));
+        assert!(prompt.contains("Preserve it exactly; do not infer, expand, or look up a surname"));
         assert!(prompt.contains("--mention <hex-or-npub>"));
         assert!(prompt.contains("every presentation-only name that should notify"));
         assert!(
@@ -4764,6 +5220,59 @@ mod owner_control_command_tests {
             ControlSignal::Rotate
         ));
     }
+
+    #[test]
+    fn project_owner_control_signs_only_addressable_project_events() {
+        let keys = Keys::generate();
+        let events = build_project_owner_announcement_events(
+            vec![
+                ProjectOwnerAnnouncementTemplate {
+                    kind: 30_621,
+                    content: String::new(),
+                    created_at: Some(1),
+                    tags: vec![vec!["d".to_string(), "project".to_string()]],
+                },
+                ProjectOwnerAnnouncementTemplate {
+                    kind: 30_617,
+                    content: String::new(),
+                    created_at: Some(1),
+                    tags: vec![vec!["d".to_string(), "repository".to_string()]],
+                },
+            ],
+            &keys,
+        )
+        .expect("valid project events");
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.pubkey == keys.public_key()));
+        assert!(events.iter().all(|event| event.verify().is_ok()));
+    }
+
+    #[test]
+    fn project_owner_control_rejects_arbitrary_or_unaddressed_events() {
+        let keys = Keys::generate();
+        let arbitrary = build_project_owner_announcement_events(
+            vec![ProjectOwnerAnnouncementTemplate {
+                kind: 1,
+                content: String::new(),
+                created_at: None,
+                tags: vec![vec!["d".to_string(), "project".to_string()]],
+            }],
+            &keys,
+        );
+        assert!(arbitrary.is_err());
+
+        let unaddressed = build_project_owner_announcement_events(
+            vec![ProjectOwnerAnnouncementTemplate {
+                kind: 30_621,
+                content: String::new(),
+                created_at: None,
+                tags: vec![],
+            }],
+            &keys,
+        );
+        assert!(unaddressed.is_err());
+    }
 }
 
 #[cfg(test)]
@@ -5031,6 +5540,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "dm".into(),
                     channel_type: "dm".into(),
+                    description: None,
                 },
             ),
             (
@@ -5038,6 +5548,7 @@ mod author_gate_tests {
                 relay::ChannelInfo {
                     name: "stream".into(),
                     channel_type: "stream".into(),
+                    description: None,
                 },
             ),
         ]);
@@ -5054,6 +5565,7 @@ mod author_gate_tests {
             relay::ChannelInfo {
                 name: "unknown".into(),
                 channel_type: "unknown".into(),
+                description: None,
             },
         )]);
         assert!(
@@ -6249,6 +6761,7 @@ mod build_mcp_servers_tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -6471,6 +6984,7 @@ mod error_outcome_emission_tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,

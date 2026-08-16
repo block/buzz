@@ -781,6 +781,10 @@ pub struct Config {
     pub system_prompt: String,
     pub max_rounds: u32,
     pub max_output_tokens: u32,
+    /// Maximum number of retries after a provider returns a successful but
+    /// output-truncated response. Zero disables truncation recovery. This is
+    /// independent of `max_rounds`, which still bounds all successful calls.
+    pub max_token_recoveries: u32,
     pub llm_timeout: Duration,
     pub tool_timeout: Duration,
     pub mcp_init_timeout: Duration,
@@ -931,7 +935,8 @@ impl Config {
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
             max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
-            max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 32_768)?,
+            max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
+            max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
             llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
             tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660)?),
             mcp_init_timeout: Duration::from_secs(parse_env(
@@ -983,6 +988,7 @@ impl Config {
             openai_api: OpenAiApi::Chat,
             max_rounds: 0,
             max_output_tokens: 1,
+            max_token_recoveries: 0,
             llm_timeout: Duration::from_secs(30),
             tool_timeout: Duration::from_secs(30),
             mcp_init_timeout: Duration::from_secs(30),

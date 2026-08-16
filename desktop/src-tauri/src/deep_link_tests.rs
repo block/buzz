@@ -1,171 +1,82 @@
 use url::Url;
 
 use super::{
-    parse_add_community_deep_link, parse_import_claim_deep_link, parse_join_deep_link,
-    parse_join_slack_deep_link, parse_message_deep_link, parse_nostr_bind_deep_link,
-    PendingCommunityDeepLink, PendingCommunityDeepLinks, PendingImportClaimDeepLink,
-    PendingImportClaimDeepLinks,
+    parse_add_community_deep_link, parse_channel_deep_link, parse_entity_deep_link,
+    parse_import_claim_deep_link, parse_join_deep_link, parse_join_slack_deep_link,
+    parse_message_deep_link, parse_nostr_bind_deep_link, PendingCommunityDeepLink,
+    PendingCommunityDeepLinks, PendingEntityDeepLinks, PendingImportClaimDeepLink,
+    PendingImportClaimDeepLinks, PendingNavigationDeepLink, PendingNavigationDeepLinks,
+    ENTITY_LINK_TABS,
 };
 
-#[test]
-fn parse_join_slack_extracts_relay_and_service() {
-    let url = Url::parse(
-        "buzz://join-slack?relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
-    )
-    .unwrap();
-    let p = parse_join_slack_deep_link(&url).unwrap();
-    assert_eq!(p.relay_url, "wss://relay.example");
-    assert_eq!(p.service, "https://mig.example");
+fn entity_link_golden() -> serde_json::Value {
+    serde_json::from_str(include_str!("../../../test-fixtures/entity-links.json"))
+        .expect("valid entity-links golden fixture")
 }
 
 #[test]
-fn parse_join_slack_rejects_missing_relay_or_bad_service() {
-    // missing relay
-    assert!(parse_join_slack_deep_link(
-        &Url::parse("buzz://join-slack?service=https%3A%2F%2Fmig.example").unwrap()
-    )
-    .is_err());
-    // missing service
-    assert!(parse_join_slack_deep_link(
-        &Url::parse("buzz://join-slack?relay=wss%3A%2F%2Frelay.example").unwrap()
-    )
-    .is_err());
-    // non-http service
-    assert!(parse_join_slack_deep_link(
-        &Url::parse("buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=file%3A%2F%2Fx")
-            .unwrap()
-    )
-    .is_err());
-    // Remote services must use TLS; local development may use loopback HTTP.
-    assert!(parse_join_slack_deep_link(
-        &Url::parse(
-            "buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=http%3A%2F%2Fmig.example"
-        )
+fn parse_entity_deep_link_accepts_every_share_link_shape() {
+    let golden = entity_link_golden();
+    let owner = golden["owner"].as_str().unwrap();
+    let dtag = golden["dtag"].as_str().unwrap();
+    for raw in golden["links"]
+        .as_object()
         .unwrap()
-    )
-    .is_err());
-    assert!(parse_join_slack_deep_link(
-        &Url::parse(
-            "buzz://join-slack?relay=ws%3A%2F%2Flocalhost%3A3000&service=http%3A%2F%2Flocalhost%3A8787"
-        )
-        .unwrap()
-    )
-    .is_ok());
-    // The service is an origin; appending endpoints to a path prefix is unsafe.
-    assert!(parse_join_slack_deep_link(
-        &Url::parse(
-            "buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=https%3A%2F%2Fmig.example%2Fprefix"
-        )
-        .unwrap()
-    )
-    .is_err());
-}
-
-#[test]
-fn parse_import_claim_email_channel() {
-    let url = Url::parse(
-            "buzz://import-claim?subject=slack:U060&token=v1.aa.bb.cc.dd&service=https%3A%2F%2Fmig.example",
-        )
-        .unwrap();
-    let p = parse_import_claim_deep_link(&url).unwrap();
-    assert_eq!(p.subject, "slack:U060");
-    assert_eq!(p.token.as_deref(), Some("v1.aa.bb.cc.dd"));
-    assert_eq!(p.service.as_deref(), Some("https://mig.example"));
-    assert_eq!(p.via, None);
-    assert_eq!(p.relay_url, None);
-}
-
-#[test]
-fn parse_import_claim_oidc_channel() {
-    let url = Url::parse(
-            "buzz://import-claim?subject=slack:U060&via=oidc&code=abc123&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
-        )
-        .unwrap();
-    let p = parse_import_claim_deep_link(&url).unwrap();
-    assert_eq!(p.subject, "slack:U060");
-    assert_eq!(p.via.as_deref(), Some("oidc"));
-    assert_eq!(p.token, None);
-    assert_eq!(p.service.as_deref(), Some("https://mig.example"));
-    assert_eq!(p.relay_url.as_deref(), Some("wss://relay.example"));
-    assert_eq!(p.code.as_deref(), Some("abc123"));
-}
-
-#[test]
-fn parse_import_claim_rejects_incomplete_and_malformed() {
-    // Neither channel identifiable (subject only).
-    assert!(parse_import_claim_deep_link(
-        &Url::parse("buzz://import-claim?subject=slack:U060").unwrap()
-    )
-    .is_err());
-    assert!(parse_import_claim_deep_link(
-        &Url::parse("buzz://import-claim?subject=slack:U060&via=oidc").unwrap()
-    )
-    .is_err());
-    // OIDC with relay + service but no finalize code.
-    assert!(parse_import_claim_deep_link(
-        &Url::parse(
-            "buzz://import-claim?subject=slack:U060&via=oidc&relay=wss%3A%2F%2Fr.example&service=https%3A%2F%2Fmig.example"
-        )
-        .unwrap()
-    )
-    .is_err());
-    // token without service.
-    assert!(parse_import_claim_deep_link(
-        &Url::parse("buzz://import-claim?subject=slack:U060&token=t").unwrap()
-    )
-    .is_err());
-    // Malformed subject (no source).
-    assert!(parse_import_claim_deep_link(
-        &Url::parse("buzz://import-claim?subject=U060&via=oidc").unwrap()
-    )
-    .is_err());
-    // Non-http service.
-    assert!(parse_import_claim_deep_link(
-        &Url::parse("buzz://import-claim?subject=slack:U060&token=t&service=file%3A%2F%2Fx")
-            .unwrap()
-    )
-    .is_err());
-    // A query or fragment would make the app append /oidc/start or
-    // /email/complete at the wrong location.
-    for service in [
-        "https%3A%2F%2Fmig.example%3Fnext%3Devil",
-        "https%3A%2F%2Fmig.example%23fragment",
-        "https%3A%2F%2Fmig.example%2Fprefix",
-        "http%3A%2F%2Fmig.example",
-    ] {
-        assert!(parse_import_claim_deep_link(
-            &Url::parse(&format!(
-                "buzz://import-claim?subject=slack:U060&token=t&service={service}"
-            ))
-            .unwrap()
-        )
-        .is_err());
-    }
-}
-
-#[test]
-fn pending_import_claims_dedupe_and_acknowledge() {
-    let queue = PendingImportClaimDeepLinks::default();
-    let payload = parse_import_claim_deep_link(
-            &Url::parse(
-                "buzz://import-claim?subject=slack:U060&via=oidc&code=abc123&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+        .values()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .chain(golden["tabs"].as_array().unwrap().iter().map(|tab| {
+            format!(
+                "buzz://repo?owner={owner}&d={dtag}&tab={}",
+                tab.as_str().unwrap()
             )
-            .unwrap(),
-        )
-        .unwrap();
-    queue.enqueue(PendingImportClaimDeepLink {
-        request_id: "first".into(),
-        payload: payload.clone(),
-    });
-    queue.enqueue(PendingImportClaimDeepLink {
-        request_id: "duplicate".into(),
-        payload,
-    });
+        }))
+    {
+        assert!(
+            parse_entity_deep_link(&Url::parse(&raw).unwrap()).is_some(),
+            "{raw}"
+        );
+    }
+    let expected_tabs = golden["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tab| tab.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ENTITY_LINK_TABS.as_slice(), expected_tabs);
+}
 
-    assert_eq!(queue.first().unwrap().request_id, "first");
-    assert!(!queue.acknowledge("wrong"));
-    assert!(queue.acknowledge("first"));
-    assert!(queue.first().is_none());
+#[test]
+fn parse_entity_deep_link_rejects_malformed_and_non_canonical_links() {
+    let golden = entity_link_golden();
+    let owner = golden["owner"].as_str().unwrap();
+    let event_id = golden["eventId"].as_str().unwrap();
+    for raw in [
+        // Missing or malformed identifiers.
+        format!("buzz://repo?owner={owner}"),
+        "buzz://repo?owner=nope&d=buzz-world".to_owned(),
+        format!("buzz://repo?owner={owner}&d=.hidden"),
+        format!("buzz://repo?owner={owner}&d=has%20space"),
+        format!("buzz://pr?owner={owner}&d=buzz-world"),
+        format!("buzz://pr?id=short&owner={owner}&d=buzz-world"),
+        // Coordinate links take no event id.
+        format!("buzz://repo?id={event_id}&owner={owner}&d=buzz-world"),
+        // Non-canonical: unknown param, duplicate param, path, fragment.
+        format!("buzz://repo?owner={owner}&d=buzz-world&relay=wss%3A%2F%2Fx.example"),
+        format!("buzz://repo?owner={owner}&owner={owner}&d=buzz-world"),
+        // Unknown tab value, duplicate tab, and tab on an event link.
+        format!("buzz://repo?owner={owner}&d=buzz-world&tab=overview"),
+        format!("buzz://repo?owner={owner}&d=buzz-world&tab=prs&tab=prs"),
+        format!("buzz://pr?id={event_id}&owner={owner}&d=buzz-world&tab=prs"),
+        format!("buzz://repo/extra?owner={owner}&d=buzz-world"),
+        format!("buzz://repo?owner={owner}&d=buzz-world#top"),
+        // Not an entity host.
+        format!("buzz://message?owner={owner}&d=buzz-world"),
+    ] {
+        assert!(
+            parse_entity_deep_link(&Url::parse(&raw).unwrap()).is_none(),
+            "{raw}"
+        );
+    }
 }
 
 fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
@@ -178,6 +89,100 @@ fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDee
         name: None,
         service: None,
     }
+}
+
+fn pending_navigation(
+    id: &str,
+    kind: &str,
+    channel_id: &str,
+    message_id: Option<&str>,
+    thread_root_id: Option<&str>,
+) -> PendingNavigationDeepLink {
+    PendingNavigationDeepLink {
+        id: id.to_owned(),
+        kind: kind.to_owned(),
+        channel_id: channel_id.to_owned(),
+        message_id: message_id.map(str::to_owned),
+        thread_root_id: thread_root_id.map(str::to_owned),
+    }
+}
+
+#[test]
+fn pending_navigation_links_are_fifo_acknowledged_and_deduplicated() {
+    let queue = PendingNavigationDeepLinks::default();
+    queue.enqueue(pending_navigation(
+        "first",
+        "channel",
+        "channel-1",
+        None,
+        None,
+    ));
+    queue.enqueue(pending_navigation(
+        "duplicate",
+        "channel",
+        "channel-1",
+        None,
+        None,
+    ));
+    queue.enqueue(pending_navigation(
+        "second",
+        "message",
+        "channel-1",
+        Some("message-1"),
+        Some("root-1"),
+    ));
+
+    assert_eq!(queue.first().unwrap().id, "first");
+    assert!(!queue.acknowledge("second"));
+    assert!(queue.acknowledge("first"));
+    assert_eq!(queue.first().unwrap().id, "second");
+    assert!(queue.acknowledge("second"));
+    assert!(queue.first().is_none());
+}
+
+#[test]
+fn pending_navigation_links_can_be_cleared() {
+    let queue = PendingNavigationDeepLinks::default();
+    queue.enqueue(pending_navigation(
+        "first",
+        "channel",
+        "channel-1",
+        None,
+        None,
+    ));
+    queue.enqueue(pending_navigation(
+        "second",
+        "message",
+        "channel-1",
+        Some("message-1"),
+        None,
+    ));
+
+    queue.clear();
+    assert!(queue.first().is_none());
+}
+
+#[test]
+fn pending_navigation_queue_recovers_after_mutex_poisoning() {
+    let queue = std::sync::Arc::new(PendingNavigationDeepLinks::default());
+    let poisoner = std::sync::Arc::clone(&queue);
+    assert!(std::thread::spawn(move || {
+        let _guard = poisoner.0.lock().unwrap();
+        panic!("poison queue for recovery regression");
+    })
+    .join()
+    .is_err());
+
+    queue.enqueue(pending_navigation(
+        "after-poison",
+        "channel",
+        "channel-1",
+        None,
+        None,
+    ));
+    assert_eq!(queue.first().unwrap().id, "after-poison");
+    assert!(queue.acknowledge("after-poison"));
+    assert!(queue.first().is_none());
 }
 
 #[test]
@@ -209,19 +214,43 @@ fn pending_community_links_dedupe_exact_intents() {
     assert!(queue.first().is_none());
 }
 
+#[test]
+fn pending_entity_links_survive_until_acknowledged_in_order() {
+    let queue = PendingEntityDeepLinks::default();
+    let first = queue.enqueue("buzz://project?owner=aa&d=first".to_owned());
+    let second = queue.enqueue("buzz://project?owner=aa&d=second".to_owned());
+
+    assert_eq!(queue.first(), Some(first.clone()));
+    assert!(!queue.acknowledge(&second.id));
+    assert!(queue.acknowledge(&first.id));
+    assert_eq!(queue.first(), Some(second));
+}
+
+#[test]
+fn pending_entity_links_dedupe_launch_and_open_callbacks() {
+    let queue = PendingEntityDeepLinks::default();
+    let href = "buzz://project?owner=aa&d=buzz".to_owned();
+    let first = queue.enqueue(href.clone());
+    let duplicate = queue.enqueue(href);
+
+    assert_eq!(duplicate.id, first.id);
+    assert!(queue.acknowledge(&first.id));
+    assert!(queue.first().is_none());
+}
+
 fn valid_nostr_bind_url() -> Url {
     Url::parse(
-            "buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard",
-        )
-        .unwrap()
+        "buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard",
+    )
+    .unwrap()
 }
 
 #[test]
 fn parse_add_community_deep_link_extracts_relay_and_name() {
     let url = Url::parse(
-            "buzz://add-community?relay=wss%3A%2F%2Facme.communities.buzz.xyz&name=Acme%20Team&ignored=value",
-        )
-        .unwrap();
+        "buzz://add-community?relay=wss%3A%2F%2Facme.communities.buzz.xyz&name=Acme%20Team&ignored=value",
+    )
+    .unwrap();
     let payload = parse_add_community_deep_link(&url).unwrap();
     assert_eq!(payload.relay_url, "wss://acme.communities.buzz.xyz");
     assert_eq!(payload.name.as_deref(), Some("Acme Team"));
@@ -250,6 +279,63 @@ fn parse_add_community_deep_link_rejects_invalid_relays() {
         "buzz://add-community?relay=wss%3A%2F%2F",
     ] {
         assert!(parse_add_community_deep_link(&Url::parse(raw).unwrap()).is_none());
+    }
+}
+
+#[test]
+fn parse_channel_deep_link_accepts_one_path_segment() {
+    let url = Url::parse("buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32").unwrap();
+    let payload = parse_channel_deep_link(&url).unwrap();
+    assert_eq!(payload["channelId"], "580ca78b-9dae-46f3-8854-bd671853ba32");
+}
+
+#[test]
+fn parse_channel_deep_link_accepts_message_path() {
+    let message_id = "8455293f0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+    let url = Url::parse(&format!(
+        "buzz://channel/a372f080-5961-4535-b1a3-edffface377d/{message_id}"
+    ))
+    .unwrap();
+    let payload = parse_channel_deep_link(&url).unwrap();
+    assert_eq!(payload["channelId"], "a372f080-5961-4535-b1a3-edffface377d");
+    assert_eq!(payload["messageId"], message_id);
+}
+
+#[test]
+fn parse_channel_deep_link_accepts_v7_and_normalizes_uppercase() {
+    for (raw, expected) in [
+        (
+            "buzz://channel/018fdb5d-3a64-7c35-b5f9-4a23e1f9d2d9",
+            "018fdb5d-3a64-7c35-b5f9-4a23e1f9d2d9",
+        ),
+        (
+            "buzz://channel/580CA78B-9DAE-46F3-8854-BD671853BA32",
+            "580ca78b-9dae-46f3-8854-bd671853ba32",
+        ),
+    ] {
+        let payload = parse_channel_deep_link(&Url::parse(raw).unwrap()).unwrap();
+        assert_eq!(payload["channelId"], expected);
+    }
+}
+
+#[test]
+fn parse_channel_deep_link_rejects_malformed_forms() {
+    for raw in [
+        "buzz://channel",
+        "buzz://channel/",
+        "buzz://channel/one/two",
+        "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/not-hex",
+        "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/extra",
+        "buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32/",
+        "buzz://channel/one?extra=true",
+        "buzz://channel/one#fragment",
+        "buzz://:pass@channel/580ca78b-9dae-46f3-8854-bd671853ba32/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "buzz://channel/not-a-uuid",
+        "buzz://channel/%2F",
+        "buzz://channel/%00",
+    ] {
+        assert!(parse_channel_deep_link(&Url::parse(raw).unwrap()).is_none());
     }
 }
 
@@ -483,4 +569,165 @@ fn parse_nostr_bind_deep_link_accepts_expired_link_for_user_facing_error() {
     let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2000-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
     let payload = parse_nostr_bind_deep_link(&url).unwrap();
     assert_eq!(payload.expires_at, "2000-01-01T00:00:00Z");
+}
+
+#[test]
+fn parse_join_slack_extracts_relay_and_service() {
+    let url = Url::parse(
+        "buzz://join-slack?relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+    )
+    .unwrap();
+    let p = parse_join_slack_deep_link(&url).unwrap();
+    assert_eq!(p.relay_url, "wss://relay.example");
+    assert_eq!(p.service, "https://mig.example");
+}
+
+#[test]
+fn parse_join_slack_rejects_missing_relay_or_bad_service() {
+    // missing relay
+    assert!(parse_join_slack_deep_link(
+        &Url::parse("buzz://join-slack?service=https%3A%2F%2Fmig.example").unwrap()
+    )
+    .is_err());
+    // missing service
+    assert!(parse_join_slack_deep_link(
+        &Url::parse("buzz://join-slack?relay=wss%3A%2F%2Frelay.example").unwrap()
+    )
+    .is_err());
+    // non-http service
+    assert!(parse_join_slack_deep_link(
+        &Url::parse("buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=file%3A%2F%2Fx")
+            .unwrap()
+    )
+    .is_err());
+    // Remote services must use TLS; local development may use loopback HTTP.
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=http%3A%2F%2Fmig.example"
+        )
+        .unwrap()
+    )
+    .is_err());
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=ws%3A%2F%2Flocalhost%3A3000&service=http%3A%2F%2Flocalhost%3A8787"
+        )
+        .unwrap()
+    )
+    .is_ok());
+    // The service is an origin; appending endpoints to a path prefix is unsafe.
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=https%3A%2F%2Fmig.example%2Fprefix"
+        )
+        .unwrap()
+    )
+    .is_err());
+}
+
+#[test]
+fn parse_import_claim_email_channel() {
+    let url = Url::parse(
+            "buzz://import-claim?subject=slack:U060&token=v1.aa.bb.cc.dd&service=https%3A%2F%2Fmig.example",
+        )
+        .unwrap();
+    let p = parse_import_claim_deep_link(&url).unwrap();
+    assert_eq!(p.subject, "slack:U060");
+    assert_eq!(p.token.as_deref(), Some("v1.aa.bb.cc.dd"));
+    assert_eq!(p.service.as_deref(), Some("https://mig.example"));
+    assert_eq!(p.via, None);
+    assert_eq!(p.relay_url, None);
+}
+
+#[test]
+fn parse_import_claim_oidc_channel() {
+    let url = Url::parse(
+            "buzz://import-claim?subject=slack:U060&via=oidc&code=abc123&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+        )
+        .unwrap();
+    let p = parse_import_claim_deep_link(&url).unwrap();
+    assert_eq!(p.subject, "slack:U060");
+    assert_eq!(p.via.as_deref(), Some("oidc"));
+    assert_eq!(p.token, None);
+    assert_eq!(p.service.as_deref(), Some("https://mig.example"));
+    assert_eq!(p.relay_url.as_deref(), Some("wss://relay.example"));
+    assert_eq!(p.code.as_deref(), Some("abc123"));
+}
+
+#[test]
+fn parse_import_claim_rejects_incomplete_and_malformed() {
+    // Neither channel identifiable (subject only).
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=slack:U060").unwrap()
+    )
+    .is_err());
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=slack:U060&via=oidc").unwrap()
+    )
+    .is_err());
+    // OIDC with relay + service but no finalize code.
+    assert!(parse_import_claim_deep_link(
+        &Url::parse(
+            "buzz://import-claim?subject=slack:U060&via=oidc&relay=wss%3A%2F%2Fr.example&service=https%3A%2F%2Fmig.example"
+        )
+        .unwrap()
+    )
+    .is_err());
+    // token without service.
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=slack:U060&token=t").unwrap()
+    )
+    .is_err());
+    // Malformed subject (no source).
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=U060&via=oidc").unwrap()
+    )
+    .is_err());
+    // Non-http service.
+    assert!(parse_import_claim_deep_link(
+        &Url::parse("buzz://import-claim?subject=slack:U060&token=t&service=file%3A%2F%2Fx")
+            .unwrap()
+    )
+    .is_err());
+    // A query or fragment would make the app append /oidc/start or
+    // /email/complete at the wrong location.
+    for service in [
+        "https%3A%2F%2Fmig.example%3Fnext%3Devil",
+        "https%3A%2F%2Fmig.example%23fragment",
+        "https%3A%2F%2Fmig.example%2Fprefix",
+        "http%3A%2F%2Fmig.example",
+    ] {
+        assert!(parse_import_claim_deep_link(
+            &Url::parse(&format!(
+                "buzz://import-claim?subject=slack:U060&token=t&service={service}"
+            ))
+            .unwrap()
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn pending_import_claims_dedupe_and_acknowledge() {
+    let queue = PendingImportClaimDeepLinks::default();
+    let payload = parse_import_claim_deep_link(
+            &Url::parse(
+                "buzz://import-claim?subject=slack:U060&via=oidc&code=abc123&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    queue.enqueue(PendingImportClaimDeepLink {
+        request_id: "first".into(),
+        payload: payload.clone(),
+    });
+    queue.enqueue(PendingImportClaimDeepLink {
+        request_id: "duplicate".into(),
+        payload,
+    });
+
+    assert_eq!(queue.first().unwrap().request_id, "first");
+    assert!(!queue.acknowledge("wrong"));
+    assert!(queue.acknowledge("first"));
+    assert!(queue.first().is_none());
 }

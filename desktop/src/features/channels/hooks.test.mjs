@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   applyLastMessages,
+  canFetchChannelsForIdentity,
   reconcileRefreshedCachedChannel,
+  requireFullChannelList,
   upsertCachedChannel,
   upsertCachedChannelMember,
 } from "./hooks.ts";
@@ -108,6 +110,21 @@ test("reconcileRefreshedCachedChannel_restoresOpenedDmAfterStaleRefresh", () => 
     fizzPubkey,
   ]);
   assert.deepEqual(reconciled[0], openedDm);
+});
+
+test("identity failure enables a hashless live channel fetch", () => {
+  assert.equal(canFetchChannelsForIdentity(null, false), false);
+  assert.equal(canFetchChannelsForIdentity("owner-pubkey", false), true);
+  assert.equal(canFetchChannelsForIdentity(null, true), true);
+});
+
+test("hashless retry rejects null channels before persistence", () => {
+  const channels = [makeChannel("general", "General")];
+  assert.strictEqual(requireFullChannelList(channels), channels);
+  assert.throws(
+    () => requireFullChannelList(null),
+    /no list for a hashless request/,
+  );
 });
 
 // ── applyLastMessages ─────────────────────────────────────────────────────────

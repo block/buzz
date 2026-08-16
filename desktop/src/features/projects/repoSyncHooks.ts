@@ -51,7 +51,7 @@ export function useProjectRepoSyncStatusQuery(
     },
     staleTime: 10_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
     retry: 1,
   });
 }

@@ -1,5 +1,6 @@
 import {
   buildIssueLink,
+  buildProjectLink,
   buildPullRequestLink,
   buildRepoLink,
   isEntityLink,
@@ -11,6 +12,7 @@ export type SupportedLinkPreviewKind =
   | "buzz-pull-request"
   | "buzz-issue"
   | "buzz-repository"
+  | "buzz-project"
   | "github-pull-request"
   | "github-issue"
   | "github-repository"
@@ -34,6 +36,7 @@ export type SupportedLinkPreview = {
     | "PR"
     | "issue"
     | "repo"
+    | "project"
     | "file"
     | "folder"
     | "document"
@@ -46,9 +49,9 @@ export type SupportedLinkPreview = {
 // their distinctive path shape (`/git/<64-hex-pubkey>/<repo>`) rather than by
 // hostname, and require an explicit scheme. Generic previews remain HTTPS-only.
 const SUPPORTED_URL_RE =
-  /(^|[\s([{<>"'])(https:\/\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+|buzz:\/\/(?:pr|issue|repo)\?[^\s<>"'\]]+|(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+)/gi;
+  /(^|[\s([{<>"'])(https:\/\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+|buzz:\/\/(?:pr|issue|repo|project)\?[^\s<>"'\]]+|(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+)/gi;
 const MARKDOWN_SUPPORTED_LINK_RE =
-  /!?\[([^\]\n]+)\]\((https:\/\/[^)\s<>"']+|https?:\/\/[^)\s<>"']+\/git\/[a-f0-9]{64}\/[^)\s<>"']+|buzz:\/\/(?:pr|issue|repo)\?[^)\s<>"']+|(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
+  /!?\[([^\]\n]+)\]\((https:\/\/[^)\s<>"']+|https?:\/\/[^)\s<>"']+\/git\/[a-f0-9]{64}\/[^)\s<>"']+|buzz:\/\/(?:pr|issue|repo|project)\?[^)\s<>"']+|(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
 const MAX_PREVIEWS = 8;
 
 type HiddenRange = {
@@ -295,14 +298,14 @@ function createPreview(
  * markdown-label override it must not overwrite.
  */
 export function buzzEntityFallbackTitle(link: ParsedEntityLink): string {
-  if (link.type === "repo") return link.dtag;
+  if (link.type === "repo" || link.type === "project") return link.dtag;
   return `${link.dtag} #${link.id.slice(0, 8)}`;
 }
 
 /**
- * Map a `buzz://pr|issue|repo` deep link onto a preview card. The href is
- * rebuilt through the canonical builders so equivalent links (case or query
- * order variants) dedupe to a single card.
+ * Map a `buzz://pr|issue|repo|project` deep link onto a preview card. The
+ * href is rebuilt through the canonical builders so equivalent links (case
+ * or query order variants) dedupe to a single card.
  */
 function parseBuzzEntityPreview(href: string): SupportedLinkPreview | null {
   const parsed = parseEntityLink(href);
@@ -326,6 +329,15 @@ function parseBuzzEntityPreview(href: string): SupportedLinkPreview | null {
       provider: "Buzz",
       title,
       typeLabel: "issue",
+    };
+  }
+  if (link.type === "project") {
+    return {
+      kind: "buzz-project",
+      href: buildProjectLink(link),
+      provider: "Buzz",
+      title,
+      typeLabel: "project",
     };
   }
   return {

@@ -1,3 +1,4 @@
+import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { WorkflowRun, WorkflowRunStatus } from "@/shared/api/types";
@@ -19,10 +20,8 @@ import {
 } from "@/shared/api/tauriWorkflows";
 
 /** Stale gate for workflow list queries (useChannelWorkflowsQuery, allWorkflowsQuery).
- * These queries have no poll and no relay push subscription; invalidateWorkflowListQueries
- * only fires for mutations performed by this renderer, so remote workflow creates/edits/deletes
- * surface only via refetch on focus return.  10 s suppresses rapid focus-flip burst refetches
- * while keeping remote changes visible on the next focus return. */
+ * These queries have no poll and no relay push subscription; foreground return
+ * explicitly refreshes them after the interaction-first activation boundary. */
 export const WORKFLOW_LIST_FOCUS_STALE_TIME_MS = 10_000;
 /** Keeps focused polling for run approvals at the established 10-second cadence. */
 export const RUN_APPROVALS_REFETCH_INTERVAL_MS = 10_000;
@@ -44,20 +43,50 @@ export const RUN_APPROVALS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Focus-refetch policy for workflow list queries; consumed by focusRefetchPolicy.test.mjs. */
 export const workflowListFocusRefetchPolicy = {
   staleTime: WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 /** Focus-refetch policy for the workflow-runs query; consumed by focusRefetchPolicy.test.mjs. */
 export const workflowRunsFocusRefetchPolicy = {
   staleTime: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 /** Focus-refetch policy for the run-approvals query; consumed by focusRefetchPolicy.test.mjs. */
 export const runApprovalsFocusRefetchPolicy = {
   staleTime: RUN_APPROVALS_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
+
+export function shouldRefreshQueryOnForeground(
+  queryKey: readonly unknown[],
+  data: unknown,
+): boolean {
+  const family = queryKey[0];
+  if (family === "workflows" || family === "workflows-all") return true;
+  if (family === "project" && queryKey[2] === "repo-sync-status") return true;
+  if (family !== "workflow-runs") return false;
+  const runs = data as WorkflowRun[] | undefined;
+  return !runs?.some((run) => isActiveWorkflowRunStatus(run.status));
+}
+
+export function useForegroundQueryRefresh(): void {
+  const queryClient = useQueryClient();
+  const appFocused = useAppFocused();
+  const wasFocused = React.useRef(appFocused);
+  React.useEffect(() => {
+    const returnedToForeground = appFocused && !wasFocused.current;
+    wasFocused.current = appFocused;
+    if (!returnedToForeground) return;
+
+    void queryClient.refetchQueries({
+      predicate: (query) =>
+        shouldRefreshQueryOnForeground(query.queryKey, query.state.data),
+      stale: true,
+      type: "active",
+    });
+  }, [appFocused, queryClient]);
+}
 
 export const allWorkflowsQueryKey = (channelIdKey: string) =>
   ["workflows-all", channelIdKey] as const;
