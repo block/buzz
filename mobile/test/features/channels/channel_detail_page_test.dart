@@ -7242,6 +7242,255 @@ void main() {
       expect(find.byKey(const ValueKey('thread-unread-divider')), findsNothing);
     });
   });
+
+  group('thread resume scroll landing', () {
+    // The divider tests above only prove the marker was *rendered*. A thread
+    // still pinned to its tail with the divider parked off-screen above passes
+    // every one of them, so this group asserts where the list actually landed.
+
+    Finder replyGroup(int index) =>
+        find.byKey(ValueKey('thread-message-group-reply-$index'));
+
+    /// Builds a paint-bounds visibility probe for the settled thread list.
+    ///
+    /// `ScrollablePositionedList` keeps a cache extent, so "attached to the
+    /// tree" is not "on screen"; and the composer is stacked over the bottom
+    /// of the list, so anything under it is covered rather than visible.
+    bool Function(Finder) visibilityProbe(WidgetTester tester) {
+      final listRect = tester.getRect(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      final composerTop = tester
+          .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+          .dy;
+      final visibleBottom = listRect.bottom < composerTop
+          ? listRect.bottom
+          : composerTop;
+      return (finder) {
+        if (finder.evaluate().length != 1) return false;
+        final rect = tester.getRect(finder);
+        return rect.top >= listRect.top - 0.5 &&
+            rect.bottom <= visibleBottom + 0.5;
+      };
+    }
+
+    testWidgets(
+      'a long half-read thread lands on the first unread reply, not the tail',
+      (tester) async {
+        // A real phone viewport, so "visible" means something.
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        const replyCount = 60;
+        const firstReplyAt = 1100;
+        const firstUnreadIndex = 30;
+        // The channel marker sits on reply 29: replies 0-29 are read, 30-59
+        // are not. Every reply therefore has a non-null effective read
+        // timestamp, which is what makes this a *resume* (the reader has been
+        // here before) rather than a never-opened first open.
+        const channelReadAt = firstReplyAt + firstUnreadIndex - 1;
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < replyCount; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: firstReplyAt + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            // The channel page marks the channel read on mount, and the thread
+            // page marks every reply read post-frame. Either pass would move
+            // the marker off the halfway point this test is built around, so
+            // pin the read state instead of letting it advance.
+            readStateNotifier: _FrozenReadStateNotifier(
+              const ReadStateState(
+                isReady: true,
+                pubkey: 'self',
+                contexts: {_channelId: channelReadAt},
+                version: 0,
+              ),
+            ),
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+            disableAnimations: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final isOnScreen = visibilityProbe(tester);
+
+        // The thread settled on the first unread reply, with its divider.
+        expect(
+          isOnScreen(replyGroup(firstUnreadIndex)),
+          isTrue,
+          reason:
+              'reply $firstUnreadIndex (the first unread) should be inside the '
+              'viewport after the thread settles',
+        );
+        expect(
+          isOnScreen(find.byKey(const ValueKey('thread-unread-divider'))),
+          isTrue,
+          reason: 'the unread divider should be on screen, not parked above it',
+        );
+
+        // Not the tail — otherwise this cannot tell resume apart from the old
+        // bottom-pinned open.
+        expect(
+          isOnScreen(replyGroup(replyCount - 1)),
+          isFalse,
+          reason: 'the newest reply must not be what the reader lands on',
+        );
+        // Nor the top: an unscrolled top-anchored list would show reply 0.
+        expect(
+          isOnScreen(replyGroup(0)),
+          isFalse,
+          reason: 'the oldest reply must be scrolled past, not still on screen',
+        );
+
+        // The way back to the newest reply is still offered, and still works.
+        final jumpToLatest = find.byKey(
+          const ValueKey('thread-jump-to-latest'),
+        );
+        expect(jumpToLatest.hitTestable(), findsOneWidget);
+        expect(find.text('Latest'), findsOneWidget);
+
+        await tester.tap(jumpToLatest);
+        await tester.pumpAndSettle();
+        expect(
+          isOnScreen(replyGroup(replyCount - 1)),
+          isTrue,
+          reason: 'Latest should return the reader to the newest reply',
+        );
+      },
+    );
+
+    testWidgets('a never-read thread still opens at the tail', (tester) async {
+      // The other half of the cross-client contract: resuming is for coming
+      // *back* to a thread. A reader with no marker over any reply has nowhere
+      // to return to, so a first open settles on the newest reply exactly as it
+      // always has, even though every reply is unread. Without this, the guard
+      // in `thread_detail_page.dart` can be deleted with the suite still green.
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      const replyCount = 60;
+      const firstReplyAt = 1100;
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < replyCount; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: firstReplyAt + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          // No markers anywhere: every reply's effective read time is null, so
+          // this reader has never seen the thread or the channel. The state has
+          // to stay frozen, because the mark-read passes on open would
+          // manufacture exactly the history this test is asserting the absence
+          // of.
+          readStateNotifier: _FrozenReadStateNotifier(
+            const ReadStateState(
+              isReady: true,
+              pubkey: 'self',
+              contexts: {},
+              version: 0,
+            ),
+          ),
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          disableAnimations: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final isOnScreen = visibilityProbe(tester);
+
+      expect(
+        isOnScreen(replyGroup(replyCount - 1)),
+        isTrue,
+        reason:
+            'a never-read thread must open on the newest reply, the way it '
+            'always has',
+      );
+      // Reply 0 is the first unread here, so this is the assertion that fails
+      // if the never-read guard is dropped and the resume drags the reader to
+      // the top of a thread they have never seen.
+      expect(
+        isOnScreen(replyGroup(0)),
+        isFalse,
+        reason:
+            'the reader must not be dragged to the top of a thread they have '
+            'never opened',
+      );
+    });
+  });
 }
 
 Channel _channel({required String id, required String name}) => Channel(
@@ -7352,6 +7601,28 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
   }
+}
+
+/// Read state that never advances.
+///
+/// Opening a channel marks it read at the newest root message, and opening a
+/// thread marks every reply read post-frame. Both would silently rewrite the
+/// markers a scroll-landing test is built around, so this notifier drops
+/// `markContextRead` and keeps the state exactly as constructed.
+class _FrozenReadStateNotifier extends ReadStateNotifier {
+  final ReadStateState _initialState;
+
+  _FrozenReadStateNotifier(this._initialState);
+
+  @override
+  ReadStateState build() => _initialState;
+
+  @override
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {}
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {

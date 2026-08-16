@@ -22,6 +22,31 @@ type UseThreadOpenResumeTargetResult = {
  * A captured `null` is latched too. That is a decision ("nothing was unread
  * when this opened"), and it is what stops a live reply arriving into a
  * fully-read thread from re-deriving a target and jumping the reader.
+ *
+ * The latch must not fire while replies are still arriving. A thread reopened
+ * from cache renders one reply off the channel timeline first, and at that
+ * point the unread marker has not been recomputed — so the latch would capture
+ * `null`, which this hook keeps as a deliberate decision. The real target
+ * arrives with the rest of the replies and is then ignored forever, leaving
+ * the reader bottom-pinned: exactly what this resume exists to replace. That is
+ * why `hasReplies` is expected to fold in the caller's settled-query gate, and
+ * why `hasReadHistory` rides that same gate rather than one of its own.
+ *
+ * `fetchStatus` is the caller's signal there, not `isPending`. A refetch over
+ * cached data reports `isPending: false` while still in flight, so pending
+ * alone lets the early render through. `"idle"` means nothing is on the wire —
+ * true once the replies have landed, and true for a forum thread whose query is
+ * disabled and whose replies resolve from the channel timeline instead. Paired
+ * with a reply-count check, a query that has not started yet is excluded as
+ * well, since it has no replies to latch onto.
+ *
+ * `hasReadHistory` has to arrive already frozen, from `useChannelUnreadState`,
+ * and it cannot be re-derived here from `getMessageReadAt`. That accessor is
+ * hierarchical — `msg:<id>` resolves to max(own marker, active channel marker)
+ * — so once the channel has been opened every reply reports a read time, and a
+ * snapshot taken at this hook's first sight of the replies claims read history
+ * for a thread the reader has never opened, resuming them to the top: the exact
+ * defect the guard exists to prevent. Measured, not theorised.
  */
 export function useThreadOpenResumeTarget(
   input: ThreadResumeTargetInput,

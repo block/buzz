@@ -8,6 +8,7 @@ function input(overrides = {}) {
   return {
     openThreadHeadId: "head-1",
     firstUnreadReplyId: "reply-7",
+    hasReadHistory: true,
     externalScrollTargetId: null,
     routeTargetMessageId: null,
     hasReplies: true,
@@ -24,6 +25,30 @@ test("a fully read thread keeps today's bottom pin", () => {
   assert.equal(
     selectThreadResumeTargetId(input({ firstUnreadReplyId: null })),
     null,
+  );
+});
+
+test("a never-read thread keeps today's bottom pin", () => {
+  // No marker over any reply means the reader has never been in this thread,
+  // so there is no position to return to. Mobile pins a first open to the tail
+  // (`hasThreadReadHistory`); desktop must not drag the reader to the top.
+  assert.equal(
+    selectThreadResumeTargetId(
+      input({ hasReadHistory: false, firstUnreadReplyId: "reply-1" }),
+    ),
+    null,
+  );
+});
+
+test("a seen thread whose replies are all unread resumes at the first", () => {
+  // The counterpart to the case above, and the reason `hasReadHistory` cannot
+  // be inferred from `firstUnreadReplyId`: both name the oldest reply, but this
+  // reader has read history here and does have a position to return to.
+  assert.equal(
+    selectThreadResumeTargetId(
+      input({ hasReadHistory: true, firstUnreadReplyId: "reply-1" }),
+    ),
+    "reply-1",
   );
 });
 

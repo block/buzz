@@ -186,4 +186,66 @@ test.describe("thread resume at last read", () => {
       path: `${SHOT_DIR}/02-fully-read-thread-still-opens-at-newest.png`,
     });
   });
+
+  test("03-never-read-thread-opens-at-newest", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    // #general is never visited before the assertion — no `channel-general`
+    // click, no `establishReadFrontier`. That is the whole point: desktop read
+    // markers are hierarchical, so `msg:<id>` resolves to max(own marker,
+    // active channel marker). Visiting the channel first would hand every reply
+    // a read time and the reader would count as having history here. The
+    // replies are recorded straight into the mock store instead, which needs no
+    // live subscription — the channel's first history fetch returns them.
+    //
+    // 60 replies so "resumed to the first unread" (the top) and "pinned to the
+    // newest" cannot render the same frame; 40 was already the point at which
+    // the panel started to discriminate.
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            typeof (
+              window as Window & {
+                __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: unknown;
+              }
+            ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+        ),
+      )
+      .toBe(true);
+
+    const base = unreadTimestamp();
+    for (let i = 0; i < 60; i++) {
+      await emitMockMessage(page, "general", `Unread reply ${i + 1}`, {
+        parentEventId: "mock-general-welcome",
+        createdAt: base + i,
+      });
+    }
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await page.getByTestId("message-thread-summary").first().click();
+
+    const panel = page.getByTestId("message-thread-panel");
+    await expect(panel).toBeVisible();
+
+    const replies = page.getByTestId("message-thread-replies");
+    await expect(replies.getByTestId("message-row")).toHaveCount(60);
+
+    await waitForAnimations(page);
+    await panel.screenshot({
+      path: `${SHOT_DIR}/03-never-read-thread-opens-at-newest.png`,
+    });
+
+    // `toBeInViewport`, never a bounding-box comparison against `replies`: that
+    // container's box is the whole scrollable *content*, so every reply in it
+    // measures as "inside" and the assertion passes on a visibly wrong panel.
+    await expect(replies.getByTestId("message-row").last()).toBeInViewport();
+    // And the resume did not happen: the oldest unread reply, which is where a
+    // resume would have parked this reader, is scrolled far out of sight.
+    await expect(
+      replies.getByTestId("message-row").first(),
+    ).not.toBeInViewport();
+  });
 });
