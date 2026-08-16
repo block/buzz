@@ -1,11 +1,9 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
+import 'buzz_sheet_header.dart';
+import 'buzz_titled_sheet_layout.dart';
 import 'concentric_sheet_surface.dart';
 
 /// Shared motion for occasional modal UI.
@@ -23,10 +21,12 @@ const buzzModalAnimationStyle = AnimationStyle(
 ///
 /// Sheets include the shared close control by default. On iOS, the surface
 /// uses native concentric corners when available and paints a requested drag
-/// handle inside that inset surface; other platforms retain Flutter's handle.
+/// handle inside the shared header so its spacing is consistent on every
+/// platform.
 Future<T?> showBuzzModalBottomSheet<T>({
   required BuildContext context,
   required WidgetBuilder builder,
+  String? title,
   Color? backgroundColor,
   String? barrierLabel,
   double? elevation,
@@ -63,12 +63,16 @@ Future<T?> showBuzzModalBottomSheet<T>({
       enabled: isIos,
       color: surfaceColor,
       child: _SheetContent(
+        title: title,
         showCloseButton: showCloseButton,
-        showDragHandle: isIos && showDragHandle == true,
+        showDragHandle: showDragHandle == true,
+        surfaceColor: surfaceColor,
         child: builder(sheetContext),
       ),
     ),
-    backgroundColor: isIos ? Colors.transparent : backgroundColor,
+    backgroundColor: isIos || title != null
+        ? Colors.transparent
+        : backgroundColor,
     barrierLabel: barrierLabel,
     elevation: elevation,
     shape: shape,
@@ -80,9 +84,9 @@ Future<T?> showBuzzModalBottomSheet<T>({
     useRootNavigator: useRootNavigator,
     isDismissible: isDismissible,
     enableDrag: enableDrag,
-    // The iOS route is transparent so its stock handle sits outside the inset
-    // concentric surface. Paint it inside the surface above instead.
-    showDragHandle: isIos ? false : showDragHandle,
+    // The shared header owns the handle so Android does not reserve a second
+    // handle band above the title row and iOS keeps it inside its native inset.
+    showDragHandle: false,
     useSafeArea: useSafeArea,
     routeSettings: routeSettings,
     transitionAnimationController: transitionAnimationController,
@@ -97,78 +101,55 @@ Future<T?> showBuzzModalBottomSheet<T>({
 class _SheetContent extends StatelessWidget {
   const _SheetContent({
     required this.child,
+    required this.title,
     required this.showCloseButton,
     required this.showDragHandle,
+    required this.surfaceColor,
   });
 
   final Widget child;
+  final String? title;
   final bool showCloseButton;
   final bool showDragHandle;
+  final Color surfaceColor;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (showCloseButton)
-          Padding(
-            padding: const EdgeInsets.only(
-              top: Grid.xxs,
-              left: Grid.gutter,
-              right: Grid.gutter,
-              bottom: Grid.xs,
+    if (title == null || !showCloseButton) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (showCloseButton)
+            BuzzSheetHeader(title: title, showDragHandle: showDragHandle)
+          else if (showDragHandle)
+            const Padding(
+              padding: EdgeInsets.only(top: Grid.xxs, bottom: Grid.xs),
+              child: _StandaloneSheetDragHandle(),
             ),
-            child: SizedBox(
-              height: 56,
-              child: Stack(
-                alignment: Alignment.topCenter,
-                children: [
-                  if (showDragHandle) const _SheetDragHandle(),
-                  Align(
-                    alignment: Alignment.bottomRight,
-                    child: SizedBox.square(
-                      dimension: 44,
-                      child: IconButton(
-                        tooltip: 'Close sheet',
-                        onPressed: () {
-                          unawaited(HapticFeedback.lightImpact());
-                          Navigator.of(context).pop();
-                        },
-                        style: IconButton.styleFrom(
-                          padding: EdgeInsets.zero,
-                          backgroundColor:
-                              context.colors.surfaceContainerHighest,
-                          foregroundColor: context.colors.onSurface,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(Radii.dialog),
-                          ),
-                        ),
-                        icon: const Icon(LucideIcons.x, size: 22),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          )
-        else if (showDragHandle)
-          const Padding(
-            padding: EdgeInsets.only(top: Grid.xxs, bottom: Grid.xs),
-            child: _SheetDragHandle(),
-          ),
-        Flexible(child: child),
-      ],
+          Flexible(child: child),
+        ],
+      );
+    }
+
+    return BuzzTitledSheetLayout(
+      title: title!,
+      showDragHandle: showDragHandle,
+      surfaceColor: surfaceColor,
+      child: child,
     );
   }
 }
 
-class _SheetDragHandle extends StatelessWidget {
-  const _SheetDragHandle();
+class _StandaloneSheetDragHandle extends StatelessWidget {
+  const _StandaloneSheetDragHandle();
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
-      label: 'Drag handle',
+      label: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      container: true,
+      button: true,
+      onTap: () => Navigator.of(context).pop(),
       child: Container(
         key: const ValueKey('buzz-sheet-drag-handle'),
         width: 32,

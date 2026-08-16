@@ -57,6 +57,7 @@ import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionH
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
+import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
@@ -103,10 +104,8 @@ function MessageComposerImpl({
   const [previewContent, setPreviewContent] = React.useState("");
   const {
     previewList: composerLinkPreviews,
+    getLiveCandidates: getLiveLinkPreviewCandidates,
     getReadyTags: getReadyLinkPreviewTags,
-    hasPendingSnapshots: hasPendingLinkPreviewSnapshots,
-    // Ref lets the submit guard block Enter/form/auto-submit until snapshots settle.
-    hasPendingSnapshotsRef: hasPendingLinkPreviewSnapshotsRef,
   } = useComposerLinkPreviews(previewContent, editTarget == null);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
@@ -516,9 +515,7 @@ function MessageComposerImpl({
     // Edit mode
     if (editTargetRef.current && onEditSaveRef.current) {
       if (isEditSubmissionLocked) return;
-      // No empty-edit guard here: clearing an edit to empty (no text, no
-      // attachments) flows through to onEditSave as empty content, which
-      // deletes the message instead of publishing it (see handleEditSave).
+      // Empty edits delete the message through handleEditSave.
       await submitMessageEdit({
         content: trimmed,
         editTargetId: editTargetRef.current.id,
@@ -551,6 +548,7 @@ function MessageComposerImpl({
           setSpoileredAttachmentUrls(draft.spoileredAttachmentUrls);
         },
         restoreMentionRefs: mentions.restoreDraftMentionRefs,
+        revalidateMentionPubkeys: mentions.revalidateMentionPubkeys,
         shouldRestoreComposer: () => canRestoreEditDraftRef.current,
         setDeferredUploadPending: setDeferredEditPending,
         setUploadError: (message) =>
@@ -569,7 +567,6 @@ function MessageComposerImpl({
       isSendingRef.current ||
       isSubmitLockedRef.current ||
       isUploadingRef.current ||
-      hasPendingLinkPreviewSnapshotsRef.current ||
       mentionSendFlow.isPreparingMentionSend
     ) {
       return;
@@ -585,12 +582,18 @@ function MessageComposerImpl({
     onPreparingMentionSendChange?.(true);
     persistentMentionHydration.beginSubmit();
     try {
+      const preparedLinkPreviews = getReadyLinkPreviewTags().some(
+        (tag) => tag[1] === "none",
+      )
+        ? null
+        : prepareBackgroundLinkPreviews(getLiveLinkPreviewCandidates());
       await mentionSendFlow.sendMessageWithMentionFlow({
         capturedChannelId: channelId,
         capturedThreadContext,
         pendingImeta: currentPendingImeta,
         queuedAttachments: currentQueuedAttachments,
-        linkPreviewTags: getReadyLinkPreviewTags(),
+        linkPreviewTags: preparedLinkPreviews ? [] : getReadyLinkPreviewTags(),
+        preparedLinkPreviews,
         sentDraftKey: resolveSentDraftKey(
           effectiveDraftKeyRef.current,
           drafts.loadDraft,
@@ -612,8 +615,8 @@ function MessageComposerImpl({
     customEmoji,
     drafts.loadDraft,
     emojiAutocomplete.clearEmojis,
+    getLiveLinkPreviewCandidates,
     getReadyLinkPreviewTags,
-    hasPendingLinkPreviewSnapshotsRef,
     media.clearQueuedAttachments,
     media.pendingImetaRef,
     media.queuedAttachmentsRef,
@@ -638,19 +641,10 @@ function MessageComposerImpl({
     effectiveDraftKey,
     mentions.getDraftMentionRefs,
     mentions.restoreDraftMentionRefs,
+    mentions.revalidateMentionPubkeys,
   ]);
   submitMessageRef.current = submitMessage;
-  // ── Auto-submit on draft send ────────────────────────────────────────────
-  // When `autoSubmitDraftKey` is set (the user clicked "Send message" in the
-  // Drafts panel and confirmed), fire `submitMessage` once after mount so the
-  // draft is sent through the real send path (mention resolution, media, etc.).
-  //
-  // Guard: only fire when the effective draft key matches the trigger so a
-  // stale URL param on a different channel never fires a spurious send.
-  //
-  // Fires at most once per mount (empty dep array after the key check) — the
-  // `onAutoSubmitComplete` callback clears the trigger before `submitMessage`
-  // runs, preventing re-fire on re-render or back-navigation.
+  // Draft auto-submit runs once after persisted editor state loads.
   const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
   onAutoSubmitCompleteRef.current = onAutoSubmitComplete;
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally fires once on mount only
@@ -665,7 +659,6 @@ function MessageComposerImpl({
     // loop back with the param still present.
     onAutoSubmitCompleteRef.current?.();
     return scheduleSettleGatedAutoSubmit({
-      isPending: () => hasPendingLinkPreviewSnapshotsRef.current,
       submit: () => submitMessageRef.current(),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -810,7 +803,6 @@ function MessageComposerImpl({
   const sendDisabled =
     composerDisabled ||
     media.isUploading ||
-    hasPendingLinkPreviewSnapshots ||
     mentionSendFlow.isPreparingMentionSend ||
     (isContentEmpty &&
       media.pendingImeta.length === 0 &&

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
+import { reconcileFetchedChannelWindow } from "../hooks.ts";
 import { channelMessagesKey, channelWindowKey } from "./messageQueryKeys.ts";
 import {
   appendOlderChannelWindow,
@@ -11,10 +12,8 @@ import {
   replaceNewestChannelWindow,
 } from "./channelWindowStore.ts";
 import {
-  CHANNEL_WINDOW_FRESH_MS,
   projectChannelWindowMessages,
   refreshChannelWindowMessages,
-  shouldRefreshChannelWindowAfterSubscribe,
 } from "./projectChannelWindow.ts";
 import { reconcileChannelWindowMessages } from "./channelWindowReconciliation.ts";
 
@@ -28,6 +27,18 @@ function event(id, createdAt) {
     content: id,
     sig: "b".repeat(128),
   };
+}
+
+function wirePage(rows) {
+  return [
+    ...rows,
+    {
+      ...event("bounds", 0),
+      kind: 39006,
+      tags: [["d", "channel:head"]],
+      content: JSON.stringify({ has_more: false, next_cursor: null }),
+    },
+  ];
 }
 
 function newestPage(rows) {
@@ -276,92 +287,79 @@ test("test_live_projection_retains_pending_send_and_non_broadcast_thread_reply",
   ]);
 });
 
-test("test_subscribe_refresh_skips_fresh_populated_window", () => {
+test("test_canceled_stale_fetch_cannot_overwrite_catch_up_window", async () => {
   const harness = createHarness();
-  const updatedAt = harness.client.getQueryState(
-    harness.windowKey,
-  ).dataUpdatedAt;
-
-  assert.equal(
-    shouldRefreshChannelWindowAfterSubscribe(
-      harness.client,
-      harness.channelId,
-      updatedAt + CHANNEL_WINDOW_FRESH_MS - 1,
-    ),
-    false,
-  );
-});
-
-test("test_subscribe_refresh_runs_for_stale_window", () => {
-  const harness = createHarness();
-  const updatedAt = harness.client.getQueryState(
-    harness.windowKey,
-  ).dataUpdatedAt;
-
-  assert.equal(
-    shouldRefreshChannelWindowAfterSubscribe(
-      harness.client,
-      harness.channelId,
-      updatedAt + CHANNEL_WINDOW_FRESH_MS,
-    ),
-    true,
-  );
-});
-
-test("test_live_cache_merge_does_not_extend_window_freshness", () => {
-  const harness = createHarness();
-  const windowUpdatedAt = harness.client.getQueryState(
-    harness.windowKey,
-  ).dataUpdatedAt;
-
-  harness.client.setQueryData(harness.messagesKey, (messages) => [
-    ...messages,
-    event("live-cache-only", 110),
-  ]);
-
-  assert.equal(
-    shouldRefreshChannelWindowAfterSubscribe(
-      harness.client,
-      harness.channelId,
-      windowUpdatedAt + CHANNEL_WINDOW_FRESH_MS,
-    ),
-    true,
-  );
-});
-
-test("test_subscribe_refresh_runs_without_a_message_query", () => {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+  const requests = [];
+  let resolveRequestStarted;
+  let requestStarted = new Promise((resolve) => {
+    resolveRequestStarted = resolve;
   });
-
-  assert.equal(
-    shouldRefreshChannelWindowAfterSubscribe(client, "missing-channel"),
-    true,
-  );
-});
-
-test("test_subscribe_refresh_does_not_duplicate_inflight_initial_fetch", async () => {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  const channelId = "pending-channel";
-  const queryKey = channelMessagesKey(channelId);
-  let resolveFetch;
-  const observer = new QueryObserver(client, {
-    queryKey,
-    queryFn: () =>
-      new Promise((resolve) => {
+  const observer = new QueryObserver(harness.client, {
+    queryKey: harness.messagesKey,
+    queryFn: async ({ signal }) => {
+      const previousMessages = harness.client.getQueryData(harness.messagesKey);
+      let resolveFetch;
+      const fetch = new Promise((resolve) => {
         resolveFetch = resolve;
-      }),
+      });
+      requests.push({ resolveFetch, signal });
+      resolveRequestStarted();
+      const events = await fetch;
+      return reconcileFetchedChannelWindow(
+        harness.client,
+        harness.channelId,
+        events,
+        previousMessages,
+        signal,
+      );
+    },
   });
   const unsubscribe = observer.subscribe(() => {});
 
-  assert.equal(
-    shouldRefreshChannelWindowAfterSubscribe(client, channelId),
-    false,
+  await requestStarted;
+  requestStarted = new Promise((resolve) => {
+    resolveRequestStarted = resolve;
+  });
+  const catchUp = refreshChannelWindowMessages(
+    harness.client,
+    harness.channelId,
   );
+  await requestStarted;
 
-  resolveFetch([]);
-  await client.getQueryCache().find({ queryKey })?.promise;
+  assert.equal(requests[0].signal.aborted, true);
+  requests[1].resolveFetch(
+    wirePage([event("gap", 110), event("initial", 100)]),
+  );
+  await catchUp;
+  assert.deepEqual(contents(harness), ["initial", "gap"]);
+
+  requests[0].resolveFetch(wirePage([event("initial", 100)]));
+  await new Promise((resolve) => setImmediate(resolve));
+  appendLiveEvent(harness, event("live", 120));
+
+  assert.deepEqual(contents(harness), ["initial", "gap", "live"]);
+  assert.deepEqual(
+    flattenChannelWindowEvents(
+      harness.client.getQueryData(harness.windowKey),
+    ).map((item) => item.content),
+    ["initial", "gap", "live"],
+  );
   unsubscribe();
+});
+
+test("test_pageless_live_projection_preserves_cached_timeline", () => {
+  const harness = createHarness();
+  const cached = harness.client.getQueryData(harness.messagesKey);
+  const pageless = emptyChannelWindowStore();
+  harness.client.setQueryData(harness.windowKey, pageless);
+
+  const next = mergeLiveChannelWindowEvent(
+    harness.client.getQueryData(harness.windowKey),
+    event("live", 110),
+  );
+  harness.client.setQueryData(harness.windowKey, next);
+  projectChannelWindowMessages(harness.client, harness.channelId);
+
+  assert.deepEqual(contents(harness), ["initial", "live"]);
+  assert.equal(harness.client.getQueryData(harness.messagesKey)[0], cached[0]);
 });

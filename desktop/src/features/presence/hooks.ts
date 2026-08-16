@@ -9,6 +9,7 @@ import { getPresence } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import {
+  activePresencePubkeys,
   mergePresenceUpdate,
   parseLivePresenceEvent,
   presenceQueryWantsPubkey,
@@ -16,9 +17,23 @@ import {
   PRESENCE_TTL_SECONDS,
   resolveAutomaticPresenceStatus,
 } from "@/features/presence/lib/presence";
+import { PresenceSubscriptionReconciler } from "@/features/presence/lib/presenceSubscriptionReconciler";
+import { openPresenceSubscription } from "@/shared/api/presenceRelaySubscription";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
 const PRESENCE_STATUS_TICK_INTERVAL_MS = 30_000;
+/** Keeps focused polling for presence at the established 60-second backstop cadence. */
+export const PRESENCE_REFETCH_INTERVAL_MS = 60_000;
+/** Suppresses the focus refetch until presence data is genuinely stale.
+ * The live subscription (setQueriesData) and reconnect invalidation are the
+ * primary freshness paths; the 60s poll is the backstop. */
+export const PRESENCE_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the presence query; consumed by focusRefetchPolicy.test.mjs. */
+export const presenceFocusRefetchPolicy = {
+  staleTime: PRESENCE_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: false,
+} as const;
 const PRESENCE_ACTIVITY_THROTTLE_MS = 1_000;
 const PRESENCE_PREFERENCE_STORAGE_KEY = "buzz-presence-preference";
 
@@ -84,34 +99,33 @@ export function usePresenceQuery(
   const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
   const connectionState = useRelayConnection();
   const connected = connectionState === "connected";
-  const refetchInterval = useFocusedRefetchInterval(connected ? 60_000 : false);
+  const refetchInterval = useFocusedRefetchInterval(
+    connected ? PRESENCE_REFETCH_INTERVAL_MS : false,
+  );
 
   return useQuery<PresenceLookup>({
     enabled,
     queryKey: presenceQueryKey(normalizedPubkeys),
     queryFn: () => getPresence(normalizedPubkeys),
-    staleTime: 30_000,
     // Backstop poll: catches REST-only writers (ACP agents) and TTL expiry
     // (crashed clients). WS events handle the fast path. Pause on degraded
     // connections — HTTP presence calls fail anyway and consume relay quota.
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...presenceFocusRefetchPolicy,
   });
 }
 
 /**
- * Subscribe to kind:20001 presence events over WebSocket and update the
- * TanStack Query presence cache in-place when updates arrive. Call once
- * in AppShell. Uses setQueriesData for targeted per-pubkey updates without
- * triggering refetches. Retries with exponential backoff on failure.
+ * Keep one live presence subscription scoped to pubkeys requested by active
+ * TanStack queries. Replacement subscriptions open before the old one closes,
+ * avoiding a live-update gap while query observers change.
  */
 export function usePresenceSubscription() {
   const queryClient = useQueryClient();
 
   React.useEffect(() => {
-    let unsub: (() => Promise<void>) | null = null;
     let isCancelled = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
 
     function handlePresenceEvent(event: { pubkey: string; content: string }) {
       if (isCancelled) return;
@@ -128,28 +142,37 @@ export function usePresenceSubscription() {
       );
     }
 
-    function subscribeWithRetry(attempt = 0) {
-      if (isCancelled) return;
-      void relayClient
-        .subscribeToPresenceUpdates(handlePresenceEvent)
-        .then((unsubFn) => {
-          if (isCancelled) {
-            void unsubFn();
-            return;
-          }
-          unsub = unsubFn;
-        })
-        .catch(() => {
-          if (!isCancelled) {
-            const delay = Math.min(1000 * 2 ** attempt, 30_000);
-            retryTimer = setTimeout(
-              () => subscribeWithRetry(attempt + 1),
-              delay,
-            );
-          }
-        });
+    const reconciler = new PresenceSubscriptionReconciler({
+      open: (authors) =>
+        openPresenceSubscription(authors, handlePresenceEvent, (...args) =>
+          relayClient.subscribeLive(...args),
+        ),
+    });
+
+    function reconcileActiveQueries() {
+      reconciler.setAuthors(
+        activePresencePubkeys(queryClient.getQueryCache().getAll()),
+      );
     }
-    subscribeWithRetry();
+
+    function scheduleReconcile() {
+      if (reconcileTimer) return;
+      reconcileTimer = setTimeout(() => {
+        reconcileTimer = null;
+        reconcileActiveQueries();
+      }, 100);
+    }
+
+    const unsubQueryCache = queryClient.getQueryCache().subscribe((event) => {
+      if (
+        event.type === "observerAdded" ||
+        event.type === "observerRemoved" ||
+        event.type === "observerOptionsUpdated"
+      ) {
+        scheduleReconcile();
+      }
+    });
+    reconcileActiveQueries();
 
     const unsubReconnect = relayClient.subscribeToReconnects(() => {
       if (!isCancelled)
@@ -158,9 +181,10 @@ export function usePresenceSubscription() {
 
     return () => {
       isCancelled = true;
+      unsubQueryCache();
       unsubReconnect();
-      if (retryTimer) clearTimeout(retryTimer);
-      if (unsub) void unsub();
+      if (reconcileTimer) clearTimeout(reconcileTimer);
+      reconciler.dispose();
     };
   }, [queryClient]);
 }

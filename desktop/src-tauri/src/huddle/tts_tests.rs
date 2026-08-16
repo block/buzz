@@ -785,98 +785,63 @@ fn apply_fade_out_single_sample() {
 
 // ── build_sentence_append_buffer tests ───────────────────────────────────
 
-/// REGRESSION: every chunk needs an onset cushion; synthesized chunks
-/// can start with speech energy within the first millisecond.
-#[test]
-fn lead_in_pad_is_present_for_every_sentence_chunk() {
-    const SENTENCE_AUDIO_LEN: usize = 1000;
-    const SILENCE_BUF_LEN: usize = 2400; // 100 ms at 24 kHz, like production
-    const N_SENTENCES: usize = 5;
-
-    let mut first = true;
-
-    for _ in 0..N_SENTENCES {
-        let buf = build_sentence_append_buffer(
-            &mut first,
-            vec![0.5_f32; SENTENCE_AUDIO_LEN],
-            SILENCE_BUF_LEN,
-            true,
-            true,
-        );
-
-        assert_eq!(buf.len(), SENTENCE_AUDIO_LEN + SILENCE_BUF_LEN);
-        assert!(
-            buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0),
-            "lead-in pad must be pure silence"
-        );
-        assert!(
-            buf[SENTENCE_LEAD_IN_SAMPLES..SENTENCE_LEAD_IN_SAMPLES + SENTENCE_AUDIO_LEN]
-                .iter()
-                .all(|&s| s == 0.5),
-            "sentence audio must immediately follow the lead-in"
-        );
-        assert!(
-            buf[SENTENCE_LEAD_IN_SAMPLES + SENTENCE_AUDIO_LEN..]
-                .iter()
-                .all(|&s| s == 0.0),
-            "trailing gap must be pure silence"
-        );
-    }
-
-    assert!(!first, "first_append flag must be cleared after first call");
-}
-
-/// `first_append` still flips on the first call for `tts_active` gating.
+/// `first_append` still flips on the first append for `tts_active` gating.
 #[test]
 fn build_sentence_append_buffer_flips_first_append() {
     let mut first = true;
-    let _ = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
+    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], false);
+    assert_eq!(buf, vec![0.5; 100]);
     assert!(!first, "first call must flip the flag");
-
-    // Subsequent call: still has a per-sentence lead-in, flag stays false.
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
-    assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
-    assert!(!first);
 }
 
-/// Leading silence is exactly the lead-in; no pre-audio gap is double-counted.
+/// Playback chunks are contiguous: Pocket's generated pause is not extended
+/// with a fixed inter-sentence silence budget.
 #[test]
-fn first_sentence_leading_silence_is_exactly_lead_in() {
+fn sentence_append_buffer_does_not_inject_silence() {
     let mut first = true;
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
+    let first_buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], false);
+    let second_buf = build_sentence_append_buffer(&mut first, vec![0.25; 100], false);
+
+    assert_eq!(first_buf, vec![0.5; 100]);
+    assert_eq!(second_buf, vec![0.25; 100]);
+}
+
+/// If generation falls behind playback, retain the onset cushion that protects
+/// the first phoneme while the output path wakes back up.
+#[test]
+fn idle_playback_gets_an_onset_cushion() {
+    let mut first = true;
+    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], true);
+
+    assert_eq!(buf.len(), SENTENCE_LEAD_IN_SAMPLES + 100);
     assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
     assert_eq!(buf[SENTENCE_LEAD_IN_SAMPLES], 0.5);
 }
 
-/// Tail silence plus the next lead-in preserves the 100 ms sentence gap.
 #[test]
-fn sentence_gap_budget_is_preserved() {
-    let mut first = true;
-    let silence_buf_len = 2400;
-    let first_buf =
-        build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len, true, true);
-    let second_buf =
-        build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len, true, true);
+fn tts_worker_uses_distinct_playback_and_model_splitters() {
+    let source = include_str!("tts.rs");
+    let playback_calls = source.matches("engine.split_text_for_playback(").count();
+    let model_calls = source.matches("engine.split_text_into_chunks(").count();
 
-    let first_tail = &first_buf[SENTENCE_LEAD_IN_SAMPLES + 100..];
-    let second_lead = &second_buf[..SENTENCE_LEAD_IN_SAMPLES];
-    assert_eq!(first_tail.len(), silence_buf_len - SENTENCE_LEAD_IN_SAMPLES);
-    assert_eq!(second_lead.len(), SENTENCE_LEAD_IN_SAMPLES);
-    assert_eq!(first_tail.len() + second_lead.len(), silence_buf_len);
-}
+    assert_eq!(
+        (playback_calls, model_calls),
+        (1, 1),
+        "the worker must isolate sentence one only in the outer playback split"
+    );
 
-/// Regression guard: one contiguous rodio source per synthesized sentence.
-#[test]
-fn sentence_append_buffer_is_one_contiguous_source() {
-    let mut first = true;
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
-
-    assert_eq!(buf.len(), 2400 + 100);
-    assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
+    // Counts alone are order-blind: swapping the two call sites keeps them at
+    // (1, 1) while the outer split stops isolating sentence one, which delays
+    // first audio by a whole generation. Pin the ORDER too.
+    let playback_at = source
+        .find("engine.split_text_for_playback(")
+        .expect("outer playback split exists");
+    let model_at = source
+        .find("engine.split_text_into_chunks(")
+        .expect("inner model split exists");
     assert!(
-        buf[SENTENCE_LEAD_IN_SAMPLES..SENTENCE_LEAD_IN_SAMPLES + 100]
-            .iter()
-            .all(|&s| s == 0.5)
+        playback_at < model_at,
+        "the playback split must be the OUTER pass; swapping the two delays first audio"
     );
 }
 
@@ -906,80 +871,4 @@ fn clamp_to_full_scale_clamps_outliers() {
 fn clamp_to_full_scale_empty_buffer() {
     let out = clamp_to_full_scale(Vec::new());
     assert!(out.is_empty());
-}
-
-// ── group_sentences_into_chunks tests ─────────────────────────────────────
-
-fn s(v: &[&str]) -> Vec<String> {
-    v.iter().map(|x| x.to_string()).collect()
-}
-
-/// The first sentence always stands alone — it bounds time-to-first-audio.
-/// Even when the whole message would fit in one chunk, sentence one must
-/// not wait on synthesis of the rest.
-#[test]
-fn chunk_grouping_first_sentence_is_always_alone() {
-    let chunks = group_sentences_into_chunks(&s(&["Hi there.", "Short.", "Tiny."]), 200);
-    assert_eq!(chunks[0], "Hi there.");
-    assert_eq!(chunks.len(), 2);
-    assert_eq!(chunks[1], "Short. Tiny.");
-}
-
-/// Sentences after the first pack greedily up to the char budget, then
-/// spill into a new chunk. Fewer generate() calls = fewer prosody seams.
-#[test]
-fn chunk_grouping_packs_up_to_budget_then_spills() {
-    let a = "A".repeat(50) + ".";
-    let b = "B".repeat(50) + ".";
-    let c = "C".repeat(50) + ".";
-    let d = "D".repeat(50) + ".";
-    // Budget of 110: b+c fits (51+1+51 = 103), adding d (103+1+51) does not.
-    let chunks = group_sentences_into_chunks(&s(&[&a, &b, &c, &d]), 110);
-    assert_eq!(chunks.len(), 3, "chunks: {chunks:?}");
-    assert_eq!(chunks[0], a);
-    assert_eq!(chunks[1], format!("{b} {c}"));
-    assert_eq!(chunks[2], d);
-}
-
-/// A single sentence longer than the coarse budget is passed through here;
-/// the loaded April engine subsequently enforces its exact 50-token limit.
-#[test]
-fn chunk_grouping_oversized_sentence_passes_through() {
-    let long = "word ".repeat(60).trim_end().to_string() + ".";
-    assert!(long.len() > 200);
-    let chunks = group_sentences_into_chunks(&s(&["First.", &long]), 200);
-    assert_eq!(chunks, vec!["First.".to_string(), long]);
-}
-
-/// Single-sentence messages — the common huddle case, since agents are
-/// prompted to send one sentence per message — are unaffected by grouping.
-#[test]
-fn chunk_grouping_single_sentence_unchanged() {
-    let chunks = group_sentences_into_chunks(&s(&["Just one sentence here."]), 200);
-    assert_eq!(chunks, vec!["Just one sentence here.".to_string()]);
-}
-
-/// Empty and whitespace-only entries are dropped, and never produce
-/// empty chunks (which would synthesize as garbage).
-#[test]
-fn chunk_grouping_skips_blank_sentences() {
-    let chunks = group_sentences_into_chunks(&s(&["", "  ", "Real sentence.", "   ", "Two."]), 200);
-    assert_eq!(chunks[0], "Real sentence.");
-    assert_eq!(chunks.len(), 2);
-    assert_eq!(chunks[1], "Two.");
-}
-
-/// Empty input produces no chunks (the worker loop then synthesizes nothing).
-#[test]
-fn chunk_grouping_empty_input() {
-    assert!(group_sentences_into_chunks(&[], 200).is_empty());
-}
-
-/// Chunks joined with a single space preserve each sentence's terminal
-/// punctuation — the model sees natural multi-sentence prose, matching the
-/// shape upstream's ~50-token chunker produces.
-#[test]
-fn chunk_grouping_preserves_punctuation_at_joins() {
-    let chunks = group_sentences_into_chunks(&s(&["Lead.", "Really?", "Yes!", "Good."]), 200);
-    assert_eq!(chunks[1], "Really? Yes! Good.");
 }

@@ -92,37 +92,138 @@ export function isAgentIdentityInAllowedList(
   );
 }
 
-export function shouldHideAgentFromMentions({
+export type AgentMentionAdmission = "allow" | "deny" | "unknown";
+
+export function getAgentMentionAdmission({
   isAgent,
-  isMember,
+  isManagedAgent,
   pubkey,
+  ownerPubkey,
+  currentPubkey,
   mentionableAgentPubkeys,
-  directoryAgentPubkeys,
+  directoryReady,
+  ownerOnly,
 }: {
   isAgent: boolean;
-  isMember: boolean;
+  isManagedAgent: boolean;
   pubkey: string;
+  ownerPubkey?: string | null;
+  currentPubkey?: string | null;
   mentionableAgentPubkeys: ReadonlySet<string>;
-  directoryAgentPubkeys: ReadonlySet<string>;
-}) {
-  if (!isAgent) return false;
+  directoryReady: boolean;
+  ownerOnly: boolean | undefined;
+}): AgentMentionAdmission {
+  if (!isAgent) return "allow";
+  if (!directoryReady || ownerOnly === undefined) return "unknown";
+
   const normalized = normalizePubkey(pubkey);
-  // Invocable => always show.
-  if (mentionableAgentPubkeys.has(normalized)) return false;
-  // Non-member, non-invocable => hide (preserves prior behavior).
-  if (!isMember) return true;
-  // Member (Option B): hide only when we have an explicit not-invocable
-  // signal — a relay directory (kind:10100) entry that excludes us.
-  // Unknown invocability (not in directory) => show.
-  //
-  // NOTE: this assumes `directoryAgentPubkeys` and `mentionableAgentPubkeys`
-  // share the same source query (`relayAgentsQuery.data`), so directory
-  // presence without membership in `mentionableAgentPubkeys` is a real
-  // explicit-exclusion signal. If a future change sources the directory set
-  // from a different query, an agent that's directory-present but whose
-  // mentionability is still loading could be hidden prematurely — keep the
-  // two sets derived from the same query.
-  return directoryAgentPubkeys.has(normalized);
+  if (!mentionableAgentPubkeys.has(normalized)) return "deny";
+  if (!ownerOnly || isManagedAgent) return "allow";
+  if (!ownerPubkey || !currentPubkey) return "unknown";
+
+  return normalizePubkey(ownerPubkey) === normalizePubkey(currentPubkey)
+    ? "allow"
+    : "deny";
+}
+
+export function shouldHideAgentFromMentions({
+  isAgent,
+  isManagedAgent = false,
+  pubkey,
+  ownerPubkey,
+  currentPubkey,
+  mentionableAgentPubkeys,
+  directoryReady = true,
+  ownerOnly,
+}: {
+  isAgent: boolean;
+  isManagedAgent?: boolean;
+  pubkey: string;
+  ownerPubkey?: string | null;
+  currentPubkey?: string | null;
+  mentionableAgentPubkeys: ReadonlySet<string>;
+  directoryReady?: boolean;
+  ownerOnly: boolean | undefined;
+}) {
+  return (
+    getAgentMentionAdmission({
+      isAgent,
+      isManagedAgent,
+      pubkey,
+      ownerPubkey,
+      currentPubkey,
+      mentionableAgentPubkeys,
+      directoryReady,
+      ownerOnly,
+    }) !== "allow"
+  );
+}
+
+export function getAgentIdentityPubkeys({
+  managedAgentPubkeys,
+  relayAgents,
+  members,
+  profileIsAgent,
+}: {
+  managedAgentPubkeys: ReadonlySet<string>;
+  relayAgents: readonly { pubkey: string }[];
+  members: readonly {
+    pubkey: string;
+    isAgent?: boolean;
+    role?: string | null;
+  }[];
+  profileIsAgent: (pubkey: string) => boolean;
+}) {
+  return new Set([
+    ...managedAgentPubkeys,
+    ...relayAgents.map(({ pubkey }) => normalizePubkey(pubkey)),
+    ...members
+      .filter(
+        (member) =>
+          member.isAgent === true ||
+          member.role === "bot" ||
+          profileIsAgent(normalizePubkey(member.pubkey)),
+      )
+      .map(({ pubkey }) => normalizePubkey(pubkey)),
+  ]);
+}
+
+export function getAdmittedAgentPubkeys(
+  candidates: readonly { pubkey?: string; isAgent?: boolean }[],
+) {
+  return new Set(
+    candidates.flatMap((candidate) =>
+      candidate.isAgent && candidate.pubkey
+        ? [normalizePubkey(candidate.pubkey)]
+        : [],
+    ),
+  );
+}
+
+export function rememberSelectedAgentPubkeys(
+  target: Set<string>,
+  selected: readonly { pubkey?: string; isAgent?: boolean }[],
+  selectionIsAgent: boolean,
+) {
+  for (const candidate of selected) {
+    if (candidate.pubkey && (selectionIsAgent || candidate.isAgent === true)) {
+      target.add(normalizePubkey(candidate.pubkey));
+    }
+  }
+}
+
+export function filterAdmittedMentionPubkeys(
+  pubkeys: readonly string[],
+  agentIdentityPubkeys: ReadonlySet<string>,
+  admittedAgentPubkeys: ReadonlySet<string>,
+) {
+  return pubkeys.filter((pubkey) => {
+    const normalized = normalizePubkey(pubkey);
+    return (
+      !agentIdentityPubkeys.has(normalized) ||
+      admittedAgentPubkeys.has(normalized)
+    );
+  });
 }
 
 export function isAgentMentionChannelType(type?: string | null) {

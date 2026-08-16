@@ -32,6 +32,22 @@ export type RawChannel = {
   ttl_deadline: string | null;
 };
 
+/**
+ * Response payload for the `get_channels` Tauri command.
+ *
+ * When `channels` is `null`, the caller's `knownHash` matched the relay
+ * snapshot and the expensive channel list was not re-serialized across IPC.
+ * `lastMessages` is always present so the caller can update sidebar
+ * timestamps without a full channel-list re-render.
+ */
+export type GetChannelsPayload = {
+  hash: string;
+  /** Full channel list, or `null` on a not-modified (hash-match) response. */
+  channels: Channel[] | null;
+  /** Map of channel id → ISO-8601 timestamp of its most recent message. */
+  lastMessages: Record<string, string>;
+};
+
 type RawChannelDetail = RawChannel & {
   created_by: string;
   created_at: string;
@@ -105,9 +121,27 @@ function fromRawChannelMember(member: RawChannelMember): ChannelMember {
   };
 }
 
-export async function getChannels(): Promise<Channel[]> {
-  const channels = await invokeTauri<RawChannel[]>("get_channels");
-  return channels.map(fromRawChannel);
+/**
+ * Fetch the channel list from the backend.
+ *
+ * Pass `knownHash` from a previous response to enable the not-modified
+ * short-circuit: when the relay snapshot is unchanged, `channels` in the
+ * returned payload will be `null` so the multi-MB list is not deserialized.
+ * Pass `null` to always request the full list.
+ */
+export async function getChannels(
+  knownHash: string | null,
+): Promise<GetChannelsPayload> {
+  const raw = await invokeTauri<{
+    hash: string;
+    channels: RawChannel[] | null;
+    last_messages: Record<string, string>;
+  }>("get_channels", { knownHash });
+  return {
+    hash: raw.hash,
+    channels: raw.channels !== null ? raw.channels.map(fromRawChannel) : null,
+    lastMessages: raw.last_messages,
+  };
 }
 
 export async function createChannel(

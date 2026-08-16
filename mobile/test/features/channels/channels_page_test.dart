@@ -232,6 +232,55 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('interrupts a ballistic scroll from a transparent list gap', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 480);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final channels = List.generate(
+      40,
+      (index) => Channel(
+        id: 'channel-$index',
+        name: 'channel-$index',
+        channelType: 'stream',
+        visibility: 'open',
+        description: 'Channel $index',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 10,
+        isMember: true,
+      ),
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final scrollView = find.byType(CustomScrollView);
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: scrollView, matching: find.byType(Scrollable)).first,
+    );
+    await tester.fling(scrollView, const Offset(0, -300), 2400);
+    await tester.pump(const Duration(milliseconds: 32));
+    final ballisticOffset = scrollable.position.pixels;
+    await tester.pump(const Duration(milliseconds: 32));
+    expect(scrollable.position.pixels, greaterThan(ballisticOffset));
+
+    // x=1 is inside the scroll viewport but outside the padded section rows.
+    // A drag beginning here must still enter the scrollable's gesture arena.
+    final interruptingDrag = await tester.startGesture(const Offset(1, 300));
+    await interruptingDrag.moveBy(const Offset(0, 80));
+    await tester.pump();
+
+    expect(scrollable.position.pixels, lessThan(ballisticOffset));
+    await interruptingDrag.up();
+  });
+
   testWidgets('keeps the last channel above the floating tab bar', (
     tester,
   ) async {
@@ -860,11 +909,12 @@ void main() {
     final options = find.byKey(const Key('community-switcher-options'));
     expect(options, findsOneWidget);
     final editButton = find.byKey(const Key('community-switcher-edit'));
+    expect(tester.getSize(editButton), const Size(56, 44));
+    expect(find.byTooltip('Close sheet'), findsNothing);
     expect(
-      tester.getRect(options).top - tester.getRect(editButton).bottom,
-      closeTo(8, 0.01),
+      tester.getCenter(editButton).dx,
+      greaterThan(tester.getCenter(find.text('Switch Community')).dx),
     );
-    expect(tester.getSize(editButton).height, 32);
     expect(find.text('alpha.example.com'), findsOneWidget);
     expect(find.text('bravo.example.com'), findsOneWidget);
     expect(find.text('Rename'), findsNothing);
@@ -893,6 +943,10 @@ void main() {
     );
     final inactiveSelection = find.byKey(
       const Key('community-switcher-selection-bravo'),
+    );
+    expect(
+      tester.getCenter(editButton).dx,
+      closeTo(tester.getCenter(activeSelection).dx, 0.01),
     );
     expect(tester.getSize(activeSelection), const Size.square(40));
     expect(

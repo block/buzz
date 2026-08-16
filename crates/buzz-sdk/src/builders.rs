@@ -1121,6 +1121,131 @@ pub fn build_git_issue(
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_ISSUE as u16), content).tags(tags))
 }
 
+/// Build an issue assignment note (kind:1) — a labeled comment whose `p`
+/// tags are the assignees, mirroring the Desktop app's assignment events.
+///
+/// Tag layout: `["e", <issue>, "", "root"]`, `["a", <repo>]`, one `["p", ..]`
+/// per assignee, and `["t", "assignment"]`.
+///
+/// Clients only trust assignments signed by the issue author or the repo
+/// owner (who may assign anyone), or a self-assignment whose sole assignee
+/// is the signer. Assignments from other signers are ignored on read.
+pub fn build_git_issue_assignment(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignment_with_prior(repo, issue_id, assignees, content, None)
+}
+
+/// Build an issue assignment note with an optional causal assignment-operation
+/// event ID in a `["prior", <event-id>]` tag.
+///
+/// `prior`, when present, must be a 64-character hexadecimal event ID.
+pub fn build_git_issue_assignment_with_prior(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignee_operation(
+        repo,
+        issue_id,
+        assignees,
+        content,
+        GitIssueAssigneeOperation::Assign,
+        prior,
+    )
+}
+
+/// Build an issue unassignment note (kind:1) whose `p` tags name the people
+/// being removed and whose operation label is `t: unassignment`.
+///
+/// Clients trust unassignments signed by the issue author or repository owner,
+/// or a self-unassignment whose sole `p` tag is the signer.
+pub fn build_git_issue_unassignment(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_unassignment_with_prior(repo, issue_id, assignees, content, None)
+}
+
+/// Build an issue unassignment note with an optional causal
+/// assignment-operation event ID in a `["prior", <event-id>]` tag.
+///
+/// `prior`, when present, must be a 64-character hexadecimal event ID.
+pub fn build_git_issue_unassignment_with_prior(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignee_operation(
+        repo,
+        issue_id,
+        assignees,
+        content,
+        GitIssueAssigneeOperation::Unassign,
+        prior,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum GitIssueAssigneeOperation {
+    Assign,
+    Unassign,
+}
+
+impl GitIssueAssigneeOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Assign => "assignment",
+            Self::Unassign => "unassignment",
+        }
+    }
+}
+
+fn build_git_issue_assignee_operation(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    operation: GitIssueAssigneeOperation,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let issue = check_hex_exact(issue_id, 64, "issue")?;
+    let a_value = repo.to_a_tag_value()?;
+    if assignees.is_empty() || assignees.len() > 50 {
+        return Err(SdkError::InvalidInput(
+            "between 1 and 50 assignees are required".into(),
+        ));
+    }
+    let mut normalized = assignees
+        .iter()
+        .map(|assignee| check_pubkey_hex(assignee, "assignee"))
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+
+    let mut tags = vec![tag(&["e", &issue, "", "root"])?, tag(&["a", &a_value])?];
+    for assignee in &normalized {
+        tags.push(tag(&["p", assignee])?);
+    }
+    tags.push(tag(&["t", operation.label()])?);
+    if let Some(prior) = prior {
+        let prior = check_hex_exact(prior, 64, "prior assignment operation")?;
+        tags.push(tag(&["prior", &prior])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+}
+
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitStatus {
@@ -3479,6 +3604,149 @@ mod tests {
         };
         let err = build_git_issue(&repo, "", "body", &GitIssueMeta::default()).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_issue_assignment_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        // Duplicates (case-insensitive) collapse to a single p tag.
+        let assignees = vec!["C".repeat(64), "c".repeat(64), "d".repeat(64)];
+        let ev = sign(
+            build_git_issue_assignment(&repo, &issue, &assignees, "Assigned this issue to Thomas")
+                .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Assigned this issue to Thomas");
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "p", &"c".repeat(64)));
+        assert!(has_tag(&ev, "p", &"d".repeat(64)));
+        assert!(has_tag(&ev, "t", "assignment"));
+        let p_count = ev
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+            .count();
+        assert_eq!(p_count, 2);
+    }
+
+    #[test]
+    fn git_issue_assignment_rejects_bad_input() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        // No assignees.
+        let err = build_git_issue_assignment(&repo, &issue, &[], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        // Malformed assignee pubkey.
+        let err =
+            build_git_issue_assignment(&repo, &issue, &["nope".to_string()], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        // Malformed issue id.
+        let err = build_git_issue_assignment(&repo, "short", &["c".repeat(64)], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_issue_assignment_with_prior_emits_valid_causal_tag() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignee = "c".repeat(64);
+        let prior = "d".repeat(64);
+        let ev = sign(
+            build_git_issue_assignment_with_prior(
+                &repo,
+                &issue,
+                &[assignee],
+                "Assigned this issue",
+                Some(&prior),
+            )
+            .unwrap(),
+        );
+
+        assert!(has_tag(&ev, "prior", &prior));
+        let unassignment = sign(
+            build_git_issue_unassignment_with_prior(
+                &repo,
+                &issue,
+                &["c".repeat(64)],
+                "Unassigned this issue",
+                Some(&prior),
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&unassignment, "prior", &prior));
+        assert!(build_git_issue_assignment_with_prior(
+            &repo,
+            &issue,
+            &["c".repeat(64)],
+            "Assigned this issue",
+            Some("invalid"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn git_issue_unassignment_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignee = "c".repeat(64);
+        let ev = sign(
+            build_git_issue_unassignment(
+                &repo,
+                &issue,
+                std::slice::from_ref(&assignee),
+                "Unassigned Thomas from this issue",
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Unassigned Thomas from this issue");
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "p", &assignee));
+        assert!(has_tag(&ev, "t", "unassignment"));
+        assert!(!has_tag(&ev, "t", "assignment"));
+    }
+
+    #[test]
+    fn legacy_issue_assignment_builders_omit_prior() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignees = vec!["c".repeat(64)];
+        let assignment = sign(
+            build_git_issue_assignment(&repo, &issue, &assignees, "Assigned this issue").unwrap(),
+        );
+        let unassignment = sign(
+            build_git_issue_unassignment(&repo, &issue, &assignees, "Unassigned this issue")
+                .unwrap(),
+        );
+
+        assert!(!assignment
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice().first().map(String::as_str) == Some("prior") }));
+        assert!(!unassignment
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice().first().map(String::as_str) == Some("prior") }));
     }
 
     #[test]

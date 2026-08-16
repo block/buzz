@@ -32,10 +32,15 @@ const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
-    "CLAUDE_CODE_EXECUTABLE",
+    "BUZZ_ACP_AGENTS",
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+    "BUZZ_ACP_ALLOWED_RESPOND_TO",
     "BUZZ_ACP_AGENT_OWNER",
+    "BUZZ_ACP_DISPLAY_NAME",
+    "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
+    "BUZZ_ACP_IDLE_POOL_SLEEP",
+    "BUZZ_ACP_NO_PRESENCE",
     "BUZZ_ACP_SETUP_PAYLOAD",
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
@@ -1168,7 +1173,7 @@ mod tests {
             "BUZZ_PRIVATE_KEY",
             "buzz_relay_url",
             "BUZZ_MANAGED_AGENT",
-            "CLAUDE_CODE_EXECUTABLE",
+            "BUZZ_ACP_DISPLAY_NAME",
         ] {
             let mut request = request();
             request["agent"]["env_vars"] = serde_json::json!({ key: "x" });

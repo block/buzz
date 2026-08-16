@@ -1,17 +1,11 @@
 import * as React from "react";
 
+import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { cn } from "@/shared/lib/cn";
-import {
-  MENTION_CHIP_BASE_CLASSES,
-  MENTION_CHIP_HOVER_CLASSES,
-} from "@/shared/ui/mentionChip";
 
+import { BuzzLinkChip } from "./BuzzLinkChip";
 import type { MessageLinkPillProps } from "./types";
-import {
-  getMessageLinkChannelLabel,
-  getMessageLinkLabel,
-  MESSAGE_LINK_PREFIX,
-} from "@/features/messages/lib/messageLinkLabel";
+import { getMessageLinkLabel } from "@/features/messages/lib/messageLinkLabel";
 
 const graphemeSegmenter =
   typeof Intl.Segmenter === "function"
@@ -46,6 +40,7 @@ function segmentLinkLabel(label: string): Array<{
 
 export function MessageLinkPill({
   channels,
+  href,
   interactive,
   link,
   onOpenMessageLink,
@@ -54,65 +49,38 @@ export function MessageLinkPill({
 }: MessageLinkPillProps) {
   const [isHovered, setIsHovered] = React.useState(false);
   const channel = channels.find((c) => c.id === link.channelId);
-  const channelLabel = channel?.name ?? "channel";
+  const channelLabel = channel?.name ?? link.channelId.slice(0, 8);
+  const shortId = link.messageId.slice(0, 8);
   const isSentFromThread = variant === "sent-from-thread";
+  const permalink = href ?? buildMessageLink(link);
   const label = getMessageLinkLabel({
     channelName: channelLabel,
     threadExcerpt,
     variant,
   });
-  const channelLinkLabel = getMessageLinkChannelLabel(channelLabel);
-
-  if (!interactive) {
-    if (!isSentFromThread) {
-      return (
-        <span
-          className="inline-flex min-w-0 max-w-80 items-center gap-1.5 align-baseline"
-          data-message-link=""
-        >
-          <span className="shrink-0">{MESSAGE_LINK_PREFIX}</span>
-          <span
-            className={cn(
-              MENTION_CHIP_BASE_CLASSES,
-              "min-w-0 max-w-full truncate",
-            )}
-            data-channel-link=""
-          >
-            {channelLinkLabel}
-          </span>
-        </span>
-      );
-    }
-    return (
-      <span className="inline-block max-w-80 truncate" data-message-link="">
-        {label}
-      </span>
-    );
-  }
 
   if (!isSentFromThread) {
     return (
-      <span
-        className="inline-flex min-w-0 max-w-80 items-center gap-1.5 align-baseline"
+      <BuzzLinkChip
         data-message-link=""
+        href={permalink}
+        icon="message"
+        aria-label={`Open message ${shortId} in channel ${channelLabel}`}
+        title={label}
+        interactive={interactive}
+        onOpenLink={() => {
+          onOpenMessageLink(link);
+        }}
       >
-        <span className="shrink-0">{MESSAGE_LINK_PREFIX}</span>
-        <button
-          type="button"
-          aria-label={`Open thread in ${channelLabel}`}
-          title={label}
-          className={cn(
-            MENTION_CHIP_BASE_CLASSES,
-            MENTION_CHIP_HOVER_CLASSES,
-            "min-w-0 max-w-full cursor-pointer truncate",
-          )}
-          data-channel-link=""
-          onClick={() => {
-            onOpenMessageLink(link);
-          }}
-        >
-          {channelLinkLabel}
-        </button>
+        {channelLabel} · {shortId}
+      </BuzzLinkChip>
+    );
+  }
+
+  if (!interactive) {
+    return (
+      <span className="inline-block max-w-80 truncate" data-message-link="">
+        {label}
       </span>
     );
   }

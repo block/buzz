@@ -7,9 +7,9 @@
 //!   → bounded sync_channel (TEXT_QUEUE_DEPTH = 8)
 //!   → tts_worker thread (owns 1 Pocket TTS engine + 1 persistent Player)
 //!       1. Preprocess text
-//!       2. Split into sentences
-//!       3. Synthesize each sentence individually → f32 PCM
-//!       4. Clamp to full scale + fade out each sentence
+//!       2. Split into tokenizer-safe natural units, prioritizing sentence one
+//!       3. Synthesize each unit → f32 PCM
+//!       4. Clamp to full scale + fade out each unit
 //!       5. Append each buffer to the persistent rodio Player (gapless)
 //!       6. While audio is draining, keep pulling queued text items and
 //!          synthesizing ahead — playback of item N overlaps synthesis of
@@ -41,7 +41,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -50,7 +50,7 @@ use std::{
 use super::pocket::{
     load_text_to_speech, load_voice_style, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
 };
-use super::preprocessing::{preprocess_for_tts, split_sentences};
+use super::preprocessing::preprocess_for_tts;
 
 #[path = "tts_voice_transition.rs"]
 mod voice_transition;
@@ -69,6 +69,9 @@ mod pipeline_controls;
 #[path = "tts_speaker_cancellation.rs"]
 mod speaker_cancellation;
 use speaker_cancellation::*;
+#[path = "tts_streaming.rs"]
+mod streaming;
+use streaming::*;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -99,37 +102,10 @@ const SYNTH_STEPS: usize = 1;
 /// the leading waveform is important.
 const FADE_OUT_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.008) as usize;
 
-/// Length of the zero-sample cushion prepended before each synthesized
-/// sentence chunk, so the OS audio device / rodio mixer has a fully-quiet
-/// ramp-up window before the real onset hits.
-///
-/// This used to be applied only before the first sentence of a whole response.
-/// That still left later sentence chunks vulnerable to first-syllable clipping
-/// when their first phoneme was soft (notably `I'm` / `I've`) and rodio crossed
-/// from an explicit silence buffer straight into non-zero speech. 20 ms ≈ 480
-/// samples is enough to cover a CoreAudio buffer turnover without being audible
-/// as latency. At sentence boundaries this lead-in is budgeted out of the
-/// existing inter-sentence pause, so it does not lengthen multi-sentence gaps.
+/// Length of the zero-sample cushion prepended when playback is idle, so the
+/// OS audio device / rodio mixer has a fully-quiet ramp-up window before the
+/// real onset hits. Continuously queued chunks receive no synthetic padding.
 const SENTENCE_LEAD_IN_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.020) as usize;
-
-/// Approximate character budget for one synthesis chunk.
-///
-/// Upstream pocket-tts groups sentences into chunks of up to
-/// `MAX_TOKEN_PER_CHUNK = 50` tokenizer tokens (`default_parameters.py`) —
-/// typically multi-sentence chunks — because every `generate()` call is an
-/// independent generation with a cold FlowLM start, and each chunk boundary
-/// is an exposed prosody seam (kyutai-labs/pocket-tts #151; the Kyutai team
-/// names chunk stitching as the reliability lever). Our previous
-/// sentence-per-call path created ~2–4× more seams than upstream.
-///
-/// This character budget performs only coarse sentence packing. The April
-/// engine applies its SentencePiece tokenizer afterward and refines every
-/// result at the bundle's exact 50-token boundary.
-const MAX_CHUNK_CHARS: usize = 200;
-
-/// Silence inserted between sentences by the TTS pipeline (seconds).
-/// Injected as a silent buffer between each synthesized sentence chunk.
-const INTER_SENTENCE_SILENCE: f32 = 0.1;
 
 type WorkerControlState = (
     Arc<AtomicBool>,
@@ -450,7 +426,9 @@ fn tts_worker(
     // `tts_active` lifecycle: set on the first append while idle, cleared
     // whenever the player has fully drained — either in the idle timeout
     // arm or on item receipt before synthesis begins.
-    let silence_buf_len = (INTER_SENTENCE_SILENCE * SAMPLE_RATE as f32) as usize;
+    // EXPERIMENTAL (latency bench): `Some(emit_frames)` = stream PCM deltas
+    // out of Pocket as they are generated (see tts_streaming.rs).
+    let tts_streaming = streaming_emit_frames();
     // `first_append` = "no audio queued since the player last went idle".
     // Flipped by `build_sentence_append_buffer` on the first real append; the
     // idle branch below uses it to decide when to drop `tts_active` and to
@@ -705,17 +683,20 @@ fn tts_worker(
             continue;
         }
 
-        // Split into sentences, then group into synthesis chunks: the first
-        // sentence stays alone (fast time-to-first-audio), the rest pack
-        // greedily up to MAX_CHUNK_CHARS. Playback of each model unit overlaps
-        // synthesis of the next one. The Pocket engine applies its exact
-        // 50-token split; keeping those units within one playback chunk avoids
-        // adding fades and pauses at token-only boundaries.
-        let sentences: Vec<String> = split_sentences(&text)
-            .into_iter()
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-        let chunks = group_sentences_into_chunks(&sentences, MAX_CHUNK_CHARS);
+        // Let Pocket's tokenizer-aware splitter isolate the first sentence for
+        // minimum time-to-first-audio, then pack later sentences into the
+        // largest natural units within the model's exact 50-token limit. Once
+        // each unit is appended, generation of the next proceeds while rodio
+        // plays the already-queued audio.
+        let chunks = match engine.split_text_for_playback(&text) {
+            Ok(chunks) => chunks,
+            Err(_) => {
+                eprintln!(
+                    "buzz-desktop: tts stage=synthesis status=failed reason=chunking route_id={route_id}"
+                );
+                continue;
+            }
+        };
         if chunks.is_empty() {
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=empty reason=no_chunks route_id={route_id}"
@@ -744,6 +725,41 @@ fn tts_worker(
 
             let text = chunk.trim();
             if text.is_empty() {
+                continue;
+            }
+
+            // EXPERIMENTAL (latency bench): streaming synthesis path — see
+            // tts_streaming.rs for the mechanics and exactness constraints.
+            if let Some(emit_frames) = tts_streaming {
+                let outcome = synthesize_streaming(
+                    &engine,
+                    text,
+                    &style,
+                    emit_frames,
+                    (&cancel, &voice_cancel, &shutdown),
+                    StreamingPlayback {
+                        player: &player,
+                        first_append: &mut first_append,
+                        route_id,
+                    },
+                    &mut |prepared| {
+                        if !append_audio(
+                            prepared,
+                            route_id,
+                            speaker_pubkey.as_deref(),
+                            speaker_generation,
+                        ) {
+                            return false;
+                        }
+                        appended_audio = true;
+                        last_route_id = route_id;
+                        true
+                    },
+                );
+                if let Some(outcome) = outcome {
+                    synthesis_outcome = outcome;
+                    break 'playback_chunks;
+                }
                 continue;
             }
 
@@ -811,7 +827,6 @@ fn tts_worker(
                             samples,
                             chunk_index,
                             &mut first_append,
-                            silence_buf_len,
                             player.empty(),
                         ) {
                             if !append_audio(
@@ -842,9 +857,7 @@ fn tts_worker(
                     }
                 }
             }
-            if let Some(prepared) =
-                playback_audio.finish(&mut first_append, silence_buf_len, player.empty())
-            {
+            if let Some(prepared) = playback_audio.finish(&mut first_append, player.empty()) {
                 if !append_audio(
                     prepared,
                     route_id,
@@ -880,90 +893,6 @@ fn tts_worker(
 
     finish_voice_change_ack(&voice_change_ack);
     tts_active.store(false, Ordering::Release);
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Check for cancel or shutdown. Returns `true` if the caller should break/continue.
-/// On cancel: drains the text queue and clears the cancel flag.
-///
-/// `player` pairs the Player with the `player_ops` mutex shared with the
-/// barge-in monitor thread; the cancel/shutdown clear runs under that lock so
-/// it is serialized with the monitor's stale-branch re-check (see the monitor
-/// block in `tts_worker`).
-fn handle_cancel_or_shutdown(
-    cancel_signals: CancelSignals<'_>,
-    shutdown: &AtomicBool,
-    tts_active: &AtomicBool,
-    text_state: CancelTextState<'_>,
-    voice_change_ack: &VoiceChangeAck,
-    active_route_id: Option<u64>,
-    player: Option<(&rodio::Player, &Mutex<()>)>,
-) -> bool {
-    let (cancel, voice_cancel) = cancel_signals;
-    let (text_rx, deferred_text, current_text) = text_state;
-    if shutdown.load(Ordering::Acquire) {
-        eprintln!(
-            "buzz-desktop: tts stage=cancellation reason=shutdown route_id={}",
-            active_route_id.unwrap_or(0)
-        );
-        if let Some((p, ops)) = player {
-            let _ops = lock_player_ops(ops);
-            p.clear();
-        }
-        tts_active.store(false, Ordering::Release);
-        return true;
-    }
-    if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
-        // Serialize with begin_voice_change so the generation boundary and
-        // cancel consumption are observed as one transition.
-        let pending_voice_change = voice_change_ack
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        // Consume at the serialization point. A later barge-in remains true
-        // for the next pass instead of being overwritten after queue cleanup.
-        let barge_in = cancel.swap(false, Ordering::AcqRel);
-        voice_cancel.store(false, Ordering::Release);
-        eprintln!(
-            "buzz-desktop: tts stage=cancellation reason={} route_id={}",
-            if barge_in { "barge_in" } else { "voice_switch" },
-            active_route_id.unwrap_or(0)
-        );
-        let preserve_generation = (!barge_in)
-            .then(|| {
-                pending_voice_change
-                    .as_ref()
-                    .map(|pending| pending.generation)
-            })
-            .flatten();
-        retain_cancelled_text(deferred_text, current_text, text_rx, preserve_generation);
-        if let Some((p, ops)) = player {
-            let _ops = lock_player_ops(ops);
-            // `Player::clear()` removes queued sources AND pauses the player
-            // (rodio 0.22 `clear()` ends with `self.pause()`). With one
-            // persistent Player for the worker's lifetime, the un-pause is
-            // mandatory: without `play()`, every append after a barge-in
-            // would queue silently forever.
-            p.clear();
-            p.play();
-            // Consume the flag under the lock: once released with
-            // `cancel == false`, the monitor's stale branch no-ops instead
-            // of clearing the fresh post-cancel utterance.
-        }
-        tts_active.store(false, Ordering::Release);
-        return true;
-    }
-    false
-}
-
-/// Acquire the `player_ops` lock, recovering from poison.
-///
-/// The data under the mutex is `()` — it only serializes Player mutations —
-/// so a panicked holder leaves nothing inconsistent to observe and recovery
-/// is always safe. Without this, a worker panic would wedge the monitor (or
-/// vice versa) on `unwrap()`.
-fn lock_player_ops(ops: &Mutex<()>) -> MutexGuard<'_, ()> {
-    ops.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
