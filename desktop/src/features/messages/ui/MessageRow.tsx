@@ -812,6 +812,12 @@ export const MessageRow = React.memo(
           )}
           data-message-id={message.id}
           data-testid="message-row"
+          data-author-kind={
+            message.isAgent ||
+            (message.pubkey && isKnownAgentPubkey(message.pubkey))
+              ? "agent"
+              : "human"
+          }
           onAnimationEnd={handleEntranceAnimationEnd}
         >
           {isThreadReplyLayout ? (

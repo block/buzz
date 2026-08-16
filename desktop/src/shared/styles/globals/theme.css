@@ -850,3 +850,38 @@
   position: absolute;
   z-index: 0;
 }
+
+/* ── Identity variants (brand exploration) ───────────────────────────────
+ * Active only when a variant stamps `data-identity` on <html> (see
+ * shared/theme/identity-variants.ts). `--agent-accent` is an HSL channel
+ * triplet set inline by the variant; per-variant rules below shape how
+ * agent-authored rows read against human ones. */
+
+/* Shared agent-row treatment: tinted surface + signature edge + the author
+ * name in the agent hue. */
+[data-identity] [data-author-kind="agent"] {
+  background: hsl(var(--agent-accent) / 0.07);
+  box-shadow: inset 2px 0 0 hsl(var(--agent-accent) / 0.75);
+}
+[data-identity] [data-author-kind="agent"] [data-testid="message-author"] {
+  color: hsl(var(--agent-accent));
+}
+
+/* dual — the "read a channel at a glance" direction: strongest tint. */
+[data-identity="dual"] [data-author-kind="agent"] {
+  background: hsl(var(--agent-accent) / 0.11);
+}
+
+/* mono — dev-tool identity: JetBrains Mono on names + channel labels, and a
+ * plain-text AGENT marker instead of a badge. */
+[data-identity="mono"] [data-testid="message-author"],
+[data-identity="mono"] [data-testid^="channel-"] {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+[data-identity="mono"]
+  [data-author-kind="agent"]
+  [data-testid="message-author"]::after {
+  content: " · agent";
+  letter-spacing: 0.08em;
+  opacity: 0.75;
+}

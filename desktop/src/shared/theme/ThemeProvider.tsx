@@ -12,6 +12,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invokeTauri } from "@/shared/api/tauri";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
+import { applyIdentityVariant, readIdentityVariant } from "./identity-variants";
 import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
@@ -193,6 +194,9 @@ function applyAccentColor(value: string) {
     root.style.setProperty("--sidebar-primary-foreground", background);
     root.style.setProperty("--sidebar-active", foreground);
     root.style.setProperty("--sidebar-active-foreground", background);
+    // Identity variants re-assert their signature vars after every accent
+    // application so they always win over the theme/accent layer.
+    applyIdentityVariant(readIdentityVariant());
     return;
   }
 
@@ -211,6 +215,8 @@ function applyAccentColor(value: string) {
   root.style.setProperty("--sidebar-primary-foreground", fgHsl);
   root.style.setProperty("--sidebar-active", accentHsl);
   root.style.setProperty("--sidebar-active-foreground", fgHsl);
+  // See the neutral branch above.
+  applyIdentityVariant(readIdentityVariant());
 }
 
 /**
