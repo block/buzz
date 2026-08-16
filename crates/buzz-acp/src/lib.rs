@@ -3,6 +3,8 @@
 mod acp;
 mod config;
 mod engram_fetch;
+mod experience_capture;
+mod experience_outbox;
 mod filter;
 mod observer;
 mod pool;
@@ -11,6 +13,9 @@ mod queue;
 mod relay;
 mod setup_mode;
 mod usage;
+
+#[cfg(test)]
+mod experience_capture_tests;
 
 pub use usage::TurnUsage;
 
@@ -1673,6 +1678,34 @@ async fn tokio_main() -> Result<()> {
         }
     }
     let owner_cache = OwnerCache::new(startup_owner.clone());
+
+    if config.memory_enabled {
+        if let Some(owner_pubkey) = startup_owner
+            .as_deref()
+            .and_then(|value| PublicKey::from_hex(value).ok())
+        {
+            let outbox_path = std::env::var_os("BUZZ_ACP_EXPERIENCE_OUTBOX")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .join(".buzz")
+                        .join("experience-outbox.sqlite3")
+                });
+            if let Err(error) = experience_capture::initialize_experience_runtime(
+                &outbox_path,
+                config.keys.clone(),
+                owner_pubkey,
+                relay.rest_client(),
+            ) {
+                tracing::warn!(
+                    path = %outbox_path.display(),
+                    %error,
+                    "experience_learning_degraded: outbox unavailable"
+                );
+            }
+        }
+    }
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;

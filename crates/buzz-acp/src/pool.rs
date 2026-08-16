@@ -1366,6 +1366,7 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    crate::experience_capture::finish_turn(turn_id, &outcome);
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -1416,6 +1417,15 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
+    crate::experience_capture::begin_turn(
+        &turn_id,
+        &turn_started_at,
+        &source,
+        &triggering_event_ids,
+        &ctx.agent_keys.public_key().to_hex(),
+        agent.desired_model.as_deref(),
+        &ctx.harness_name,
+    );
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
