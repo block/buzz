@@ -3,7 +3,7 @@ use nostr::PublicKey;
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::{fold_name, validate_hex64};
 
 use super::agents::fetch_archived_snapshot;
 use super::verified_profiles::{
@@ -437,7 +437,7 @@ fn profile_content(event: &serde_json::Value) -> serde_json::Map<String, serde_j
 }
 
 fn name_search_profiles(events: &[serde_json::Value], query: &str) -> Vec<serde_json::Value> {
-    let lower_query = query.to_ascii_lowercase();
+    let lower_query = fold_name(query);
     events
         .iter()
         .filter_map(|event| {
@@ -450,8 +450,8 @@ fn name_search_profiles(events: &[serde_json::Value], query: &str) -> Vec<serde_
                 .get("name")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            if !display_name.to_ascii_lowercase().contains(&lower_query)
-                && !name.to_ascii_lowercase().contains(&lower_query)
+            if !fold_name(display_name).contains(&lower_query)
+                && !fold_name(name).contains(&lower_query)
             {
                 return None;
             }

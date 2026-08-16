@@ -16,7 +16,7 @@ use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAg
 use crate::commands::users::presence_subject;
 use crate::error::CliError;
 use crate::validate::{
-    parse_uuid, read_file_or_stdin, read_or_stdin, validate_hex64, validate_uuid,
+    fold_name, parse_uuid, read_file_or_stdin, read_or_stdin, validate_hex64, validate_uuid,
 };
 
 /// Stable, scriptable projection of a kind:39000 channel-metadata event: the
@@ -190,7 +190,7 @@ pub async fn cmd_search_channels(
     });
     let arr = client.query_paginated(filter, limit).await?;
 
-    let matches = search_matches(&arr, &query.to_ascii_lowercase(), exact, include_archived);
+    let matches = search_matches(&arr, &fold_name(query), exact, include_archived);
     let output = serde_json::to_string(&matches).expect("serializing ChannelSummary");
     println!("{output}");
     Ok(())
@@ -231,7 +231,7 @@ fn search_matches(
 }
 
 fn name_matches(name: &str, needle_lower: &str, exact: bool) -> bool {
-    let hay = name.to_ascii_lowercase();
+    let hay = fold_name(name);
     if exact {
         hay == needle_lower
     } else {
