@@ -8135,6 +8135,17 @@ async function applyMockPersonaUpdate(
   return persona;
 }
 
+function teamMembershipDeletionError(displayName: string): string {
+  return `Cannot remove ${displayName}: this agent belongs to a team. Remove it from every team first.`;
+}
+
+function personaIsCurrentTeamMember(personaId: string | null): boolean {
+  return (
+    personaId !== null &&
+    mockTeams.some((team) => team.persona_ids.includes(personaId))
+  );
+}
+
 async function handleDeletePersona(args: { id: string }): Promise<void> {
   const persona = mockPersonas.find((candidate) => candidate.id === args.id);
   if (!persona) {
@@ -8143,10 +8154,8 @@ async function handleDeletePersona(args: { id: string }): Promise<void> {
   if (persona.is_builtin) {
     throw new Error("Built-in agents cannot be deleted.");
   }
-  if (mockTeams.some((team) => team.persona_ids.includes(args.id))) {
-    throw new Error(
-      `${persona.display_name} is still referenced by a team. Remove it from those teams first.`,
-    );
+  if (personaIsCurrentTeamMember(args.id)) {
+    throw new Error(teamMembershipDeletionError(persona.display_name));
   }
 
   mockPersonas = mockPersonas.filter((candidate) => candidate.id !== args.id);
@@ -8172,20 +8181,15 @@ async function handleSetPersonaActive(args: {
       "Only built-in agents can be added to or removed from My Agents.",
     );
   }
+  if (!args.active && personaIsCurrentTeamMember(args.id)) {
+    throw new Error(teamMembershipDeletionError(persona.display_name));
+  }
   if (
     !args.active &&
     mockManagedAgents.some((agent) => agent.persona_id === args.id)
   ) {
     throw new Error(
       `${persona.display_name} is still assigned to a managed agent. Remove or reassign those agents first.`,
-    );
-  }
-  if (
-    !args.active &&
-    mockTeams.some((team) => team.persona_ids.includes(args.id))
-  ) {
-    throw new Error(
-      `${persona.display_name} is still referenced by a team. Remove it from those teams first.`,
     );
   }
 
@@ -8767,6 +8771,9 @@ async function handleDeleteManagedAgent(args: {
   // Model the backend invariant: reject deletion of deployed remote agents
   // unless force_remote_delete is true.
   const agent = mockManagedAgents.find((a) => a.pubkey === args.pubkey);
+  if (agent && personaIsCurrentTeamMember(agent.persona_id)) {
+    throw new Error(teamMembershipDeletionError(agent.name));
+  }
   if (
     agent &&
     agent.backend.type === "provider" &&

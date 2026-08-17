@@ -2,7 +2,10 @@ use std::fs;
 
 use tauri::AppHandle;
 
-use crate::{managed_agents::AgentDefinition, util::now_iso};
+use crate::{
+    managed_agents::{AgentDefinition, ManagedAgentRecord, TeamRecord},
+    util::now_iso,
+};
 
 struct BuiltInPersona {
     id: &'static str,
@@ -288,14 +291,35 @@ pub fn validate_persona_deletion(
         ));
     }
 
+    validate_agent_not_in_team(&persona.display_name, referenced_by_team)?;
+
+    Ok(())
+}
+
+pub fn validate_agent_not_in_team(
+    display_name: &str,
+    referenced_by_team: bool,
+) -> Result<(), String> {
     if referenced_by_team {
         return Err(format!(
-            "{} is still referenced by a team. Remove it from those teams first.",
-            persona.display_name
+            "Cannot remove {display_name}: this agent belongs to a team. \
+             Remove it from every team first."
         ));
     }
 
     Ok(())
+}
+
+pub fn validate_managed_agent_team_deletion(
+    record: &ManagedAgentRecord,
+    teams: &[TeamRecord],
+) -> Result<(), String> {
+    let referenced_by_team = record.persona_id.as_deref().is_some_and(|persona_id| {
+        teams
+            .iter()
+            .any(|team| team.persona_ids.iter().any(|id| id == persona_id))
+    });
+    validate_agent_not_in_team(&record.name, referenced_by_team)
 }
 
 pub fn validate_persona_activation_change(
@@ -308,16 +332,13 @@ pub fn validate_persona_activation_change(
         return Err("Only built-in agents can be added to or removed from My Agents.".to_string());
     }
 
+    if !active {
+        validate_agent_not_in_team(&persona.display_name, referenced_by_team)?;
+    }
+
     if !active && referenced_by_managed_agent {
         return Err(format!(
             "{} is still assigned to a managed agent. Remove or reassign those agents first.",
-            persona.display_name
-        ));
-    }
-
-    if !active && referenced_by_team {
-        return Err(format!(
-            "{} is still referenced by a team. Remove it from those teams first.",
             persona.display_name
         ));
     }

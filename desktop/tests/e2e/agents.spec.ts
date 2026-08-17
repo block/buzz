@@ -2503,9 +2503,22 @@ test("inactive built-ins cannot be used to create teams", async ({ page }) => {
   expect(error).toBe("Honey is not in My Agents.");
 });
 
-test("built-in removal failures show up from My Agents", async ({ page }) => {
+test("team members show the same delete error from card and profile", async ({
+  page,
+}) => {
+  const honeyPubkey = TEST_IDENTITIES.alice.pubkey;
+  const teamDeleteError =
+    "Cannot remove Honey: this agent belongs to a team. Remove it from every team first.";
   await installMockBridge(page, {
     activePersonaIds: ["builtin:honey"],
+    managedAgents: [
+      {
+        pubkey: honeyPubkey,
+        name: "Honey",
+        personaId: "builtin:honey",
+        status: "running",
+      },
+    ],
   });
   await gotoApp(page);
 
@@ -2520,10 +2533,29 @@ test("built-in removal failures show up from My Agents", async ({ page }) => {
   await page.getByLabel("Open actions for Honey").click();
   await page.getByRole("menuitem", { name: "Delete" }).click();
 
+  const cardErrorToast = page
+    .locator("[data-sonner-toast]")
+    .filter({ hasText: teamDeleteError });
+  await expect(cardErrorToast).toBeVisible();
+  await expect(cardErrorToast).not.toBeVisible({ timeout: 10_000 });
+
+  await page.getByTestId("persona-agent-row-builtin:honey").click();
+  await page.getByTestId("user-profile-settings-menu-trigger").click();
+  await page.getByTestId(`user-profile-agent-delete-${honeyPubkey}`).click();
+  await page.getByTestId("agent-delete-confirm-action").click();
+
   await expect(
-    page
-      .locator("[data-sonner-toast]")
-      .filter({ hasText: "Honey is still referenced by a team." }),
+    page.locator("[data-sonner-toast]").filter({ hasText: teamDeleteError }),
+  ).toBeVisible();
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "Deleted Honey." }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`user-profile-agent-delete-${honeyPubkey}`),
+  ).toHaveCount(0);
+  await page.getByTestId("user-profile-settings-menu-trigger").click();
+  await expect(
+    page.getByTestId(`user-profile-agent-delete-${honeyPubkey}`),
   ).toBeVisible();
 });
 
@@ -2549,7 +2581,7 @@ test("personas referenced by teams cannot be deleted", async ({ page }) => {
   });
 
   expect(error).toBe(
-    "Analyst is still referenced by a team. Remove it from those teams first.",
+    "Cannot remove Analyst: this agent belongs to a team. Remove it from every team first.",
   );
 });
 

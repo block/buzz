@@ -11,10 +11,10 @@ use crate::{
         load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
         resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        sync_managed_agent_processes, try_regenerate_nest, validate_managed_agent_team_deletion,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -1296,12 +1296,10 @@ pub async fn delete_managed_agent(
                 state.clear_agent_session_caches(pubkey);
             }
 
-            // Guard: reject deletion of deployed remote agents unless explicitly forced.
-            // This turns "don't orphan remote infra" from a UI convention into a backend
-            // invariant — a buggy or compromised IPC caller cannot silently orphan a live
-            // remote deployment. The frontend sends force_remote_delete: true only after
-            // the user confirms the orphan warning.
+            // Backend guards prevent a stale or compromised IPC caller from
+            // deleting current team members or silently orphaning remote infra.
             if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
+                validate_managed_agent_team_deletion(record, &load_teams(&app)?)?;
                 if record.backend != BackendKind::Local
                     && record.backend_agent_id.is_some()
                     && !force_remote_delete.unwrap_or(false)

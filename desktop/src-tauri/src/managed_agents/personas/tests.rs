@@ -224,7 +224,20 @@ fn validate_persona_activation_change_rejects_team_references() {
 
     assert_eq!(
         err,
-        "Fizz is still referenced by a team. Remove it from those teams first."
+        "Cannot remove Fizz: this agent belongs to a team. Remove it from every team first."
+    );
+}
+
+#[test]
+fn validate_persona_activation_change_prioritizes_team_membership() {
+    let mut persona = custom_persona("builtin:fizz", "Fizz");
+    persona.is_builtin = true;
+
+    let err = validate_persona_activation_change(&persona, false, true, true).unwrap_err();
+
+    assert_eq!(
+        err,
+        "Cannot remove Fizz: this agent belongs to a team. Remove it from every team first."
     );
 }
 
@@ -255,7 +268,7 @@ fn validate_persona_deletion_rejects_team_references() {
 
     assert_eq!(
         err,
-        "Alpha is still referenced by a team. Remove it from those teams first."
+        "Cannot remove Alpha: this agent belongs to a team. Remove it from every team first."
     );
 }
 

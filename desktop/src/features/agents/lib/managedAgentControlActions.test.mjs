@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  deleteManagedAgentWithRules,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -79,6 +80,66 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+test("remote team members are rejected before shutdown or deletion", async () => {
+  const teamAgent = agent({
+    backend: {
+      type: "provider",
+      id: "remote-host",
+      config: {},
+    },
+    backendAgentId: "remote-agent-1",
+    name: "Team Agent",
+    personaId: "custom:team-agent",
+    status: "deployed",
+  });
+  let deleteCalled = false;
+
+  await assert.rejects(
+    deleteManagedAgentWithRules({
+      agent: teamAgent,
+      channels: [{ id: "channel-1", name: "general" }],
+      deleteManagedAgent: async () => {
+        deleteCalled = true;
+      },
+      presenceLookup: {
+        [teamAgent.pubkey]: "online",
+      },
+      relayAgents: [
+        {
+          pubkey: teamAgent.pubkey,
+          channelIds: ["channel-1"],
+          channels: ["general"],
+        },
+      ],
+      teams: [{ personaIds: ["custom:team-agent"] }],
+    }),
+    {
+      message:
+        "Cannot remove Team Agent: this agent belongs to a team. Remove it from every team first.",
+    },
+  );
+  assert.equal(deleteCalled, false);
+});
+
+test("agents removed from their teams can still be deleted", async () => {
+  const formerTeamAgent = agent({
+    personaId: "custom:former-team-agent",
+  });
+  let deletedPubkey = null;
+
+  await deleteManagedAgentWithRules({
+    agent: formerTeamAgent,
+    channels: [],
+    deleteManagedAgent: async ({ pubkey }) => {
+      deletedPubkey = pubkey;
+    },
+    relayAgents: [],
+    teams: [{ personaIds: ["custom:other-agent"] }],
+  });
+
+  assert.equal(deletedPubkey, formerTeamAgent.pubkey);
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------

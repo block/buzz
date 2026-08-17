@@ -90,6 +90,44 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
     }
 }
 
+fn team_record(id: &str, persona_ids: &[&str]) -> crate::managed_agents::TeamRecord {
+    crate::managed_agents::TeamRecord {
+        id: id.to_string(),
+        name: "Test Team".to_string(),
+        description: None,
+        instructions: None,
+        persona_ids: persona_ids.iter().map(|id| (*id).to_string()).collect(),
+        is_builtin: false,
+        source_dir: None,
+        is_symlink: false,
+        symlink_target: None,
+        version: None,
+        created_at: "2026-08-04T00:00:00Z".to_string(),
+        updated_at: "2026-08-04T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn managed_agent_deletion_rejects_current_team_members() {
+    let record = bare_agent_record(Some("builtin:fizz"), None, None);
+    let teams = vec![team_record("team-1", &["builtin:fizz"])];
+
+    let error = validate_managed_agent_team_deletion(&record, &teams).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Cannot remove Agent: this agent belongs to a team. Remove it from every team first."
+    );
+}
+
+#[test]
+fn managed_agent_deletion_allows_agents_removed_from_teams() {
+    let record = bare_agent_record(Some("builtin:fizz"), None, None);
+    let teams = vec![team_record("team-1", &["builtin:honey"])];
+
+    assert!(validate_managed_agent_team_deletion(&record, &teams).is_ok());
+}
+
 /// Auto-archive uses the same NIP-IA wire builder as the explicit GUI action,
 /// attaches owner consent, and marks a deliberate delete as `retired`.
 #[test]
