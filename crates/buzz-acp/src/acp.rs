@@ -2953,10 +2953,43 @@ mod tests {
         );
     }
 
+    /// Spawn a fake ACP agent that runs `script` under a resolved POSIX shell.
+    ///
+    /// Goes through [`crate::testshell::posix_shell_command`] rather than the
+    /// bare name `"bash"`: on Windows the bare name resolves to WSL's
+    /// `System32\bash.exe`, whose `read` builtin returns empty over a pipe.
+    /// See that module for the full failure mode.
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), script.into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test script")
+    }
+
+    /// [`spawn_script`], but blocks until the fixture has actually started.
+    ///
+    /// Deadline-sensitive tests must start their clock only once the shell is
+    /// provably executing. Process startup is near-free on Linux but costs
+    /// hundreds of milliseconds under MSYS fork emulation on Windows, so a
+    /// hard deadline measured from before the spawn is partly measuring host
+    /// startup rather than the behaviour under test — which is how these tests
+    /// came to depend on whichever interpreter happened to boot fastest.
+    ///
+    /// The sentinel is consumed here, so the JSON-RPC read loop never sees it.
+    async fn spawn_script_ready(script: &str) -> AcpClient {
+        let mut client = spawn_script(&format!("printf 'READY\\n'; {script}")).await;
+        let line = client
+            .reader
+            .next()
             .await
-            .expect("failed to spawn test script")
+            .expect("fixture must emit READY before running its body")
+            .expect("fixture stdout must be readable");
+        assert_eq!(line.trim(), "READY", "unexpected first line from fixture");
+        client
     }
 
     #[cfg(unix)]
@@ -3117,30 +3150,34 @@ mod tests {
         );
     }
 
+    /// Valid JSON `session/update` notifications reset the idle timer; non-JSON
+    /// lines do not.
+    ///
+    /// See [`keepalive_resets_idle_past_deadline`] for why the budget is loose
+    /// and why the elapsed floor must stay at 2x `IDLE`.
     #[tokio::test]
     async fn idle_resets_on_stdout_activity() {
-        // Send valid JSON (session/update notifications) to reset the idle timer.
-        // Non-JSON lines no longer reset idle — only valid JSON notifications do.
+        const IDLE: std::time::Duration = std::time::Duration::from_millis(600);
+        const FLOOR: std::time::Duration = std::time::Duration::from_millis(1200);
+
         let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
+            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 30"#,
         )
         .await;
-        let max_dur = std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(30);
         let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(200),
-                hard_deadline,
-                max_dur,
-            )
+            .read_until_response_with_idle_timeout("test", 999, IDLE, hard_deadline, max_dur)
             .await;
         let elapsed = start.elapsed();
-        // 10 messages × 50ms = ~500ms of activity, then idle timeout fires after 200ms more
-        assert!(elapsed >= std::time::Duration::from_millis(400));
-        assert!(elapsed < std::time::Duration::from_secs(3));
+        // 20 messages of activity, then idle fires one IDLE later. Clearing
+        // FLOOR = 2x IDLE proves the timer was reset at least once.
+        assert!(
+            elapsed >= FLOOR,
+            "stdout activity should reset idle; elapsed only {elapsed:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(20));
         assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
@@ -3314,34 +3351,45 @@ mod tests {
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
     }
 
+    /// Keepalive `session/update` lines must keep resetting the idle timer, so
+    /// the turn survives far past a single idle deadline.
+    ///
+    /// The budget here is deliberately loose. `sleep` is an external binary
+    /// under MSYS, so on Windows each `echo; sleep 0.05` iteration costs a
+    /// process spawn: the real inter-line gap is ~98ms (up to ~244ms under
+    /// load) rather than the nominal 50ms. With the original 100ms idle budget
+    /// the fixture was genuinely silent for longer than its own deadline, so
+    /// the read loop timed out *correctly* and the test failed for a reason
+    /// that had nothing to do with the behaviour under test.
+    ///
+    /// INVARIANT: the elapsed floor must stay strictly greater than
+    /// `idle_timeout` — ideally 2x, as here. If it ever drops to or below it,
+    /// a run in which no reset happened at all would still satisfy the
+    /// assertion, and the test would prove nothing.
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
+        const IDLE: std::time::Duration = std::time::Duration::from_millis(600);
+        const FLOOR: std::time::Duration = std::time::Duration::from_millis(1200);
+
         let mut client = spawn_script(
-            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
+            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 30"#,
         )
         .await;
-        let max_dur = std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(30);
         let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(100),
-                hard_deadline,
-                max_dur,
-            )
+            .read_until_response_with_idle_timeout("test", 999, IDLE, hard_deadline, max_dur)
             .await;
         let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
-        // Must survive well past the 100ms deadline.
+        // 20 keepalives of activity (~1s on Unix, ~2s on Windows), then idle
+        // fires one IDLE later. Clearing FLOOR = 2x IDLE proves at least one
+        // reset occurred.
         assert!(
-            elapsed >= std::time::Duration::from_millis(500),
+            elapsed >= FLOOR,
             "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
         );
-        assert!(elapsed < std::time::Duration::from_secs(5));
+        assert!(elapsed < std::time::Duration::from_secs(20));
         assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
@@ -3897,21 +3945,26 @@ mod tests {
     /// fix (acp.rs:1440-1444): without renewal, the read loop returns
     /// `HardTimeout` before the prompt response arrives.
     ///
-    /// Timeline:
-    ///   t≈0:    read loop starts, `hard_deadline = now + 1s`
-    ///   t≈0.5s: script emits steer response (id=0) → Success renewal
-    ///           moves `hard_deadline` to `now + 3s` (≈3.5s from start)
-    ///   t≈1.5s: script emits prompt response (id=999) → `Ok`
+    /// Timeline (t=0 is *after* the fixture reports READY, so shell startup is
+    /// outside the measured window — see [`spawn_script_ready`]):
+    ///   t≈0:  read loop starts, `hard_deadline = now + 2s`
+    ///   t≈1s: script emits steer response (id=0) → Success renewal moves
+    ///         `hard_deadline` to `now + 10s`
+    ///   t≈4s: script emits prompt response (id=999) → `Ok`
     ///
-    /// Old code: `HardTimeout` at t≈1s (before prompt response).
-    /// New code: deadline renewed at t≈0.5s → prompt response at t≈1.5s → `Ok`.
+    /// Old code: `HardTimeout` at t≈2s (before the prompt response).
+    /// New code: deadline renewed at t≈1s → prompt response at t≈4s → `Ok`.
+    ///
+    /// The ~1s gaps on either side of the deadline are deliberate slack: on
+    /// Windows `sleep` is an external binary, so each step carries a process
+    /// spawn the fixture cannot control.
     #[tokio::test]
     async fn steer_success_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 0.5; \
+        let script = "sleep 1; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
-                      sleep 1; \
+                      sleep 3; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
 
         let update = session_info_update_msg(Some(serde_json::json!("run-99")));
         let _ = client.handle_session_update(&update);
@@ -3931,8 +3984,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
@@ -3971,10 +4024,17 @@ mod tests {
         capture_path: &std::path::Path,
         response: &str,
     ) -> AcpClient {
+        // The redirect target MUST be single-quoted. `capture_path` is absolute,
+        // and on Windows that means `C:\Users\...\x.json`; interpolated bare,
+        // bash consumes every backslash as an escape and the redirect lands on a
+        // *relative* file named `C:UsersmfethAppData...json` in the crate source
+        // directory. The parent then reads the real path, finds nothing, and the
+        // test fails — while quietly littering the working tree. Quoting keeps
+        // the backslashes intact, which MSYS accepts as a Win32 path.
         let script = format!(
-            "read -r line; printf '%s' \"$line\" > {capture}; \
+            "read -r line; printf '%s' \"$line\" > '{capture}'; \
              printf '%s\\n' '{response}'; sleep 10",
-            capture = capture_path.display(),
+            capture = crate::testshell::quote_for_shell(capture_path),
             response = response,
         );
         spawn_script(&script).await
@@ -4019,10 +4079,15 @@ mod tests {
     }
 
     /// Unique temp path for one test's captured request bytes.
+    ///
+    /// The uuid suffix is load-bearing: `%TEMP%` is shared across every
+    /// concurrent `cargo test -p buzz-acp` on the machine, so a fixed name
+    /// makes two runs — two git worktrees, or a rerun overlapping a previous
+    /// one — read each other's captures.
     fn capture_path(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("buzz-acp-steer-capture");
         std::fs::create_dir_all(&dir).expect("create capture dir");
-        let path = dir.join(format!("{name}.json"));
+        let path = dir.join(format!("{name}-{}.json", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -4230,15 +4295,16 @@ mod tests {
     /// `steer_success_renews_hard_deadline_and_survives_past_original` for
     /// the `_session/steering` transport.
     ///
-    /// Timeline: original hard deadline at t≈1s; steer response at t≈0.5s
-    /// renews it to t≈3.5s; prompt response at t≈1.5s lands inside it.
+    /// Timeline (t=0 is after READY): original hard deadline at t≈2s; steer
+    /// response at t≈1s renews it to t≈11s; prompt response at t≈4s lands
+    /// inside it.
     #[tokio::test]
     async fn acp_steer_injected_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 0.5; \
+        let script = "sleep 1; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"injected\"}}'; \
-                      sleep 1; \
+                      sleep 3; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
         set_steering_supported(&mut client);
 
         let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
@@ -4255,8 +4321,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
@@ -4281,17 +4347,19 @@ mod tests {
     /// deadline — that clock belongs to a turn which is already settled.
     ///
     /// Same timeline as the `injected` test, so the only difference is the
-    /// outcome string: original hard deadline at t≈1s, steer response at
-    /// t≈0.5s, prompt response at t≈1.5s. With renewal the prompt response
-    /// would land and this returns `Ok`; without renewal the original
-    /// deadline fires first and we get `HardTimeout`.
+    /// outcome string: original hard deadline at t≈2s, steer response at
+    /// t≈1s, prompt response at t≈4s. With renewal the prompt response would
+    /// land and this returns `Ok`; without renewal the original deadline fires
+    /// first and we get `HardTimeout`. The steer response must arrive *before*
+    /// the deadline (so the ack is still produced) and the prompt response
+    /// *after* it — which is what the ~1s gaps on either side protect.
     #[tokio::test]
     async fn acp_steer_started_new_turn_acks_success_without_renewing_hard_deadline() {
-        let script = "sleep 0.5; \
+        let script = "sleep 1; \
              echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"startedNewTurn\"}}'; \
-             sleep 1; \
+             sleep 3; \
              echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
         set_steering_supported(&mut client);
 
         let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
@@ -4308,8 +4376,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;

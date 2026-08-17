@@ -5628,7 +5628,7 @@ mod tests {
             "buzz-acp-standing-lifecycle-{}.ndjson",
             Uuid::new_v4()
         ));
-        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let quoted_capture = crate::testshell::quote_for_shell(&capture);
         let script = format!(
             r#"count=0
 while IFS= read -r line; do
@@ -5641,9 +5641,14 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn lifecycle ACP script");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn lifecycle ACP script");
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -5721,7 +5726,7 @@ done"#
             "buzz-acp-channel-delivery-lifecycle-{}.ndjson",
             Uuid::new_v4()
         ));
-        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let quoted_capture = crate::testshell::quote_for_shell(&capture);
         let script = format!(
             r#"count=0
 while IFS= read -r line; do
@@ -5734,9 +5739,14 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn channel lifecycle ACP script");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn channel lifecycle ACP script");
         let channel_id = Uuid::new_v4();
         let mut agent = OwnedAgent {
             index: 0,
@@ -5898,7 +5908,7 @@ done"#
             "buzz-acp-merged-delivery-wire-{}.ndjson",
             Uuid::new_v4()
         ));
-        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let quoted_capture = crate::testshell::quote_for_shell(&capture);
         let script = format!(
             r#"count=0
 while IFS= read -r line; do
@@ -5907,9 +5917,14 @@ while IFS= read -r line; do
   count=$((count + 1))
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
-            .await
-            .expect("spawn wire-capture ACP");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn wire-capture ACP");
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -6051,15 +6066,20 @@ done"#
             "buzz-acp-late-steer-wire-{}.ndjson",
             Uuid::new_v4()
         ));
-        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let quoted_capture = crate::testshell::quote_for_shell(&capture);
         let script = format!(
             r#"IFS= read -r line
 printf '%s\n' "$line" > '{quoted_capture}'
 printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
-            .await
-            .expect("spawn wire-capture ACP");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn wire-capture ACP");
         let mut agent = OwnedAgent {
             index: 0,
             acp,
