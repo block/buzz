@@ -31,6 +31,7 @@ import {
   AttachmentMedia,
   AttachmentTitle,
 } from "@/shared/ui/attachment";
+import { useReleasingVideoRef } from "@/shared/ui/mediaSession";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Progress } from "@/shared/ui/progress";
 import { Toggle } from "@/shared/ui/toggle";
@@ -263,6 +264,10 @@ const MediaAttachmentItem = React.forwardRef<
 ) {
   const [open, setOpen] = React.useState(false);
   const [mode, setMode] = React.useState<"view" | "edit">("view");
+  // Closing the lightbox unmounts the preview; without an explicit release it
+  // would keep the macOS Now Playing session (and the hardware play/pause key)
+  // until the detached element is collected.
+  const attachPreviewVideo = useReleasingVideoRef();
 
   const hash = shortHash(attachment.sha256);
   const isVideo = attachment.type.startsWith("video/");
@@ -412,6 +417,7 @@ const MediaAttachmentItem = React.forwardRef<
               ) : isVideo ? (
                 // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
                 <video
+                  ref={attachPreviewVideo}
                   src={rewriteRelayUrl(attachment.url)}
                   controls
                   className={cn(

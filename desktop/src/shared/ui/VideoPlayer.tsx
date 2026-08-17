@@ -21,11 +21,21 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  claimMediaSession,
+  markMediaSessionPaused,
+  type NowPlayingMetadata,
+  useReleasingVideoRef,
+} from "./mediaSession";
 import { Spinner } from "./spinner";
+import {
+  DEFAULT_PLAYBACK_SPEED,
+  isPlaybackSpeedOption,
+  PlaybackSpeedControl,
+} from "./VideoPlaybackSpeedControl";
 import { useNaturalVideoAspectRatio } from "./videoAspectRatio";
 import { useVideoContextMenu } from "./useVideoContextMenu";
 import { useRegisterVideoReview } from "./VideoReviewNavigation";
@@ -117,9 +127,7 @@ type TimecodedComment = {
 };
 
 const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
-const DEFAULT_PLAYBACK_SPEED = 1;
 const INLINE_SPEED_CONTROL_MIN_WIDTH = 220;
-const PLAYBACK_SPEEDS = [2, 1.75, 1.5, 1.25, 1, 0.75, 0.5, 0.25];
 
 /**
  * Frosted-glass backing layer for floating media controls. The parent must
@@ -179,14 +187,6 @@ function formatCommentTimecode(seconds: number): string {
     fractionalDigits: 1,
     trimZeroFraction: true,
   });
-}
-
-function formatPlaybackSpeed(speed: number): string {
-  return `${speed}x`;
-}
-
-function isPlaybackSpeedOption(speed: number): boolean {
-  return PLAYBACK_SPEEDS.some((option) => option === speed);
 }
 
 function parseTimecodedComment(comment: VideoReviewComment): TimecodedComment {
@@ -600,82 +600,6 @@ function VolumeControl({
   );
 }
 
-function PlaybackSpeedControl({
-  playbackSpeed,
-  onPlaybackSpeedChange,
-  size = "inline",
-  testId,
-}: {
-  playbackSpeed: number;
-  onPlaybackSpeedChange: (speed: number) => void;
-  size?: "inline" | "review";
-  testId: string;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const label = formatPlaybackSpeed(playbackSpeed);
-  const triggerSizeClass =
-    size === "review"
-      ? "h-8 min-w-11 rounded-lg px-2 text-xs"
-      : "h-7 min-w-10 rounded-md px-1.5 text-2xs";
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          aria-label={`Playback speed: ${label}`}
-          className={cn(
-            "flex shrink-0 items-center justify-center font-semibold tabular-nums text-white transition-colors hover:bg-white/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/60",
-            triggerSizeClass,
-            open && "bg-white/15",
-          )}
-          data-testid={testId}
-          type="button"
-          onClick={(event) => event.stopPropagation()}
-        >
-          {label}
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="end"
-        className="w-28 border-white/10 bg-black/85 p-1 text-white backdrop-blur-xl"
-        data-testid={`${testId}-menu`}
-        side="top"
-        sideOffset={8}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="px-2 pb-1 pt-1 text-2xs font-medium text-white/55">
-          Speed
-        </div>
-        <div className="grid gap-0.5">
-          {PLAYBACK_SPEEDS.map((speed) => {
-            const speedLabel = formatPlaybackSpeed(speed);
-            const selected = speed === playbackSpeed;
-            return (
-              <button
-                aria-pressed={selected}
-                className={cn(
-                  "flex h-8 w-full items-center justify-between rounded-lg px-2 text-left text-xs font-medium tabular-nums text-white transition-colors hover:bg-white/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/60",
-                  selected && "bg-white/15",
-                )}
-                key={speed}
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onPlaybackSpeedChange(speed);
-                  setOpen(false);
-                }}
-              >
-                <span>{speedLabel}</span>
-                {selected ? <Check className="h-3.5 w-3.5" /> : null}
-              </button>
-            );
-          })}
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-}
-
 export function VideoPlayer({
   src,
   poster,
@@ -750,19 +674,47 @@ export function VideoPlayer({
     );
   }, [persistedReviewKey]);
 
-  React.useEffect(() => {
-    return () => {
-      const video = videoRef.current;
-      if (!video || !Number.isFinite(video.currentTime)) {
+  const savePositionFor = React.useCallback(
+    (video: HTMLVideoElement, key: string) => {
+      if (!Number.isFinite(video.currentTime)) {
         return;
       }
       saveInlinePlaybackPosition(
-        persistedReviewKey,
+        key,
         Math.max(video.currentTime, currentTimeRef.current),
         { ignoreResetToZero: true },
       );
+    },
+    [],
+  );
+
+  // Covers the key swapping under a still-mounted player (optimistic row
+  // replaced by its acked event); the unmount path saves from the ref cleanup
+  // below, where the element is still reachable.
+  React.useEffect(() => {
+    return () => {
+      const video = videoRef.current;
+      if (!video) {
+        return;
+      }
+      savePositionFor(video, persistedReviewKey);
     };
-  }, [persistedReviewKey]);
+  }, [persistedReviewKey, savePositionFor]);
+
+  const mediaSessionMetadata = React.useMemo<NowPlayingMetadata>(
+    () => ({
+      artist: reviewContext?.channelName,
+      title: reviewContext?.title ?? filename ?? fileNameFromUrl(src),
+    }),
+    [filename, reviewContext?.channelName, reviewContext?.title, src],
+  );
+
+  // Saves the position, then hands the macOS media keys back: an unmounted
+  // player must not keep answering the hardware play/pause key.
+  const attachInlineVideo = useReleasingVideoRef({
+    onRelease: (video) => savePositionFor(video, persistedReviewKey),
+    videoRef,
+  });
 
   const setCurrentTime = React.useCallback(
     (seconds: number) => {
@@ -998,7 +950,7 @@ export function VideoPlayer({
               frame. */}
           {/* biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available */}
           <video
-            ref={videoRef}
+            ref={attachInlineVideo}
             className="h-full w-full object-cover"
             playsInline
             poster={poster}
@@ -1008,7 +960,10 @@ export function VideoPlayer({
             onDurationChange={(event) =>
               handleMediaDuration(event.currentTarget.duration)
             }
-            onEnded={() => setIsPlaying(false)}
+            onEnded={(event) => {
+              markMediaSessionPaused(event.currentTarget);
+              setIsPlaying(false);
+            }}
             onError={() => {
               if (started) {
                 setHasError(true);
@@ -1042,11 +997,13 @@ export function VideoPlayer({
               }
               learnNaturalAspectRatio(videoWidth, videoHeight);
             }}
-            onPause={() => {
+            onPause={(event) => {
+              markMediaSessionPaused(event.currentTarget);
               setIsPlaying(false);
               setIsBuffering(false);
             }}
-            onPlay={() => {
+            onPlay={(event) => {
+              claimMediaSession(event.currentTarget, mediaSessionMetadata);
               setStarted(true);
               setIsPlaying(true);
             }}
@@ -1408,6 +1365,15 @@ function VideoReviewDialog({
 
   const reviewSeek = useThrottledVideoSeek(videoRef);
 
+  const mediaSessionMetadata = React.useMemo<NowPlayingMetadata>(
+    () => ({ artist: reviewContext?.channelName, title }),
+    [reviewContext?.channelName, title],
+  );
+
+  // Closing the overlay unmounts this element; releasing it is what returns
+  // the macOS media keys to whatever owned them before the video played.
+  const attachReviewVideo = useReleasingVideoRef({ videoRef });
+
   const setVideoTime = React.useCallback(
     (seconds: number) => {
       const boundedSeconds = boundSeconds(seconds);
@@ -1704,7 +1670,7 @@ function VideoReviewDialog({
                 <div className="relative z-10 h-full w-full overflow-hidden rounded-lg">
                   {/* biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available */}
                   <video
-                    ref={videoRef}
+                    ref={attachReviewVideo}
                     className="h-full w-full min-h-0 object-contain"
                     playsInline
                     poster={poster}
@@ -1715,6 +1681,7 @@ function VideoReviewDialog({
                       onDurationChange(event.currentTarget.duration)
                     }
                     onEnded={(event) => {
+                      markMediaSessionPaused(event.currentTarget);
                       syncCurrentTime(event.currentTarget.currentTime);
                       setIsPlaying(false);
                     }}
@@ -1735,10 +1702,15 @@ function VideoReviewDialog({
                     }}
                     onLoadedData={() => setHasVisibleFrame(true)}
                     onPause={(event) => {
+                      markMediaSessionPaused(event.currentTarget);
                       syncCurrentTime(event.currentTarget.currentTime);
                       setIsPlaying(false);
                     }}
                     onPlay={(event) => {
+                      claimMediaSession(
+                        event.currentTarget,
+                        mediaSessionMetadata,
+                      );
                       syncCurrentTime(event.currentTarget.currentTime);
                       setIsPlaying(true);
                     }}
