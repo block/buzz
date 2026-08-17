@@ -4196,8 +4196,8 @@ pub(crate) fn build_turn_metric_counts(
 
 /// Best-effort: build and publish a `kind:44200` NIP-AM agent turn metric event.
 ///
-/// Does nothing when `usage` is `None` (goose emitted no usage notification
-/// for this turn) or when `owner_pubkey` is unconfigured (no NIP-AO identity).
+/// Usage is optional: terminal turn existence remains durable when an adapter
+/// reports no counters. The owner pubkey remains required for NIP-44 delivery.
 /// Errors are logged at WARN and never surface to the caller — metric
 /// publishing must never fail a turn.
 async fn publish_agent_turn_metric(
@@ -4206,76 +4206,16 @@ async fn publish_agent_turn_metric(
     provenance: &TurnProvenance,
     completion: TurnMetricCompletion,
 ) {
-    use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
-    use nostr::{EventBuilder, Kind, Tag};
-
-    let (usage, owner_pk) = match (usage, ctx.agent_owner_pubkey.as_ref()) {
-        (Some(u), Some(pk)) => (u, pk),
-        _ => return,
-    };
-
-    let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
-    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let session_id = provenance.adapter_session_id.as_deref().unwrap_or_default();
-    let payload = AgentTurnMetricPayload {
-        harness: ctx.harness_name.clone(),
-        model: usage.model.clone(),
-        channel_id: provenance.channel_id.map(|id| id.to_string()),
-        session_id: Some(usage.session_id.clone()),
-        turn_id: Some(provenance.turn_id.clone()),
-        triggering_event_ids: provenance.triggering_event_ids.clone(),
-        root_event_id: provenance.root_event_id.clone(),
-        parent_event_id: provenance.parent_event_id.clone(),
-        started_at: Some(provenance.started_at.clone()),
-        outcome: Some(completion.outcome),
-        terminal_evidence: Some(completion.terminal_evidence),
-        adapter_session_id: provenance.adapter_session_id.clone(),
-        runtime_session_id: None,
-        runtime_request_id: None,
-        native_stop_reason: completion.native_stop_reason,
-        turn_seq: Some(usage.turn_seq),
-        timestamp,
-        turn: turn_counts,
-        cumulative: cumulative_counts,
-        delta_reliable: usage.delta_reliable,
-        stop_reason: completion.stop_reason,
-        pricing_identity: usage.pricing_identity.clone(),
-    };
-    let ciphertext = match buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
-        &ctx.agent_keys,
-        owner_pk,
-        &payload,
-    ) {
-        Ok(c) => c,
+    let event = match build_agent_turn_metric_event(ctx, usage.as_ref(), provenance, completion) {
+        Ok(Some(event)) => event,
+        Ok(None) => return,
         Err(e) => {
             tracing::warn!(
                 target: "pool::metrics",
                 session_id,
                 turn_id = provenance.turn_id,
-                "NIP-AM: encrypt failed: {e}"
-            );
-            return;
-        }
-    };
-    let agent_hex = ctx.agent_keys.public_key().to_hex();
-    let owner_hex = owner_pk.to_hex();
-    let event = match EventBuilder::new(
-        Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16),
-        ciphertext,
-    )
-    .tags([
-        Tag::parse(["p", &owner_hex]).expect("p tag"),
-        Tag::parse(["agent", &agent_hex]).expect("agent tag"),
-    ])
-    .sign_with_keys(&ctx.agent_keys)
-    {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(
-                target: "pool::metrics",
-                session_id,
-                turn_id = provenance.turn_id,
-                "NIP-AM: sign failed: {e}"
+                "NIP-AM: build failed: {e}"
             );
             return;
         }
@@ -4296,6 +4236,68 @@ async fn publish_agent_turn_metric(
             "NIP-AM: publish timed out"
         ),
     }
+}
+
+fn build_agent_turn_metric_event(
+    ctx: &PromptContext,
+    usage: Option<&crate::usage::TurnUsage>,
+    provenance: &TurnProvenance,
+    completion: TurnMetricCompletion,
+) -> Result<Option<nostr::Event>, String> {
+    use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let Some(owner_pk) = ctx.agent_owner_pubkey.as_ref() else {
+        return Ok(None);
+    };
+    let (turn_counts, cumulative_counts) =
+        usage.map(build_turn_metric_counts).unwrap_or((None, None));
+    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let payload = AgentTurnMetricPayload {
+        harness: ctx.harness_name.clone(),
+        model: usage.and_then(|usage| usage.model.clone()),
+        channel_id: provenance.channel_id.map(|id| id.to_string()),
+        session_id: usage
+            .map(|usage| usage.session_id.clone())
+            .or_else(|| provenance.adapter_session_id.clone()),
+        turn_id: Some(provenance.turn_id.clone()),
+        triggering_event_ids: provenance.triggering_event_ids.clone(),
+        root_event_id: provenance.root_event_id.clone(),
+        parent_event_id: provenance.parent_event_id.clone(),
+        started_at: Some(provenance.started_at.clone()),
+        outcome: Some(completion.outcome),
+        terminal_evidence: Some(completion.terminal_evidence),
+        adapter_session_id: provenance.adapter_session_id.clone(),
+        runtime_session_id: None,
+        runtime_request_id: None,
+        native_stop_reason: completion.native_stop_reason,
+        turn_seq: usage.map(|usage| usage.turn_seq),
+        timestamp,
+        turn: turn_counts,
+        cumulative: cumulative_counts,
+        delta_reliable: usage.is_some_and(|usage| usage.delta_reliable),
+        stop_reason: completion.stop_reason,
+        pricing_identity: usage.and_then(|usage| usage.pricing_identity.clone()),
+    };
+    let ciphertext = buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
+        &ctx.agent_keys,
+        owner_pk,
+        &payload,
+    )
+    .map_err(|e| format!("encrypt failed: {e}"))?;
+    let agent_hex = ctx.agent_keys.public_key().to_hex();
+    let owner_hex = owner_pk.to_hex();
+    let event = EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16),
+        ciphertext,
+    )
+    .tags([
+        Tag::parse(["p", &owner_hex]).expect("p tag"),
+        Tag::parse(["agent", &agent_hex]).expect("agent tag"),
+    ])
+    .sign_with_keys(&ctx.agent_keys)
+    .map_err(|e| format!("sign failed: {e}"))?;
+    Ok(Some(event))
 }
 
 const REACTION_SEEN: &str = "👀";
@@ -7416,18 +7418,75 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert_eq!(acp_stop_to_core(&StopReason::Refusal), CoreStop::Unknown);
     }
 
-    /// `publish_agent_turn_metric` is a no-op when `usage` is `None`.
-    #[tokio::test]
-    async fn test_publish_agent_turn_metric_noop_on_no_usage() {
-        let ctx = make_prompt_context_no_owner();
-        // usage = None → early return, no panic.
-        publish_agent_turn_metric(
+    /// Owner + terminal completion publishes a valid encrypted metric even
+    /// when the adapter reported no usage.
+    #[test]
+    fn test_build_agent_turn_metric_event_publishes_no_usage() {
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        let event = build_agent_turn_metric_event(
             &ctx,
             None,
             &metric_test_provenance("sess-1", "turn-1", None),
             successful_metric_completion(),
         )
-        .await;
+        .expect("metric build")
+        .expect("owner permits publication");
+        let payload = buzz_core::agent_turn_metric::decrypt_agent_turn_metric(&owner_keys, &event)
+            .expect("decrypt metric");
+        assert_eq!(payload.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(payload.adapter_session_id.as_deref(), Some("sess-1"));
+        assert!(payload.turn.is_none());
+        assert!(payload.cumulative.is_none());
+        assert!(payload.turn_seq.is_none());
+        assert!(payload.model.is_none());
+        assert!(payload.pricing_identity.is_none());
+        assert!(!payload.delta_reliable);
+    }
+
+    #[test]
+    fn test_hermes_no_usage_terminal_outcomes_build_metrics() {
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let mut ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        ctx.harness_name = "hermes-acp".to_string();
+        let cases = [
+            (
+                buzz_core::agent_turn_metric::StopReason::EndTurn,
+                buzz_core::agent_turn_metric::TurnOutcome::Success,
+                buzz_core::agent_turn_metric::TerminalEvidence::PromptResponse,
+            ),
+            (
+                buzz_core::agent_turn_metric::StopReason::Cancelled,
+                buzz_core::agent_turn_metric::TurnOutcome::Cancelled,
+                buzz_core::agent_turn_metric::TerminalEvidence::CancelResponse,
+            ),
+            (
+                buzz_core::agent_turn_metric::StopReason::Error,
+                buzz_core::agent_turn_metric::TurnOutcome::Failed,
+                buzz_core::agent_turn_metric::TerminalEvidence::Error,
+            ),
+        ];
+        for (index, (stop_reason, outcome, evidence)) in cases.into_iter().enumerate() {
+            let event = build_agent_turn_metric_event(
+                &ctx,
+                None,
+                &metric_test_provenance("hermes-session", &format!("turn-{index}"), None),
+                TurnMetricCompletion::new(stop_reason, outcome.clone(), evidence.clone(), None),
+            )
+            .expect("metric build")
+            .expect("owner permits publication");
+            let payload =
+                buzz_core::agent_turn_metric::decrypt_agent_turn_metric(&owner_keys, &event)
+                    .expect("decrypt Hermes metric");
+            assert_eq!(payload.harness, "hermes-acp");
+            assert_eq!(payload.outcome, Some(outcome));
+            assert_eq!(payload.terminal_evidence, Some(evidence));
+            assert!(payload.turn.is_none());
+            assert!(payload.cumulative.is_none());
+            assert!(!payload.delta_reliable);
+        }
     }
 
     /// `publish_agent_turn_metric` is a no-op when `owner_pubkey` is absent.

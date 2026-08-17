@@ -6,8 +6,8 @@ Agent Turn Metrics
 
 `draft` `optional` `relay`
 
-This NIP defines a durable, encrypted event kind for recording per-turn token
-usage and estimated cost of AI agent sessions. An agent publishes one
+This NIP defines a durable, encrypted event kind for recording completed agent
+turns and any token usage or estimated cost available for them. An agent publishes one
 `kind:44200` event per completed turn, NIP-44 encrypted to its owner, so the
 owner can account for token usage across agents and harnesses without the
 relay — or any third party — learning what the agent did or what it cost.
@@ -96,7 +96,8 @@ The `content` field decrypts to a UTF-8 JSON object:
   "turnSeq":   17 | null,                // REQUIRED when "cumulative" is present
   "timestamp": "2026-07-01T20:11:03.213Z", // REQUIRED: RFC 3339, end of turn
 
-  // Usage for THIS turn (computed delta). Fields are null when the harness
+  // Usage for THIS turn (computed delta). The whole object is null when the
+  // harness reports no usage. Fields are null when the harness
   // does not report them — a null MUST NOT be recorded or summed as zero.
   // Exception: cache fields (cacheReadTokens, cacheWriteTokens) MUST be
   // omitted rather than null when unavailable — see "Numeric validity" below.
@@ -107,7 +108,8 @@ The `content` field decrypts to a UTF-8 JSON object:
     "costUsd":      0.0123 | null        // estimated
   },
 
-  // Session-cumulative usage as reported at the end of this turn.
+  // Session-cumulative usage as reported at the end of this turn, or null
+  // when the harness reports none.
   "cumulative": {
     "inputTokens":  45210 | null,
     "outputTokens": 9876  | null,
@@ -257,9 +259,11 @@ unlabeled total.
 ## Publisher Behavior
 
 - Publish exactly one event per completed turn, at turn completion, including
-  turns that end in cancellation or error when usage was observed.
-- Do NOT publish an event for a turn with no observed usage (all counters
-  unknown); an all-null metric carries no information.
+  turns that end in cancellation or error and turns for which no usage was
+  observed. Turn existence and usage measurement are separate facts.
+- When usage is unavailable, publish `turn: null`, `cumulative: null`,
+  `turnSeq: null`, `deltaReliable: false`, and omit unknown model, pricing,
+  cache, token, and cost values. Unavailable values MUST NOT become zero.
 - `created_at` SHOULD equal the payload `timestamp` truncated to seconds.
 
 ## Relay Behavior
