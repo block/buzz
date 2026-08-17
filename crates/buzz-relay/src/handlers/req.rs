@@ -855,15 +855,20 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
 }
 
 /// Extract a channel UUID from a single filter's `#h` tag.
+///
+/// Returns `None` for a multi-value `#h` — NIP-01 treats the tag list as an
+/// OR set, so scoping to just the first channel would drop events from the
+/// rest (#4381). Callers widen to the accessible set and let `filters_match`
+/// enforce the OR. This matches the sibling extractors at `api/bridge.rs:235`
+/// and `handlers/count.rs:17`.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
     for (tag_key, tag_values) in filter.generic_tags.iter() {
         let key = tag_key.to_string();
         if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
+            if tag_values.len() != 1 {
+                return None;
             }
+            return tag_values.iter().next()?.parse::<uuid::Uuid>().ok();
         }
     }
     None
@@ -1584,6 +1589,33 @@ mod tests {
             filter_with_channel(channel_id),
         ];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    #[test]
+    fn test_extract_channel_id_from_filter_single_channel() {
+        let channel_id = uuid::Uuid::new_v4();
+        let filter = filter_with_channel(channel_id);
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel_id));
+    }
+
+    #[test]
+    fn test_extract_channel_id_from_filter_multi_value_h_returns_none() {
+        // #4381: a multi-value #h must not silently scope to the first channel —
+        // NIP-01 treats it as an OR set. Returning None widens the query to the
+        // accessible set so filters_match can enforce the OR.
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let filter = Filter::new().custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            [channel_a.to_string(), channel_b.to_string()],
+        );
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
+    }
+
+    #[test]
+    fn test_extract_channel_id_from_filter_no_h_tag_returns_none() {
+        let filter = Filter::new();
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
     }
 
     #[test]
