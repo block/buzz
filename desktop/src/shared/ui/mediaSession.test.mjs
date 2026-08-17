@@ -15,6 +15,7 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
 
 const paused = [];
 const loaded = [];
+const playingElements = new WeakSet();
 let mediaSession;
 
 before(() => {
@@ -24,10 +25,22 @@ before(() => {
     IS_REACT_ACT_ENVIRONMENT: true,
     window: dom.window,
   });
-  // jsdom leaves the playback methods unimplemented; record the calls instead.
+  // jsdom leaves the playback methods unimplemented and hardcodes `paused` to
+  // true; record the calls and track playback ourselves instead, since who is
+  // still audible is what decides where the session goes.
+  dom.window.HTMLMediaElement.prototype.play = function play() {
+    playingElements.add(this);
+  };
   dom.window.HTMLMediaElement.prototype.pause = function pause() {
+    playingElements.delete(this);
     paused.push(this);
   };
+  Object.defineProperty(dom.window.HTMLMediaElement.prototype, "paused", {
+    configurable: true,
+    get() {
+      return !playingElements.has(this);
+    },
+  });
   dom.window.HTMLMediaElement.prototype.load = function load() {
     loaded.push(this);
   };
@@ -51,7 +64,14 @@ before(() => {
 
 afterEach(async () => {
   const { cleanup } = await import("@testing-library/react");
+  const { releaseMediaSession } = await import("./mediaSession.ts");
   cleanup();
+  // The claimant registry is a module singleton, so hand-built elements have to
+  // be released or their ownership leaks into the next test.
+  for (const video of standaloneVideos.splice(0)) {
+    video.remove();
+    releaseMediaSession(video);
+  }
   paused.length = 0;
   loaded.length = 0;
   mediaSession.metadata = null;
@@ -59,6 +79,17 @@ afterEach(async () => {
 });
 
 after(() => dom.window.close());
+
+/** Videos outside a React tree, in the document because a claimant that has
+ * left it is treated as gone. */
+const standaloneVideos = [];
+
+function appendVideo() {
+  const video = dom.window.document.createElement("video");
+  dom.window.document.body.append(video);
+  standaloneVideos.push(video);
+  return video;
+}
 
 async function renderVideo({ strict = false } = {}) {
   const React = await import("react");
@@ -68,7 +99,9 @@ async function renderVideo({ strict = false } = {}) {
 
   function Player() {
     const attach = useReleasingVideoRef({
-      onRelease: (video) => released.push(video.currentTime),
+      // Recording the source pins the ordering: it reads back null once the
+      // release has detached it.
+      onRelease: (video) => released.push(video.getAttribute("src")),
     });
     return React.createElement("video", {
       ref: attach,
@@ -108,27 +141,94 @@ test("unmounting a player releases the media keys it claimed", async () => {
   assert.equal(mediaSession.playbackState, "none");
 });
 
-test("release runs before the source is detached, so the position is still readable", async () => {
+test("release runs before the source is detached, so the element is still readable", async () => {
   const { released, act, unmount } = await renderVideo();
 
   await act(async () => unmount());
 
-  assert.deepEqual(released, [0]);
+  // A callback running after the release would see a source-less element, and
+  // so could not read the playback position the inline player saves here.
+  assert.deepEqual(released, ["https://relay.example/media/clip.mp4"]);
 });
 
 test("a bystander player's teardown leaves the playing video's session alone", async () => {
   const { claimMediaSession, releaseVideoElement } = await import(
     "./mediaSession.ts"
   );
-  const playing = dom.window.document.createElement("video");
-  const bystander = dom.window.document.createElement("video");
+  const playing = appendVideo();
+  const bystander = appendVideo();
 
+  playing.play();
   claimMediaSession(playing, { title: "review.mp4" });
   // An off-screen timeline row unmounting while the review overlay plays.
   releaseVideoElement(bystander);
 
   assert.equal(mediaSession.metadata.title, "review.mp4");
   assert.equal(mediaSession.playbackState, "playing");
+});
+
+test("the owner's teardown hands the session to a player that is still audible", async () => {
+  const { claimMediaSession, markMediaSessionPaused, releaseVideoElement } =
+    await import("./mediaSession.ts");
+  const first = appendVideo();
+  const second = appendVideo();
+
+  // Nothing stops one player when another starts, so both are making noise and
+  // the later claim owns the session.
+  first.play();
+  claimMediaSession(first, { artist: "engineering", title: "first.mp4" });
+  second.play();
+  claimMediaSession(second, { artist: "design", title: "second.mp4" });
+
+  // The owner scrolls out of the virtualized timeline. Reporting no session
+  // here would take the hardware key away from a video that is still playing.
+  releaseVideoElement(second);
+
+  assert.equal(mediaSession.metadata.title, "first.mp4");
+  assert.equal(mediaSession.playbackState, "playing");
+
+  // And the survivor owns the session, so its own pause is not a no-op.
+  first.pause();
+  markMediaSessionPaused(first);
+  assert.equal(mediaSession.playbackState, "paused");
+});
+
+test("the owner pausing hands the session to a player that is still audible", async () => {
+  const { claimMediaSession, markMediaSessionPaused } = await import(
+    "./mediaSession.ts"
+  );
+  const first = appendVideo();
+  const second = appendVideo();
+
+  first.play();
+  claimMediaSession(first, { title: "first.mp4" });
+  second.play();
+  claimMediaSession(second, { title: "second.mp4" });
+
+  second.pause();
+  markMediaSessionPaused(second);
+
+  assert.equal(mediaSession.metadata.title, "first.mp4");
+  assert.equal(mediaSession.playbackState, "playing");
+});
+
+test("teardown with nothing else audible clears the session", async () => {
+  const { claimMediaSession, releaseVideoElement } = await import(
+    "./mediaSession.ts"
+  );
+  const first = appendVideo();
+  const second = appendVideo();
+
+  first.play();
+  claimMediaSession(first, { title: "first.mp4" });
+  second.play();
+  claimMediaSession(second, { title: "second.mp4" });
+  first.pause();
+
+  releaseVideoElement(second);
+
+  assert.equal(mediaSession.metadata, null);
+  assert.equal(mediaSession.playbackState, "none");
 });
 
 test("StrictMode's simulated remount leaves the source attached", async () => {

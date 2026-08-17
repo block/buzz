@@ -12,7 +12,8 @@ import * as React from "react";
  * works in every macOS app. Handing them back when the video goes away is what
  * this module exists for: pause, detach the source (the only thing that makes
  * WebKit destroy the session immediately rather than at some later GC), and
- * clear the metadata this player published.
+ * clear the metadata this player published — or, if another player is still
+ * audible, hand the session to that one instead of claiming the page is quiet.
  */
 
 export type NowPlayingMetadata = {
@@ -28,6 +29,20 @@ export type NowPlayingMetadata = {
  */
 let sessionOwner: HTMLVideoElement | null = null;
 
+/**
+ * Every element that has claimed the session and not released it, in claim
+ * order, with the metadata each published. Nothing in the app stops one player
+ * when another starts, so several can be audible at once and the owner going
+ * away is not the same as the page going quiet — this is what the owner is
+ * handed over to instead.
+ *
+ * Strong keys, because picking a successor means iterating the claimants. Every
+ * element {@link useReleasingVideoRef} attaches is released when React drops
+ * it, which is what removes it here; {@link audibleClaimant} drops any that
+ * left the document some other way.
+ */
+const claimants = new Map<HTMLVideoElement, NowPlayingMetadata>();
+
 /** Sources detached by {@link releaseVideoElement}, for the StrictMode
  * re-attach path in {@link useReleasingVideoRef}. Weak so a released element
  * stays collectable. */
@@ -42,9 +57,7 @@ function getMediaSession(): MediaSession | null {
   return navigator.mediaSession ?? null;
 }
 
-/** Publish what is playing so Control Center shows the video instead of a
- * bare "Buzz" entry, and record this element as the session's owner. */
-export function claimMediaSession(
+function publishNowPlaying(
   video: HTMLVideoElement,
   metadata: NowPlayingMetadata,
 ): void {
@@ -62,19 +75,79 @@ export function claimMediaSession(
   session.playbackState = "playing";
 }
 
+/**
+ * The most recently claimed element other than `leaving` that is still making
+ * noise — the player the session belongs to once `leaving` stops owning it.
+ */
+function audibleClaimant(
+  leaving: HTMLVideoElement,
+): { metadata: NowPlayingMetadata; video: HTMLVideoElement } | null {
+  let successor: {
+    metadata: NowPlayingMetadata;
+    video: HTMLVideoElement;
+  } | null = null;
+  for (const [video, metadata] of claimants) {
+    if (video === leaving) {
+      continue;
+    }
+    if (!video.isConnected) {
+      // Claimed, then removed from the document without a release: cannot be
+      // what the user is watching, and holding it here would leak the element.
+      claimants.delete(video);
+      continue;
+    }
+    if (!video.paused) {
+      successor = { metadata, video };
+    }
+  }
+  return successor;
+}
+
+/** Publish what is playing so Control Center shows the video instead of a
+ * bare "Buzz" entry, and record this element as the session's owner. */
+export function claimMediaSession(
+  video: HTMLVideoElement,
+  metadata: NowPlayingMetadata,
+): void {
+  // Re-insert so claim order stays recency order: of two audible players, the
+  // one started last is the one the hardware key should reach.
+  claimants.delete(video);
+  claimants.set(video, metadata);
+  publishNowPlaying(video, metadata);
+}
+
 export function markMediaSessionPaused(video: HTMLVideoElement): void {
+  if (sessionOwner !== video) {
+    return;
+  }
+  // The owner pausing does not mean the page went quiet; report whatever is
+  // still audible rather than "paused" over the top of it.
+  const successor = audibleClaimant(video);
+  if (successor) {
+    publishNowPlaying(successor.video, successor.metadata);
+    return;
+  }
   const session = getMediaSession();
-  if (!session || sessionOwner !== video) {
+  if (!session) {
     return;
   }
   session.playbackState = "paused";
 }
 
 export function releaseMediaSession(video: HTMLVideoElement): void {
+  claimants.delete(video);
   if (sessionOwner !== video) {
     return;
   }
   sessionOwner = null;
+  const successor = audibleClaimant(video);
+  if (successor) {
+    // Reporting no session while another player is audible is exactly the
+    // state where the hardware key stops reaching it, so hand over instead of
+    // clearing — the leaving element's own session dies with its source.
+    publishNowPlaying(successor.video, successor.metadata);
+    return;
+  }
   const session = getMediaSession();
   if (!session) {
     return;
