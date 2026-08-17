@@ -17,6 +17,7 @@ export function WorkflowsRouteScreen({
   return (
     <WorkflowsScreen
       channels={memberChannels}
+      channelsLoading={channelsQuery.isLoading}
       onCloseWorkflow={closeWorkflowDetail}
       onSelectWorkflow={(workflowId) => {
         void goWorkflow(workflowId);

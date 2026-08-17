@@ -22,6 +22,8 @@ import { Skeleton } from "@/shared/ui/skeleton";
 
 type WorkflowsViewProps = {
   channels: Channel[];
+  /** True while the channel membership list is still loading. */
+  channelsLoading?: boolean;
   onCloseWorkflow: () => void;
   onSelectWorkflow: (workflowId: string) => void;
   selectedWorkflowId: string | null;
@@ -69,6 +71,7 @@ function WorkflowsListSkeleton() {
 
 export function WorkflowsView({
   channels,
+  channelsLoading = false,
   onCloseWorkflow,
   onSelectWorkflow,
   selectedWorkflowId,
@@ -108,6 +111,11 @@ export function WorkflowsView({
   });
 
   const allWorkflows = allWorkflowsQuery.data ?? [];
+  // Disabled query (no member channels yet) is not "loading" in RQ v5, so without
+  // channelsLoading we would flash "No workflows yet" while membership loads.
+  const showListSkeleton =
+    channelsLoading ||
+    (memberChannels.length > 0 && allWorkflowsQuery.isLoading);
 
   const triggerMutation = useMutation({
     mutationFn: (workflowId: string) => triggerWorkflow(workflowId),
@@ -198,7 +206,7 @@ export function WorkflowsView({
           </Button>
         </div>
 
-        {allWorkflowsQuery.isLoading ? (
+        {showListSkeleton ? (
           <WorkflowsListSkeleton />
         ) : allWorkflowsQuery.isError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
