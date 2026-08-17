@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../community/community.dart';
+import '../deeplink/deep_link.dart';
 import '../relay/nostr_models.dart';
 import '../relay/relay_provider.dart';
 import 'push_models.dart';
@@ -16,6 +17,47 @@ final apnsRegistrationError = ValueNotifier<String?>(null);
 
 final pushEndpointGrants = ValueNotifier<List<BuzzPushEndpointGrant>>([]);
 final pushEndpointGrantError = ValueNotifier<String?>(null);
+
+/// The most recent notification response waiting for app navigation.
+///
+/// Native iOS buffers cold-start responses until Dart asks for them. This
+/// notifier also carries warm responses into the existing deep-link pipeline.
+final pendingPushNotificationLink = ValueNotifier<MessageDeepLink?>(null);
+
+MessageDeepLink? _pushNotificationLink(Object? arguments) {
+  if (arguments is! Map) return null;
+  final eventId = arguments['eventId'];
+  final communityId = arguments['communityId'];
+  final channelId = arguments['channelId'];
+  if (eventId is! String ||
+      eventId.isEmpty ||
+      communityId is! String ||
+      communityId.isEmpty ||
+      channelId is! String ||
+      channelId.isEmpty) {
+    return null;
+  }
+  return MessageDeepLink(
+    communityId: communityId,
+    channelId: channelId,
+    messageId: eventId,
+  );
+}
+
+/// Pulls a notification response that arrived before the Flutter method
+/// handler was installed.
+Future<void> syncPendingBuzzPushNotificationResponse() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    final arguments = await _channel.invokeMapMethod<dynamic, dynamic>(
+      'takePendingNotificationResponse',
+    );
+    final link = _pushNotificationLink(arguments);
+    if (link != null) pendingPushNotificationLink.value = link;
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
 
 class BuzzPushEndpointGrant {
   final String relayOrigin;
@@ -231,6 +273,11 @@ void installBuzzPushMethodHandler() {
             : 'APNs registration failed';
         debugPrint('APNs registration failed: ${apnsRegistrationError.value}');
         return null;
+      case 'notificationOpened':
+        final link = _pushNotificationLink(call.arguments);
+        if (link == null) return 'ignored';
+        pendingPushNotificationLink.value = link;
+        return 'handled';
       case 'resolveNotification':
         final args = call.arguments;
         if (args is! Map) return null;

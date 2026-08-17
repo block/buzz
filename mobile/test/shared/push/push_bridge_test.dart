@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter/foundation.dart';
@@ -14,6 +17,7 @@ void main() {
     apnsRegistrationError.value = null;
     pushEndpointGrants.value = const [];
     pushEndpointGrantError.value = null;
+    pendingPushNotificationLink.value = null;
     installBuzzPushMethodHandler();
   });
 
@@ -169,6 +173,58 @@ void main() {
           (_) {},
         );
     expect(apnsRegistrationError.value, 'denied');
+  });
+
+  test('turns a warm notification response into a message link', () async {
+    final response = Completer<ByteData?>();
+    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .handlePlatformMessage(
+          _channel.name,
+          _channel.codec.encodeMethodCall(
+            const MethodCall('notificationOpened', {
+              'eventId': 'event-id',
+              'communityId': 'community-id',
+              'channelId': 'channel-id',
+            }),
+          ),
+          response.complete,
+        );
+
+    final envelope = await response.future;
+    expect(envelope, isNotNull);
+    expect(_channel.codec.decodeEnvelope(envelope!), 'handled');
+    expect(
+      pendingPushNotificationLink.value,
+      const MessageDeepLink(
+        communityId: 'community-id',
+        channelId: 'channel-id',
+        messageId: 'event-id',
+      ),
+    );
+  });
+
+  test('pulls a cold-start notification response from native iOS', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'takePendingNotificationResponse');
+          return {
+            'eventId': 'cold-event',
+            'communityId': 'community-id',
+            'channelId': 'channel-id',
+          };
+        });
+
+    await syncPendingBuzzPushNotificationResponse();
+
+    expect(
+      pendingPushNotificationLink.value,
+      const MessageDeepLink(
+        communityId: 'community-id',
+        channelId: 'channel-id',
+        messageId: 'cold-event',
+      ),
+    );
   });
 }
 

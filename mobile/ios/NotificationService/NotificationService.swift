@@ -38,6 +38,9 @@ final class NotificationService: UNNotificationServiceExtension {
       return
     }
     bestAttemptContent = content
+    var cleanUserInfo = content.userInfo
+    cleanUserInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
+    content.userInfo = cleanUserInfo
 
     resolver.resolve { [weak self] resolution in
       guard let self else { return }
@@ -49,6 +52,11 @@ final class NotificationService: UNNotificationServiceExtension {
         }
         if let threadIdentifier = resolution.threadIdentifier {
           content.threadIdentifier = threadIdentifier
+        }
+        if let navigationTarget = resolution.navigationTarget {
+          var userInfo = content.userInfo
+          userInfo[BuzzPushNavigationTarget.userInfoKey] = navigationTarget.userInfoValue
+          content.userInfo = userInfo
         }
       }
       self.finish(content)

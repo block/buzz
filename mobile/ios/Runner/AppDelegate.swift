@@ -9,6 +9,7 @@ import UserNotifications
   private var mediaUploadChannel: FlutterMethodChannel?
   private var pushChannel: FlutterMethodChannel?
   private let apnsRegistrationBuffer = APNsRegistrationBuffer()
+  private let pushNavigationBuffer = BuzzPushNavigationBuffer()
   private var apnsDeviceToken: Data?
   private lazy var endpointGrantStore = BuzzPushEndpointGrantKeychainStore(
     accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
@@ -27,7 +28,9 @@ import UserNotifications
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) {
+    let notificationCenter = UNUserNotificationCenter.current()
+    notificationCenter.delegate = self
+    notificationCenter.requestAuthorization(options: [.alert, .badge, .sound]) {
       granted, _ in
       if granted {
         DispatchQueue.main.async {
@@ -169,11 +172,43 @@ import UserNotifications
     apnsRegistrationBuffer.recordError(error.localizedDescription)
   }
 
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+      let target = BuzzPushNavigationTarget.decodeIfPresent(
+        from: response.notification.request.content.userInfo
+      )
+    {
+      pushNavigationBuffer.record(target)
+      deliverPushNavigationTarget(target)
+    }
+    super.userNotificationCenter(
+      center,
+      didReceive: response,
+      withCompletionHandler: completionHandler
+    )
+  }
+
+  private func deliverPushNavigationTarget(_ target: BuzzPushNavigationTarget) {
+    pushChannel?.invokeMethod(
+      "notificationOpened",
+      arguments: target.flutterArguments
+    ) { [weak self] result in
+      guard result as? String == "handled" else { return }
+      self?.pushNavigationBuffer.remove(ifMatching: target)
+    }
+  }
+
   private func handlePushMethodCall(
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
   ) {
     switch call.method {
+    case "takePendingNotificationResponse":
+      result(pushNavigationBuffer.take()?.flutterArguments)
     case "saveCommunitySnapshot":
       guard let arguments = call.arguments as? [String: Any],
         let communities = arguments["communities"] as? [[String: Any]],
@@ -549,5 +584,15 @@ import UserNotifications
         try? FileManager.default.removeItem(at: outputURL)
       }
     }
+  }
+}
+
+extension BuzzPushNavigationTarget {
+  fileprivate var flutterArguments: [String: String] {
+    [
+      "eventId": eventID,
+      "communityId": communityID,
+      "channelId": channelID,
+    ]
   }
 }

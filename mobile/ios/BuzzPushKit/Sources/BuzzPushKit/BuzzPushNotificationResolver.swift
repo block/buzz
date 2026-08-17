@@ -10,12 +10,20 @@ public struct BuzzPushResolution: Decodable, Equatable, Sendable {
   public let body: String
   public let subtitle: String?
   public let threadIdentifier: String?
+  public let navigationTarget: BuzzPushNavigationTarget?
 
-  public init(title: String, body: String, subtitle: String?, threadIdentifier: String?) {
+  public init(
+    title: String,
+    body: String,
+    subtitle: String?,
+    threadIdentifier: String?,
+    navigationTarget: BuzzPushNavigationTarget? = nil
+  ) {
     self.title = title
     self.body = body
     self.subtitle = subtitle
     self.threadIdentifier = threadIdentifier
+    self.navigationTarget = navigationTarget
   }
 }
 
@@ -130,10 +138,19 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     let body = previewBody(event.content)
     guard !body.isEmpty else { return nil }
     let channel = event.tags.first { $0.count >= 2 && $0[0] == "h" }?[1]
-    return (BuzzPushResolution(
-      title: shortPubkey(event.pubkey), body: body, subtitle: community.name,
-      threadIdentifier: channel ?? community.id
-    ), event)
+    return (
+      BuzzPushResolution(
+        title: shortPubkey(event.pubkey), body: body, subtitle: community.name,
+        threadIdentifier: channel ?? community.id,
+        navigationTarget: channel.map {
+          BuzzPushNavigationTarget(
+            eventID: event.id,
+            communityID: community.id,
+            channelID: $0
+          )
+        }
+      ), event
+    )
   }
 
   static func previewBody(_ content: String) -> String {

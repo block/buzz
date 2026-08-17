@@ -141,6 +141,14 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result.body, "Hello Buzz")
     XCTAssertEqual(result.subtitle, "Community")
     XCTAssertEqual(result.threadIdentifier, "channel-id")
+    XCTAssertEqual(
+      result.navigationTarget,
+      BuzzPushNavigationTarget(
+        eventID: event.id,
+        communityID: "community-id",
+        channelID: "channel-id"
+      )
+    )
   }
 
   private func makeResolver(

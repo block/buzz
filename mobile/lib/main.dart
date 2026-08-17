@@ -11,6 +11,7 @@ void main() => runBuzzApp(const App());
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
   installBuzzPushMethodHandler();
+  await syncPendingBuzzPushNotificationResponse();
 
   // Pre-load preferences so the first frame uses the saved theme/accent.
   final prefs = await SharedPreferences.getInstance();

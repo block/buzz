@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'deep_link.dart';
+import '../push/push_bridge.dart';
 
 /// Holds the most recent supported deep link that has not been
 /// dispatched yet.
@@ -19,16 +20,26 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
   static Stream<Uri>? debugUriStreamOverride;
 
   StreamSubscription<Uri>? _subscription;
+  VoidCallback? _pushNotificationListener;
 
   @override
   BuzzDeepLink? build() {
     final stream = debugUriStreamOverride ?? AppLinks().uriLinkStream;
     _subscription = stream.listen(handleUri);
+    _pushNotificationListener = () {
+      final link = pendingPushNotificationLink.value;
+      if (link != null) state = link;
+    };
+    pendingPushNotificationLink.addListener(_pushNotificationListener!);
     ref.onDispose(() {
       _subscription?.cancel();
       _subscription = null;
+      if (_pushNotificationListener case final listener?) {
+        pendingPushNotificationLink.removeListener(listener);
+      }
+      _pushNotificationListener = null;
     });
-    return null;
+    return pendingPushNotificationLink.value;
   }
 
   /// Parse and park an incoming URI. Unsupported links are ignored loudly.
@@ -43,7 +54,12 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
   }
 
   /// Clear the pending link after it has been dispatched (or dropped).
-  void consume() => state = null;
+  void consume() {
+    if (pendingPushNotificationLink.value == state) {
+      pendingPushNotificationLink.value = null;
+    }
+    state = null;
+  }
 }
 
 final pendingDeepLinkProvider =
