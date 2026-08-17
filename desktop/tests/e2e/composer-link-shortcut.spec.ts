@@ -177,3 +177,49 @@ test("⌘K outside the composer opens quick search", async ({ page }) => {
 
   await expect(page.getByTestId("search-dialog-input")).toBeVisible();
 });
+
+test("⌘B toggles the sidebar outside the composer", async ({ page }) => {
+  await installMockBridge(page);
+  await openGeneral(page);
+
+  const contentSurface = page.locator("[data-buzz-content-surface]").first();
+  await expect(contentSurface).toHaveCSS("margin-left", "1px");
+
+  await page.getByTestId("chat-title").click();
+  await page.keyboard.press("ControlOrMeta+b");
+
+  await expect(page.getByTestId("app-sidebar").locator("..")).toHaveAttribute(
+    "data-state",
+    "collapsed",
+  );
+  await expect(contentSurface).toHaveCSS("margin-left", "8px");
+});
+
+test("⌘S remains a sidebar shortcut alias", async ({ page }) => {
+  await installMockBridge(page);
+  await openGeneral(page);
+
+  await page.getByTestId("chat-title").click();
+  await page.keyboard.press("ControlOrMeta+s");
+
+  await expect(page.getByTestId("app-sidebar").locator("..")).toHaveAttribute(
+    "data-state",
+    "collapsed",
+  );
+});
+
+test("⌘B keeps bold formatting inside the composer", async ({ page }) => {
+  await installMockBridge(page);
+  await openGeneral(page);
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+b");
+  await input.pressSequentially("Bold");
+
+  await expect(input.locator("strong")).toHaveText("Bold");
+  await expect(page.getByTestId("app-sidebar").locator("..")).toHaveAttribute(
+    "data-state",
+    "expanded",
+  );
+});

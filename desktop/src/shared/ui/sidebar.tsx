@@ -5,7 +5,7 @@ import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { performSidebarDefaultHaptic } from "@/shared/lib/haptics";
-import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
+import { isSidebarToggleShortcut } from "@/shared/lib/sidebar-shortcut";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
@@ -36,7 +36,6 @@ const SIDEBAR_WIDTH_MIN = 220;
 const SIDEBAR_WIDTH_MAX = 420;
 const SIDEBAR_WIDTH_MOBILE = "288px";
 const SIDEBAR_WIDTH_ICON = "48px";
-const SIDEBAR_KEYBOARD_SHORTCUT = "s";
 
 type SidebarContextProps = {
   state: "expanded" | "collapsed";
@@ -207,10 +206,7 @@ const SidebarProvider = React.forwardRef<
 
     React.useEffect(() => {
       const handleKeyDown = (event: KeyboardEvent) => {
-        if (
-          event.key === SIDEBAR_KEYBOARD_SHORTCUT &&
-          hasPrimaryShortcutModifier(event)
-        ) {
+        if (isSidebarToggleShortcut(event)) {
           event.preventDefault();
           toggleSidebar();
         }

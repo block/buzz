@@ -64,7 +64,7 @@ test.describe("community rail", () => {
       "overflow",
       "visible",
     );
-    await expect(rail).toHaveCSS("z-index", "0");
+    await expect(rail).toHaveCSS("z-index", "20");
 
     const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
     const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
@@ -1174,6 +1174,46 @@ test.describe("community rail", () => {
       page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
     ).toBeVisible();
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
+  });
+
+  test("keeps the rail above the sidebar throughout the collapse animation", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const rail = page.getByTestId("community-rail");
+    const communityButton = page.getByTestId(
+      `community-rail-button-${COMMUNITY_A.id}`,
+    );
+    await expect(rail).toBeVisible();
+    await expect(communityButton).toBeVisible();
+
+    // Slow only the moving sidebar surface so the assertion samples the
+    // transition rather than the steady expanded or collapsed endpoint.
+    await page.addStyleTag({
+      content:
+        '[data-testid="app-sidebar"] { transition-duration: 1000ms !important; }',
+    });
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+    await page.waitForTimeout(100);
+
+    const railOwnsCommunityButtonPoint = await communityButton.evaluate(
+      (button) => {
+        const bounds = button.getBoundingClientRect();
+        const topmost = document.elementFromPoint(
+          bounds.left + bounds.width / 2,
+          bounds.top + bounds.height / 2,
+        );
+        return (
+          topmost === button || (topmost !== null && button.contains(topmost))
+        );
+      },
+    );
+    expect(railOwnsCommunityButtonPoint).toBe(true);
   });
 
   test("clears the macOS traffic lights", async ({ page }) => {

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { cn } from "@/shared/lib/cn";
 
 export function GradientLayer() {
   return (
@@ -22,21 +23,26 @@ export function GradientLayer() {
 
 export function ContentSurface({
   children,
+  insetLeft = false,
   unframed = false,
   terminal,
 }: {
   children: ReactNode;
+  /** Match the outer card gutter when no sidebar is visible to its left. */
+  insetLeft?: boolean;
   terminal?: ReactNode;
   /** Used by dedicated huddle windows, which should not resemble app cards. */
   unframed?: boolean;
 }) {
   return (
     <div
-      className={
+      className={cn(
+        "relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden bg-background",
         unframed
-          ? "relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden bg-background"
-          : "relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-content-edge"
-      }
+          ? undefined
+          : "mb-2 mr-2 mt-px rounded-2xl shadow-content-edge motion-safe:transition-[margin] motion-safe:duration-200 motion-safe:ease-linear",
+        !unframed && (insetLeft ? "ml-2" : "ml-px"),
+      )}
       data-buzz-content-surface
       data-buzz-content-unframed={unframed ? true : undefined}
     >

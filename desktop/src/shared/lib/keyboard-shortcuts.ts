@@ -99,8 +99,8 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     id: "toggle-sidebar",
     label: "Toggle sidebar",
     description: "Show or hide the sidebar",
-    keys: "⌘S",
-    keysWindows: "Ctrl+S",
+    keys: "⌘B",
+    keysWindows: "Ctrl+B",
     category: "Navigation",
   },
   {
