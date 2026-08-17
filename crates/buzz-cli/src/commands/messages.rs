@@ -455,11 +455,14 @@ pub async fn cmd_get_thread(
     if include_aux {
         reply_filter["include_aux"] = serde_json::json!(true);
     }
-    let root_filter = serde_json::json!({
+    let mut root_filter = serde_json::json!({
         "ids": [root_event_id.as_str()],
         "#h": [channel_id],
         "limit": 1
     });
+    if include_aux {
+        root_filter["include_aux"] = serde_json::json!(true);
+    }
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|event| {
