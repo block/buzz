@@ -7,11 +7,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_CHANNEL_ADD_POLICY,
+    KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
+    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -33,7 +33,7 @@ pub fn is_admin_kind(kind: u32) -> bool {
 /// handled in `ingest_event()` before storage so we can short-circuit on
 /// duplicates without storing the event at all.
 pub fn is_side_effect_kind(kind: u32) -> bool {
-    matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | 41001..=41003 | 40099)
+    matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_CHANNEL_ADD_POLICY | 41001..=41003 | 40099)
 }
 
 async fn evict_live_channel_subscriptions(
@@ -215,7 +215,9 @@ pub async fn handle_side_effects(
         9022 => handle_leave_request(tenant, event, state).await,
         // NIP-34: Git repo announcement → reserve name + seed manifest pointer.
         KIND_GIT_REPO_ANNOUNCEMENT => handle_git_repo_announcement(tenant, event, state).await,
-        KIND_AGENT_PROFILE => handle_agent_profile(tenant, event, state).await,
+        KIND_AGENT_CHANNEL_ADD_POLICY => {
+            handle_agent_channel_add_policy(tenant, event, state).await
+        }
         // kind:7 (reaction) handled inline in ingest_event() before storage.
         _ => Ok(()),
     }
@@ -1167,18 +1169,20 @@ pub async fn emit_group_discovery_events(
     Ok(())
 }
 
-async fn handle_agent_profile(
+async fn handle_agent_channel_add_policy(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
     let content: serde_json::Value = serde_json::from_str(&event.content)
-        .map_err(|e| anyhow::anyhow!("kind:10100 content parse error: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("channel-add-policy content parse error: {e}"))?;
 
     let policy = content
         .get("channel_add_policy")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("channel-add-policy event missing channel_add_policy field")
+        })?;
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
     if state
@@ -1197,7 +1201,7 @@ async fn handle_agent_profile(
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
         .await?;
 
-    info!(pubkey = %hex::encode(&pubkey_bytes), policy, "kind:10100 channel_add_policy updated");
+    info!(pubkey = %hex::encode(&pubkey_bytes), policy, "channel_add_policy updated");
     Ok(())
 }
 
@@ -3374,6 +3378,15 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_profiles_do_not_trigger_channel_add_policy_side_effects() {
+        assert!(is_side_effect_kind(KIND_AGENT_CHANNEL_ADD_POLICY));
+        assert!(
+            !is_side_effect_kind(buzz_core::kind::KIND_AGENT_PROFILE),
+            "a runtime routing profile must never be parsed as a channel-add policy"
+        );
+    }
 
     #[test]
     fn group_members_snapshot_keeps_members_past_one_thousand() {

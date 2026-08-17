@@ -83,7 +83,7 @@ test("relayAgentIsSharedWithUser: accepts shared anyone agents and rejects unsha
   );
 });
 
-test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user", () => {
+test("relayAgentIsSharedWithUser: keeps allowlist agents private", () => {
   const sharedChannelIds = new Set(["general"]);
 
   assert.equal(
@@ -94,9 +94,8 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
         channelIds: ["other"],
       },
       sharedChannelIds,
-      CURRENT_PUBKEY,
     ),
-    true,
+    false,
   );
   assert.equal(
     relayAgentIsSharedWithUser(
@@ -106,29 +105,24 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
         channelIds: ["general"],
       },
       sharedChannelIds,
-      CURRENT_PUBKEY,
     ),
     false,
   );
 });
 
-test("relayAgentCanRespondInChannel: requires exact channel membership and viewer access", () => {
+test("relayAgentCanRespondInChannel: requires exact channel membership and public access", () => {
   const agent = {
-    respondTo: "allowlist",
-    respondToAllowlist: [CURRENT_PUBKEY],
+    respondTo: "anyone",
+    respondToAllowlist: [],
     channelIds: ["general"],
   };
 
   assert.equal(
-    relayAgentCanRespondInChannel(agent, "general", CURRENT_PUBKEY),
+    relayAgentCanRespondInChannel(agent, "general"),
     true,
   );
   assert.equal(
-    relayAgentCanRespondInChannel(agent, "other", CURRENT_PUBKEY),
-    false,
-  );
-  assert.equal(
-    relayAgentCanRespondInChannel(agent, "general", OTHER_OWNER_PUBKEY),
+    relayAgentCanRespondInChannel(agent, "other"),
     false,
   );
 });
@@ -161,7 +155,7 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
     sharedChannelIds: new Set(["general"]),
   });
 
-  assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
+  assert.deepEqual(result, new Set([PUB_A, PUB_B]));
 });
 
 test("getMentionableAgentPubkeys: scopes channel composers and fails closed without context", () => {
@@ -185,7 +179,7 @@ test("getMentionableAgentPubkeys: scopes channel composers and fails closed with
       ...base,
       eligibilityScope: { type: "channel", channelId: "general" },
     }),
-    new Set([PUB_A, PUB_B]),
+    new Set([PUB_A]),
   );
   assert.deepEqual(
     getMentionableAgentPubkeys({

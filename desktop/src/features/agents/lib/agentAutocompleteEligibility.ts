@@ -12,18 +12,10 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
 export function relayAgentIsSharedWithUser(
   agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
   sharedChannelIds: ReadonlySet<string>,
-  currentPubkey?: string | null,
 ) {
-  const normalizedCurrentPubkey = currentPubkey
-    ? normalizePubkey(currentPubkey)
-    : null;
-
-  if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
-    return agent.respondToAllowlist
-      .map((pubkey) => normalizePubkey(pubkey))
-      .includes(normalizedCurrentPubkey);
-  }
-
+  // A remote agent's allowlist is private policy. The public runtime profile
+  // only proves that an `anyone` agent shares this channel; other modes must
+  // not become mentionable based on a community-visible recipient list.
   return (
     agent.respondTo === "anyone" &&
     agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))
@@ -33,11 +25,10 @@ export function relayAgentIsSharedWithUser(
 export function relayAgentCanRespondInChannel(
   agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
   channelId: string,
-  currentPubkey?: string | null,
 ) {
   return (
     agent.channelIds.includes(channelId) &&
-    relayAgentIsSharedWithUser(agent, new Set([channelId]), currentPubkey)
+    relayAgentIsSharedWithUser(agent, new Set([channelId]))
   );
 }
 
@@ -47,7 +38,6 @@ export type AgentEligibilityScope =
   | { type: "managed-only" };
 
 export function getMentionableAgentPubkeys({
-  currentPubkey,
   eligibilityScope,
   managedAgentPubkeys,
   relayAgents,
@@ -68,11 +58,10 @@ export function getMentionableAgentPubkeys({
       eligibilityScope.type === "managed-only"
         ? false
         : eligibilityScope.type === "community"
-          ? relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)
+          ? relayAgentIsSharedWithUser(agent, sharedChannelIds)
           : relayAgentCanRespondInChannel(
               agent,
               eligibilityScope.channelId,
-              currentPubkey,
             );
     if (isAllowed) {
       pubkeys.add(normalizePubkey(agent.pubkey));

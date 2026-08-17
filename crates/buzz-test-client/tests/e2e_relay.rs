@@ -1334,14 +1334,14 @@ async fn test_nip29_put_user_nobody_blocks() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "nobody" via kind:10100 event.
+    // Set agent's channel_add_policy to "nobody" via its dedicated event.
     let http_client = reqwest::Client::new();
     let policy_event = EventBuilder::new(
-        Kind::Custom(10100),
+        Kind::Custom(buzz_core::kind::KIND_AGENT_CHANNEL_ADD_POLICY as u16),
         serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
     )
     .sign_with_keys(&agent_keys)
-    .expect("sign kind:10100");
+    .expect("sign channel-add-policy event");
     let resp = http_client
         .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
@@ -1396,14 +1396,14 @@ async fn test_nip29_put_user_self_add_bypasses_policy() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "nobody" via kind:10100 event.
+    // Set agent's channel_add_policy to "nobody" via its dedicated event.
     let http_client = reqwest::Client::new();
     let policy_event = EventBuilder::new(
-        Kind::Custom(10100),
+        Kind::Custom(buzz_core::kind::KIND_AGENT_CHANNEL_ADD_POLICY as u16),
         serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
     )
     .sign_with_keys(&agent_keys)
-    .expect("sign kind:10100");
+    .expect("sign channel-add-policy event");
     let resp = http_client
         .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
@@ -1456,14 +1456,14 @@ async fn test_nip29_put_user_owner_only_blocks() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "owner_only" via kind:10100 event.
+    // Set agent's channel_add_policy to "owner_only" via its dedicated event.
     let http_client = reqwest::Client::new();
     let policy_event = EventBuilder::new(
-        Kind::Custom(10100),
+        Kind::Custom(buzz_core::kind::KIND_AGENT_CHANNEL_ADD_POLICY as u16),
         serde_json::json!({ "channel_add_policy": "owner_only" }).to_string(),
     )
     .sign_with_keys(&agent_keys)
-    .expect("sign kind:10100");
+    .expect("sign channel-add-policy event");
     let resp = http_client
         .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
