@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -5,9 +7,54 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart' as http_testing;
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  test(
+    'publishes a signed kind:0 profile and preserves existing fields',
+    () async {
+      final keys = nostr.Keys.generate();
+      http.Request? captured;
+      final client = http_testing.MockClient((request) async {
+        captured = request;
+        return http.Response(jsonEncode({'accepted': true}), 200);
+      });
+      addTearDown(client.close);
+
+      await publishProfileOverHttp(
+        client: client,
+        relayUrl: 'wss://relay.example.com/tenant-path?ignored=true',
+        nsec: keys.nsec,
+        displayName: '  Matt Example  ',
+        existing: const UserProfile(
+          pubkey: 'old',
+          avatarUrl: 'https://cdn.example/avatar.png',
+          about: 'Builder',
+          nip05Handle: 'matt@example.com',
+        ),
+      );
+
+      expect(captured?.url.toString(), 'https://relay.example.com/events');
+      expect(captured?.headers['Authorization'], startsWith('Nostr '));
+      expect(captured?.followRedirects, isFalse);
+      final event = jsonDecode(captured!.body) as Map<String, dynamic>;
+      expect(event['kind'], 0);
+      expect(event['pubkey'], keys.public);
+      final content =
+          jsonDecode(event['content'] as String) as Map<String, dynamic>;
+      expect(content, {
+        'name': 'Matt Example',
+        'display_name': 'Matt Example',
+        'picture': 'https://cdn.example/avatar.png',
+        'about': 'Builder',
+        'nip05': 'matt@example.com',
+      });
+    },
+  );
+
   test(
     'manual presence persists until Online restores automatic mode',
     () async {

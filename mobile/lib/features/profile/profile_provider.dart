@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -38,11 +41,132 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
   Future<void> refresh() async {
     state = await AsyncValue.guard(_fetch);
   }
+
+  Future<void> saveDisplayName(String displayName) async {
+    final normalized = displayName.trim();
+    if (normalized.isEmpty) {
+      throw ArgumentError.value(
+        displayName,
+        'displayName',
+        'must not be empty',
+      );
+    }
+
+    final config = ref.read(relayConfigProvider);
+    final nsec = config.nsec;
+    if (nsec == null || nsec.isEmpty) {
+      throw StateError('Cannot save profile without a signing key');
+    }
+
+    final previous = state.asData?.value;
+    final client = http.Client();
+    try {
+      await publishProfileOverHttp(
+        client: client,
+        relayUrl: config.baseUrl,
+        nsec: nsec,
+        displayName: normalized,
+        existing: previous,
+      );
+    } finally {
+      client.close();
+    }
+
+    final pubkey = pubkeyFromNsec(nsec);
+    if (pubkey == null) {
+      throw StateError('Cannot derive profile public key');
+    }
+    state = AsyncData(
+      UserProfile(
+        pubkey: pubkey,
+        displayName: normalized,
+        avatarUrl: previous?.avatarUrl,
+        about: previous?.about,
+        nip05Handle: previous?.nip05Handle,
+        ownerPubkey: previous?.ownerPubkey,
+      ),
+    );
+  }
 }
 
 final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(
   ProfileNotifier.new,
 );
+
+/// Publish a signed kind:0 profile through the relay's authenticated HTTP
+/// bridge. Invite onboarding uses this before the WebSocket reconnect settles;
+/// Settings uses the same path so an unnamed mobile identity can recover.
+Future<void> publishProfileOverHttp({
+  required http.Client client,
+  required String relayUrl,
+  required String nsec,
+  required String displayName,
+  UserProfile? existing,
+}) async {
+  final normalized = displayName.trim();
+  if (normalized.isEmpty) {
+    throw ArgumentError.value(displayName, 'displayName', 'must not be empty');
+  }
+
+  final privateKey = nostr.Nip19.decode(payload: nsec).data;
+  if (privateKey.isEmpty) throw StateError('Invalid signing key');
+
+  final content = <String, dynamic>{
+    'name': normalized,
+    'display_name': normalized,
+    'picture': ?existing?.avatarUrl,
+    'about': ?existing?.about,
+    'nip05': ?existing?.nip05Handle,
+  };
+  final event = nostr.Event.from(
+    kind: EventKind.metadata,
+    content: jsonEncode(content),
+    tags: const [],
+    secretKey: privateKey,
+    verify: false,
+  );
+  final bodyBytes = utf8.encode(jsonEncode(event.toMap()));
+  final url = _eventsUrlFromRelay(relayUrl);
+  final request = http.Request('POST', Uri.parse(url))
+    ..followRedirects = false
+    ..headers.addAll({
+      'Authorization': buildNip98AuthHeader(
+        method: 'POST',
+        url: url,
+        bodyBytes: bodyBytes,
+        nsec: nsec,
+      ),
+      'Content-Type': 'application/json',
+    })
+    ..bodyBytes = bodyBytes;
+  final response = await http.Response.fromStream(await client.send(request));
+  final decoded = jsonDecode(response.body.isEmpty ? '{}' : response.body);
+  final accepted =
+      response.statusCode >= 200 &&
+      response.statusCode < 300 &&
+      decoded is Map &&
+      decoded['accepted'] == true;
+  if (!accepted) {
+    throw StateError('Relay rejected profile update');
+  }
+}
+
+String _eventsUrlFromRelay(String relayUrl) {
+  final uri = Uri.parse(relayUrl);
+  final scheme = switch (uri.scheme) {
+    'wss' => 'https',
+    'ws' => 'http',
+    'https' => 'https',
+    'http' => 'http',
+    _ => throw FormatException('Invalid relay URL scheme: ${uri.scheme}'),
+  };
+  return Uri(
+    scheme: scheme,
+    host: uri.host,
+    port: uri.hasPort ? uri.port : null,
+    path: '/events',
+  ).toString();
+}
 
 /// Presence status for the current user.
 ///

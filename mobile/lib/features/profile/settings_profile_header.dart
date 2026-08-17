@@ -13,6 +13,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
+import 'edit_profile_sheet.dart';
 import 'profile_provider.dart';
 import 'set_status_sheet.dart';
 import 'user_status_provider.dart';
@@ -83,10 +84,21 @@ class SettingsProfileHeader extends HookConsumerWidget {
             ),
           ),
           const SizedBox(height: Grid.twelve),
-          Text(
-            profile?.label ?? 'Your profile',
-            style: context.textTheme.titleMedium,
-            textAlign: TextAlign.center,
+          TextButton.icon(
+            key: const ValueKey('settings-edit-profile'),
+            onPressed: () => showEditProfileSheet(
+              context,
+              initialName: profile?.displayName ?? '',
+            ),
+            iconAlignment: IconAlignment.end,
+            icon: const Icon(LucideIcons.pencil, size: 16),
+            label: Text(
+              profile?.displayName?.trim().isNotEmpty == true
+                  ? profile!.displayName!.trim()
+                  : 'Add your name',
+              style: context.textTheme.titleMedium,
+              textAlign: TextAlign.center,
+            ),
           ),
           // Keep the status text visible even when no emoji is set. NIP-38
           // permits text-only statuses, which the avatar badge cannot represent.

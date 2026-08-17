@@ -80,7 +80,7 @@ void main() {
     'claim posts with freshly-generated key and stores joined community',
     () async {
       final keys = nostr.Keys.generate();
-      http.Request? capturedRequest;
+      final capturedRequests = <http.Request>[];
       final storage = CommunityStorage(secure: FakeSecureStorage());
       final auth = _RecordingAuthNotifier();
       final container = ProviderContainer(
@@ -90,7 +90,13 @@ void main() {
           inviteKeyGeneratorProvider.overrideWithValue(() => keys),
           inviteJoinHttpClientProvider.overrideWithValue(
             http_testing.MockClient((request) async {
-              capturedRequest = request;
+              capturedRequests.add(request);
+              if (request.url.path == '/events') {
+                return http.Response(
+                  jsonEncode({'accepted': true, 'message': 'saved'}),
+                  200,
+                );
+              }
               return http.Response(
                 jsonEncode({
                   'status': 'joined',
@@ -119,19 +125,22 @@ void main() {
         InviteJoinStatus.confirming,
       );
 
-      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      await container
+          .read(inviteJoinProvider.notifier)
+          .confirmJoin(displayName: 'Matt Example');
 
       final state = container.read(inviteJoinProvider);
       expect(state.status, InviteJoinStatus.success);
-      expect(capturedRequest, isNotNull);
+      expect(capturedRequests, hasLength(2));
+      final capturedRequest = capturedRequests.first;
       expect(
-        capturedRequest!.url.toString(),
+        capturedRequest.url.toString(),
         'https://relay.example.com/api/invites/claim',
       );
-      expect(capturedRequest!.body, jsonEncode({'code': 'code'}));
-      final authHeader = capturedRequest!.headers['Authorization'];
+      expect(capturedRequest.body, jsonEncode({'code': 'code'}));
+      final authHeader = capturedRequest.headers['Authorization'];
       expect(authHeader, startsWith('Nostr '));
-      expect(capturedRequest!.followRedirects, isFalse);
+      expect(capturedRequest.followRedirects, isFalse);
       final encoded = authHeader!.substring('Nostr '.length);
       final authEvent =
           jsonDecode(
@@ -142,11 +151,11 @@ void main() {
           .map((tag) => (tag as List<dynamic>).cast<String>())
           .toList();
       final payloadHash = SHA256Digest()
-          .process(capturedRequest!.bodyBytes)
+          .process(capturedRequest.bodyBytes)
           .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
           .join();
       expect(authEvent['kind'], 27235);
-      expect(tags, contains(equals(['u', capturedRequest!.url.toString()])));
+      expect(tags, contains(equals(['u', capturedRequest.url.toString()])));
       expect(tags, contains(equals(['method', 'POST'])));
       expect(tags, contains(equals(['payload', payloadHash])));
       expect(auth.authenticatedCommunities, hasLength(1));
@@ -156,6 +165,16 @@ void main() {
       );
       expect(auth.authenticatedCommunities.single.pubkey, keys.public);
       expect(auth.authenticatedCommunities.single.nsec, keys.nsec);
+      final profileRequest = capturedRequests.last;
+      expect(profileRequest.url.toString(), 'https://relay.example.com/events');
+      final profileEvent =
+          jsonDecode(profileRequest.body) as Map<String, dynamic>;
+      expect(profileEvent['kind'], 0);
+      expect(profileEvent['pubkey'], keys.public);
+      final profileContent =
+          jsonDecode(profileEvent['content'] as String) as Map<String, dynamic>;
+      expect(profileContent['display_name'], 'Matt Example');
+      expect(profileContent['name'], 'Matt Example');
       expect(
         auth.authenticatedCommunities.single.sensitiveActionPolicy,
         SensitiveActionPolicy.disabledByUser,
@@ -208,7 +227,9 @@ void main() {
             policyReceipt: 'expired.receipt',
           ),
         );
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    await container
+        .read(inviteJoinProvider.notifier)
+        .confirmJoin(displayName: 'Matt');
 
     final state = container.read(inviteJoinProvider);
     expect(state.status, InviteJoinStatus.error);
@@ -218,7 +239,9 @@ void main() {
       'This invite approval has expired. Re-open the invite link to try again.',
     );
 
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    await container
+        .read(inviteJoinProvider.notifier)
+        .confirmJoin(displayName: 'Matt');
     expect(attempts, 1);
   });
 
@@ -251,7 +274,9 @@ void main() {
             code: 'v2.exhausted-secret',
           ),
         );
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    await container
+        .read(inviteJoinProvider.notifier)
+        .confirmJoin(displayName: 'Matt');
 
     final state = container.read(inviteJoinProvider);
     expect(state.status, InviteJoinStatus.error);
@@ -261,7 +286,9 @@ void main() {
       'This invite has reached its use limit. Ask for a new invite.',
     );
 
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    await container
+        .read(inviteJoinProvider.notifier)
+        .confirmJoin(displayName: 'Matt');
     expect(attempts, 1);
   });
 
@@ -278,6 +305,12 @@ void main() {
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
         inviteJoinHttpClientProvider.overrideWithValue(
           http_testing.MockClient((request) async {
+            if (request.url.path == '/events') {
+              return http.Response(
+                jsonEncode({'accepted': true, 'message': 'saved'}),
+                200,
+              );
+            }
             attempts++;
             bodies.add(request.body);
             if (attempts == 1) {
@@ -306,10 +339,14 @@ void main() {
             policyReceipt: 'receipt.value',
           ),
         );
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    await container
+        .read(inviteJoinProvider.notifier)
+        .confirmJoin(displayName: 'Matt');
     expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
 
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
+    await container
+        .read(inviteJoinProvider.notifier)
+        .confirmJoin(displayName: 'Matt');
 
     expect(container.read(inviteJoinProvider).status, InviteJoinStatus.success);
     expect(attempts, 2);
@@ -320,6 +357,65 @@ void main() {
       ),
     );
     expect(auth.authenticatedCommunities, hasLength(1));
+  });
+
+  test('profile failure retries without claiming the invite twice', () async {
+    final keys = nostr.Keys.generate();
+    var claimAttempts = 0;
+    var profileAttempts = 0;
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        authProvider.overrideWith(_RecordingAuthNotifier.new),
+        inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+        inviteJoinHttpClientProvider.overrideWithValue(
+          http_testing.MockClient((request) async {
+            if (request.url.path == '/events') {
+              profileAttempts++;
+              return http.Response(
+                jsonEncode({'accepted': profileAttempts > 1}),
+                200,
+              );
+            }
+            claimAttempts++;
+            return http.Response(
+              jsonEncode({
+                'status': 'joined',
+                'host': 'relay.example.com',
+                'role': 'member',
+              }),
+              200,
+            );
+          }),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container
+        .read(inviteJoinProvider.notifier)
+        .prepare(
+          const InviteDeepLink(
+            relayUrl: 'wss://relay.example.com',
+            code: 'code',
+          ),
+        );
+    await container
+        .read(inviteJoinProvider.notifier)
+        .confirmJoin(displayName: 'Matt');
+    expect(
+      container.read(inviteJoinProvider).status,
+      InviteJoinStatus.profileError,
+    );
+
+    await container
+        .read(inviteJoinProvider.notifier)
+        .confirmJoin(displayName: 'Matt');
+
+    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.success);
+    expect(claimAttempts, 1);
+    expect(profileAttempts, 2);
   });
 }
 
