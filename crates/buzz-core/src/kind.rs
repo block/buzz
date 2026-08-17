@@ -93,6 +93,12 @@ pub const KIND_AGENT_PROFILE: u32 = 10100;
 /// `docs/nips/NIP-AE.md` and [`crate::engram`].
 pub const KIND_AGENT_ENGRAM: u32 = 30174;
 
+/// Owner-encrypted immutable autonomous skill version.
+pub const KIND_AGENT_SKILL_VERSION: u32 = 30180;
+
+/// Owner-encrypted replaceable pointer to an active autonomous skill version.
+pub const KIND_AGENT_SKILL_POINTER: u32 = 30181;
+
 /// NIP-ER: Event Reminder (parameterized replaceable, author-only).
 ///
 /// Encrypted, author-only reminder addressed by `(pubkey, kind, d_tag)`. The
@@ -143,7 +149,13 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
     KIND_DM_VISIBILITY,
     KIND_AGENT_TURN_METRIC,
     KIND_COMMAND_BRIEF,
+    KIND_AGENT_SKILL_VERSION,
+    KIND_AGENT_SKILL_POINTER,
 ];
+
+/// Owner-encrypted autonomous skill events readable only by their agent author
+/// or the owner named in the event's `p` tag.
+pub const AGENT_SKILL_KINDS: &[u32] = &[KIND_AGENT_SKILL_VERSION, KIND_AGENT_SKILL_POINTER];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -694,6 +706,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_FILE_METADATA,
     KIND_AGENT_PROFILE,
     KIND_AGENT_ENGRAM,
+    KIND_AGENT_SKILL_VERSION,
+    KIND_AGENT_SKILL_POINTER,
     KIND_EVENT_REMINDER,
     KIND_BATTLE_RHYTHM_SOURCE,
     KIND_BATTLE_RHYTHM_EVENT,

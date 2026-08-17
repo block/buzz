@@ -12,15 +12,16 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BATTLE_RHYTHM_EVENT,
-    KIND_BATTLE_RHYTHM_REVISION, KIND_BATTLE_RHYTHM_SOURCE, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_COMMAND_BRIEF, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
-    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
-    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
-    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
-    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    is_relay_admin_kind, AGENT_SKILL_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE,
+    KIND_AGENT_SKILL_POINTER, KIND_AGENT_SKILL_VERSION, KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY,
+    KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BATTLE_RHYTHM_EVENT, KIND_BATTLE_RHYTHM_REVISION,
+    KIND_BATTLE_RHYTHM_SOURCE, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS,
+    KIND_COMMAND_BRIEF, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE,
+    KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE,
+    KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
     KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
     KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MISSION_CONSTRAINT,
@@ -332,6 +333,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
+        | KIND_AGENT_SKILL_VERSION | KIND_AGENT_SKILL_POINTER
         | KIND_EVENT_REMINDER | KIND_BATTLE_RHYTHM_SOURCE | KIND_BATTLE_RHYTHM_EVENT
         | KIND_BATTLE_RHYTHM_REVISION | KIND_PLANNING_PROJECT | KIND_PLANNING_TASK
         | KIND_MISSION_CONSTRAINT | KIND_PLANNING_TASK_DETAILS | KIND_PLANNING_PLAYBOOK
@@ -539,6 +541,10 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_EMOJI_LIST
             // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
             | KIND_AGENT_ENGRAM
+            // Autonomous skill versions and active pointers share the same
+            // agent-author/owner-encrypted global addressing boundary.
+            | KIND_AGENT_SKILL_VERSION
+            | KIND_AGENT_SKILL_POINTER
             // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
             | KIND_EVENT_REMINDER
             // Battle Rhythm calendar sources, event snapshots, and revisions are
@@ -1174,6 +1180,11 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
     // replacement and then be silently discarded by readers.
     validate_engram_nip44_content(&event.content)?;
     Ok(())
+}
+
+/// Validate the canonical public envelope shared by both encrypted skill kinds.
+fn validate_agent_skill_envelope(event: &Event) -> Result<(), String> {
+    validate_engram_envelope(event).map_err(|error| error.replace("agent-engram", "agent-skill"))
 }
 
 /// Enforce the `shared`-tag shape shared by every kind in
@@ -2545,6 +2556,11 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_AGENT_ENGRAM {
         validate_engram_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if AGENT_SKILL_KINDS.contains(&kind_u32) {
+        validate_agent_skill_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
@@ -4001,6 +4017,42 @@ mod tests {
         let p = "b".repeat(64);
         let ev = make_engram(&[&["d", &d], &["p", &p]], &fake_nip44_v2());
         assert!(validate_engram_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn agent_skill_envelope_accepts_only_canonical_private_shape() {
+        let d = "a".repeat(64);
+        let p = "b".repeat(64);
+        for kind in [
+            buzz_core::kind::KIND_AGENT_SKILL_VERSION,
+            buzz_core::kind::KIND_AGENT_SKILL_POINTER,
+        ] {
+            let valid = make_event_with_tags(kind, &fake_nip44_v2(), &[&["d", &d], &["p", &p]]);
+            assert!(validate_agent_skill_envelope(&valid).is_ok());
+
+            let missing_owner = make_event_with_tags(kind, &fake_nip44_v2(), &[&["d", &d]]);
+            assert!(validate_agent_skill_envelope(&missing_owner).is_err());
+
+            let uppercase_d = d.to_ascii_uppercase();
+            let malformed =
+                make_event_with_tags(kind, &fake_nip44_v2(), &[&["d", &uppercase_d], &["p", &p]]);
+            assert!(validate_agent_skill_envelope(&malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn agent_skill_kinds_require_users_write() {
+        let dummy = make_dummy_event();
+        for kind in [
+            buzz_core::kind::KIND_AGENT_SKILL_VERSION,
+            buzz_core::kind::KIND_AGENT_SKILL_POINTER,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).ok(),
+                Some(Scope::UsersWrite)
+            );
+            assert!(is_global_only_kind(kind));
+        }
     }
 
     #[test]

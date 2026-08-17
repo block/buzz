@@ -7,8 +7,9 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_COMMAND_BRIEF, KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
+    is_unshared_gated_event, AGENT_SKILL_KINDS, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM,
+    KIND_AGENT_TURN_METRIC, KIND_COMMAND_BRIEF, KIND_DM_VISIBILITY, P_GATED_KINDS,
+    RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -191,6 +192,13 @@ pub async fn handle_req(
             conn.send(RelayMessage::closed(
                 &sub_id,
                 "restricted: agent-engram reads require authors=[self] or #p=[self]",
+            ));
+            return;
+        }
+        if !agent_skill_filters_authorized(&filters, &authed_pubkey_hex) {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: agent-skill reads require authors=[self] or #p=[self]",
             ));
             return;
         }
@@ -1144,6 +1152,34 @@ pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &
     })
 }
 
+/// Authorize autonomous skill queries only for the agent author or named owner.
+/// Explicit skill-kind filters do not gain an event-ID bypass. Kindless filters
+/// remain available for normal Nostr ID/search queries; skill events matched by
+/// those filters are removed later by [`event_visible_to_reader`].
+pub(crate) fn agent_skill_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
+    let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+    filters.iter().all(|filter| {
+        let explicitly_matches_skill = filter.kinds.as_ref().is_some_and(|kinds| {
+            kinds
+                .iter()
+                .any(|kind| AGENT_SKILL_KINDS.contains(&(kind.as_u16() as u32)))
+        });
+        if !explicitly_matches_skill {
+            return true;
+        }
+        let authors_ok = filter.authors.as_ref().is_some_and(|authors| {
+            !authors.is_empty()
+                && authors
+                    .iter()
+                    .all(|author| author.to_hex().eq_ignore_ascii_case(authed_pubkey_hex))
+        });
+        authors_ok
+            || filter.generic_tags.get(&p_tag).is_some_and(|values| {
+                !values.is_empty() && values.iter().all(|value| value == authed_pubkey_hex)
+            })
+    })
+}
+
 /// Returns `true` if the filter CAN match author-only kinds — meaning it either
 /// has no `kinds` constraint (wildcard) or includes at least one author-only kind.
 ///
@@ -1249,6 +1285,13 @@ pub(crate) fn event_visible_to_reader(event: &nostr::Event, requester_pubkey_byt
         return false;
     }
     let requester_pubkey_hex = hex::encode(requester_pubkey_bytes);
+    if AGENT_SKILL_KINDS.contains(&(event.kind.as_u16() as u32)) {
+        return event.pubkey.to_bytes() == requester_pubkey_bytes
+            || event.tags.iter().any(|tag| {
+                tag.kind().to_string() == "p"
+                    && tag.content() == Some(requester_pubkey_hex.as_str())
+            });
+    }
     if !buzz_core::filter::reader_authorized_for_event(event, &requester_pubkey_hex) {
         return false;
     }
@@ -1300,6 +1343,90 @@ fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    fn skill_event(kind: u32, agent: &nostr::Keys, owner: &nostr::PublicKey) -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), "ciphertext")
+            .tags([
+                nostr::Tag::parse(["d", "a".repeat(64).as_str()]).expect("d tag"),
+                nostr::Tag::parse(["p", owner.to_hex().as_str()]).expect("p tag"),
+            ])
+            .sign_with_keys(agent)
+            .expect("skill event")
+    }
+
+    #[test]
+    fn agent_skill_explicit_kind_filters_require_self_author_or_self_owner() {
+        let agent = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let stranger = nostr::Keys::generate();
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_SKILL_VERSION as u16);
+        let by_agent = Filter::new().kind(kind).author(agent.public_key());
+        let by_owner = Filter::new().kind(kind).custom_tag(
+            SingleLetterTag::lowercase(Alphabet::P),
+            owner.public_key().to_hex(),
+        );
+        let by_known_id = Filter::new().kind(kind).id(nostr::EventId::all_zeros());
+
+        assert!(agent_skill_filters_authorized(
+            &[by_agent],
+            &agent.public_key().to_hex()
+        ));
+        assert!(agent_skill_filters_authorized(
+            &[by_owner],
+            &owner.public_key().to_hex()
+        ));
+        assert!(!agent_skill_filters_authorized(
+            &[by_known_id],
+            &stranger.public_key().to_hex()
+        ));
+    }
+
+    #[test]
+    fn agent_skill_gate_allows_kindless_id_filters_for_result_level_filtering() {
+        let stranger = nostr::Keys::generate();
+        let by_known_id = Filter::new().id(nostr::EventId::all_zeros());
+
+        assert!(agent_skill_filters_authorized(
+            &[by_known_id],
+            &stranger.public_key().to_hex()
+        ));
+    }
+
+    #[test]
+    fn agent_skill_gate_allows_kindless_search_filters_for_result_level_filtering() {
+        let stranger = nostr::Keys::generate();
+        let search = Filter::new().search("command doctrine");
+
+        assert!(agent_skill_filters_authorized(
+            &[search],
+            &stranger.public_key().to_hex()
+        ));
+    }
+
+    #[test]
+    fn agent_skill_results_are_visible_only_to_agent_or_owner() {
+        let agent = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let stranger = nostr::Keys::generate();
+        let event = skill_event(
+            buzz_core::kind::KIND_AGENT_SKILL_POINTER,
+            &agent,
+            &owner.public_key(),
+        );
+
+        assert!(event_visible_to_reader(
+            &event,
+            &agent.public_key().to_bytes()
+        ));
+        assert!(event_visible_to_reader(
+            &event,
+            &owner.public_key().to_bytes()
+        ));
+        assert!(!event_visible_to_reader(
+            &event,
+            &stranger.public_key().to_bytes()
+        ));
+    }
 
     #[test]
     fn global_queries_push_access_scope_before_limit() {

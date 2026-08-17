@@ -2,11 +2,23 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::mcp::truncate_at_boundary;
+use buzz_core::agent_skill::skill_body_hash;
+use serde::Deserialize;
 
 const MAX_HINTS_BYTES: usize = 128 * 1024;
 pub const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
 const MAX_NATIVE_SKILL_CONTEXT_BYTES: usize = 64 * 1024;
 const SKILL_DIRS: &[&str] = &[".agents/skills", ".goose/skills", ".claude/skills"];
+const MANAGED_SKILL_MARKER: &str = ".skill-version.json";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagedSkillMarkerV1 {
+    schema_version: u8,
+    skill_id: String,
+    version_id: String,
+    content_hash: String,
+}
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
@@ -134,6 +146,13 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
         let Some((name, description)) = parse_skill_frontmatter(&content) else {
             continue;
         };
+        let managed = subdir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.starts_with("learned-"));
+        if managed && !valid_managed_projection(&subdir, &name, &content) {
+            continue;
+        }
         if seen.contains(&name) {
             continue;
         }
@@ -142,7 +161,11 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
         // Collect supporting files: every non-SKILL.md file in the skill dir tree.
         // Don't descend into subdirs that themselves have a SKILL.md — those are
         // separate skills with their own entries.
-        let supporting_files = collect_supporting_files(&subdir);
+        let supporting_files = if managed {
+            vec![]
+        } else {
+            collect_supporting_files(&subdir)
+        };
 
         skills.push(SkillEntry {
             name,
@@ -151,6 +174,40 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
             supporting_files,
         });
     }
+}
+
+fn valid_managed_projection(directory: &Path, name: &str, content: &str) -> bool {
+    let Some(directory_name) = directory.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let valid_name = directory_name
+        .strip_prefix("learned-")
+        .is_some_and(|suffix| {
+            suffix.len() == 12
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        });
+    if !valid_name || name != directory_name {
+        return false;
+    }
+    let marker: ManagedSkillMarkerV1 = match std::fs::read(directory.join(MANAGED_SKILL_MARKER))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(marker) => marker,
+        None => return false,
+    };
+    marker.schema_version == 1
+        && marker.skill_id == directory_name
+        && !marker.version_id.is_empty()
+        && marker.version_id.len() <= 512
+        && marker.version_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
+        })
+        && marker.content_hash == skill_body_hash(content)
 }
 
 /// Walk `skill_dir` recursively and return the absolute path of every file
@@ -779,5 +836,49 @@ mod tests {
             "unexpected path: {:?}",
             skills[0].supporting_files[0]
         );
+    }
+
+    #[test]
+    fn managed_skill_requires_matching_marker_and_hash() {
+        let tmp = TempDir::new().unwrap();
+        let skill_id = "learned-0123456789ab";
+        let skill_dir = tmp.path().join(".agents/skills").join(skill_id);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let body =
+            format!("---\nname: {skill_id}\ndescription: Learned.\n---\n# Procedure\nSafe.\n");
+        std::fs::write(skill_dir.join("SKILL.md"), &body).unwrap();
+
+        assert!(discover_skills_impl(tmp.path(), None).is_empty());
+
+        std::fs::write(
+            skill_dir.join(".skill-version.json"),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "skillId": skill_id,
+                "versionId": "version-one",
+                "contentHash": buzz_core::agent_skill::skill_body_hash(&body),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let skills = discover_skills_impl(tmp.path(), None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, skill_id);
+
+        std::fs::write(skill_dir.join("SKILL.md"), format!("{body}tampered\n")).unwrap();
+        assert!(discover_skills_impl(tmp.path(), None).is_empty());
+    }
+
+    #[test]
+    fn ordinary_user_skill_does_not_require_managed_marker() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join(".agents/skills/user-authored");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: user-authored\ndescription: User skill.\n---\nBody.\n",
+        )
+        .unwrap();
+        assert_eq!(discover_skills_impl(tmp.path(), None).len(), 1);
     }
 }

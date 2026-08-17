@@ -1,4 +1,6 @@
-use buzz_core::agent_experience::{build_experience_event, ExperienceOutcome, MemoryScope};
+use buzz_core::agent_experience::{
+    build_experience_event, ExperienceOutcome, MemoryScope, SkillVersionV1, ValidationResultV1,
+};
 use nostr::Keys;
 
 use crate::experience_capture::{ExperienceCapture, RuntimeEvidence, TurnOutcome};
@@ -17,6 +19,15 @@ fn evidence() -> RuntimeEvidence {
         prompt_template_id: "buzz-acp-v1".into(),
         memory_view_revision: "nip-ae-core".into(),
         rag_snapshot_id: "snapshot-f88174".into(),
+        skill_versions: vec![SkillVersionV1 {
+            skill_id: "learned-navigation".into(),
+            version: "version-1".into(),
+        }],
+        validation_results: vec![ValidationResultV1 {
+            check_id: "bounded-output".into(),
+            passed: true,
+            detail: None,
+        }],
     }
 }
 
@@ -26,6 +37,8 @@ fn experience_capture_maps_completed_failed_cancelled_and_non_substantive_turns(
         .expect("completed capture")
         .expect("substantive record");
     assert_eq!(completed.outcome, ExperienceOutcome::Succeeded);
+    assert_eq!(completed.skill_versions[0].version, "version-1");
+    assert_eq!(completed.validation_results[0].check_id, "bounded-output");
 
     let failed = ExperienceCapture::from_turn(
         TurnOutcome::Failed {

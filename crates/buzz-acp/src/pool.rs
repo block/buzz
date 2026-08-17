@@ -21,9 +21,11 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
@@ -104,6 +106,9 @@ pub struct SessionState {
     /// fetch fails — all fail open. Cleared on session invalidation alongside
     /// `core_sections` so the next session picks up any canvas change.
     pub canvas_sections: HashMap<Uuid, String>,
+    /// Fingerprint of materialized learned skills observed before the turn.
+    /// A change invalidates the next session, never a turn already in flight.
+    managed_skill_fingerprint: Option<String>,
 }
 
 impl SessionState {
@@ -139,6 +144,19 @@ impl SessionState {
         self.canvas_sections.clear();
     }
 
+    fn refresh_managed_skills(&mut self, source: &PromptSource, cwd: &Path) -> bool {
+        let current = managed_skill_projection_fingerprint(cwd);
+        let changed = self
+            .managed_skill_fingerprint
+            .as_ref()
+            .is_some_and(|previous| previous != &current);
+        self.managed_skill_fingerprint = Some(current);
+        if changed {
+            self.invalidate(source);
+        }
+        changed
+    }
+
     #[cfg(test)]
     fn has_channel_state(&self, channel_id: &Uuid) -> bool {
         self.sessions.contains_key(channel_id)
@@ -146,6 +164,35 @@ impl SessionState {
             || self.core_sections.contains_key(channel_id)
             || self.canvas_sections.contains_key(channel_id)
     }
+}
+
+fn managed_skill_projection_fingerprint(cwd: &Path) -> String {
+    let root = cwd.join(".agents").join("skills");
+    let mut directories = std::fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("learned-"))
+        })
+        .collect::<Vec<_>>();
+    directories.sort_by_key(std::fs::DirEntry::file_name);
+    let mut hasher = Sha256::new();
+    for directory in directories {
+        hasher.update(directory.file_name().to_string_lossy().as_bytes());
+        for filename in [".skill-version.json", "SKILL.md"] {
+            if let Ok(bytes) = std::fs::read(directory.path().join(filename)) {
+                hasher.update(filename.as_bytes());
+                hasher.update(bytes);
+            }
+        }
+    }
+    hex::encode(hasher.finalize())
 }
 
 /// An agent with its session state, owned by the pool or a running task.
@@ -1414,6 +1461,12 @@ pub async fn run_prompt_task(
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
     };
+    if agent
+        .state
+        .refresh_managed_skills(&source, Path::new(&ctx.cwd))
+    {
+        tracing::info!("skill projection changed: creating a fresh session for this turn");
+    }
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
@@ -1429,15 +1482,16 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
-    crate::experience_capture::begin_turn(
-        &turn_id,
-        &turn_started_at,
-        &source,
-        &triggering_event_ids,
-        &ctx.agent_keys.public_key().to_hex(),
-        agent.desired_model.as_deref(),
-        &ctx.harness_name,
-    );
+    crate::experience_capture::begin_turn(crate::experience_capture::BeginTurn {
+        turn_id: &turn_id,
+        occurred_at: &turn_started_at,
+        source: &source,
+        source_event_ids: &triggering_event_ids,
+        specialist_id: &ctx.agent_keys.public_key().to_hex(),
+        task_text: &recall_query,
+        model_identity: agent.desired_model.as_deref(),
+        harness_name: &ctx.harness_name,
+    });
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
@@ -5436,6 +5490,37 @@ mod tests {
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
         assert!(s.core_sections.is_empty());
+    }
+
+    #[test]
+    fn managed_skill_projection_change_invalidates_only_the_next_turn() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let marker = directory
+            .path()
+            .join(".agents/skills/learned-brief/.skill-version.json");
+        std::fs::create_dir_all(marker.parent().expect("marker parent")).expect("skill dir");
+        std::fs::write(&marker, br#"{"versionId":"version-1"}"#).expect("first marker");
+        let channel = Uuid::new_v4();
+        let source = PromptSource::Channel(channel);
+        let mut state = SessionState::default();
+        state.sessions.insert(channel, "session-1".into());
+
+        assert!(!state.refresh_managed_skills(&source, directory.path()));
+        assert_eq!(
+            state.sessions.get(&channel).map(String::as_str),
+            Some("session-1")
+        );
+
+        std::fs::write(&marker, br#"{"versionId":"version-2"}"#).expect("updated marker");
+        assert!(state.refresh_managed_skills(&source, directory.path()));
+        assert!(!state.sessions.contains_key(&channel));
+
+        state.sessions.insert(channel, "session-2".into());
+        assert!(!state.refresh_managed_skills(&source, directory.path()));
+        assert_eq!(
+            state.sessions.get(&channel).map(String::as_str),
+            Some("session-2")
+        );
     }
 
     #[test]

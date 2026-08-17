@@ -2,8 +2,9 @@ use nostr::Keys;
 use serde_json::json;
 
 use crate::agent_experience::{
-    build_experience_event, experience_projection_payload, from_engram_body, ExperienceOutcome,
-    ExperienceRecordV1, MemoryScope, SkillVersionV1, ToolEvidenceV1, ValidationResultV1,
+    build_experience_event, experience_projection_payload, from_engram_body, redact_task_summary,
+    ExperienceOutcome, ExperienceRecordV1, MemoryScope, SkillVersionV1, ToolEvidenceV1,
+    ValidationResultV1, MAX_TASK_SUMMARY_BYTES,
 };
 use crate::engram::{validate_and_decrypt, Body};
 
@@ -141,6 +142,22 @@ fn agent_experience_redacts_obvious_free_text_secrets_before_storage() {
 }
 
 #[test]
+fn task_summary_redaction_is_safe_before_local_persistence() {
+    let input = format!(
+        "Prepare the brief with password: Farout23 and bearer abc123 {}",
+        "x".repeat(MAX_TASK_SUMMARY_BYTES)
+    );
+
+    let redacted = redact_task_summary(&input);
+
+    assert!(!redacted.contains("Farout23"));
+    assert!(!redacted.contains("abc123"));
+    assert!(redacted.contains("password: [REDACTED]"));
+    assert!(redacted.len() <= MAX_TASK_SUMMARY_BYTES);
+    assert!(!redacted.trim().is_empty());
+}
+
+#[test]
 fn experience_projection_is_bound_to_the_signed_event_and_owner() {
     let agent = Keys::generate();
     let owner = Keys::generate();
@@ -162,4 +179,21 @@ fn experience_projection_is_bound_to_the_signed_event_and_owner() {
         "2026-08-16T10:00:00Z"
     );
     assert_eq!(projection["metadata"]["status"], "active");
+}
+
+#[test]
+fn experience_projection_never_exposes_a_task_secret() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let mut candidate = record();
+    candidate.task_summary = "Check provider password=Farout23 before sailing".into();
+    let event = build_experience_event(&agent, &owner.public_key(), &candidate, 1_777_777_777)
+        .expect("event");
+
+    let projection =
+        experience_projection_payload(&event, &owner.public_key(), &candidate).expect("projection");
+    let encoded = projection.to_string();
+
+    assert!(!encoded.contains("Farout23"));
+    assert!(encoded.contains("REDACTED"));
 }
