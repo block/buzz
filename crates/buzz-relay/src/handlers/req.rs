@@ -1153,16 +1153,18 @@ pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &
 }
 
 /// Authorize autonomous skill queries only for the agent author or named owner.
-/// Explicit event IDs deliberately do not bypass this gate.
+/// Explicit skill-kind filters do not gain an event-ID bypass. Kindless filters
+/// remain available for normal Nostr ID/search queries; skill events matched by
+/// those filters are removed later by [`event_visible_to_reader`].
 pub(crate) fn agent_skill_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
-        let can_match_skill = filter.kinds.as_ref().is_none_or(|kinds| {
+        let explicitly_matches_skill = filter.kinds.as_ref().is_some_and(|kinds| {
             kinds
                 .iter()
                 .any(|kind| AGENT_SKILL_KINDS.contains(&(kind.as_u16() as u32)))
         });
-        if !can_match_skill {
+        if !explicitly_matches_skill {
             return true;
         }
         let authors_ok = filter.authors.as_ref().is_some_and(|authors| {
@@ -1353,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_skill_filters_require_self_author_or_self_owner_even_by_id() {
+    fn agent_skill_explicit_kind_filters_require_self_author_or_self_owner() {
         let agent = nostr::Keys::generate();
         let owner = nostr::Keys::generate();
         let stranger = nostr::Keys::generate();
@@ -1363,7 +1365,7 @@ mod tests {
             SingleLetterTag::lowercase(Alphabet::P),
             owner.public_key().to_hex(),
         );
-        let by_known_id = Filter::new().id(nostr::EventId::all_zeros());
+        let by_known_id = Filter::new().kind(kind).id(nostr::EventId::all_zeros());
 
         assert!(agent_skill_filters_authorized(
             &[by_agent],
@@ -1375,6 +1377,28 @@ mod tests {
         ));
         assert!(!agent_skill_filters_authorized(
             &[by_known_id],
+            &stranger.public_key().to_hex()
+        ));
+    }
+
+    #[test]
+    fn agent_skill_gate_allows_kindless_id_filters_for_result_level_filtering() {
+        let stranger = nostr::Keys::generate();
+        let by_known_id = Filter::new().id(nostr::EventId::all_zeros());
+
+        assert!(agent_skill_filters_authorized(
+            &[by_known_id],
+            &stranger.public_key().to_hex()
+        ));
+    }
+
+    #[test]
+    fn agent_skill_gate_allows_kindless_search_filters_for_result_level_filtering() {
+        let stranger = nostr::Keys::generate();
+        let search = Filter::new().search("command doctrine");
+
+        assert!(agent_skill_filters_authorized(
+            &[search],
             &stranger.public_key().to_hex()
         ));
     }
