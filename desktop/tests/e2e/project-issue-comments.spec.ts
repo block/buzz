@@ -22,6 +22,42 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await projectEntry.click();
 }
 
+test("issue detail can open agent chat or seed a channel question", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Tasks", exact: true }).click();
+  const issueRow = page.getByTestId("project-issue-row").first();
+  await expect(issueRow).toBeVisible({ timeout: 10_000 });
+  await issueRow.getByRole("button", { name: /^#/ }).click();
+
+  const communication = page.getByTestId(
+    "project-context-communication-actions",
+  );
+  await expect(communication).toBeVisible();
+  await page.getByTestId("project-context-chat-agent").click();
+  await expect(page.getByTestId("project-agent-chat-panel")).toBeVisible();
+  await expect(page.getByTestId("projects-agent-selection-item")).toHaveCount(
+    1,
+  );
+  await page.getByRole("button", { name: "Close agent chat" }).click();
+  await expect(
+    page.getByTestId("project-right-panel-repository-tab"),
+  ).toHaveAttribute("aria-pressed", "false");
+
+  await page.getByTestId("project-right-panel-repository-tab").click();
+  await page.getByTestId("project-context-discuss").click();
+  await expect(
+    page.getByTestId("project-context-channel-choices"),
+  ).toBeVisible();
+  await page.getByTestId("project-context-related-channel").first().click();
+  await expect(page.getByTestId("message-input")).toContainText(
+    "Let's talk about this task:",
+  );
+});
+
 test("issue comments use the project activity timeline", async ({ page }) => {
   await installMockBridge(page);
   await openBuzzProject(page);

@@ -12,6 +12,7 @@ import type {
   ProjectRepoSnapshot,
   Repository,
 } from "@/features/projects/hooks";
+import type { ProjectsOverviewAgentContextItem } from "@/features/projects/lib/projectDetailAgentContext";
 import {
   commitShareLink,
   issueShareLink,
@@ -319,6 +320,34 @@ function buildActivityItems({
   return items
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, ACTIVITY_LIMIT);
+}
+
+export function buildProjectsActivityAgentContextItems(
+  input: Pick<
+    ProjectsActivityFeedProps,
+    "issues" | "projects" | "pullRequests" | "snapshots"
+  >,
+): ProjectsOverviewAgentContextItem[] {
+  return buildActivityItems(input).map((item) => {
+    const project = item.target.project;
+    const repository =
+      item.target.type === "issue" || item.target.type === "pull-request"
+        ? item.target.repository.name
+        : null;
+    return {
+      detail: [
+        item.action,
+        repository ? `${project.name} / ${repository}` : project.name,
+        item.detail,
+        item.body,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      kind: item.kind,
+      reference: item.id,
+      title: item.title,
+    };
+  });
 }
 
 function startOfWeek(timestamp: number) {

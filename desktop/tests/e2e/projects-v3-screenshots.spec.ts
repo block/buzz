@@ -43,7 +43,7 @@ test("projects activity overview screenshot", async ({ page }) => {
   await expect(page.getByTestId("projects-page-header")).toBeVisible();
   await expect(page.getByTestId("projects-activity-search")).toBeVisible();
   await expect(page.getByTestId("projects-activity-intro")).toContainText(
-    "Welcome to Activity",
+    "Projects Activity",
   );
   await expect(
     page.getByTestId("projects-overview-context-panel"),

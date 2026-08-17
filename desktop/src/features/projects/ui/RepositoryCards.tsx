@@ -20,7 +20,6 @@ import {
 } from "@/features/projects/lib/projectSelection";
 import {
   formatExactTimestamp,
-  listRowDescription,
   relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
 import { cn } from "@/shared/lib/cn";
@@ -302,12 +301,13 @@ export function RepositoryListRow(props: RepositoryItemProps) {
   });
   return (
     <ProjectEntityListRow
-      affiliation={project.name}
-      affiliationTestId="repositories-row-project"
+      beforeDate={
+        <div className="w-44" data-testid="repositories-row-activity-bar">
+          <ProjectActivityBar summary={summary} />
+        </div>
+      }
       dateSeconds={updatedAt}
       dateTestId="repositories-row-date"
-      description={listRowDescription(repository.description, repository.name)}
-      descriptionTestId="repositories-row-description"
       icon={<RepositoryHostIcon compact repository={repository} />}
       onClick={() => onOpen(project, repository)}
       people={repositoryPeople(repository, summary)}
@@ -321,6 +321,8 @@ export function RepositoryListRow(props: RepositoryItemProps) {
       testId={`repository-row-${repository.dtag}`}
       title={repository.name}
       titleAttr={repository.name}
+      titleSecondary={repository.description || undefined}
+      titleSecondaryTestId="repositories-row-description"
       trailing={
         <RepositoryActionsMenu
           hasLocal={hasLocal}

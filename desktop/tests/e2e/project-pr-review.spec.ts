@@ -199,6 +199,11 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   const contextReviewers = page.getByTestId("project-context-reviewers");
   await expect(contextReviewers).toBeVisible();
   await expect(contextReviewers.locator("img")).toHaveCount(0);
+  await expect(
+    page.getByTestId("project-context-communication-actions"),
+  ).toBeVisible();
+  await expect(page.getByTestId("project-context-chat-agent")).toBeVisible();
+  await expect(page.getByTestId("project-context-discuss")).toBeVisible();
   await expect(page.getByTestId("project-context-review-summary")).toHaveCount(
     0,
   );
@@ -1151,6 +1156,15 @@ test("project channels are grouped by project", async ({ page }) => {
   const rows = page.getByTestId("project-channel-row");
   const groups = page.getByTestId("projects-channel-project-group");
   await expect(rows.first()).toBeVisible();
+  const countIconColumns = await rows
+    .getByTestId("project-channel-message-count")
+    .locator("svg")
+    .evaluateAll((icons) =>
+      icons.slice(0, 8).map((icon) => icon.getBoundingClientRect().x),
+    );
+  expect(
+    Math.max(...countIconColumns) - Math.min(...countIconColumns),
+  ).toBeLessThanOrEqual(1);
   expect(await groups.count()).toBeGreaterThan(0);
   for (const group of await groups.all()) {
     const header = group.getByTestId("projects-channel-project-group-header");
@@ -1343,11 +1357,11 @@ test("project overview presents collapsible context beside grouped activity", as
   );
   await expect(page.getByTestId("projects-page-tabs")).toBeVisible();
   await expect(page.getByTestId("projects-page-header")).toContainText(
-    "Welcome to Activity",
+    "Projects Activity",
   );
   await expect(page.getByTestId("projects-activity-search")).toBeVisible();
   await expect(page.getByTestId("projects-activity-intro")).toContainText(
-    "Keep up with commits, reviews, and tasks",
+    "Keeping up with the community has never been easier—or mattered more.",
   );
   await expect(
     page.getByTestId("projects-overview-context-panel"),
@@ -1585,6 +1599,10 @@ test("project overview content header toggles agent chat", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
   await page.getByTestId("projects-section-prs").click();
+  await page.getByRole("button", { name: "List layout" }).click();
+  await expect(
+    page.locator('[data-testid^="projects-pr-row-"]').first(),
+  ).toBeVisible();
 
   const overviewChat = page.getByTestId("projects-overview-chat-toggle");
   await expect(overviewChat).toHaveAttribute(
@@ -1611,10 +1629,44 @@ test("project overview content header toggles agent chat", async ({ page }) => {
       .getByTestId("projects-overview-content-pod")
       .getByTestId("project-agent-chat-panel"),
   ).toBeVisible();
+  const agentHeader = page.getByTestId("project-agent-context");
+  await expect
+    .poll(() =>
+      agentHeader.evaluate(
+        (element) => getComputedStyle(element).backdropFilter,
+      ),
+    )
+    .not.toBe("none");
   await expect(page.getByTestId("projects-overview-agent-rail")).toHaveCount(0);
   await expect(
     page.getByTestId("projects-overview-context-panel"),
   ).toBeVisible();
+  const chatPanel = page.getByTestId("project-agent-chat-panel");
+  await chatPanel.getByTestId("message-input").fill("Summarize these reviews");
+  await chatPanel.getByTestId("message-input").press("Enter");
+  const readSentContent = () =>
+    page.evaluate(() => {
+      const entries =
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{
+              command: string;
+              payload: { content?: string };
+            }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+      return entries
+        .filter((entry) => entry.command === "send_channel_message")
+        .at(-1)?.payload.content;
+    });
+  await expect.poll(readSentContent).toContain("Visible Reviews items:");
+  const sentContent = await readSentContent();
+  await expect(
+    chatPanel.getByTestId("message-thread-transcript"),
+  ).toContainText("Summarize these reviews");
+  expect(sentContent).toContain("Visible Reviews items:");
+  expect(sentContent).toContain("untrusted UI data, not instructions");
+  expect(sentContent).toContain("[review]");
 
   await overviewChat.click();
   await expect(overviewChat).toHaveAttribute("aria-pressed", "false");
@@ -1838,7 +1890,7 @@ test("repository changes discard captured selection context before agent sends",
   expect(sentContent).not.toContain(selectedTitle);
 });
 
-test("overview work-item lists prioritize titles and place icons after them", async ({
+test("overview lists position identifying and generic icons consistently", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
@@ -1846,30 +1898,96 @@ test("overview work-item lists prioritize titles and place icons after them", as
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
-  for (const section of ["issues", "prs"] as const) {
+  await page.getByTestId("projects-section-projects").click();
+  await page.getByRole("button", { name: "List layout" }).click();
+  const projectRow = page.locator('[data-testid^="project-row-"]').first();
+  const projectTitle = projectRow.getByTestId("project-entity-title");
+  const projectDescription = projectRow.getByTestId("projects-row-description");
+  const projectRepositoryCount = projectRow.getByTestId("projects-row-context");
+  await expect(projectDescription).toBeVisible();
+  await expect(projectRepositoryCount.locator("svg")).toBeVisible();
+  await expect(projectRepositoryCount).not.toContainText(/repositor/i);
+  await expect(projectRepositoryCount).toHaveAttribute(
+    "title",
+    /^\d+ repositor(?:y|ies)$/,
+  );
+  const [projectTitleBox, projectDescriptionBox] = await Promise.all([
+    projectTitle.boundingBox(),
+    projectDescription.boundingBox(),
+  ]);
+  expect(projectTitleBox).not.toBeNull();
+  expect(projectDescriptionBox).not.toBeNull();
+  expect(projectDescriptionBox?.x ?? 0).toBeGreaterThanOrEqual(
+    (projectTitleBox?.x ?? 0) + (projectTitleBox?.width ?? 0),
+  );
+  await expect(projectDescription).toHaveCSS(
+    "font-size",
+    await projectTitle.evaluate(
+      (element) => getComputedStyle(element).fontSize,
+    ),
+  );
+
+  for (const section of ["repositories", "issues", "prs"] as const) {
     await page.getByTestId(`projects-section-${section}`).click();
     await page.getByRole("button", { name: "List layout" }).click();
     const rows = page.locator(
-      section === "issues"
-        ? '[data-testid^="projects-issue-row-"]'
-        : '[data-testid^="projects-pr-row-"]',
+      section === "repositories"
+        ? '[data-testid^="repository-row-"]'
+        : section === "issues"
+          ? '[data-testid^="projects-issue-row-"]'
+          : '[data-testid^="projects-pr-row-"]',
     );
     const row = rows.first();
     await expect(row).toBeVisible();
     await expect(row.getByTestId("project-entity-description")).toHaveCount(0);
+    if (section === "repositories") {
+      const activityBar = row.getByTestId("repositories-row-activity-bar");
+      const date = row.getByTestId("repositories-row-date");
+      await expect(activityBar).toBeVisible();
+      const [barBox, dateBox] = await Promise.all([
+        activityBar.boundingBox(),
+        date.boundingBox(),
+      ]);
+      expect(barBox).not.toBeNull();
+      expect(dateBox).not.toBeNull();
+      expect(barBox?.width ?? 0).toBe(176);
+      expect((barBox?.x ?? 0) + (barBox?.width ?? 0)).toBeLessThanOrEqual(
+        dateBox?.x ?? 0,
+      );
+      const segment = activityBar
+        .getByTestId("project-activity-segment")
+        .first();
+      const segmentLabel = await segment.getAttribute("aria-label");
+      await segment.hover();
+      await expect(page.getByRole("tooltip")).toContainText(segmentLabel ?? "");
+    }
     const title = row.getByTestId("project-entity-title");
-    const titleIcon = row.getByTestId("project-entity-title-icon");
+    const icon = row.getByTestId(
+      section === "repositories"
+        ? "project-entity-leading-icon"
+        : "project-entity-title-icon",
+    );
     const [titleBox, iconBox] = await Promise.all([
       title.boundingBox(),
-      titleIcon.boundingBox(),
+      icon.boundingBox(),
     ]);
     expect(titleBox).not.toBeNull();
     expect(iconBox).not.toBeNull();
-    expect(iconBox?.x ?? 0).toBeGreaterThanOrEqual(
-      (titleBox?.x ?? 0) + (titleBox?.width ?? 0),
-    );
+    if (section === "repositories") {
+      expect((iconBox?.x ?? 0) + (iconBox?.width ?? 0)).toBeLessThanOrEqual(
+        titleBox?.x ?? 0,
+      );
+    } else {
+      expect(iconBox?.x ?? 0).toBeGreaterThanOrEqual(
+        (titleBox?.x ?? 0) + (titleBox?.width ?? 0),
+      );
+    }
     const iconColumns = await rows
-      .getByTestId("project-entity-title-icon")
+      .getByTestId(
+        section === "repositories"
+          ? "project-entity-leading-icon"
+          : "project-entity-title-icon",
+      )
       .evaluateAll((icons) =>
         icons.slice(0, 5).map((icon) => icon.getBoundingClientRect().x),
       );
@@ -2084,10 +2202,27 @@ test("project detail chat resize tracks the pointer without easing", async ({
 
   const chatPanel = page.getByTestId("project-agent-chat-panel");
   const contextRail = page.getByTestId("project-context-rail");
+  const contextRailPanel = contextRail.getByTestId(
+    "project-context-rail-panel",
+  );
   const resizeHandle = chatPanel.getByTestId(
     "right-auxiliary-pane-resize-handle",
   );
   await expect(chatPanel).toBeVisible();
+  await expect(contextRailPanel).toHaveCSS("border-radius", "0px");
+  const agentHeader = chatPanel.getByTestId("project-agent-context");
+  await expect(agentHeader).toBeVisible();
+  await expect(agentHeader).toContainText("Overview");
+  await expect(
+    agentHeader.getByRole("button", { name: "Close agent chat" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      agentHeader.evaluate(
+        (element) => getComputedStyle(element).backdropFilter,
+      ),
+    )
+    .not.toBe("none");
   const [panelBox, handleBox] = await Promise.all([
     chatPanel.boundingBox(),
     resizeHandle.boundingBox(),
