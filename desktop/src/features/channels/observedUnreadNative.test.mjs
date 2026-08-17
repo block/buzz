@@ -185,6 +185,98 @@ test("native mode is NOT entered when the bridge fails, and the hook says so", a
   }
 });
 
+test("native ingest rejection heals the chain, re-syncs projection, and preserves the next mutation", async () => {
+  installFreshStorage();
+  let harness;
+  const failCommands = new Set();
+  const rig = installNativeRig({ failCommands });
+  const scope = { pubkey: "pk-ingest-recovery", relayUrl: RELAY };
+  try {
+    harness = await mountHook(
+      {
+        ...DEFAULT_PROPS,
+        pubkey: scope.pubkey,
+        getTs: () => NOW_S,
+      },
+      makeRefs(),
+    );
+    await settle();
+
+    const store = rig.scope(scope);
+    store.events.set("evt-recovery", {
+      id: "evt-recovery",
+      channelId: "channel-recovery",
+      createdAt: NOW_S + 1,
+      rootId: null,
+      highPriority: false,
+      countsTowardBadge: true,
+      countsTowardAppBadge: true,
+    });
+    failCommands.add("observed_unread_ingest");
+
+    harness.api.syncMarkers(["channel-failed"]);
+    await settle();
+    await settle();
+    failCommands.delete("observed_unread_ingest");
+
+    assert.equal(
+      harness.api.projectionsRef.current.get("channel-recovery")?.count,
+      1,
+      "reopening after the rejected transaction must replace the optimistic projection with the authoritative snapshot",
+    );
+    assert.equal(
+      harness.api.isNative(),
+      true,
+      "a successful reopen must keep native persistence healthy",
+    );
+
+    harness.api.syncMarkers(["channel-next"]);
+    await settle();
+
+    assert.equal(
+      store.markers.get("channel-next"),
+      NOW_S,
+      "the mutation after a rejected ingest must still reach the native store",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
+test("native ingest and reopen rejection declares native persistence unhealthy", async () => {
+  installFreshStorage();
+  let harness;
+  const failCommands = new Set();
+  const rig = installNativeRig({ failCommands });
+  try {
+    harness = await mountHook(
+      {
+        ...DEFAULT_PROPS,
+        pubkey: "pk-ingest-reopen-failure",
+        getTs: () => NOW_S,
+      },
+      makeRefs(),
+    );
+    await settle();
+    failCommands.add("observed_unread_ingest");
+    failCommands.add("observed_unread_open_scope");
+
+    harness.api.syncMarkers(["channel-failed"]);
+    await settle();
+    await settle();
+
+    assert.equal(
+      harness.api.isNative(),
+      false,
+      "if the authoritative snapshot cannot be reopened, isNative must stop reporting the failed path as healthy",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
 // ── D1: local mark-read must reach the native store ──────────────────────────
 
 test("D1: local markChannelRead sends a read marker to the native store", async () => {

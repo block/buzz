@@ -14,7 +14,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use rusqlite::{params, Connection, Transaction};
@@ -26,9 +26,16 @@ const PER_CHANNEL_CAP: i64 = 1_000;
 const GLOBAL_CAP: i64 = 5_000;
 const HORIZON_SECONDS: i64 = 7 * 24 * 60 * 60;
 
+/// Serializes the two observed-unread commands against each other.
+///
+/// `Arc` because the guard is taken *inside* the blocking closure the commands
+/// hand to `spawn_blocking`: a `std::sync::MutexGuard` is not `Send`, so it
+/// cannot be acquired on the caller side of an await. Cloning the handle into
+/// the closure keeps serialization identical while moving the wait off the
+/// thread that runs the IPC handler.
 #[derive(Default)]
 pub(crate) struct ObservedUnreadStore {
-    write_lock: Mutex<()>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -403,14 +410,61 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
     Ok(result)
 }
 
+/// Runs one observed-unread SQLite unit on the blocking pool.
+///
+/// A sync `#[tauri::command]` is `ExecutionContext::Blocking`, which runs the
+/// body inline in the IPC handler — the main thread on macOS. The projection is
+/// linear in the whole scope (measured 7.2 ms release / 27.6 ms debug at
+/// 15 channels / 5000 events, and callers issue these in per-root loops during
+/// catch-up), so inline execution holds the UI thread past the 16.7 ms frame
+/// budget. `archive_events` next door already routes its SQLite work this way;
+/// these two were the exception.
+///
+/// The token is what makes that structural rather than a convention. Its field
+/// is private to this module, so `OnBlockingThread` cannot be constructed
+/// anywhere else — and since the bodies below require one, a command that
+/// stopped going through [`blocking::run`] would not compile. That covers both
+/// regressions: dropping `async` leaves no way to await this, and keeping
+/// `async` while calling a body directly leaves no way to obtain the token.
+mod blocking {
+    /// Evidence that the holder is executing on the blocking pool.
+    pub(super) struct OnBlockingThread(());
+
+    pub(super) async fn run<T, F>(task: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(OnBlockingThread) -> Result<T, String> + Send + 'static,
+    {
+        tauri::async_runtime::spawn_blocking(move || task(OnBlockingThread(())))
+            .await
+            .map_err(|error| format!("observed-unread db task failed: {error}"))?
+    }
+}
+use blocking::OnBlockingThread;
+
+/// Off-thread execution lets two invocations reach the lock in an order the IPC
+/// arrival order no longer fixes. Nothing here depends on that order: the
+/// renderer keeps one call per scope in flight, and a request that arrives
+/// against a moved revision is rejected with `SnapshotRequired` rather than
+/// applied — the same gate that already covers a lost ack.
 #[tauri::command]
-pub(crate) fn observed_unread_open_scope(
+pub(crate) async fn observed_unread_open_scope(
     request: OpenScopeRequest,
     app: AppHandle,
     store: State<'_, ObservedUnreadStore>,
 ) -> Result<ObservedUnreadResponse, String> {
-    let _guard = store.write_lock.lock().map_err(|e| e.to_string())?;
-    let mut conn = open_db(&db_path(&app)?)?;
+    let write_lock = Arc::clone(&store.write_lock);
+    blocking::run(move |proof| open_scope_locked(proof, &write_lock, &app, request)).await
+}
+
+fn open_scope_locked(
+    _proof: OnBlockingThread,
+    write_lock: &Mutex<()>,
+    app: &AppHandle,
+    request: OpenScopeRequest,
+) -> Result<ObservedUnreadResponse, String> {
+    let _guard = write_lock.lock().map_err(|e| e.to_string())?;
+    let mut conn = open_db(&db_path(app)?)?;
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin observed-unread open: {e}"))?;
@@ -463,13 +517,23 @@ pub(crate) fn observed_unread_open_scope(
 }
 
 #[tauri::command]
-pub(crate) fn observed_unread_ingest(
+pub(crate) async fn observed_unread_ingest(
     request: IngestRequest,
     app: AppHandle,
     store: State<'_, ObservedUnreadStore>,
 ) -> Result<ObservedUnreadResponse, String> {
-    let _guard = store.write_lock.lock().map_err(|e| e.to_string())?;
-    let mut conn = open_db(&db_path(&app)?)?;
+    let write_lock = Arc::clone(&store.write_lock);
+    blocking::run(move |proof| ingest_locked(proof, &write_lock, &app, request)).await
+}
+
+fn ingest_locked(
+    _proof: OnBlockingThread,
+    write_lock: &Mutex<()>,
+    app: &AppHandle,
+    request: IngestRequest,
+) -> Result<ObservedUnreadResponse, String> {
+    let _guard = write_lock.lock().map_err(|e| e.to_string())?;
+    let mut conn = open_db(&db_path(app)?)?;
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin observed ingest: {e}"))?;
@@ -696,6 +760,42 @@ mod tests {
         .unwrap();
         assert_eq!(request.channel_latest[0].channel_id, "ch");
         assert_eq!(request.channel_latest[0].created_at, 42);
+    }
+    /// Both commands must stay `async`. A sync `#[tauri::command]` is
+    /// `ExecutionContext::Blocking` and runs its body inline in the IPC
+    /// handler — the main thread on macOS — which is the defect this fix
+    /// closes. The bound is the assertion: dropping `async` makes the return
+    /// type `Result`, which is not a `Future`, and this stops compiling.
+    ///
+    /// The companion half — `async` kept but the body called directly, skipping
+    /// `spawn_blocking` — is held by `blocking::OnBlockingThread`, which the
+    /// bodies require and only `blocking::run` can mint. This test survived that
+    /// mutant while it asserted the helper's own behavior; the token is what
+    /// killed it, so the invariant lives in the types, not here.
+    const _: () = {
+        fn returns_future<A, B, C, F: std::future::Future>(_: fn(A, B, C) -> F) {}
+        fn assert() {
+            returns_future(
+                observed_unread_open_scope
+                    as fn(OpenScopeRequest, AppHandle, State<'static, ObservedUnreadStore>) -> _,
+            );
+            returns_future(
+                observed_unread_ingest
+                    as fn(IngestRequest, AppHandle, State<'static, ObservedUnreadStore>) -> _,
+            );
+        }
+        let _ = assert;
+    };
+    /// `blocking::run` must actually leave the caller's thread. This pins the
+    /// helper only; that the commands go *through* it is the token's job.
+    #[test]
+    fn blocking_run_leaves_the_calling_thread() {
+        let caller = std::thread::current().id();
+        let observed = tauri::async_runtime::block_on(blocking::run(move |_proof| {
+            Ok::<_, String>(std::thread::current().id())
+        }))
+        .unwrap();
+        assert_ne!(observed, caller);
     }
     #[test]
     fn second_seed_cannot_erase_discovered_membership() {

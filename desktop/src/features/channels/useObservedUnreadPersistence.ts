@@ -62,6 +62,11 @@ type QueuedObservedUnreadEvent = {
   event: ObservedUnreadWireEvent;
 };
 
+type NativeMutation = Omit<
+  Parameters<typeof ingestObservedUnread>[0],
+  "scope" | "sequence" | "baseRevision"
+>;
+
 type NativeState = {
   scope: { pubkey: string; relayUrl: string };
   generation: string;
@@ -108,7 +113,15 @@ export function useObservedUnreadPersistence(
         legacyPayload: null,
         membershipSeed: null,
       });
-      if (response.kind !== "snapshot") return;
+      if (response.kind !== "snapshot")
+        throw new Error(
+          "native observed-unread reopen did not return snapshot",
+        );
+      if (
+        activityScopeKey(scope.pubkey, scope.relayUrl) !==
+        scopeLoadedRef.current
+      )
+        return;
       nativeRef.current = {
         scope,
         generation: response.generation,
@@ -240,6 +253,44 @@ export function useObservedUnreadPersistence(
       });
   }, [apply]);
 
+  const enqueueNative = React.useCallback(
+    (state: NativeState, mutation: NativeMutation) => {
+      flushNative();
+      chainRef.current = chainRef.current
+        .then(async () => {
+          const current = nativeRef.current;
+          if (
+            !current ||
+            current.scope.pubkey !== state.scope.pubkey ||
+            current.scope.relayUrl !== state.scope.relayUrl
+          )
+            return;
+          apply(
+            await ingestObservedUnread({
+              scope: current.scope,
+              sequence: current.sequence + 1,
+              baseRevision: current.revision,
+              ...mutation,
+            }),
+          );
+        })
+        .catch(async () => {
+          try {
+            await reopen(state.scope);
+          } catch {
+            if (
+              activityScopeKey(state.scope.pubkey, state.scope.relayUrl) ===
+              scopeLoadedRef.current
+            ) {
+              nativeFailedRef.current = true;
+              nativeRef.current = null;
+            }
+          }
+        });
+    },
+    [apply, flushNative, reopen],
+  );
+
   React.useEffect(() => {
     const onPageHide = () => {
       flushNative();
@@ -332,29 +383,16 @@ export function useObservedUnreadPersistence(
             : getEffectiveTimestamp(contextId)),
       }));
       if (markers.length === 0) return;
-      flushNative();
-      chainRef.current = chainRef.current.then(() => {
-        const current = nativeRef.current;
-        if (
-          !current ||
-          current.scope.pubkey !== state.scope.pubkey ||
-          current.scope.relayUrl !== state.scope.relayUrl
-        )
-          return;
-        return ingestObservedUnread({
-          scope: current.scope,
-          sequence: current.sequence + 1,
-          baseRevision: current.revision,
-          events: [],
-          channelLatest: [],
-          markers,
-          membership: [],
-          clearChannels: [],
-          clearAll: false,
-        }).then(apply);
+      enqueueNative(state, {
+        events: [],
+        channelLatest: [],
+        markers,
+        membership: [],
+        clearChannels: [],
+        clearAll: false,
       });
     },
-    [apply, flushNative, getEffectiveTimestamp, getOwnTimestamp],
+    [enqueueNative, getEffectiveTimestamp, getOwnTimestamp],
   );
 
   // A read-state revision only needs to send the contexts that changed. Native
@@ -397,30 +435,17 @@ export function useObservedUnreadPersistence(
     (clearChannels: string[], clearAll: boolean) => {
       const state = nativeRef.current;
       if (!state) return false;
-      flushNative();
-      chainRef.current = chainRef.current.then(() => {
-        const current = nativeRef.current;
-        if (
-          !current ||
-          current.scope.pubkey !== state.scope.pubkey ||
-          current.scope.relayUrl !== state.scope.relayUrl
-        )
-          return;
-        return ingestObservedUnread({
-          scope: current.scope,
-          sequence: current.sequence + 1,
-          baseRevision: current.revision,
-          events: [],
-          channelLatest: [],
-          markers: [],
-          membership: [],
-          clearChannels,
-          clearAll,
-        }).then(apply);
+      enqueueNative(state, {
+        events: [],
+        channelLatest: [],
+        markers: [],
+        membership: [],
+        clearChannels,
+        clearAll,
       });
       return true;
     },
-    [apply, flushNative],
+    [enqueueNative],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: mutable storage refs are stable containers
@@ -433,58 +458,32 @@ export function useObservedUnreadPersistence(
           latestByChannelRef.current.set(channelId, createdAt);
         return;
       }
-      flushNative();
-      chainRef.current = chainRef.current.then(() => {
-        const current = nativeRef.current;
-        if (
-          !current ||
-          current.scope.pubkey !== state.scope.pubkey ||
-          current.scope.relayUrl !== state.scope.relayUrl
-        )
-          return;
-        return ingestObservedUnread({
-          scope: current.scope,
-          sequence: current.sequence + 1,
-          baseRevision: current.revision,
-          events: [],
-          channelLatest: [{ channelId, createdAt }],
-          markers: [],
-          membership: [],
-          clearChannels: [],
-          clearAll: false,
-        }).then(apply);
+      enqueueNative(state, {
+        events: [],
+        channelLatest: [{ channelId, createdAt }],
+        markers: [],
+        membership: [],
+        clearChannels: [],
+        clearAll: false,
       });
     },
-    [apply, flushNative],
+    [enqueueNative],
   );
 
   const updateMembership = React.useCallback(
     (kind: string, value: string, present: boolean) => {
       const state = nativeRef.current;
       if (!state) return;
-      flushNative();
-      chainRef.current = chainRef.current.then(() => {
-        const current = nativeRef.current;
-        if (
-          !current ||
-          current.scope.pubkey !== state.scope.pubkey ||
-          current.scope.relayUrl !== state.scope.relayUrl
-        )
-          return;
-        return ingestObservedUnread({
-          scope: current.scope,
-          sequence: current.sequence + 1,
-          baseRevision: current.revision,
-          events: [],
-          channelLatest: [],
-          markers: [],
-          membership: [{ kind, value, present }],
-          clearChannels: [],
-          clearAll: false,
-        }).then(apply);
+      enqueueNative(state, {
+        events: [],
+        channelLatest: [],
+        markers: [],
+        membership: [{ kind, value, present }],
+        clearChannels: [],
+        clearAll: false,
       });
     },
-    [apply, flushNative],
+    [enqueueNative],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: mutable storage refs are stable containers
