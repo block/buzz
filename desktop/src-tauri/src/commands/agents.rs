@@ -1180,11 +1180,15 @@ pub async fn start_managed_agent(
     // profile is published on the relay. This self-heals cases where the initial
     // profile sync at creation time failed silently. For legacy records (pre-PR-921)
     // with no persisted avatar, this also backfills the avatar from the relay.
-    if result.is_ok()
-        && state
-            .managed_agent_profile_reconcile_enabled
-            .load(std::sync::atomic::Ordering::Acquire)
-    {
+    // Called whenever the start succeeded, regardless of the
+    // `agentManagedProfiles` experiment. `reconcile_agent_profile` publishes the
+    // kind:10100 directory record first and *then* re-checks that flag before
+    // touching kind:0, so the experiment still decides profile-metadata
+    // ownership while agent discovery keeps working either way. Gating here
+    // instead would leave remote agents unmentionable for exactly the users who
+    // enabled the experiment — and nothing else in the product publishes that
+    // record.
+    if result.is_ok() {
         let reconcile_pubkey = pubkey.clone();
         let reconcile_app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -1210,7 +1214,9 @@ pub async fn stop_managed_agent(
     app: AppHandle,
 ) -> Result<ManagedAgentSummary, String> {
     use tauri::Manager;
-    tokio::task::spawn_blocking(move || {
+    let directory_app = app.clone();
+    let directory_pubkey = pubkey.clone();
+    let summary = tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _store_guard = state
             .managed_agents_store_lock
@@ -1259,7 +1265,15 @@ pub async fn stop_managed_agent(
         )
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    // The agent is no longer running, so refresh its directory record to
+    // `offline`. Other clients read that record to decide whether to offer the
+    // agent in mentions; without this they would keep offering an agent that
+    // cannot answer.
+    profile::spawn_offline_directory_update(&directory_app, &directory_pubkey);
+
+    Ok(summary)
 }
 
 // Async so the blocking body (disk reads/writes, process termination, keyring
@@ -1363,8 +1377,11 @@ use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
 #[path = "agents_profile.rs"]
 mod profile;
 #[cfg(test)]
-use profile::{profile_needs_sync, resolve_legacy_avatar};
-pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
+use profile::{
+    build_agent_directory_content, channel_ids_from_member_events, channel_names_from_meta_events,
+    existing_channel_add_policy, profile_needs_sync, resolve_legacy_avatar,
+};
+pub(crate) use profile::{publish_agent_directory, reconcile_agent_profile, ProfileReconcileData};
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]

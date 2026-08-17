@@ -306,6 +306,35 @@ fn start_pair(
     drop(runtimes);
     save_managed_agents(&app, &records)?;
     emit_status(&app, &status);
+
+    // ── kind:10100 agent directory record ───────────────────────────────────
+    // This is the runtime-level start path the renderer drives, and it does not
+    // go through `start_local_agent_with_preflight`, so it never reaches
+    // `reconcile_agent_profile`. Without publishing here, an agent started this
+    // way stays invisible to every other client on the relay — which is the
+    // common case, not an edge case.
+    //
+    // Fire-and-forget on the async runtime: `start_pair` is sync and has
+    // released its locks by this point, and a directory publish must never fail
+    // or delay the start the user asked for.
+    let directory_app = app.clone();
+    let directory_pubkey = key.pubkey.clone();
+    let directory_relay = key.relay_url.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = directory_app.state::<AppState>();
+        if let Err(e) = crate::commands::publish_agent_directory(
+            &state,
+            &directory_app,
+            &directory_relay,
+            &directory_pubkey,
+            "online",
+        )
+        .await
+        {
+            eprintln!("buzz-desktop: agent directory publish failed for {directory_pubkey}: {e}");
+        }
+    });
+
     Ok(status)
 }
 

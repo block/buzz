@@ -661,3 +661,208 @@ fn owner_only_access_deploy_payload_clamps_stale_access() {
         "owner-only-access deploy payload retained a stale allowlist"
     );
 }
+
+// ── kind:10100 agent directory record ───────────────────────────────────────
+//
+// The record is world-readable, so its content is an explicit allowlist of
+// publishable fields rather than a dump of the agent record. These tests pin
+// both halves of that contract: the fields a remote client needs to decide
+// mentionability, and the fields that must never leave the host.
+
+fn directory_agent_record() -> ManagedAgentRecord {
+    use crate::managed_agents::RespondTo;
+    let mut record = bare_agent_record(None, Some("gpt-5"), Some("openai"));
+    record.pubkey = "a".repeat(64);
+    record.name = "Tester".to_string();
+    record.display_name = Some("Tester".to_string());
+    record.respond_to = RespondTo::Anyone;
+    record.respond_to_allowlist = vec![];
+    record.private_key_nsec = "nsec1supersecret".to_string();
+    record.auth_tag = Some(r#"{"tag":"secret-attestation"}"#.to_string());
+    record.system_prompt = Some("you are a helpful agent".to_string());
+    record
+        .env_vars
+        .insert("OPENAI_API_KEY".to_string(), "sk-secret".to_string());
+    record
+}
+
+#[test]
+fn directory_record_carries_the_fields_a_remote_client_needs() {
+    let record = directory_agent_record();
+    let content = build_agent_directory_content(
+        &record,
+        &["chan-1".to_string(), "chan-2".to_string()],
+        &["general".to_string(), "agents".to_string()],
+        "online",
+        "anyone",
+    );
+
+    assert_eq!(content["name"], "Tester");
+    assert_eq!(content["status"], "online");
+    assert_eq!(content["respond_to"], "anyone");
+    assert_eq!(content["channel_add_policy"], "anyone");
+    assert_eq!(
+        content["channel_ids"],
+        serde_json::json!(["chan-1", "chan-2"])
+    );
+    assert_eq!(
+        content["channels"],
+        serde_json::json!(["general", "agents"])
+    );
+    assert!(content["agent_type"].is_string());
+    assert!(content["capabilities"].is_array());
+    assert!(content["respond_to_allowlist"].is_array());
+}
+
+#[test]
+fn directory_record_carries_the_allowlist_when_respond_to_is_allowlist() {
+    use crate::managed_agents::RespondTo;
+    let mut record = directory_agent_record();
+    record.respond_to = RespondTo::Allowlist;
+    record.respond_to_allowlist = vec!["b".repeat(64)];
+
+    let content = build_agent_directory_content(&record, &[], &[], "online", "anyone");
+
+    assert_eq!(content["respond_to"], "allowlist");
+    assert_eq!(
+        content["respond_to_allowlist"],
+        serde_json::json!([&"b".repeat(64)])
+    );
+}
+
+#[test]
+fn directory_record_reports_a_stopped_agent_as_offline() {
+    let record = directory_agent_record();
+    let content = build_agent_directory_content(&record, &[], &[], "offline", "anyone");
+
+    assert_eq!(content["status"], "offline");
+}
+
+#[test]
+fn directory_record_never_leaks_the_agents_secret_key() {
+    let record = directory_agent_record();
+    let serialized =
+        build_agent_directory_content(&record, &[], &[], "online", "anyone").to_string();
+
+    assert!(!serialized.contains("nsec1supersecret"));
+    assert!(!serialized.contains("private_key"));
+}
+
+#[test]
+fn directory_record_never_leaks_the_auth_attestation() {
+    let record = directory_agent_record();
+    let serialized =
+        build_agent_directory_content(&record, &[], &[], "online", "anyone").to_string();
+
+    assert!(!serialized.contains("secret-attestation"));
+    assert!(!serialized.contains("auth_tag"));
+}
+
+#[test]
+fn directory_record_never_leaks_environment_variables() {
+    let record = directory_agent_record();
+    let serialized =
+        build_agent_directory_content(&record, &[], &[], "online", "anyone").to_string();
+
+    assert!(!serialized.contains("OPENAI_API_KEY"));
+    assert!(!serialized.contains("sk-secret"));
+}
+
+#[test]
+fn directory_record_never_leaks_runtime_configuration() {
+    let record = directory_agent_record();
+    let serialized =
+        build_agent_directory_content(&record, &[], &[], "online", "anyone").to_string();
+
+    assert!(!serialized.contains("you are a helpful agent"));
+    assert!(!serialized.contains("system_prompt"));
+    assert!(!serialized.contains("acp_command"));
+    assert!(!serialized.contains("agent_args"));
+}
+
+#[test]
+fn channel_ids_come_from_the_d_tags_of_membership_events() {
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    let keys = Keys::generate();
+    let build = |d: &str| {
+        EventBuilder::new(Kind::Custom(39002), "")
+            .tags([Tag::parse(["d", d]).expect("d tag")])
+            .sign_with_keys(&keys)
+            .expect("sign")
+    };
+
+    // Two distinct channels, one duplicated, and one event with no `d` tag at
+    // all — a malformed record must be skipped, not abort the whole publish.
+    let untagged = EventBuilder::new(Kind::Custom(39002), "")
+        .sign_with_keys(&keys)
+        .expect("sign");
+    let events = vec![build("chan-b"), build("chan-a"), build("chan-b"), untagged];
+
+    assert_eq!(
+        channel_ids_from_member_events(&events),
+        vec!["chan-a".to_string(), "chan-b".to_string()]
+    );
+}
+
+#[test]
+fn existing_channel_add_policy_is_preserved_from_the_agents_prior_record() {
+    use nostr::{EventBuilder, Keys, Kind};
+
+    let keys = Keys::generate();
+    let prior = EventBuilder::new(
+        Kind::Custom(10100),
+        r#"{"name":"Tester","channel_add_policy":"owner_only"}"#,
+    )
+    .sign_with_keys(&keys)
+    .expect("sign");
+
+    assert_eq!(existing_channel_add_policy(&[prior]), "owner_only");
+}
+
+#[test]
+fn channel_add_policy_falls_back_to_the_schema_default_when_never_published() {
+    // The relay column defaults to 'anyone'; sending that for an agent with no
+    // prior record leaves the stored policy exactly as it already was.
+    assert_eq!(existing_channel_add_policy(&[]), "anyone");
+}
+
+#[test]
+fn channel_add_policy_falls_back_when_the_prior_record_is_malformed() {
+    use nostr::{EventBuilder, Keys, Kind};
+
+    let keys = Keys::generate();
+    let junk = EventBuilder::new(Kind::Custom(10100), "not json")
+        .sign_with_keys(&keys)
+        .expect("sign");
+
+    assert_eq!(existing_channel_add_policy(&[junk]), "anyone");
+}
+
+#[test]
+fn channel_names_come_from_the_name_tag_of_metadata_events() {
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    let keys = Keys::generate();
+    // kind:39000 carries the channel name in a `name` tag; `content` is empty.
+    let meta = EventBuilder::new(Kind::Custom(39000), "")
+        .tags([
+            Tag::parse(["d", "chan-a"]).expect("d"),
+            Tag::parse(["name", "general"]).expect("name"),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign");
+
+    assert_eq!(
+        channel_names_from_meta_events(&[meta], &["chan-a".to_string()]),
+        vec!["general".to_string()]
+    );
+}
+
+#[test]
+fn channel_name_falls_back_to_the_id_when_metadata_is_missing() {
+    assert_eq!(
+        channel_names_from_meta_events(&[], &["chan-zz".to_string()]),
+        vec!["chan-zz".to_string()]
+    );
+}
