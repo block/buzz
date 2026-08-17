@@ -513,6 +513,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archival_snapshot_advances_timestamp_for_rapid_state_replacement() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        if sqlx::query("SELECT 1 FROM archived_identities LIMIT 1")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_test_community(&pool).await;
+        let target_hex = Keys::generate().public_key().to_hex();
+        let request_id = "a".repeat(64);
+
+        state
+            .db
+            .archive(
+                tenant.community(),
+                &target_hex,
+                "self",
+                &target_hex,
+                None,
+                None,
+                &request_id,
+            )
+            .await
+            .expect("archive identity");
+        publish_nipia_archival_list(&tenant, &state)
+            .await
+            .expect("publish archived snapshot");
+        let archived_snapshot = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(1),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .expect("query archived snapshot")
+            .into_iter()
+            .next()
+            .expect("archived snapshot exists");
+
+        state
+            .db
+            .unarchive(tenant.community(), &target_hex)
+            .await
+            .expect("unarchive identity");
+        publish_nipia_archival_list(&tenant, &state)
+            .await
+            .expect("publish unarchived snapshot");
+        let final_snapshot = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(1),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .expect("query final snapshot")
+            .into_iter()
+            .next()
+            .expect("final snapshot exists");
+
+        assert!(
+            final_snapshot.event.created_at > archived_snapshot.event.created_at,
+            "replacement snapshots must not rely on random same-second event-id ordering"
+        );
+        assert!(
+            !final_snapshot.event.tags.iter().any(|tag| {
+                let fields = tag.as_slice();
+                fields.first().map(String::as_str) == Some("p")
+                    && fields.get(1).map(String::as_str) == Some(target_hex.as_str())
+            }),
+            "final snapshot must reflect the canonical empty archive set"
+        );
+    }
+
+    #[tokio::test]
     async fn owner_archive_rejects_stale_request_after_live_kind0_owner_flip() {
         let Some(pool) = test_pool().await else {
             return;

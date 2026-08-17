@@ -3124,29 +3124,70 @@ pub async fn publish_nipia_archival_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let archived = state.db.list_archived(tenant.community()).await?;
-    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    const MAX_REPLACEMENT_ATTEMPTS: usize = 8;
+    let relay_pubkey = state.relay_keypair.public_key();
+    let relay_pubkey_hex = relay_pubkey.to_hex();
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
+    // A concurrent archive mutation can race between reading the current head and
+    // replacing it. Rebuild from canonical state on rejection so an older snapshot
+    // can never strand the final archive set.
+    for _ in 0..MAX_REPLACEMENT_ATTEMPTS {
+        let archived = state.db.list_archived(tenant.community()).await?;
+        let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
+        tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
 
-    for identity in &archived {
-        tags.push(
-            Tag::parse(["p", &identity.pubkey])
-                .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-        );
-    }
+        for identity in &archived {
+            tags.push(
+                Tag::parse(["p", &identity.pubkey])
+                    .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
+            );
+        }
 
-    let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
-        .tags(tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
+        // NIP-16 resolves same-second replacements by event id. Force this
+        // canonical snapshot strictly past the current head instead of letting a
+        // rapid archive→unarchive randomly preserve the stale archive state.
+        let now = nostr::Timestamp::now().as_secs();
+        let previous = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
+                limit: Some(1),
+                global_only: true,
+                ..buzz_db::event::EventQuery::for_community(tenant.community())
+            })
+            .await?;
+        let created_at = previous
+            .first()
+            .map(|event| (event.event.created_at.as_secs() + 1).max(now))
+            .unwrap_or(now);
 
-    let (stored, was_inserted) = state
-        .db
-        .replace_addressable_event(tenant.community(), &event, None)
-        .await?;
-    if was_inserted {
+        let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(&state.relay_keypair)
+            .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
+
+        let (stored, was_inserted) = state
+            .db
+            .replace_addressable_event(tenant.community(), &event, None)
+            .await?;
+        if !was_inserted {
+            continue;
+        }
+
+        let current_archived = state.db.list_archived(tenant.community()).await?;
+        let snapshot_is_current =
+            archived
+                .iter()
+                .map(|identity| identity.pubkey.as_str())
+                .eq(current_archived
+                    .iter()
+                    .map(|identity| identity.pubkey.as_str()));
+        if !snapshot_is_current {
+            continue;
+        }
+
         dispatch_persistent_event(
             tenant,
             state,
@@ -3156,13 +3197,16 @@ pub async fn publish_nipia_archival_list(
             None,
         )
         .await;
+        info!(
+            archived_count = archived.len(),
+            "NIP-IA archived identities list published"
+        );
+        return Ok(());
     }
 
-    info!(
-        archived_count = archived.len(),
-        "NIP-IA archived identities list published"
-    );
-    Ok(())
+    anyhow::bail!(
+        "failed to publish kind:{KIND_IA_ARCHIVED_LIST} after {MAX_REPLACEMENT_ATTEMPTS} concurrent replacements"
+    )
 }
 
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
