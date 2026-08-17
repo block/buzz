@@ -82,3 +82,16 @@ crates/buzz-acp/*Temp*
 crates/buzz-acp/*tmp-build*
 /st.txt
 *.concat
+
+# SMS operator harness runtime state. The install root normally lives outside
+# the repo (~/.buzz-sms-harness), but -InstallRoot is operator-supplied, so
+# these patterns exist so a mistake there cannot commit key material.
+# buzz-private-key.dpapi is a DPAPI blob rather than the raw key, but it is
+# still live secret material and committing it to an OSS repo is unrecoverable.
+*.dpapi
+buzz-private-key*
+.buzz-sms-harness/
+harness.config.json
+harness.pid
+heartbeat.txt
+stop.flag
