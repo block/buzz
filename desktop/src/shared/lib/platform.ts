@@ -12,6 +12,24 @@ export function isMacPlatform(): boolean {
   return /mac|iphone|ipad|ipod/i.test(navigator.platform);
 }
 
+/**
+ * Returns true on Windows desktops.
+ *
+ * WebView2 reports `navigator.platform` as `Win32` today, but the property is
+ * deprecated, so the user agent backs it up. This gates the app-drawn caption
+ * buttons on an undecorated window: a false negative would leave that window
+ * with no way to close, so it does not rest on one deprecated signal.
+ */
+export function isWindowsPlatform(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+
+  return (
+    /win/i.test(navigator.platform) || /windows/i.test(navigator.userAgent)
+  );
+}
+
 /** Returns true on Linux desktops (excludes Android). */
 export function isLinuxPlatform(): boolean {
   if (typeof navigator === "undefined") {
