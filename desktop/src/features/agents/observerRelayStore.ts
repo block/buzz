@@ -475,6 +475,9 @@ function processLiveObserverEvents(
   // callbacks. Those callbacks historically observed their triggering frame
   // in the raw/transcript stores; batching must preserve that visibility while
   // deferring only the global external-store publication.
+  // `addedEvents` is the payload external-store subscribers receive;
+  // `observerChanged` additionally tracks circuit-only changes, which append
+  // nothing but must still repaint the badge (see the OR in the loop below).
   const addedEvents = appendAgentEvents(agentPubkey, events);
   let observerChanged = addedEvents !== null;
 
