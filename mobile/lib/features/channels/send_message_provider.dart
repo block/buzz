@@ -1,5 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
 import '../profile/user_cache_provider.dart';
@@ -7,6 +8,7 @@ import '../profile/user_profile.dart';
 import 'channel.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
+import 'threading.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
@@ -18,6 +20,7 @@ class SendMessage {
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
   final bool Function()? _isDeliveryValid;
+  final bool Function(String channelId, String pubkey)? _isAgentPubkey;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -29,13 +32,15 @@ class SendMessage {
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
     bool Function()? isDeliveryValid,
+    bool Function(String channelId, String pubkey)? isAgentPubkey,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage,
-       _isDeliveryValid = isDeliveryValid;
+       _isDeliveryValid = isDeliveryValid,
+       _isAgentPubkey = isAgentPubkey;
 
   /// Send a text message to a channel.
   ///
@@ -51,6 +56,7 @@ class SendMessage {
     String? rootEventId,
     List<String>? mentionPubkeys,
     Channel? channel,
+    List<NostrEvent>? threadEvents,
     List<List<String>> mediaTags = const [],
   }) async {
     _ensureDeliveryValid();
@@ -74,9 +80,21 @@ class SendMessage {
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
     // the desktop's normalizeMentionPubkeys).
     final selfLower = authorPubkey?.toLowerCase();
+    var mentionList = resolvedMentions;
+    final isAgentPubkey = _isAgentPubkey;
+    if (parentEventId != null && isAgentPubkey != null) {
+      final events = threadEvents ?? const <NostrEvent>[];
+      final root = rootEventId ?? resolveReplyRootId(parentEventId, events);
+      mentionList = mentionPubkeysWithThreadAgents(
+        mentionList,
+        events,
+        root,
+        (pubkey) => isAgentPubkey(channelId, pubkey),
+      );
+    }
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
+      for (final pk in mentionList)
         if (seenMentions.add(pk.toLowerCase())) pk,
     ];
 
@@ -236,6 +254,9 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     removeLocalMessage: (channelId, eventId) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .removeLocalMessage(eventId),
+    isAgentPubkey: (channelId, pubkey) => ref
+        .read(agentMentionPubkeysProvider(channelId))
+        .contains(pubkey.toLowerCase()),
     isDeliveryValid: () {
       final currentConfig = ref.read(relayConfigProvider);
       return currentConfig.baseUrl == config.baseUrl &&
