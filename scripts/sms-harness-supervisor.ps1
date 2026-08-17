@@ -286,6 +286,12 @@ try {
             -NoNewWindow -PassThru
         Set-Content -Path $Layout.PidFile -Value $proc.Id -Encoding ascii
         Write-Log 'INFO' "harness started (pid $($proc.Id), restart #$restarts)"
+        # Publish immediately, not just on the 60s tick. Without this the
+        # heartbeat still advertises the PREVIOUS child's pid and restart count
+        # for up to a minute after a restart — i.e. it is least trustworthy in
+        # exactly the window where someone is asking "did it come back?".
+        # Caught by killing the child and watching the heartbeat not move.
+        Write-Heartbeat -ChildPid $proc.Id -Restarts $restarts
 
         # Poll rather than block, so the heartbeat keeps publishing and the
         # stop flag stays responsive while the child runs.
