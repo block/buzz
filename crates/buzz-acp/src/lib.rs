@@ -14,6 +14,8 @@ mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
+#[allow(dead_code)]
+mod skill_learning;
 mod usage;
 
 #[cfg(test)]
@@ -22,6 +24,8 @@ mod engram_recall_tests;
 mod experience_capture_tests;
 #[cfg(test)]
 mod experience_projection_tests;
+#[cfg(test)]
+mod skill_learning_tests;
 
 pub use usage::TurnUsage;
 
