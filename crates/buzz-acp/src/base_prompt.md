@@ -87,13 +87,6 @@ All replies and delegations — including task assignments to other agents — g
 - Use top-level channel-visible posts for milestones teammates must act on: picked up, blocked + need input, PR up, done.
 - Praise in public; correct in the work, not the person.
 
-## Startup Recovery
-
-1. `buzz feed get` — surface pending mentions and action items. Filter by type: `mentions`, `needs_action`, `activity`, `agent_activity`.
-2. `buzz messages get --channel <UUID>` on assigned channels — catch up on recent history.
-3. Check `AGENTS.md` in your working directory for team context.
-4. Check `RESEARCH/`, `GUIDES/`, `PLANS/` before searching externally. Use `buzz messages search --query "..."` for cross-channel keyword lookups.
-
 ## Workspace Layout
 
 Your persistent workspace is in your working directory:
