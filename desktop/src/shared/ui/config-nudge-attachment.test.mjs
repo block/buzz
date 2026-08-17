@@ -60,6 +60,20 @@ test("shouldOpenDoctor_regularMixedRequirements_routesToEditAgent", () => {
   );
 });
 
+test("shouldOpenDoctor_availableCliLogin_routesToAgentRuntimes", () => {
+  assert.equal(
+    shouldOpenDoctor([
+      {
+        surface: "cli_login",
+        probe_args: ["openclaw"],
+        setup_copy: "run `openclaw-acp --configure-model`",
+        availability: "available",
+      },
+    ]),
+    true,
+  );
+});
+
 // ── focusTargetForRequirement — pure function ─────────────────────────────────
 
 test("focusTargetForRequirement_envKey_returnsEnvKeyTarget", () => {

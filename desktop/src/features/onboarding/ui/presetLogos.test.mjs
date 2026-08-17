@@ -17,7 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { RUNTIME_MARKS } from "./HarnessMarks.tsx";
-import { PRESET_LOGOS } from "./RuntimeIcon.tsx";
+import { PRESET_LOGOS, RUNTIME_LOGOS } from "./RuntimeIcon.tsx";
 
 const desktopRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -78,6 +78,15 @@ test("PRESET_LOGOS has no entries for unknown presets", () => {
     unknown,
     [],
     `PRESET_LOGOS maps ids the backend does not emit as presets: ${unknown.join(", ")}`,
+  );
+});
+
+test("OpenClaw keeps its bundled logo as a compiled-in runtime", () => {
+  const logoPath = RUNTIME_LOGOS.openclaw;
+  assert.equal(logoPath, "/harness-logos/openclaw.svg");
+  assert.ok(
+    existsSync(path.join(desktopRoot, "public", logoPath)),
+    `RUNTIME_LOGOS.openclaw points at ${logoPath}, which is missing from desktop/public`,
   );
 });
 

@@ -256,7 +256,8 @@ fn launch_terminal_auth(runtime_id: &str, method: &AcpAuthMethod) -> Result<(), 
         .ok_or_else(|| format!("{} ACP adapter is not installed", runtime.label))?;
     let fallback_command = adapter_command.1.display().to_string();
     let argv = adapter_terminal_argv(runtime.label, method, &fallback_command)?;
-    launch_visible_terminal(&argv)
+    let augmented_path = auth_command_path();
+    launch_visible_terminal(&argv, augmented_path.as_deref())
 }
 
 fn adapter_terminal_argv(
@@ -361,17 +362,13 @@ fn spawn_without_stdio(mut command: Command) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
+fn launch_visible_terminal(argv: &[String], augmented_path: Option<&str>) -> Result<(), String> {
     let mut script = tempfile::Builder::new()
         .prefix("buzz-auth-")
         .suffix(".command")
         .tempfile()
         .map_err(|error| format!("failed to create terminal login script: {error}"))?;
-    writeln!(
-        script,
-        "#!/bin/sh\ntrap 'rm -f -- \"$0\"' EXIT\n{}",
-        shell_join(argv)
-    )
+    writeln!(script, "{}", terminal_shell_script(argv, augmented_path))
     .map_err(|error| format!("failed to write terminal login script: {error}"))?;
     fs::set_permissions(script.path(), fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("failed to prepare terminal login script: {error}"))?;
@@ -395,8 +392,8 @@ fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
-    let command = shell_join(argv);
+fn launch_visible_terminal(argv: &[String], augmented_path: Option<&str>) -> Result<(), String> {
+    let command = terminal_shell_command(argv, augmented_path);
     let candidates: [(&str, &[&str]); 4] = [
         ("x-terminal-emulator", &["-e", "sh", "-lc"]),
         ("gnome-terminal", &["--", "sh", "-lc"]),
@@ -414,7 +411,7 @@ fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
+fn launch_visible_terminal(argv: &[String], augmented_path: Option<&str>) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
@@ -425,6 +422,9 @@ fn launch_visible_terminal(argv: &[String]) -> Result<(), String> {
     command
         .args(windows_terminal_args(argv))
         .creation_flags(CREATE_NEW_CONSOLE);
+    if let Some(path) = augmented_path {
+        command.env("PATH", path);
+    }
     spawn_without_stdio(command)
 }
 
@@ -436,8 +436,23 @@ fn windows_terminal_args(argv: &[String]) -> Vec<String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn launch_visible_terminal(_argv: &[String]) -> Result<(), String> {
+fn launch_visible_terminal(_argv: &[String], _augmented_path: Option<&str>) -> Result<(), String> {
     Err("opening a terminal is not supported on this platform".to_string())
+}
+
+fn terminal_shell_command(argv: &[String], augmented_path: Option<&str>) -> String {
+    match augmented_path {
+        Some(path) => format!("export PATH={}; exec {}", shell_escape(path), shell_join(argv)),
+        None => format!("exec {}", shell_join(argv)),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn terminal_shell_script(argv: &[String], augmented_path: Option<&str>) -> String {
+    format!(
+        "#!/bin/sh\ntrap 'rm -f -- \"$0\"' EXIT\n{}",
+        terminal_shell_command(argv, augmented_path)
+    )
 }
 
 fn shell_join(argv: &[String]) -> String {
@@ -462,8 +477,8 @@ fn shell_escape(arg: &str) -> String {
 mod tests {
     use super::{
         adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
-        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, terminal_shell_script,
+        uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
     };
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
@@ -569,6 +584,17 @@ mod tests {
     #[test]
     fn shell_escape_leaves_simple_args_unquoted() {
         assert_eq!(shell_escape("--claudeai"), "--claudeai");
+    }
+
+    #[test]
+    fn terminal_auth_script_exports_augmented_path() {
+        assert_eq!(
+            terminal_shell_script(
+                &["/managed/openclaw-acp".into(), "--configure-model".into()],
+                Some("/managed node/bin:/usr/bin"),
+            ),
+            "#!/bin/sh\ntrap 'rm -f -- \"$0\"' EXIT\nexport PATH='/managed node/bin:/usr/bin'; exec /managed/openclaw-acp --configure-model"
+        );
     }
 
     #[test]

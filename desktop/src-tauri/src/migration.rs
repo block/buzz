@@ -169,6 +169,7 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     }
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
+    reconcile_openclaw_native_runtime(app);
     // Fold personas.json into the unified store HERE: after the JSON-level
     // personas.json migrations above (which must see the legacy file), and
     // before every consumer of the load/save_personas shims below —
@@ -1099,6 +1100,57 @@ fn reconcile_legacy_command_names_in_file(path: &Path) {
     });
 }
 
+fn reconcile_openclaw_native_runtime_in_file(path: &Path) {
+    patch_json_records(path, |obj| {
+        let legacy_args = obj
+            .get("agent_args")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|args| args.len() == 1 && args[0].as_str() == Some("acp"));
+        if !legacy_args {
+            return false;
+        }
+
+        let command_is_legacy =
+            obj.get("agent_command").and_then(serde_json::Value::as_str) == Some("openclaw");
+        let command_override = obj
+            .get("agent_command_override")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if command_override.is_some_and(|value| value != "openclaw") {
+            return false;
+        }
+        let override_is_legacy = command_override == Some("openclaw");
+        if !command_is_legacy && !override_is_legacy {
+            return false;
+        }
+
+        if command_is_legacy {
+            obj.insert(
+                "agent_command".to_string(),
+                serde_json::Value::String("openclaw-acp".to_string()),
+            );
+        }
+        if override_is_legacy {
+            obj.insert(
+                "agent_command_override".to_string(),
+                serde_json::Value::String("openclaw-acp".to_string()),
+            );
+        }
+        obj.insert(
+            "agent_args".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+        eprintln!(
+            "buzz-desktop: runtime-reconcile: {:?}: migrated OpenClaw to native ACP",
+            obj.get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?"),
+        );
+        true
+    });
+}
+
 fn reconcile_legacy_persona_runtimes_in_file(path: &Path) {
     patch_json_records(path, |obj| {
         let Some(runtime) = obj.get("runtime").and_then(|v| v.as_str()) else {
@@ -1209,6 +1261,27 @@ pub fn reconcile_legacy_command_names(app: &tauri::AppHandle) {
         let teams_dir = dir.join("agents/teams");
         if teams_dir.exists() && !teams_dir.is_symlink() {
             reconcile_legacy_team_persona_runtime_files(&teams_dir);
+        }
+    }
+}
+
+/// Upgrade the exact OpenClaw command/argument shape shipped by Buzz v0.5.2.
+///
+/// Custom commands and any non-standard arguments remain untouched.
+pub fn reconcile_openclaw_native_runtime(app: &tauri::AppHandle) {
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let mut dirs = vec![current_dir.clone()];
+    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
+        if canonical.exists() && canonical != current_dir {
+            dirs.push(canonical);
+        }
+    }
+    for dir in dirs {
+        let path = dir.join("agents/managed-agents.json");
+        if path.exists() {
+            reconcile_openclaw_native_runtime_in_file(&path);
         }
     }
 }

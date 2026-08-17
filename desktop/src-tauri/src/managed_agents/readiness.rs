@@ -393,6 +393,7 @@ impl AgentReadiness {
 /// * **claude**: a successful `claude auth status` probe.
 /// * **codex**: a successful `codex login status` probe (checks the codex
 ///   credential store — NOT `OPENAI_API_KEY`).
+/// * **openclaw**: a configured model route with usable authentication.
 /// * **unknown / custom command**: always `Ready` (no requirements known).
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
@@ -441,6 +442,17 @@ fn collect_missing_requirements(
             rt,
         ),
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
+        "openclaw" => cli_login::requirements(
+            &[
+                "openclaw",
+                "models",
+                "status",
+                "--check",
+                "--json",
+            ],
+            "run `openclaw-acp --configure-model`",
+            rt,
+        ),
         _ => vec![],
     }
 }

@@ -8,7 +8,7 @@ use super::{
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
     try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    GOOSE_AVATAR_URL, OPENCLAW_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -79,6 +79,18 @@ fn resolves_buzz_agent_avatar() {
     assert_eq!(
         managed_agent_avatar_url("/usr/local/bin/buzz-agent"),
         Some(BUZZ_AGENT_AVATAR_URL.to_string())
+    );
+}
+
+#[test]
+fn resolves_openclaw_native_runtime() {
+    assert_eq!(
+        managed_agent_avatar_url("openclaw-acp"),
+        Some(OPENCLAW_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        normalize_agent_args("openclaw-acp", vec!["acp".into()]),
+        Vec::<String>::new()
     );
 }
 

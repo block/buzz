@@ -83,6 +83,66 @@ fn reconcile_legacy_command_names_preserves_custom_commands() {
 }
 
 #[test]
+fn reconcile_openclaw_native_runtime_rewrites_exact_shipped_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([
+            {
+                "name": "Inherited OpenClaw",
+                "agent_command": "openclaw",
+                "agent_args": ["acp"]
+            },
+            {
+                "name": "Pinned OpenClaw",
+                "agent_command": "openclaw",
+                "agent_command_override": "openclaw",
+                "agent_args": ["acp"]
+            }
+        ]),
+    );
+
+    reconcile_openclaw_native_runtime_in_file(&dir.path().join("agents/managed-agents.json"));
+
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["agent_command"], "openclaw-acp");
+    assert_eq!(records[0]["agent_args"], serde_json::json!([]));
+    assert_eq!(records[1]["agent_command"], "openclaw-acp");
+    assert_eq!(records[1]["agent_command_override"], "openclaw-acp");
+    assert_eq!(records[1]["agent_args"], serde_json::json!([]));
+}
+
+#[test]
+fn reconcile_openclaw_native_runtime_preserves_custom_openclaw_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let records = serde_json::json!([
+        {
+            "name": "Custom args",
+            "agent_command": "openclaw",
+            "agent_args": ["acp", "--url", "wss://example.invalid"]
+        },
+        {
+            "name": "Custom command",
+            "agent_command": "/opt/openclaw",
+            "agent_args": ["acp"]
+        },
+        {
+            "name": "Custom override",
+            "agent_command": "openclaw",
+            "agent_command_override": "my-openclaw-wrapper",
+            "agent_args": ["acp"]
+        }
+    ]);
+    write_agents_json(dir.path(), &records);
+    let path = dir.path().join("agents/managed-agents.json");
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    reconcile_openclaw_native_runtime_in_file(&path);
+
+    assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+}
+
+#[test]
 fn reconcile_legacy_command_names_rewrites_persona_runtime() {
     let dir = tempfile::tempdir().unwrap();
     write_personas_json(

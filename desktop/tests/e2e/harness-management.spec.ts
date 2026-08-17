@@ -3,8 +3,8 @@
  * catalog dialog.
  *
  * Covers:
- *  - Ready preset gets a row in "Your harnesses"; needs-setup preset does NOT
- *  - Needs-setup preset appears in the Add-harnesses catalog with status,
+ *  - Ready and one-click-install runtimes get rows in "Your harnesses"
+ *  - Needs-setup runtimes appear in the Add-harnesses catalog with status,
  *    curated description, docs link, and setup action
  *  - Catalog search filters the list
  *  - Toggling install does not reorder rows (stable order)
@@ -45,25 +45,26 @@ const HERMES_AVAILABLE = {
   source: "preset",
 } as const;
 
-/** OpenClaw preset "not_installed" + no auto-install — catalog-only. */
+/** OpenClaw builtin with its native ACP executable not installed yet. */
 const OPENCLAW_NOT_INSTALLED = {
   id: "openclaw",
   label: "OpenClaw",
   avatar_url: "",
   availability: "not_installed",
-  command: "openclaw",
+  command: "openclaw-acp",
   binary_path: null,
-  default_args: ["acp"],
+  default_args: [],
   mcp_command: null,
-  install_hint:
-    "Buzz talks to OpenClaw through its ACP mode (openclaw acp), which relies on the OpenClaw Gateway daemon. Follow the setup guide to install both.",
-  install_instructions_url: "https://docs.openclaw.ai/start/getting-started",
-  can_auto_install: false,
-  requires_external_cli: true,
+  install_hint: "Install OpenClaw to add its self-contained native ACP runtime.",
+  install_instructions_url: "https://docs.openclaw.ai/install",
+  can_auto_install: true,
+  requires_external_cli: false,
   underlying_cli_path: null,
   node_required: false,
   auth_status: { status: "unknown" },
-  source: "preset",
+  source: "builtin",
+  login_hint:
+    "Run `openclaw-acp --configure-model` to authenticate a provider and choose a model.",
 } as const;
 
 /** Cursor preset — deliberately has NO bundled logo (brand assets not
@@ -174,7 +175,7 @@ async function fillHarnessForm(
 // ── Your harnesses vs catalog split ──────────────────────────────────────────
 
 test.describe("your harnesses split", () => {
-  test("ready preset gets a row; needs-setup preset is catalog-only", async ({
+  test("ready preset and one-click-install builtin get rows", async ({
     page,
   }) => {
     await installMockBridge(page, {
@@ -189,14 +190,16 @@ test.describe("your harnesses split", () => {
       "Ready",
     );
 
-    // Needs-setup preset must NOT render a row (and thus no Install button).
-    await expect(page.getByTestId("doctor-runtime-openclaw")).toHaveCount(0);
+    await expect(page.getByTestId("doctor-runtime-openclaw")).toBeVisible();
+    await expect(page.getByTestId("doctor-runtime-status-openclaw")).toHaveText(
+      "CLI needed",
+    );
     await expect(
       page.getByTestId("doctor-runtime-install-openclaw"),
-    ).toHaveCount(0);
+    ).toBeVisible();
   });
 
-  test("needs-setup preset appears in catalog with status, description, docs and setup action", async ({
+  test("needs-setup builtin appears in catalog with status, description, docs and install action", async ({
     page,
   }) => {
     await installMockBridge(page, {
@@ -219,11 +222,9 @@ test.describe("your harnesses split", () => {
     await expect(detail).toContainText(
       "A personal AI assistant that runs on your own devices.",
     );
-    // Operational setup hint from runtime state.
-    await expect(detail).toContainText("OpenClaw Gateway daemon");
-    // Primary setup action under the header (no auto-install → setup guide).
+    await expect(detail).toContainText("self-contained native ACP runtime");
     await expect(
-      page.getByTestId("harness-catalog-setup-openclaw"),
+      page.getByTestId("harness-catalog-install-openclaw"),
     ).toBeVisible();
 
     // Technical details are visible by default.
@@ -273,8 +274,11 @@ test.describe("your harnesses split", () => {
         HERMES_AVAILABLE,
         {
           ...OPENCLAW_NOT_INSTALLED,
+          id: "claude",
+          label: "Claude Code",
+          command: "claude-agent-acp",
           availability: "adapter_outdated",
-          binary_path: "/usr/local/bin/openclaw",
+          binary_path: "/usr/local/bin/claude-agent-acp",
           can_auto_install: true,
         },
       ],
@@ -291,19 +295,19 @@ test.describe("your harnesses split", () => {
           ).filter((command) => command === "install_acp_runtime").length,
       );
 
-    await page.getByTestId("harness-catalog-list-item-openclaw").click();
+    await page.getByTestId("harness-catalog-list-item-claude").click();
     await expect(
-      page.getByTestId("harness-catalog-status-openclaw"),
+      page.getByTestId("harness-catalog-status-claude"),
     ).toHaveText("Update needed");
-    const updateButton = page.getByTestId("harness-catalog-install-openclaw");
+    const updateButton = page.getByTestId("harness-catalog-install-claude");
     await expect(updateButton).toHaveText("Update");
 
     // Cancel path: clicking Update opens the warning, no mutation fires.
     await updateButton.click();
     const dialog = page.getByRole("alertdialog");
-    await expect(dialog).toContainText("Update OpenClaw adapter?");
+    await expect(dialog).toContainText("Update Claude Code adapter?");
     await expect(dialog).toContainText(
-      "This replaces the machine-wide openclaw adapter.",
+      "This replaces the machine-wide claude-agent-acp adapter.",
     );
     // Generic runtimes must never get Codex's package copy.
     await expect(dialog).not.toContainText("codex-acp");
@@ -314,7 +318,7 @@ test.describe("your harnesses split", () => {
 
     // Confirm path: exactly one install fires after confirmation.
     await updateButton.click();
-    await page.getByTestId("harness-catalog-confirm-update-openclaw").click();
+    await page.getByTestId("harness-catalog-confirm-update-claude").click();
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
     await expect.poll(installCalls).toBe(1);
     // No duplicate mutation after the flow settles.

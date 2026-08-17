@@ -89,7 +89,10 @@ with a TypeScript lookup table or an id comparison in a component.
    failure. A harness selection alone does not enable Next when the harness
    requires provider/model/credential config (e.g. buzz-agent with no
    provider). Baked build env and runtime-file config satisfy the gate. Drafts
-   intentionally do not survive an app restart.
+   intentionally do not survive an app restart. ACP runtimes may advertise
+   terminal authentication methods; setup nudges for installed but
+   unauthenticated runtimes route back to Agent runtimes so that flow remains
+   actionable.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
 8. **Omit the Model control only after a confirmed successful empty

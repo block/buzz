@@ -23,6 +23,8 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const OPENCLAW_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/openclaw/openclaw/refs/heads/main/ui/public/favicon.svg";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 fn common_binary_paths() -> &'static [PathBuf] {
@@ -177,6 +179,48 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "openclaw",
+        label: "OpenClaw",
+        commands: &["openclaw-acp"],
+        aliases: &[],
+        avatar_url: OPENCLAW_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: None,
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &["npm install -g openclaw@latest"],
+        cli_install_instructions_url: "https://docs.openclaw.ai/install",
+        adapter_install_instructions_url: "https://docs.openclaw.ai/cli/acp",
+        cli_install_hint: "",
+        adapter_install_hint:
+            "Install OpenClaw to add its self-contained native ACP runtime.",
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.openclaw/openclaw.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some(
+            "Run `openclaw-acp --configure-model` to authenticate a provider and choose a model.",
+        ),
+        auth_probe_args: Some(&[
+            "openclaw",
+            "models",
+            "status",
+            "--check",
+            "--json",
+        ]),
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -444,7 +488,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "openclaw-acp" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
 }
