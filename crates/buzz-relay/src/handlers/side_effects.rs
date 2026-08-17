@@ -3112,10 +3112,30 @@ pub async fn reconcile_channel_events(
     Ok(())
 }
 
+/// `created_at` for a replaceable snapshot that must supersede `previous`.
+///
+/// `created_at` is second-resolution, and NIP-16 breaks a same-second tie on the
+/// lowest event id — which, being a content hash, is effectively random. Two
+/// snapshots written inside one wall-clock second therefore leave an arbitrary
+/// one of them authoritative, and the loser is discarded with no error. Forcing
+/// the next snapshot strictly past the previous one keeps replacement
+/// deterministic no matter how fast the mutations arrive.
+fn monotonic_snapshot_created_at(now: u64, previous: Option<u64>) -> u64 {
+    match previous {
+        Some(previous) => now.max(previous + 1),
+        None => now,
+    }
+}
+
 /// Publish a kind:13535 archived identities list event (NIP-IA).
 ///
 /// Queries all current archived identities and emits a relay-signed,
 /// NIP-70-protected replaceable-by-convention snapshot with bare `p` tags.
+///
+/// The snapshot's `created_at` is forced strictly past the previous snapshot's,
+/// so a burst of archive requests inside one second cannot strand an
+/// intermediate list as authoritative. Same guard as
+/// `emit_addressable_discovery_event` and `publish_dm_visibility_snapshot`.
 pub async fn publish_nipia_archival_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -3133,8 +3153,26 @@ pub async fn publish_nipia_archival_list(
         );
     }
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let previous = state
+        .db
+        .query_events(&buzz_db::event::EventQuery {
+            kinds: Some(vec![KIND_IA_ARCHIVED_LIST as i32]),
+            pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+            limit: Some(1),
+            ..buzz_db::event::EventQuery::for_community(tenant.community())
+        })
+        .await
+        .unwrap_or_default();
+    let ts =
+        monotonic_snapshot_created_at(now, previous.first().map(|e| e.event.created_at.as_secs()));
+
     let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
         .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(ts))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
 
@@ -3481,5 +3519,56 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    #[test]
+    fn first_snapshot_uses_wall_clock() {
+        assert_eq!(
+            monotonic_snapshot_created_at(1_700_000_000, None),
+            1_700_000_000
+        );
+    }
+
+    #[test]
+    fn snapshots_within_one_second_get_strictly_increasing_timestamps() {
+        // Six archive requests landing inside one wall-clock second: without the
+        // guard all six snapshots share `created_at`, the NIP-16 lowest-event-id
+        // tiebreak picks an arbitrary winner, and the rest are silently dropped.
+        let now = 1_700_000_000;
+        let mut previous = None;
+        let mut published = Vec::new();
+
+        for _ in 0..6 {
+            let ts = monotonic_snapshot_created_at(now, previous);
+            published.push(ts);
+            previous = Some(ts);
+        }
+
+        assert_eq!(
+            published,
+            vec![now, now + 1, now + 2, now + 3, now + 4, now + 5]
+        );
+        assert!(published.windows(2).all(|w| w[1] > w[0]));
+    }
+
+    #[test]
+    fn snapshot_follows_wall_clock_once_it_overtakes_the_previous() {
+        // A burst can push `created_at` ahead of the clock; once real time passes
+        // it, the snapshot must go back to using the wall clock rather than
+        // drifting further into the future.
+        let previous = 1_700_000_005;
+
+        assert_eq!(
+            monotonic_snapshot_created_at(1_700_000_000, Some(previous)),
+            1_700_000_006
+        );
+        assert_eq!(
+            monotonic_snapshot_created_at(1_700_000_006, Some(previous)),
+            1_700_000_006
+        );
+        assert_eq!(
+            monotonic_snapshot_created_at(1_700_000_099, Some(previous)),
+            1_700_000_099
+        );
     }
 }
