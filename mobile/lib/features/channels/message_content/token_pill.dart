@@ -10,10 +10,13 @@ String? _channelNameForId(Map<String, String> channels, String channelId) {
 class _ChannelLinkMd extends InlineMd {
   final Map<String, String> channelNames;
   final void Function(String channelId)? onChannelTap;
+  // Require at least one letter/underscore so digits-only tokens like
+  // `#2959` (common GitHub issue labels) are never claimed as channels.
   late final RegExp _exp = _buildPrefixPattern(
     prefix: '#',
     knownNames: channelNames.keys,
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_-]*',
+    genericTokenPattern:
+        r'(?=[A-Za-z0-9_-]*[A-Za-z_])[A-Za-z0-9_][A-Za-z0-9_-]*',
   );
 
   _ChannelLinkMd({required this.channelNames, this.onChannelTap});
@@ -101,6 +104,118 @@ class _TokenPill extends StatelessWidget {
       button: interactive,
       child: ExcludeSemantics(child: pill),
     );
+  }
+}
+
+/// Markdown `[label](url)` that keeps custom mention/channel/emoji components
+/// out of the *label*. gpt_markdown's default [ATagMd] re-runs the full
+/// `inlineComponents` list on the label, so `_ChannelLinkMd` used to swallow
+/// labels like `#2959` into a token pill and leave the link blank on device.
+class _AuthoredMarkdownLinkMd extends InlineMd {
+  @override
+  RegExp get exp => RegExp(r'(?<!\!)\[.*\]\([^\s]*\)');
+
+  @override
+  InlineSpan span(
+    BuildContext context,
+    String text,
+    final GptMarkdownConfig config,
+  ) {
+    var bracketCount = 0;
+    const start = 1;
+    var end = 0;
+    for (var i = 0; i < text.length; i++) {
+      if (text[i] == '[') {
+        bracketCount++;
+      } else if (text[i] == ']') {
+        bracketCount--;
+        if (bracketCount == 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+
+    if (end + 1 >= text.length || text[end + 1] != '(') {
+      return const TextSpan();
+    }
+
+    final linkText = text.substring(start, end);
+    final urlStart = end + 2;
+
+    var parenCount = 0;
+    var urlEnd = urlStart;
+    for (var i = urlStart; i < text.length; i++) {
+      final char = text[i];
+      if (char == '(') {
+        parenCount++;
+      } else if (char == ')') {
+        if (parenCount == 0) {
+          urlEnd = i;
+          break;
+        }
+        parenCount--;
+      }
+    }
+
+    if (urlEnd == urlStart) {
+      return const TextSpan();
+    }
+
+    final url = text.substring(urlStart, urlEnd).trim();
+    final builder = config.linkBuilder;
+    final ending = text.substring(urlEnd + 1);
+    final endingSpans = MarkdownComponent.generate(
+      context,
+      ending,
+      config,
+      false,
+    );
+    final theme = GptMarkdownTheme.of(context);
+
+    // Formatting (bold/italic/…) stays; mention/channel/emoji pills do not.
+    final labelConfig = config.copyWith(
+      inlineComponents: MarkdownComponent.inlineComponents
+          .where((component) => component is! ATagMd)
+          .toList(growable: false),
+    );
+    final linkTextSpan = TextSpan(
+      children: MarkdownComponent.generate(
+        context,
+        linkText,
+        labelConfig,
+        false,
+      ),
+      style: config.style?.copyWith(
+        color: theme.linkColor,
+        decorationColor: theme.linkColor,
+      ),
+    );
+
+    WidgetSpan? child;
+    if (builder != null) {
+      child = WidgetSpan(
+        baseline: TextBaseline.alphabetic,
+        alignment: PlaceholderAlignment.baseline,
+        child: GestureDetector(
+          onTap: () => config.onLinkTap?.call(url, linkText),
+          child: builder(
+            context,
+            linkTextSpan,
+            url,
+            config.style ?? const TextStyle(),
+          ),
+        ),
+      );
+    }
+
+    child ??= WidgetSpan(
+      alignment: PlaceholderAlignment.baseline,
+      baseline: TextBaseline.alphabetic,
+      child: config.getRich(linkTextSpan),
+    );
+
+    return TextSpan(children: [child, ...endingSpans]);
   }
 }
 
