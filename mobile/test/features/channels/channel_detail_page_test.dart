@@ -193,6 +193,7 @@ Widget _buildTestable({
   Map<String, Future<List<NostrEvent>>> pendingThreadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
+  bool disableRetries = false,
   RelaySessionNotifier? relaySessionNotifier,
   http.Client? mediaClient,
   Widget? home,
@@ -203,6 +204,7 @@ Widget _buildTestable({
   final fakeMessagesNotifier =
       messagesNotifier ?? _FakeMessagesNotifier(messages);
   return ProviderScope(
+    retry: disableRetries ? (_, _) => null : null,
     overrides: [
       channelMessagesProvider(
         _channelId,
@@ -4467,6 +4469,68 @@ void main() {
           tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
       expect(enteringDecoration.color!.a, greaterThan(0));
       expect(enteringDecoration.color!.a, lessThan(0.12 * 0.4));
+    });
+
+    testWidgets('highlights a hydrated target after the thread query fails', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'bob',
+        content: 'Hydrated target',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final timelineMessages = formatTimeline([root, target]);
+      final replyCompleter = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, target],
+          pendingThreadReplies: {'root': replyCompleter.future},
+          disableRetries: true,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: ThreadDetailPage(
+            threadHead: timelineMessages.first,
+            allMessages: timelineMessages,
+            channelId: _testChannel.id,
+            currentPubkey: null,
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'target',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final targetFinder = find.byKey(const ValueKey('thread-message-target'));
+      expect(targetFinder, findsOneWidget);
+      final loadingDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(loadingDecoration.color, Colors.transparent);
+
+      replyCompleter.completeError(Exception('thread query failed'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+
+      final highlightedDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(highlightedDecoration.color!.a, greaterThan(0));
+      expect(highlightedDecoration.color!.a, lessThan(0.12 * 0.4));
     });
 
     testWidgets('opens a nested reply in its direct-parent thread', (

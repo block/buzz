@@ -114,6 +114,11 @@ class ThreadDetailPage extends HookConsumerWidget {
     });
 
     final fetchedReplies = replyMessages.value;
+    // A terminal query error cannot produce a more authoritative list. Keep
+    // loading states provisional, but let the hydrated route snapshot drive
+    // the one-shot target jump when the relay query has definitively failed.
+    final canUseMessagesForInitialTarget =
+        fetchedReplies != null || replyMessages.hasError;
     final liveDeletionHidesHead = _isDeletedBy(
       liveChannelEvents,
       threadHead.id,
@@ -342,43 +347,53 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
     }
 
-    useEffect(() {
-      final messageId = initialMessageId;
-      // Wait for the authoritative thread query before consuming the one-shot
-      // jump; the fallback main-timeline list can contain only the linked reply.
-      if (messageId == null || fetchedReplies == null) return null;
-      final chronologicalIndex = replies.indexWhere(
-        (reply) => reply.id == messageId,
-      );
-      final targetIndex = messageId == threadHead.id
-          ? headIndex
-          : chronologicalIndex < 0
-          ? null
-          : indexForReply(chronologicalIndex);
-      if (targetIndex == null || didJumpToInitialMessage.value) return null;
-      didJumpToInitialMessage.value = true;
-      initialTailSettle.abandon();
-      userOptedOutOfTailFollow.value = true;
-      userDragDetachedTailFollow.value = false;
-      tailIntent.schedule(
-        allowed: true,
-        revalidate: () =>
-            context.mounted &&
-            itemScrollController.isAttached &&
-            !tailIntent.isDragging,
-        action: () {
-          // The provisional route snapshot can make the linked reply look like
-          // the tail. This authoritative deep-link jump intentionally leaves
-          // the user at an older item, so it must opt out of follow-tail first.
-          tailIntent.detach();
-          followsThreadTail.value = false;
-          isAtThreadTail.value = false;
-          itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
-          initialHighlightTargetIndex.value = targetIndex;
-        },
-      );
-      return null;
-    }, [initialMessageId, fetchedReplies, replies.length]);
+    useEffect(
+      () {
+        final messageId = initialMessageId;
+        // Wait for either the authoritative thread query or a terminal query
+        // error before consuming the one-shot jump. During loading, the fallback
+        // main-timeline list can contain only the linked reply; after an error,
+        // that hydrated snapshot is the best available target list.
+        if (messageId == null || !canUseMessagesForInitialTarget) return null;
+        final chronologicalIndex = replies.indexWhere(
+          (reply) => reply.id == messageId,
+        );
+        final targetIndex = messageId == threadHead.id
+            ? headIndex
+            : chronologicalIndex < 0
+            ? null
+            : indexForReply(chronologicalIndex);
+        if (targetIndex == null || didJumpToInitialMessage.value) return null;
+        didJumpToInitialMessage.value = true;
+        initialTailSettle.abandon();
+        userOptedOutOfTailFollow.value = true;
+        userDragDetachedTailFollow.value = false;
+        tailIntent.schedule(
+          allowed: true,
+          revalidate: () =>
+              context.mounted &&
+              itemScrollController.isAttached &&
+              !tailIntent.isDragging,
+          action: () {
+            // The provisional route snapshot can make the linked reply look like
+            // the tail. This authoritative deep-link jump intentionally leaves
+            // the user at an older item, so it must opt out of follow-tail first.
+            tailIntent.detach();
+            followsThreadTail.value = false;
+            isAtThreadTail.value = false;
+            itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
+            initialHighlightTargetIndex.value = targetIndex;
+          },
+        );
+        return null;
+      },
+      [
+        initialMessageId,
+        canUseMessagesForInitialTarget,
+        fetchedReplies,
+        replies.length,
+      ],
+    );
 
     useEffect(
       () {
