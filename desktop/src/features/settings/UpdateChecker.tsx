@@ -1,6 +1,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { ReleaseHistory } from "@/features/whatsNew/ui/ReleaseHistory";
+import { formatDownloadProgress } from "@/features/settings/lib/formatDownloadProgress.mjs";
 import { Button } from "@/shared/ui/button";
 import {
   SettingsOptionGroup,
@@ -116,13 +117,57 @@ export function UpdateChecker() {
 
         {status.state === "downloading" && (
           <SettingsOptionRow>
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Downloading update...
+                {formatDownloadProgress(
+                  status.downloadedBytes,
+                  status.totalBytes ?? null,
+                )}
               </p>
+              {/*
+                A determinate bar only when the server told us the total.
+                Without it an indeterminate shimmer is honest; a bar pinned at
+                zero would read as a stall.
+              */}
+              <div
+                aria-label="Update download progress"
+                aria-valuemax={100}
+                aria-valuemin={0}
+                aria-valuenow={
+                  status.totalBytes
+                    ? Math.round(
+                        (status.downloadedBytes / status.totalBytes) * 100,
+                      )
+                    : undefined
+                }
+                className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+                data-testid="update-download-progress"
+                role="progressbar"
+              >
+                <div
+                  className={
+                    status.totalBytes
+                      ? "h-full rounded-full bg-primary transition-[width] duration-300"
+                      : "h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse"
+                  }
+                  style={
+                    status.totalBytes
+                      ? {
+                          width: `${Math.min(
+                            100,
+                            Math.round(
+                              (status.downloadedBytes / status.totalBytes) *
+                                100,
+                            ),
+                          )}%`,
+                        }
+                      : undefined
+                  }
+                />
+              </div>
             </div>
           </SettingsOptionRow>
         )}

@@ -159,6 +159,43 @@ test("the merged timeline runs newest first", () => {
   );
 });
 
+test("two releases on the same day run newest first", () => {
+  // The regression: compareVersions strips the prerelease suffix, so
+  // "0.5.14-4" and "0.5.14-5" compare equal and the stable sort left them in
+  // array order — oldest first, which is backwards.
+  const merged = mergeReleaseTimeline(
+    localReleaseRows([
+      { version: "0.5.14-4", date: "2026-08-17", bullets: [] },
+      { version: "0.5.14-5", date: "2026-08-17", bullets: [] },
+    ]),
+    [],
+  );
+
+  assert.deepEqual(
+    merged.map((row) => row.version),
+    ["0.5.14-5", "0.5.14-4"],
+  );
+});
+
+test("a whole same-day changelog stays in release order", () => {
+  const merged = mergeReleaseTimeline(
+    localReleaseRows([
+      { version: "0.5.14-0", date: "2026-08-15", bullets: [] },
+      { version: "0.5.14-1", date: "2026-08-15", bullets: [] },
+      { version: "0.5.14-2", date: "2026-08-16", bullets: [] },
+      { version: "0.5.14-3", date: "2026-08-16", bullets: [] },
+      { version: "0.5.14-4", date: "2026-08-17", bullets: [] },
+      { version: "0.5.14-5", date: "2026-08-17", bullets: [] },
+    ]),
+    [],
+  );
+
+  assert.deepEqual(
+    merged.map((row) => row.version),
+    ["0.5.14-5", "0.5.14-4", "0.5.14-3", "0.5.14-2", "0.5.14-1", "0.5.14-0"],
+  );
+});
+
 test("undated rows sort last, never first", () => {
   const merged = mergeReleaseTimeline(
     localReleaseRows([

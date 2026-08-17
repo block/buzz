@@ -7,7 +7,7 @@ Everything upstream does, this does. This document covers only what is
 **different**, so you can decide whether to run this build, take a patch from
 it, or contribute.
 
-Current release: **`0.5.14-4`**, based on upstream `desktop-v0.5.14`.
+Current release: **`0.5.14-6`**, based on upstream `desktop-v0.5.14`.
 Windows installers are published under
 [Releases](https://github.com/ranjank2alpha/buzz/releases).
 
@@ -66,6 +66,27 @@ recorded in `CONTEXT.md` so nobody rebuilds it by accident.
 - Unread dot visibility fixed on the active row, where it was drawing
   primary-on-primary and effectively invisible.
 
+### Global mentions
+
+`@channel` notifies everyone in a channel; `@here` only those currently online.
+`@channel` reaches people even in a channel they have muted — it exists for the
+things you would want pulled out of a mute — and `@here` never does.
+
+An `@here` you missed while offline does not accumulate as urgent when you come
+back, which is the whole distinction from `@channel`.
+
+Both are a single marker tag on the message rather than a `p` tag per member,
+so the audience resolves against *current* membership: someone who joins an
+hour later still sees the announcement as addressed to them.
+
+Two things to know. The words are typed, not offered by autocomplete — the
+mention hook carries debouncing, personas and teams, and threading synthetic
+entries through it was a larger change than the feature needed to start
+working. And there is currently **no permission gate**: anyone can `@channel` a
+forty-person room. The size-based gating logic exists and is tested
+(`canUseMentionScope`, admins-only above 32 members, following WhatsApp's
+design) but is deliberately unwired pending real usage.
+
 ### Google Meet
 
 Start an instant Meet from a channel or DM and post the join link. Each user
@@ -116,6 +137,7 @@ to this fork:
 Stated plainly, because they are the things most likely to surprise you:
 
 - **No voice notes**, no video messages, no mobile client in practice.
+- **No autocomplete for `@channel` / `@here`**, and no permission gate on them.
 - **The Files tab lists top-level channel messages only.** A file attached
   solely inside a thread reply will not appear there — the relay excludes
   thread replies via a `thread_metadata` join.

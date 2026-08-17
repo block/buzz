@@ -9,7 +9,16 @@ export type UpdateStatus =
   | { state: "up-to-date" }
   | { state: "unavailable" }
   | { state: "available"; version: string }
-  | { state: "downloading" }
+  | {
+      state: "downloading";
+      /** Bytes received so far. */
+      downloadedBytes: number;
+      /**
+       * Total size, or null when the server sent no Content-Length. Callers
+       * must handle null rather than assuming a percentage is available.
+       */
+      totalBytes?: number | null;
+    }
   | { state: "installing" }
   | { state: "ready" }
   | { state: "error"; message: string }
@@ -89,8 +98,25 @@ export function useUpdater() {
         return;
       }
 
-      setStatus({ state: "downloading" });
-      await update.download();
+      setStatus({ state: "downloading", downloadedBytes: 0 });
+      let downloadedBytes = 0;
+      let totalBytes: number | null = null;
+
+      // Tauri reports the total only in `Started`, and never for a server that
+      // omits Content-Length — so `totalBytes` stays null there and the UI
+      // shows bytes downloaded without a percentage rather than a bar stuck
+      // at zero.
+      await update.download((event) => {
+        if (event.event === "Started") {
+          totalBytes = event.data.contentLength ?? null;
+          setStatus({ state: "downloading", downloadedBytes: 0, totalBytes });
+          return;
+        }
+        if (event.event === "Progress") {
+          downloadedBytes += event.data.chunkLength;
+          setStatus({ state: "downloading", downloadedBytes, totalBytes });
+        }
+      });
       setStatus({ state: "ready" });
     } catch (err) {
       setStatus({ state: "error", message: toErrorMessage(err) });

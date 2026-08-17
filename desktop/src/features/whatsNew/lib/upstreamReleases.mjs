@@ -102,16 +102,26 @@ export function parseUpstreamReleases(payload, atOrBelowVersion) {
   return rows;
 }
 
-/** This fork's own entries, in the same shape as the upstream rows. */
+/**
+ * This fork's own entries, in the same shape as the upstream rows.
+ *
+ * `order` is the entry's position in `WHATS_NEW_CHANGELOG`, which is
+ * maintained oldest-first and is the authoritative record of release order.
+ * It exists because version strings cannot break a tie here: `compareVersions`
+ * strips the prerelease suffix by design, so `0.5.14-4` and `0.5.14-5` compare
+ * equal and same-day releases would fall back to array order — ascending, and
+ * therefore backwards.
+ */
 export function localReleaseRows(entries) {
   return (entries ?? [])
     .filter((entry) => entry && entry.version)
-    .map((entry) => ({
+    .map((entry, index) => ({
       key: `local:${entry.version}`,
       source: "local",
       version: entry.version,
       date: entry.date ?? null,
       bullets: entry.bullets ?? [],
+      order: index,
     }));
 }
 
@@ -137,6 +147,12 @@ export function mergeReleaseTimeline(localRows, upstreamRows) {
       return a.date ? -1 : 1;
     }
     if (a.source !== b.source) return a.source === "local" ? -1 : 1;
+    // Two of this fork's releases on the same day: array position is the only
+    // reliable ordering, since the version strings compare equal once the
+    // prerelease suffix is stripped. Newest (highest index) first.
+    if (typeof a.order === "number" && typeof b.order === "number") {
+      return b.order - a.order;
+    }
     return compareVersions(b.version, a.version);
   });
 

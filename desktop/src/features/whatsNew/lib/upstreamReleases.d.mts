@@ -10,6 +10,12 @@ export type ReleaseTimelineRow = {
   bullets?: string[];
   /** Present on upstream rows only. */
   url?: string | null;
+  /**
+   * Position in `WHATS_NEW_CHANGELOG` (oldest-first). Local rows only.
+   * The tiebreak for two releases on the same day — version strings cannot
+   * serve, since `compareVersions` strips the prerelease suffix.
+   */
+  order?: number;
 };
 
 export function compareVersions(a: string, b: string): number;

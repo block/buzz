@@ -5,7 +5,7 @@ A complete map of what this product does today, for competitive gap analysis.
 **What this is.** Buzz is a desktop team-chat application (Tauri 2 + React,
 Windows/macOS/Linux) built on the Nostr protocol. Messages are signed events on
 a relay rather than rows in a vendor database. This repository is `k2alpha`, a
-fork of the open-source `block/buzz` project, currently at version `0.5.14-3`
+fork of the open-source `block/buzz` project, currently at version `0.5.14-6`
 (based on upstream `desktop-v0.5.14`, plus fork-specific work).
 
 **Who uses it.** A team of ~40 senior professionals, predominantly on Windows,
@@ -27,6 +27,11 @@ explicitly marked otherwise.
 - **Threads** — replies grouped under a parent message rather than filling the
   main timeline. Threads can be explicitly followed or muted, independent of
   the channel. A focused thread drawer and a side thread panel both exist.
+- **Global mentions** — `@channel` notifies every member; `@here` only those
+  currently online. `@channel` pierces a muted channel, `@here` does not, and an
+  `@here` missed while offline does not persist as urgent. Carried as one marker
+  tag resolved against current membership, not a `p` tag per member. Typed
+  rather than autocompleted, and currently ungated — anyone may use either.
 - **Message composition** — markdown, formatting toolbar, emoji picker with
   autocomplete, @-mention autocomplete, #channel autocomplete, inline image
   editor before sending, drag-and-drop and paste attachments, upload progress.
@@ -156,6 +161,8 @@ Stated explicitly, since gap analysis depends on it:
 
 - **No voice notes / audio messages.** No recording, no inline playback, no
   playback speed control.
+- **No `@everyone`, no user groups / roles for mentions** (`@design-team`).
+- **No permission gate on `@channel` / `@here`**, and no autocomplete for them.
 - **No video messages.**
 - **No mobile app in practice.** Mobile pairing exists; the product is used on
   desktop.

@@ -129,6 +129,14 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Collapsed sidebar sections now show what is waiting inside them: a count when someone has mentioned you or sent a DM, a dot for ordinary activity, and nothing when the section is quiet",
     ],
   },
+  {
+    version: "0.5.14-6",
+    date: "2026-08-17",
+    bullets: [
+      "Updates now show real download progress instead of a label that never changed",
+      "Release history in Settings → Updates lists same-day releases newest-first, as it always should have",
+    ],
+  },
 ];
 
 /**
