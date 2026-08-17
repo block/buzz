@@ -37,18 +37,10 @@ pub fn validate_hex64(s: &str) -> Result<(), CliError> {
 
 /// Case-fold a user-facing name for matching.
 ///
-/// Names are arbitrary Unicode — channel names, display names, template
-/// names — so folding them with `to_ascii_lowercase` leaves every non-ASCII
-/// letter untouched and `ÉQUIPE` never matches `équipe`. Desktop uses
-/// JavaScript's `toLowerCase`, which is Unicode-aware, so an ASCII-only fold
-/// here also means the CLI and the app disagree about what a query finds.
-///
-/// Use this for names only. Hex, pubkeys and UUIDs are ASCII by construction
-/// and stay on `to_ascii_lowercase`, which cannot be surprised by a Turkish
-/// dotless i.
-pub fn fold_name(name: &str) -> String {
-    name.to_lowercase()
-}
+/// Re-exported from buzz-sdk, which owns the rule: `extract_at_mentions_with_known`
+/// returns keys folded with it, so the CLI's `name → pubkey` maps have to be
+/// built with the very same function, not a second copy of it.
+pub use buzz_sdk::mentions::fold_name;
 
 /// Validate a git repo identifier: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`.
 pub fn validate_repo_id(s: &str) -> Result<(), CliError> {

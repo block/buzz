@@ -397,7 +397,9 @@ fn owned_agent_pubkeys_from_events(events: &[serde_json::Value], query: &str) ->
             let content: serde_json::Value =
                 serde_json::from_str(event.get("content")?.as_str()?).ok()?;
             let name = content.get("name")?.as_str()?;
-            if !name.eq_ignore_ascii_case(query) {
+            // `eq_ignore_ascii_case` compares only ASCII letters case-blind, so
+            // an agent named `Équipe` was unreachable as `équipe`.
+            if fold_name(name) != fold_name(query) {
                 return None;
             }
             let pubkey = extract_d_tag(event);
@@ -2151,6 +2153,22 @@ mod tests {
             owned_agent_pubkeys_from_events(&events, "Honey"),
             vec!["a", "b"]
         );
+    }
+
+    /// The lookup used `eq_ignore_ascii_case`, which is case-blind for ASCII
+    /// letters only, so a non-ASCII agent name could only be reached by
+    /// reproducing its exact case.
+    #[test]
+    fn owned_agent_lookup_matches_non_ascii_names_across_case() {
+        let events = vec![
+            json!({"content": r#"{"name":"ÉQUIPE"}"#, "tags": [["d", "a"]]}),
+            json!({"content": r#"{"name":"Общий"}"#, "tags": [["d", "b"]]}),
+        ];
+        assert_eq!(
+            owned_agent_pubkeys_from_events(&events, "équipe"),
+            vec!["a"]
+        );
+        assert_eq!(owned_agent_pubkeys_from_events(&events, "ОБЩИЙ"), vec!["b"]);
     }
 
     #[test]
