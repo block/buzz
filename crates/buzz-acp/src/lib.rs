@@ -3968,20 +3968,33 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
-            } else if let Some(dead) = queue.requeue(batch) {
-                let reason = match &result.outcome {
-                    PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
-                    PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
-                        "the turn exceeded the maximum duration".to_string()
-                    }
-                    PromptOutcome::AgentExited => "the agent process exited".to_string(),
-                    PromptOutcome::Error(e) => format!("{e}"),
-                    _ => "repeated failures".to_string(),
-                };
-                let content = format!(
-                    "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
-                );
-                spawn_failure_notice(rest_client, &dead, content);
+            } else {
+                let first_failure = queue.retry_count(&batch.channel_id) == 0;
+                if first_failure {
+                    spawn_failure_notice(
+                        rest_client,
+                        &batch,
+                        "⚠️ I couldn't complete that request. I'm retrying automatically; no action is needed yet."
+                            .to_string(),
+                    );
+                }
+                if let Some(dead) = queue.requeue(batch) {
+                    let reason = match &result.outcome {
+                        PromptOutcome::Timeout(TimeoutKind::Idle) => {
+                            "the turn timed out".to_string()
+                        }
+                        PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
+                            "the turn exceeded the maximum duration".to_string()
+                        }
+                        PromptOutcome::AgentExited => "the agent process exited".to_string(),
+                        PromptOutcome::Error(e) => format!("{e}"),
+                        _ => "repeated failures".to_string(),
+                    };
+                    let content = format!(
+                        "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
+                    );
+                    spawn_failure_notice(rest_client, &dead, content);
+                }
             }
         } else {
             tracing::debug!(
