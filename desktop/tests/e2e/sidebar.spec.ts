@@ -545,7 +545,7 @@ test("scales the sidebar backward while its chrome closes", async ({
 
   await expect(sidebarSurface).toHaveCSS("opacity", "0");
   await expect(sidebar).toHaveCSS("pointer-events", "none");
-  await expect(sidebar).toHaveCSS("overflow", "hidden");
+  await expect(sidebar).toHaveCSS("overflow", "visible");
   await expect(sidebar.locator(':scope > [data-sidebar="sidebar"]')).toHaveCSS(
     "background-color",
     await sidebarSurface.evaluate((element) => {
@@ -579,6 +579,25 @@ test("scales the sidebar backward while its chrome closes", async ({
   await expect(sidebarSurface).toHaveCSS("opacity", "1");
   await expect(sidebar).toHaveCSS("pointer-events", "auto");
   await expect(sidebarSurface).toHaveCSS("scale", "none");
+});
+
+test("disables the sidebar collapse transition for reduced motion", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+
+  const sidebarSurface = page
+    .getByTestId("app-sidebar")
+    .locator("[data-sidebar-transition-content]");
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0s");
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+
+  await expect(sidebarSurface).toHaveCSS("opacity", "0");
+  await expect(sidebarSurface).toHaveCSS("scale", "0.95");
+  await expect(sidebarSurface).toHaveCSS("translate", "24px");
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0s");
 });
 
 test("sidebar rail resizes without toggling the sidebar", async ({ page }) => {

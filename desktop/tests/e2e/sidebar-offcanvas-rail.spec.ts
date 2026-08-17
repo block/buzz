@@ -63,87 +63,82 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
     const railBoxBeforeCollapse = await communityRail.boundingBox();
     expect(railBoxBeforeCollapse).not.toBeNull();
 
-    await page.locator('[data-sidebar="trigger"]').first().click();
-
-    // Sample every rendered frame while the sidebar crosses the rail. The
-    // community list must remain the painted hit target without moving or
-    // fading at any point in the transition, while the sidebar content visibly
-    // recedes in place before the shell finishes closing.
-    const transitionFrames = await communityButton.evaluate(async (button) => {
+    // Observe the transition before triggering it, then hold every animated
+    // sidebar-content property at its midpoint. This keeps the regression
+    // causal without making its assertions depend on Playwright or rAF
+    // scheduler latency.
+    const transition = await communityButton.evaluate(async (button) => {
       const rail = button.closest('[data-testid="community-rail"]');
+      const trigger = document.querySelector<HTMLElement>(
+        '[data-sidebar="trigger"]',
+      );
       const sidebarContent = document.querySelector<HTMLElement>(
         "[data-sidebar-transition-content]",
       );
-      if (!(rail instanceof HTMLElement) || !sidebarContent) return [];
-
-      const frames: Array<{
-        elapsed: number;
-        hitRail: boolean;
-        opacity: string;
-        sidebarOpacity: number;
-        sidebarScale: string;
-        sidebarTranslateX: number;
-        visibility: string;
-        x: number;
-        y: number;
-      }> = [];
-      const startedAt = performance.now();
-      while (performance.now() - startedAt < 250) {
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => resolve()),
-        );
-        const buttonBox = button.getBoundingClientRect();
-        const railBox = rail.getBoundingClientRect();
-        const hit = document.elementFromPoint(
-          buttonBox.x + buttonBox.width / 2,
-          buttonBox.y + buttonBox.height / 2,
-        );
-        const style = getComputedStyle(rail);
-        const sidebarStyle = getComputedStyle(sidebarContent);
-        frames.push({
-          elapsed: performance.now() - startedAt,
-          hitRail: hit === rail || rail.contains(hit),
-          opacity: style.opacity,
-          sidebarOpacity: Number.parseFloat(sidebarStyle.opacity),
-          sidebarScale: sidebarStyle.scale,
-          sidebarTranslateX: Number.parseFloat(sidebarStyle.translate),
-          visibility: style.visibility,
-          x: railBox.x,
-          y: railBox.y,
-        });
+      if (!(rail instanceof HTMLElement) || !trigger || !sidebarContent) {
+        return null;
       }
-      return frames;
+
+      const transitionStarted = new Promise<void>((resolve) => {
+        sidebarContent.addEventListener("transitionrun", () => resolve(), {
+          once: true,
+        });
+      });
+      trigger.click();
+      await transitionStarted;
+
+      const animations = sidebarContent.getAnimations();
+      await Promise.all(animations.map((animation) => animation.ready));
+      for (const animation of animations) {
+        animation.pause();
+        animation.currentTime = 100;
+      }
+
+      const buttonBox = button.getBoundingClientRect();
+      const railBox = rail.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        buttonBox.x + buttonBox.width / 2,
+        buttonBox.y + buttonBox.height / 2,
+      );
+      const railStyle = getComputedStyle(rail);
+      const sidebarStyle = getComputedStyle(sidebarContent);
+      const result = {
+        durations: animations.map(
+          (animation) => animation.effect?.getTiming().duration,
+        ),
+        hitRail: hit === rail || rail.contains(hit),
+        opacity: railStyle.opacity,
+        sidebarOpacity: Number.parseFloat(sidebarStyle.opacity),
+        sidebarScale: sidebarStyle.scale,
+        sidebarTranslateX: Number.parseFloat(sidebarStyle.translate),
+        visibility: railStyle.visibility,
+        x: railBox.x,
+        y: railBox.y,
+      };
+
+      for (const animation of animations) animation.finish();
+      return result;
     });
-    expect(transitionFrames.length).toBeGreaterThan(1);
+    expect(transition).not.toBeNull();
+    expect(transition?.durations).toEqual([200, 200, 200]);
+    expect(transition).toMatchObject({
+      hitRail: true,
+      opacity: "1",
+      visibility: "visible",
+      x: railBoxBeforeCollapse?.x,
+      y: railBoxBeforeCollapse?.y,
+    });
+    expect(transition?.sidebarOpacity).toBeGreaterThan(0);
+    expect(transition?.sidebarOpacity).toBeLessThan(1);
+    expect(transition?.sidebarScale).not.toBe("none");
+    expect(transition?.sidebarScale).not.toBe("0.95");
+    expect(transition?.sidebarTranslateX).toBeGreaterThan(0);
+    expect(transition?.sidebarTranslateX).toBeLessThan(24);
+
     const shell = page.locator(
       '[data-state="collapsed"][data-collapsible="offcanvas"]',
     );
     await expect(shell).toHaveCount(1);
-    expect(
-      transitionFrames.every(
-        (frame) =>
-          frame.hitRail &&
-          frame.opacity === "1" &&
-          frame.visibility === "visible" &&
-          frame.x === railBoxBeforeCollapse?.x &&
-          frame.y === railBoxBeforeCollapse?.y,
-      ),
-    ).toBe(true);
-    const midTransitionFrames = transitionFrames.filter(
-      (frame) =>
-        frame.sidebarOpacity > 0 &&
-        frame.sidebarOpacity < 1 &&
-        frame.sidebarScale !== "none" &&
-        frame.sidebarScale !== "0.95" &&
-        frame.sidebarTranslateX > 0 &&
-        frame.sidebarTranslateX < 24,
-    );
-    expect(midTransitionFrames.length).toBeGreaterThan(1);
-    expect(
-      transitionFrames.some(
-        (frame) => frame.elapsed >= 100 && frame.sidebarOpacity > 0.05,
-      ),
-    ).toBe(true);
 
     // Let the 200ms slide finish; visibility flips at the transition's end.
     await page.waitForTimeout(250);
