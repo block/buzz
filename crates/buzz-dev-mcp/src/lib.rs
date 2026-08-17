@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod buzz_message_send;
+mod nxtlinq_setup;
 mod paths;
 mod read_file;
 mod rg;
@@ -40,7 +41,7 @@ impl DevMcp {
 
     #[tool(
         name = "shell",
-        description = "Run a shell command (bash by default; set `BUZZ_SHELL` to use cmd, PowerShell, or another shell). Ephemeral process per call. Output tail-truncated to ~8KB for the LLM; full output (first 10MB) saved to artifact file. timeout_ms defaults to 120000 (2 min) if omitted; capped at 600000 (10 min). For long-running commands (git push with hooks, cargo build, test suites), use 300000+. On PATH: rg (prefer over grep; flags: -n -i -l -g <glob> -C <n> --files), tree (flags: -d <depth>; shows line counts), and buzz (Buzz relay CLI — run buzz --help for commands)."
+        description = "Run a shell command (bash by default; set `BUZZ_SHELL` to use cmd, PowerShell, or another shell). Ephemeral process per call. `environment`, when used, is a list of variable names (never NAME=value); the child receives only available named values plus PATH. Output tail-truncated to ~8KB for the LLM; full output (first 10MB) saved to artifact file. timeout_ms defaults to 120000 (2 min) if omitted; capped at 600000 (10 min). For long-running commands (git push with hooks, cargo build, test suites), use 300000+. On PATH: rg (prefer over grep; flags: -n -i -l -g <glob> -C <n> --files), tree (flags: -d <depth>; shows line counts), and buzz (Buzz relay CLI — run buzz --help for commands)."
     )]
     async fn shell(
         &self,
@@ -59,6 +60,17 @@ impl DevMcp {
         Parameters(p): Parameters<buzz_message_send::BuzzMessageSendParams>,
     ) -> Result<CallToolResult, ErrorData> {
         buzz_message_send::run(&self.state, p).await
+    }
+
+    #[tool(
+        name = "nxtlinq_setup",
+        description = "Submit a policy-only Nxtlinq setup draft to Buzz Desktop for owner review. The argument envelope is exactly {channel, owner_project_root, explanation, policy}; name, version, scope, aud, capabilities, and optional exp MUST be nested inside policy and MUST NOT appear at the top level. Use this when the owner asks to install, configure, reconfigure, expand, enable, or protect this Agent with Nxtlinq. A denial from the current policy is expected during reconfiguration and MUST NOT prevent this tool call; propose the smallest capability needed for the denied operation instead. owner_project_root MUST copy the exact absolute project path explicitly supplied by the owner in the current request; never substitute the MCP cwd or default Agent workspace. If no path was supplied, ask for it before calling this tool. The real project directory may be uninitialized; Desktop owns Attest initialization after review, so never ask the owner to run nxtlinq-attest init merely because nxtlinq/ is absent. This tool only proposes changes: it does not install packages, edit project files, or sign a manifest. Never include or inspect private/signing keys."
+    )]
+    async fn nxtlinq_setup(
+        &self,
+        Parameters(p): Parameters<nxtlinq_setup::NxtlinqSetupParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        nxtlinq_setup::run(&self.state, p).await
     }
 
     #[tool(

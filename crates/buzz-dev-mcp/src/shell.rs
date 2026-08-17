@@ -22,6 +22,9 @@ const MAX_LINES: usize = 2000;
 const TAIL_BYTES: usize = 8 * 1024;
 const ARTIFACT_RING_SIZE: usize = 8;
 const READ_CHUNK: usize = 16 * 1024;
+const MAX_ENVIRONMENT_NAMES: usize = 128;
+const FORBIDDEN_PROTECTED_ENVIRONMENT_NAMES: &[&str] =
+    &["BUZZ_PRIVATE_KEY", "NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG"];
 
 pub struct SharedState {
     pub cwd: PathBuf,
@@ -125,6 +128,46 @@ pub struct ShellParams {
     /// For long-running commands (git push with hooks, cargo build, test suites), use 300000+.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Optional name-only environment allowlist. When present, the child starts
+    /// from an empty environment and receives only these variables (when set in
+    /// the MCP process) plus the MCP-owned PATH baseline. Omit it to preserve
+    /// the ordinary, unprotected shell behavior.
+    #[serde(default)]
+    pub environment: Option<Vec<String>>,
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+fn validate_environment_names(names: &[String]) -> Result<(), ErrorData> {
+    if names.len() > MAX_ENVIRONMENT_NAMES {
+        return Err(ErrorData::invalid_params(
+            format!(
+                "environment contains too many names: {} > {MAX_ENVIRONMENT_NAMES}",
+                names.len()
+            ),
+            None,
+        ));
+    }
+    if let Some(name) = names.iter().find(|name| !valid_environment_name(name)) {
+        return Err(ErrorData::invalid_params(
+            format!("invalid environment variable name: {name}"),
+            None,
+        ));
+    }
+    if let Some(name) = names
+        .iter()
+        .find(|name| FORBIDDEN_PROTECTED_ENVIRONMENT_NAMES.contains(&name.as_str()))
+    {
+        return Err(ErrorData::invalid_params(
+            format!("protected shell cannot receive host identity variable: {name}"),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub async fn run(
@@ -166,11 +209,28 @@ pub async fn run(
     let mut cmd = Command::new(&bash);
     cmd.arg(shell_arg).arg(&p.command);
     cmd.current_dir(&workdir);
-    cmd.env("PATH", &state.shim.path_env);
-    // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
-    // BUZZ_PRIVATE_KEY is intentionally inherited — the buzz CLI needs it.
-    for (k, v) in &state.shim.git_env {
-        cmd.env(k, v);
+    if let Some(environment) = &p.environment {
+        validate_environment_names(environment)?;
+        // Presence of the list is the protected-mode execution contract. Do
+        // not inherit provider credentials, Buzz identity, proxy secrets, or
+        // the ephemeral git signing configuration from the MCP process.
+        cmd.env_clear();
+        cmd.env("PATH", &state.shim.path_env);
+        for name in environment {
+            if name != "PATH" {
+                if let Some(value) = std::env::var_os(name) {
+                    cmd.env(name, value);
+                }
+            }
+        }
+    } else {
+        // Ordinary non-Nxtlinq sessions retain their established behavior.
+        cmd.env("PATH", &state.shim.path_env);
+        // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
+        // BUZZ_PRIVATE_KEY is intentionally inherited — the buzz CLI needs it.
+        for (k, v) in &state.shim.git_env {
+            cmd.env(k, v);
+        }
     }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -1012,6 +1072,7 @@ mod tests {
                 command: "echo hello".into(),
                 workdir: None,
                 timeout_ms: Some(5_000),
+                environment: None,
             },
             CancellationToken::new(),
         )
@@ -1038,6 +1099,7 @@ mod tests {
                 command: "sleep 5".into(),
                 workdir: None,
                 timeout_ms: Some(150),
+                environment: None,
             },
             CancellationToken::new(),
         )
@@ -1060,6 +1122,7 @@ mod tests {
                 command: "pwd".into(),
                 workdir: Some(sub.display().to_string()),
                 timeout_ms: Some(5_000),
+                environment: None,
             },
             CancellationToken::new(),
         )
@@ -1076,6 +1139,88 @@ mod tests {
                 || stdout.contains(sub.file_name().unwrap().to_str().unwrap()),
             "stdout: {stdout}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn protected_environment_does_not_expose_buzz_identity() {
+        let dir = tempdir().expect("tempdir");
+        let mut state = make_state(dir.path());
+        state
+            .shim
+            .git_env
+            .push(("BUZZ_PRIVATE_KEY".into(), "must-not-leak".into()));
+
+        let protected = run(
+            &state,
+            ShellParams {
+                command: "env".into(),
+                workdir: None,
+                timeout_ms: Some(5_000),
+                environment: Some(vec!["PATH".into()]),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("protected shell");
+        let protected_stdout = body(protected)["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(protected_stdout
+            .lines()
+            .any(|line| line.starts_with("PATH=")));
+        assert!(!protected_stdout.contains("BUZZ_PRIVATE_KEY="));
+
+        let ordinary = run(
+            &state,
+            ShellParams {
+                command: "env".into(),
+                workdir: None,
+                timeout_ms: Some(5_000),
+                environment: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("ordinary shell");
+        let ordinary_stdout = body(ordinary)["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(ordinary_stdout.contains("BUZZ_PRIVATE_KEY=must-not-leak"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_shell_call_rejects_environment_assignments() {
+        let dir = tempdir().expect("tempdir");
+        let state = make_state(dir.path());
+        let error = run(
+            &state,
+            ShellParams {
+                command: "env".into(),
+                workdir: None,
+                timeout_ms: Some(5_000),
+                environment: Some(vec!["TOKEN=secret".into()]),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("assignment must be rejected");
+        assert!(error.message.contains("invalid environment variable name"));
+
+        let error = run(
+            &state,
+            ShellParams {
+                command: "env".into(),
+                workdir: None,
+                timeout_ms: Some(5_000),
+                environment: Some(vec!["BUZZ_PRIVATE_KEY".into()]),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("host identity must not enter protected shell");
+        assert!(error.message.contains("host identity variable"));
     }
 
     // --- is_windows_apps_alias predicate tests (cross-host) ---

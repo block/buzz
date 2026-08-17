@@ -76,6 +76,22 @@ fn compose_effective_system_prompt(
     prompt
 }
 
+fn session_hints(
+    cwd: &std::path::Path,
+    hints_enabled: bool,
+    nxtlinq_permission_bridge: bool,
+) -> (String, Vec<SkillEntry>) {
+    // Project/global hint and skill discovery performs eager filesystem reads,
+    // while load_skill reads more files in-process. Until those reads have a
+    // receipt-bearing authorization path, exclude the entire surface from an
+    // attested session instead of letting it bypass the Gateway.
+    if hints_enabled && !nxtlinq_permission_bridge {
+        hints::build_hints_section(cwd)
+    } else {
+        (String::new(), Vec::new())
+    }
+}
+
 struct App {
     cfg: Config,
     llm: Arc<Llm>,
@@ -408,11 +424,11 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             .await;
         }
     }
-    let (hints_text, skills) = if app.cfg.hints_enabled {
-        hints::build_hints_section(std::path::Path::new(&p.cwd))
-    } else {
-        (String::new(), Vec::new())
-    };
+    let (hints_text, skills) = session_hints(
+        std::path::Path::new(&p.cwd),
+        app.cfg.hints_enabled,
+        app.cfg.nxtlinq_permission_bridge,
+    );
     let effective_system_prompt: Arc<str> = {
         // When the harness provides a systemPrompt (base_prompt + persona), use
         // it as the primary content and suppress the default. The default is only
@@ -1074,5 +1090,26 @@ mod tests {
 
         assert_eq!(prompt, "base\n\nhints");
         assert!(!prompt.contains("Nxtlinq"));
+    }
+
+    #[test]
+    fn nxtlinq_sessions_do_not_eagerly_read_hints_or_expose_disk_skills() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("AGENTS.md"), "protected hints").expect("fixture");
+        let skill = root.path().join(".agents/skills/example");
+        std::fs::create_dir_all(&skill).expect("skill dir");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: example\ndescription: protected skill\n---\nsecret instructions",
+        )
+        .expect("skill fixture");
+
+        let (hints, skills) = crate::session_hints(root.path(), true, true);
+        assert!(hints.is_empty());
+        assert!(skills.is_empty());
+
+        let (hints, skills) = crate::session_hints(root.path(), true, false);
+        assert!(hints.contains("protected hints"));
+        assert_eq!(skills.len(), 1);
     }
 }

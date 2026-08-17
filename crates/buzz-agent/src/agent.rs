@@ -721,13 +721,14 @@ impl RunCtx<'_> {
                     if stop_rejections >= self.cfg.stop_max_rejections {
                         return Ok(stop);
                     }
+                    let effective_hook_servers = self.cfg.effective_hook_servers();
                     let mut objections = self
                         .mcp
                         .call_hooks(
                             "_Stop",
                             &json!({}),
                             self.cfg.hook_timeout,
-                            &self.cfg.hook_servers,
+                            &effective_hook_servers,
                         )
                         .await;
                     // Reply guard shares this gate and this budget, so a round
@@ -898,7 +899,7 @@ impl RunCtx<'_> {
         let mut set: JoinSet<(usize, InvokeOutcome)> = JoinSet::new();
 
         for &i in runnable {
-            let call = calls[i].clone();
+            let mut call = calls[i].clone();
             let mcp = Arc::clone(self.mcp);
             let session_cwd = self.session_cwd.to_path_buf();
             let permissions = Arc::clone(self.permissions);
@@ -925,16 +926,21 @@ impl RunCtx<'_> {
                 emit_in_progress(&wire, &session_id, &call).await;
                 if permission_bridge {
                     match action_for_tool(&call, &session_cwd) {
-                        Ok(Some(action)) => {
-                            if let Err(reason) = permissions
-                                .authorize(&wire, &session_id, &call, action)
-                                .await
-                            {
-                                emit_failed(&wire, &session_id, &call, &reason).await;
-                                return (i, InvokeOutcome::Failed(reason));
+                        Ok(authorization) => {
+                            for action in authorization.actions {
+                                if let Err(reason) = permissions
+                                    .authorize(&wire, &session_id, &call, action)
+                                    .await
+                                {
+                                    emit_failed(&wire, &session_id, &call, &reason).await;
+                                    return (i, InvokeOutcome::Failed(reason));
+                                }
                             }
+                            // Bind execution to the canonical path that was
+                            // authorized, rather than resolving a user-supplied
+                            // symlink a second time inside the MCP handler.
+                            call.arguments = authorization.arguments;
                         }
-                        Ok(None) => {}
                         Err(reason) => {
                             emit_failed(&wire, &session_id, &call, &reason).await;
                             return (i, InvokeOutcome::Failed(reason));

@@ -1297,6 +1297,19 @@ impl HookServers {
     }
 }
 
+impl Config {
+    /// Nxtlinq-protected sessions never dispatch lifecycle hooks to arbitrary
+    /// MCP servers. Preserve the operator's on/off choice, but pin enabled
+    /// hooks to the bundled state-only server whose behavior Buzz owns.
+    pub fn effective_hook_servers(&self) -> HookServers {
+        if !self.nxtlinq_permission_bridge || self.hook_servers.is_disabled() {
+            self.hook_servers.clone()
+        } else {
+            HookServers::Only(vec!["buzz-dev-mcp".to_string()])
+        }
+    }
+}
+
 fn parse_hook_servers_env(key: &str) -> HookServers {
     parse_hook_servers(env(key).as_deref())
 }
@@ -1403,6 +1416,20 @@ mod tests {
     #[test]
     fn hook_servers_allows_blocks_when_none() {
         assert!(!parse_hook_servers(None).allows("foo"));
+    }
+
+    #[test]
+    fn nxtlinq_protected_hooks_are_pinned_to_the_bundled_server() {
+        let mut cfg =
+            Config::for_discovery(Provider::OpenAi, "key".into(), "https://example.com".into());
+        cfg.hook_servers = HookServers::All;
+        cfg.nxtlinq_permission_bridge = true;
+        let hooks = cfg.effective_hook_servers();
+        assert!(hooks.allows("buzz-dev-mcp"));
+        assert!(!hooks.allows("customer-mcp"));
+
+        cfg.hook_servers = HookServers::None;
+        assert!(cfg.effective_hook_servers().is_disabled());
     }
 
     #[test]

@@ -4011,6 +4011,24 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_allows_uninitialized_nxtlinq_review_drafts() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("does not need an existing `nxtlinq/` initialization"));
+        assert!(prompt.contains("Never ask the owner to run `nxtlinq-attest init`"));
+        assert!(prompt.contains("Desktop runs the reviewed standard Attest init"));
+    }
+
+    #[test]
+    fn shared_base_prompt_uses_structured_nxtlinq_setup_after_denials() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("structured `nxtlinq_setup` tool"));
+        assert!(prompt.contains("Inspection is optional evidence, never a prerequisite"));
+        assert!(prompt.contains("current owner-reviewed proposal and owner guidance"));
+        assert!(prompt.contains("Do not invoke `buzz agents nxtlinq-setup`, its `--help`"));
+        assert!(!prompt.contains("printf '%s'"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_structured_message_replies() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("structured `buzz_message_send` tool"));

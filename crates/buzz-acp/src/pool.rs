@@ -1109,6 +1109,14 @@ fn mcp_servers_with_git_origin(
     agent_name: Option<&str>,
 ) -> Vec<McpServer> {
     let mut servers = servers.to_vec();
+    if let Some(channel_id) = channel_id {
+        for server in &mut servers {
+            server.env.push(EnvVar {
+                name: "BUZZ_CONTEXT_CHANNEL_ID".into(),
+                value: channel_id.to_string(),
+            });
+        }
+    }
     let origin = match (channel_id, channel_type) {
         (Some(channel_id), Some("stream")) => Some(EnvVar {
             name: "BUZZ_GIT_ORIGIN_CHANNEL_ID".into(),
@@ -4289,6 +4297,9 @@ mod tests {
         assert!(servers[0].env.iter().any(|entry| {
             entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID" && entry.value == channel_id.to_string()
         }));
+        assert!(servers[0].env.iter().any(|entry| {
+            entry.name == "BUZZ_CONTEXT_CHANNEL_ID" && entry.value == channel_id.to_string()
+        }));
         assert!(!servers[0]
             .env
             .iter()
@@ -4297,9 +4308,10 @@ mod tests {
 
     #[test]
     fn private_session_forwards_agent_name_without_channel_id() {
+        let channel_id = Uuid::new_v4();
         let servers = mcp_servers_with_git_origin(
             &[test_mcp_server()],
-            Some(Uuid::new_v4()),
+            Some(channel_id),
             Some("dm"),
             Some("Builder"),
         );
@@ -4310,6 +4322,9 @@ mod tests {
             .env
             .iter()
             .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID"));
+        assert!(servers[0].env.iter().any(|entry| {
+            entry.name == "BUZZ_CONTEXT_CHANNEL_ID" && entry.value == channel_id.to_string()
+        }));
     }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):

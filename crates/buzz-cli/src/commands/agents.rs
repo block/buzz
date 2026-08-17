@@ -3,7 +3,10 @@ use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identit
 use nostr::PublicKey;
 use serde_json::json;
 
-use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
+use crate::agent_management::{
+    build_create, build_nxtlinq_setup, build_update, CreateAgentDraft, NxtlinqPolicyDraft,
+    NxtlinqSetupDraft, UpdateAgentDraft,
+};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, validate_hex64};
@@ -78,6 +81,45 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                 obj.insert(
                     "message".into(),
                     "Draft sent to Buzz Desktop for owner review. Nothing changes until the owner saves it."
+                        .into(),
+                );
+            }
+            println!("{output}");
+            Ok(())
+        }
+
+        AgentsCmd::NxtlinqSetup {
+            channel,
+            project_root,
+            policy,
+            explanation,
+        } => {
+            let owner = require_owner(client)?;
+            let policy_text = read_or_stdin(&policy)?;
+            let policy: NxtlinqPolicyDraft =
+                serde_json::from_str(&policy_text).map_err(|error| {
+                    CliError::Usage(format!("invalid Nxtlinq policy JSON: {error}"))
+                })?;
+            let built = build_nxtlinq_setup(
+                client.keys(),
+                &owner,
+                NxtlinqSetupDraft {
+                    channel_id: channel,
+                    project_root,
+                    explanation,
+                    policy,
+                },
+            )?;
+            let response = client.publish_ephemeral_event(built.event).await?;
+            let mut output: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert("request_id".into(), built.request_id.into());
+                obj.insert("action".into(), built.action.into());
+                obj.insert("applied".into(), false.into());
+                obj.insert(
+                    "message".into(),
+                    "Nxtlinq setup draft sent to Buzz Desktop for owner review. No package was installed and no project file was changed."
                         .into(),
                 );
             }

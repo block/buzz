@@ -296,6 +296,21 @@ pub enum AgentsCmd {
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
     },
+    /// Propose an owner-reviewed Nxtlinq install, manifest policy, and Agent enablement
+    NxtlinqSetup {
+        /// Current channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Absolute project workspace containing an initialized nxtlinq/ directory
+        #[arg(long)]
+        project_root: String,
+        /// Policy-only JSON; use '-' to read from stdin. Private/signing keys are rejected.
+        #[arg(long)]
+        policy: String,
+        /// Human-readable explanation of the proposed access ceiling
+        #[arg(long)]
+        explanation: String,
+    },
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(
         after_help = "Auth flow: when target != signer, the CLI fetches the target's kind:0 and \
@@ -2175,6 +2190,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "nxtlinq-setup",
                 "unarchive"
             ]
         );
@@ -2313,7 +2329,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

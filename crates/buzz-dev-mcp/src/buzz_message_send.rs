@@ -9,6 +9,7 @@ use tokio::process::Command;
 
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+const CONTEXT_CHANNEL_ENV: &str = "BUZZ_CONTEXT_CHANNEL_ID";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct BuzzMessageSendParams {
@@ -31,6 +32,10 @@ pub async fn run(
     p: BuzzMessageSendParams,
 ) -> Result<CallToolResult, ErrorData> {
     validate(&p)?;
+    validate_context_channel(
+        &p.channel,
+        std::env::var(CONTEXT_CHANNEL_ENV).ok().as_deref(),
+    )?;
 
     let mut command = Command::new(&state.shim.buzz_path);
     command
@@ -124,6 +129,22 @@ fn validate(p: &BuzzMessageSendParams) -> Result<(), ErrorData> {
     Ok(())
 }
 
+fn validate_context_channel(requested: &str, expected: Option<&str>) -> Result<(), ErrorData> {
+    let Some(expected) = expected.filter(|value| !value.is_empty()) else {
+        return Err(ErrorData::invalid_params(
+            "Buzz message sending requires a host-bound channel context",
+            None,
+        ));
+    };
+    if requested != expected {
+        return Err(ErrorData::invalid_params(
+            "message channel does not match the host-bound conversation channel",
+            None,
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +160,12 @@ mod tests {
             mentions: vec![],
         };
         assert!(validate(&params).is_err());
+    }
+
+    #[test]
+    fn message_channel_is_bound_by_the_host() {
+        assert!(validate_context_channel("channel-a", Some("channel-a")).is_ok());
+        assert!(validate_context_channel("channel-b", Some("channel-a")).is_err());
+        assert!(validate_context_channel("channel-a", None).is_err());
     }
 }
