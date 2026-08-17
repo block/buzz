@@ -1,3 +1,8 @@
+import {
+  type ProjectSelectionItem,
+  projectSelectionTitle,
+} from "./projectSelection.ts";
+
 const PROJECT_PAGE_CONTEXT_MARKER = "Current Buzz project page:";
 
 /**
@@ -37,6 +42,10 @@ export type ProjectDetailAgentContext = {
   repoAddress: string;
   repositoryName: string;
   source: "local" | "remote";
+  selection?: Pick<
+    ProjectSelectionItem,
+    "id" | "kind" | "shareLink" | "title"
+  >[];
   view: string;
   workItem?: {
     id: string;
@@ -45,6 +54,53 @@ export type ProjectDetailAgentContext = {
     title: string;
   } | null;
 };
+
+export function buildProjectsOverviewAgentContext(
+  view: string,
+): ProjectDetailAgentContext {
+  return {
+    projectName: "Projects",
+    repoAddress: "projects:overview",
+    repositoryName: "All projects",
+    source: "remote",
+    view,
+  };
+}
+
+export function buildProjectSelectionAgentContext(
+  items: ProjectSelectionItem[],
+): ProjectDetailAgentContext {
+  const kind = items[0]?.kind ?? "project";
+  return {
+    projectName: "Projects",
+    repoAddress: `selection:${kind}`,
+    repositoryName: "Selected items",
+    selection: items.map(({ id, kind: itemKind, shareLink, title }) => ({
+      id,
+      kind: itemKind,
+      shareLink,
+      title,
+    })),
+    source: "remote",
+    view: projectSelectionTitle(items),
+  };
+}
+
+export function withProjectSelectionAgentContext(
+  context: ProjectDetailAgentContext,
+  items: ProjectSelectionItem[],
+): ProjectDetailAgentContext {
+  return {
+    ...context,
+    selection: items.map(({ id, kind, shareLink, title }) => ({
+      id,
+      kind,
+      shareLink,
+      title,
+    })),
+    view: projectSelectionTitle(items),
+  };
+}
 
 export function buildProjectDetailAgentContext({
   activeTab,
@@ -141,6 +197,14 @@ export function projectDetailAgentContextBlock(
     );
     if (context.workItem.status) {
       lines.push(`- Status: ${untrustedPromptValue(context.workItem.status)}`);
+    }
+  }
+  if (context.selection?.length) {
+    lines.push(`- Selection: ${context.view}`);
+    for (const item of context.selection) {
+      lines.push(
+        `  - ${item.kind}: ${item.title} (${item.shareLink || item.id})`,
+      );
     }
   }
   lines.push(

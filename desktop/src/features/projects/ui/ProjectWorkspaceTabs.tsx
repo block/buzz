@@ -21,7 +21,6 @@ import type {
   Repository,
 } from "@/features/projects/hooks";
 import {
-  commitAuthorPubkeysFromPullRequests,
   gitContributorPubkeysFromCommits,
   type ProjectContributorActivityCounts,
   type ViewerGitIdentity,
@@ -92,6 +91,8 @@ export function WorkspaceTabs({
   createIssueAction,
   createIssueRequestKey,
   createPullRequestAction,
+  createPullRequestRequestKey,
+  headerAction,
   updatePullRequestAction,
   initialTab,
   initialTabRequestKey,
@@ -136,6 +137,8 @@ export function WorkspaceTabs({
   createIssueAction: CreateIssueAction;
   createIssueRequestKey?: number;
   createPullRequestAction?: CreatePullRequestAction;
+  createPullRequestRequestKey?: number;
+  headerAction?: React.ReactNode;
   updatePullRequestAction?: UpdatePullRequestAction;
   /** Tab to open on mount (workspace vocabulary), e.g. from a share link. */
   initialTab?: string;
@@ -236,10 +239,6 @@ export function WorkspaceTabs({
         retryPending={sourceControls?.fetchPending}
       />
     ) : null;
-  const commitAuthorPubkeys = React.useMemo(
-    () => commitAuthorPubkeysFromPullRequests(pullRequests),
-    [pullRequests],
-  );
   const selectedPullRequest =
     pullRequests.find(
       (pullRequest) => pullRequest.id === selectedPullRequestId,
@@ -275,12 +274,26 @@ export function WorkspaceTabs({
   const previousCreateIssueRequestKey = React.useRef(createIssueRequestKey);
   const [createPullRequestOpen, setCreatePullRequestOpen] =
     React.useState(false);
+  const previousCreatePullRequestRequestKey = React.useRef(
+    createPullRequestRequestKey,
+  );
 
   React.useEffect(() => {
     if (previousCreateIssueRequestKey.current === createIssueRequestKey) return;
     previousCreateIssueRequestKey.current = createIssueRequestKey;
     setCreateIssueOpen(true);
   }, [createIssueRequestKey]);
+
+  React.useEffect(() => {
+    if (
+      previousCreatePullRequestRequestKey.current ===
+      createPullRequestRequestKey
+    ) {
+      return;
+    }
+    previousCreatePullRequestRequestKey.current = createPullRequestRequestKey;
+    setCreatePullRequestOpen(true);
+  }, [createPullRequestRequestKey]);
 
   React.useEffect(() => {
     onSelectedTabChange?.(selectedTab);
@@ -386,19 +399,24 @@ export function WorkspaceTabs({
           data-testid="project-workspace-tab-menu"
         >
           <ProjectTabsList prsActive={isPullRequestSelected} />
-          {updatePullRequestAction ? (
-            <Button
-              className="h-8 shrink-0 gap-1.5"
-              disabled={updatePullRequestAction.pending}
-              onClick={updatePullRequestAction.onUpdate}
-              size="sm"
-              title="Publish the pushed commit to this review"
-              variant="outline"
-            >
-              <RefreshCw className="h-4 w-4" />
-              {updatePullRequestAction.pending ? "Updating…" : "Update review"}
-            </Button>
-          ) : null}
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            {updatePullRequestAction ? (
+              <Button
+                className="h-8 shrink-0 gap-1.5"
+                disabled={updatePullRequestAction.pending}
+                onClick={updatePullRequestAction.onUpdate}
+                size="sm"
+                title="Publish the pushed commit to this review"
+                variant="outline"
+              >
+                <RefreshCw className="h-4 w-4" />
+                {updatePullRequestAction.pending
+                  ? "Updating…"
+                  : "Update review"}
+              </Button>
+            ) : null}
+            {headerAction}
+          </div>
         </div>
       ) : null}
       {/* Project content follows the same borderless flow as work-item details.
@@ -435,15 +453,12 @@ export function WorkspaceTabs({
                     (commit) => commit.hash === selectedCommitHash,
                   ) ?? null
                 }
-                commitAuthorPubkeys={commitAuthorPubkeys}
                 commitHash={selectedCommitHash}
-                viewerGitIdentity={viewerGitIdentity}
                 diff={commitDiff}
                 diffError={commitDiffError}
                 diffLoading={commitDiffLoading}
                 originAgentName={selectedCommitPullRequest?.originAgentName}
                 originChannelId={selectedCommitPullRequest?.channelId}
-                profiles={profiles}
                 project={project}
               />
             ) : (
@@ -455,6 +470,8 @@ export function WorkspaceTabs({
                   onSelectedCommitHashChange(commit.hash)
                 }
                 profiles={profiles}
+                project={project}
+                projectId={projectId}
                 pullRequests={pullRequests}
                 repoContributors={displayedContributors}
                 snapshot={displayedSnapshot}

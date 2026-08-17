@@ -12106,6 +12106,8 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_project_local_repositories":
         return [];
+      case "open_project_repository_folder":
+        return null;
       case "push_project_local_repository": {
         const input = payload as { branchName?: string | null };
         const status = window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__;

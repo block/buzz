@@ -1,9 +1,23 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/projects-v3-screenshots";
+
+async function expectSinglePrimaryTextColumn(row: Locator) {
+  const primary = row.locator('[data-projects-text-priority="primary"]');
+  const secondary = row.locator('[data-projects-text-priority="secondary"]');
+  await expect(primary).toHaveCount(1);
+  expect(await secondary.count()).toBeGreaterThan(0);
+  const primaryColor = await primary.evaluate(
+    (element) => getComputedStyle(element).color,
+  );
+  const secondaryColors = await secondary.evaluateAll((elements) =>
+    elements.map((element) => getComputedStyle(element).color),
+  );
+  expect(secondaryColors.every((color) => color !== primaryColor)).toBe(true);
+}
 
 async function openBuzzProject(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -459,6 +473,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     (sharedHeaderBackdropBounds?.x ?? 0) +
       (sharedHeaderBackdropBounds?.width ?? 0),
   ).toBeLessThan(repositoryActionsPanelBounds?.x ?? 0);
+  const contextRail = page.getByTestId("project-context-rail");
   const resizeHandle = repositoryActionsPanel.getByTestId(
     "right-auxiliary-pane-resize-handle",
   );
@@ -468,10 +483,16 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     (resizeHandleBounds?.x ?? 0) + (resizeHandleBounds?.width ?? 0) / 2;
   const resizeStartY =
     (resizeHandleBounds?.y ?? 0) + (resizeHandleBounds?.height ?? 0) / 2;
-  await page.mouse.move(resizeStartX, resizeStartY);
-  await page.mouse.down();
+  await resizeHandle.dispatchEvent("pointerdown", {
+    button: 0,
+    clientX: resizeStartX,
+    clientY: resizeStartY,
+    pointerId: 1,
+    pointerType: "mouse",
+  });
+  await expect(contextRail).toHaveAttribute("data-resizing", "true");
+  await expect(contextRail).toHaveCSS("transition-duration", "0s");
   await page.mouse.move(resizeStartX - 40, resizeStartY);
-  await page.mouse.up();
   await expect
     .poll(async () =>
       repositoryActionsPanel.evaluate((element) =>
@@ -479,6 +500,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
       ),
     )
     .toBe(320);
+  await page.mouse.up();
+  await expect(contextRail).toHaveAttribute("data-resizing", "false");
+  await expect(contextRail).toHaveCSS("transition-duration", "0.2s");
   await resizeHandle.dblclick();
   await expect
     .poll(async () =>
@@ -493,12 +517,22 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   const chatPanelTab = page.getByTestId("project-right-panel-chat-tab");
   const terminalButton = page.getByTestId("project-terminal-toggle");
   const terminalIcon = page.getByTestId("project-terminal-icon");
+  const repositoryContextIcon = page.getByTestId(
+    "project-right-panel-repository-icon",
+  );
   await expect(repositoryPanelTab).toHaveAttribute("aria-pressed", "true");
   await expect(repositoryPanelTab).toHaveAttribute(
     "aria-label",
     "Hide project context",
   );
   await expect(terminalIcon).toBeVisible();
+  await expect(repositoryPanelTab).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(repositoryContextIcon).toHaveCSS("opacity", "1");
+  await expect(contextRail).toHaveCSS("width", "288px");
+  await expect(contextRail).toHaveCSS("transition-duration", "0.2s");
   // The icon is an inline SVG drawn with currentColor, so it must inherit
   // the toggle button's text color to stay tinted with button state.
   expect(
@@ -518,11 +552,15 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     strokesCurrentColor: true,
     tagName: "svg",
   });
-  const [repositoryTabBounds, chatTabBounds] = await Promise.all([
-    repositoryPanelTab.boundingBox(),
-    chatPanelTab.boundingBox(),
-  ]);
+  const [repositoryTabBounds, chatTabBounds, terminalTabBounds] =
+    await Promise.all([
+      repositoryPanelTab.boundingBox(),
+      chatPanelTab.boundingBox(),
+      terminalButton.boundingBox(),
+    ]);
   expect(repositoryTabBounds?.width).toBe(chatTabBounds?.width);
+  expect(chatTabBounds?.x).toBeLessThan(terminalTabBounds?.x ?? 0);
+  expect(terminalTabBounds?.x).toBeLessThan(repositoryTabBounds?.x ?? 0);
   await chatPanelTab.click();
   const agentChatPanel = page.getByTestId("project-agent-chat-panel");
   await expect(agentChatPanel).toBeVisible();
@@ -634,7 +672,8 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     page.getByTestId("project-repository-selection-row"),
   ).toHaveCount(0);
   await repositoryPanelTab.click();
-  await expect(repositoryActionsPanel).toHaveCount(0);
+  await expect(contextRail).toHaveCSS("width", "0px");
+  await expect(repositoryContextIcon).toHaveCSS("opacity", "0.6");
   await expect(repositoryPanelTab).toHaveAttribute(
     "aria-label",
     "Show project context",
@@ -662,6 +701,8 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     ),
   ).toBeLessThanOrEqual(8);
   await repositoryPanelTab.click();
+  await expect(contextRail).toHaveCSS("width", "288px");
+  await expect(repositoryContextIcon).toHaveCSS("opacity", "1");
   await expect(repositoryActionsPanel).toBeVisible();
   await expect(repositoryPanelTab).toHaveAttribute(
     "aria-label",
@@ -703,10 +744,12 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     .getByRole("button", { name: "Clone", exact: true })
     .click();
   const localSourceTrigger = repositoryActionsPanel.getByRole("button", {
-    name: "Local",
-    exact: true,
+    name: /^Local /,
   });
   await expect(localSourceTrigger).toBeVisible();
+  await expect(
+    repositoryActionsPanel.getByTestId("project-repository-local-path"),
+  ).toHaveText("…/buzz/REPOS/buzz");
   await expect(
     repositoryActionsPanel.getByRole("button", {
       name: "Open",
@@ -1044,11 +1087,27 @@ test("projects v3 work-item list metadata", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
+  await page.getByTestId("projects-section-all").click();
+  await expectSinglePrimaryTextColumn(
+    page.getByTestId("projects-activity-card").first(),
+  );
+
+  await page.getByTestId("projects-section-projects").click();
+  await expectSinglePrimaryTextColumn(
+    page.getByTestId(/^project-row-/).first(),
+  );
+
+  await page.getByTestId("projects-section-repositories").click();
+  await expectSinglePrimaryTextColumn(
+    page.getByTestId(/^repository-row-/).first(),
+  );
+
   await page.getByTestId("projects-section-prs").click();
   const reviewList = page.getByTestId("projects-list-container");
   await expect(reviewList).toBeVisible();
   const pullRequestRow = page.getByTestId(/^projects-pr-row-/).first();
   await expect(pullRequestRow).toBeVisible();
+  await expectSinglePrimaryTextColumn(pullRequestRow);
   await expect(pullRequestRow).toContainText(/relay-tools|buzz|design-system/);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/05-pr-list-metadata.png` });
@@ -1058,6 +1117,7 @@ test("projects v3 work-item list metadata", async ({ page }) => {
   await expect(taskList).toBeVisible();
   const issueRow = page.getByTestId(/^projects-issue-row-/).first();
   await expect(issueRow).toBeVisible();
+  await expectSinglePrimaryTextColumn(issueRow);
   await expect(issueRow).toContainText(/relay-tools|buzz|design-system/);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/06-issue-list-metadata.png` });
@@ -1065,6 +1125,7 @@ test("projects v3 work-item list metadata", async ({ page }) => {
   await page.getByTestId("projects-section-channels").click();
   const channelRow = page.getByTestId("project-channel-row").first();
   await expect(channelRow).toBeVisible();
+  await expectSinglePrimaryTextColumn(channelRow);
   await expect(channelRow).toContainText("#general");
   await expect(
     page.getByTestId("project-channel-project").first(),

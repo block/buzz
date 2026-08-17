@@ -1,5 +1,10 @@
 import * as React from "react";
 
+import {
+  type ProjectDetailAgentContext,
+  withProjectSelectionAgentContext,
+} from "@/features/projects/lib/projectDetailAgentContext";
+import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
 import type { ProjectRightPanelMode } from "./ProjectRightPanelControls";
 
 const REPOSITORY_PANEL_COLLAPSED_KEY =
@@ -30,6 +35,8 @@ function initialMode(): ProjectRightPanelMode {
 
 export function useProjectRepositoryPanel() {
   const [collapsed, setCollapsedState] = React.useState(initialCollapsed);
+  const [selectionAgentContext, setSelectionAgentContext] =
+    React.useState<ProjectDetailAgentContext | null>(null);
   const [mode, setModeState] =
     React.useState<ProjectRightPanelMode>(initialMode);
   const setCollapsed = React.useCallback((nextCollapsed: boolean) => {
@@ -44,6 +51,7 @@ export function useProjectRepositoryPanel() {
     }
   }, []);
   const setMode = React.useCallback((nextMode: ProjectRightPanelMode) => {
+    setSelectionAgentContext(null);
     setModeState(nextMode);
     try {
       globalThis.sessionStorage?.setItem(
@@ -54,12 +62,27 @@ export function useProjectRepositoryPanel() {
       // Persistence is best-effort; the in-memory panel mode still works.
     }
   }, []);
+  const openSelectionChat = React.useCallback(
+    (context: ProjectDetailAgentContext, items: ProjectSelectionItem[]) => {
+      setMode("chat");
+      setSelectionAgentContext(
+        withProjectSelectionAgentContext(context, items),
+      );
+      setCollapsed(false);
+    },
+    [setCollapsed, setMode],
+  );
 
   return {
+    agentContext: (fallback: ProjectDetailAgentContext) =>
+      selectionAgentContext ?? fallback,
     collapse: React.useCallback(() => setCollapsed(true), [setCollapsed]),
     collapsed,
     expand: React.useCallback(() => setCollapsed(false), [setCollapsed]),
     mode,
+    openSelectionChat,
+    openSelectionChatFor: (context: ProjectDetailAgentContext) =>
+      openSelectionChat.bind(null, context),
     setMode,
   };
 }

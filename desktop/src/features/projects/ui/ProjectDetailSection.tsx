@@ -35,7 +35,6 @@ export function ProjectDetailSection({
 
   return (
     <section
-      className="border-border/50 border-t"
       data-open={open ? "true" : "false"}
       data-testid={testId ?? "project-detail-section"}
     >
