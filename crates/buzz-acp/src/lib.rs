@@ -4602,85 +4602,93 @@ async fn initialize_agent_pool(
     mut shutdown: Option<watch::Receiver<()>>,
 ) -> Result<AgentPool> {
     // One agent failing to start must not kill the whole pool.
-    // Attempt each spawn under a 60-second timeout; a partial pool is valid.
+    // Transient adapter failures should not require restarting the harness, so
+    // each slot gets a bounded series of startup attempts. A partial pool is
+    // still valid after the retry budget is exhausted.
+    const STARTUP_ATTEMPTS: usize = 6;
+    const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
-        let spawn_result = AcpClient::spawn(
-            &startup.command,
-            &startup.args,
-            &startup.extra_env,
-            startup.has_generated_codex_config,
-        )
-        .await;
-        match spawn_result {
-            Ok(mut acp) => {
-                acp.set_observer(startup.observer.clone(), i);
-                let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
-                let initialize_result = match shutdown.as_mut() {
+        let mut initialized = None;
+        for attempt in 0..STARTUP_ATTEMPTS {
+            let start = tokio::time::timeout(
+                STARTUP_TIMEOUT,
+                spawn_and_init(
+                    &startup.command,
+                    &startup.args,
+                    &startup.extra_env,
+                    startup.has_generated_codex_config,
+                    i,
+                    startup.observer.clone(),
+                ),
+            );
+            let result = match shutdown.as_mut() {
+                Some(shutdown) => tokio::select! {
+                    biased;
+                    _ = shutdown.changed() => {
+                        shutdown_agent_slots(&mut agent_slots).await;
+                        return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
+                    }
+                    result = start => result,
+                },
+                None => start.await,
+            };
+
+            match result {
+                Ok(Ok(agent)) => {
+                    initialized = Some(agent);
+                    break;
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    agent = i,
+                    attempt = attempt + 1,
+                    max_attempts = STARTUP_ATTEMPTS,
+                    "agent startup attempt failed: {error}"
+                ),
+                Err(_) => tracing::warn!(
+                    agent = i,
+                    attempt = attempt + 1,
+                    max_attempts = STARTUP_ATTEMPTS,
+                    timeout_seconds = STARTUP_TIMEOUT.as_secs(),
+                    "agent startup attempt timed out"
+                ),
+            }
+
+            if attempt + 1 < STARTUP_ATTEMPTS {
+                let delay = Duration::from_secs(startup_retry_delay_seconds(attempt));
+                tracing::info!(
+                    agent = i,
+                    delay_seconds = delay.as_secs(),
+                    "retrying agent startup"
+                );
+                match shutdown.as_mut() {
                     Some(shutdown) => tokio::select! {
                         biased;
                         _ = shutdown.changed() => {
-                            acp.shutdown().await;
                             shutdown_agent_slots(&mut agent_slots).await;
                             return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
                         }
-                        result = initialize => result,
+                        _ = tokio::time::sleep(delay) => {}
                     },
-                    None => initialize.await,
-                };
-                match initialize_result {
-                    Ok(Ok(init_result)) => {
-                        tracing::info!(agent = i, "agent initialized: {init_result}");
-                        let protocol_version =
-                            init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
-                        tracing::info!(
-                            agent = i,
-                            name = init_result
-                                .get("agentInfo")
-                                .or_else(|| init_result.get("serverInfo"))
-                                .and_then(|info| info.get("name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown"),
-                            steering_supported = acp.steering_supported(),
-                            "agent initialized"
-                        );
-                        acp.observe(
-                            "agent_initialized",
-                            serde_json::json!({
-                                "agentIndex": i,
-                                "initializeResult": init_result,
-                            }),
-                        );
-                        let agent_name = normalized_agent_name(&init_result);
-                        agent_slots.push(Some(OwnedAgent {
-                            index: i,
-                            acp,
-                            state: SessionState::default(),
-                            model_capabilities: None,
-                            desired_model: startup.model.clone(),
-                            model_overridden: false,
-                            agent_name,
-                            goose_system_prompt_supported: None,
-                            protocol_version,
-                        }));
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(agent = i, "agent initialize failed: {e}");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
-                    Err(_) => {
-                        tracing::error!(agent = i, "agent timed out during init (60s)");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
+                    None => tokio::time::sleep(delay).await,
                 }
             }
-            Err(e) => {
-                tracing::error!(agent = i, "agent failed to spawn: {e}");
-                agent_slots.push(None);
-            }
         }
+
+        agent_slots.push(
+            initialized.map(|(acp, protocol_version, agent_name)| OwnedAgent {
+                index: i,
+                acp,
+                state: SessionState::default(),
+                model_capabilities: None,
+                desired_model: startup.model.clone(),
+                model_overridden: false,
+                agent_name,
+                goose_system_prompt_supported: None,
+                protocol_version,
+            }),
+        );
     }
     let live_count = agent_slots.iter().filter(|slot| slot.is_some()).count();
     if live_count == 0 {
@@ -4698,6 +4706,21 @@ async fn initialize_agent_pool(
     }
     tracing::info!("agent_pool_ready agents={}", live_count);
     Ok(AgentPool::from_slots(agent_slots))
+}
+
+fn startup_retry_delay_seconds(failed_attempt: usize) -> u64 {
+    2u64.saturating_pow((failed_attempt as u32) + 1).min(30)
+}
+
+#[cfg(test)]
+mod startup_retry_tests {
+    use super::startup_retry_delay_seconds;
+
+    #[test]
+    fn startup_retry_backoff_is_bounded() {
+        let delays: Vec<u64> = (0..7).map(startup_retry_delay_seconds).collect();
+        assert_eq!(delays, vec![2, 4, 8, 16, 30, 30, 30]);
+    }
 }
 
 // ── spawn_and_init ────────────────────────────────────────────────────────────
@@ -4722,6 +4745,17 @@ async fn spawn_and_init(
         Ok(init_result) => {
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+            tracing::info!(
+                agent = agent_index,
+                name = init_result
+                    .get("agentInfo")
+                    .or_else(|| init_result.get("serverInfo"))
+                    .and_then(|info| info.get("name"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown"),
+                steering_supported = acp.steering_supported(),
+                "agent initialized"
+            );
             acp.observe(
                 "agent_initialized",
                 serde_json::json!({
