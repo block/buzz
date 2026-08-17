@@ -24,6 +24,9 @@ pub struct WorkflowDef {
     /// Whether this workflow is active. Defaults to `true`.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Flow Studio canvas id when exported from Flow Studio (`d` tag on kind 46200).
+    #[serde(default)]
+    pub flow_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -81,6 +84,9 @@ pub struct Step {
     /// Maximum seconds this step may run before timing out.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Flow Studio block registry type when exported from canvas (e.g. `http`, `agent`).
+    #[serde(default)]
+    pub block_type: Option<String>,
     /// The action to perform when this step executes.
     #[serde(flatten)]
     pub action: ActionDef,

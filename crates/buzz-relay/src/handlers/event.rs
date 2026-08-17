@@ -557,6 +557,33 @@ async fn dispatch_persistent_event_inner(
         });
     }
 
+    if buzz_core::kind::is_flow_studio_kind(kind_u32) {
+        let community_id = tenant.community();
+        let content = stored_event.event.content.to_string();
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            match buzz_flow::projector::project_event(community_id, kind_u32, &content) {
+                Ok(Some(action)) => {
+                    if let Err(error) = apply_flow_projector_action(&db, action).await {
+                        tracing::warn!("Flow Studio projector apply failed: {error}");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!("Flow Studio projector parse failed: {error}");
+                }
+            }
+        });
+    }
+
+    if kind_u32 == buzz_core::kind::KIND_AGENT_SESSION_TELEMETRY {
+        let content = stored_event.event.content.to_string();
+        let recorded_at = stored_event.event.created_at.as_secs() as i64;
+        tokio::spawn(async move {
+            record_agent_session_telemetry_from_content(&content, recorded_at).await;
+        });
+    }
+
     matches.len()
 }
 
@@ -598,6 +625,100 @@ async fn enqueue_event_created_audit(
         error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
         metrics::counter!("buzz_audit_send_errors_total").increment(1);
     }
+}
+
+async fn apply_flow_projector_action(
+    db: &buzz_db::Db,
+    action: buzz_flow::projector::ProjectorAction,
+) -> buzz_db::error::Result<()> {
+    use buzz_flow::projector::ProjectorAction;
+
+    match action {
+        ProjectorAction::UpsertKnowledgeDocument {
+            community_id,
+            payload,
+        } => apply_kb_document_projector(db, community_id, &payload).await,
+        ProjectorAction::UpsertTableRow {
+            community_id,
+            table_id,
+            row_id,
+            row_json,
+        } => {
+            db.upsert_flow_table_row(community_id, &table_id, &row_id, &row_json)
+                .await
+        }
+        ProjectorAction::DeleteTableRow {
+            community_id,
+            table_id,
+            row_id,
+        } => {
+            db.delete_flow_table_row(community_id, &table_id, &row_id)
+                .await
+        }
+        ProjectorAction::UpsertFile {
+            community_id,
+            file_id,
+            filename,
+            media_url,
+        } => {
+            db.upsert_flow_file(community_id, &file_id, &filename, media_url.as_deref())
+                .await
+        }
+        ProjectorAction::DeleteFile {
+            community_id,
+            file_id,
+        } => db.delete_flow_file(community_id, &file_id).await,
+    }
+}
+
+async fn apply_kb_document_projector(
+    db: &buzz_db::Db,
+    community_id: buzz_core::tenant::CommunityId,
+    payload: &buzz_flow::event_payloads::FlowKbDocumentIngested,
+) -> buzz_db::error::Result<()> {
+    db.upsert_flow_knowledge_document(
+        community_id,
+        &payload.knowledge_base_id,
+        &payload.document_id,
+        &payload.filename,
+        &payload.mime_type,
+    )
+    .await?;
+    if let Some(content) = payload.content.as_deref().filter(|text| !text.is_empty()) {
+        let embedding_id = format!("{}:0", payload.document_id);
+        let embedding = buzz_flow::knowledge::embed::text_to_embedding(content);
+        db.upsert_flow_knowledge_embedding(
+            community_id,
+            &payload.document_id,
+            &embedding_id,
+            0,
+            content,
+            &embedding,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn record_agent_session_telemetry_from_content(content: &str, recorded_at: i64) {
+    let Ok(payload) =
+        serde_json::from_str::<buzz_agent_studio::events::AgentSessionTelemetry>(content)
+    else {
+        tracing::warn!("Agent Studio telemetry parse failed");
+        return;
+    };
+    crate::api::agent_studio::record_session_telemetry(
+        buzz_agent_studio::monitor::SessionTelemetry {
+            session_id: payload.session_id,
+            agent_id: payload.agent_id,
+            input_tokens: payload.input_tokens,
+            output_tokens: payload.output_tokens,
+            cost_usd: payload.cost_usd,
+            tool_calls: payload.tool_calls,
+            recorded_at,
+        },
+    )
+    .await;
 }
 
 /// Handle an EVENT message from a WebSocket connection.

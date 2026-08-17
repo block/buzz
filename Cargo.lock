@@ -830,6 +830,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "buzz-agent-studio",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
@@ -909,6 +910,16 @@ dependencies = [
  "url",
  "urlencoding",
  "webbrowser",
+]
+
+[[package]]
+name = "buzz-agent-studio"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1120,6 +1131,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-flow"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "buzz-workflow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
@@ -1257,6 +1280,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "buzz-agent-studio",
  "buzz-audit",
  "buzz-auth",
  "buzz-conformance",
@@ -1264,6 +1288,7 @@ dependencies = [
  "buzz-datastore-tracing",
  "buzz-db",
  "buzz-deletion",
+ "buzz-flow",
  "buzz-media",
  "buzz-pubsub",
  "buzz-relay-mesh",

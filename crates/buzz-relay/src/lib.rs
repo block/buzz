@@ -19,6 +19,8 @@ pub mod conformance;
 pub mod connection;
 /// Relay error types.
 pub mod error;
+/// Flow Studio block telemetry after workflow execution.
+pub mod flow_telemetry;
 /// WebSocket message handlers for NIP-01 client commands.
 pub mod handlers;
 /// Stateless HMAC-signed relay invite tokens (mint/verify).

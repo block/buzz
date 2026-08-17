@@ -460,6 +460,12 @@ pub enum StepResult {
     Suspended {
         /// Token used to resume or reject this approval gate.
         approval_token: String,
+        /// Workflow step id that requested approval.
+        step_id: String,
+        /// Who may approve (user mention or role spec).
+        approver_spec: String,
+        /// When this approval request expires.
+        expires_at: chrono::DateTime<chrono::Utc>,
     },
     /// Step was skipped due to `if:` condition being false.
     Skipped,
@@ -678,12 +684,15 @@ pub async fn dispatch_action(
                     );
 
                     let token = generate_approval_token(run_id, step_id);
-
-                    // TODO (WF-08): create approval record in DB, emit kind:46010.
-                    // For now, return Suspended with the token so the caller can persist state.
+                    let timeout_secs = parse_duration_secs(timeout_str)?;
+                    let expires_at =
+                        chrono::Utc::now() + chrono::Duration::seconds(timeout_secs as i64);
 
                     Ok(StepResult::Suspended {
                         approval_token: token,
+                        step_id: step_id.to_string(),
+                        approver_spec: from.clone(),
+                        expires_at,
                     })
                 }
 
@@ -969,6 +978,19 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
     }))
 }
 
+/// Metadata captured when execution suspends at a `RequestApproval` step.
+#[derive(Debug, Clone)]
+pub struct ApprovalGate {
+    /// Raw approval token (hashed before DB storage).
+    pub token: String,
+    /// Workflow step id that requested approval.
+    pub step_id: String,
+    /// Who may approve (user mention or role spec).
+    pub approver_spec: String,
+    /// When this approval request expires.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Rich return type from `execute_run` / `execute_from_step`.
 ///
 /// Carries enough information for the caller to:
@@ -979,7 +1001,7 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
-    pub approval_token: Option<String>,
+    pub approval_gate: Option<ApprovalGate>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
@@ -1220,15 +1242,28 @@ async fn execute_steps(
                 }));
                 step_outputs.insert(step.id.clone(), output);
             }
-            StepResult::Suspended { approval_token } => {
+            StepResult::Suspended {
+                approval_token,
+                step_id,
+                approver_spec,
+                expires_at,
+            } => {
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
                 );
-                // Return the token and current state so the caller can persist the
-                // approval record and update the run's execution trace.
+                trace.push(serde_json::json!({
+                    "step_id": step_id,
+                    "status": "suspended",
+                    "approver": approver_spec,
+                }));
                 return Ok(ExecutionResult {
-                    approval_token: Some(approval_token),
+                    approval_gate: Some(ApprovalGate {
+                        token: approval_token,
+                        step_id,
+                        approver_spec,
+                        expires_at,
+                    }),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1246,7 +1281,7 @@ async fn execute_steps(
 
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
-        approval_token: None,
+        approval_gate: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,

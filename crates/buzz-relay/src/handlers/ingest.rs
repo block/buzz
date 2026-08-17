@@ -450,6 +450,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
+        k if buzz_core::kind::is_flow_studio_kind(k) => Ok(Scope::UsersWrite),
+        k if buzz_core::kind::is_agent_studio_kind(k) => Ok(Scope::UsersWrite),
         _ => Err("restricted: unknown event kind"),
     }
 }
@@ -527,6 +529,9 @@ pub(crate) async fn derive_reaction_channel(
 /// limitation affecting all global-only kinds and should be addressed in the
 /// filter layer as a follow-up.
 pub(crate) fn is_global_only_kind(kind: u32) -> bool {
+    if buzz_core::kind::is_flow_studio_kind(kind) || buzz_core::kind::is_agent_studio_kind(kind) {
+        return true;
+    }
     matches!(
         kind,
         KIND_PROFILE

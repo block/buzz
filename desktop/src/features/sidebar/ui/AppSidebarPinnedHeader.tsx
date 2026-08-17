@@ -1,4 +1,12 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FolderGit2,
+  GitBranch,
+  Inbox,
+  Network,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -19,7 +27,11 @@ type SidebarSelectedView =
   | "agents"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "projects"
+  | "flow-studio"
+  | "agent-studio";
+
+export type { SidebarSelectedView };
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
@@ -42,6 +54,8 @@ type AppSidebarPrimaryMenuProps = {
   onSelectAgents: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
+  onSelectFlowStudio: () => void;
+  onSelectAgentStudio: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
   selectedView: SidebarSelectedView;
@@ -91,6 +105,8 @@ export function AppSidebarPrimaryMenu({
   onSelectAgents,
   onSelectHome,
   onSelectProjects,
+  onSelectFlowStudio,
+  onSelectAgentStudio,
   onSelectPulse,
   onSelectWorkflows,
   selectedView,
@@ -155,6 +171,34 @@ export function AppSidebarPrimaryMenu({
             >
               <FolderGit2 className="h-4 w-4" />
               <SidebarMenuLabel>Projects</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
+        <FeatureGate feature="flow-studio">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-flow-studio-view"
+              isActive={selectedView === "flow-studio"}
+              onClick={onSelectFlowStudio}
+              tooltip="Flow Studio"
+              type="button"
+            >
+              <GitBranch className="h-4 w-4" />
+              <SidebarMenuLabel>Flow Studio</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
+        <FeatureGate feature="agent-studio">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-agent-studio-view"
+              isActive={selectedView === "agent-studio"}
+              onClick={onSelectAgentStudio}
+              tooltip="Agent Studio"
+              type="button"
+            >
+              <Network className="h-4 w-4" />
+              <SidebarMenuLabel>Agent Studio</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>

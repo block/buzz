@@ -1,0 +1,14 @@
+[package]
+name = "buzz-agent-studio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Buzz Agent Studio — agent/skill graph ported from claude-code-cli-ui (Buzz Hive P0 skeleton)"
+
+[dependencies]
+buzz-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

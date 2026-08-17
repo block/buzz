@@ -88,11 +88,7 @@ use tauri_plugin_window_state::StateFlags;
 use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // mesh-llm's async chains (model download, node start/join) overflow
-    // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
-    // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
-    // stacks for this reason; give Tauri's command runtime the same headroom
-    // before anything else touches tauri::async_runtime.
+    // mesh-llm async chains overflow 2 MiB tokio stacks; install 8 MiB workers first.
     #[cfg(feature = "mesh-llm")]
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -101,8 +97,6 @@ pub fn run() {
     {
         Ok(runtime) => {
             tauri::async_runtime::set(runtime.handle().clone());
-            // Keep the runtime alive for the process lifetime; dropping it
-            // would shut down the workers Tauri now depends on.
             std::mem::forget(runtime);
             eprintln!(
                 "buzz-mesh: installed tokio runtime with {} MiB worker stacks",
@@ -110,8 +104,6 @@ pub fn run() {
             );
         }
         Err(error) => {
-            // Fall back to Tauri's default runtime: the app still works,
-            // only deep mesh-llm futures are at risk of stack overflow.
             eprintln!("buzz-mesh: failed to build big-stack tokio runtime, using default: {error}");
         }
     }
@@ -712,6 +704,13 @@ pub fn run() {
             leave_channel,
             get_canvas,
             set_canvas,
+            publish_flow_graph,
+            get_flow_graph,
+            publish_skill_import,
+            publish_kb_document,
+            publish_table_row,
+            delete_table_row,
+            publish_flow_file,
             get_feed,
             search_messages,
             send_channel_message,

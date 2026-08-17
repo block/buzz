@@ -625,7 +625,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 31);
+        assert_eq!(migrations.len(), 32);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1057,6 +1057,22 @@ mod tests {
             .as_str()
             .contains("error_code"));
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
+    }
+
+    #[test]
+    fn buzz_hive_studio_migration_adds_pgvector_read_model() {
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
+
+        assert_eq!(migrations[31].version, 32);
+        let sql = migrations[31].sql.as_str();
+        assert!(sql.contains("CREATE EXTENSION IF NOT EXISTS vector"));
+        assert!(sql.contains("flow_knowledge_documents"));
+        assert!(sql.contains("flow_table_rows"));
+        assert!(sql.contains("flow_files"));
+        assert!(include_str!("../../../schema/schema.sql").contains("flow_knowledge_documents"));
+        assert!(include_str!("../../../schema/schema.sql")
+            .contains("CREATE EXTENSION IF NOT EXISTS vector"));
     }
 
     #[test]

@@ -152,10 +152,11 @@ pub(super) fn prepare_persona_publication_at(
     shared_override: Option<bool>,
 ) -> Result<(nostr::Event, RetainedEvent, AgentDefinition), String> {
     use crate::managed_agents::{
+        agent_studio_events::build_agent_config_event,
         persona_events::{build_persona_event, monotonic_created_at, persona_d_tag},
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
     };
-    use buzz_core_pkg::kind::KIND_PERSONA;
+    use buzz_core_pkg::kind::{KIND_AGENT_CONFIG_CREATED, KIND_AGENT_CONFIG_UPDATED, KIND_PERSONA};
     use nostr::JsonUtil;
 
     let d_tag = persona_d_tag(persona);
@@ -179,14 +180,40 @@ pub(super) fn prepare_persona_publication_at(
         .map_err(|e| format!("failed to sign persona event: {e}"))?;
     let retained = RetainedEvent {
         kind: KIND_PERSONA,
-        pubkey,
-        d_tag,
+        pubkey: pubkey.clone(),
+        d_tag: d_tag.clone(),
         content: event.content.to_string(),
         created_at: event.created_at.as_secs() as i64,
         raw_event: event.as_json(),
         pending_sync: true,
     };
     retain_event(&conn, &retained)?;
+
+    let is_create = existing.is_none();
+    let config_kind = if is_create {
+        KIND_AGENT_CONFIG_CREATED
+    } else {
+        KIND_AGENT_CONFIG_UPDATED
+    };
+    let existing_config = get_retained_event(&conn, config_kind, &pubkey, &d_tag)?;
+    let config_builder = build_agent_config_event(&scoped_persona, is_create)?;
+    let config_event = config_builder
+        .custom_created_at(monotonic_created_at(
+            existing_config.as_ref().map(|row| row.created_at),
+        ))
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign agent config event: {e}"))?;
+    let config_retained = RetainedEvent {
+        kind: config_kind,
+        pubkey: pubkey.clone(),
+        d_tag: d_tag.clone(),
+        content: config_event.content.to_string(),
+        created_at: config_event.created_at.as_secs() as i64,
+        raw_event: config_event.as_json(),
+        pending_sync: true,
+    };
+    retain_event(&conn, &config_retained)?;
+
     Ok((event, retained, scoped_persona))
 }
 

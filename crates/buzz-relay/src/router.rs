@@ -80,6 +80,37 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/workflows/{workflow_id}/runs/{run_id}/approvals",
             get(api::workflows::run_approvals),
         )
+        .route("/agent-studio/graph", get(api::agent_studio::graph))
+        .route("/agent-studio/sessions", get(api::agent_studio::sessions))
+        .route("/agent-studio/costs", get(api::agent_studio::costs))
+        .route(
+            "/agent-studio/skills/import",
+            post(api::agent_studio::import_skill),
+        )
+        .route(
+            "/agent-studio/telemetry",
+            post(api::agent_studio::post_telemetry),
+        )
+        .route("/flow-studio/blocks", get(api::flow_studio::blocks))
+        .route("/flow-studio/tools", get(api::flow_studio::tools))
+        .route("/flow-studio/graph", get(api::flow_studio::get_graph))
+        .route(
+            "/flow-studio/knowledge/search",
+            get(api::flow_studio::knowledge_search),
+        )
+        .route(
+            "/flow-studio/tables/{table_id}/rows",
+            get(api::flow_studio::list_table_rows),
+        )
+        .route("/flow-studio/files", get(api::flow_studio::list_files))
+        .route(
+            "/flow-studio/yaml/from-canvas",
+            post(api::flow_studio::yaml_from_canvas),
+        )
+        .route(
+            "/flow-studio/graph/save",
+            post(api::flow_studio::save_graph),
+        )
         .route(
             "/operator/communities",
             get(api::operator::list_owned_communities).post(api::operator::provision_community),

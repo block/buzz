@@ -104,6 +104,18 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goFlowStudio = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation({ to: "/flow-studio" }, behavior),
+    [commitNavigation],
+  );
+
+  const goAgentStudio = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation({ to: "/agent-studio" }, behavior),
+    [commitNavigation],
+  );
+
   const goProject = React.useCallback(
     (
       projectId: string,
@@ -335,6 +347,8 @@ export function useAppNavigation() {
     goNewMessage,
     goProject,
     goProjects,
+    goFlowStudio,
+    goAgentStudio,
     goPulse,
     goProfile,
     goSettings,
