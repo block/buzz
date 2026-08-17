@@ -5076,22 +5076,55 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     }];
 
     // Append extra MCP servers from BUZZ_ACP_EXTRA_MCP_COMMANDS.
-    // Each entry is split on whitespace into command + args.
+    // Each entry is shell-split into command + args using shlex, so quoted
+    // paths and arguments with spaces are preserved. Malformed entries are
+    // preserved as-is with a warning.
     // Extra servers do not receive Buzz relay credentials or auth tags —
     // they are third-party tools, not Buzz-native MCP servers.
+    let mut seen_names: std::collections::HashSet<String> =
+        std::collections::HashSet::from_iter([servers[0].name.clone()]);
     for extra in &config.extra_mcp_commands {
-        let parts: Vec<&str> = extra.split_whitespace().collect();
-        if parts.is_empty() {
+        let trimmed = extra.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        let command = parts[0].to_string();
-        let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+        let parts = match shlex::split(trimmed) {
+            Some(p) if !p.is_empty() => p,
+            Some(_) => continue,
+            None => {
+                tracing::warn!(
+                    entry = %trimmed,
+                    "BUZZ_ACP_EXTRA_MCP_COMMANDS entry has malformed shell quoting; skipping"
+                );
+                continue;
+            }
+        };
+        let command = parts[0].clone();
+        let args: Vec<String> = parts[1..].to_vec();
+        // Derive a name from the executable stem, then disambiguate so
+        // two wrappers like `npx -y first-mcp` and `npx -y second-mcp`
+        // don't both become `npx` and trip McpRegistry's duplicate check.
+        let base_name = std::path::Path::new(&command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("extra-mcp")
+            .to_string();
+        let name = if seen_names.contains(&base_name) {
+            // Append a numeric suffix until we find a unique name.
+            let mut i = 2;
+            loop {
+                let candidate = format!("{base_name}-{i}");
+                if !seen_names.contains(&candidate) {
+                    break candidate;
+                }
+                i += 1;
+            }
+        } else {
+            base_name
+        };
+        seen_names.insert(name.clone());
         servers.push(McpServer {
-            name: std::path::Path::new(&command)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("extra-mcp")
-                .to_string(),
+            name,
             command,
             args,
             env: vec![],
@@ -6966,9 +6999,8 @@ mod build_mcp_servers_tests {
     #[test]
     fn extra_mcp_commands_append_additional_servers() {
         let mut config = test_config();
-        config.extra_mcp_commands = vec![
-            "npx -y mcp-remote https://mcp.tavily.com/mcp/?tavilyApiKey=test-key".into(),
-        ];
+        config.extra_mcp_commands =
+            vec!["npx -y mcp-remote https://mcp.tavily.com/mcp/?tavilyApiKey=test-key".into()];
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 2, "primary + 1 extra = 2 servers");
         assert_eq!(servers[0].name, "test-mcp-server");
@@ -7040,6 +7072,43 @@ mod build_mcp_servers_tests {
             servers.is_empty(),
             "empty primary mcp_command should still short-circuit even with extras"
         );
+    }
+
+    #[test]
+    fn extra_mcp_commands_disambiguate_duplicate_names() {
+        // Two npx-based wrappers must not both become "npx" — that would
+        // trip McpRegistry's duplicate-name check at spawn.
+        let mut config = test_config();
+        config.extra_mcp_commands = vec!["npx -y first-mcp".into(), "npx -y second-mcp".into()];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 3, "primary + 2 extra = 3 servers");
+        assert_eq!(servers[1].name, "npx");
+        assert_eq!(servers[2].name, "npx-2");
+    }
+
+    #[test]
+    fn extra_mcp_commands_shell_split_quoted_paths() {
+        // Quoted paths with spaces must be preserved as a single argv element.
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![r#""my server" --port 8080"#.into()];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[1].command, "my server");
+        assert_eq!(servers[1].args, vec!["--port", "8080"]);
+    }
+
+    #[test]
+    fn extra_mcp_commands_skip_malformed_quoting() {
+        let mut config = test_config();
+        config.extra_mcp_commands = vec![
+            "valid-server".into(),
+            "'unmatched-quote".into(),
+            "another-server".into(),
+        ];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 3, "primary + 2 valid (malformed skipped)");
+        assert_eq!(servers[1].name, "valid-server");
+        assert_eq!(servers[2].name, "another-server");
     }
 }
 

@@ -268,8 +268,12 @@ pub struct CliArgs {
     pub mcp_command: String,
 
     /// Additional MCP server commands to pass to the agent session alongside
-    /// the primary MCP server. Each comma-separated entry is split on
-    /// whitespace into a command and its args. Example:
+    /// the primary MCP server. Entries are comma-separated; each entry is
+    /// shell-split (shlex) into a command and its args, so quoted paths and
+    /// arguments with spaces are preserved. Server names are derived from the
+    /// executable stem and disambiguated with a numeric suffix if duplicates
+    /// occur (e.g. two `npx` wrappers become `npx` and `npx-2`). Entries with
+    /// malformed quoting are skipped with a warning. Example:
     /// `npx -y mcp-remote https://mcp.tavily.com/mcp/?tavilyApiKey=...,other-server`
     #[arg(long, env = "BUZZ_ACP_EXTRA_MCP_COMMANDS", value_delimiter = ',')]
     pub extra_mcp_commands: Vec<String>,
