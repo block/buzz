@@ -194,6 +194,7 @@ export function UserProfilePanel({
       currentPubkey,
       managedAgents: managedAgentsQuery.data,
       personaId: persona?.id,
+      preferDirectManagedAgent: true,
       preserveRequestedInstance,
       pubkey,
     });
