@@ -408,7 +408,16 @@ pub(crate) fn valid_agent_runtime_receipt_with(
     else {
         return false;
     };
+    // A stored connection URL must belong to this pair: canonicalizing it has
+    // to reproduce the receipt's own key. Absent is fine (pre-field receipts);
+    // present-but-foreign or unparseable is a corrupt receipt, not a fallback.
+    let connect_url_matches_key = match receipt.connect_relay_url.as_deref() {
+        None => true,
+        Some(connect_url) => ManagedAgentRuntimeKey::new(receipt.key.pubkey.clone(), connect_url)
+            .is_ok_and(|from_connect| from_connect == receipt.key),
+    };
     canonical == receipt.key
+        && connect_url_matches_key
         && path.file_name().and_then(|name| name.to_str())
             == Some(&format!("{}.json", receipt.key.runtime_id()))
         && receipt.desktop_instance_id == instance_id
@@ -466,4 +475,124 @@ pub(crate) fn terminate_untracked_pair_runtime(
         process_is_running,
         super::super::remove_agent_runtime_receipt_path,
     )
+}
+
+/// The URL a child is dialed with: the configured spelling, trimmed. The
+/// canonical form is identity-only; connection code preserves the authority.
+pub(crate) fn connection_relay_url(configured_relay_url: &str) -> String {
+    configured_relay_url.trim().to_string()
+}
+
+/// Comparable connection target, parsed with `url::Url`: lowercased scheme,
+/// case-folded host with a single FQDN root dot stripped (mirroring the
+/// tenancy authority `tenant::normalize_host`), a port only when it is not
+/// the scheme's own default, a root-slash-folded path, and the query kept
+/// verbatim. Folds spellings that reach the same tenant while preserving
+/// tenancy-significant differences: `localhost`, `127.0.0.1`, and `[::1]`
+/// stay three distinct hosts, and `ws` vs `wss`, non-default ports (including
+/// the OTHER scheme's default), paths, and query strings stay distinct.
+/// `None` for unparsable URLs - and for parseable ones that are not valid
+/// relay targets: a non-ws(s) scheme, userinfo, or a fragment (all rejected
+/// by `normalize_relay_url`, and matching the TS mirror's scheme gate).
+/// Folding those away would alias distinct spellings like
+/// `wss://alice@relay.example` and `wss://bob@relay.example`; returning
+/// `None` fails closed onto the caller's exact comparison instead.
+fn connection_target(raw: &str) -> Option<ConnectionTarget> {
+    let url = url::Url::parse(raw.trim()).ok()?;
+    let scheme = url.scheme().to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "ws" => 80,
+        "wss" => 443,
+        _ => return None,
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    let host = {
+        let host = url.host_str()?.to_ascii_lowercase();
+        host.strip_suffix('.').map(str::to_string).unwrap_or(host)
+    };
+    let port = url
+        .port_or_known_default()
+        .filter(|port| *port != default_port);
+    let path = match url.path() {
+        "/" => String::new(),
+        path => path.to_string(),
+    };
+    let query = url.query().map(str::to_string);
+    Some(ConnectionTarget {
+        scheme,
+        host,
+        port,
+        path,
+        query,
+    })
+}
+
+/// See [`connection_target`].
+#[derive(PartialEq)]
+struct ConnectionTarget {
+    scheme: String,
+    host: String,
+    port: Option<u16>,
+    path: String,
+    query: Option<String>,
+}
+
+/// A live pair may only be reused for a start request that dials the same
+/// connection target it already holds. Canonical keys fold host spellings,
+/// so two distinct tenants can share one key; silently reusing across
+/// spellings would report the requested tenant as started while the child
+/// stays connected to the old one, and reconciliation would stop retrying.
+/// Equivalence is by [`connection_target`], so harmless formatting drift
+/// (host case, default port, root slash, FQDN dot) never reads as a
+/// conflict. The error deliberately omits both URLs: they may carry query
+/// tokens, and this string lands in `last_error` and the UI.
+pub(crate) fn ensure_pair_connection_matches(
+    runtime: &ManagedAgentPairRuntime,
+    requested_relay_url: &str,
+) -> Result<(), String> {
+    let matches = match (
+        connection_target(&runtime.connect_relay_url),
+        connection_target(requested_relay_url),
+    ) {
+        (Some(live), Some(requested)) => live == requested,
+        // Fail closed on unparsable URLs: only byte-identical trimmed
+        // spellings count as the same target.
+        _ => runtime.connect_relay_url == connection_relay_url(requested_relay_url),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(
+            "connection-target conflict: a live runtime for this agent already exists under the \
+             same community identity but a different connection URL; stop the pair before \
+             starting it with the requested URL"
+                .into(),
+        )
+    }
+}
+
+/// Hand-written so `connect_relay_url` never renders verbatim:
+/// `normalize_relay_url` rejects userinfo but deliberately preserves query
+/// strings, so `wss://relay.example/ws?token=...` is a valid value. Same
+/// masking policy as `SpawnConfigSnapshot`'s `relay_url` (its single
+/// redaction authority), pinned by the owning-process Debug sentinel test.
+impl std::fmt::Debug for crate::managed_agents::ManagedAgentProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("ManagedAgentProcess");
+        s.field("child", &self.child)
+            .field("log_path", &self.log_path)
+            .field(
+                "connect_relay_url",
+                &crate::managed_agents::spawn_snapshot::diff::MASK,
+            )
+            .field("spawn_config", &self.spawn_config)
+            .field("setup_mode", &self.setup_mode)
+            .field("adapter_availability", &self.adapter_availability)
+            .field("start_nonce", &self.start_nonce);
+        #[cfg(windows)]
+        s.field("job", &self.job);
+        s.finish()
+    }
 }
