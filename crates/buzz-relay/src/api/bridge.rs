@@ -1106,6 +1106,12 @@ async fn query_events_authed(
             "restricted: agent-engram reads require authors=[self] or #p=[self]",
         ));
     }
+    if !crate::handlers::req::agent_skill_filters_authorized(&filters, &authed_pubkey_hex) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: agent-skill reads require authors=[self] or #p=[self]",
+        ));
+    }
     if !crate::handlers::req::author_only_filters_authorized(&filters, &authed_pubkey_hex) {
         return Err(api_error(
             StatusCode::FORBIDDEN,
@@ -1542,6 +1548,12 @@ async fn count_events_authed(
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "restricted: agent-engram reads require authors=[self] or #p=[self]",
+        ));
+    }
+    if !crate::handlers::req::agent_skill_filters_authorized(&filters, &authed_pubkey_hex) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: agent-skill reads require authors=[self] or #p=[self]",
         ));
     }
     if !crate::handlers::req::author_only_filters_authorized(&filters, &authed_pubkey_hex) {

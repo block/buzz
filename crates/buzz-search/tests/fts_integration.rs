@@ -8,8 +8,8 @@
 
 use buzz_core::{
     kind::{
-        AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_MEMBER_ADDED_NOTIFICATION,
-        KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
+        AGENT_SKILL_KINDS, AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC,
+        KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
     },
     CommunityId,
 };
@@ -1444,5 +1444,48 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
         result.hits.len(),
     );
 
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn encrypted_agent_skill_kinds_have_storage_null_tsvector() {
+    let (pool, schema) = setup().await;
+    let community = mk_community(&pool, "agent-skill-fts.example").await;
+    let token = "agent_skill_private_marker_qwerty";
+
+    for (index, kind) in AGENT_SKILL_KINDS.iter().copied().enumerate() {
+        insert_event(
+            &pool,
+            community,
+            rand_bytes32(),
+            rand_bytes32(),
+            kind as i32,
+            token,
+            None,
+            1_700_010_000 + index as i64,
+        )
+        .await;
+    }
+
+    let indexed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE community_id = $1 AND kind = ANY($2) \
+         AND search_tsv IS NOT NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(
+        AGENT_SKILL_KINDS
+            .iter()
+            .map(|kind| *kind as i32)
+            .collect::<Vec<_>>(),
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query skill search vectors");
+
+    assert_eq!(
+        indexed, 0,
+        "encrypted skill ciphertext must never enter FTS"
+    );
     teardown(pool, &schema).await;
 }
