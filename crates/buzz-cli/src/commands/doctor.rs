@@ -76,11 +76,7 @@ impl Check {
         }
     }
 
-    fn error(
-        id: &'static str,
-        message: impl Into<String>,
-        remediation: Option<&str>,
-    ) -> Self {
+    fn error(id: &'static str, message: impl Into<String>, remediation: Option<&str>) -> Self {
         Self {
             id,
             status: Status::Error,
@@ -121,7 +117,10 @@ pub async fn run(cli: &crate::Cli, offline: bool) -> Result<(), CliError> {
     } else if !(relay_url.starts_with("http://") || relay_url.starts_with("https://")) {
         checks.push(Check::error(
             "relay_url",
-            format!("relay URL {:?} is not an http(s) URL after canonicalization", relay_url),
+            format!(
+                "relay URL {:?} is not an http(s) URL after canonicalization",
+                relay_url
+            ),
             Some("Use http:// or https://; ws:// and wss:// are rewritten automatically"),
         ));
     } else {
@@ -179,25 +178,23 @@ pub async fn run(cli: &crate::Cli, offline: bool) -> Result<(), CliError> {
         }
         Some(raw) => match buzz_sdk::nip_oa::parse_auth_tag(raw) {
             Ok(tag) => match &keys {
-                Some(k) => {
-                    match buzz_sdk::nip_oa::verify_auth_tag(raw, &k.public_key()) {
-                        Ok(_) => {
-                            checks.push(Check::ok(
-                                "auth_tag",
-                                "BUZZ_AUTH_TAG parsed and verified for this identity",
-                            ));
-                            Some(tag)
-                        }
-                        Err(e) => {
-                            checks.push(Check::error(
-                                "auth_tag",
-                                format!("BUZZ_AUTH_TAG failed verification: {e}"),
-                                Some("Re-issue the auth tag for the current identity"),
-                            ));
-                            None
-                        }
+                Some(k) => match buzz_sdk::nip_oa::verify_auth_tag(raw, &k.public_key()) {
+                    Ok(_) => {
+                        checks.push(Check::ok(
+                            "auth_tag",
+                            "BUZZ_AUTH_TAG parsed and verified for this identity",
+                        ));
+                        Some(tag)
                     }
-                }
+                    Err(e) => {
+                        checks.push(Check::error(
+                            "auth_tag",
+                            format!("BUZZ_AUTH_TAG failed verification: {e}"),
+                            Some("Re-issue the auth tag for the current identity"),
+                        ));
+                        None
+                    }
+                },
                 None => {
                     // Cannot verify without an identity; report as warning.
                     checks.push(Check::warning(
@@ -227,15 +224,19 @@ pub async fn run(cli: &crate::Cli, offline: bool) -> Result<(), CliError> {
     // ---- remote checks ----
 
     if offline {
-        checks.push(Check::skipped(
-            "relay_reachable",
-            "skipped (--offline)",
-        ));
+        checks.push(Check::skipped("relay_reachable", "skipped (--offline)"));
         checks.push(Check::skipped("nip11", "skipped (--offline)"));
         checks.push(Check::skipped("auth_read", "skipped (--offline)"));
         checks.push(Check::skipped("membership", "skipped (--offline)"));
     } else {
-        run_remote_checks(&relay_url, keys.as_ref(), auth_tag.as_ref(), cli, &mut checks).await;
+        run_remote_checks(
+            &relay_url,
+            keys.as_ref(),
+            auth_tag.as_ref(),
+            cli,
+            &mut checks,
+        )
+        .await;
     }
 
     // ---- output ----
@@ -346,10 +347,7 @@ async fn run_remote_checks(
             });
             match client.query_paginated(filter, 1).await {
                 Ok(events) => {
-                    checks.push(Check::ok(
-                        "auth_read",
-                        "authenticated read succeeded",
-                    ));
+                    checks.push(Check::ok("auth_read", "authenticated read succeeded"));
                     // membership: any kind:39002 with #p=self means we're
                     // a member of at least one channel.
                     if events.is_empty() {
@@ -370,7 +368,11 @@ async fn run_remote_checks(
                 // True auth rejection — either an explicit Auth variant or a
                 // relay 401/403 — classifies as auth (exit 3).
                 Err(e @ CliError::Auth(_))
-                | Err(e @ CliError::Relay { status: 401 | 403, .. }) => {
+                | Err(
+                    e @ CliError::Relay {
+                        status: 401 | 403, ..
+                    },
+                ) => {
                     checks.push(Check::error(
                         "auth_read",
                         format!("relay rejected authentication: {e}"),
@@ -522,9 +524,7 @@ fn emit_and_exit(checks: &[Check]) -> Result<(), CliError> {
             body: format!("doctor check {} failed: {}", c.id, c.message),
         });
     }
-    Err(CliError::Other(
-        "one or more doctor checks failed".into(),
-    ))
+    Err(CliError::Other("one or more doctor checks failed".into()))
 }
 
 #[cfg(test)]

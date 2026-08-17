@@ -1431,8 +1431,14 @@ mod tests {
                 && total <= RANGE_FALLBACK_MAX_OBJECT_BYTES
         };
         assert!(should_fallback(&rejected, small));
-        assert!(!should_fallback(&rejected, large), "oversize object must propagate");
-        assert!(!should_fallback(&auth, small), "auth/server errors must propagate");
+        assert!(
+            !should_fallback(&rejected, large),
+            "oversize object must propagate"
+        );
+        assert!(
+            !should_fallback(&auth, small),
+            "auth/server errors must propagate"
+        );
         assert!(!should_fallback(&MediaError::NotFound, small));
     }
 
