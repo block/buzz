@@ -1,0 +1,2282 @@
+use std::time::Duration;
+
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Reasoning/thinking effort level for providers that support it.
+///
+/// Set via `BUZZ_AGENT_THINKING_EFFORT` (`none|minimal|low|medium|high|xhigh|max`).
+/// When unset the provider's default behaviour is preserved — no thinking
+/// config is sent in the request body.
+///
+/// Provider support (doc-verified, July 2025):
+/// - **Anthropic adaptive**: `low|medium|high|xhigh|max` (model-dependent; see `anthropic_thinking_config`).
+///   `none`/`minimal` are not Anthropic values — rejected at startup.
+/// - **Anthropic manual budget** (claude-3*, opus-4-5): `low|medium|high`; `xhigh`/`max` clamp to high budget.
+/// - **OpenAI Responses / Chat Completions**: effort support is model-dependent and normalized at
+///   request time; `max` is valid for documented max-supporting families such as GPT-5.6.
+/// - **Databricks**: routed by model family (Claude → Anthropic mapping, GPT-5 → Responses, MLflow → Chat).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ThinkingEffort {
+    /// Map level to an Anthropic `budget_tokens` value for legacy Claude 3.x / Opus 4.5 models.
+    /// `XHigh` and `Max` clamp to the high budget value; the answer-room reserve of 1024 tokens
+    /// is applied separately in `anthropic_thinking_config`.
+    pub fn anthropic_budget_tokens(self) -> u32 {
+        match self {
+            ThinkingEffort::Low => 1_024,
+            ThinkingEffort::Medium => 8_192,
+            ThinkingEffort::High | ThinkingEffort::XHigh | ThinkingEffort::Max => 32_768,
+            // None/Minimal are not valid for Anthropic (rejected at startup); treat as zero
+            // defensively so a misconfigured call doesn't accidentally enable thinking.
+            ThinkingEffort::None | ThinkingEffort::Minimal => 0,
+        }
+    }
+
+    /// Map level to an OpenAI `reasoning.effort` / `reasoning_effort` string.
+    pub fn openai_effort_str(self) -> &'static str {
+        match self {
+            ThinkingEffort::None => "none",
+            ThinkingEffort::Minimal => "minimal",
+            ThinkingEffort::Low => "low",
+            ThinkingEffort::Medium => "medium",
+            ThinkingEffort::High => "high",
+            ThinkingEffort::XHigh => "xhigh",
+            ThinkingEffort::Max => "max",
+        }
+    }
+
+    /// Map level to an Anthropic `output_config.effort` string.
+    /// Returns the level string if supported, or the highest supported level for the model.
+    /// Caller must apply model-level clamping via `clamp_for_anthropic_adaptive`.
+    pub fn anthropic_effort_str(self) -> &'static str {
+        match self {
+            ThinkingEffort::Low => "low",
+            ThinkingEffort::Medium => "medium",
+            ThinkingEffort::High => "high",
+            ThinkingEffort::XHigh => "xhigh",
+            ThinkingEffort::Max => "max",
+            // None/Minimal are rejected at startup for Anthropic; defensive fallback.
+            ThinkingEffort::None | ThinkingEffort::Minimal => "low",
+        }
+    }
+}
+
+/// Resolve the nearest supported effort level for a given OpenAI model.
+///
+/// When the requested effort is not in the model's supported set, falls back to the
+/// nearest supported level using this preference order:
+///
+/// - `none` ↔ `minimal` are each other's first fallback (the none/minimal split across
+///   model families means the "closest analogue" is the other form before jumping to `low`).
+/// - Above that pair: upward clamp first, then downward (prefer more thinking over less).
+/// - `xhigh` falls back to `high` when not supported (no model skips from `high` to `xhigh`).
+/// - `max` passes through for model families whose table includes it; otherwise it resolves to
+///   the nearest supported level.
+///
+/// Logs a `warn!` on every substitution.
+fn resolve_openai_effort(
+    model: &str,
+    requested: ThinkingEffort,
+    supported: &[ThinkingEffort],
+) -> ThinkingEffort {
+    if supported.contains(&requested) {
+        return requested;
+    }
+
+    // Build a candidate list ordered by preference: the "other" form of none/minimal first,
+    // then the levels sorted nearest to requested (ascending distance).
+    let candidates: Vec<ThinkingEffort> = {
+        // none ↔ minimal are each other's first fallback.
+        let peer = match requested {
+            ThinkingEffort::None => Some(ThinkingEffort::Minimal),
+            ThinkingEffort::Minimal => Some(ThinkingEffort::None),
+            _ => None,
+        };
+        // All supported values sorted by distance (abs diff in ordinal), upward ties win.
+        let mut by_dist: Vec<ThinkingEffort> = supported.to_vec();
+        by_dist.sort_by_key(|&e| {
+            let dist = (e as i32 - requested as i32).unsigned_abs();
+            // Prefer upward (e > requested) to break ties between equidistant values.
+            let up = if e >= requested { 0u32 } else { 1 };
+            (dist, up)
+        });
+        // Peer first, then by distance.
+        let mut result = Vec::new();
+        if let Some(p) = peer {
+            if supported.contains(&p) {
+                result.push(p);
+            }
+        }
+        for e in by_dist {
+            if !result.contains(&e) {
+                result.push(e);
+            }
+        }
+        result
+    };
+
+    let resolved = candidates
+        .into_iter()
+        .next()
+        .expect("supported is non-empty");
+
+    tracing::warn!(
+        %model,
+        requested = requested.openai_effort_str(),
+        resolved = resolved.openai_effort_str(),
+        "BUZZ_AGENT_THINKING_EFFORT={} is not supported by this OpenAI model; using nearest supported level",
+        requested.openai_effort_str(),
+    );
+    resolved
+}
+
+/// Normalize the effort value for an Anthropic-shaped request body (Messages API).
+///
+/// Anthropic-shaped bodies (`anthropic_body`) do not have a `none` or `minimal` concept —
+/// the thinking block is either present (with a level) or absent. When `none` or `minimal`
+/// is configured, we omit the thinking fields entirely and log a warning (omission = provider
+/// default; default-on/always-on adaptive models may still think). This handles `DatabricksV2`
+/// sessions where the route can switch from GPT to Claude via `session/set_model` after startup.
+///
+/// Returns `None` to signal "omit thinking fields", or the original effort if it is a valid
+/// Anthropic level.
+pub fn normalize_effort_for_anthropic_route(effort: ThinkingEffort) -> Option<ThinkingEffort> {
+    match effort {
+        ThinkingEffort::None | ThinkingEffort::Minimal => {
+            tracing::warn!(
+                requested = effort.openai_effort_str(),
+                "BUZZ_AGENT_THINKING_EFFORT={} is not expressible as an Anthropic thinking level; \
+                 omitting thinking fields (provider default; default-on/always-on adaptive models may still think)",
+                effort.openai_effort_str()
+            );
+            None
+        }
+        other => Some(other),
+    }
+}
+
+/// Normalize the effort value for an OpenAI-shaped request (pure OpenAI or legacy Databricks).
+///
+/// Resolves the manifest capability record for the actual provider/model and applies
+/// `resolve_openai_effort` over its `supported_efforts`. The provider fallback record's
+/// effort set encodes the former "unknown model: clamp `max`→`xhigh`, pass the rest"
+/// behavior, so unknown models need no special-casing here; adopted exact-record
+/// corrections (e.g. `databricks-gpt-5-4-mini` → `[low, medium, high]`) are enforced in
+/// production because they live on the resolved `supported_efforts` axis.
+///
+/// This is the single production authority for `Provider::OpenAi` and `Provider::Databricks`
+/// effort normalization.
+pub fn normalize_effort_for_provider(
+    provider: &str,
+    raw_model: &str,
+    effort: ThinkingEffort,
+) -> ThinkingEffort {
+    let cap = crate::model_capabilities::resolve(provider, raw_model);
+    resolve_openai_effort(raw_model, effort, cap.supported_efforts)
+}
+
+/// Normalize the effort value for a DatabricksV2 OpenAI-shaped request (Responses / MLflow).
+///
+/// Reads `normalization_policy` from the manifest record for this raw model id
+/// (`provider = "databricks_v2"`) and applies it:
+/// - `OpenaiStandard`        → resolve against the record's `supported_efforts` (the axis
+///   that carries the adopted exact-record corrections).
+/// - `OpenaiClampMaxToXhigh` → clamp `max`→`xhigh` with a DBv2-specific warning; resolve
+///   any other unsupported value against `supported_efforts`.
+/// - `None`                  → pass the effort through unchanged (Anthropic-routed models,
+///   which are normalized by `normalize_effort_for_anthropic_route` and never reach here).
+///
+/// This is the production authority for DatabricksV2 OpenAI-shaped effort normalization;
+/// `normalize_effort_for_provider` covers pure OpenAI and legacy Databricks.
+pub fn normalize_effort_for_databricks_v2(
+    effort: ThinkingEffort,
+    raw_model: &str,
+) -> ThinkingEffort {
+    use crate::model_capabilities::NormalizationPolicy;
+    let cap = crate::model_capabilities::resolve("databricks_v2", raw_model);
+    match cap.normalization_policy {
+        NormalizationPolicy::OpenaiStandard => {
+            resolve_openai_effort(raw_model, effort, cap.supported_efforts)
+        }
+        NormalizationPolicy::OpenaiClampMaxToXhigh => {
+            if effort == ThinkingEffort::Max {
+                tracing::warn!(
+                    requested = "max",
+                    resolved = "xhigh",
+                    model = raw_model,
+                    "BUZZ_AGENT_THINKING_EFFORT=max not confirmed for this DatabricksV2 model; clamping to xhigh"
+                );
+                ThinkingEffort::XHigh
+            } else {
+                resolve_openai_effort(raw_model, effort, cap.supported_efforts)
+            }
+        }
+        NormalizationPolicy::None => effort,
+    }
+}
+
+/// Build the Anthropic thinking/effort request fields for any manifest-owned provider/model.
+///
+/// Resolves `thinking_mode` and `supported_efforts` from the manifest record for the
+/// effective provider/model and applies them:
+/// - `ManualBudget` → `thinking:{type:"enabled", budget_tokens, display:"summarized"}`,
+///   with `budget_tokens` clamped to leave at least 1024 answer tokens (both fields omitted
+///   when `max_output_tokens` is too small to fit thinking budget + answer headroom).
+/// - `Adaptive`     → `thinking:{type:"adaptive", display:"summarized"}` +
+///   `output_config:{effort}`, with effort clamped down to the highest supported level.
+/// - `None` / `OmitFields` → omit both fields (non-thinking model, or unknown/unverified
+///   Anthropic name — safer to omit than to guess an unsupported request shape).
+///
+/// `display:"summarized"` keeps thinking text visible in the observer feed (Anthropic
+/// defaults to `display:"omitted"` on the newest models). This is the single production
+/// authority for all providers' Anthropic thinking body construction.
+pub fn anthropic_thinking_config(
+    provider: &str,
+    effective_model: &str,
+    effort: ThinkingEffort,
+    max_output_tokens: u32,
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    use crate::model_capabilities::ThinkingMode;
+    use serde_json::json;
+
+    let cap = crate::model_capabilities::resolve(provider, effective_model);
+    match cap.thinking_mode {
+        ThinkingMode::ManualBudget => {
+            // Manual-budget shape (claude-3*, claude-opus-4-5): budget_tokens clamped to
+            // fit within max_output_tokens while preserving at least MIN_ANSWER_TOKENS.
+            const MIN_ANSWER_TOKENS: u32 = 1024;
+            let level_budget = effort.anthropic_budget_tokens();
+            let headroom = max_output_tokens.saturating_sub(MIN_ANSWER_TOKENS);
+            let budget = level_budget.min(headroom);
+            if budget < MIN_ANSWER_TOKENS {
+                tracing::warn!(
+                    max_output_tokens,
+                    level_budget,
+                    headroom,
+                    model = effective_model,
+                    "BUZZ_AGENT_THINKING_EFFORT: max_output_tokens too small to fit thinking budget + answer headroom; omitting thinking fields"
+                );
+                return (None, None);
+            }
+            (
+                Some(
+                    json!({ "type": "enabled", "budget_tokens": budget, "display": "summarized" }),
+                ),
+                None,
+            )
+        }
+        ThinkingMode::Adaptive => {
+            // Adaptive shape: clamp effort downward to the highest supported level using the
+            // manifest's supported_efforts (sorted ascending by validate_manifest).
+            let clamped = cap
+                .supported_efforts
+                .iter()
+                .rev()
+                .find(|&&e| e <= effort)
+                .copied()
+                .unwrap_or(effort); // effort below the lowest supported; pass through (rare)
+            if clamped != effort {
+                tracing::warn!(
+                    model = effective_model,
+                    requested = effort.openai_effort_str(),
+                    clamped = clamped.openai_effort_str(),
+                    "BUZZ_AGENT_THINKING_EFFORT is not available for this model; clamping to highest supported level"
+                );
+            }
+            (
+                Some(json!({ "type": "adaptive", "display": "summarized" })),
+                Some(json!({ "effort": clamped.anthropic_effort_str() })),
+            )
+        }
+        ThinkingMode::None | ThinkingMode::OmitFields => {
+            // Non-thinking model, or unknown/unverified Anthropic name: omit rather than guess.
+            (None, None)
+        }
+    }
+}
+
+/// Reasoning summary mode for the OpenAI Responses API route.
+///
+/// Controls the `reasoning.summary` field sent alongside `reasoning.effort` in
+/// `responses_body`. The Responses API only returns populated `summary` arrays
+/// when a summary mode is requested — without it, `summary: []` is returned and
+/// the observer feed shows no reasoning text even though the model billed thinking
+/// tokens.
+///
+/// **Responses-route only.** On the Anthropic route, thinking blocks contain the
+/// full reasoning text directly (no summary concept); this field is ignored there.
+/// On Chat Completions and OpenRouter paths the field is also ignored.
+///
+/// Set via `BUZZ_AGENT_THINKING_SUMMARY` (`auto|concise|detailed`).
+/// Unset/empty → `auto` (the provider chooses the best available summary for the
+/// model). Use `detailed` for maximum reasoning visibility in the observer feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingSummary {
+    /// Provider selects the best available summary format for the model.
+    Auto,
+    /// Shorter summaries — lower token overhead.
+    Concise,
+    /// Full-length summaries — maximum reasoning visibility.
+    Detailed,
+}
+
+impl ThinkingSummary {
+    /// The string value sent in the `reasoning.summary` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThinkingSummary::Auto => "auto",
+            ThinkingSummary::Concise => "concise",
+            ThinkingSummary::Detailed => "detailed",
+        }
+    }
+}
+
+/// Parse `BUZZ_AGENT_THINKING_SUMMARY`. Pure (env-free) for testability.
+///
+/// Unset or empty → `Auto` (the safe default that works for all Responses-capable models).
+/// Invalid value → startup error.
+pub fn parse_thinking_summary(raw: Option<&str>) -> Result<ThinkingSummary, String> {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") => Ok(ThinkingSummary::Auto),
+        Some("auto") => Ok(ThinkingSummary::Auto),
+        Some("concise") => Ok(ThinkingSummary::Concise),
+        Some("detailed") => Ok(ThinkingSummary::Detailed),
+        Some(other) => Err(format!(
+            "config: BUZZ_AGENT_THINKING_SUMMARY={other} not supported (use auto|concise|detailed)"
+        )),
+    }
+}
+
+/// Parse `BUZZ_AGENT_THINKING_EFFORT`. Pure (env-free) for testability.
+pub fn parse_thinking_effort(raw: Option<&str>) -> Result<Option<ThinkingEffort>, String> {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") => Ok(None),
+        Some("none") => Ok(Some(ThinkingEffort::None)),
+        Some("minimal") => Ok(Some(ThinkingEffort::Minimal)),
+        Some("low") => Ok(Some(ThinkingEffort::Low)),
+        Some("medium") => Ok(Some(ThinkingEffort::Medium)),
+        Some("high") => Ok(Some(ThinkingEffort::High)),
+        Some("xhigh") => Ok(Some(ThinkingEffort::XHigh)),
+        Some("max") => Ok(Some(ThinkingEffort::Max)),
+        Some(other) => Err(format!(
+            "config: BUZZ_AGENT_THINKING_EFFORT={other} not supported (use none|minimal|low|medium|high|xhigh|max)"
+        )),
+    }
+}
+
+pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
+/// Total per-result byte ceiling (text + images). Sized for image-bearing
+/// results — view_image can legitimately return multi-MiB base64 payloads.
+/// Text is governed by the much smaller `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
+pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
+/// Default cap on the *text* portion of a single tool result. Oversized text
+/// is middle-elided before it enters history; without this, one fat `cat`
+/// burns the context window and forces a lossy handoff. 50 KiB matches the
+/// shell-output caps in sprout-dev-mcp, goose, and pi; codex defaults to
+/// 10 KB. Tunable via `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
+pub const DEFAULT_TOOL_RESULT_TEXT_BYTES: usize = 50 * 1024;
+pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
+
+pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 8192;
+
+pub const HANDOFF_ORIGINAL_TASK_MAX_BYTES: usize = 16 * 1024;
+
+pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
+
+/// Maximum reactive context-recovery attempts per `run()`. A provider
+/// context-window 400 is recoverable — shrink history and retry — but the
+/// retry must be bounded: `max_rounds` defaults to `0` (unbounded), so without
+/// its own budget a request that stays oversized after every rescue would
+/// retry forever. On exhaustion the error surfaces to the caller, which is a
+/// visible failure rather than a silent infinite rescue.
+pub const MAX_CONTEXT_RECOVERIES_PER_RUN: u32 = 3;
+
+/// Floor for the reactive handoff's history-prompt budget, in bytes. Each
+/// recovery attempt halves the budget so the rescue summarize call can escape
+/// an overstated `max_context_tokens`, but halving must terminate: below this
+/// the prompt can no longer carry a useful summary, so the recovery gives up
+/// and surfaces the error instead of issuing ever-smaller doomed requests.
+pub const HANDOFF_MIN_PROMPT_BUDGET_BYTES: usize = 4 * 1024;
+
+const DEFAULT_SYSTEM_PROMPT: &str =
+    "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Provider {
+    Anthropic,
+    OpenAi,
+    /// Databricks model serving. Routes to `{base_url}/serving-endpoints/{model}/invocations`
+    /// with a dynamically-acquired bearer (OAuth 2.0 PKCE, or static `DATABRICKS_TOKEN`).
+    /// Wire format is OpenAI-chat-compatible — reuses the same body builder and parser.
+    Databricks,
+    /// Databricks AI Gateway v2. Routes by model family through the gateway's
+    /// OpenAI Responses, Anthropic Messages, or MLflow Chat Completions paths.
+    DatabricksV2,
+    /// OpenRouter multi-provider gateway. Routes to `{base_url}/chat/completions` with bearer auth. Wire format is OpenAI-chat-compatible.
+    OpenRouter,
+}
+
+/// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
+/// (`auto|chat|responses`); ignored when `provider = Anthropic`. `Auto`
+/// picks Responses for `*.openai.com`, Chat Completions otherwise, and
+/// permits a one-shot chat→responses upgrade on a "use /v1/responses"
+/// provider error.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OpenAiApi {
+    Chat,
+    Responses,
+    Auto,
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub provider: Provider,
+    pub system_prompt: String,
+    pub max_rounds: u32,
+    pub max_output_tokens: u32,
+    /// Maximum number of retries after a provider returns a successful but
+    /// output-truncated response. Zero disables truncation recovery. This is
+    /// independent of `max_rounds`, which still bounds all successful calls.
+    pub max_token_recoveries: u32,
+    pub llm_timeout: Duration,
+    pub tool_timeout: Duration,
+    pub mcp_init_timeout: Duration,
+    pub mcp_max_restart_attempts: u32,
+    pub mcp_restart_base_ms: u64,
+    pub mcp_restart_max_ms: u64,
+    pub max_sessions: usize,
+    pub max_line_bytes: usize,
+    pub max_history_bytes: usize,
+    /// Per-tool-result cap on text content. Oversized text is middle-elided
+    /// (head + tail kept) before entering history. Images are exempt — they
+    /// are bounded by [`MAX_TOOL_RESULT_BYTES`] and accounted separately.
+    /// Set via `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
+    pub max_tool_result_text_bytes: usize,
+    /// Provider context window in tokens used to gate handoff. The handoff
+    /// fires when the previous request's (cache-summed) input tokens cross the
+    /// handoff threshold for this budget, before the next request can exceed
+    /// the window and 400. Default 200_000 — matching Claude 4.x windows;
+    /// operators lower/raise it for other models. Set via
+    /// `BUZZ_AGENT_MAX_CONTEXT_TOKENS`.
+    pub max_context_tokens: u64,
+    /// Maximum context-handoff attempts permitted within a single
+    /// `session/prompt` turn. Caps runaway compaction loops inside one turn;
+    /// does NOT limit handoffs across a session's lifetime — a long-lived
+    /// session can compact on every successive turn without hitting this bound.
+    /// Set via `BUZZ_AGENT_MAX_HANDOFFS`. Default 10.
+    pub max_handoffs: usize,
+    pub max_parallel_tools: usize,
+    pub hook_timeout: Duration,
+    /// Maximum `_Stop` rejections per prompt. Default 3. Set to 0 to
+    /// disable `_Stop` hooks entirely (agent always honors end_turn).
+    pub stop_max_rejections: u32,
+    /// Remind the model to publish when a turn is about to end without any
+    /// recognized attempt to post to Buzz. Default off; opt in per agent with
+    /// `BUZZ_AGENT_REQUIRE_REPLY=1`.
+    ///
+    /// Advisory only: at most `MAX_REPLY_NAGS` reminders (see `agent.rs`),
+    /// then the turn ends regardless. Bounded by the same
+    /// `stop_max_rejections` budget as `_Stop` hooks, which is the outer cap on
+    /// all end-turn objections — at the default 3 both reminders fit; at 1 only
+    /// one does; at 0 the guard is off with the hooks.
+    pub require_reply: bool,
+    /// Hook server allowlist. See [`HookServers`] for variant semantics.
+    /// Default (env unset/empty) is `None` — hooks are off unless the
+    /// operator explicitly opts in.
+    pub hook_servers: HookServers,
+    pub api_key: String,
+    pub model: String,
+    pub base_url: String,
+    pub anthropic_api_version: String,
+    /// OpenAI endpoint selection. See [`OpenAiApi`].
+    pub openai_api: OpenAiApi,
+    pub hints_enabled: bool,
+    /// Thinking/reasoning effort level. `None` = use provider default (no
+    /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
+    pub thinking_effort: Option<ThinkingEffort>,
+    /// Reasoning summary mode for the OpenAI Responses route. Controls the
+    /// `reasoning.summary` field emitted alongside `reasoning.effort`; only
+    /// takes effect when `thinking_effort` is also set. Default `Auto`.
+    /// Set via `BUZZ_AGENT_THINKING_SUMMARY`. Ignored on Anthropic, Chat
+    /// Completions, and OpenRouter routes.
+    pub thinking_summary: ThinkingSummary,
+    /// Emit Anthropic `cache_control` breakpoints on the stable prefix
+    /// (tools + system prompt) and the rolling conversation tail. Default on;
+    /// disable with `BUZZ_AGENT_PROMPT_CACHING=0`. Consulted on every route that
+    /// speaks the Anthropic caching dialect: first-party Anthropic, the
+    /// DatabricksV2 Claude route, and OpenRouter's `anthropic/*` models. The
+    /// Databricks gateway does not auto-cache, so without this the surfaced
+    /// `cache_read_input_tokens` is structurally always 0.
+    pub prompt_caching: bool,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self, String> {
+        let databricks_host = env("DATABRICKS_HOST");
+        let databricks_model = env("DATABRICKS_MODEL");
+        let provider = resolve_provider(
+            env("BUZZ_AGENT_PROVIDER").as_deref(),
+            env("ANTHROPIC_API_KEY").as_deref(),
+            env("OPENAI_COMPAT_API_KEY").as_deref(),
+            env("OPENROUTER_API_KEY").as_deref(),
+        )?;
+
+        // Universal model override — takes priority over provider-specific model
+        // env vars (ANTHROPIC_MODEL, OPENAI_COMPAT_MODEL, DATABRICKS_MODEL) when
+        // present. Set by the desktop from the persona/record to express explicit
+        // user intent; provider-specific vars serve as defaults for CLI/standalone use.
+        let buzz_agent_model = env("BUZZ_AGENT_MODEL");
+
+        // OPENAI_COMPAT_API is only read when provider=openai, so a stray
+        // bad value can't break an Anthropic-only deployment.
+        //
+        // Databricks borrows api_key as the *optional* `DATABRICKS_TOKEN` escape
+        // hatch — empty means "use OAuth PKCE." Legacy Databricks encodes the
+        // model in the URL path; Databricks v2 keeps it in the request body.
+        let (api_key, model, base_url, openai_api) = match provider {
+            Provider::Anthropic => (
+                req("ANTHROPIC_API_KEY")?,
+                resolve_model(
+                    buzz_agent_model.as_deref(),
+                    env("ANTHROPIC_MODEL").as_deref(),
+                )
+                .ok_or_else(|| "config: ANTHROPIC_MODEL required".to_string())?,
+                env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+                OpenAiApi::Auto, // unused for Anthropic
+            ),
+            Provider::OpenAi => (
+                req("OPENAI_COMPAT_API_KEY")?,
+                resolve_model(
+                    buzz_agent_model.as_deref(),
+                    env("OPENAI_COMPAT_MODEL").as_deref(),
+                )
+                .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
+                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
+                parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
+            ),
+            Provider::Databricks | Provider::DatabricksV2 => (
+                env("DATABRICKS_TOKEN").unwrap_or_default(),
+                resolve_model(buzz_agent_model.as_deref(), databricks_model.as_deref())
+                    .ok_or_else(|| "config: DATABRICKS_MODEL required".to_string())?,
+                databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
+                OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
+            ),
+            Provider::OpenRouter => (
+                req("OPENROUTER_API_KEY")?,
+                resolve_model(
+                    buzz_agent_model.as_deref(),
+                    env("OPENROUTER_MODEL").as_deref(),
+                )
+                .ok_or_else(|| "config: OPENROUTER_MODEL required".to_string())?,
+                env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+                OpenAiApi::Chat, // OpenRouter uses Chat Completions only
+            ),
+        };
+        let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
+            (Some(_), Some(_)) => return Err(
+                "config: BUZZ_AGENT_SYSTEM_PROMPT and BUZZ_AGENT_SYSTEM_PROMPT_FILE are mutually exclusive".into()),
+            (Some(s), _) => s,
+            (_, Some(p)) => std::fs::read_to_string(&p).map_err(|e| format!("config: read {p}: {e}"))?,
+            _ => DEFAULT_SYSTEM_PROMPT.to_owned(),
+        };
+        let cfg = Config {
+            provider,
+            system_prompt,
+            api_key,
+            model,
+            base_url,
+            anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
+            openai_api,
+            max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
+            max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
+            max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
+            llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
+            tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660)?),
+            mcp_init_timeout: Duration::from_secs(parse_env(
+                "BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS",
+                30,
+            )?),
+            mcp_max_restart_attempts: parse_env("BUZZ_AGENT_MCP_RESTART_MAX_ATTEMPTS", 3u32)?,
+            mcp_restart_base_ms: parse_env("BUZZ_AGENT_MCP_RESTART_BASE_MS", 500u64)?,
+            mcp_restart_max_ms: parse_env("BUZZ_AGENT_MCP_RESTART_MAX_MS", 30_000u64)?,
+            max_sessions: parse_env("BUZZ_AGENT_MAX_SESSIONS", usize::MAX)?,
+            max_line_bytes: parse_env("BUZZ_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
+            max_history_bytes: parse_env("BUZZ_AGENT_MAX_HISTORY_BYTES", 16 * 1024 * 1024)?,
+            max_tool_result_text_bytes: parse_env(
+                "BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES",
+                DEFAULT_TOOL_RESULT_TEXT_BYTES,
+            )?,
+            max_context_tokens: parse_env("BUZZ_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
+            max_handoffs: parse_env("BUZZ_AGENT_MAX_HANDOFFS", 10)?,
+            max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
+            hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
+            stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
+            require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
+            hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
+            hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
+            thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            thinking_summary: parse_thinking_summary(
+                env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
+            )?,
+            prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Construct a minimal `Config` for model-catalog discovery.
+    ///
+    /// Only the fields used by [`build_token_source`](crate::llm::build_token_source)
+    /// and the catalog HTTP helpers are meaningful; all others are set to
+    /// inert defaults. Never call `from_env` for discovery — it requires
+    /// `DATABRICKS_MODEL` and other fields that are irrelevant here.
+    pub fn for_discovery(provider: Provider, api_key: String, base_url: String) -> Self {
+        Self {
+            provider,
+            api_key,
+            base_url,
+            model: String::new(),
+            system_prompt: String::new(),
+            anthropic_api_version: "2023-06-01".into(),
+            openai_api: OpenAiApi::Chat,
+            max_rounds: 0,
+            max_output_tokens: 1,
+            max_token_recoveries: 0,
+            llm_timeout: Duration::from_secs(30),
+            tool_timeout: Duration::from_secs(30),
+            mcp_init_timeout: Duration::from_secs(30),
+            mcp_max_restart_attempts: 0,
+            mcp_restart_base_ms: 0,
+            mcp_restart_max_ms: 0,
+            max_sessions: 1,
+            max_line_bytes: 4 * 1024 * 1024,
+            max_history_bytes: 16 * 1024 * 1024,
+            max_tool_result_text_bytes: 50 * 1024,
+            max_context_tokens: 200_001,
+            max_handoffs: 0,
+            max_parallel_tools: 1,
+            hook_timeout: Duration::from_secs(1),
+            stop_max_rejections: 0,
+            require_reply: false,
+            hook_servers: HookServers::None,
+            hints_enabled: false,
+            thinking_effort: None,
+            thinking_summary: ThinkingSummary::Auto,
+            prompt_caching: false,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        const MIN_HISTORY_BYTES: usize = 4096;
+        const MIN_LINE_BYTES: usize = 1024;
+        const MIN_TOOL_RESULT_TEXT_BYTES: usize = 1024;
+        const MIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+        if self.max_output_tokens < 1 {
+            return Err("config: BUZZ_AGENT_MAX_OUTPUT_TOKENS must be >= 1".into());
+        }
+        if self.max_context_tokens <= u64::from(self.max_output_tokens) {
+            return Err(format!(
+                "config: BUZZ_AGENT_MAX_CONTEXT_TOKENS ({}) must be > BUZZ_AGENT_MAX_OUTPUT_TOKENS ({}) — the context window must leave room for the response",
+                self.max_context_tokens, self.max_output_tokens
+            ));
+        }
+        if self.max_history_bytes < MIN_HISTORY_BYTES {
+            return Err(format!(
+                "config: BUZZ_AGENT_MAX_HISTORY_BYTES must be >= {MIN_HISTORY_BYTES}"
+            ));
+        }
+        if self.max_history_bytes < MAX_PROMPT_BYTES {
+            return Err(format!(
+                "config: BUZZ_AGENT_MAX_HISTORY_BYTES ({}) must be >= MAX_PROMPT_BYTES ({MAX_PROMPT_BYTES})",
+                self.max_history_bytes
+            ));
+        }
+        if self.max_line_bytes < MIN_LINE_BYTES {
+            return Err(format!(
+                "config: BUZZ_AGENT_MAX_LINE_BYTES must be >= {MIN_LINE_BYTES}"
+            ));
+        }
+        if self.max_tool_result_text_bytes < MIN_TOOL_RESULT_TEXT_BYTES
+            || self.max_tool_result_text_bytes > MAX_TOOL_RESULT_BYTES
+        {
+            return Err(format!(
+                "config: BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES must be in {MIN_TOOL_RESULT_TEXT_BYTES}..={MAX_TOOL_RESULT_BYTES}"
+            ));
+        }
+        if self.llm_timeout < MIN_TIMEOUT {
+            return Err("config: BUZZ_AGENT_LLM_TIMEOUT_SECS must be >= 1".into());
+        }
+        if self.tool_timeout < MIN_TIMEOUT {
+            return Err("config: BUZZ_AGENT_TOOL_TIMEOUT_SECS must be >= 1".into());
+        }
+        if self.mcp_init_timeout < MIN_TIMEOUT {
+            return Err("config: BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS must be >= 1".into());
+        }
+        if self.max_parallel_tools < 1 {
+            return Err("config: BUZZ_AGENT_MAX_PARALLEL_TOOLS must be >= 1".into());
+        }
+        if self.mcp_max_restart_attempts < 1 {
+            return Err("config: BUZZ_AGENT_MCP_RESTART_MAX_ATTEMPTS must be >= 1".into());
+        }
+        if self.mcp_restart_base_ms < 1 {
+            return Err("config: BUZZ_AGENT_MCP_RESTART_BASE_MS must be >= 1".into());
+        }
+        if self.mcp_restart_max_ms < self.mcp_restart_base_ms {
+            return Err(
+                "config: BUZZ_AGENT_MCP_RESTART_MAX_MS must be >= BUZZ_AGENT_MCP_RESTART_BASE_MS"
+                    .into(),
+            );
+        }
+        // Provider-level effort validation (fail-fast, clear error).
+        // `none`/`minimal` are not Anthropic values — rejected at startup.
+        //
+        // OpenAI, Databricks, and DatabricksV2 defer effort validation to request-time routing:
+        // availability is model-dependent, and `session/set_model` can change the effective model
+        // after startup. `normalize_effort_for_provider` / `normalize_effort_for_databricks_v2` /
+        // `normalize_effort_for_anthropic_route` apply route-aware normalization in `llm.rs` when
+        // building each request.
+        if let Some(effort) = self.thinking_effort {
+            let is_pure_anthropic = matches!(self.provider, Provider::Anthropic);
+            if is_pure_anthropic && matches!(effort, ThinkingEffort::None | ThinkingEffort::Minimal)
+            {
+                return Err(format!(
+                    "config: BUZZ_AGENT_THINKING_EFFORT={} is not valid for Anthropic providers \
+                     (allowed: low|medium|high|xhigh|max)",
+                    effort.openai_effort_str()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn env(k: &str) -> Option<String> {
+    std::env::var(k).ok()
+}
+
+fn env_or(k: &str, d: &str) -> String {
+    env(k).unwrap_or_else(|| d.into())
+}
+
+fn req(k: &str) -> Result<String, String> {
+    env(k).ok_or_else(|| format!("config: {k} required"))
+}
+
+/// Returns the first present value. `explicit_override` (BUZZ_AGENT_MODEL,
+/// set by the desktop from the persona/record) wins over `provider_default`
+/// (provider-specific env var that may be inherited from the shell).
+/// Returns `None` when both are absent so the caller can supply a
+/// provider-specific error message.
+fn resolve_model(
+    explicit_override: Option<&str>,
+    provider_default: Option<&str>,
+) -> Option<String> {
+    explicit_override.or(provider_default).map(str::to_owned)
+}
+
+fn present_nonempty(v: Option<&str>) -> bool {
+    v.map(str::trim).is_some_and(|s| !s.is_empty())
+}
+
+fn resolve_provider(
+    requested: Option<&str>,
+    anthropic_key: Option<&str>,
+    openai_key: Option<&str>,
+    openrouter_key: Option<&str>,
+) -> Result<Provider, String> {
+    match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let normalized = raw.to_ascii_lowercase();
+            match normalized.as_str() {
+                "anthropic" if present_nonempty(anthropic_key) => Ok(Provider::Anthropic),
+                "anthropic" => Err(
+                    "config: ANTHROPIC_API_KEY required".into(),
+                ),
+                "openai" | "openai-compat" if present_nonempty(openai_key) => Ok(Provider::OpenAi),
+                "openai" | "openai-compat" => Err(
+                    "config: OPENAI_COMPAT_API_KEY required".into(),
+                ),
+                "databricks" => Ok(Provider::Databricks),
+                "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
+                "openrouter" if present_nonempty(openrouter_key) => Ok(Provider::OpenRouter),
+                "openrouter" => Err("config: OPENROUTER_API_KEY required".into()),
+                _ => Err(format!(
+                    "config: BUZZ_AGENT_PROVIDER={raw} not supported"
+                )),
+            }
+        }
+        None => Err(
+            "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, databricks)".into(),
+        ),
+    }
+}
+
+/// Parse `OPENAI_COMPAT_API`. Pure (env-free) for testability; the
+/// caller hands in the raw value.
+fn parse_openai_api(raw: Option<&str>) -> Result<OpenAiApi, String> {
+    match raw.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "chat" | "chat-completions" | "chat_completions" => Ok(OpenAiApi::Chat),
+        "responses" => Ok(OpenAiApi::Responses),
+        "auto" | "" => Ok(OpenAiApi::Auto),
+        other => Err(format!(
+            "config: OPENAI_COMPAT_API={other} not supported (use auto|chat|responses)"
+        )),
+    }
+}
+
+/// `true` when `base_url` is an official OpenAI host. Hosts on
+/// `*.openai.com` get Responses under `Auto`; everything else (vLLM,
+/// Ollama, OpenRouter, Block Gateway, …) gets Chat Completions.
+/// Lookalike-safe: `api.openai.com.evil.example` returns `false`.
+pub fn is_openai_host(base_url: &str) -> bool {
+    let rest = match base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+    {
+        Some(r) => r,
+        None => return false,
+    };
+    let host = &rest[..rest.find(['/', ':']).unwrap_or(rest.len())];
+    host == "api.openai.com" || host.ends_with(".openai.com")
+}
+
+/// Return the NIP-AM registered billing-authority token for `base_url` when it
+/// canonically matches one of the official allowlisted endpoints. Returns `None`
+/// for any custom, gateway, or lookalike URL.
+///
+/// Rules (per NIP-AM publisher behavior):
+/// - HTTPS only (no HTTP).
+/// - Exact allowlisted host — lookalike-safe: `api.openai.com.evil.example` is rejected.
+/// - Default port only (no `:8443` etc.).
+/// - No userinfo, query string, or fragment.
+/// - Required API base path present and exact (where applicable — OpenRouter requires `/api/v1`).
+/// - No path prefix lookalikes (`/api/v10` is not `/api/v1`).
+///
+/// The wire token itself is the registered bare-host identifier (e.g.
+/// `"api.anthropic.com"`), not a URL — the path check is publisher-side only.
+///
+/// Allowlist (registered values; set extends only by NIP-AM amendment):
+/// - `https://api.anthropic.com/` → `"api.anthropic.com"`
+/// - `https://api.openai.com/v1` → `"api.openai.com"`  (path `/v1` required)
+/// - `https://openrouter.ai/api/v1` → `"openrouter.ai"` (path `/api/v1` required)
+pub fn pricing_authority(base_url: &str) -> Option<&'static str> {
+    let parsed = url::Url::parse(base_url).ok()?;
+
+    // Require HTTPS only.
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    // Reject userinfo (username or password present).
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    // Reject query strings and fragments.
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return None;
+    }
+    // Require either no port or the default HTTPS port (443). Both forms are
+    // equivalent canonical origins; rejecting explicit :443 would create false
+    // negatives for providers that include the default port in their base URL.
+    if let Some(port) = parsed.port() {
+        if port != 443 {
+            return None;
+        }
+    }
+
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    // Normalise trailing slashes for path comparison.
+    let path = parsed.path().trim_end_matches('/');
+
+    match host.as_str() {
+        "api.anthropic.com" => {
+            // Anthropic: path must be empty or "/" — no required prefix.
+            if path.is_empty() {
+                Some("api.anthropic.com")
+            } else {
+                None
+            }
+        }
+        "api.openai.com" => {
+            // OpenAI: path must be exactly "/v1".
+            if path == "/v1" {
+                Some("api.openai.com")
+            } else {
+                None
+            }
+        }
+        "openrouter.ai" => {
+            // OpenRouter: path must be exactly "/api/v1".
+            if path == "/api/v1" {
+                Some("openrouter.ai")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> Result<T, String>
+where
+    T::Err: std::fmt::Display,
+{
+    env(key)
+        .map(|v| v.parse().map_err(|e| format!("config: {key}: {e}")))
+        .unwrap_or(Ok(default))
+}
+
+/// Hook-server allowlist parsed from a comma-separated env var.
+///   - unset / empty / whitespace-only → `None` (no hooks enabled)
+///   - `*`                              → `All` (every server eligible)
+///   - `a,b,c`                          → `Only(["a","b","c"])`
+#[derive(Debug, Clone)]
+pub enum HookServers {
+    None,
+    All,
+    Only(Vec<String>),
+}
+
+impl HookServers {
+    /// Returns true iff `name` may receive hook calls.
+    pub fn allows(&self, name: &str) -> bool {
+        match self {
+            HookServers::None => false,
+            HookServers::All => true,
+            HookServers::Only(v) => v.iter().any(|s| s == name),
+        }
+    }
+
+    /// True if no hooks should ever fire — used to short-circuit dispatch.
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, HookServers::None)
+    }
+}
+
+fn parse_hook_servers_env(key: &str) -> HookServers {
+    parse_hook_servers(env(key).as_deref())
+}
+
+/// Pure parser exposed for unit tests. `None` (env unset) and `Some("")`
+/// (env set but empty) both yield `HookServers::None`.
+fn parse_hook_servers(raw: Option<&str>) -> HookServers {
+    let raw = match raw {
+        Some(v) => v,
+        None => return HookServers::None,
+    };
+    let names: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        return HookServers::None;
+    }
+    // `*` is the wildcard — only honored when it's the sole entry. A mixed
+    // value like "*,foo" falls through to `Only(["*","foo"])`; "*" is not a
+    // legal MCP server name (it can't pass `valid_name`), so it never matches
+    // an actual server. This avoids silently widening scope on typos.
+    if names.len() == 1 && names[0] == "*" {
+        return HookServers::All;
+    }
+    HookServers::Only(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_servers_unset_is_none() {
+        assert!(matches!(parse_hook_servers(None), HookServers::None));
+    }
+
+    #[test]
+    fn hook_servers_empty_string_is_none() {
+        assert!(matches!(parse_hook_servers(Some("")), HookServers::None));
+    }
+
+    #[test]
+    fn hook_servers_whitespace_only_is_none() {
+        assert!(matches!(
+            parse_hook_servers(Some("   ,, ,")),
+            HookServers::None
+        ));
+    }
+
+    #[test]
+    fn hook_servers_star_is_all() {
+        assert!(matches!(parse_hook_servers(Some("*")), HookServers::All));
+    }
+
+    #[test]
+    fn hook_servers_star_with_whitespace_is_all() {
+        assert!(matches!(
+            parse_hook_servers(Some("  *  ")),
+            HookServers::All
+        ));
+    }
+
+    #[test]
+    fn hook_servers_named_list() {
+        match parse_hook_servers(Some("foo,bar")) {
+            HookServers::Only(v) => assert_eq!(v, vec!["foo".to_owned(), "bar".to_owned()]),
+            other => panic!("expected Only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_servers_trims_entries() {
+        match parse_hook_servers(Some(" foo , bar , ")) {
+            HookServers::Only(v) => assert_eq!(v, vec!["foo".to_owned(), "bar".to_owned()]),
+            other => panic!("expected Only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_servers_star_mixed_is_literal() {
+        // `*,foo` is NOT a wildcard — it's a literal Only(["*","foo"]).
+        // No real server can be named `*`, so this never matches anything.
+        match parse_hook_servers(Some("*,foo")) {
+            HookServers::Only(v) => assert_eq!(v, vec!["*".to_owned(), "foo".to_owned()]),
+            other => panic!("expected Only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_servers_allows_matches_named_only() {
+        let hs = parse_hook_servers(Some("foo,bar"));
+        assert!(hs.allows("foo"));
+        assert!(hs.allows("bar"));
+        assert!(!hs.allows("baz"));
+    }
+
+    #[test]
+    fn hook_servers_allows_matches_all() {
+        assert!(parse_hook_servers(Some("*")).allows("anything"));
+    }
+
+    #[test]
+    fn hook_servers_allows_blocks_when_none() {
+        assert!(!parse_hook_servers(None).allows("foo"));
+    }
+
+    #[test]
+    fn hook_servers_star_mixed_does_not_match_real_server() {
+        let hs = parse_hook_servers(Some("*,foo"));
+        // The literal "*" entry exists in Only, but no real server can
+        // be named "*" (rejected by the MCP server name validator).
+        assert!(hs.allows("foo"));
+        assert!(!hs.allows("bar"));
+        // Allowed strictly only as a literal match — defense-in-depth
+        // expectation for callers.
+        assert!(hs.allows("*"));
+    }
+
+    #[test]
+    fn parse_openai_api_values() {
+        use OpenAiApi::*;
+        for (raw, want) in [
+            (None, Ok(Auto)),
+            (Some("auto"), Ok(Auto)),
+            (Some("  AUTO  "), Ok(Auto)),
+            (Some(""), Ok(Auto)),
+            (Some("chat"), Ok(Chat)),
+            (Some("chat-completions"), Ok(Chat)),
+            (Some("Responses"), Ok(Responses)),
+        ] {
+            assert_eq!(parse_openai_api(raw), want, "raw={raw:?}");
+        }
+        let err = parse_openai_api(Some("nope")).unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API=nope"), "{err}");
+    }
+
+    #[test]
+    fn resolve_provider_keeps_requested_provider_when_token_present() {
+        assert_eq!(
+            resolve_provider(Some("anthropic"), Some("sk-ant"), None, None).unwrap(),
+            Provider::Anthropic
+        );
+        assert_eq!(
+            resolve_provider(Some("openai"), None, Some("sk-openai"), None).unwrap(),
+            Provider::OpenAi
+        );
+    }
+
+    #[test]
+    fn resolve_provider_errors_when_requested_provider_key_missing() {
+        // No fallback — missing key returns an error regardless of Databricks availability.
+        let err = resolve_provider(Some("anthropic"), None, None, None).unwrap_err();
+        assert!(err.contains("ANTHROPIC_API_KEY required"), "{err}");
+
+        let err = resolve_provider(Some("openai-compat"), None, Some("   "), None).unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
+    }
+
+    #[test]
+    fn resolve_provider_errors_when_provider_env_absent() {
+        // No implicit inference — absent BUZZ_AGENT_PROVIDER is an error.
+        let err = resolve_provider(None, None, None, None).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
+    }
+
+    #[test]
+    fn resolve_provider_requires_databricks_host_and_model_for_fallback() {
+        // Renamed: verify the explicit databricks provider path works correctly.
+        // When BUZZ_AGENT_PROVIDER=databricks, resolve_provider succeeds regardless
+        // of DATABRICKS_HOST/MODEL (those are validated later in from_env()).
+        assert_eq!(
+            resolve_provider(Some("databricks"), None, None, None).unwrap(),
+            Provider::Databricks
+        );
+        // Missing key for other providers still errors — no Databricks fallback.
+        let err = resolve_provider(Some("openai"), None, None, None).unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
+        let err = resolve_provider(None, None, None, None).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
+    }
+
+    #[test]
+    fn resolve_provider_unsupported_error_preserves_user_casing() {
+        let err = resolve_provider(Some("OpenAIish"), None, None, None).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
+    }
+
+    #[test]
+    fn is_openai_host_matrix() {
+        // Lookalike-safe: `api.openai.com.evil.example` and malformed URLs
+        // are treated as non-OpenAI (which falls back to Chat Completions).
+        for (url, want) in [
+            ("https://api.openai.com/v1", true),
+            ("https://api.openai.com", true),
+            ("http://eu.api.openai.com/v1", true),
+            ("http://localhost:11434/v1", false),
+            ("https://openrouter.ai/api/v1", false),
+            ("https://gateway.block.example/v1", false),
+            ("https://api.openai.com.evil.example/v1", false),
+            ("not a url", false),
+        ] {
+            assert_eq!(is_openai_host(url), want, "url={url}");
+        }
+    }
+
+    #[test]
+    fn resolve_model_prefers_explicit_override() {
+        let result = resolve_model(Some("override-model"), Some("provider-model"));
+        assert_eq!(result.as_deref(), Some("override-model"));
+    }
+
+    #[test]
+    fn resolve_model_falls_back_to_provider_default() {
+        let result = resolve_model(None, Some("provider-model"));
+        assert_eq!(result.as_deref(), Some("provider-model"));
+    }
+
+    #[test]
+    fn resolve_model_returns_none_when_both_absent() {
+        let result = resolve_model(None, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_thinking_effort_round_trips_all_values() {
+        for (raw, expected) in [
+            ("none", ThinkingEffort::None),
+            ("minimal", ThinkingEffort::Minimal),
+            ("low", ThinkingEffort::Low),
+            ("medium", ThinkingEffort::Medium),
+            ("high", ThinkingEffort::High),
+            ("xhigh", ThinkingEffort::XHigh),
+            ("max", ThinkingEffort::Max),
+        ] {
+            assert_eq!(
+                parse_thinking_effort(Some(raw)).unwrap(),
+                Some(expected),
+                "raw={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_thinking_effort_none_and_empty_yield_none() {
+        assert_eq!(parse_thinking_effort(None).unwrap(), None);
+        assert_eq!(parse_thinking_effort(Some("")).unwrap(), None);
+        assert_eq!(parse_thinking_effort(Some("   ")).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_thinking_effort_is_case_insensitive() {
+        assert_eq!(
+            parse_thinking_effort(Some("HIGH")).unwrap(),
+            Some(ThinkingEffort::High)
+        );
+        assert_eq!(
+            parse_thinking_effort(Some("  Medium  ")).unwrap(),
+            Some(ThinkingEffort::Medium)
+        );
+    }
+
+    #[test]
+    fn parse_thinking_effort_rejects_unknown_value() {
+        let err = parse_thinking_effort(Some("extreme")).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_THINKING_EFFORT=extreme"), "{err}");
+        assert!(
+            err.contains("none|minimal|low|medium|high|xhigh|max"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_thinking_summary_round_trips_all_values() {
+        for (raw, expected) in [
+            ("auto", ThinkingSummary::Auto),
+            ("concise", ThinkingSummary::Concise),
+            ("detailed", ThinkingSummary::Detailed),
+        ] {
+            assert_eq!(
+                parse_thinking_summary(Some(raw)).unwrap(),
+                expected,
+                "raw={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_thinking_summary_unset_and_empty_yield_auto() {
+        assert_eq!(parse_thinking_summary(None).unwrap(), ThinkingSummary::Auto);
+        assert_eq!(
+            parse_thinking_summary(Some("")).unwrap(),
+            ThinkingSummary::Auto
+        );
+        assert_eq!(
+            parse_thinking_summary(Some("   ")).unwrap(),
+            ThinkingSummary::Auto
+        );
+    }
+
+    #[test]
+    fn parse_thinking_summary_is_case_insensitive() {
+        assert_eq!(
+            parse_thinking_summary(Some("DETAILED")).unwrap(),
+            ThinkingSummary::Detailed
+        );
+        assert_eq!(
+            parse_thinking_summary(Some("  Concise  ")).unwrap(),
+            ThinkingSummary::Concise
+        );
+    }
+
+    #[test]
+    fn parse_thinking_summary_rejects_unknown_value() {
+        let err = parse_thinking_summary(Some("verbose")).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_THINKING_SUMMARY=verbose"), "{err}");
+        assert!(err.contains("auto|concise|detailed"), "{err}");
+    }
+
+    #[test]
+    fn thinking_summary_as_str_mapping() {
+        assert_eq!(ThinkingSummary::Auto.as_str(), "auto");
+        assert_eq!(ThinkingSummary::Concise.as_str(), "concise");
+        assert_eq!(ThinkingSummary::Detailed.as_str(), "detailed");
+    }
+
+    #[test]
+    fn thinking_effort_anthropic_budget_tokens_mapping() {
+        assert_eq!(ThinkingEffort::Low.anthropic_budget_tokens(), 1_024);
+        assert_eq!(ThinkingEffort::Medium.anthropic_budget_tokens(), 8_192);
+        assert_eq!(ThinkingEffort::High.anthropic_budget_tokens(), 32_768);
+        // XHigh and Max clamp to the high budget value for manual-budget models.
+        assert_eq!(ThinkingEffort::XHigh.anthropic_budget_tokens(), 32_768);
+        assert_eq!(ThinkingEffort::Max.anthropic_budget_tokens(), 32_768);
+        // None/Minimal are rejected at startup for Anthropic; defensive zero.
+        assert_eq!(ThinkingEffort::None.anthropic_budget_tokens(), 0);
+        assert_eq!(ThinkingEffort::Minimal.anthropic_budget_tokens(), 0);
+    }
+
+    #[test]
+    fn thinking_effort_openai_effort_str_mapping() {
+        assert_eq!(ThinkingEffort::None.openai_effort_str(), "none");
+        assert_eq!(ThinkingEffort::Minimal.openai_effort_str(), "minimal");
+        assert_eq!(ThinkingEffort::Low.openai_effort_str(), "low");
+        assert_eq!(ThinkingEffort::Medium.openai_effort_str(), "medium");
+        assert_eq!(ThinkingEffort::High.openai_effort_str(), "high");
+        assert_eq!(ThinkingEffort::XHigh.openai_effort_str(), "xhigh");
+        assert_eq!(ThinkingEffort::Max.openai_effort_str(), "max");
+    }
+
+    #[test]
+    fn thinking_effort_anthropic_effort_str_mapping() {
+        assert_eq!(ThinkingEffort::Low.anthropic_effort_str(), "low");
+        assert_eq!(ThinkingEffort::Medium.anthropic_effort_str(), "medium");
+        assert_eq!(ThinkingEffort::High.anthropic_effort_str(), "high");
+        assert_eq!(ThinkingEffort::XHigh.anthropic_effort_str(), "xhigh");
+        assert_eq!(ThinkingEffort::Max.anthropic_effort_str(), "max");
+        // Defensive fallback for invalid Anthropic values (caught at startup validation).
+        assert_eq!(ThinkingEffort::None.anthropic_effort_str(), "low");
+        assert_eq!(ThinkingEffort::Minimal.anthropic_effort_str(), "low");
+    }
+
+    #[test]
+    fn thinking_effort_ord_ordering() {
+        // PartialOrd/Ord must reflect the ordered hierarchy.
+        assert!(ThinkingEffort::None < ThinkingEffort::Minimal);
+        assert!(ThinkingEffort::Minimal < ThinkingEffort::Low);
+        assert!(ThinkingEffort::Low < ThinkingEffort::Medium);
+        assert!(ThinkingEffort::Medium < ThinkingEffort::High);
+        assert!(ThinkingEffort::High < ThinkingEffort::XHigh);
+        assert!(ThinkingEffort::XHigh < ThinkingEffort::Max);
+    }
+
+    // ---- anthropic_thinking_config helper — per-family tests ----
+
+    #[test]
+    fn anthropic_thinking_config_claude3_emits_budget_tokens() {
+        // Claude 3.x → `thinking.budget_tokens`; clamped to min(level_budget, max_output - 1024).
+        // max_output_tokens = 4096: headroom = 4096 - 1024 = 3072; High budget (32768) → 3072.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-3-7-sonnet-20250219",
+            ThinkingEffort::High,
+            4096,
+        );
+        let t = thinking.expect("thinking field must be present for claude-3");
+        assert_eq!(t["type"], "enabled");
+        assert_eq!(t["budget_tokens"], 3072); // capped: min(32768, 4096-1024)
+        assert!(
+            output_config.is_none(),
+            "output_config must be absent for claude-3"
+        );
+    }
+
+    #[test]
+    fn anthropic_thinking_config_claude3_omits_thinking_when_max_output_too_small() {
+        // max_output_tokens = 2047: headroom = 2047 - 1024 = 1023 < 1024 → omit thinking.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-3-7-sonnet-20250219",
+            ThinkingEffort::High,
+            2047,
+        );
+        assert!(
+            thinking.is_none(),
+            "thinking must be omitted when max_output_tokens - 1024 < 1024 (budget would starve answer)"
+        );
+        assert!(output_config.is_none());
+    }
+
+    #[test]
+    fn anthropic_thinking_config_claude3_emits_thinking_at_boundary_2048() {
+        // max_output_tokens = 2048: headroom = 2048 - 1024 = 1024 ≥ 1024 → emit budget = 1024.
+        let (thinking, _) = anthropic_thinking_config(
+            "anthropic",
+            "claude-3-7-sonnet-20250219",
+            ThinkingEffort::High,
+            2048,
+        );
+        let t = thinking.expect("thinking must be present when max_output_tokens = 2048");
+        assert_eq!(t["budget_tokens"], 1024); // min(32768, 2048-1024) = 1024
+    }
+
+    #[test]
+    fn anthropic_thinking_config_claude3_budget_uncapped_when_fits() {
+        // High budget fits comfortably under a large max_output_tokens.
+        let (thinking, _) = anthropic_thinking_config(
+            "anthropic",
+            "claude-3-7-sonnet-20250219",
+            ThinkingEffort::High,
+            65_536,
+        );
+        let t = thinking.unwrap();
+        assert_eq!(t["budget_tokens"], 32_768);
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_8_emits_adaptive_and_effort() {
+        // Opus 4.8 — adaptive family. Requires thinking:{type:"adaptive"} to enable thinking.
+        let (thinking, output_config) =
+            anthropic_thinking_config("anthropic", "claude-opus-4-8", ThinkingEffort::High, 32_768);
+        let t = thinking.expect("thinking must be present for claude-opus-4-8");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-opus-4-8");
+        assert_eq!(oc["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_7_emits_adaptive_and_effort() {
+        // Opus 4.7 — adaptive family.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-opus-4-7",
+            ThinkingEffort::Medium,
+            32_768,
+        );
+        let t = thinking.expect("thinking must be present for claude-opus-4-7");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-opus-4-7");
+        assert_eq!(oc["effort"], "medium");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_sonnet_5_emits_adaptive_and_effort() {
+        // Sonnet 5 — adaptive family.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-sonnet-5-20250901",
+            ThinkingEffort::Low,
+            32_768,
+        );
+        let t = thinking.expect("thinking must be present for claude-sonnet-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-sonnet-5");
+        assert_eq!(oc["effort"], "low");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_sonnet_4_6_emits_adaptive_and_effort() {
+        // Sonnet 4.6 — adaptive family. Docs explicitly list "Combine effort with adaptive thinking."
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-sonnet-4-6",
+            ThinkingEffort::High,
+            32_768,
+        );
+        let t = thinking.expect("thinking must be present for claude-sonnet-4-6");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-sonnet-4-6");
+        assert_eq!(oc["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_5_emits_manual_budget() {
+        // Opus 4.5 — manual budget (NOT adaptive; effort page: "uses manual thinking").
+        let (thinking, output_config) =
+            anthropic_thinking_config("anthropic", "claude-opus-4-5", ThinkingEffort::High, 65_536);
+        let t = thinking.expect("thinking must be present for claude-opus-4-5");
+        assert_eq!(t["type"], "enabled");
+        assert_eq!(t["budget_tokens"], 32_768); // High budget fits under 65536
+        assert!(
+            output_config.is_none(),
+            "output_config must be absent for claude-opus-4-5 (manual budget)"
+        );
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_5_budget_capped() {
+        // Opus 4.5 manual budget is clamped to min(level_budget, max_output_tokens - 1024).
+        // max_output_tokens = 4096: headroom = 4096 - 1024 = 3072; High budget (32768) → 3072.
+        let (thinking, _) =
+            anthropic_thinking_config("anthropic", "claude-opus-4-5", ThinkingEffort::High, 4096);
+        let t = thinking.unwrap();
+        assert_eq!(t["budget_tokens"], 3072); // min(32768, 4096-1024)
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_5_omits_thinking_when_max_output_1025() {
+        // max_output_tokens = 1025: headroom = 1025 - 1024 = 1 < 1024 → omit thinking.
+        let (thinking, _) =
+            anthropic_thinking_config("anthropic", "claude-opus-4-5", ThinkingEffort::High, 1025);
+        assert!(
+            thinking.is_none(),
+            "thinking must be omitted when max_output_tokens - 1024 < 1024"
+        );
+    }
+
+    #[test]
+    fn anthropic_thinking_config_manual_budget_low_emits_1024_when_fits() {
+        // Low budget (1024 tokens) exactly fits when max_output_tokens = 2048.
+        // headroom = 2048 - 1024 = 1024; min(1024, 1024) = 1024 ≥ 1024 → emit.
+        let (thinking, _) = anthropic_thinking_config(
+            "anthropic",
+            "claude-3-7-sonnet-20250219",
+            ThinkingEffort::Low,
+            2048,
+        );
+        let t = thinking.expect("Low budget (1024) must be emitted when max_output_tokens = 2048");
+        assert_eq!(t["budget_tokens"], 1024);
+    }
+
+    #[test]
+    fn anthropic_thinking_config_unknown_claude_omits_both_fields() {
+        // An unknown/future "claude-*" name that is not in the allowlist → omit both fields.
+        // This prevents sending an unverified shape to an unrecognized model.
+        // Includes Opus 4.9 (future version), which is NOT in the doc-verified adaptive list.
+        for model in &[
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5",
+            "claude-unknown-9-1",
+            "claude-future-model",
+            "claude-opus-4-9",
+        ] {
+            let (thinking, output_config) =
+                anthropic_thinking_config("anthropic", model, ThinkingEffort::High, 32_768);
+            assert!(
+                thinking.is_none(),
+                "thinking must be absent for unverified claude model: {model}"
+            );
+            assert!(
+                output_config.is_none(),
+                "output_config must be absent for unverified claude model: {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_non_claude_omits_both_fields() {
+        // Non-Anthropic model names (gpt-5, llama, etc.) → omit both fields.
+        let (thinking, output_config) =
+            anthropic_thinking_config("anthropic", "gpt-4o-mini", ThinkingEffort::High, 32_768);
+        assert!(
+            thinking.is_none(),
+            "thinking must be absent for non-claude model"
+        );
+        assert!(
+            output_config.is_none(),
+            "output_config must be absent for non-claude model"
+        );
+    }
+
+    #[test]
+    fn anthropic_thinking_config_databricks_prefix_stripped_for_claude3() {
+        // Databricks gateway prefixes like "databricks-claude-3-..." must be stripped.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "databricks-claude-3-5-sonnet",
+            ThinkingEffort::Low,
+            8_192,
+        );
+        let t = thinking.expect("thinking must be present after stripping databricks- prefix");
+        assert_eq!(t["type"], "enabled");
+        assert!(output_config.is_none());
+    }
+
+    #[test]
+    fn anthropic_thinking_config_databricks_prefix_stripped_for_opus_4_7() {
+        // Databricks gateway prefix stripping applies to adaptive Claude families too.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "databricks-claude-opus-4-7",
+            ThinkingEffort::High,
+            32_768,
+        );
+        let t = thinking
+            .expect("thinking:{type:adaptive} must be present for databricks-claude-opus-4-7");
+        assert_eq!(t["type"], "adaptive");
+        let oc =
+            output_config.expect("output_config must be present for databricks-claude-opus-4-7");
+        assert_eq!(oc["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_databricks_prefix_stripped_for_opus_4_8() {
+        // Databricks gateway prefix stripping applies to Opus 4.8 too.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "databricks-claude-opus-4-8",
+            ThinkingEffort::Medium,
+            32_768,
+        );
+        let t = thinking
+            .expect("thinking:{type:adaptive} must be present for databricks-claude-opus-4-8");
+        assert_eq!(t["type"], "adaptive");
+        let oc =
+            output_config.expect("output_config must be present for databricks-claude-opus-4-8");
+        assert_eq!(oc["effort"], "medium");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_goose_prefix_stripped_for_fable_5() {
+        // "goose-" catalog prefix must be stripped so goose-claude-fable-5 routes to
+        // the adaptive + xhigh/max bucket, not the "unknown model → (None, None)" path.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "goose-claude-fable-5",
+            ThinkingEffort::Max,
+            32_768,
+        );
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for goose-claude-fable-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for goose-claude-fable-5");
+        assert_eq!(oc["effort"], "max");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_goose_prefix_stripped_for_sonnet_5() {
+        // Adaptive xhigh model via goose- prefix.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "goose-claude-sonnet-5",
+            ThinkingEffort::XHigh,
+            32_768,
+        );
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for goose-claude-sonnet-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for goose-claude-sonnet-5");
+        assert_eq!(oc["effort"], "xhigh");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_arbitrary_prefix_stripped_for_opus_4_7() {
+        // team-x-claude-opus-4-7: first claude- token at index 7 → strips "team-x-"
+        // Verifies the arbitrary-prefix normalization reaches anthropic_thinking_config
+        // end-to-end: UI exposes max as valid, and runtime must honor it.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "team-x-claude-opus-4-7",
+            ThinkingEffort::Max,
+            32_768,
+        );
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for team-x-claude-opus-4-7");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for team-x-claude-opus-4-7");
+        assert_eq!(oc["effort"], "max");
+    }
+
+    // ---- anthropic_thinking_config: display:"summarized" in all enabled shapes ----
+
+    #[test]
+    fn anthropic_thinking_config_adaptive_emits_display_summarized() {
+        // Adaptive families (Opus 4.7, Sonnet 5, Fable 5, etc.) must include
+        // display:"summarized" so thinking text is returned, not omitted.
+        for model in &[
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-5-20250901",
+            "claude-fable-5",
+            "claude-mythos-5",
+        ] {
+            let (thinking, _) =
+                anthropic_thinking_config("anthropic", model, ThinkingEffort::High, 32_768);
+            let t = thinking
+                .unwrap_or_else(|| panic!("thinking must be present for adaptive model {model}"));
+            assert_eq!(
+                t["display"], "summarized",
+                "display:summarized must be present for adaptive model {model}: got {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_manual_budget_emits_display_summarized() {
+        // Manual-budget families (claude-3.x, opus-4-5) must also include
+        // display:"summarized" so thinking text is returned.
+        for model in &["claude-3-7-sonnet-20250219", "claude-opus-4-5"] {
+            let (thinking, _) =
+                anthropic_thinking_config("anthropic", model, ThinkingEffort::High, 65_536);
+            let t = thinking.unwrap_or_else(|| {
+                panic!("thinking must be present for manual-budget model {model}")
+            });
+            assert_eq!(
+                t["display"], "summarized",
+                "display:summarized must be present for manual-budget model {model}: got {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_omitted_when_no_thinking_has_no_display_field() {
+        // Models that don't produce a thinking field at all should have no display key.
+        let (thinking, _) = anthropic_thinking_config(
+            "anthropic",
+            "claude-haiku-4-5",
+            ThinkingEffort::High,
+            32_768,
+        );
+        assert!(
+            thinking.is_none(),
+            "thinking must be absent for unknown model"
+        );
+    }
+
+    // ---- anthropic_thinking_config — xhigh/max body-shape assertions ----
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_8_xhigh_emits_xhigh_effort() {
+        // Opus 4.8 supports xhigh; output_config.effort must be "xhigh".
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-opus-4-8",
+            ThinkingEffort::XHigh,
+            32_768,
+        );
+        let t = thinking.expect("thinking must be present for claude-opus-4-8");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-opus-4-8");
+        assert_eq!(oc["effort"], "xhigh");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_8_max_emits_max_effort() {
+        // Opus 4.8 supports max; output_config.effort must be "max".
+        let (thinking, output_config) =
+            anthropic_thinking_config("anthropic", "claude-opus-4-8", ThinkingEffort::Max, 32_768);
+        let t = thinking.expect("thinking must be present for claude-opus-4-8");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-opus-4-8");
+        assert_eq!(oc["effort"], "max");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_7_xhigh_emits_xhigh_effort() {
+        // Opus 4.7 supports xhigh.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-opus-4-7",
+            ThinkingEffort::XHigh,
+            32_768,
+        );
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.unwrap();
+        assert_eq!(oc["effort"], "xhigh");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_6_xhigh_clamps_to_high() {
+        // Opus 4.6 does NOT support xhigh → clamp to high.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-opus-4-6",
+            ThinkingEffort::XHigh,
+            32_768,
+        );
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.unwrap();
+        assert_eq!(
+            oc["effort"], "high",
+            "xhigh must clamp to high for claude-opus-4-6"
+        );
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_6_max_passes_through() {
+        // Opus 4.6 supports max — passes through without clamping.
+        let (thinking, output_config) =
+            anthropic_thinking_config("anthropic", "claude-opus-4-6", ThinkingEffort::Max, 32_768);
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.unwrap();
+        assert_eq!(oc["effort"], "max");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_manual_bucket_xhigh_clamps_to_high_budget() {
+        // Manual-budget models (claude-3*, opus-4-5): xhigh clamps to high budget (32_768).
+        for model in &["claude-3-7-sonnet-20250219", "claude-opus-4-5"] {
+            let (thinking, output_config) =
+                anthropic_thinking_config("anthropic", model, ThinkingEffort::XHigh, 65_536);
+            let t = thinking.expect("thinking must be present");
+            assert_eq!(t["type"], "enabled");
+            assert_eq!(
+                t["budget_tokens"], 32_768,
+                "xhigh must clamp to high budget for manual model {model}"
+            );
+            assert!(output_config.is_none());
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_manual_bucket_max_clamps_to_high_budget() {
+        // Manual-budget models: max also clamps to high budget (32_768).
+        let (thinking, _) =
+            anthropic_thinking_config("anthropic", "claude-opus-4-5", ThinkingEffort::Max, 65_536);
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "enabled");
+        assert_eq!(t["budget_tokens"], 32_768);
+    }
+
+    // ---- provider-level validation tests ----
+
+    /// Build a minimal Config with the given provider and thinking_effort, bypassing from_env().
+    /// Uses `Config::for_discovery` as a base and patches the fields we care about.
+    fn make_config_for_validation(
+        provider: Provider,
+        thinking_effort: Option<ThinkingEffort>,
+    ) -> Config {
+        let mut cfg = Config::for_discovery(provider, "key".into(), "https://example.com".into());
+        cfg.model = "some-model".into();
+        cfg.thinking_effort = thinking_effort;
+        // for_discovery sets max_output_tokens=1 and max_context_tokens=200_001 which satisfies
+        // the context > output constraint. Adjust to something valid for further checks.
+        cfg.max_output_tokens = 1024;
+        cfg.max_context_tokens = 200_000 + 1024;
+        // Restore mandatory positive values that for_discovery zeroes out.
+        cfg.mcp_max_restart_attempts = 1;
+        cfg.mcp_restart_base_ms = 1;
+        cfg.mcp_restart_max_ms = 1;
+        cfg.max_parallel_tools = 1;
+        cfg.llm_timeout = Duration::from_secs(1);
+        cfg.tool_timeout = Duration::from_secs(1);
+        cfg.mcp_init_timeout = Duration::from_secs(1);
+        cfg
+    }
+
+    #[test]
+    fn validate_rejects_none_effort_for_anthropic() {
+        let cfg = make_config_for_validation(Provider::Anthropic, Some(ThinkingEffort::None));
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("BUZZ_AGENT_THINKING_EFFORT=none"),
+            "error must name the value: {err}"
+        );
+        assert!(
+            err.contains("not valid for Anthropic"),
+            "error must name the provider: {err}"
+        );
+        assert!(
+            err.contains("low|medium|high|xhigh|max"),
+            "error must name allowed values: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_minimal_effort_for_anthropic() {
+        let cfg = make_config_for_validation(Provider::Anthropic, Some(ThinkingEffort::Minimal));
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_THINKING_EFFORT=minimal"), "{err}");
+        assert!(err.contains("not valid for Anthropic"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_all_efforts_for_databricks_v2() {
+        // DatabricksV2 dispatches across Anthropic/OpenAI/MLflow routes at request build time.
+        // No effort value is invalid for all three routes — startup rejects none.
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let cfg = make_config_for_validation(Provider::DatabricksV2, Some(effort));
+            assert!(
+                cfg.validate().is_ok(),
+                "DatabricksV2 must accept {effort:?} at startup (route-aware normalization at request build)"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_all_efforts_for_openai() {
+        // OpenAI effort support is model-dependent and normalized at request build time.
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let cfg = make_config_for_validation(Provider::OpenAi, Some(effort));
+            assert!(
+                cfg.validate().is_ok(),
+                "OpenAI must accept {effort:?} at startup (route-aware normalization at request build)"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_all_efforts_for_databricks() {
+        // Legacy Databricks effort support is model-dependent and normalized at request build time.
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let cfg = make_config_for_validation(Provider::Databricks, Some(effort));
+            assert!(
+                cfg.validate().is_ok(),
+                "Databricks must accept {effort:?} at startup (route-aware normalization at request build)"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_xhigh_for_anthropic() {
+        // xhigh is valid for Anthropic providers — model-level clamping is dynamic.
+        let cfg = make_config_for_validation(Provider::Anthropic, Some(ThinkingEffort::XHigh));
+        assert!(
+            cfg.validate().is_ok(),
+            "xhigh must be accepted at startup for Anthropic"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_max_for_anthropic() {
+        // max is valid for Anthropic providers.
+        let cfg = make_config_for_validation(Provider::Anthropic, Some(ThinkingEffort::Max));
+        assert!(cfg.validate().is_ok(), "max must be accepted for Anthropic");
+    }
+
+    #[test]
+    fn validate_accepts_xhigh_for_openai() {
+        // xhigh is valid for OpenAI providers (server-validated per-model).
+        let cfg = make_config_for_validation(Provider::OpenAi, Some(ThinkingEffort::XHigh));
+        assert!(cfg.validate().is_ok(), "xhigh must be accepted for OpenAI");
+    }
+
+    #[test]
+    fn validate_accepts_none_and_minimal_for_openai() {
+        // none/minimal are valid OpenAI effort values.
+        let cfg_none = make_config_for_validation(Provider::OpenAi, Some(ThinkingEffort::None));
+        assert!(
+            cfg_none.validate().is_ok(),
+            "none must be accepted for OpenAI"
+        );
+        let cfg_minimal =
+            make_config_for_validation(Provider::OpenAi, Some(ThinkingEffort::Minimal));
+        assert!(
+            cfg_minimal.validate().is_ok(),
+            "minimal must be accepted for OpenAI"
+        );
+    }
+
+    // ---- normalize_effort_for_databricks_v2 (F1 exact-record corrections) ----
+
+    #[test]
+    fn normalize_effort_for_databricks_v2_gpt_5_5_xhigh_clamps_to_high() {
+        // F1 correction: databricks-gpt-5-5 supported_efforts = [low, medium, high].
+        // XHigh is outside the supported set → nearest supported is High.
+        assert_eq!(
+            normalize_effort_for_databricks_v2(ThinkingEffort::XHigh, "databricks-gpt-5-5"),
+            ThinkingEffort::High,
+            "databricks-gpt-5-5 XHigh must clamp to High (F1 correction: supported=[low,medium,high])"
+        );
+    }
+
+    #[test]
+    fn normalize_effort_for_databricks_v2_gpt_5_5_none_clamps_to_low() {
+        // F1 correction: databricks-gpt-5-5 supported_efforts = [low, medium, high].
+        // None is outside the set → nearest supported is Low.
+        assert_eq!(
+            normalize_effort_for_databricks_v2(ThinkingEffort::None, "databricks-gpt-5-5"),
+            ThinkingEffort::Low,
+            "databricks-gpt-5-5 None must clamp to Low (F1 correction: supported=[low,medium,high])"
+        );
+    }
+
+    #[test]
+    fn normalize_effort_for_databricks_v2_gpt_5_5_in_range_passes_through() {
+        // Values within the corrected set must pass through unchanged.
+        for effort in [
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+        ] {
+            assert_eq!(
+                normalize_effort_for_databricks_v2(effort, "databricks-gpt-5-5"),
+                effort,
+                "databricks-gpt-5-5 {effort:?} is in supported set, must pass through"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_effort_for_databricks_v2_gpt_5_6_sol_max_passes_through() {
+        // databricks-gpt-5-6-sol F1 adoption: [low, medium, high, max] — max is supported.
+        assert_eq!(
+            normalize_effort_for_databricks_v2(ThinkingEffort::Max, "databricks-gpt-5-6-sol"),
+            ThinkingEffort::Max,
+            "databricks-gpt-5-6-sol Max must pass through (F1: supported includes max)"
+        );
+    }
+
+    // ---- normalize_effort_for_anthropic_route ----
+
+    #[test]
+    fn normalize_anthropic_route_none_yields_none() {
+        assert_eq!(
+            normalize_effort_for_anthropic_route(ThinkingEffort::None),
+            None,
+            "none must yield None (omit thinking fields)"
+        );
+    }
+
+    #[test]
+    fn normalize_anthropic_route_minimal_yields_none() {
+        assert_eq!(
+            normalize_effort_for_anthropic_route(ThinkingEffort::Minimal),
+            None,
+            "minimal must yield None (omit thinking fields)"
+        );
+    }
+
+    #[test]
+    fn normalize_anthropic_route_passes_through_valid_values() {
+        for effort in [
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            assert_eq!(
+                normalize_effort_for_anthropic_route(effort),
+                Some(effort),
+                "normalize_effort_for_anthropic_route must pass through {effort:?}"
+            );
+        }
+    }
+
+    // ---- F2: Fable 5 / Mythos 5 / Mythos Preview adaptive thinking ----
+
+    #[test]
+    fn anthropic_thinking_config_fable_5_emits_adaptive_and_effort() {
+        // Fable 5 — always-on adaptive thinking.
+        let (thinking, output_config) =
+            anthropic_thinking_config("anthropic", "claude-fable-5", ThinkingEffort::High, 32_768);
+        let t = thinking.expect("thinking must be present for claude-fable-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-fable-5");
+        assert_eq!(oc["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_mythos_5_emits_adaptive_and_effort() {
+        // Mythos 5 — always-on adaptive thinking.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-mythos-5",
+            ThinkingEffort::Medium,
+            32_768,
+        );
+        let t = thinking.expect("thinking must be present for claude-mythos-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-mythos-5");
+        assert_eq!(oc["effort"], "medium");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_mythos_preview_emits_adaptive_and_effort() {
+        // Mythos Preview — Always on adaptive thinking.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-mythos-preview",
+            ThinkingEffort::Low,
+            32_768,
+        );
+        let t = thinking.expect("thinking must be present for claude-mythos-preview");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-mythos-preview");
+        assert_eq!(oc["effort"], "low");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_fable_5_xhigh_emits_xhigh() {
+        let (thinking, output_config) =
+            anthropic_thinking_config("anthropic", "claude-fable-5", ThinkingEffort::XHigh, 32_768);
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "adaptive");
+        assert_eq!(output_config.unwrap()["effort"], "xhigh");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_mythos_5_xhigh_emits_xhigh() {
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-mythos-5",
+            ThinkingEffort::XHigh,
+            32_768,
+        );
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "adaptive");
+        assert_eq!(output_config.unwrap()["effort"], "xhigh");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_mythos_preview_xhigh_clamps_to_high() {
+        // Mythos Preview does NOT support xhigh → clamp to high.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-mythos-preview",
+            ThinkingEffort::XHigh,
+            32_768,
+        );
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "adaptive");
+        assert_eq!(
+            output_config.unwrap()["effort"],
+            "high",
+            "xhigh must clamp to high for claude-mythos-preview"
+        );
+    }
+
+    #[test]
+    fn anthropic_thinking_config_fable_5_max_passes_through() {
+        let (thinking, output_config) =
+            anthropic_thinking_config("anthropic", "claude-fable-5", ThinkingEffort::Max, 32_768);
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "adaptive");
+        assert_eq!(output_config.unwrap()["effort"], "max");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_mythos_preview_max_passes_through() {
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-mythos-preview",
+            ThinkingEffort::Max,
+            32_768,
+        );
+        let t = thinking.unwrap();
+        assert_eq!(t["type"], "adaptive");
+        assert_eq!(output_config.unwrap()["effort"], "max");
+    }
+
+    #[test]
+    fn resolve_provider_openrouter_with_key() {
+        assert_eq!(
+            resolve_provider(Some("openrouter"), None, None, Some("sk-or-123")).unwrap(),
+            Provider::OpenRouter
+        );
+    }
+
+    #[test]
+    fn resolve_provider_openrouter_missing_key() {
+        let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
+        assert!(err.contains("OPENROUTER_API_KEY"));
+    }
+
+    // ── pricing_authority: canonical URL → bare-host registry token ──────────
+
+    #[test]
+    fn pricing_authority_anthropic_returns_registry_token() {
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com/"),
+            Some("api.anthropic.com")
+        );
+        // No trailing slash
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com"),
+            Some("api.anthropic.com")
+        );
+    }
+
+    #[test]
+    fn pricing_authority_openai_requires_v1_path() {
+        assert_eq!(
+            pricing_authority("https://api.openai.com/v1"),
+            Some("api.openai.com")
+        );
+        // With trailing slash
+        assert_eq!(
+            pricing_authority("https://api.openai.com/v1/"),
+            Some("api.openai.com")
+        );
+        // Root-only: no path → must return None
+        assert_eq!(pricing_authority("https://api.openai.com/"), None);
+        assert_eq!(pricing_authority("https://api.openai.com"), None);
+        // Wrong path
+        assert_eq!(pricing_authority("https://api.openai.com/v2"), None);
+    }
+
+    #[test]
+    fn pricing_authority_openrouter_requires_api_v1_path() {
+        assert_eq!(
+            pricing_authority("https://openrouter.ai/api/v1"),
+            Some("openrouter.ai")
+        );
+        assert_eq!(
+            pricing_authority("https://openrouter.ai/api/v1/"),
+            Some("openrouter.ai")
+        );
+        assert_eq!(pricing_authority("https://openrouter.ai/"), None);
+        assert_eq!(pricing_authority("https://openrouter.ai"), None);
+    }
+
+    #[test]
+    fn pricing_authority_rejects_http_scheme() {
+        assert_eq!(pricing_authority("http://api.anthropic.com/"), None);
+        assert_eq!(pricing_authority("http://api.openai.com/v1"), None);
+    }
+
+    #[test]
+    fn pricing_authority_accepts_explicit_default_port() {
+        // Explicit :443 is the default HTTPS port — both omitted and explicit
+        // forms resolve to the same canonical origin and must both be accepted.
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com:443/"),
+            Some("api.anthropic.com"),
+            "explicit :443 must be accepted for Anthropic"
+        );
+        assert_eq!(
+            pricing_authority("https://api.openai.com:443/v1"),
+            Some("api.openai.com"),
+            "explicit :443 must be accepted for OpenAI"
+        );
+        assert_eq!(
+            pricing_authority("https://openrouter.ai:443/api/v1"),
+            Some("openrouter.ai"),
+            "explicit :443 must be accepted for OpenRouter"
+        );
+        // Non-default port must still be rejected.
+        assert_eq!(pricing_authority("https://api.openai.com:8080/v1"), None);
+    }
+
+    #[test]
+    fn pricing_authority_rejects_userinfo() {
+        assert_eq!(
+            pricing_authority("https://user:pass@api.anthropic.com/"),
+            None
+        );
+    }
+
+    #[test]
+    fn pricing_authority_rejects_query_and_fragment() {
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com/?debug=1"),
+            None
+        );
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com/#section"),
+            None
+        );
+        assert_eq!(pricing_authority("https://api.openai.com/v1?key=1"), None);
+    }
+
+    #[test]
+    fn pricing_authority_rejects_lookalike_hosts() {
+        // Subdomain: must NOT match
+        assert_eq!(
+            pricing_authority("https://subdomain.api.anthropic.com/"),
+            None
+        );
+        // Superset: must NOT match
+        assert_eq!(pricing_authority("https://notapi.anthropic.com/"), None);
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com.evil.com/"),
+            None
+        );
+        // Path-prefix lookalike for OpenAI: /v1extra must not match /v1
+        assert_eq!(pricing_authority("https://api.openai.com/v1extra"), None);
+    }
+
+    #[test]
+    fn pricing_authority_unknown_host_returns_none() {
+        assert_eq!(pricing_authority("https://api.databricks.com/v1"), None);
+        assert_eq!(pricing_authority("https://custom.llm.corp/v1"), None);
+    }
+}

@@ -1,0 +1,184 @@
+name: Sprig
+
+# Builds and publishes Sprig — one deploy-anywhere Linux multicall binary for:
+#   buzz-acp       ACP harness that bridges Buzz events to the LLM agent
+#   buzz-agent     ACP-compliant agent (spawns MCP, calls LLMs)
+#   buzz-dev-mcp   Developer MCP server (multicall: rg, tree, buzz,
+#                    git-credential-nostr, git-sign-nostr)
+#
+# Targets: x86_64-unknown-linux-musl and aarch64-unknown-linux-musl (static
+# musl so the tarball runs on any modern Linux without libc surprises).
+#
+# Triggers:
+#   - push to main     → updates rolling `sprig-latest` release
+#   - tag `sprig-v*`  → versioned release
+#   - workflow_dispatch → manual canary build (no release publish unless asked)
+
+on:
+  push:
+    branches: [main]
+    tags: ["sprig-v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to the rolling release (otherwise artifacts only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Install cross
+        uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
+        with:
+          tool: cross@0.2.5
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          WORKSPACE_VERSION=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.name=="sprig") | .version')
+
+          REF="${GITHUB_REF#refs/tags/}"
+          if [[ "$GITHUB_REF" == refs/tags/sprig-v* ]]; then
+            VERSION="${REF#sprig-v}"
+            CHANNEL="tag"
+          else
+            SHORT_SHA="${GITHUB_SHA::7}"
+            VERSION="${WORKSPACE_VERSION}+git.${SHORT_SHA}"
+            CHANNEL="rolling"
+          fi
+          {
+            echo "workspace_version=$WORKSPACE_VERSION"
+            echo "version=$VERSION"
+            echo "channel=$CHANNEL"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved version=$VERSION channel=$CHANNEL"
+
+      - name: Build & package Sprig
+        id: pkg
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          CHANNEL: ${{ steps.ver.outputs.channel }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHANNEL" == "tag" ]]; then
+            ARCHIVE_BASENAME="sprig-${VERSION}-${TARGET}"
+          else
+            ARCHIVE_BASENAME="sprig-${TARGET}"
+          fi
+          ARCHIVE_BASENAME="$ARCHIVE_BASENAME" \
+            ./scripts/build-sprig.sh "$VERSION" "$TARGET"
+          ARCHIVE="dist/${ARCHIVE_BASENAME}.tar.gz"
+          test -f "$ARCHIVE"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "archive_name=${ARCHIVE_BASENAME}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sprig-${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.pkg.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish rolling release
+    needs: build
+    if: |
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Download all Sprig artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: sprig-*
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -lh dist/
+
+      - name: Update rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG="sprig-latest"
+          TITLE="Sprig (rolling)"
+          NOTES="Rolling Linux build of Sprig (all-in-one buzz-acp + buzz-agent + buzz-dev-mcp), tracking \`main\` (\`${SHA}\`)."
+
+          gh release edit "$TAG" \
+            --prerelease \
+            --title "$TITLE" \
+            --notes "$NOTES"
+          gh release upload "$TAG" dist/* --clobber
+
+  publish-tag:
+    name: Publish tagged release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/sprig-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Download all Sprig artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: sprig-*
+          merge-multiple: true
+
+      - name: Resolve tag version
+        id: ver
+        run: |
+          REF="${GITHUB_REF#refs/tags/}"
+          VERSION="${REF#sprig-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Create tagged release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "Sprig v${VERSION}" \
+            --notes "Sprig v${VERSION} — Linux all-in-one builds of buzz-acp + buzz-agent + buzz-dev-mcp." \
+            dist/*

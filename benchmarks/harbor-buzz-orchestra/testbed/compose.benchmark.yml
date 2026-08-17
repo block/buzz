@@ -1,0 +1,18 @@
+# Benchmark-only overrides for deploy/compose/compose.yml.
+#
+# The production bundle stays untouched; this file publishes what the
+# benchmark harness needs on the host:
+#   - relay Prometheus metrics (:9102) for scraping during runs
+#   - Postgres (:5433) for the provisioner and receipts ingestion
+#     (5433 to avoid colliding with other local Postgres instances)
+#
+# Usage:
+#   docker compose --env-file .env \
+#     -f compose.yml -f <this file> up -d --wait
+services:
+  relay:
+    ports:
+      - "${BUZZ_METRICS_HOST_PORT:-9102}:9102"
+  postgres:
+    ports:
+      - "${BUZZ_PG_HOST_PORT:-5433}:5432"

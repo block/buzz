@@ -1,0 +1,394 @@
+# Default values for buzz.
+#
+# Two supported tiers:
+#
+#   PRODUCTION (default) — external Postgres/Redis/S3, existingSecret
+#   refs everywhere, no chart-side autogeneration, GitOps-safe (ArgoCD/Flux).
+#   HA-ready: replicaCount >= 2 (requires Redis; git state is object-store-
+#   backed, so no ReadWriteMany volume is needed — RWO per replica is fine).
+#
+#   QUICKSTART — bundles in-cluster Postgres + Redis + MinIO and
+#   auto-generates relay secrets via the `lookup` pattern (NOT GitOps-safe —
+#   see README), single replica, evaluation only. Opt in by enabling each
+#   bundled service: postgresql.enabled, redis.enabled, minio.enabled.
+#   See ci/quickstart-values.yaml and the README.
+#
+# See examples/argocd-app.yaml and examples/flux-helmrelease.yaml for the
+# canonical GitOps configurations.
+
+# Intent marker for the evaluation profile, surfaced in NOTES.txt. It does NOT
+# by itself enable any bundled service — set the per-service .enabled flags
+# (postgresql / redis / minio) to bring them up in-cluster.
+quickstart: false
+
+# ── Image ────────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/block/buzz
+  tag: ""                        # empty → .Chart.AppVersion
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# ── Topology ────────────────────────────────────────────────────────────────
+# replicaCount > 1 hard-requires Redis for buzz-pubsub (in-cluster or external).
+# It does NOT require ReadWriteMany git storage: git ref/object state is
+# object-store-backed (each request hydrates an ephemeral repo from S3; writer
+# serialization is the object-store pointer CAS), and repo-name uniqueness lives
+# in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
+replicaCount: 1
+
+# ── Autoscaling ──────────────────────────────────────────────────────────────
+# Requires Metrics Server for CPU. Optional WebSocket scaling additionally
+# requires a custom-metrics adapter exposing its pod-level Prometheus gauge.
+# Kubernetes HPA uses the larger replica recommendation from enabled metrics.
+autoscaling:
+  enabled: false
+  minReplicas: 5
+  maxReplicas: 15
+  targetCPUUtilizationPercentage: 65
+  websocketMetricEnabled: true
+  websocketMetricName: buzz_ws_connections_active
+  targetWebsocketConnections: 5000
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
+
+# ── Public URL ───────────────────────────────────────────────────────────────
+# Required. The wss:// URL clients use to connect. Drives:
+#   - RELAY_URL env (relay-side)
+#   - Default mediaBaseUrl (https://<host>/media)
+#   - Default ingress host
+relayUrl: ""
+mediaBaseUrl: ""
+
+# ── Owner ────────────────────────────────────────────────────────────────────
+# 64-char lowercase hex Nostr pubkey of the relay operator. Required when
+# relay.requireRelayMembership=true (the production default).
+ownerPubkey: ""
+
+# ── Chart-managed secrets ────────────────────────────────────────────────────
+# Production / GitOps path: create a Secret out-of-band with these keys and
+# point `secrets.existingSecret` at it. Any key omitted from the existing
+# Secret falls back to chart-side autogen (only effective at first install).
+#
+# Expected keys (all optional unless required by relay config):
+#   BUZZ_RELAY_PRIVATE_KEY        — 64-char hex; relay identity (rotation = identity change)
+#   BUZZ_GIT_HOOK_HMAC_SECRET     — 32+ chars; required when replicaCount > 1
+#   DATABASE_URL                  — full Postgres URL (preferred over externalPostgresql.url)
+#   READ_DATABASE_URL             — optional Postgres read-replica URL; omit to keep all reads on the writer
+#   REDIS_URL                     — full Redis URL with auth
+#   BUZZ_S3_ACCESS_KEY            — S3 access key
+#   BUZZ_S3_SECRET_KEY            — S3 secret key
+secrets:
+  existingSecret: ""
+  # Inline overrides (NOT recommended for production; they land in values).
+  relayPrivateKey: ""
+  gitHookHmacSecret: ""
+
+# ── Relay behavior ───────────────────────────────────────────────────────────
+relay:
+  bindAddr: "0.0.0.0:3000"
+  maxConnections: 10000
+  maxConcurrentHandlers: 1024
+  sendBuffer: 1000
+  # Graceful-shutdown reconnect jitter. On SIGTERM the relay closes every live
+  # WebSocket with a 1012 Service Restart frame; with a rolling deploy this can
+  # release a whole pod's sockets at once and stampede reconnects into the DB
+  # pool. A positive value (milliseconds) spreads each close over a per-socket
+  # random delay in [1, drainJitterMs], smoothing the reconnect herd. 0 (the
+  # default) closes all sockets at once, preserving the previous behavior.
+  # Values above 20000 are capped to 20000, leaving close-frame delivery
+  # headroom under the relay's 30s hard-drain timeout (itself inside the 60s
+  # terminationGracePeriodSeconds below).
+  drainJitterMs: 0
+  requireAuthToken: true
+  requireRelayMembership: true
+  allowNipOaAuth: true
+  pubkeyAllowlist: false
+  corsOrigins: []
+  # Huddle audio is safe only for single-pod relay deployments until an SFU
+  # exists. null lets the chart render false automatically when
+  # replicaCount > 1. Explicit true with replicaCount > 1 means the operator
+  # accepts/owns the external multi-pod audio/SFU behavior.
+  huddleAudioAvailable: null
+  ephemeralTtlOverride: 0
+  # Per-upload-event records (`_uploads/` moderation side channel). Off by
+  # default. Operators hosting communities for other people may have legal
+  # obligations (e.g. NCMEC reporting for US-serving providers) that require
+  # recording the network address of an upload; Buzz never collects IPs unless
+  # uploadIpHeader is set. When set (e.g. "cf-connecting-ip"), the connecting
+  # address reported by YOUR trusted edge is stored in the per-event record
+  # only — never served to clients, never in event data. uploadRecords must be
+  # true for uploadIpHeader to be valid (startup-checked).
+  uploadRecords: false
+  uploadIpHeader: ""
+  uploadPortHeader: ""
+
+  livenessProbe:
+    httpGet:
+      path: /_liveness
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /_readiness
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startupProbe:
+    httpGet:
+      path: /_liveness
+      port: health
+    failureThreshold: 60
+    periodSeconds: 2
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+    readOnlyRootFilesystem: false  # git writes need a writable repo path
+  terminationGracePeriodSeconds: 60
+
+  # Optional image entrypoint/arguments overrides. Empty arrays preserve the
+  # relay image's defaults. Consumers own compatibility with the selected image.
+  command: []
+  args: []
+  # Appended to the chart-owned relay mounts. Names must match extraVolumes (or
+  # another volume supplied by the platform) and must not collide with built-ins.
+  extraVolumeMounts: []
+
+  extraEnv: []
+  extraEnvFrom: []
+
+# ── Pod extensions ──────────────────────────────────────────────────────────
+# Raw Kubernetes fragments appended to the relay Pod. They are rendered with
+# toYaml, not tpl. Init containers must define their own securityContext and
+# resources; names must not collide with chart-owned containers or volumes.
+extraInitContainers: []
+extraVolumes: []
+
+# ── Device pairing relay ─────────────────────────────────────────────────────
+# Optional, stateless NIP-AB relay. When enabled, the main relay advertises
+# pairingRelay.url in NIP-11 and Buzz clients use it instead of the legacy
+# same-host /pair convention.
+pairingRelay:
+  enabled: false
+  url: ""
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 5000
+    annotations: {}
+  podAnnotations: {}
+  podLabels: {}
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "32Mi"
+    limits:
+      cpu: "250m"
+      memory: "128Mi"
+
+# ── Service ──────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 3000
+  healthPort: 8080
+  metricsPort: 9102
+  annotations: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+
+# ── Ingress (classic) ────────────────────────────────────────────────────────
+# Mutually exclusive with httproute.enabled.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []                      # empty → derived from relayUrl
+  tls: []                        # [{hosts: [...], secretName: "..."}]
+
+# ── Gateway API (HTTPRoute) ──────────────────────────────────────────────────
+httproute:
+  enabled: false
+  parentRefs: []
+  hostnames: []
+  rules: []                      # empty → default match-all → service
+
+# ── Git scratch volume ───────────────────────────────────────────────────────
+# Ephemeral working space only. No persistent git state lives here — reads/writes
+# hydrate ephemeral repos from object storage per request, and repo-name
+# uniqueness lives in Postgres.
+#
+# enabled: true  → mount a PVC at mountPath (durable across pod restarts, but a
+#   single ReadWriteOnce PVC binds to one node, so it does NOT support multi-pod
+#   scheduling across nodes on a Deployment).
+# enabled: false → mount a per-pod emptyDir at mountPath (pure scratch), bounded
+#   by size. This is the correct choice for multi-replica HA: each pod gets its
+#   own local working space, nothing is shared, and there is no volume to
+#   multi-attach. Safe because the object store + Postgres are the sources of
+#   truth, not this disk.
+persistence:
+  git:
+    enabled: true
+    mountPath: /var/lib/buzz/git
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 10Gi                    # PVC capacity or emptyDir sizeLimit
+    annotations: {}
+    existingClaim: ""
+
+# ── Postgres ─────────────────────────────────────────────────────────────────
+# Eval-only CloudPirates subchart. The relay's DATABASE_URL is composed in the
+# chart-managed Secret with a chart-generated password; auth.existingSecret
+# points this subchart at that same Secret/key so server and client agree.
+postgresql:
+  enabled: false
+  auth:
+    database: buzz
+    username: buzz
+    existingSecret: '{{ if contains "buzz" .Release.Name }}{{ .Release.Name }}-relay{{ else }}{{ .Release.Name }}-buzz-relay{{ end }}'
+    secretKeys:
+      adminPasswordKey: postgres-password
+  persistence:
+    enabled: true
+    size: 10Gi
+externalPostgresql:
+  url: ""                        # postgres://user:pass@host:5432/db — placeholder example, sadscan:disable np.postgres.1
+
+# ── Redis ────────────────────────────────────────────────────────────────────
+# Eval-only CloudPirates subchart (standalone). REDIS_URL is composed in the
+# chart-managed Secret; auth.existingSecret points the subchart at that Secret
+# so the server password matches the URL the relay dials.
+redis:
+  enabled: false
+  auth:
+    existingSecret: '{{ if contains "buzz" .Release.Name }}{{ .Release.Name }}-relay{{ else }}{{ .Release.Name }}-buzz-relay{{ end }}'
+    existingSecretPasswordKey: redis-password
+  persistence:
+    enabled: true
+    size: 4Gi
+externalRedis:
+  url: ""                        # redis://:pass@host:6379
+
+# ── S3 / object storage (media) ──────────────────────────────────────────────
+# Production: point endpoint/bucket at an external S3-compatible service and
+# supply credentials (inline below or via secrets.existingSecret).
+# Quickstart (`minio.enabled: true`): the chart runs an in-cluster, eval-only
+# MinIO Deployment, creates the bucket via a post-install Job, and composes
+# the endpoint + autogenerated credentials automatically.
+#
+# Storage metrics (hourly bucket sweep, BUZZ_STORAGE_METRICS — see env docs):
+# the credentials above must additionally grant `s3:ListBucket` on the bucket
+# ARN itself (bucket-level; distinct from the object-level GetObject/
+# PutObject/DeleteObject perms already required for media). Without it the
+# first sweep fails AccessDenied and buzz_storage_sweep_ok stays 0 — no other
+# media functionality is affected. Set BUZZ_STORAGE_METRICS=off to disable
+# the sweep entirely on a deployment that can't grant it.
+# Note: buzz_storage_sweep_failures is a process-local gauge — on leader
+# failover it resets to the new leader's local count, not a global total.
+# Note: on a failed sweep attempt, the next retry fires on the next usage tick
+# (default 300 s BUZZ_USAGE_METRICS_INTERVAL_SECS), not at sweep-interval
+# cadence — so a permanently missing s3:ListBucket yields one cheap LIST call
+# per tick until the permission is added.
+s3:
+  endpoint: ""
+  bucket: "buzz-media"
+  # SigV4 signing region shared by the relay and `buzz-admin deletions`.
+  # Keep the MinIO/local default operable; production providers should set
+  # their credential region explicitly when it differs.
+  region: "us-east-1"
+  # path: https://endpoint/bucket/key (bundled MinIO-compatible default)
+  # virtual: https://bucket.endpoint/key (standard S3; required by new Railway buckets)
+  addressingStyle: path
+  accessKey: ""
+  secretKey: ""
+
+# In-cluster MinIO for the quickstart profile only. Production deploys leave
+# this disabled and use s3.* (or secrets.existingSecret) against managed S3.
+minio:
+  enabled: false                 # quickstart: set true for bundled in-cluster MinIO
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  mcImage: minio/mc:RELEASE.2025-08-13T08-35-41Z
+  persistence:
+    enabled: true
+    size: 10Gi
+
+# ── Git server config ────────────────────────────────────────────────────────
+git:
+  maxPackBytes: 524288000        # 500 MiB
+  packCachePath: /var/cache/buzz/git-packs
+  packCacheMaxBytes: 5368709120  # 5 GiB
+  packCacheMaxConcurrentPopulations: 2
+  packCacheVolumeSize: 7Gi       # per-pod emptyDir; includes cold-population staging
+  maxReposPerPubkey: 100
+  maxConcurrentOps: 20
+
+# ── Migrations ───────────────────────────────────────────────────────────────
+# Relay runs sqlx migrations at startup via BUZZ_AUTO_MIGRATE=true.
+migrate:
+  autoMigrate: true
+  preUpgradeJob:
+    enabled: false
+    resources: {}
+    backoffLimit: 3
+    activeDeadlineSeconds: 600
+
+# ── Monitoring ───────────────────────────────────────────────────────────────
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# ── Free-form extra manifests ────────────────────────────────────────────────
+extraManifests: []

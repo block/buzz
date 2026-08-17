@@ -1,0 +1,74 @@
+# Build artifacts
+/target/
+/dist/
+/admin-web/dist/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# lefthook-generated hook scripts (machine-specific)
+.hooks/
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Editor / IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+.*.sw?
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Scratch / working files (AI reviews, notes, drafts)
+.scratch/
+
+# Playwright artifacts
+playwright-report/
+test-results/
+blob-report/
+.playwright-mcp/
+
+# Node modules (pnpm workspace hoists to root)
+node_modules/
+
+# Root npm lockfiles are accidental; desktop uses pnpm in /desktop.
+/package-lock.json
+
+# sqlx offline query data (generated, not portable)
+.sqlx/
+
+# SQLite database (created by relay in CWD)
+buzz.db
+buzz.db-wal
+buzz.db-shm
+
+# Docker volumes (if mounted locally)
+mysql-data/
+typesense-data/
+
+# Hermit (toolchain manager cache)
+.hermit/
+doc/
+/repos/
+
+# Local identity files
+identity.key
+**/identity.key
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# mesh-llm build cache
+.cache/
+
+# Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
+deploy/charts/*/charts/*.tgz

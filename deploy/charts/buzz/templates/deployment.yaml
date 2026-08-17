@@ -1,0 +1,261 @@
+{{- include "buzz.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "buzz.fullname" . }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "buzz.relaySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "buzz.relaySelectorLabels" . | nindent 8 }}
+        {{- with .Values.relay.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll pods when the chart-managed Secret changes.
+        checksum/secret: {{ include (print $.Template.BasePath "/secret-chart.yaml") . | sha256sum }}
+        {{- with .Values.relay.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "buzz.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.relay.securityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.relay.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.minio.enabled .Values.extraInitContainers }}
+      initContainers:
+      {{- if .Values.minio.enabled }}
+      # Quickstart only: the bundled MinIO bucket is created by a concurrent
+      # init Job (templates/quickstart-minio-init.yaml). The relay's A3 S3
+      # conformance probe is startup-fatal, so without this gate the relay Pods
+      # CrashLoopBackOff (with growing backoff) until the bucket appears. Block
+      # relay start until the bucket exists — deterministic, no crash-loops.
+        - name: wait-for-bucket
+          image: {{ .Values.minio.mcImage | quote }}
+          securityContext:
+            {{- toYaml .Values.relay.containerSecurityContext | nindent 12 }}
+          env:
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_SECRET_KEY
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              export MC_CONFIG_DIR=/tmp/.mc
+              until mc alias set local {{ include "buzz.minioEndpoint" . }} "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null 2>&1; do
+                echo "waiting for MinIO..."; sleep 2
+              done
+              until mc stat local/{{ .Values.s3.bucket }} >/dev/null 2>&1; do
+                echo "waiting for bucket {{ .Values.s3.bucket }}..."; sleep 2
+              done
+              echo "bucket {{ .Values.s3.bucket }} present"
+      {{- end }}
+      {{- with .Values.extraInitContainers }}
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: relay
+          image: {{ include "buzz.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.relay.containerSecurityContext | nindent 12 }}
+          {{- with .Values.relay.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.relay.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - { name: app,     containerPort: 3000, protocol: TCP }
+            - { name: health,  containerPort: {{ .Values.service.healthPort }}, protocol: TCP }
+            - { name: metrics, containerPort: {{ .Values.service.metricsPort }}, protocol: TCP }
+          env:
+            # ── Networking ───────────────────────────────────────────
+            - { name: BUZZ_BIND_ADDR,     value: {{ .Values.relay.bindAddr | quote }} }
+            - { name: BUZZ_HEALTH_PORT,   value: {{ .Values.service.healthPort | quote }} }
+            - { name: BUZZ_METRICS_PORT,  value: {{ .Values.service.metricsPort | quote }} }
+            - { name: RELAY_URL,          value: {{ .Values.relayUrl | quote }} }
+            {{- if .Values.pairingRelay.url }}
+            - { name: BUZZ_PAIRING_RELAY_URL, value: {{ .Values.pairingRelay.url | quote }} }
+            {{- end }}
+            - { name: BUZZ_MEDIA_BASE_URL, value: {{ include "buzz.mediaBaseUrl" . | quote }} }
+
+            # ── Behavior ─────────────────────────────────────────────
+            - { name: BUZZ_MAX_CONNECTIONS,        value: {{ .Values.relay.maxConnections | quote }} }
+            - { name: BUZZ_MAX_CONCURRENT_HANDLERS, value: {{ .Values.relay.maxConcurrentHandlers | quote }} }
+            - { name: BUZZ_SEND_BUFFER,            value: {{ .Values.relay.sendBuffer | quote }} }
+            - { name: BUZZ_DRAIN_JITTER_MS,        value: {{ .Values.relay.drainJitterMs | quote }} }
+            - { name: BUZZ_REQUIRE_AUTH_TOKEN,     value: {{ .Values.relay.requireAuthToken | quote }} }
+            - { name: BUZZ_REQUIRE_RELAY_MEMBERSHIP, value: {{ .Values.relay.requireRelayMembership | quote }} }
+            - { name: BUZZ_ALLOW_NIP_OA_AUTH,      value: {{ .Values.relay.allowNipOaAuth | quote }} }
+            - { name: BUZZ_PUBKEY_ALLOWLIST,       value: {{ .Values.relay.pubkeyAllowlist | quote }} }
+            {{- if .Values.relay.corsOrigins }}
+            - { name: BUZZ_CORS_ORIGINS, value: {{ join "," .Values.relay.corsOrigins | quote }} }
+            {{- end }}
+            {{- if gt (.Values.relay.ephemeralTtlOverride | int) 0 }}
+            - { name: BUZZ_EPHEMERAL_TTL_OVERRIDE, value: {{ .Values.relay.ephemeralTtlOverride | quote }} }
+            {{- end }}
+            {{- if .Values.relay.uploadRecords }}
+            - { name: BUZZ_MEDIA_UPLOAD_RECORDS, value: "true" }
+            {{- end }}
+            {{- if .Values.relay.uploadIpHeader }}
+            - { name: BUZZ_MEDIA_UPLOAD_IP_HEADER, value: {{ .Values.relay.uploadIpHeader | quote }} }
+            {{- end }}
+            {{- if .Values.relay.uploadPortHeader }}
+            - { name: BUZZ_MEDIA_UPLOAD_PORT_HEADER, value: {{ .Values.relay.uploadPortHeader | quote }} }
+            {{- end }}
+
+            # ── Owner ────────────────────────────────────────────────
+            - { name: RELAY_OWNER_PUBKEY, value: {{ .Values.ownerPubkey | quote }} }
+
+            # ── Migrations ───────────────────────────────────────────
+            - { name: BUZZ_AUTO_MIGRATE, value: {{ .Values.migrate.autoMigrate | quote }} }
+
+            # ── Git ──────────────────────────────────────────────────
+            - { name: BUZZ_GIT_REPO_PATH,         value: {{ .Values.persistence.git.mountPath | quote }} }
+            - { name: BUZZ_GIT_MAX_PACK_BYTES,    value: {{ .Values.git.maxPackBytes | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_PATH,   value: {{ .Values.git.packCachePath | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_MAX_BYTES, value: {{ .Values.git.packCacheMaxBytes | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS, value: {{ .Values.git.packCacheMaxConcurrentPopulations | quote }} }
+            - { name: BUZZ_GIT_MAX_REPOS_PER_PUBKEY, value: {{ .Values.git.maxReposPerPubkey | quote }} }
+            - { name: BUZZ_GIT_MAX_CONCURRENT_OPS, value: {{ .Values.git.maxConcurrentOps | quote }} }
+
+            # ── S3 (non-secret) ──────────────────────────────────────
+            {{- $s3Endpoint := include "buzz.s3Endpoint" . }}
+            {{- if $s3Endpoint }}
+            - { name: BUZZ_S3_ENDPOINT, value: {{ $s3Endpoint | quote }} }
+            {{- end }}
+            - { name: BUZZ_S3_BUCKET, value: {{ .Values.s3.bucket | quote }} }
+            - { name: BUZZ_S3_REGION, value: {{ .Values.s3.region | quote }} }
+            - { name: BUZZ_S3_ADDRESSING_STYLE, value: {{ .Values.s3.addressingStyle | quote }} }
+
+            # ── Secrets (from chart-managed or existing) ─────────────
+            - name: BUZZ_RELAY_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: BUZZ_RELAY_PRIVATE_KEY
+                  optional: true
+            - name: BUZZ_GIT_HOOK_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: BUZZ_GIT_HOOK_HMAC_SECRET
+                  optional: true
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: DATABASE_URL
+            - name: READ_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: READ_DATABASE_URL
+                  optional: true
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: REDIS_URL
+                  optional: {{ and (eq (include "buzz.minimumReplicas" . | int) 1) (not .Values.redis.enabled) (not .Values.externalRedis.url) }}
+            - name: BUZZ_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: BUZZ_S3_ACCESS_KEY
+                  optional: true
+            - name: BUZZ_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: BUZZ_S3_SECRET_KEY
+                  optional: true
+
+            - name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+              value: {{ include "buzz.huddleAudioAvailable" . | quote }}
+
+            {{- with .Values.relay.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.relay.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          livenessProbe:
+            {{- toYaml .Values.relay.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.relay.readinessProbe | nindent 12 }}
+          startupProbe:
+            {{- toYaml .Values.relay.startupProbe | nindent 12 }}
+
+          resources:
+            {{- toYaml .Values.relay.resources | nindent 12 }}
+
+          volumeMounts:
+            - { name: git-repos, mountPath: {{ .Values.persistence.git.mountPath | quote }} }
+            - { name: git-pack-cache, mountPath: {{ .Values.git.packCachePath | quote }} }
+            {{- with .Values.relay.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+      volumes:
+        - name: git-repos
+        {{- if .Values.persistence.git.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-git" (include "buzz.fullname" .)) .Values.persistence.git.existingClaim }}
+        {{- else }}
+          emptyDir:
+            sizeLimit: {{ .Values.persistence.git.size | quote }}
+        {{- end }}
+        - name: git-pack-cache
+          emptyDir:
+            sizeLimit: {{ .Values.git.packCacheVolumeSize | quote }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

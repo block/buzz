@@ -1,0 +1,14 @@
+{
+  "name": "buzz-workspace",
+  "private": true,
+  "packageManager": "pnpm@11.4.0",
+  "scripts": {
+    "check": "pnpm -r check"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.6"
+  },
+  "dependencies": {
+    "@tailwindcss/typography": "^0.5.19"
+  }
+}

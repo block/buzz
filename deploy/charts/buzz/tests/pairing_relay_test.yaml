@@ -1,0 +1,54 @@
+suite: optional pairing relay
+templates:
+  - templates/deployment.yaml
+  - templates/secret-chart.yaml
+  - templates/pairing-relay.yaml
+  - templates/serviceaccount.yaml
+tests:
+  - it: does not render the pairing relay by default
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/pairing-relay.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_PAIRING_RELAY_URL
+        template: templates/deployment.yaml
+
+  - it: renders and advertises the configured pairing relay
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+    asserts:
+      - equal:
+          path: kind
+          value: Deployment
+        documentIndex: 0
+        template: templates/pairing-relay.yaml
+      - equal:
+          path: kind
+          value: Service
+        documentIndex: 1
+        template: templates/pairing-relay.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_PAIRING_RELAY_URL
+            value: wss://pairing.buzz.xyz
+        template: templates/deployment.yaml
