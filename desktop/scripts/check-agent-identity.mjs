@@ -24,9 +24,13 @@ import { fileURLToPath } from "node:url";
  *
  * Deliberately narrow. A guard that cries wolf gets disabled, so it does not
  * try to catch every possible way of grouping agents — only the shape that
- * actually caused the outage. Non-identity uses of the same prefix (a dialog's
- * selection token, a render key for a panel with no pubkey) are allowlisted
- * below with a reason each.
+ * actually caused the outage.
+ *
+ * It has no exceptions. The two legitimate non-identity uses of a similar
+ * prefix carry namespaces of their own instead — `catalog-persona:` for the
+ * persona catalog dialog's selection token, `profile:` for the profile panel's
+ * render key — so neither looks like an agent identity to this guard or to a
+ * reader. Prefer that route over an allowlist entry; see `overrides`.
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
