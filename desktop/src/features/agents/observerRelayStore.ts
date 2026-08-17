@@ -291,7 +291,10 @@ function appendAgentEvents(
   eventsByAgent.set(key, final);
   const currentEvidence =
     capabilityEvidenceByAgent.get(key) ?? EMPTY_AGENT_CAPABILITY_EVIDENCE;
-  const nextEvidence = reduceAgentCapabilityEvidence(currentEvidence, event);
+  let nextEvidence = currentEvidence;
+  for (const ev of sortedAdded) {
+    nextEvidence = reduceAgentCapabilityEvidence(nextEvidence, ev);
+  }
   if (nextEvidence !== currentEvidence) {
     capabilityEvidenceByAgent.set(key, nextEvidence);
   }
