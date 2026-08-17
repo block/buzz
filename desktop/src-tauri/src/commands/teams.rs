@@ -5,7 +5,8 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         delete_team_with_cascade, ensure_persona_ids_are_active, load_personas, load_teams,
-        save_teams, try_regenerate_nest, CreateTeamRequest, TeamRecord, UpdateTeamRequest,
+        save_teams, try_regenerate_nest, validate_team_definition_text, CreateTeamRequest,
+        TeamRecord, UpdateTeamRequest,
     },
     util::now_iso,
 };
@@ -148,6 +149,9 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
         let name = trim_required(&input.name, "Team name")?;
         let description = trim_optional(input.description);
         let instructions = trim_optional(input.instructions);
+        // Before the store lock and before any load/save, so a rejected team
+        // cannot leave a partial write behind.
+        validate_team_definition_text(&name, instructions.as_deref())?;
         let now = now_iso();
 
         let _store_guard = state
@@ -189,6 +193,7 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
         let name = trim_required(&input.name, "Team name")?;
         let description = trim_optional(input.description);
         let instructions = trim_optional(input.instructions);
+        validate_team_definition_text(&name, instructions.as_deref())?;
 
         let _store_guard = state
             .managed_agents_store_lock
