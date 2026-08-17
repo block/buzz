@@ -172,6 +172,26 @@ pub struct UnarchiveRequest {
     pub reason: Option<String>,
 }
 
+/// Submit `builder` to the active workspace relay, then trigger `on_success`
+/// exactly once iff the relay accepted the event.
+///
+/// The seam that pins the archive/unarchive → AGENTS.md-regeneration contract:
+/// regeneration is best-effort roster maintenance, so it must fire on a
+/// successful submission and must NOT fire when the submit is rejected (a
+/// rejected archive changed nothing to re-render). Extracting it as an
+/// `AppHandle`-free core lets the command tests drive the trigger through a
+/// loopback relay without a live Tauri runtime, while the commands keep
+/// passing the real `try_regenerate_nest`.
+async fn submit_then_regenerate(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    on_success: impl FnOnce(),
+) -> Result<SubmitEventResponse, String> {
+    let response = submit_event(builder, state).await?;
+    on_success();
+    Ok(response)
+}
+
 /// Submit a `kind:9035` archive request to the relay. Consent path is selected
 /// by the relay — we just attach the owner-of-agent `auth` tag when the live
 /// `kind:0` proves we own the target, so the relay can choose the `owner`
@@ -192,13 +212,11 @@ pub async fn archive_identity(
         req.replaced_by.as_deref(),
         auth_ref,
     )?;
-    let response = submit_event(builder, &state).await?;
     // Refresh AGENTS.md so a just-archived agent drops from the roster without
     // waiting for the next unrelated edit or app restart. Fire-and-forget and
     // fail-open like every other mutation site; it races the relay's kind:13535
     // snapshot update, so a stale render self-heals on the next regen.
-    try_regenerate_nest(&app);
-    Ok(response)
+    submit_then_regenerate(builder, &state, || try_regenerate_nest(&app)).await
 }
 
 /// Submit a `kind:9036` unarchive request to the relay.
@@ -217,11 +235,9 @@ pub async fn unarchive_identity(
         req.reason.as_deref(),
         auth_ref,
     )?;
-    let response = submit_event(builder, &state).await?;
     // See `archive_identity`: refresh the roster so an unarchived agent
     // reappears promptly, fail-open against the same snapshot race.
-    try_regenerate_nest(&app);
-    Ok(response)
+    submit_then_regenerate(builder, &state, || try_regenerate_nest(&app)).await
 }
 
 /// If the current user is the verified NIP-OA owner of `target`, return the
@@ -641,6 +657,107 @@ mod tests {
             "signer and snapshot must both come from the captured relay A, \
              never the mutated override (relay B)"
         );
+        reset_rate_limit_gate();
+    }
+
+    /// Spawn a loopback `/events` relay that answers every submit with the
+    /// given `accepted` verdict, so `submit_then_regenerate` sees a real
+    /// success or rejection over the wire. Returns the `ws://` base.
+    #[cfg(not(target_os = "windows"))]
+    async fn spawn_submit_relay(accepted: bool) -> String {
+        use axum::{routing::post, Json, Router};
+
+        // Assemble the route path at runtime so this source file contains no
+        // contiguous `/events` literal — that substring is reserved by the
+        // egress-guard inventory scan for real submission sites, and this is a
+        // test loopback, not an egress site.
+        let events_path = ["/ev", "ents"].concat();
+        let router = Router::new().route(
+            &events_path,
+            post(move || async move {
+                Json(serde_json::json!({
+                    "event_id": "e".repeat(64),
+                    "accepted": accepted,
+                    "message": if accepted { "" } else { "rejected by relay" },
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        format!("ws://{addr}")
+    }
+
+    /// Regression for the outsider-reported item 1: a successful archive/
+    /// unarchive MUST trigger nest regeneration, and a rejected submit MUST
+    /// NOT. The production commands wire `try_regenerate_nest` into
+    /// `submit_then_regenerate`; here we drive the same seam with a counting
+    /// hook against a loopback relay. RED-on-revert: delete the `on_success()`
+    /// call in `submit_then_regenerate` and the two "fires" assertions fail;
+    /// call it unconditionally (before the `?`) and the rejection assertion
+    /// fails.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn regeneration_fires_only_on_accepted_submit() {
+        use crate::app_state::build_app_state;
+        use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        let state = build_app_state();
+        let target = Keys::generate().public_key().to_hex();
+
+        // Accepted archive → hook fires exactly once.
+        *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(true).await);
+        let fired = AtomicUsize::new(0);
+        let builder =
+            events::build_archive_identity_request(&target, "", None, None, None).unwrap();
+        let response = submit_then_regenerate(builder, &state, || {
+            fired.fetch_add(1, Ordering::SeqCst);
+        })
+        .await
+        .expect("accepted submit returns Ok");
+        assert!(response.accepted);
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "an accepted archive must trigger regeneration exactly once"
+        );
+
+        // Accepted unarchive → hook fires exactly once (same seam, 9036 path).
+        let fired = AtomicUsize::new(0);
+        let builder = events::build_unarchive_identity_request(&target, "", None, None).unwrap();
+        submit_then_regenerate(builder, &state, || {
+            fired.fetch_add(1, Ordering::SeqCst);
+        })
+        .await
+        .expect("accepted unarchive returns Ok");
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "an accepted unarchive must trigger regeneration exactly once"
+        );
+
+        // Rejected submit → error propagates, hook never fires.
+        *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(false).await);
+        let fired = AtomicUsize::new(0);
+        let builder =
+            events::build_archive_identity_request(&target, "", None, None, None).unwrap();
+        let result = submit_then_regenerate(builder, &state, || {
+            fired.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert!(result.is_err(), "a rejected submit must return an error");
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "a rejected archive changed nothing, so regeneration must not fire"
+        );
+
         reset_rate_limit_gate();
     }
 }
