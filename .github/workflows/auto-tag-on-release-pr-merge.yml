@@ -1,0 +1,163 @@
+name: Auto-tag on Release PR Merge
+
+# Four PR-driven release lanes share this workflow. Each uses an explicit branch
+# prefix; the main chart lane also auto-detects a Chart.yaml version bump so
+# a chart feature PR can publish its own new version when merged:
+#
+#   version-bump/<v>   → tag desktop-v<v>        → release.yml (desktop app)
+#   relay-release/<v>  → tag relay-v<v>  → docker.yml (relay image)
+#   chart-release/<v>  → tag chart-v<v>  → helm-chart.yml (main helm chart)
+#   push-chart-release/<v> → tag push-chart-v<v> → push-gateway-helm-chart.yml
+#   any internal PR that bumps deploy/charts/buzz/Chart.yaml `version`
+#                       → tag chart-v<v>  → helm-chart.yml (helm chart)
+#
+# Mobile candidate tags do not come from merged PRs. Operators create immutable
+# mobile-v<v>-rc.N tags directly from remote main with scripts/mobile-release.sh,
+# then hand the exact tag to buzz-releases.
+#
+# Release tags are created with a short-lived token from the dedicated
+# buzz-release-bot GitHub App. GitHub attributes the ref creation to that
+# App, so the consumer's `on.push.tags` trigger runs normally. The workflow's
+# default GITHUB_TOKEN remains read-only and is never used to create a tag.
+#
+# Mobile is manual-only by infosec necessity: OSS `block/buzz` CI must
+# not trigger CI in the private `buzz-releases` repo. A human feeds the exact
+# mobile candidate tag to the private Buildkite pipeline, which builds and
+# ships mobile.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  auto-tag:
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve release lane and version
+        id: release
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Explicit release branches retain their established behavior. For an
+          # ordinary internal PR, publish only when Chart.yaml itself changed
+          # and its version differs from the PR's base commit.
+          case "$BRANCH" in
+            version-bump/*)
+              VERSION="${BRANCH#version-bump/}"
+              TAG_PREFIX="desktop-v" ;;
+            relay-release/*)
+              VERSION="${BRANCH#relay-release/}"
+              TAG_PREFIX="relay-v" ;;
+            chart-release/*)
+              VERSION="${BRANCH#chart-release/}"
+              TAG_PREFIX="chart-v" ;;
+            push-chart-release/*)
+              VERSION="${BRANCH#push-chart-release/}"
+              TAG_PREFIX="push-chart-v" ;;
+            *)
+              parent_sha="$(git rev-parse HEAD^)"
+              old_version="$(git show "${parent_sha}:deploy/charts/buzz/Chart.yaml" 2>/dev/null | awk '/^version:/ {print $2}')"
+              VERSION="$(awk '/^version:/ {print $2}' deploy/charts/buzz/Chart.yaml)"
+              if [ -z "$old_version" ] || [ -z "$VERSION" ] || [ "$old_version" = "$VERSION" ]; then
+                echo "No release branch or chart version bump — nothing to tag"
+                echo "enabled=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              TAG_PREFIX="chart-v" ;;
+          esac
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid release version: '$VERSION'"
+            exit 1
+          fi
+          {
+            echo "enabled=true"
+            echo "tag=${TAG_PREFIX}${VERSION}"
+            if [[ "$TAG_PREFIX" == desktop-v ]]; then
+              echo "target_sha=${{ github.event.pull_request.head.sha }}"
+              echo "desktop=true"
+            else
+              echo "target_sha=$GITHUB_SHA"
+              echo "desktop=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+          echo "Tagging ${TAG_PREFIX}${VERSION}"
+
+
+      - name: Verify immutable reviewed desktop candidate
+        if: steps.release.outputs.desktop == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.tag }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGED_AT: ${{ github.event.pull_request.merged_at }}
+        run: |
+          VERSION="${VERSION#desktop-v}"
+          export VERSION
+          scripts/verify-desktop-release-merge.sh
+
+      - name: Create release tagger token
+        if: steps.release.outputs.enabled == 'true'
+        id: release-tagger
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.BUZZ_RELEASE_TAGGER_CLIENT_ID }}
+          private-key: ${{ secrets.BUZZ_RELEASE_TAGGER_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Create and push tag
+        if: steps.release.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release-tagger.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          # Check gh's exit status, not its output. A missing ref returns a 404
+          # JSON body on stdout, which must not be mistaken for an existing tag.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            EXISTING_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+            if [ "$EXISTING_SHA" = "$TARGET_SHA" ]; then
+              echo "Tag $TAG already exists at $TARGET_SHA — skipping tag creation"
+              exit 0
+            else
+              echo "::error::Tag $TAG already exists at $EXISTING_SHA (expected $TARGET_SHA)"
+              exit 1
+            fi
+          fi
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG" \
+            -f sha="$TARGET_SHA" \
+            --silent; then
+            # Ref creation is atomic. A concurrent retry may have won the race;
+            # accept that only when it created the exact immutable ref.
+            EXISTING_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+            if [ "$EXISTING_SHA" = "$TARGET_SHA" ]; then
+              echo "Tag $TAG was concurrently created at $TARGET_SHA"
+              exit 0
+            fi
+            echo "::error::Tag creation failed and $TAG resolves to $EXISTING_SHA (expected $TARGET_SHA)"
+            exit 1
+          fi

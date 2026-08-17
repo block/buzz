@@ -1,0 +1,94 @@
+:root {
+  --buzz-diff-insert-gutter-bg: 143 58% 91%;
+  --buzz-diff-insert-code-bg: 140 56% 96%;
+  --buzz-diff-insert-edit-bg: 142 44% 82%;
+  --buzz-diff-insert-text: 143 63% 20%;
+  --buzz-diff-delete-gutter-bg: 352 73% 93%;
+  --buzz-diff-delete-code-bg: 356 87% 97%;
+  --buzz-diff-delete-edit-bg: 353 64% 84%;
+  --buzz-diff-delete-text: 356 55% 24%;
+}
+
+.dark {
+  --buzz-diff-insert-gutter-bg: 143 33% 20%;
+  --buzz-diff-insert-code-bg: 143 29% 15%;
+  --buzz-diff-insert-edit-bg: 143 30% 27%;
+  --buzz-diff-insert-text: 143 47% 78%;
+  --buzz-diff-delete-gutter-bg: 353 28% 20%;
+  --buzz-diff-delete-code-bg: 353 25% 15%;
+  --buzz-diff-delete-edit-bg: 353 31% 27%;
+  --buzz-diff-delete-text: 352 71% 83%;
+}
+
+.buzz-diff-theme {
+  --diff-background-color: transparent;
+  --diff-text-color: hsl(var(--foreground));
+  --diff-font-family:
+    "SFMono-Regular", "Geist Mono", ui-monospace, "Cascadia Code",
+    "Source Code Pro", Menlo, Consolas, monospace;
+  --diff-selection-background-color: hsl(var(--accent) / 0.9);
+  --diff-selection-text-color: hsl(var(--accent-foreground));
+  --diff-gutter-insert-background-color: hsl(var(--buzz-diff-insert-gutter-bg));
+  --diff-gutter-insert-text-color: hsl(var(--buzz-diff-insert-text));
+  --diff-gutter-delete-background-color: hsl(var(--buzz-diff-delete-gutter-bg));
+  --diff-gutter-delete-text-color: hsl(var(--buzz-diff-delete-text));
+  --diff-gutter-selected-background-color: hsl(var(--accent) / 0.45);
+  --diff-gutter-selected-text-color: hsl(var(--foreground));
+  --diff-code-insert-background-color: hsl(var(--buzz-diff-insert-code-bg));
+  --diff-code-insert-text-color: hsl(var(--buzz-diff-insert-text));
+  --diff-code-delete-background-color: hsl(var(--buzz-diff-delete-code-bg));
+  --diff-code-delete-text-color: hsl(var(--buzz-diff-delete-text));
+  --diff-code-insert-edit-background-color: hsl(
+    var(--buzz-diff-insert-edit-bg)
+  );
+  --diff-code-insert-edit-text-color: hsl(var(--buzz-diff-insert-text));
+  --diff-code-delete-edit-background-color: hsl(
+    var(--buzz-diff-delete-edit-bg)
+  );
+  --diff-code-delete-edit-text-color: hsl(var(--buzz-diff-delete-text));
+  --diff-code-selected-background-color: hsl(var(--accent) / 0.35);
+  --diff-code-selected-text-color: hsl(var(--foreground));
+  --diff-omit-gutter-line-color: hsl(var(--border));
+}
+
+.buzz-diff-theme .diff {
+  font-size: 0.75rem;
+}
+
+.buzz-diff-theme .diff td {
+  border: 0;
+}
+
+.buzz-diff-theme .buzz-diff-line {
+  line-height: 1.35;
+}
+
+.buzz-diff-theme .buzz-diff-gutter {
+  min-width: 3.5rem;
+  padding: 0.125rem 0.5rem;
+  border-right: 1px solid hsl(var(--border) / 0.65);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+}
+
+.buzz-diff-theme .buzz-diff-code {
+  padding: 0.125rem 0.75rem 0.125rem 0.5rem;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.buzz-diff-theme .diff-code-edit {
+  border-radius: 0.2rem;
+}
+
+.buzz-diff-theme .diff-decoration-content {
+  padding: 0.2rem 0.75rem;
+  background: hsl(var(--muted) / 0.35);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+}
+
+.buzz-diff-theme .diff-gutter-omit::before {
+  margin-left: 2.65rem;
+}

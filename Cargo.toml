@@ -1,0 +1,185 @@
+[workspace]
+members = [
+    "crates/buzz-relay",
+    "crates/buzz-core",
+    "crates/buzz-conformance",
+    "crates/buzz-push-gateway",
+    "crates/buzz-db",
+    "crates/buzz-pubsub",
+    "crates/buzz-auth",
+    "crates/buzz-search",
+    "crates/buzz-audit",
+    "crates/buzz-acp",
+    "crates/buzz-agent",
+    "crates/sprig",
+    "crates/buzz-test-client",
+    "crates/buzz-ws-client",
+    "crates/buzz-admin",
+    "crates/buzz-deletion",
+    "crates/buzz-workflow",
+    "crates/buzz-media",
+    "crates/buzz-cli",
+    "crates/buzz-pairing-cli",
+    "crates/buzz-sdk",
+    "crates/buzz-persona",
+    "crates/git-credential-nostr",
+    "crates/git-sign-nostr",
+    "crates/buzz-pair-relay",
+    "crates/buzz-relay-mesh",
+    "crates/buzz-dev-mcp",
+    "crates/buzz-voice",
+    "crates/buzz-backend-kubernetes",
+    "crates/buzz-datastore-tracing",
+    "examples/countdown-bot",
+]
+exclude = ["desktop/src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88.0"
+license = "Apache-2.0"
+repository = "https://github.com/block/sprout"
+
+[workspace.dependencies]
+# Runtime
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "process"] }
+tokio-util  = { version = "0.7", features = ["rt", "codec"] }
+
+# HTTP + WebSocket
+axum        = { version = "0.8", features = ["ws", "macros"] }
+tower       = { version = "0.5", features = ["timeout", "util", "limit"] }
+tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "timeout", "fs"] }
+
+# Database
+sqlx = { version = "0.9", features = [
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
+] }
+
+# Redis
+redis        = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
+deadpool-redis = { version = "0.23", features = ["rt_tokio_1"] }
+
+# Kubernetes (buzz-backend-kubernetes provider). No `ring` feature here: the
+# process-level CryptoProvider is installed explicitly at startup, matching
+# buzz-cli/buzz-acp/buzz-admin/buzz-relay/buzz-dev-mcp — see the comment on the
+# crate's own rustls dependency.
+kube = { version = "2.0", default-features = false, features = ["client", "rustls-tls"] }
+k8s-openapi = { version = "0.26", features = ["v1_31"] }
+
+# Nostr
+nostr = { version = "0.44", features = ["nip44", "nip98"] }
+
+# Serialization
+serde       = { version = "1", features = ["derive"] }
+postcard    = { version = "1", default-features = false, features = ["use-std"] }
+
+# Inter-relay mesh transport (buzz-relay-mesh)
+iroh = { version = "1.0.0-rc.0", default-features = false, features = ["tls-ring"] }
+serde_json  = "1"
+serde_yaml  = "0.9"
+evalexpr    = "11"
+cron        = "0.16"
+# Observability
+tracing                     = "0.1"
+tracing-subscriber          = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry       = { version = "0.33" }
+opentelemetry               = { version = "0.32", features = ["trace"] }
+opentelemetry_sdk           = { version = "0.32", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp          = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring"] }
+metrics             = "0.24"
+metrics-exporter-prometheus = "0.18"
+metrics-util        = "0.20"
+
+# Error handling
+thiserror = "2"
+anyhow    = "1"
+
+# Utilities
+uuid    = { version = "1", features = ["v4", "serde"] }
+chrono  = { version = "0.4", features = ["serde"] }
+
+# HTTP client (webhook delivery)
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+
+# Cryptography
+sha2      = "0.11"
+hex       = "0.4"
+hmac      = "0.13"
+base64    = "0.22"
+
+# Randomness
+rand = "0.10"
+subtle = "2.6"
+zeroize = "1.8"
+
+# Concurrent data structures
+dashmap = "6"
+moka    = { version = "0.12", features = ["sync"] }
+
+# Async stream utilities
+futures-util = "0.3"
+
+# WebSocket client (test client)
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+
+# Property-based testing (dev-only)
+proptest = "1"
+
+# MCP SDK (used by buzz-dev-mcp and buzz-agent)
+rmcp = { version = "1.1.0", features = ["server", "transport-io", "macros"] }
+schemars = { version = "1", default-features = false }
+
+# Internal crates
+buzz-core = { path = "crates/buzz-core" }
+buzz-conformance = { path = "crates/buzz-conformance" }
+buzz-db = { path = "crates/buzz-db" }
+buzz-deletion = { path = "crates/buzz-deletion" }
+buzz-auth = { path = "crates/buzz-auth" }
+buzz-pubsub = { path = "crates/buzz-pubsub" }
+buzz-search = { path = "crates/buzz-search" }
+buzz-audit = { path = "crates/buzz-audit" }
+buzz-workflow = { path = "crates/buzz-workflow" }
+buzz-media = { path = "crates/buzz-media" }
+buzz-sdk = { path = "crates/buzz-sdk" }
+buzz-ws-client = { path = "crates/buzz-ws-client" }
+buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
+buzz-datastore-tracing = { path = "crates/buzz-datastore-tracing" }
+
+# CI profile — builds the relay for desktop e2e. Dependencies keep full
+# release optimization (warm from main's cache; they carry the runtime hot
+# path: tokio/sqlx/axum). Workspace crates build at opt-level 1 — enough for
+# stable e2e timing (PR #307 flakiness was opt-0 + debug-assertions) at
+# roughly half the codegen cost. Incremental stays disabled: rust-cache exports
+# CARGO_INCREMENTAL=0, and the CI compiler cache requires non-incremental units.
+[profile.ci]
+inherits = "release"
+lto = false
+opt-level = 1
+
+[profile.ci.package."*"]
+opt-level = 3
+
+# Sprig profile — optimized for deploy-anywhere Sprig release artifacts.
+# Sprig is distributed over the network and installed on fresh hosts, so binary
+# size matters more than compile speed here. Keep this separate from the normal
+# `release` profile so desktop/dev release builds do not inherit the slower
+# size-focused settings unless they opt in explicitly.
+[profile.sprig]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Temporary fork pin: aws-creds 0.39.1 (via rust-s3) cannot read EKS Pod Identity
+# credentials (AWS_CONTAINER_CREDENTIALS_FULL_URI + AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE),
+# which the relay pod on bb-block requires for S3 media + git storage. This pins
+# aws-creds to a fork that adopts the aws-creds portion of durch/rust-s3#449
+# (FULL_URI + token-file + Authorization header, refresh-safe, with a loopback
+# allowlist for the auth token). Revert to crates.io once #449 lands upstream.
+[patch.crates-io]
+aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce3620dd434c1f810101d672cf384268dbb0f" }

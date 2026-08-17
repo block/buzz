@@ -1,0 +1,830 @@
+import * as React from "react";
+import { AnimatePresence, LayoutGroup, motion } from "motion/react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import {
+  Bot,
+  FileText,
+  HatGlasses,
+  LineSquiggle,
+  Pencil,
+  Play,
+  UploadCloud,
+  Users,
+  X,
+} from "lucide-react";
+
+import type { BlobDescriptor } from "@/shared/api/tauri";
+import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import {
+  shortHash,
+  type UploadingAttachmentPreview,
+} from "@/features/messages/lib/useMediaUpload";
+import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
+import {
+  Attachment,
+  AttachmentAction,
+  AttachmentActions,
+  AttachmentContent,
+  AttachmentDescription,
+  AttachmentMedia,
+  AttachmentTitle,
+} from "@/shared/ui/attachment";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
+import { Progress } from "@/shared/ui/progress";
+import { Toggle } from "@/shared/ui/toggle";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { ComposerImageEditor } from "./ComposerImageEditor";
+
+/**
+ * Reveal-on-interaction for the composer's media action buttons.
+ *
+ * These stay invisible until the thumbnail is hovered, but `display: none`
+ * cannot hold focus, which would leave keyboard-only users unable to reach
+ * them at all. Hiding with `opacity-0` instead keeps them in the tab order,
+ * and `pointer-events-none` until hover/focus means a mouse behaves exactly as
+ * it did before — an invisible overlay never swallows a click. Keyboard focus
+ * and Enter are unaffected by `pointer-events`.
+ */
+const COMPOSER_MEDIA_REVEAL_CLASS =
+  "pointer-events-none opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100";
+
+/** Corner "remove attachment" badge on a composer thumbnail. */
+const COMPOSER_MEDIA_REMOVE_CLASS = cn(
+  "absolute -right-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background",
+  COMPOSER_MEDIA_REVEAL_CLASS,
+);
+
+const COMPOSER_MEDIA_HOVER_ACTION_CLASS = cn(
+  "absolute inset-0 z-[1] flex items-center justify-center rounded-2xl bg-black/35 text-white backdrop-blur-[1px] hover:bg-black/45",
+  COMPOSER_MEDIA_REVEAL_CLASS,
+);
+
+/** Dashed-border overlay shown when a file is dragged over the composer form. */
+export function DropZoneOverlay({ className }: { className?: string }) {
+  return (
+    <div
+      data-testid="drop-zone-overlay"
+      className={cn(
+        "pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/10",
+        className,
+      )}
+    >
+      <span
+        className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm ring-1 ring-background/15"
+        data-testid="drop-zone-label"
+      >
+        <UploadCloud aria-hidden="true" className="size-4" />
+        <span>Drop files to upload</span>
+      </span>
+    </div>
+  );
+}
+
+type ComposerAttachmentsProps = {
+  attachments: ImetaMedia[];
+  isUploading?: boolean;
+  onCancelUpload?: (previewId: number) => void;
+  /** Remove a local attachment that has not started uploading yet. */
+  onRemoveQueued?: (previewId: number) => void;
+  /** Toggle spoiler state for a queued video before it receives a URL. */
+  onToggleQueuedSpoiler?: (previewId: number) => void;
+  /** Local previews that are queued for upload when the message is sent. */
+  queuedPreviews?: UploadingAttachmentPreview[];
+  uploadingCount?: number;
+  uploadingPreviews?: UploadingAttachmentPreview[];
+  /** Upload annotated bytes as a replacement for the attachment at `url`. */
+  onEditSave?: (url: string, bytes: Uint8Array) => Promise<void>;
+  onRemove: (url: string) => void;
+  /** Restore the pre-edit original for an annotated attachment. */
+  onRevert?: (url: string) => void;
+  /** Annotated attachment URL → original (pre-edit) URL. */
+  originalUrlByUrl?: ReadonlyMap<string, string>;
+  onToggleSpoiler?: (url: string) => void;
+  spoileredUrls?: ReadonlySet<string>;
+};
+
+function formatAttachmentSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+type SnapshotKind = "agent" | "team";
+
+function getSnapshotKind(attachment: ImetaMedia): SnapshotKind | null {
+  const filename = attachment.filename?.toLowerCase();
+  if (attachment.sha256.length !== 64) return null;
+  if (filename?.endsWith(".agent.png") || filename?.endsWith(".agent.json")) {
+    return "agent";
+  }
+  if (filename?.endsWith(".team.png") || filename?.endsWith(".team.json")) {
+    return "team";
+  }
+  return null;
+}
+
+function ComposerSnapshotCard({
+  attachment,
+  onRemove,
+  snapshotKind,
+}: {
+  attachment: ImetaMedia;
+  onRemove: (url: string) => void;
+  snapshotKind: SnapshotKind;
+}) {
+  const [thumbError, setThumbError] = React.useState(false);
+  const isAgentPng =
+    snapshotKind === "agent" &&
+    attachment.filename?.toLowerCase().endsWith(".agent.png");
+  const showThumb = isAgentPng && !thumbError;
+  const SnapshotIcon = snapshotKind === "team" ? Users : Bot;
+  const fallbackLabel = snapshotKind === "team" ? "Team" : "Agent";
+  const displayName =
+    attachment.displayLabel?.trim() ||
+    attachment.filename?.replace(/\.(?:agent|team)\.(?:png|json)$/i, "") ||
+    fallbackLabel;
+
+  return (
+    <motion.div
+      animate={{ opacity: 1, scale: 1 }}
+      className="min-w-0 max-w-full"
+      exit={{ opacity: 0, scale: 0.8 }}
+      initial={false}
+      layout
+      transition={{ type: "spring", stiffness: 500, damping: 30 }}
+    >
+      <Attachment
+        className="w-fit max-w-full shadow-none"
+        data-testid={`composer-${snapshotKind}-snapshot-card`}
+        size="sm"
+      >
+        <AttachmentMedia
+          className={
+            showThumb
+              ? "relative h-9 w-9"
+              : "bg-primary/10 text-primary ring-1 ring-primary/20 dark:bg-primary/15"
+          }
+          variant={showThumb ? "image" : "icon"}
+        >
+          {showThumb ? (
+            <>
+              <img
+                alt=""
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 h-full w-full scale-150 object-cover"
+                src={rewriteRelayUrl(attachment.url)}
+              />
+              <img
+                alt=""
+                className="relative h-full w-full object-cover"
+                src={rewriteRelayUrl(attachment.url)}
+                onError={() => setThumbError(true)}
+              />
+            </>
+          ) : (
+            <SnapshotIcon />
+          )}
+        </AttachmentMedia>
+        <AttachmentContent>
+          <AttachmentTitle className="overflow-visible whitespace-normal text-clip">
+            {displayName}
+          </AttachmentTitle>
+          <AttachmentDescription className="text-secondary-foreground/75">
+            {formatAttachmentSize(attachment.size)}
+          </AttachmentDescription>
+        </AttachmentContent>
+        <AttachmentActions className="ml-4">
+          <AttachmentAction
+            aria-label={`Remove ${displayName}`}
+            className="border-0 bg-transparent text-muted-foreground/70 shadow-none hover:text-foreground hover:shadow-none focus-visible:bg-muted focus-visible:ring-0"
+            data-testid={`composer-${snapshotKind}-snapshot-remove`}
+            onClick={() => onRemove(attachment.url)}
+            title="Remove"
+            type="button"
+          >
+            <X />
+          </AttachmentAction>
+        </AttachmentActions>
+      </Attachment>
+    </motion.div>
+  );
+}
+
+const LIGHTBOX_BUTTON_CLASS =
+  "rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30";
+
+const COMPOSER_MEDIA_HEIGHT_PX = 55;
+const COMPOSER_MEDIA_WIDTH_PX = 55;
+
+function composerMediaStyle(): React.CSSProperties {
+  return {
+    height: COMPOSER_MEDIA_HEIGHT_PX,
+    width: COMPOSER_MEDIA_WIDTH_PX,
+  };
+}
+
+type MediaAttachmentItemProps = {
+  attachment: BlobDescriptor;
+  isSpoilered: boolean;
+  onEditSave?: (url: string, bytes: Uint8Array) => Promise<void>;
+  onRemove: (url: string) => void;
+  onRevert?: (url: string) => void;
+  onToggleSpoiler?: (url: string) => void;
+  /** Set when this attachment is an annotated replacement of an original. */
+  originalUrl?: string;
+};
+
+/**
+ * A single image/video attachment thumbnail with its lightbox dialog.
+ * Images support an in-lightbox canvas edit mode (freehand drawing) and,
+ * once annotated, an in-place revert to the original. Save closes the
+ * dialog; revert keeps it open (the parent keys this item by its original
+ * URL so the swap doesn't remount it).
+ *
+ * Forwards its ref to the root motion.div — required by the parent
+ * `AnimatePresence mode="popLayout"`, which measures exiting children.
+ */
+const MediaAttachmentItem = React.forwardRef<
+  HTMLDivElement,
+  MediaAttachmentItemProps
+>(function MediaAttachmentItem(
+  {
+    attachment,
+    isSpoilered,
+    onEditSave,
+    onRemove,
+    onRevert,
+    onToggleSpoiler,
+    originalUrl,
+  },
+  ref,
+) {
+  const [open, setOpen] = React.useState(false);
+  const [mode, setMode] = React.useState<"view" | "edit">("view");
+
+  const hash = shortHash(attachment.sha256);
+  const isVideo = attachment.type.startsWith("video/");
+  const thumbUrl = attachment.thumb
+    ? rewriteRelayUrl(attachment.thumb)
+    : rewriteRelayUrl(attachment.url);
+  const videoPosterUrl = attachment.image
+    ? rewriteRelayUrl(attachment.image)
+    : attachment.thumb
+      ? rewriteRelayUrl(attachment.thumb)
+      : undefined;
+
+  const canEdit = !isVideo && onEditSave !== undefined;
+  const canRevert =
+    !isVideo && onRevert !== undefined && originalUrl !== undefined;
+
+  const handleOpenChange = React.useCallback((next: boolean) => {
+    setOpen(next);
+    if (!next) setMode("view");
+  }, []);
+
+  // Read `mode` via a ref: Radix's dismissable layer (>=1.1.14) registers a
+  // stable Escape listener, so the handler would otherwise see a stale mode.
+  const modeRef = React.useRef(mode);
+  modeRef.current = mode;
+  // Gates Escape while the editor's save upload is in flight: dismissing
+  // edit mode mid-save would look like a cancel while the swap still lands.
+  const editorSavingRef = React.useRef(false);
+  const handleEditorSavingChange = React.useCallback((saving: boolean) => {
+    editorSavingRef.current = saving;
+  }, []);
+  const handleEscapeKeyDown = React.useCallback((event: KeyboardEvent) => {
+    if (modeRef.current === "edit") {
+      // Escape leaves canvas mode but keeps the lightbox open.
+      event.preventDefault();
+      if (!editorSavingRef.current) setMode("view");
+    }
+  }, []);
+
+  const handleEditorSave = React.useCallback(
+    async (bytes: Uint8Array) => {
+      if (!onEditSave) return;
+      await onEditSave(attachment.url, bytes);
+      // Close on save so rapid save/redraw cycles don't orphan a blob per iteration.
+      setMode("view");
+      setOpen(false);
+    },
+    [attachment.url, onEditSave],
+  );
+
+  const handleEditorCancel = React.useCallback(() => setMode("view"), []);
+
+  const handleRevert = React.useCallback(() => {
+    onRevert?.(attachment.url);
+  }, [attachment.url, onRevert]);
+  const handleOpenLightbox = React.useCallback(() => {
+    setOpen(true);
+  }, []);
+
+  return (
+    <motion.div
+      data-testid="composer-media-attachment"
+      ref={ref}
+      layout
+      initial={false}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.8 }}
+      transition={{ type: "spring", stiffness: 500, damping: 30 }}
+      className="group relative"
+    >
+      <div
+        className="relative h-[55px] max-w-[55px]"
+        style={composerMediaStyle()}
+      >
+        <DialogPrimitive.Root open={open} onOpenChange={handleOpenChange}>
+          <DialogPrimitive.Trigger asChild>
+            <div className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70">
+              {isVideo ? (
+                <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
+                  {videoPosterUrl ? (
+                    <img
+                      src={videoPosterUrl}
+                      alt={`Video attachment ${hash}`}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <div className="h-full w-full bg-muted/80" />
+                  )}
+                  <div className="absolute inset-0 bg-black/15" />
+                  <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
+                    <Play className="h-4 w-4 fill-white text-white" />
+                  </div>
+                </div>
+              ) : (
+                <img
+                  src={thumbUrl}
+                  alt={`Attachment ${hash}`}
+                  className="h-full w-full object-cover"
+                />
+              )}
+              {isSpoilered ? (
+                <div
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
+                  data-composer-media-spoiler=""
+                >
+                  <HatGlasses className="h-4 w-4" />
+                </div>
+              ) : null}
+            </div>
+          </DialogPrimitive.Trigger>
+          <DialogPrimitive.Portal>
+            <DialogPrimitive.Overlay
+              className={cn(
+                "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+                MODAL_BACKDROP_BLUR_CLASS,
+              )}
+            />
+            <DialogPrimitive.Content
+              className="fixed inset-0 z-50 flex items-center justify-center p-8"
+              onPointerDownOutside={(e) => e.preventDefault()}
+              onInteractOutside={(e) => e.preventDefault()}
+              onEscapeKeyDown={handleEscapeKeyDown}
+            >
+              <DialogPrimitive.Title className="sr-only">
+                Attachment {hash} preview
+              </DialogPrimitive.Title>
+              <DialogPrimitive.Description className="sr-only">
+                Full-size attachment preview. Press Escape or click outside to
+                close.
+              </DialogPrimitive.Description>
+              {mode === "view" ? (
+                <DialogPrimitive.Close
+                  className="absolute inset-0 cursor-default"
+                  aria-label="Close lightbox"
+                />
+              ) : null}
+              {mode === "edit" && !isVideo ? (
+                <ComposerImageEditor
+                  alt={`Attachment ${hash}`}
+                  src={rewriteRelayUrl(attachment.url)}
+                  sourceUrl={attachment.url}
+                  sourceType={attachment.type}
+                  onCancel={handleEditorCancel}
+                  onSave={handleEditorSave}
+                  onSavingChange={handleEditorSavingChange}
+                />
+              ) : isVideo ? (
+                // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
+                <video
+                  src={rewriteRelayUrl(attachment.url)}
+                  controls
+                  className={cn(
+                    "relative max-h-[90vh] max-w-[90vw] rounded-lg",
+                    isSpoilered && "blur-2xl brightness-75",
+                  )}
+                />
+              ) : (
+                <img
+                  alt={`Attachment ${hash}`}
+                  className={cn(
+                    "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
+                    isSpoilered && "blur-2xl brightness-75",
+                  )}
+                  src={rewriteRelayUrl(attachment.url)}
+                />
+              )}
+              {mode === "view" && isSpoilered ? (
+                /*
+                 * Expanded-media counterpart of the thumbnail spoiler treatment:
+                 * the media itself is blurred above, and this layer centers the
+                 * spoiler glyph. pointer-events-none keeps controls and
+                 * backdrop-close clickable.
+                 */
+                <div
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center text-foreground/70"
+                  data-lightbox-media-spoiler=""
+                >
+                  <HatGlasses className="h-10 w-10" />
+                </div>
+              ) : null}
+              {mode === "view" ? (
+                <div className="absolute right-4 top-4 flex items-center gap-2">
+                  {canRevert ? (
+                    <Tooltip disableHoverableContent>
+                      <TooltipTrigger asChild>
+                        <Button
+                          data-testid="composer-attachment-revert"
+                          onClick={handleRevert}
+                          size="sm"
+                          type="button"
+                        >
+                          Revert
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Revert to original</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  {onToggleSpoiler ? (
+                    <Tooltip disableHoverableContent>
+                      <TooltipTrigger asChild>
+                        <Toggle
+                          aria-label={
+                            isSpoilered ? "Remove spoiler" : "Mark as spoiler"
+                          }
+                          className={cn(
+                            LIGHTBOX_BUTTON_CLASS,
+                            "h-auto min-w-0",
+                            isSpoilered &&
+                              "rounded-lg bg-white/25 text-white ring-2 ring-white",
+                          )}
+                          data-testid="composer-attachment-spoiler"
+                          onPressedChange={() =>
+                            onToggleSpoiler(attachment.url)
+                          }
+                          pressed={isSpoilered}
+                        >
+                          <HatGlasses className="h-4 w-4" />
+                        </Toggle>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  {canEdit ? (
+                    <Tooltip disableHoverableContent>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className={LIGHTBOX_BUTTON_CLASS}
+                          data-testid="composer-attachment-edit"
+                          onClick={() => setMode("edit")}
+                        >
+                          <Pencil className="h-4 w-4" />
+                          <span className="sr-only">Draw on image</span>
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Draw on image</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  <DialogPrimitive.Close className={LIGHTBOX_BUTTON_CLASS}>
+                    <X className="h-4 w-4" />
+                    <span className="sr-only">Close</span>
+                  </DialogPrimitive.Close>
+                </div>
+              ) : null}
+            </DialogPrimitive.Content>
+          </DialogPrimitive.Portal>
+        </DialogPrimitive.Root>
+        <Tooltip disableHoverableContent>
+          <TooltipTrigger asChild>
+            <button
+              aria-label="Remove attachment"
+              type="button"
+              onClick={() => onRemove(attachment.url)}
+              className={COMPOSER_MEDIA_REMOVE_CLASS}
+            >
+              <X className="h-2.5 w-2.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Remove attachment</TooltipContent>
+        </Tooltip>
+        {canEdit ? (
+          <Tooltip disableHoverableContent>
+            <TooltipTrigger asChild>
+              <button
+                className={COMPOSER_MEDIA_HOVER_ACTION_CLASS}
+                data-testid="composer-attachment-annotate"
+                onClick={handleOpenLightbox}
+                type="button"
+              >
+                <LineSquiggle className="h-5 w-5" />
+                <span className="sr-only">Draw on image</span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Draw on image</TooltipContent>
+          </Tooltip>
+        ) : null}
+        {isVideo && onToggleSpoiler ? (
+          <Tooltip disableHoverableContent>
+            <TooltipTrigger asChild>
+              <button
+                aria-label={isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
+                aria-pressed={isSpoilered}
+                className={COMPOSER_MEDIA_HOVER_ACTION_CLASS}
+                data-testid="composer-video-spoiler"
+                onClick={() => onToggleSpoiler(attachment.url)}
+                type="button"
+              >
+                <HatGlasses className="h-5 w-5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
+    </motion.div>
+  );
+});
+
+/**
+ * Thumbnail previews for uploaded attachments in the composer.
+ * Each attachment shows as a small image with a remove button and
+ * a short hash label (e.g. "a3f2").
+ */
+export const ComposerAttachments = React.memo(function ComposerAttachments({
+  attachments,
+  isUploading = false,
+  uploadingCount = 0,
+  uploadingPreviews = [],
+  onCancelUpload,
+  onRemoveQueued,
+  onToggleQueuedSpoiler,
+  queuedPreviews = [],
+  onEditSave,
+  onRemove,
+  onRevert,
+  originalUrlByUrl,
+  onToggleSpoiler,
+  spoileredUrls,
+}: ComposerAttachmentsProps) {
+  if (attachments.length === 0 && queuedPreviews.length === 0 && !isUploading)
+    return null;
+
+  const uploadPlaceholders: UploadingAttachmentPreview[] =
+    uploadingPreviews.length > 0
+      ? uploadingPreviews
+      : Array.from({ length: uploadingCount || 1 }, (_, index) => ({
+          id: -index - 1,
+        }));
+
+  return (
+    <LayoutGroup>
+      <motion.div
+        layout
+        className="flex items-center gap-2"
+        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+      >
+        <AnimatePresence mode="popLayout">
+          {attachments.map((attachment) => {
+            const hash = shortHash(attachment.sha256);
+            const isVideo = attachment.type.startsWith("video/");
+            const isImage = attachment.type.startsWith("image/");
+            const isFile = !isVideo && !isImage;
+
+            const snapshotKind = getSnapshotKind(attachment);
+            if (snapshotKind) {
+              return (
+                <ComposerSnapshotCard
+                  attachment={attachment}
+                  key={attachment.url}
+                  onRemove={onRemove}
+                  snapshotKind={snapshotKind}
+                />
+              );
+            }
+
+            // Generic file: compact chip with a file icon + filename, plus the
+            // same remove button. No lightbox (nothing to preview).
+            if (isFile) {
+              const label =
+                attachment.filename ||
+                attachment.url.split("/").pop() ||
+                `file ${hash}`;
+              return (
+                <motion.div
+                  key={attachment.url}
+                  layout
+                  initial={false}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                  className="group relative"
+                >
+                  <div className="flex h-5 max-w-40 items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
+                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate text-2xs text-muted-foreground">
+                      {label}
+                    </span>
+                  </div>
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <button
+                        aria-label="Remove attachment"
+                        type="button"
+                        onClick={() => onRemove(attachment.url)}
+                        className={COMPOSER_MEDIA_REMOVE_CLASS}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Remove attachment</TooltipContent>
+                  </Tooltip>
+                </motion.div>
+              );
+            }
+
+            const originalUrl = originalUrlByUrl?.get(attachment.url);
+            return (
+              <MediaAttachmentItem
+                attachment={attachment}
+                isSpoilered={spoileredUrls?.has(attachment.url) ?? false}
+                // Annotated attachments keep their original URL as the key so
+                // the in-place edit/revert URL swap doesn't remount the item
+                // (which would close its open lightbox dialog).
+                key={originalUrl ?? attachment.url}
+                onEditSave={onEditSave}
+                onRemove={onRemove}
+                onRevert={onRevert}
+                onToggleSpoiler={onToggleSpoiler}
+                originalUrl={originalUrl}
+              />
+            );
+          })}
+          {queuedPreviews.map((preview) => {
+            const isVideo = preview.type?.startsWith("video/") ?? false;
+            const isMedia = preview.type?.startsWith("image/") || isVideo;
+            return (
+              <motion.div
+                animate={{ opacity: 1, scale: 1 }}
+                className="group relative"
+                data-testid="composer-queued-media-attachment"
+                exit={{ opacity: 0, scale: 0.8 }}
+                initial={{ opacity: 0, scale: 0.8 }}
+                key={`queued-attachment-${preview.id}`}
+                layout
+                transition={{ type: "spring", stiffness: 500, damping: 30 }}
+              >
+                {isMedia ? (
+                  <div
+                    className="relative h-[55px] max-w-[55px]"
+                    style={composerMediaStyle()}
+                  >
+                    <div className="h-full w-full overflow-hidden rounded-2xl border border-border/70 bg-muted">
+                      {preview.posterUrl ? (
+                        <img
+                          alt={preview.filename ?? "Queued attachment"}
+                          className="h-full w-full object-cover"
+                          src={preview.posterUrl}
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                          <Play className="size-5" />
+                        </div>
+                      )}
+                    </div>
+                    {preview.spoilered ? (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]">
+                        <HatGlasses className="h-4 w-4" />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="flex h-5 max-w-40 items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
+                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate text-2xs text-muted-foreground">
+                      {preview.filename ?? "Attachment"}
+                    </span>
+                  </div>
+                )}
+                {onRemoveQueued ? (
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <button
+                        aria-label="Remove attachment"
+                        className={COMPOSER_MEDIA_REMOVE_CLASS}
+                        onClick={() => onRemoveQueued(preview.id)}
+                        type="button"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Remove attachment</TooltipContent>
+                  </Tooltip>
+                ) : null}
+                {isVideo && onToggleQueuedSpoiler ? (
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <button
+                        aria-label={
+                          preview.spoilered
+                            ? "Remove spoiler"
+                            : "Mark as spoiler"
+                        }
+                        aria-pressed={preview.spoilered}
+                        className={COMPOSER_MEDIA_HOVER_ACTION_CLASS}
+                        data-testid="composer-queued-video-spoiler"
+                        onClick={() => onToggleQueuedSpoiler(preview.id)}
+                        type="button"
+                      >
+                        <HatGlasses className="h-5 w-5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {preview.spoilered ? "Remove spoiler" : "Mark as spoiler"}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : null}
+              </motion.div>
+            );
+          })}
+          {isUploading &&
+            uploadPlaceholders.map((preview) => (
+              <motion.div
+                key={`upload-placeholder-${preview.id}`}
+                layout
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                className="group relative"
+              >
+                <div
+                  className="relative h-[55px] max-w-[55px]"
+                  style={composerMediaStyle()}
+                >
+                  <div className="h-full w-full overflow-hidden rounded-2xl border border-border/70 bg-muted">
+                    {preview.posterUrl ? (
+                      <img
+                        src={preview.posterUrl}
+                        alt={`Uploading ${preview.filename ?? "video"}`}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="h-full w-full animate-pulse bg-muted" />
+                    )}
+                    <div className="absolute inset-0 flex items-end rounded-2xl bg-background/25 px-2 pb-1.5">
+                      <Progress
+                        aria-label={`Uploading ${preview.filename ?? "attachment"}`}
+                        className={cn(
+                          "h-1",
+                          preview.posterUrl
+                            ? "bg-white/30 [&>div]:bg-white"
+                            : "bg-foreground/15 [&>div]:bg-foreground/80",
+                        )}
+                        data-testid="upload-progress"
+                        value={preview.progress ?? null}
+                      />
+                    </div>
+                  </div>
+                  {onCancelUpload && preview.id >= 0 ? (
+                    <Tooltip disableHoverableContent>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Cancel upload"
+                          onClick={() => onCancelUpload(preview.id)}
+                          className="absolute -right-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Cancel upload</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                </div>
+              </motion.div>
+            ))}
+        </AnimatePresence>
+      </motion.div>
+    </LayoutGroup>
+  );
+});

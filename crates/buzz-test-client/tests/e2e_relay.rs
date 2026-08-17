@@ -1,0 +1,3100 @@
+//! End-to-end integration tests for the Buzz relay.
+//!
+//! These tests require a running relay instance.  By default they are marked
+//! `#[ignore]` so that `cargo test` does not fail in CI when the relay is not
+//! available.
+//!
+//! # Running
+//!
+//! Start the relay, then run:
+//!
+//! ```text
+//! cargo test --test e2e_relay -- --ignored
+//! ```
+//!
+//! Override the relay URL with the `RELAY_URL` environment variable:
+//!
+//! ```text
+//! RELAY_URL=ws://relay.example.com cargo test --test e2e_relay -- --ignored
+//! ```
+
+use std::time::Duration;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
+use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+fn relay_url() -> String {
+    std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
+}
+
+fn sub_id(name: &str) -> String {
+    format!("e2e-{name}-{}", uuid::Uuid::new_v4())
+}
+
+fn relay_http_url() -> String {
+    relay_url()
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn test_owner_keys() -> Keys {
+    std::env::var("BUZZ_TEST_OWNER_PRIVATE_KEY")
+        .ok()
+        .and_then(|secret| Keys::parse(&secret).ok())
+        .unwrap_or_else(Keys::generate)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    hex::encode(digest)
+}
+
+fn nip98_post_header(keys: &Keys, url: &str, body: &str) -> String {
+    let event = EventBuilder::new(Kind::Custom(27_235), "")
+        .tags(vec![
+            Tag::parse(["u", url]).unwrap(),
+            Tag::parse(["method", "POST"]).unwrap(),
+            Tag::parse(["payload", &sha256_hex(body.as_bytes())]).unwrap(),
+            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .expect("sign NIP-98 event");
+    format!(
+        "Nostr {}",
+        BASE64.encode(serde_json::to_string(&event).expect("serialize NIP-98 event"))
+    )
+}
+
+async fn e2e_db_pool() -> sqlx::Pool<sqlx::Postgres> {
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string() // sadscan:disable np.postgres.1
+    });
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect to e2e Postgres")
+}
+
+async fn ensure_test_community(host: &str) -> uuid::Uuid {
+    let pool = e2e_db_pool().await;
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO communities (id, host) \
+         VALUES ($1, $2) \
+         ON CONFLICT (lower(host)) DO NOTHING",
+    )
+    .bind(id)
+    .bind(host)
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed community {host}: {e}"));
+
+    sqlx::query_scalar("SELECT id FROM communities WHERE lower(host) = lower($1)")
+        .bind(host)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("lookup community {host}: {e}"))
+}
+
+async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
+    let pool = e2e_db_pool().await;
+    let community_id = ensure_test_community(host).await;
+    sqlx::query(
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+         VALUES ($1, $2, $3, NULL) \
+         ON CONFLICT (community_id, pubkey) DO UPDATE \
+         SET role = $3, updated_at = now()",
+    )
+    .bind(community_id)
+    .bind(keys.public_key().to_hex())
+    .bind(role)
+    .execute(&pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed relay member {role}: {e}"));
+}
+
+async fn seed_relay_owner(keys: &Keys) {
+    seed_relay_member(&relay_authority(), keys, "owner").await;
+}
+
+fn relay_authority() -> String {
+    let url = url::Url::parse(&relay_http_url()).expect("relay HTTP URL");
+    url[url::Position::BeforeHost..url::Position::AfterPort].to_string()
+}
+
+fn http_origin_for_host(host: &str) -> String {
+    let scheme = if relay_http_url().starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{host}")
+}
+
+async fn invite_post(keys: &Keys, path: &str, body: &str) -> reqwest::Response {
+    invite_post_with_host(keys, None, path, body).await
+}
+
+async fn invite_post_with_host(
+    keys: &Keys,
+    host: Option<&str>,
+    path: &str,
+    body: &str,
+) -> reqwest::Response {
+    let client = reqwest::Client::new();
+    let connection_url = format!("{}{}", relay_http_url(), path);
+    let signed_url = host
+        .map(|host| format!("{}{}", http_origin_for_host(host), path))
+        .unwrap_or_else(|| connection_url.clone());
+    let mut request = client
+        .post(&connection_url)
+        .header("Authorization", nip98_post_header(keys, &signed_url, body))
+        .header("Content-Type", "application/json");
+    if let Some(host) = host {
+        request = request.header(reqwest::header::HOST, host);
+    }
+    request
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST {path} failed: {e}"))
+}
+
+/// Create a real channel via a signed kind:9007 event submitted to POST /events.
+async fn create_test_channel(keys: &Keys) -> String {
+    let client = reqwest::Client::new();
+    let pubkey_hex = keys.public_key().to_hex();
+    let channel_uuid = uuid::Uuid::new_v4();
+    let channel_name = format!("relay-e2e-{}", channel_uuid);
+
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
+            Tag::parse(["name", &channel_name]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "open"]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("submit create-channel event");
+    assert!(
+        resp.status().is_success(),
+        "channel creation event failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse event response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "channel creation not accepted: {}",
+        body
+    );
+
+    channel_uuid.to_string()
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_connect_and_authenticate() {
+    let url = relay_url();
+    let keys = Keys::generate();
+
+    let client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("should connect and authenticate");
+
+    client.disconnect().await.expect("clean disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_client_submitted_nip43_membership_snapshots_are_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    // Prove this actor can submit a normal event so the rejection below is
+    // specifically the relay-only invariant, not a broader authorization failure.
+    create_test_channel(&keys).await;
+    let forged = EventBuilder::new(Kind::Custom(13_534), "")
+        .tags([Tag::parse(["member", &keys.public_key().to_hex(), "owner"]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign forged membership snapshot");
+
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let ok = ws
+        .send_event(forged.clone())
+        .await
+        .expect("submit forged snapshot via websocket");
+    assert!(!ok.accepted, "forged WebSocket snapshot must be rejected");
+    assert_eq!(ok.message, "restricted: relay-only kind");
+    ws.disconnect().await.expect("disconnect");
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&forged).unwrap())
+        .send()
+        .await
+        .expect("submit forged snapshot via HTTP");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = response.text().await.expect("read HTTP rejection");
+    assert!(
+        body.contains("restricted: relay-only kind"),
+        "unexpected HTTP rejection: {body}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_mint_and_claim_admits_new_pubkey() {
+    let owner = test_owner_keys();
+    let joiner = Keys::generate();
+    seed_relay_owner(&owner).await;
+
+    let mint_response = invite_post(&owner, "/api/invites", "{}").await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes code");
+    assert_eq!(
+        mint_json.get("url").and_then(serde_json::Value::as_str),
+        Some(format!("{}/invite/{code}", relay_http_url()).as_str()),
+        "minted URL should be the shareable HTTPS/HTTP invite URL"
+    );
+
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claim_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
+    assert_eq!(claim_response.status(), reqwest::StatusCode::OK);
+    let claim_json: serde_json::Value = claim_response.json().await.expect("claim JSON");
+    assert_eq!(
+        claim_json.get("status").and_then(serde_json::Value::as_str),
+        Some("joined")
+    );
+    assert_eq!(
+        claim_json.get("role").and_then(serde_json::Value::as_str),
+        Some("member")
+    );
+
+    let repeat_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
+    assert_eq!(repeat_response.status(), reqwest::StatusCode::OK);
+    let repeat_json: serde_json::Value = repeat_response.json().await.expect("repeat claim JSON");
+    assert_eq!(
+        repeat_json
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("already_member")
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_claim_rejects_invalid_code() {
+    let joiner = Keys::generate();
+    let body = serde_json::json!({ "code": "garbage.code" }).to_string();
+
+    let response = invite_post(&joiner, "/api/invites/claim", &body).await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let json: serde_json::Value = response.json().await.expect("error JSON");
+    assert_eq!(
+        json.get("error").and_then(serde_json::Value::as_str),
+        Some("invite_invalid")
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_mint_requires_owner_or_admin() {
+    let member = Keys::generate();
+    seed_relay_member(&relay_authority(), &member, "member").await;
+
+    let response = invite_post(&member, "/api/invites", "{}").await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let outsider = Keys::generate();
+    let response = invite_post(&outsider, "/api/invites", "{}").await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_code_minted_for_one_host_fails_on_another() {
+    let host_a = format!("invites-a-{}.example", Uuid::new_v4().simple());
+    let host_b = format!("invites-b-{}.example", Uuid::new_v4().simple());
+    let owner = Keys::generate();
+    let joiner = Keys::generate();
+    ensure_test_community(&host_b).await;
+    seed_relay_member(&host_a, &owner, "owner").await;
+
+    let mint_response = invite_post_with_host(&owner, Some(&host_a), "/api/invites", "{}").await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes code");
+
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claim_response =
+        invite_post_with_host(&joiner, Some(&host_b), "/api/invites/claim", &claim_body).await;
+    assert_eq!(claim_response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_send_event_and_receive_via_subscription() {
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let channel = create_test_channel(&keys_a).await;
+
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+
+    let sid = sub_id("send-recv");
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client_a
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("client A subscribe");
+
+    // Drain EOSE so we're ready for live events.
+    client_a
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("client A EOSE");
+
+    let mut client_b = BuzzTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+
+    let content = format!("hello from B at {}", uuid::Uuid::new_v4());
+    let ok = client_b
+        .send_text_message(&keys_b, &channel, &content, kind)
+        .await
+        .expect("client B send");
+
+    assert!(ok.accepted, "relay rejected event: {}", ok.message);
+
+    let msg = client_a
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("client A recv");
+
+    match msg {
+        RelayMessage::Event { event, .. } => {
+            assert_eq!(event.content, content);
+            assert_eq!(event.pubkey, keys_b.public_key());
+        }
+        other => panic!("Expected Event, got {other:?}"),
+    }
+
+    client_a.disconnect().await.expect("disconnect A");
+    client_b.disconnect().await.expect("disconnect B");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_large_event_frame_below_configured_limit_is_accepted() {
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let h_tag = Tag::parse(["h", channel.as_str()]).expect("h tag");
+    let content = "x".repeat(70_000);
+    let event = EventBuilder::new(Kind::Custom(kind), content)
+        .tags([h_tag])
+        .sign_with_keys(&keys)
+        .expect("sign large event");
+
+    let frame = serde_json::to_string(&serde_json::json!(["EVENT", &event])).expect("frame JSON");
+    assert!(
+        frame.len() > 65_536,
+        "test frame must exceed the old 64 KiB cap; got {} bytes",
+        frame.len()
+    );
+    assert!(
+        frame.len() < 512 * 1024,
+        "test frame should fit under the new default cap; got {} bytes",
+        frame.len()
+    );
+
+    let ok = client.send_event(event).await.expect("send large event");
+    assert!(ok.accepted, "large event rejected: {}", ok.message);
+
+    let ok_after = client
+        .send_text_message(
+            &keys,
+            &channel,
+            "socket still usable after large frame",
+            kind,
+        )
+        .await
+        .expect("send follow-up event");
+    assert!(
+        ok_after.accepted,
+        "follow-up event rejected: {}",
+        ok_after.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_subscription_filters_by_kind() {
+    let url = relay_url();
+    let target_kind: u16 = 9;
+    let other_kind: u16 = 40002;
+
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("filter-kind");
+    let filter = Filter::new()
+        .kind(Kind::Custom(target_kind))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    // Send one matching event and one non-matching event.
+    let ok_match = client
+        .send_text_message(&keys, &channel, "should arrive", target_kind)
+        .await
+        .expect("send matching");
+    assert!(ok_match.accepted, "matching event rejected");
+
+    let ok_other = client
+        .send_text_message(&keys, &channel, "should not arrive", other_kind)
+        .await
+        .expect("send non-matching");
+    assert!(ok_other.accepted, "non-matching event rejected");
+
+    // We should receive exactly the matching event.
+    let msg = client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("recv event");
+
+    match msg {
+        RelayMessage::Event { event, .. } => {
+            assert_eq!(event.content, "should arrive");
+            assert_eq!(event.kind, Kind::Custom(target_kind));
+        }
+        other => panic!("Expected Event, got {other:?}"),
+    }
+
+    // No second event should arrive within a short timeout.
+    let result = client.recv_event(Duration::from_millis(500)).await;
+    match result {
+        Err(TestClientError::Timeout) => { /* expected */ }
+        Ok(RelayMessage::Event { event, .. }) => {
+            panic!("Received unexpected event: kind={}", event.kind.as_u16());
+        }
+        Ok(other) => {
+            // EOSE or NOTICE are fine to receive here.
+            let _ = other;
+        }
+        Err(e) => panic!("Unexpected error: {e}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_close_subscription_stops_delivery() {
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("close-sub");
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    client
+        .close_subscription(&sid)
+        .await
+        .expect("close subscription");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let ok = client
+        .send_text_message(&keys, &channel, "after close", kind)
+        .await
+        .expect("send");
+    assert!(ok.accepted, "event rejected: {}", ok.message);
+
+    let result = client.recv_event(Duration::from_millis(500)).await;
+    match result {
+        Err(TestClientError::Timeout) => { /* expected — no delivery */ }
+        Ok(RelayMessage::Event { event, .. }) => {
+            panic!(
+                "Received event after subscription closed: {}",
+                event.content
+            );
+        }
+        Ok(_) => { /* NOTICE etc. are fine */ }
+        Err(e) => panic!("Unexpected error: {e}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_unauthenticated_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+
+    let mut client = BuzzTestClient::connect_unauthenticated(&url)
+        .await
+        .expect("connect unauthenticated");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let result = client
+        .send_text_message(&keys, "some-channel", "unauthenticated message", 9)
+        .await;
+
+    match result {
+        Ok(ok) => {
+            // Relay may accept the send but reject with OK false.
+            assert!(
+                !ok.accepted,
+                "Relay accepted unauthenticated event — expected rejection"
+            );
+        }
+        Err(TestClientError::ConnectionClosed) => {
+            // Relay closed the connection — also acceptable.
+        }
+        Err(TestClientError::Timeout) => {
+            // Relay may not respond at all to unauthenticated clients.
+            // This is acceptable behaviour.
+        }
+        Err(e) => panic!("Unexpected error: {e}"),
+    }
+
+    let _ = client.disconnect().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_multiple_concurrent_clients() {
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
+    let channel = create_test_channel(&keys[0]).await;
+
+    let mut clients: Vec<BuzzTestClient> =
+        futures_util::future::try_join_all(keys.iter().map(|k| BuzzTestClient::connect(&url, k)))
+            .await
+            .expect("all clients connect");
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    for (i, client) in clients.iter_mut().enumerate() {
+        let sid = format!("multi-{i}");
+        client
+            .subscribe(&sid, vec![filter.clone()])
+            .await
+            .expect("subscribe");
+        client
+            .collect_until_eose(&sid, Duration::from_secs(5))
+            .await
+            .expect("EOSE");
+    }
+
+    let content = format!("broadcast-{}", uuid::Uuid::new_v4());
+    let ok = clients[0]
+        .send_text_message(&keys[0], &channel, &content, kind)
+        .await
+        .expect("send");
+    assert!(ok.accepted, "event rejected: {}", ok.message);
+
+    for (i, client) in clients.iter_mut().enumerate() {
+        let msg = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|e| panic!("client {i} recv failed: {e}"));
+
+        match msg {
+            RelayMessage::Event { event, .. } => {
+                assert_eq!(event.content, content, "client {i} received wrong content");
+            }
+            other => panic!("client {i}: expected Event, got {other:?}"),
+        }
+    }
+
+    for client in clients {
+        client.disconnect().await.expect("disconnect");
+    }
+}
+
+/// Historical events must be returned before EOSE.
+#[tokio::test]
+#[ignore]
+async fn test_stored_events_returned_before_eose() {
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let content = format!("stored-{}", uuid::Uuid::new_v4());
+    let ok = client
+        .send_text_message(&keys, &channel, &content, kind)
+        .await
+        .expect("send");
+    assert!(ok.accepted, "event rejected: {}", ok.message);
+
+    let sid = sub_id("stored");
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect until EOSE");
+
+    let found = events.iter().any(|e| e.content == content);
+    assert!(
+        found,
+        "Stored event not returned before EOSE. Got: {events:?}"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// An explicit `#h` branch that cannot match must not cancel a valid OR sibling.
+/// The valid channel remains usable for historical delivery and live fan-out;
+/// malformed-only requests still close because no authorized UUID survives.
+#[tokio::test]
+#[ignore]
+async fn test_valid_channel_survives_malformed_or_empty_h_sibling() {
+    let url = relay_url();
+    let kind: u16 = 9;
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    for (label, sibling) in [
+        (
+            "malformed",
+            serde_json::json!({"kinds": [kind], "#h": ["not-a-uuid"]}),
+        ),
+        ("empty", serde_json::json!({"kinds": [kind], "#h": []})),
+    ] {
+        let historical = format!("{label}-historical-{}", Uuid::new_v4());
+        let ok = client
+            .send_text_message(&keys, &channel, &historical, kind)
+            .await
+            .expect("send historical event");
+        assert!(ok.accepted, "historical event rejected: {}", ok.message);
+
+        let valid = Filter::new()
+            .kind(Kind::Custom(kind))
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+        let sibling: Filter = serde_json::from_value(sibling).expect("parse sibling filter");
+        let sid = sub_id(label);
+        client
+            .subscribe(&sid, vec![valid, sibling])
+            .await
+            .expect("subscribe");
+
+        let events = client
+            .collect_until_eose(&sid, Duration::from_secs(5))
+            .await
+            .expect("valid sibling history followed by EOSE");
+        assert!(
+            events.iter().any(|event| event.content == historical),
+            "valid sibling history missing for {label} #h branch: {events:?}",
+        );
+
+        let live = format!("{label}-live-{}", Uuid::new_v4());
+        let ok = client
+            .send_text_message(&keys, &channel, &live, kind)
+            .await
+            .expect("send live event");
+        assert!(ok.accepted, "live event rejected: {}", ok.message);
+        let message = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("receive post-EOSE live event");
+        match message {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } => {
+                assert_eq!(subscription_id, sid);
+                assert_eq!(event.content, live);
+            }
+            other => panic!("expected live EVENT for {label} sibling, got {other:?}"),
+        }
+
+        client
+            .close_subscription(&sid)
+            .await
+            .expect("close subscription");
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Ephemeral events (kind 20000–29999) must be accepted but not persisted.
+#[tokio::test]
+#[ignore]
+async fn test_ephemeral_event_not_stored() {
+    let url = relay_url();
+    let ephemeral_kind: u16 = 20001;
+
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let ok = client
+        .send_text_message(&keys, &channel, "ephemeral content", ephemeral_kind)
+        .await
+        .expect("send ephemeral");
+    assert!(
+        ok.accepted,
+        "relay rejected ephemeral event: {}",
+        ok.message
+    );
+
+    let sid = sub_id("ephemeral");
+    let filter = Filter::new()
+        .kind(Kind::Custom(ephemeral_kind))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect until EOSE");
+
+    assert!(
+        events.is_empty(),
+        "Ephemeral event must not be stored. Got: {events:?}"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Kind-22242 AUTH events submitted via EVENT must be rejected.
+#[tokio::test]
+#[ignore]
+async fn test_auth_event_kind_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let relay_url_parsed: nostr::RelayUrl = url.parse().unwrap();
+    let auth_event = nostr::EventBuilder::auth("fake-challenge", relay_url_parsed)
+        .sign_with_keys(&keys)
+        .expect("sign");
+
+    let ok = client.send_event(auth_event).await.expect("send");
+
+    assert!(
+        !ok.accepted,
+        "Relay must reject kind-22242 submitted as EVENT"
+    );
+    let msg_lower = ok.message.to_lowercase();
+    assert!(
+        msg_lower.contains("invalid") || msg_lower.contains("auth"),
+        "Rejection message should mention 'invalid' or 'auth', got: {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// NIP-11 max_subscriptions must be enforced; (limit+1)th REQ gets CLOSED.
+///
+/// This is a protocol-cap test, not an admission-throughput test. Open one REQ
+/// at a time and wait out any shared fixed-window quota before retrying a REQ
+/// rejected specifically as `rate-limited`, so production admission remains
+/// enabled while the test deterministically reaches the independent 1024 cap.
+#[tokio::test]
+#[ignore]
+async fn test_subscription_limit_enforced() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    for i in 0..1024 {
+        let sid = format!("limit-sub-{i}");
+        let filter = Filter::new().kind(Kind::Custom(49_999));
+        subscribe_until_eose(&mut client, &sid, filter).await;
+    }
+
+    let overflow_sid = sub_id("overflow");
+    let filter = Filter::new().kind(Kind::Custom(49_999));
+    loop {
+        client
+            .subscribe(&overflow_sid, vec![filter.clone()])
+            .await
+            .expect("send overflow REQ");
+
+        match client
+            .recv_event(Duration::from_secs(6))
+            .await
+            .expect("recv overflow CLOSED")
+        {
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == overflow_sid && message.starts_with("rate-limited:") => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } => {
+                assert_eq!(subscription_id, overflow_sid);
+                assert!(
+                    message.to_lowercase().contains("too many"),
+                    "Expected 'too many' in CLOSED message, got: {message}"
+                );
+                break;
+            }
+            other => panic!("Expected CLOSED for overflow subscription, got {other:?}"),
+        }
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+async fn subscribe_until_eose(client: &mut BuzzTestClient, sid: &str, filter: Filter) {
+    loop {
+        client
+            .subscribe(sid, vec![filter.clone()])
+            .await
+            .expect("subscribe");
+        match client
+            .recv_event(Duration::from_secs(6))
+            .await
+            .expect("EOSE or rate-limit CLOSED")
+        {
+            RelayMessage::Eose { subscription_id } => {
+                assert_eq!(subscription_id, sid);
+                return;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == sid && message.starts_with("rate-limited:") => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            other => panic!("unexpected response while opening {sid}: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_nip11_relay_info() {
+    let ws_url = relay_url();
+    let http_url = ws_url
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
+    let info_url = format!("{http_url}/info");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&info_url)
+        .send()
+        .await
+        .expect("HTTP GET /info failed");
+
+    assert!(
+        resp.status().is_success(),
+        "GET /info returned {}",
+        resp.status()
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("response is not valid JSON");
+
+    assert!(body.get("name").is_some(), "Missing 'name' field");
+    assert!(
+        body.get("description").is_some(),
+        "Missing 'description' field"
+    );
+    assert!(
+        body.get("supported_nips").is_some(),
+        "Missing 'supported_nips' field"
+    );
+    assert!(body.get("version").is_some(), "Missing 'version' field");
+
+    let limitation = body.get("limitation").expect("Missing 'limitation' field");
+    assert_eq!(
+        limitation.get("max_subscriptions").and_then(|v| v.as_u64()),
+        Some(1024),
+        "limitation.max_subscriptions must be 1024"
+    );
+    // The REQ, EVENT, and COUNT handlers unconditionally require an
+    // authenticated connection, so the NIP-11 doc must advertise that.
+    assert_eq!(
+        limitation.get("auth_required").and_then(|v| v.as_bool()),
+        Some(true),
+        "limitation.auth_required must be true — REQ/EVENT/COUNT require NIP-42 auth"
+    );
+}
+
+/// Events signed by a key other than the authenticated pubkey must be rejected.
+#[tokio::test]
+#[ignore]
+async fn test_pubkey_mismatch_rejected() {
+    let url = relay_url();
+
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let channel = create_test_channel(&keys_a).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("connect as keys_a");
+
+    let ok = client
+        .send_text_message(&keys_b, &channel, "impersonation attempt", 9)
+        .await
+        .expect("send");
+
+    assert!(
+        !ok.accepted,
+        "Relay must reject event signed by a different key than the authenticated pubkey"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_eose_sent_for_empty_subscription() {
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("empty-eose");
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+        .since(nostr::Timestamp::now());
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect until EOSE");
+
+    // There should be no stored events (we just created this channel).
+    assert!(
+        events.is_empty(),
+        "Expected no stored events, got: {events:?}"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Kind:0 NIP-05 sync regression test.
+///
+/// Verifies:
+/// 1. A valid `nip05` in kind:0 content is synced to the profile and resolvable via NIP-05 endpoint.
+/// 2. An off-domain `nip05` in kind:0 content is NOT synced (handle is cleared).
+#[tokio::test]
+#[ignore]
+async fn test_kind0_nip05_sync() {
+    let url = relay_url();
+    let http = relay_http_url();
+    let keys = Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+
+    // Extract the relay domain from the relay URL for building a valid NIP-05 handle.
+    // e.g. "ws://localhost:3000" → "localhost"
+    let relay_domain = url
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .split(':')
+        .next()
+        .unwrap_or("localhost")
+        .split('/')
+        .next()
+        .unwrap_or("localhost")
+        .to_lowercase();
+
+    let unique_name = format!("kind0test{}", &pubkey_hex[..8]);
+    let valid_handle = format!("{}@{}", unique_name, relay_domain);
+
+    // Step 1: Connect and publish kind:0 with a valid nip05 handle.
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let kind0_content = serde_json::json!({
+        "display_name": "Kind0 Test User",
+        "nip05": valid_handle,
+    })
+    .to_string();
+
+    let event = nostr::EventBuilder::new(Kind::Custom(0), kind0_content)
+        .tags([])
+        .sign_with_keys(&keys)
+        .expect("sign kind:0");
+
+    let ok = client.send_event(event).await.expect("send kind:0");
+    assert!(
+        ok.accepted,
+        "kind:0 event should be accepted: {:?}",
+        ok.message
+    );
+
+    // Give the relay a moment to process the side effect.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Step 2: Verify the kind:0 content was stored via POST /query.
+    let http_client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [0],
+        "authors": [&pubkey_hex],
+        "limit": 1,
+    }]);
+    let profile_resp = http_client
+        .post(format!("{}/query", http))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("query kind:0");
+    assert!(
+        profile_resp.status().is_success(),
+        "kind:0 query failed: {}",
+        profile_resp.status()
+    );
+    let events: Vec<serde_json::Value> = profile_resp.json().await.expect("kind:0 json");
+    assert!(
+        !events.is_empty(),
+        "kind:0 event should exist after publishing"
+    );
+    let kind0_stored: serde_json::Value =
+        serde_json::from_str(events[0]["content"].as_str().unwrap_or("{}"))
+            .expect("parse kind:0 content");
+    assert_eq!(
+        kind0_stored["nip05"].as_str(),
+        Some(valid_handle.as_str()),
+        "nip05 should be stored in kind:0 content"
+    );
+
+    // Step 3: Verify NIP-05 resolves via /.well-known/nostr.json.
+    let nip05_resp = http_client
+        .get(format!(
+            "{}/.well-known/nostr.json?name={}",
+            http, unique_name
+        ))
+        .send()
+        .await
+        .expect("GET nostr.json");
+    assert_eq!(nip05_resp.status(), 200);
+    let nip05_body: serde_json::Value = nip05_resp.json().await.expect("nip05 json");
+    let resolved_pubkey = nip05_body["names"][&unique_name].as_str();
+    assert_eq!(
+        resolved_pubkey,
+        Some(pubkey_hex.as_str()),
+        "NIP-05 should resolve the pubkey after kind:0 sync"
+    );
+
+    // Step 4: Publish another kind:0 with an off-domain nip05 (should be cleared).
+    // Sleep to ensure a strictly newer created_at (second-level granularity).
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let off_domain_content = serde_json::json!({
+        "display_name": "Kind0 Test User",
+        "nip05": format!("{}@evil.com", unique_name),
+    })
+    .to_string();
+
+    let event2 = nostr::EventBuilder::new(Kind::Custom(0), off_domain_content)
+        .tags([])
+        .sign_with_keys(&keys)
+        .expect("sign kind:0 off-domain");
+
+    let ok2 = client
+        .send_event(event2)
+        .await
+        .expect("send kind:0 off-domain");
+    assert!(
+        ok2.accepted,
+        "off-domain kind:0 should still be accepted (stored but handle cleared)"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Step 5: Verify the handle was CLEARED — NIP-05 should no longer resolve
+    // after the off-domain kind:0 was accepted. The relay's side effect clears
+    // the nip05_handle in the users table when the domain doesn't match.
+    let nip05_resp2 = http_client
+        .get(format!(
+            "{}/.well-known/nostr.json?name={}",
+            http, unique_name
+        ))
+        .send()
+        .await
+        .expect("GET nostr.json after clear");
+    let nip05_body2: serde_json::Value = nip05_resp2.json().await.expect("nip05 json");
+    assert!(
+        nip05_body2["names"][&unique_name].is_null(),
+        "NIP-05 should not resolve after handle was cleared"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// NIP-29 kind 9000 (PUT_USER): default policy ("anyone") allows a third party to add an agent.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_put_user_default_policy_allows() {
+    let url = relay_url();
+
+    let channel_owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let agent_pubkey_hex = agent_keys.public_key().to_hex();
+
+    // Create a channel owned by channel_owner.
+    let channel_id = create_test_channel(&channel_owner_keys).await;
+
+    // Connect as channel_owner.
+    let mut ws = BuzzTestClient::connect(&url, &channel_owner_keys)
+        .await
+        .expect("connect as channel_owner");
+
+    // Build kind 9000 PUT_USER event: h = channel_id, p = agent pubkey.
+    let h_tag = nostr::Tag::parse(["h", &channel_id]).expect("h tag");
+    let p_tag = nostr::Tag::parse(["p", &agent_pubkey_hex]).expect("p tag");
+    let event = nostr::EventBuilder::new(Kind::Custom(9000), "")
+        .tags([h_tag, p_tag])
+        .sign_with_keys(&channel_owner_keys)
+        .expect("sign kind 9000");
+
+    let ok = ws.send_event(event).await.expect("send kind 9000");
+
+    assert!(
+        ok.accepted,
+        "default policy should allow PUT_USER, got: {}",
+        ok.message
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
+/// Restoring an archived channel must re-signal connected members so their
+/// agents resubscribe. Archive evicts live channel subscriptions; unarchive
+/// emits a kind:44100 member_added notification per member on the always-live
+/// global membership feed, which is the resubscribe trigger remove/re-add uses.
+#[tokio::test]
+#[ignore]
+async fn test_unarchive_emits_member_added_notification() {
+    let url = relay_url();
+
+    let owner_keys = Keys::generate();
+    let owner_pubkey_hex = owner_keys.public_key().to_hex();
+
+    // Creating the channel makes the owner its sole member.
+    let channel_id = create_test_channel(&owner_keys).await;
+
+    let mut ws = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+
+    // Subscribe to the global membership feed (kind:44100 addressed to the owner).
+    // This is a global, non-channel-scoped subscription, so archive's
+    // channel-scoped eviction leaves it intact across the archive→unarchive cycle.
+    let sid = sub_id("membership-feed");
+    let membership_filter = Filter::new().kind(Kind::Custom(44100)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::P),
+        [owner_pubkey_hex.as_str()],
+    );
+    ws.subscribe(&sid, vec![membership_filter])
+        .await
+        .expect("subscribe to membership feed");
+    ws.collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("membership feed EOSE");
+
+    // Archive, then unarchive, the channel via kind:9002 edit-metadata.
+    for archived in ["true", "false"] {
+        let event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel_id]).unwrap(),
+                Tag::parse(["archived", archived]).unwrap(),
+            ])
+            .sign_with_keys(&owner_keys)
+            .unwrap();
+        let ok = ws.send_event(event).await.expect("send kind 9002");
+        assert!(ok.accepted, "edit-metadata rejected: {}", ok.message);
+    }
+
+    // The unarchive must fan out a 44100 to the owner. Loop past any other
+    // events delivered on the connection until we see it (or time out).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .expect("timed out waiting for member_added notification");
+        if let RelayMessage::Event { event, .. } = ws
+            .recv_event(remaining)
+            .await
+            .expect("recv membership notification")
+        {
+            if event.kind == Kind::Custom(44100) {
+                let content: serde_json::Value =
+                    serde_json::from_str(&event.content).expect("parse notification content");
+                assert_eq!(content["type"], "member_added");
+                assert_eq!(content["channel_id"], channel_id);
+                break;
+            }
+        }
+    }
+
+    ws.disconnect().await.expect("disconnect");
+}
+
+/// NIP-29 kind 9000 (PUT_USER): "nobody" policy blocks a third party from adding the agent.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_put_user_nobody_blocks() {
+    let url = relay_url();
+
+    let channel_owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let agent_pubkey_hex = agent_keys.public_key().to_hex();
+
+    // Set agent's channel_add_policy to "nobody" via kind:10100 event.
+    let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
+    let resp = http_client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &agent_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
+        .send()
+        .await
+        .expect("set policy request");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
+
+    // Create a channel owned by channel_owner (not the agent).
+    let channel_id = create_test_channel(&channel_owner_keys).await;
+
+    // Connect as channel_owner.
+    let mut ws = BuzzTestClient::connect(&url, &channel_owner_keys)
+        .await
+        .expect("connect as channel_owner");
+
+    // Build kind 9000 PUT_USER event targeting the agent.
+    let h_tag = nostr::Tag::parse(["h", &channel_id]).expect("h tag");
+    let p_tag = nostr::Tag::parse(["p", &agent_pubkey_hex]).expect("p tag");
+    let event = nostr::EventBuilder::new(Kind::Custom(9000), "")
+        .tags([h_tag, p_tag])
+        .sign_with_keys(&channel_owner_keys)
+        .expect("sign kind 9000");
+
+    let ok = ws.send_event(event).await.expect("send kind 9000");
+
+    assert!(
+        !ok.accepted,
+        "nobody policy should block PUT_USER, but relay accepted it"
+    );
+    assert!(
+        ok.message.contains("policy:nobody"),
+        "rejection message should contain 'policy:nobody', got: {}",
+        ok.message
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
+/// NIP-29 kind 9000 (PUT_USER): self-add bypasses "nobody" policy — an agent can always add itself.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_put_user_self_add_bypasses_policy() {
+    let url = relay_url();
+
+    let agent_keys = Keys::generate();
+    let agent_pubkey_hex = agent_keys.public_key().to_hex();
+
+    // Set agent's channel_add_policy to "nobody" via kind:10100 event.
+    let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
+    let resp = http_client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &agent_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
+        .send()
+        .await
+        .expect("set policy request");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
+
+    // Create a channel where the agent is the owner.
+    let channel_id = create_test_channel(&agent_keys).await;
+
+    // Connect as agent.
+    let mut ws = BuzzTestClient::connect(&url, &agent_keys)
+        .await
+        .expect("connect as agent");
+
+    // Build kind 9000 PUT_USER event where agent targets ITSELF.
+    let h_tag = nostr::Tag::parse(["h", &channel_id]).expect("h tag");
+    let p_tag = nostr::Tag::parse(["p", &agent_pubkey_hex]).expect("p tag");
+    let event = nostr::EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([h_tag, p_tag])
+        .sign_with_keys(&agent_keys)
+        .expect("sign kind 9000");
+
+    let ok = ws.send_event(event).await.expect("send kind 9000");
+
+    assert!(
+        ok.accepted,
+        "self-add should bypass nobody policy, got: {}",
+        ok.message
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
+/// NIP-29 kind 9000: `owner_only` policy blocks third-party PUT_USER.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_put_user_owner_only_blocks() {
+    let url = relay_url();
+
+    let channel_owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let agent_pubkey_hex = agent_keys.public_key().to_hex();
+
+    // Set agent's channel_add_policy to "owner_only" via kind:10100 event.
+    let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "owner_only" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
+    let resp = http_client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &agent_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
+        .send()
+        .await
+        .expect("set policy request");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
+
+    // Create a channel owned by channel_owner (not the agent).
+    let channel_id = create_test_channel(&channel_owner_keys).await;
+
+    // Connect as channel_owner.
+    let mut ws = BuzzTestClient::connect(&url, &channel_owner_keys)
+        .await
+        .expect("connect as channel_owner");
+
+    // Build kind 9000 PUT_USER event targeting the agent.
+    let h_tag = nostr::Tag::parse(["h", &channel_id]).expect("h tag");
+    let p_tag = nostr::Tag::parse(["p", &agent_pubkey_hex]).expect("p tag");
+    let event = nostr::EventBuilder::new(Kind::Custom(9000), "")
+        .tags([h_tag, p_tag])
+        .sign_with_keys(&channel_owner_keys)
+        .expect("sign kind 9000");
+
+    let ok = ws.send_event(event).await.expect("send kind 9000");
+
+    assert!(
+        !ok.accepted,
+        "owner_only policy should block third-party PUT_USER, but relay accepted it"
+    );
+    assert!(
+        ok.message.contains("policy:owner_only"),
+        "rejection message should contain 'policy:owner_only', got: {}",
+        ok.message
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
+/// End-to-end test of the standard NIP-29 client flow:
+/// connect, authenticate, discover groups, subscribe, send/receive messages,
+/// react, and delete.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_standard_client_flow() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel_id = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys)
+        .await
+        .expect("connect and authenticate via NIP-42");
+
+    // 1. Query group discovery events (kind:39000)
+    //    The channel was just created, so the relay should have emitted a 39000 event.
+    let discovery_sid = sub_id("discovery");
+    let discovery_filter = Filter::new().kind(Kind::Custom(39000));
+    client
+        .subscribe(&discovery_sid, vec![discovery_filter])
+        .await
+        .expect("subscribe to group discovery");
+    let discovery_events = client
+        .collect_until_eose(&discovery_sid, Duration::from_secs(5))
+        .await
+        .expect("collect discovery events");
+
+    // Find our channel's 39000 event by checking d tags.
+    let our_group = discovery_events.iter().find(|e| {
+        e.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "d" && s[1] == channel_id
+        })
+    });
+    assert!(
+        our_group.is_some(),
+        "should find kind:39000 for our channel among {} events",
+        discovery_events.len()
+    );
+
+    let group_meta = our_group.unwrap();
+    // Verify it has a name tag.
+    let has_name = group_meta.tags.iter().any(|t| {
+        let s = t.as_slice();
+        s.len() >= 2 && s[0] == "name"
+    });
+    assert!(has_name, "39000 event should have a name tag");
+
+    // 1b. Verify kind:39001 (group admins) was also emitted.
+    let admins_sid = sub_id("admins");
+    let admins_filter = Filter::new().kind(Kind::Custom(39001));
+    client
+        .subscribe(&admins_sid, vec![admins_filter])
+        .await
+        .expect("subscribe to group admins");
+    let admins_events = client
+        .collect_until_eose(&admins_sid, Duration::from_secs(5))
+        .await
+        .expect("collect admins events");
+    let our_admins = admins_events.iter().find(|e| {
+        e.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "d" && s[1] == channel_id
+        })
+    });
+    assert!(
+        our_admins.is_some(),
+        "should find kind:39001 for our channel among {} events",
+        admins_events.len()
+    );
+
+    // 1c. Verify kind:39002 (group members) was also emitted.
+    let members_sid = sub_id("members");
+    let members_filter = Filter::new().kind(Kind::Custom(39002));
+    client
+        .subscribe(&members_sid, vec![members_filter])
+        .await
+        .expect("subscribe to group members");
+    let members_events = client
+        .collect_until_eose(&members_sid, Duration::from_secs(5))
+        .await
+        .expect("collect members events");
+    let our_members = members_events.iter().find(|e| {
+        e.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "d" && s[1] == channel_id
+        })
+    });
+    assert!(
+        our_members.is_some(),
+        "should find kind:39002 for our channel among {} events",
+        members_events.len()
+    );
+
+    // 2. Subscribe to channel messages (kind:9 + h tag).
+    let msg_sid = sub_id("messages");
+    let msg_filter = Filter::new()
+        .kind(Kind::Custom(9))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), channel_id.as_str());
+    client
+        .subscribe(&msg_sid, vec![msg_filter])
+        .await
+        .expect("subscribe to channel messages");
+    let _historical = client
+        .collect_until_eose(&msg_sid, Duration::from_secs(5))
+        .await
+        .expect("collect historical messages");
+
+    // 3. Send a kind:9 message with h tag.
+    let content = format!("nip29-test-{}", uuid::Uuid::new_v4());
+    let ok = client
+        .send_text_message(&keys, &channel_id, &content, 9)
+        .await
+        .expect("send kind:9 message");
+    assert!(
+        ok.accepted,
+        "relay should accept kind:9 with h tag: {}",
+        ok.message
+    );
+
+    // 4. Receive the message on the subscription and capture the event ID.
+    let msg = client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("receive kind:9 event");
+    let message_event_id = match msg {
+        RelayMessage::Event { ref event, .. } => {
+            assert_eq!(event.kind, Kind::Custom(9));
+            assert_eq!(event.content, content);
+            event.id.to_hex()
+        }
+        other => panic!("expected EVENT, got: {:?}", other),
+    };
+
+    // 5. Send a kind:7 reaction targeting the message.
+    let h_tag = Tag::parse(["h", &channel_id]).expect("h tag");
+    let e_tag = Tag::parse(["e", &message_event_id]).expect("e tag");
+    let reaction_event = EventBuilder::new(Kind::Custom(7), "+")
+        .tags([h_tag, e_tag])
+        .sign_with_keys(&keys)
+        .expect("sign reaction");
+    let ok = client
+        .send_event(reaction_event)
+        .await
+        .expect("send reaction");
+    assert!(
+        ok.accepted,
+        "relay should accept kind:7 reaction: {}",
+        ok.message
+    );
+
+    // 6. Send a kind:5 deletion targeting the message.
+    let h_tag2 = Tag::parse(["h", &channel_id]).expect("h tag");
+    let e_tag2 = Tag::parse(["e", &message_event_id]).expect("e tag");
+    let delete_event = EventBuilder::new(Kind::Custom(5), "test delete")
+        .tags([h_tag2, e_tag2])
+        .sign_with_keys(&keys)
+        .expect("sign deletion");
+    let ok = client
+        .send_event(delete_event)
+        .await
+        .expect("send deletion");
+    assert!(
+        ok.accepted,
+        "relay should accept kind:5 deletion: {}",
+        ok.message
+    );
+
+    // 7. Verify kind:9 without h tag is rejected.
+    let no_h_event = EventBuilder::new(Kind::Custom(9), "no h tag")
+        .tags([])
+        .sign_with_keys(&keys)
+        .expect("sign no-h event");
+    let ok = client
+        .send_event(no_h_event)
+        .await
+        .expect("send no-h event");
+    assert!(!ok.accepted, "relay should reject kind:9 without h tag");
+
+    client.disconnect().await.expect("clean disconnect");
+}
+
+/// Client-submitted kind:44100 (member-added notification) must be rejected.
+/// Only the relay keypair may sign these events.
+#[tokio::test]
+#[ignore]
+async fn test_membership_notification_kind_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel_id = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let p_tag = Tag::parse(["p", &keys.public_key().to_hex()]).expect("p tag");
+    let h_tag = Tag::parse(["h", &channel_id]).expect("h tag");
+    let event = EventBuilder::new(Kind::Custom(44100), "")
+        .tags([p_tag, h_tag])
+        .sign_with_keys(&keys)
+        .expect("sign kind:44100");
+
+    let ok = client.send_event(event).await.expect("send");
+
+    assert!(
+        !ok.accepted,
+        "relay must reject client-submitted kind:44100, but accepted it"
+    );
+    let msg_lower = ok.message.to_lowercase();
+    assert!(
+        msg_lower.contains("relay-signed only")
+            || msg_lower.contains("relay signed only")
+            || msg_lower.contains("relay"),
+        "rejection message should mention relay-signed restriction, got: {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// When a member is added via REST, the relay must emit a kind:44100 notification
+/// to any subscriber filtering on `#p` = that member's pubkey.
+#[tokio::test]
+#[ignore]
+async fn test_membership_notification_emitted_on_add() {
+    let url = relay_url();
+
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let agent_pubkey_hex = agent_keys.public_key().to_hex();
+
+    // Connect as agent — NIP-42 auth establishes the authenticated pubkey.
+    let mut agent_client = BuzzTestClient::connect(&url, &agent_keys)
+        .await
+        .expect("connect as agent");
+
+    // Create a channel owned by owner (not agent).
+    let channel_id = create_test_channel(&owner_keys).await;
+
+    // Subscribe to membership notifications for agent's own pubkey.
+    let sid = sub_id("membership-notif");
+    let filter = Filter::new()
+        .kinds(vec![Kind::Custom(44100), Kind::Custom(44101)])
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::P),
+            agent_pubkey_hex.as_str(),
+        )
+        .since(nostr::Timestamp::now() - 5u64);
+
+    agent_client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe to membership notifications");
+
+    // Drain EOSE — no historical events expected.
+    agent_client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE for membership sub");
+
+    // Add agent to the channel via signed kind:9000 event.
+    let http_client = reqwest::Client::new();
+    let add_event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &agent_pubkey_hex]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let resp = http_client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &owner_keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&add_event).unwrap())
+        .send()
+        .await
+        .expect("submit add-member event");
+    assert!(
+        resp.status().is_success(),
+        "add member failed: {}",
+        resp.status()
+    );
+
+    // Wait for the kind:44100 notification.
+    let msg = agent_client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("recv kind:44100 notification");
+
+    match msg {
+        RelayMessage::Event { event, .. } => {
+            assert_eq!(
+                event.kind,
+                Kind::Custom(44100),
+                "expected kind:44100, got {}",
+                event.kind.as_u16()
+            );
+
+            let tags: Vec<Vec<String>> = event
+                .tags
+                .iter()
+                .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+                .collect();
+
+            let has_p = tags
+                .iter()
+                .any(|t| t.len() >= 2 && t[0] == "p" && t[1] == agent_pubkey_hex);
+            assert!(
+                has_p,
+                "kind:44100 missing p tag = agent pubkey. tags: {tags:?}"
+            );
+
+            let has_h = tags
+                .iter()
+                .any(|t| t.len() >= 2 && t[0] == "h" && t[1] == channel_id);
+            assert!(
+                has_h,
+                "kind:44100 missing h tag = channel uuid. tags: {tags:?}"
+            );
+        }
+        other => panic!("expected EVENT kind:44100, got {other:?}"),
+    }
+
+    agent_client.disconnect().await.expect("disconnect");
+}
+
+/// Subscribing to kind:44100/44101 without a `#p` filter must be rejected with CLOSED.
+#[tokio::test]
+#[ignore]
+async fn test_membership_notification_requires_p_filter() {
+    let url = relay_url();
+    let keys = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("no-p-filter");
+    let filter = Filter::new().kinds(vec![Kind::Custom(44100), Kind::Custom(44101)]);
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("send REQ");
+
+    // Drain until we get the CLOSED for our subscription.
+    let msg = loop {
+        let m = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv CLOSED");
+        match &m {
+            RelayMessage::Eose { .. } => continue,
+            RelayMessage::Event { .. } => continue,
+            _ => break m,
+        }
+    };
+
+    match msg {
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            assert_eq!(
+                subscription_id, sid,
+                "CLOSED for wrong subscription: {subscription_id}"
+            );
+            assert!(
+                message.to_lowercase().contains("restricted"),
+                "expected 'restricted' in CLOSED message, got: {message}"
+            );
+        }
+        other => panic!("expected CLOSED, got {other:?}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// A subscription with NO kinds filter and NO #p filter (wildcard) must be rejected with CLOSED
+/// because it can match kind:44100/44101.
+#[tokio::test]
+#[ignore]
+async fn test_membership_notification_wildcard_filter_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("wildcard-filter");
+    // Empty filter — no kinds, no #p — can match kind:44100/44101.
+    let filter = Filter::new();
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("send REQ");
+
+    // Drain until we get the CLOSED for our subscription.
+    let msg = loop {
+        let m = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv CLOSED");
+        match &m {
+            RelayMessage::Eose { .. } => continue,
+            RelayMessage::Event { .. } => continue,
+            _ => break m,
+        }
+    };
+
+    match msg {
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            assert_eq!(
+                subscription_id, sid,
+                "CLOSED for wrong subscription: {subscription_id}"
+            );
+            assert!(
+                message.to_lowercase().contains("restricted"),
+                "expected 'restricted' in CLOSED message, got: {message}"
+            );
+        }
+        other => panic!("expected CLOSED, got {other:?}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Subscribing to kind:44100/44101 with someone else's `#p` must be rejected with CLOSED.
+#[tokio::test]
+#[ignore]
+async fn test_membership_notification_requires_own_p_filter() {
+    let url = relay_url();
+
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let keys_b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // Connect as keys_a.
+    let mut client = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("connect as keys_a");
+
+    let sid = sub_id("wrong-p-filter");
+    // Filter uses keys_b's pubkey — not the authenticated pubkey (keys_a).
+    let filter = Filter::new()
+        .kinds(vec![Kind::Custom(44100), Kind::Custom(44101)])
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::P),
+            keys_b_pubkey_hex.as_str(),
+        );
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("send REQ");
+
+    // Drain until we get the CLOSED for our subscription.
+    let msg = loop {
+        let m = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv CLOSED");
+        match &m {
+            RelayMessage::Eose { .. } => continue,
+            RelayMessage::Event { .. } => continue,
+            _ => break m,
+        }
+    };
+
+    match msg {
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            assert_eq!(
+                subscription_id, sid,
+                "CLOSED for wrong subscription: {subscription_id}"
+            );
+            assert!(
+                message.to_lowercase().contains("restricted"),
+                "expected 'restricted' in CLOSED message, got: {message}"
+            );
+        }
+        other => panic!("expected CLOSED, got {other:?}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// When a member is removed via REST, the relay must emit a kind:44101 notification
+/// to any subscriber filtering on `#p` = that member's pubkey.
+#[tokio::test]
+#[ignore]
+async fn test_membership_notification_emitted_on_remove() {
+    let url = relay_url();
+
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let agent_pubkey_hex = agent_keys.public_key().to_hex();
+
+    // Connect as agent — NIP-42 auth establishes the authenticated pubkey.
+    let mut agent_client = BuzzTestClient::connect(&url, &agent_keys)
+        .await
+        .expect("connect as agent");
+
+    // Create a channel owned by owner (not agent).
+    let channel_id = create_test_channel(&owner_keys).await;
+
+    // Subscribe to membership notifications for agent's own pubkey.
+    let sid = sub_id("membership-remove-notif");
+    let filter = Filter::new()
+        .kinds(vec![Kind::Custom(44100), Kind::Custom(44101)])
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::P),
+            agent_pubkey_hex.as_str(),
+        )
+        .since(nostr::Timestamp::now() - 5u64);
+
+    agent_client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe to membership notifications");
+
+    // Drain EOSE — no historical events expected.
+    agent_client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE for membership sub");
+
+    let http_client = reqwest::Client::new();
+    let owner_pubkey_hex = owner_keys.public_key().to_hex();
+
+    // Add agent to the channel via signed kind:9000 event.
+    let add_event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &agent_pubkey_hex]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let resp = http_client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &owner_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&add_event).unwrap())
+        .send()
+        .await
+        .expect("submit add-member event");
+    assert!(
+        resp.status().is_success(),
+        "add member failed: {}",
+        resp.status()
+    );
+
+    // Consume the kind:44100 add notification before waiting for the remove.
+    let add_msg = agent_client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("recv kind:44100 notification");
+    match add_msg {
+        RelayMessage::Event { ref event, .. } => {
+            assert_eq!(
+                event.kind,
+                Kind::Custom(44100),
+                "expected kind:44100 add notification, got {}",
+                event.kind.as_u16()
+            );
+        }
+        other => panic!("expected EVENT kind:44100, got {other:?}"),
+    }
+
+    // Remove agent from the channel via signed kind:9001 event.
+    let remove_event = EventBuilder::new(Kind::Custom(9001), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &agent_pubkey_hex]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let resp = http_client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &owner_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&remove_event).unwrap())
+        .send()
+        .await
+        .expect("submit remove-member event");
+    assert!(
+        resp.status().is_success(),
+        "remove member failed: {}",
+        resp.status()
+    );
+
+    // Wait for the kind:44101 remove notification.
+    let msg = agent_client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("recv kind:44101 notification");
+
+    match msg {
+        RelayMessage::Event { event, .. } => {
+            assert_eq!(
+                event.kind,
+                Kind::Custom(44101),
+                "expected kind:44101, got {}",
+                event.kind.as_u16()
+            );
+
+            let tags: Vec<Vec<String>> = event
+                .tags
+                .iter()
+                .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+                .collect();
+
+            let has_p = tags
+                .iter()
+                .any(|t| t.len() >= 2 && t[0] == "p" && t[1] == agent_pubkey_hex);
+            assert!(
+                has_p,
+                "kind:44101 missing p tag = agent pubkey. tags: {tags:?}"
+            );
+
+            let has_h = tags
+                .iter()
+                .any(|t| t.len() >= 2 && t[0] == "h" && t[1] == channel_id);
+            assert!(
+                has_h,
+                "kind:44101 missing h tag = channel uuid. tags: {tags:?}"
+            );
+        }
+        other => panic!("expected EVENT kind:44101, got {other:?}"),
+    }
+
+    agent_client.disconnect().await.expect("disconnect");
+}
+
+/// Subscribing to kind:44100/44101 with `#p` containing BOTH the client's own pubkey AND
+/// a victim's pubkey must be rejected with CLOSED. All #p values must match the authenticated
+/// pubkey — including the victim's key is not allowed.
+#[tokio::test]
+#[ignore]
+async fn test_membership_notification_multi_p_rejected() {
+    let url = relay_url();
+
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let keys_a_pubkey_hex = keys_a.public_key().to_hex();
+    let keys_b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // Connect as keys_a.
+    let mut client = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("connect as keys_a");
+
+    let sid = sub_id("multi-p-filter");
+    // Filter includes keys_a's own pubkey AND keys_b's (victim) pubkey.
+    // The relay must reject this because not all #p values match the authenticated pubkey.
+    let filter = Filter::new()
+        .kinds(vec![Kind::Custom(44100), Kind::Custom(44101)])
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::P),
+            [keys_a_pubkey_hex.as_str(), keys_b_pubkey_hex.as_str()],
+        );
+
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("send REQ");
+
+    // Drain until we get the CLOSED for our subscription.
+    let msg = loop {
+        let m = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv CLOSED");
+        match &m {
+            RelayMessage::Eose { .. } => continue,
+            RelayMessage::Event { .. } => continue,
+            _ => break m,
+        }
+    };
+
+    match msg {
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            assert_eq!(
+                subscription_id, sid,
+                "CLOSED for wrong subscription: {subscription_id}"
+            );
+            assert!(
+                message.to_lowercase().contains("restricted"),
+                "expected 'restricted' in CLOSED message, got: {message}"
+            );
+        }
+        other => panic!("expected CLOSED, got {other:?}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// A mixed-filter subscription where one filter has `#h` + membership kinds and another
+/// filter makes the subscription globally scoped must be rejected with CLOSED.
+/// This prevents bypassing the #p requirement via mixed filters.
+#[tokio::test]
+#[ignore]
+async fn test_membership_notification_mixed_filter_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel_id = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id("mixed-filter");
+    // Filter 1: has #h + membership kinds (would skip per-filter #h check)
+    let filter1 = Filter::new()
+        .kinds(vec![Kind::Custom(44100)])
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), channel_id.as_str());
+    // Filter 2: global filter (no #h) — makes the subscription globally scoped.
+    // No kinds = wildcard, no #p = should trigger rejection.
+    let filter2 = Filter::new().authors(vec![keys.public_key()]);
+
+    client
+        .subscribe(&sid, vec![filter1, filter2])
+        .await
+        .expect("send REQ");
+
+    // Drain until we get the CLOSED for our subscription.
+    let msg = loop {
+        let m = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv CLOSED");
+        match &m {
+            RelayMessage::Eose { .. } => continue,
+            RelayMessage::Event { .. } => continue,
+            _ => break m,
+        }
+    };
+
+    match msg {
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            assert_eq!(
+                subscription_id, sid,
+                "CLOSED for wrong subscription: {subscription_id}"
+            );
+            assert!(
+                message.to_lowercase().contains("restricted"),
+                "expected 'restricted' in CLOSED message, got: {message}"
+            );
+        }
+        other => panic!("expected CLOSED, got {other:?}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Create a private channel over WebSocket and return the channel UUID.
+async fn create_private_channel_ws(client: &mut BuzzTestClient, keys: &Keys) -> String {
+    let channel_uuid = uuid::Uuid::new_v4().to_string();
+    let channel_name = format!("relay-e2e-private-{}", channel_uuid);
+
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid]).unwrap(),
+            Tag::parse(["name", &channel_name]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "private"]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+
+    let ok = client
+        .send_event(event)
+        .await
+        .expect("create private channel");
+    assert!(
+        ok.accepted,
+        "private channel creation failed: {}",
+        ok.message
+    );
+    channel_uuid
+}
+
+/// Submit a kind:9000 PUT_USER event over WebSocket.
+///
+/// `allow_self_tagging` keeps self-targeted adds working: EventBuilder otherwise
+/// drops a `p` tag matching the signer (nostr-0.44.3 builder.rs:435-449) and the
+/// event fails as "missing p tag" instead of exercising the authority check.
+async fn add_member_ws(
+    client: &mut BuzzTestClient,
+    channel_id: &str,
+    target_pubkey_hex: &str,
+    signer: &Keys,
+) -> (bool, String) {
+    let h_tag = Tag::parse(["h", channel_id]).unwrap();
+    let p_tag = Tag::parse(["p", target_pubkey_hex]).unwrap();
+    let event = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([h_tag, p_tag])
+        .sign_with_keys(signer)
+        .unwrap();
+
+    let ok = client.send_event(event).await.expect("send PUT_USER event");
+    (ok.accepted, ok.message)
+}
+
+/// Submit a kind:9000 PUT_USER event with a role tag over WebSocket.
+///
+/// See [`add_member_ws`] for why `allow_self_tagging` is required.
+async fn add_member_with_role_ws(
+    client: &mut BuzzTestClient,
+    channel_id: &str,
+    target_pubkey_hex: &str,
+    role: &str,
+    signer: &Keys,
+) -> (bool, String) {
+    let h_tag = Tag::parse(["h", channel_id]).unwrap();
+    let p_tag = Tag::parse(["p", target_pubkey_hex]).unwrap();
+    let role_tag = Tag::parse(["role", role]).unwrap();
+    let event = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([h_tag, p_tag, role_tag])
+        .sign_with_keys(signer)
+        .unwrap();
+
+    let ok = client
+        .send_event(event)
+        .await
+        .expect("send PUT_USER event with role");
+    (ok.accepted, ok.message)
+}
+
+/// Any active member can add any ordinary role to a private channel.
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_any_member_can_invite() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let actors = [
+        ("member", Keys::generate()),
+        ("guest", Keys::generate()),
+        ("bot", Keys::generate()),
+    ];
+
+    // Connect as owner and create a private channel.
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    // Seed one actor for each ordinary active role.
+    for (role, keys) in &actors {
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut owner_client,
+            &channel_id,
+            &keys.public_key().to_hex(),
+            role,
+            &owner_keys,
+        )
+        .await;
+        assert!(accepted, "owner should add {role} actor, got: {msg}");
+    }
+
+    // Exercise the full ordinary-role target matrix. Relay and DB authorization
+    // both run here, unlike the Desktop/mobile policy-unit-test mirrors.
+    for (actor_role, actor_keys) in &actors {
+        let mut actor_client = BuzzTestClient::connect(&url, actor_keys)
+            .await
+            .unwrap_or_else(|err| panic!("connect as {actor_role}: {err}"));
+
+        for target_role in ["member", "guest", "bot"] {
+            let target_keys = Keys::generate();
+            let target_pubkey_hex = target_keys.public_key().to_hex();
+            let (accepted, msg) = add_member_with_role_ws(
+                &mut actor_client,
+                &channel_id,
+                &target_pubkey_hex,
+                target_role,
+                actor_keys,
+            )
+            .await;
+            assert!(
+                accepted,
+                "private-channel {actor_role} should add {target_role}, got: {msg}"
+            );
+            assert_eq!(
+                member_role(&url, &owner_keys, &channel_id, &target_pubkey_hex).await,
+                Some(target_role.to_string()),
+                "private-channel {actor_role} add must persist the {target_role} role"
+            );
+        }
+
+        // Re-adding oneself stays idempotent — the huddle bot-add and kind:9021
+        // paths depend on a self-targeted PUT_USER working.
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut actor_client,
+            &channel_id,
+            &actor_keys.public_key().to_hex(),
+            actor_role,
+            actor_keys,
+        )
+        .await;
+        assert!(
+            accepted,
+            "self-targeted {actor_role} re-add must stay idempotent, got: {msg}"
+        );
+
+        actor_client
+            .disconnect()
+            .await
+            .unwrap_or_else(|err| panic!("disconnect {actor_role}: {err}"));
+    }
+
+    owner_client.disconnect().await.expect("disconnect owner");
+}
+
+/// An admin — not just the owner — can still add to a private channel.
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_admin_can_invite() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let admin_keys = Keys::generate();
+    let invitee_keys = Keys::generate();
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut owner_client,
+        &channel_id,
+        &admin_keys.public_key().to_hex(),
+        "admin",
+        &owner_keys,
+    )
+    .await;
+    assert!(accepted, "owner should add an admin, got: {msg}");
+
+    let mut admin_client = BuzzTestClient::connect(&url, &admin_keys)
+        .await
+        .expect("connect as admin");
+
+    let (accepted, msg) = add_member_ws(
+        &mut admin_client,
+        &channel_id,
+        &invitee_keys.public_key().to_hex(),
+        &admin_keys,
+    )
+    .await;
+    assert!(
+        accepted,
+        "admin should be able to add to a private channel, got: {msg}"
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    admin_client.disconnect().await.expect("disconnect admin");
+}
+
+/// A non-member cannot invite someone to a private channel.
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_non_member_cannot_invite() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let outsider_keys = Keys::generate();
+    let target_keys = Keys::generate();
+
+    // Owner creates a private channel.
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    // Connect as outsider (not a member of the channel).
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider_keys)
+        .await
+        .expect("connect as outsider");
+
+    // Outsider tries to add someone — should be rejected.
+    let (accepted, msg) = add_member_ws(
+        &mut outsider_client,
+        &channel_id,
+        &target_keys.public_key().to_hex(),
+        &outsider_keys,
+    )
+    .await;
+    assert!(
+        !accepted,
+        "non-member should NOT be able to invite to private channel, but it was accepted"
+    );
+    assert!(
+        msg.contains("not authorized") || msg.contains("not a channel member"),
+        "rejection should mention authorization or membership, got: {msg}"
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    outsider_client
+        .disconnect()
+        .await
+        .expect("disconnect outsider");
+}
+
+/// Regular members cannot grant elevated roles (owner/admin) in private channels.
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_member_cannot_grant_admin() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let member_keys = Keys::generate();
+    let target_keys = Keys::generate();
+
+    // Owner creates a private channel and adds a regular member.
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    let (accepted, msg) = add_member_ws(
+        &mut owner_client,
+        &channel_id,
+        &member_keys.public_key().to_hex(),
+        &owner_keys,
+    )
+    .await;
+    assert!(accepted, "owner should add member, got: {msg}");
+
+    // Connect as the regular member.
+    let mut member_client = BuzzTestClient::connect(&url, &member_keys)
+        .await
+        .expect("connect as member");
+
+    // Regular member tries to add someone with admin role — should fail.
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut member_client,
+        &channel_id,
+        &target_keys.public_key().to_hex(),
+        "admin",
+        &member_keys,
+    )
+    .await;
+    assert!(
+        !accepted,
+        "regular member should NOT grant admin role, but it was accepted"
+    );
+    assert!(
+        msg.contains("elevated")
+            || msg.contains("owner")
+            || msg.contains("admin")
+            || msg.contains("grant"),
+        "rejection should mention elevated roles, got: {msg}"
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    member_client.disconnect().await.expect("disconnect member");
+}
+
+/// Live badge counts: every thread mutation pushes a fresh relay-signed
+/// kind:39005 recount to channel subscribers — a reply counts up, deleting
+/// that reply counts back down — without any window refetch.
+#[tokio::test]
+#[ignore]
+async fn test_reply_ingest_pushes_live_thread_summary() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    // Root message for the thread — built locally so we keep its id.
+    let root = EventBuilder::new(Kind::Custom(9), "thread root")
+        .tags([Tag::parse(["h", channel.as_str()]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign root");
+    let root_id = root.id;
+    let ok = client.send_event(root).await.expect("send root");
+    assert!(ok.accepted, "root rejected: {}", ok.message);
+
+    // Live subscription shaped like the desktop window-store one: channel
+    // scope with 39005 in kinds.
+    let sid = sub_id("live-summary");
+    let filter = Filter::new()
+        .kind(Kind::Custom(39005))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    async fn recv_summary(client: &mut BuzzTestClient) -> nostr::Event {
+        loop {
+            match client
+                .recv_event(Duration::from_secs(5))
+                .await
+                .expect("recv 39005")
+            {
+                RelayMessage::Event { event, .. } if event.kind == Kind::Custom(39005) => {
+                    return *event;
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    // Reply → pushed summary counts up.
+    let h_tag = Tag::parse(["h", channel.as_str()]).unwrap();
+    let root_tag = Tag::parse(["e", &root_id.to_hex(), "", "reply"]).unwrap();
+    let reply = EventBuilder::new(Kind::Custom(9), "first reply")
+        .tags([h_tag, root_tag])
+        .sign_with_keys(&keys)
+        .expect("sign reply");
+    let reply_id = reply.id;
+    let ok = client.send_event(reply).await.expect("send reply");
+    assert!(ok.accepted, "reply rejected: {}", ok.message);
+
+    let summary = recv_summary(&mut client).await;
+    let root_tag_val = summary
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
+        .and_then(|t| t.content().map(str::to_string))
+        .expect("summary carries root e-tag");
+    assert_eq!(root_tag_val, root_id.to_hex(), "summary targets the root");
+    let content: serde_json::Value = serde_json::from_str(&summary.content).expect("JSON");
+    assert_eq!(content["reply_count"], 1, "reply counted up: {content}");
+
+    // Delete the reply → pushed summary counts back down.
+    let delete = EventBuilder::new(Kind::Custom(5), "")
+        .tags([
+            Tag::parse(["e", &reply_id.to_hex()]).unwrap(),
+            Tag::parse(["h", channel.as_str()]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign delete");
+    let ok = client.send_event(delete).await.expect("send delete");
+    assert!(ok.accepted, "delete rejected: {}", ok.message);
+
+    let summary = recv_summary(&mut client).await;
+    let content: serde_json::Value = serde_json::from_str(&summary.content).expect("JSON");
+    assert_eq!(content["reply_count"], 0, "reply counted down: {content}");
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Read a member's authoritative role from the relay-signed kind:39002 member
+/// list. The relay's own view of membership, not the client's — a kind:9000 can
+/// be `accepted` (stored) while its membership side effect fails, so asserting
+/// on the OK alone cannot see a broken write.
+async fn member_role(url: &str, keys: &Keys, channel_id: &str, pubkey_hex: &str) -> Option<String> {
+    let mut ws = BuzzTestClient::connect(url, keys).await.expect("connect");
+    let sid = sub_id("members");
+    let filter = Filter::new()
+        .kind(Kind::Custom(39002))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [channel_id]);
+    ws.subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe 39002");
+    let events = ws
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("39002 EOSE");
+    ws.disconnect().await.ok();
+    // Latest 39002 wins; find this pubkey's tag. Shape is
+    // ["p", pubkey, relay_url, role] (side_effects.rs:1058-1062) — role is
+    // index 3, not 2.
+    events.iter().max_by_key(|e| e.created_at).and_then(|e| {
+        e.tags.iter().find_map(|t| {
+            let p = t.as_slice();
+            (p.len() >= 4 && p[0] == "p" && p[1] == pubkey_hex).then(|| p[3].clone())
+        })
+    })
+}
+
+/// SECURITY REPRO (Dawn): can an unprivileged NON-MEMBER demote the owner of an
+/// OPEN channel to `member` with a single kind:9000? Asserts the reported
+/// vulnerability is FIXED; it fails on vulnerable code.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_put_user_cannot_demote_owner() {
+    let url = relay_url();
+
+    let victim_keys = Keys::generate();
+    let victim_hex = victim_keys.public_key().to_hex();
+    let attacker_keys = Keys::generate();
+
+    // Victim creates an open channel -> victim is seeded as its owner.
+    let channel_id = create_test_channel(&victim_keys).await;
+
+    let before = member_role(&url, &victim_keys, &channel_id, &victim_hex).await;
+    assert_eq!(
+        before.as_deref(),
+        Some("owner"),
+        "victim must start as owner (got {before:?})"
+    );
+
+    // The attack: attacker (not a member, not the creator) publishes
+    // kind:9000 { h=channel, p=victim, role=member }.
+    let mut ws = BuzzTestClient::connect(&url, &attacker_keys)
+        .await
+        .expect("connect as attacker");
+    let event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &victim_hex]).unwrap(),
+            Tag::parse(["role", "member"]).unwrap(),
+        ])
+        .sign_with_keys(&attacker_keys)
+        .expect("sign kind 9000");
+    let ok = ws.send_event(event).await.expect("send kind 9000");
+    ws.disconnect().await.ok();
+
+    let after = member_role(&url, &victim_keys, &channel_id, &victim_hex).await;
+    println!(
+        "attacker kind:9000 accepted = {} ({})",
+        ok.accepted, ok.message
+    );
+    println!("victim role before = {before:?}, after = {after:?}");
+
+    assert_eq!(
+        after.as_deref(),
+        Some("owner"),
+        "PRIVESC: unprivileged non-member demoted the channel owner to {after:?}"
+    );
+    assert!(
+        !ok.accepted,
+        "unprivileged non-member's role-demotion kind:9000 must be rejected"
+    );
+}
+
+/// SECURITY REPRO (Dawn), follow-on questions the report asserts but does not test:
+/// after the owner is demoted, (a) can the attacker promote itself to owner, and
+/// (b) can the ex-owner restore its own role? Both must be rejected — which is
+/// exactly what makes the demotion unrecoverable over the relay.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_owner_demotion_recovery_paths() {
+    let url = relay_url();
+
+    let victim_keys = Keys::generate();
+    let victim_hex = victim_keys.public_key().to_hex();
+    let attacker_keys = Keys::generate();
+    let attacker_hex = attacker_keys.public_key().to_hex();
+
+    let channel_id = create_test_channel(&victim_keys).await;
+
+    let put_user = |signer: Keys, target_hex: String, role: &'static str| {
+        let channel_id = channel_id.clone();
+        let url = url.clone();
+        async move {
+            let mut ws = BuzzTestClient::connect(&url, &signer)
+                .await
+                .expect("connect");
+            // `allow_self_tagging` is REQUIRED: EventBuilder otherwise silently
+            // drops any `p` tag matching the signer (nostr-0.44.3
+            // builder.rs:435-449), which would make self-targeted PUT_USER
+            // events fail as "missing p tag" and mask the real verdict.
+            let event = EventBuilder::new(Kind::Custom(9000), "")
+                .allow_self_tagging()
+                .tags([
+                    Tag::parse(["h", &channel_id]).unwrap(),
+                    Tag::parse(["p", &target_hex]).unwrap(),
+                    Tag::parse(["role", role]).unwrap(),
+                ])
+                .sign_with_keys(&signer)
+                .expect("sign kind 9000");
+            let ok = ws.send_event(event).await.expect("send kind 9000");
+            ws.disconnect().await.ok();
+            ok
+        }
+    };
+
+    // Step 1: strip the owner.
+    let demote = put_user(attacker_keys.clone(), victim_hex.clone(), "member").await;
+    println!(
+        "1. attacker demotes owner   -> accepted={} {}",
+        demote.accepted, demote.message
+    );
+
+    // Step 2: attacker tries to make itself owner.
+    let self_promote = put_user(attacker_keys.clone(), attacker_hex.clone(), "owner").await;
+    println!(
+        "2. attacker self->owner     -> accepted={} {}",
+        self_promote.accepted, self_promote.message
+    );
+
+    // Step 3: ex-owner tries to restore itself.
+    let restore = put_user(victim_keys.clone(), victim_hex.clone(), "owner").await;
+    println!(
+        "3. ex-owner restores self   -> accepted={} {}",
+        restore.accepted, restore.message
+    );
+
+    // `accepted` only means the event was stored — the membership side effect can
+    // still fail. Read the authoritative roles back from the relay-signed 39002.
+    let mut ws = BuzzTestClient::connect(&url, &victim_keys)
+        .await
+        .expect("connect");
+    let sid = sub_id("members-final");
+    let filter = Filter::new().kind(Kind::Custom(39002)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::D),
+        [channel_id.as_str()],
+    );
+    ws.subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe 39002");
+    let events = ws
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("39002 EOSE");
+    ws.disconnect().await.ok();
+    let latest = events.iter().max_by_key(|e| e.created_at).expect("a 39002");
+    let roles: Vec<(String, String)> = latest
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let p = t.as_slice();
+            (p.len() >= 4 && p[0] == "p").then(|| (p[1].clone(), p[3].clone()))
+        })
+        .collect();
+    let role_of = |hex: &str| {
+        roles
+            .iter()
+            .find(|(pk, _)| pk == hex)
+            .map(|(_, r)| r.clone())
+    };
+    println!("FINAL victim   role = {:?}", role_of(&victim_hex));
+    println!("FINAL attacker role = {:?}", role_of(&attacker_hex));
+    assert_eq!(
+        role_of(&victim_hex).as_deref(),
+        Some("owner"),
+        "owner must retain its role through all three attempts"
+    );
+    assert_eq!(
+        role_of(&attacker_hex),
+        None,
+        "attacker must never gain a role"
+    );
+}
+
+/// SECURITY REPRO (Dawn), finding #2: a kind:9000 PUT_USER with NO `role` tag.
+///
+/// `handle_put_user` used to default an absent role tag to `member`, so a bare
+/// self-targeted PUT_USER silently demoted the sender — no attacker required.
+/// `test_nip29_put_user_self_add_bypasses_policy` sends exactly this event but
+/// asserts only `ok.accepted`, and side-effect failures are logged rather than
+/// surfaced (ingest.rs:2460-2467), so an `accepted` assertion structurally
+/// cannot observe the demotion. This asserts the resulting STATE instead.
+///
+/// TWO owners on purpose. With a sole owner the last-owner guard rejects the
+/// demotion anyway, so the test would pass even with the role-preservation
+/// removed — it would be measuring a different defect's fix. A second owner
+/// disarms that guard, leaving the absent-role-tag handling as the only thing
+/// that can decide the outcome.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_put_user_without_role_tag_preserves_role() {
+    let url = relay_url();
+
+    let owner_a = Keys::generate();
+    let owner_b = Keys::generate();
+    let b_hex = owner_b.public_key().to_hex();
+    let channel_id = create_test_channel(&owner_a).await;
+
+    // owner_a promotes owner_b, so the channel has two owners.
+    let mut ws = BuzzTestClient::connect(&url, &owner_a)
+        .await
+        .expect("connect as owner_a");
+    let promote = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &b_hex]).unwrap(),
+            Tag::parse(["role", "owner"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_a)
+        .expect("sign promote");
+    let ok = ws.send_event(promote).await.expect("send promote");
+    ws.disconnect().await.ok();
+    assert!(ok.accepted, "promote rejected: {}", ok.message);
+    assert_eq!(
+        member_role(&url, &owner_a, &channel_id, &b_hex)
+            .await
+            .as_deref(),
+        Some("owner"),
+        "owner_b must be a second owner before the probe"
+    );
+
+    // The probe: owner_b sends a bare self-targeted PUT_USER — h + p, no `role`.
+    // `allow_self_tagging` is required or EventBuilder drops the self `p` tag
+    // (nostr-0.44.3 builder.rs:435-449) and the event fails as "missing p tag".
+    let mut ws = BuzzTestClient::connect(&url, &owner_b)
+        .await
+        .expect("connect as owner_b");
+    let bare = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &b_hex]).unwrap(),
+        ])
+        .sign_with_keys(&owner_b)
+        .expect("sign bare put_user");
+    let ok = ws.send_event(bare).await.expect("send bare put_user");
+    ws.disconnect().await.ok();
+    assert!(
+        ok.accepted,
+        "self-targeted PUT_USER must stay accepted: {}",
+        ok.message
+    );
+
+    assert_eq!(
+        member_role(&url, &owner_a, &channel_id, &b_hex)
+            .await
+            .as_deref(),
+        Some("owner"),
+        "an absent role tag means no role change — it must not demote an owner"
+    );
+}
+
+/// SECURITY (Dawn), relay-layer guard isolation — the *validator*, not the DB.
+///
+/// The DB guards in `add_member` are what actually stop the privesc, and every
+/// other test here asserts the resulting STATE ("the role didn't change").
+/// That makes them structurally blind to `validate_admin_event`: stubbing out
+/// either relay-side check leaves the whole nip29 suite green, because the DB
+/// still refuses the write and the role is still correct. Verified by mutation
+/// — the relay returns `accepted:true` and logs `Side effect failed: access
+/// denied: ...` while the state assertion happily passes.
+///
+/// The relay guards earn their keep by giving the client an honest
+/// `accepted:false` instead of an OK for an event that silently fails after the
+/// fact. So these two tests assert `accepted == false` — the one observable
+/// only the validator controls — and each is shaped so exactly one guard can
+/// fire.
+///
+/// Guard under test: "only owners/admins may change an active member's role".
+/// TWO owners on purpose, so the last-owner guard cannot fire and take the
+/// credit; a plain member targeting a co-owner leaves the actor check as the
+/// only thing that can reject.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_relay_rejects_role_change_by_unprivileged_actor() {
+    let url = relay_url();
+
+    let owner_a = Keys::generate();
+    let owner_b = Keys::generate();
+    let b_hex = owner_b.public_key().to_hex();
+    let attacker = Keys::generate();
+    let attacker_hex = attacker.public_key().to_hex();
+    let channel_id = create_test_channel(&owner_a).await;
+
+    // owner_a promotes owner_b -> the channel has two owners.
+    let mut ws = BuzzTestClient::connect(&url, &owner_a)
+        .await
+        .expect("connect as owner_a");
+    let promote = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &b_hex]).unwrap(),
+            Tag::parse(["role", "owner"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_a)
+        .expect("sign promote");
+    let ok = ws.send_event(promote).await.expect("send promote");
+    ws.disconnect().await.ok();
+    assert!(ok.accepted, "promote rejected: {}", ok.message);
+
+    // The attacker joins the open channel as a plain member.
+    let mut ws = BuzzTestClient::connect(&url, &attacker)
+        .await
+        .expect("connect as attacker");
+    let join = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &attacker_hex]).unwrap(),
+            Tag::parse(["role", "member"]).unwrap(),
+        ])
+        .sign_with_keys(&attacker)
+        .expect("sign self-join");
+    let ok = ws.send_event(join).await.expect("send self-join");
+    ws.disconnect().await.ok();
+    assert!(ok.accepted, "self-join rejected: {}", ok.message);
+    assert_eq!(
+        member_role(&url, &owner_a, &channel_id, &attacker_hex)
+            .await
+            .as_deref(),
+        Some("member"),
+        "attacker must be an active plain member before the probe"
+    );
+
+    // The probe: a plain member demotes a co-owner. Two owners remain, so only
+    // the actor-authorization guard can reject this.
+    let mut ws = BuzzTestClient::connect(&url, &attacker)
+        .await
+        .expect("connect as attacker");
+    let attack = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &b_hex]).unwrap(),
+            Tag::parse(["role", "member"]).unwrap(),
+        ])
+        .sign_with_keys(&attacker)
+        .expect("sign attack");
+    let ok = ws.send_event(attack).await.expect("send attack");
+    ws.disconnect().await.ok();
+    println!(
+        "unprivileged co-owner demotion -> accepted={} {}",
+        ok.accepted, ok.message
+    );
+
+    assert!(
+        !ok.accepted,
+        "the relay validator must reject an unprivileged actor's role change, \
+         not accept it and let the side effect fail silently"
+    );
+    assert_eq!(
+        member_role(&url, &owner_a, &channel_id, &b_hex)
+            .await
+            .as_deref(),
+        Some("owner"),
+        "co-owner must keep their role"
+    );
+}
+
+/// SECURITY (Dawn), relay-layer guard isolation — see the test above for why
+/// `accepted` rather than state is the assertion that matters here.
+///
+/// Guard under test: the relay-side last-owner check. The actor is the SOLE
+/// owner demoting themselves, so the actor-authorization guard is satisfied
+/// (an owner is elevated) and cannot mask the result — only the last-owner
+/// check can reject.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_relay_rejects_last_owner_self_demotion() {
+    let url = relay_url();
+
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let channel_id = create_test_channel(&owner).await;
+
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &owner_hex)
+            .await
+            .as_deref(),
+        Some("owner"),
+        "creator must be the sole owner before the probe"
+    );
+
+    // The probe: the sole owner demotes themselves. Elevated actor, so the
+    // actor check passes; the last-owner guard is the only thing left.
+    let mut ws = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect as owner");
+    let demote = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &owner_hex]).unwrap(),
+            Tag::parse(["role", "member"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .expect("sign self-demote");
+    let ok = ws.send_event(demote).await.expect("send self-demote");
+    ws.disconnect().await.ok();
+    println!(
+        "sole-owner self-demotion -> accepted={} {}",
+        ok.accepted, ok.message
+    );
+
+    assert!(
+        !ok.accepted,
+        "the relay validator must reject demoting the last owner, not accept \
+         it and let the side effect fail silently"
+    );
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &owner_hex)
+            .await
+            .as_deref(),
+        Some("owner"),
+        "the last owner must keep their role"
+    );
+}
