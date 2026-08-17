@@ -101,15 +101,34 @@ pub async fn get_channel_workflows(
     Ok(events.iter().map(workflow_from_event).collect())
 }
 
+/// Build the NIP-01 filter list used by [`get_channels_workflows`].
+///
+/// One single-`#h` filter per channel (NIP-01 ORs them). Do not collapse into a
+/// multi-value `#h` filter — unfixed relays SQL-scoped multi-`#h` to one channel.
+fn channels_workflows_filters(channel_ids: &[String]) -> Vec<serde_json::Value> {
+    channel_ids
+        .iter()
+        .map(|channel_id| {
+            serde_json::json!({
+                "kinds": [30620],
+                "#h": [channel_id],
+            })
+        })
+        .collect()
+}
+
 /// Fetch workflows across many channels in a single relay round-trip.
 ///
-/// The Workflows overview screen previously issued one `get_channel_workflows`
-/// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
-/// relay POSTs. A nostr `#h` filter matches ANY of its listed values, so one
-/// query with all channel ids returns the same set. Each `WorkflowWire` carries
-/// its own `channel_id` (from the event's `h` tag), so the frontend can still
-/// group results by channel. Neither this nor the per-channel command sets a
-/// `limit`, so batching does not change result completeness.
+/// The Workflows overview previously fanned out one `get_channel_workflows`
+/// request per member channel (`Promise.all`). We still want one HTTP POST, but
+/// we must not pack every channel into a single multi-value `#h` filter:
+/// production relays historically collapsed multi-`#h` to one SQL `channel_id`
+/// and dropped workflows from every other channel (only the DM-scoped card
+/// appeared). NIP-01 OR of **N single-`#h` filters** is one round-trip and
+/// returns the full set on both fixed and unfixed relays.
+///
+/// Each `WorkflowWire` carries its own `channel_id` (from the event's `h` tag)
+/// so the frontend can still group by channel. No per-filter `limit` is set.
 #[tauri::command]
 pub async fn get_channels_workflows(
     channel_ids: Vec<String>,
@@ -119,14 +138,8 @@ pub async fn get_channels_workflows(
         return Ok(Vec::new());
     }
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [30620],
-            "#h": channel_ids,
-        })],
-    )
-    .await?;
+    let filters = channels_workflows_filters(&channel_ids);
+    let events = query_relay(&state, &filters).await?;
 
     Ok(events.iter().map(workflow_from_event).collect())
 }

@@ -189,8 +189,10 @@ export async function getChannelWorkflows(
  * Fetch workflows across many channels in a single relay round-trip.
  *
  * Replaces the per-channel `Promise.all(getChannelWorkflows)` fanout on the
- * Workflows overview: the backend `#h` filter matches any listed channel, and
- * each returned workflow carries its own `channelId` so callers can group.
+ * Workflows overview. The Tauri command issues N single-`#h` filters (NIP-01
+ * OR) rather than one multi-value `#h` filter, so unfixed relays that collapse
+ * multi-`#h` to a single SQL channel still return every channel's workflows.
+ * Each result carries its own `channelId` so callers can group.
  */
 export async function getChannelsWorkflows(
   channelIds: string[],
