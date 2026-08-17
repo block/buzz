@@ -12,6 +12,7 @@ import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
 export { MENTION_REFERENCE_TAG };
 
 export type PendingNonMemberMentionSend = {
+  addressedAgentPubkeys: string[];
   capturedChannelId: string | null;
   capturedThreadContext: {
     parentEventId: string | null;

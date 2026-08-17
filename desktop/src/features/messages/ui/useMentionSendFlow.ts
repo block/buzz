@@ -48,6 +48,7 @@ import {
   resolvePreviewTags,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
+import { buildAgentAddressMentionTags } from "@/features/messages/lib/agentAddressMention.mjs";
 type UseMentionSendFlowOptions = {
   channelId: string | null;
   channelLinks: Pick<UseChannelLinksResult, "clearChannels">;
@@ -547,10 +548,17 @@ export function useMentionSendFlow({
           const revalidatedMentionPubkeys =
             await mentions.revalidateMentionPubkeys(mentionPubkeys);
           if (signal?.aborted || isSendCancelled()) return;
+          const finalTagsWithAgentAddress = [
+            ...finalOutgoingTags,
+            ...buildAgentAddressMentionTags(
+              draft.addressedAgentPubkeys,
+              revalidatedMentionPubkeys,
+            ),
+          ];
           await send(
             finalContent,
             revalidatedMentionPubkeys,
-            finalOutgoingTags,
+            finalTagsWithAgentAddress,
             sendChannelId,
             draft.capturedThreadContext,
             draft.preparedLinkPreviews != null,
@@ -750,6 +758,7 @@ export function useMentionSendFlow({
         }
 
         const pendingDraft: PendingNonMemberMentionSend = {
+          addressedAgentPubkeys: uniqueNormalizedPubkeys(addressedAgentPubkeys),
           capturedChannelId: effectiveChannelId,
           capturedThreadContext,
           trimmed,
