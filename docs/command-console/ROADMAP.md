@@ -1,6 +1,6 @@
 # Command Adviser delivery roadmap
 
-Last updated: 9 August 2026
+Last updated: 17 August 2026
 
 This is the authoritative delivery sequence for Command Adviser. It exists to
 keep one implementation line, one owner, and one visible acceptance gate for
@@ -35,6 +35,11 @@ each capability.
 | Repository baseline promotion | Complete | [PR #17](https://github.com/NavigatorRAN/buzz/pull/17), merged to `main` as `d8dca6d49` | Retain as the authoritative v0.5.8 downstream baseline |
 | V2 Keeper | Typed-memory MVP complete and accepted | [PR #19](https://github.com/NavigatorRAN/buzz/pull/19) at `56a4d7045`; repository specification and Memory MCP entity `buzz-keeper` | Merge the accepted phase, then begin the basic V3 private remote-access pilot |
 | V3 native remote access | Automated private pilot implemented; physical iPhone acceptance pending | [PR #20](https://github.com/NavigatorRAN/buzz/pull/20); tailnet-only Tailscale Serve, pairing-only desktop advertisement, and mobile diagnostics | Run the outside-LAN iPhone journey; keep push/wake hardening deferred |
+| Offline Phase 1 — Gemma runtime | Complete and merged | [PR #23](https://github.com/NavigatorRAN/buzz/pull/23), merged as `2d91168dc` | Retain the exact `gemma4-26b-official` 64K capacity-one contract |
+| Offline Phase 2 — Mac-local RAG | Complete and merged | [PR #24](https://github.com/NavigatorRAN/buzz/pull/24), merged as `35dabbe89` | Preserve snapshot identity and semantic canary |
+| Offline Phase 3 — adaptive memory | Complete and merged | [PR #25](https://github.com/NavigatorRAN/buzz/pull/25), merged as `4e804b51a` | Preserve append-only history and local active recall |
+| Offline Phase 4 — autonomous skills | Complete and merged | [PR #26](https://github.com/NavigatorRAN/buzz/pull/26), merged as `87fe1a26c` | Preserve immutable skills, verified projection, and rollback |
+| Offline Phase 5 — disconnected acceptance | Automated and online preflight passed; physical gate pending | Draft [PR #27](https://github.com/NavigatorRAN/buzz/pull/27); manifest `8601516e60155bf3818f702436e4c9f4a2fe7b233118e9a1994376d5057a8048` | Run owner-controlled isolation, installed-app journeys, restart matrix, and eight-hour soak |
 
 Living Ship, the v0.5.2 integration line, the controlled sync to pinned upstream
 tag `desktop-v0.5.8`, and repository baseline promotion are complete. PR #17
@@ -44,6 +49,9 @@ installed-app acceptance, including live adviser turns and substantive doctrine
 RAG retrieval. PR #18 completed the V2/V3 compatibility freeze. Keeper passed
 the full repository gate and installed-app typed debrief, later brief,
 correction, scoped forget, immediate undo, and Living Ship journey on PR #19.
+The offline programme is now the active implementation line: Phases 1–4 are
+merged through PR #26, and Phase 5 is deliberately limited to packaging and
+physically proving those existing components.
 
 ## Execution sequence
 
@@ -261,9 +269,8 @@ Automated checks are necessary but do not replace these installed-app journeys:
 
 The following work does not block the roadmap above:
 
-- the offline-adaptive Command Adviser and mirrored knowledge programme, which
-  remains a documented future option until the current local/cloud product
-  demonstrates a real operational need for it;
+- optional Phase 6 model refinement, which remains closed until the accepted
+  archive meets its evidence threshold;
 - RAG 2.0 or a new knowledge replication ecosystem;
 - expanded operational-risk and mission-analysis workflows beyond the current
   advisory team;
