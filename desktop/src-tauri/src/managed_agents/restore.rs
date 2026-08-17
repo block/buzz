@@ -473,6 +473,10 @@ pub async fn restore_managed_agents_on_launch(
     Ok(())
 }
 
+fn profile_reconcile_completed(outcome: crate::commands::ProfileReconcileOutcome) -> bool {
+    outcome == crate::commands::ProfileReconcileOutcome::Reconciled
+}
+
 pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, workspace_relay: &str) {
     let state = app.state::<AppState>();
     if !state
@@ -500,11 +504,7 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
             match crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
                 .await
             {
-                Ok(())
-                    if state
-                        .managed_agent_profile_reconcile_enabled
-                        .load(Ordering::Acquire) =>
-                {
+                Ok(outcome) if profile_reconcile_completed(outcome) => {
                     if let Err(error) = crate::commands::mark_profile_reconciled(
                         &reconcile_app,
                         &pubkey,
@@ -515,15 +515,28 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
                         );
                     }
                 }
-                // Reconciliation can return Ok after the experiment is enabled
-                // mid-flight; retain the queue item rather than treating that
-                // intentional no-op as a successful relay write.
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(error) => eprintln!(
                     "buzz-desktop: profile reconciliation failed for agent {pubkey}: {error}"
                 ),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod profile_reconcile_tests {
+    use super::profile_reconcile_completed;
+    use crate::commands::ProfileReconcileOutcome;
+
+    #[test]
+    fn skipped_reconciliation_never_retires_pending_work() {
+        assert!(profile_reconcile_completed(
+            ProfileReconcileOutcome::Reconciled
+        ));
+        assert!(!profile_reconcile_completed(
+            ProfileReconcileOutcome::SkippedDisabled
+        ));
     }
 }
 
