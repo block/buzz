@@ -4,6 +4,7 @@ import {
   ArchiveRestore,
   CopyPlus,
   Download,
+  Sparkles,
   Trash2,
   type LucideIcon,
 } from "lucide-react";
@@ -30,6 +31,7 @@ export function UserProfileAgentManagementRows({
   canDeleteAgent,
   isDeletePending,
   managedAgent,
+  onCreateCard,
   onDeleteAgent,
   onDuplicateAgent,
   onExportAgent,
@@ -39,11 +41,14 @@ export function UserProfileAgentManagementRows({
   canDeleteAgent: boolean;
   isDeletePending: boolean;
   managedAgent?: ManagedAgent;
+  /** Mint an agent trading card. Present only for owner-managed personas. */
+  onCreateCard?: () => void;
   onDeleteAgent: () => void;
   onDuplicateAgent?: () => void;
   onExportAgent?: () => void;
 }) {
   if (
+    !onCreateCard &&
     !onDuplicateAgent &&
     !onExportAgent &&
     !canArchiveAgent &&
@@ -70,6 +75,15 @@ export function UserProfileAgentManagementRows({
           label="Export agent"
           onClick={onExportAgent}
           testId="user-profile-export-agent-row"
+        />
+      ) : null}
+      {onCreateCard ? (
+        <ProfileAgentActionRow
+          disabled={isDeletePending}
+          icon={Sparkles}
+          label="Create trading card"
+          onClick={onCreateCard}
+          testId="user-profile-create-card-row"
         />
       ) : null}
       {canArchiveAgent ? (

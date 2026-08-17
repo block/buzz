@@ -196,6 +196,10 @@ void main() {
         expect(loaded.first.pubkey, 'legacy_pub');
         expect(loaded.first.nsec, 'legacy_nsec');
         expect(loaded.first.name, isNotEmpty);
+        expect(
+          loaded.first.sensitiveActionPolicy,
+          SensitiveActionPolicy.disabledByUser,
+        );
 
         // Legacy keys should be deleted.
         expect(fakeSecure['buzz_relay_url'], isNull);

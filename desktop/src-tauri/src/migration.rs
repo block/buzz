@@ -168,13 +168,11 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     }
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
-    // Fold personas.json into the unified store HERE: after the JSON-level
-    // personas.json migrations above (which must see the legacy file), and
-    // before every consumer of the load/save_personas shims below —
-    // sync_team_personas would otherwise operate on an empty definition set.
-    // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
-    // back to the unified store's definitions.
+    // Fold personas.json after its JSON-level migrations and before consumers
+    // below; otherwise sync_team_personas sees an empty definition set.
+    // Post-fold runtime reads fall back to unified-store definitions.
     fold_personas_into_agent_store(app);
+    pollen::migrate_pollen_agent_name(app);
     // Clean the legacy baked team-instructions suffix out of stored prompts
     // AFTER the fold (so definitions lifted out of personas.json are cleaned in
     // the same boot) and BEFORE backfill_standalone_agents (so a manufactured
@@ -185,9 +183,8 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // pre-existing definition slugs exist for collision checks) and before event
     // sync republishes — the backfilled link flips the 30177 projection.
     backfill_standalone_agents(app);
-    // Repair dropped team↔member links, then detach directory-backed teams —
-    // but gate detach on a clean repair so a failed repair preserves
-    // `source_dir` (the disambiguating evidence a retry needs) for the next boot.
+    // Repair dropped team↔member links, then detach directory-backed teams,
+    // gated on a clean repair so a failure preserves `source_dir` for a retry.
     team_membership::repair_then_detach_teams(app);
     reconcile_provider_mcp_commands(app);
     reconcile_databricks_v1_to_v2(app);
@@ -1376,7 +1373,9 @@ use fold::load_persona_runtimes;
 mod backfill;
 pub use backfill::backfill_standalone_agents;
 mod detach;
+mod pollen;
 mod team_membership;
+pub(crate) use pollen::*;
 mod team_suffix;
 pub use team_suffix::strip_baked_team_instructions;
 

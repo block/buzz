@@ -73,10 +73,19 @@ test("top-level project lists align dates and overflow actions", async ({
   ).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Local" })).toBeVisible();
   await page.keyboard.press("Escape");
-  const projectPositions = await trailingPositions(
-    page.locator('[data-testid^="project-row-"]').first(),
-    { summaryTestId: "projects-row-summary" },
-  );
+  const projectRow = page.locator('[data-testid^="project-row-"]').first();
+  const projectPositions = await trailingPositions(projectRow, {
+    summaryTestId: "projects-row-summary",
+  });
+  // Project rows show the activity bar alone — counts stay in its tooltips.
+  await expect(
+    projectRow
+      .getByTestId("projects-row-summary")
+      .getByTestId("project-activity-bar"),
+  ).toBeVisible();
+  await expect(
+    projectRow.getByTestId("projects-row-summary"),
+  ).not.toContainText("commits");
 
   await page.getByTestId("projects-section-repositories").click();
   await page.getByRole("button", { name: "Filter repositories" }).click();
@@ -100,11 +109,9 @@ test("top-level project lists align dates and overflow actions", async ({
     dateTestId: "repositories-row-date",
     summaryTestId: "repositories-row-summary",
   });
-  expect(
-    Math.abs(
-      (repositoryPositions.summaryX ?? 0) - (projectPositions.summaryX ?? 0),
-    ),
-  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
+  // No summaryX comparison: repository rows carry text stats next to the bar
+  // while project rows show the bar alone, so the columns differ in width by
+  // design. The right-anchored date and menu still align across the lists.
   expect(
     Math.abs(repositoryPositions.rowHeight - projectPositions.rowHeight),
   ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
@@ -300,9 +307,9 @@ test("unsupported relays keep the initial repository accessible", async ({
   await projectEntry
     .getByRole("button", { name: "View legacy-fallback" })
     .click();
-  await expect(page.getByTestId("project-repository-picker")).toContainText(
-    "legacy-fallback",
-  );
+  const repositoryPicker = page.getByTestId("project-repository-picker");
+  await expect(repositoryPicker).toBeVisible();
+  await expect(repositoryPicker).toContainText("legacy-fallback");
   await waitForAnimations(page);
   await page.screenshot({
     path: `${SHOTS}/06-single-repository-add.png`,
@@ -425,7 +432,10 @@ test("multi-repository projects switch the active repository", async ({
     new RegExp(`repositoryId=${TEST_IDENTITIES.alice.pubkey}%3Arelay-tools`),
   );
 
+  await picker.click();
   await page.getByTestId("add-project-repository").click();
+  await expect(page.getByTestId("create-project-repository")).toBeVisible();
+  await expect(page.getByTestId("attach-project-repository")).toBeVisible();
   await page.getByTestId("create-project-repository").click();
   await page.getByTestId("add-project-repository-name").fill("mobile-app");
   await page.getByTestId("add-project-repository-submit").click();
@@ -449,6 +459,7 @@ test("multi-repository projects switch the active repository", async ({
     addedEvents.find((event) => event.kind === 30617)?.tags,
   ).toContainEqual(["buzz-channel", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"]);
 
+  await picker.click();
   await page.getByTestId("add-project-repository").click();
   await page.getByTestId("attach-project-repository").click();
   await expect(
@@ -526,6 +537,7 @@ test("commit detail opens from the commits feed with a diff", async ({
   await expect(
     page.getByRole("button", { name: "Copy commit hash" }),
   ).toBeVisible();
+  await expect(page.getByTestId("project-workspace-tab-menu")).toHaveCount(0);
   await expect(
     page.getByRole("link", { name: "project guide", exact: true }),
   ).toHaveAttribute("href", "https://example.com/project-guide");
@@ -557,6 +569,7 @@ test("commit detail opens from the commits feed with a diff", async ({
     .getByRole("button", { name: "Commits", exact: true })
     .click();
   await expect(commitRows.first()).toBeVisible();
+  await expect(page.getByTestId("project-workspace-tab-menu")).toBeVisible();
 
   // The commits feed itself gets a grayed sub-tab crumb.
   await expect(
@@ -664,6 +677,8 @@ test("adding a repository retries and reports an error when the 30617 publicatio
     .first()
     .click();
 
+  const picker = page.getByTestId("project-repository-picker");
+  await picker.click();
   await page.getByTestId("add-project-repository").click();
   await page.getByTestId("create-project-repository").click();
   await page.getByTestId("add-project-repository-name").fill("rejected-repo");
@@ -731,6 +746,7 @@ test("adding a repository treats a lost 30617 acknowledgement as success", async
 
   const picker = page.getByTestId("project-repository-picker");
 
+  await picker.click();
   await page.getByTestId("add-project-repository").click();
   await page.getByTestId("create-project-repository").click();
   await page.getByTestId("add-project-repository-name").fill("lost-ack-repo");
@@ -796,6 +812,8 @@ test("adding a repository blocks when a standalone 30617 already exists at that 
     .first()
     .click();
 
+  const picker = page.getByTestId("project-repository-picker");
+  await picker.click();
   await page.getByTestId("add-project-repository").click();
   await page.getByTestId("create-project-repository").click();
   // Use the same name — the dtag will match the seeded standalone 30617.
@@ -882,15 +900,16 @@ test("navigating via a 30617 entity-link route opens the correct non-primary rep
     { waitUntil: "domcontentloaded" },
   );
 
-  // The repository picker must show "relay-tools" (non-primary), not "buzz" (primary).
-  const picker = page.getByTestId("project-repository-picker");
-  await expect(picker).toContainText("relay-tools", { timeout: 10_000 });
-  await expect(picker).not.toContainText("buzz");
-
-  // The PR detail panel must render from the relay-tools repository — not blank.
+  // Repository controls intentionally render only on README and Files. The
+  // seeded PR and branch prove that this detail route resolved relay-tools
+  // rather than falling back to the project's primary repository.
+  await expect(page.getByTestId("project-repository-picker")).toHaveCount(0);
   // Use `first()` to avoid Playwright strict-mode violations: the text appears
   // in both the breadcrumb and the PR title heading once the detail panel opens.
   await expect(
     page.getByText("Entity-link test PR from relay-tools").first(),
   ).toBeVisible({ timeout: 10_000 });
+  await expect(
+    page.getByText("feature/entity-link-test").first(),
+  ).toBeVisible();
 });

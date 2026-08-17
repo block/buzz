@@ -47,11 +47,15 @@ mod util;
 pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
+#[doc(hidden)]
+pub use commands::print_agent_access_owner_only_probe_if_requested;
 use commands::*;
 use deep_link::{
-    acknowledge_pending_community_deep_link, acknowledge_pending_navigation_deep_link,
-    clear_pending_navigation_deep_links, handle_deep_link_url, take_pending_community_deep_link,
-    take_pending_navigation_deep_link, PendingCommunityDeepLinks, PendingNavigationDeepLinks,
+    acknowledge_pending_community_deep_link, acknowledge_pending_entity_deep_link,
+    acknowledge_pending_navigation_deep_link, clear_pending_navigation_deep_links,
+    handle_deep_link_url, take_pending_community_deep_link, take_pending_entity_deep_link,
+    take_pending_navigation_deep_link, PendingCommunityDeepLinks, PendingEntityDeepLinks,
+    PendingNavigationDeepLinks,
 };
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
@@ -304,6 +308,7 @@ pub fn run() {
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
         .manage(PendingNavigationDeepLinks::default())
+        .manage(PendingEntityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
@@ -515,15 +520,7 @@ pub fn run() {
             // and on cold start. The single-instance plugin handles forwarding
             // from duplicate launches on Windows/Linux.
             #[cfg(desktop)]
-            {
-                use tauri_plugin_deep_link::DeepLinkExt;
-                let dl_handle = app.handle().clone();
-                app.deep_link().on_open_url(move |event| {
-                    for url in event.urls() {
-                        handle_deep_link_url(&dl_handle, url.as_str());
-                    }
-                });
-            }
+            deep_link::install_deep_link_handlers(app);
 
             // Defer launch-time agent restoration until `apply_workspace` has
             // installed the active workspace relay and identity. Starting here
@@ -619,6 +616,8 @@ pub fn run() {
             take_pending_navigation_deep_link,
             acknowledge_pending_navigation_deep_link,
             clear_pending_navigation_deep_links,
+            take_pending_entity_deep_link,
+            acknowledge_pending_entity_deep_link,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,
@@ -659,8 +658,11 @@ pub fn run() {
             delete_project_remote_branch,
             push_project_local_repository,
             pull_project_local_repository,
+            publish_project_owner_announcement,
             sign_project_pull_request_status,
             sign_project_pull_request_review_request,
+            sign_project_issue_assignment,
+            sign_project_issue_unassignment,
             publish_project_pull_request_merged_status,
             merge_project_pull_request,
             open_project_terminal,

@@ -132,6 +132,9 @@ pub async fn apply_workspace(
     app: AppHandle,
 ) -> Result<(), String> {
     let restore_app = app.clone();
+    // Capture the caller's relay before the blocking apply. Reading shared
+    // state afterward could pick up a newer concurrent community switch.
+    let profile_reconcile_relay = relay_url.clone();
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
 
@@ -213,6 +216,14 @@ pub async fn apply_workspace(
 
     let state = restore_app.state::<AppState>();
     super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
+    // The Bumble→Pollen migration may have renamed stopped agents. Reconcile
+    // their relay profiles independently of runtime restore; successful writes
+    // record this relay while retaining the agent for other communities, and
+    // failures retry on the next workspace apply.
+    crate::managed_agents::spawn_pending_profile_reconciliations(
+        &restore_app,
+        &profile_reconcile_relay,
+    );
 
     // Backfill this exact relay+owner scope only after the workspace has been
     // applied. Running at process boot would target the fallback relay and

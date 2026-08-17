@@ -39,9 +39,7 @@ const _searchTitleReturnDuration = Duration(milliseconds: 80);
 const _searchCancelEnterDuration = Duration(milliseconds: 80);
 const _searchCancelExitDuration = Duration(milliseconds: 60);
 const _searchIdleFieldTopInset = Grid.half;
-const _searchActiveFieldTopOffset = 42.0;
-const _searchBottomOverlap =
-    _searchActiveFieldTopOffset + _searchIdleFieldTopInset;
+const _searchControlsToFiltersGap = Grid.xxs;
 const _searchFilterChipVerticalPadding = Grid.xxs;
 const _searchFilterBarVerticalPadding = Grid.xxs;
 const _searchHeaderFiltersMinHeight = Grid.xl;
@@ -130,15 +128,17 @@ class SearchPage extends HookConsumerWidget {
     final idleSearchFieldHeight = _idleSearchFieldHeight(context);
     final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
     final searchActiveFieldRightInset = _searchActiveFieldRightInset(context);
+    final searchBottomOverlap =
+        _searchIdleFieldTopInset +
+        compactSearchFieldHeight +
+        _searchControlsToFiltersGap;
     // Cancel remains an accessible target without giving the text action a
     // visual button treatment.
     final searchControlHeight = compactSearchFieldHeight > Grid.xl
         ? compactSearchFieldHeight
         : Grid.xl;
     final searchHeaderBottomHeight = isSearchEditing.value
-        ? _searchIdleFieldTopInset +
-              compactSearchFieldHeight +
-              searchHeaderFiltersHeight
+        ? searchHeaderFiltersHeight + _searchControlsToFiltersGap
         : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
@@ -295,7 +295,7 @@ class SearchPage extends HookConsumerWidget {
           ),
         ],
         bottomHeight: searchHeaderBottomHeight,
-        bottomOverlap: _searchBottomOverlap,
+        bottomOverlap: searchBottomOverlap,
         bottom: Stack(
           clipBehavior: Clip.none,
           children: [
@@ -308,7 +308,7 @@ class SearchPage extends HookConsumerWidget {
                   : Grid.gutter,
               top: isSearchEditing.value
                   ? _searchIdleFieldTopInset
-                  : _searchBottomOverlap + _searchIdleFieldTopInset,
+                  : searchBottomOverlap + _searchIdleFieldTopInset,
               height: isSearchEditing.value
                   ? compactSearchFieldHeight
                   : idleSearchFieldHeight,
@@ -360,7 +360,7 @@ class SearchPage extends HookConsumerWidget {
                     ? Align(
                         alignment: Alignment.topCenter,
                         child: Padding(
-                          padding: EdgeInsets.only(top: _searchBottomOverlap),
+                          padding: EdgeInsets.only(top: searchBottomOverlap),
                           child: SizedBox(
                             key: const ValueKey('search-header-filters'),
                             height: searchHeaderFiltersHeight,

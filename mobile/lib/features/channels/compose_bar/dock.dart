@@ -1,10 +1,13 @@
 part of '../compose_bar.dart';
 
 class _ComposerDockFrame extends StatelessWidget {
-  final double widthFactor;
+  final Animation<double> expansionAnimation;
   final Widget child;
 
-  const _ComposerDockFrame({required this.widthFactor, required this.child});
+  const _ComposerDockFrame({
+    required this.expansionAnimation,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -30,10 +33,19 @@ class _ComposerDockFrame extends StatelessWidget {
           ),
           child: Align(
             alignment: Alignment.bottomCenter,
-            child: FractionallySizedBox(
-              key: const ValueKey('composer-width-transition'),
-              widthFactor: widthFactor,
+            child: AnimatedBuilder(
+              animation: expansionAnimation,
               child: child,
+              builder: (context, child) {
+                final progress = expansionAnimation.value
+                    .clamp(0.0, 1.0)
+                    .toDouble();
+                return FractionallySizedBox(
+                  key: const ValueKey('composer-width-transition'),
+                  widthFactor: 0.85 + 0.15 * progress,
+                  child: child,
+                );
+              },
             ),
           ),
         ),
