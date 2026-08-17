@@ -120,6 +120,12 @@ run_unit_tests() {
   # `just test-unit` — the two lists must stay in step.
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
+
+  # buzz-acp harness unit tests: in-process, fixtures spawn a local POSIX shell
+  # as a fake agent (no relay, no database). Mirrors the nextest path in
+  # `just test-unit` — the two lists must stay in step.
+  run_test_step "buzz-acp unit tests" \
+    cargo test -p buzz-acp --lib -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
