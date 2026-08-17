@@ -355,8 +355,6 @@ struct NativeEmojiRemoteImage: View {
   let fallbackColor: UIColor
 
   @State private var phase: Phase = .loading
-  private static let maxDownloadBytes = 10 * 1024 * 1024
-  private static let maxThumbnailPixels = 84
 
   private enum Phase {
     case loading
@@ -385,44 +383,146 @@ struct NativeEmojiRemoteImage: View {
         for (name, value) in requestHeaders {
           request.setValue(value, forHTTPHeaderField: name)
         }
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard
-          let httpResponse = response as? HTTPURLResponse,
-          (200..<300).contains(httpResponse.statusCode)
-        else {
-          phase = .failure
-          return
-        }
-        if let contentLength = httpResponse.value(forHTTPHeaderField: "Content-Length"),
-          let byteCount = Int(contentLength),
-          byteCount > Self.maxDownloadBytes
-        {
-          phase = .failure
-          return
-        }
-        var data = Data()
-        let expected = httpResponse.expectedContentLength
-        if expected > 0 {
-          data.reserveCapacity(
-            Int(min(expected, Int64(Self.maxDownloadBytes)))
-          )
-        }
-        for try await byte in bytes {
-          guard data.count < Self.maxDownloadBytes else {
-            phase = .failure
-            return
-          }
-          data.append(byte)
-        }
-        guard let image = Self.thumbnail(from: data) else {
-          phase = .failure
-          return
-        }
-        phase = .success(image)
+        phase = .success(
+          try await NativeEmojiRemoteImageLoader.shared.image(for: request)
+        )
       } catch {
         if !Task.isCancelled { phase = .failure }
       }
     }
+  }
+
+  private var requestIdentity: String {
+    url.absoluteString
+  }
+}
+
+enum NativeEmojiRemoteImageError: Error {
+  case invalidResponse
+  case responseTooLarge
+  case invalidImage
+}
+
+actor NativeEmojiRemoteImageLoader {
+  typealias Downloader = (URLRequest) async throws -> UIImage
+
+  static let shared = NativeEmojiRemoteImageLoader()
+  static let defaultMaximumConcurrentDownloads = 4
+
+  private static let maximumDownloadBytes = 10 * 1024 * 1024
+  private static let maximumThumbnailPixels = 84
+  private static let defaultCacheByteLimit = 8 * 1024 * 1024
+
+  private struct Waiter {
+    let id: UUID
+    let continuation: CheckedContinuation<Void, Error>
+  }
+
+  private let maximumConcurrentDownloads: Int
+  private let downloader: Downloader
+  private let cache = NSCache<NSURLRequest, UIImage>()
+  private var activeDownloadCount = 0
+  private var waiters: [Waiter] = []
+
+  init(
+    maximumConcurrentDownloads: Int = defaultMaximumConcurrentDownloads,
+    cacheByteLimit: Int = defaultCacheByteLimit,
+    downloader: @escaping Downloader = NativeEmojiRemoteImageLoader.download
+  ) {
+    precondition(maximumConcurrentDownloads > 0)
+    precondition(cacheByteLimit >= 0)
+    self.maximumConcurrentDownloads = maximumConcurrentDownloads
+    self.downloader = downloader
+    cache.totalCostLimit = cacheByteLimit
+  }
+
+  func image(for request: URLRequest) async throws -> UIImage {
+    let cacheKey = request as NSURLRequest
+    if let cached = cache.object(forKey: cacheKey) {
+      return cached
+    }
+
+    try await acquireDownloadSlot()
+    defer { releaseDownloadSlot() }
+
+    try Task.checkCancellation()
+    if let cached = cache.object(forKey: cacheKey) {
+      return cached
+    }
+
+    let image = try await downloader(request)
+    cache.setObject(image, forKey: cacheKey, cost: Self.cacheCost(for: image))
+    return image
+  }
+
+  private func acquireDownloadSlot() async throws {
+    try Task.checkCancellation()
+    guard activeDownloadCount >= maximumConcurrentDownloads else {
+      activeDownloadCount += 1
+      return
+    }
+
+    let waiterID = UUID()
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, Error>) in
+        if Task.isCancelled {
+          continuation.resume(throwing: CancellationError())
+        } else {
+          waiters.append(Waiter(id: waiterID, continuation: continuation))
+        }
+      }
+    } onCancel: {
+      Task { await self.cancelWaiter(id: waiterID) }
+    }
+  }
+
+  private func cancelWaiter(id: UUID) {
+    guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+    let waiter = waiters.remove(at: index)
+    waiter.continuation.resume(throwing: CancellationError())
+  }
+
+  private func releaseDownloadSlot() {
+    while !waiters.isEmpty {
+      let waiter = waiters.removeFirst()
+      waiter.continuation.resume()
+      return
+    }
+    activeDownloadCount -= 1
+  }
+
+  private static func download(_ request: URLRequest) async throws -> UIImage {
+    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+    guard
+      let httpResponse = response as? HTTPURLResponse,
+      (200..<300).contains(httpResponse.statusCode)
+    else {
+      throw NativeEmojiRemoteImageError.invalidResponse
+    }
+    if let contentLength = httpResponse.value(forHTTPHeaderField: "Content-Length"),
+      let byteCount = Int(contentLength),
+      byteCount > maximumDownloadBytes
+    {
+      throw NativeEmojiRemoteImageError.responseTooLarge
+    }
+
+    var data = Data()
+    let expected = httpResponse.expectedContentLength
+    if expected > 0 {
+      data.reserveCapacity(Int(min(expected, Int64(maximumDownloadBytes))))
+    }
+    for try await byte in bytes {
+      guard data.count < maximumDownloadBytes else {
+        throw NativeEmojiRemoteImageError.responseTooLarge
+      }
+      data.append(byte)
+    }
+    try Task.checkCancellation()
+    guard let image = thumbnail(from: data) else {
+      throw NativeEmojiRemoteImageError.invalidImage
+    }
+    return image
   }
 
   private static func thumbnail(from data: Data) -> UIImage? {
@@ -432,7 +532,7 @@ struct NativeEmojiRemoteImage: View {
     let options: [CFString: Any] = [
       kCGImageSourceCreateThumbnailFromImageAlways: true,
       kCGImageSourceCreateThumbnailWithTransform: true,
-      kCGImageSourceThumbnailMaxPixelSize: maxThumbnailPixels,
+      kCGImageSourceThumbnailMaxPixelSize: maximumThumbnailPixels,
       kCGImageSourceShouldCacheImmediately: true,
     ]
     guard
@@ -447,7 +547,11 @@ struct NativeEmojiRemoteImage: View {
     return UIImage(cgImage: image)
   }
 
-  private var requestIdentity: String {
-    url.absoluteString
+  private static func cacheCost(for image: UIImage) -> Int {
+    guard let cgImage = image.cgImage else { return 0 }
+    let (cost, overflow) = cgImage.bytesPerRow.multipliedReportingOverflow(
+      by: cgImage.height
+    )
+    return overflow ? Int.max : cost
   }
 }
