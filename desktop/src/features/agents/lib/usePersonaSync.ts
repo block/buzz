@@ -35,13 +35,19 @@ export function startPersonaSync(
   relayUrl: string,
   onCancelled: () => boolean,
 ): () => Promise<void> {
+  // Reconcile in relay order. Managed-agent reconciliation can await a remote
+  // provider deployment after releasing the local store lock; firing commands
+  // independently lets an older broad policy finish after a newer restrictive
+  // one. One chain per owner/relay subscription makes the newest event the last
+  // deployment without serializing unrelated identities or communities.
+  let reconcileChain = Promise.resolve();
   const reconcile = (event: RelayEvent) => {
     if (event.pubkey !== pubkey) return;
-    void reconcileInboundPersonaEvent(JSON.stringify(event), relayUrl).catch(
-      (error) => {
+    reconcileChain = reconcileChain
+      .then(() => reconcileInboundPersonaEvent(JSON.stringify(event), relayUrl))
+      .catch((error) => {
         console.warn("[usePersonaSync] reconcile failed:", error);
-      },
-    );
+      });
   };
 
   // One-shot backfill of existing heads + tombstones (closes the fresh-start

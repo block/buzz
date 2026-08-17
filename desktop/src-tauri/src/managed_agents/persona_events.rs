@@ -247,7 +247,22 @@ pub async fn flush_active_pending_events(
     flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
 }
 
-async fn flush_pending_events_at(
+pub fn active_pending_event(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    kind: u32,
+    d_tag: &str,
+) -> Result<bool, String> {
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    let owner_pubkey = scope.owner_keys.public_key().to_hex();
+    let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+    Ok(
+        crate::managed_agents::retention::get_retained_event(&conn, kind, &owner_pubkey, d_tag)?
+            .is_some_and(|event| event.pending_sync),
+    )
+}
+
+pub(crate) async fn flush_pending_events_at(
     db_path: &std::path::Path,
     state: &AppState,
     relay_url: &str,

@@ -121,7 +121,7 @@ pub(super) fn ensure_remote_provider_supported(provider: Option<&str>) -> Result
 }
 
 /// Build the standard agent JSON payload for provider deploy calls.
-pub(super) fn build_deploy_payload(
+pub(crate) fn build_deploy_payload(
     app: &AppHandle,
     state: &AppState,
     record: &ManagedAgentRecord,
