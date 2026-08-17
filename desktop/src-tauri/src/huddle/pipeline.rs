@@ -296,6 +296,13 @@ pub(crate) async fn maybe_start_stt_pipeline(
         return Ok(false); // Models not downloaded yet — voice-only mode.
     }
     let model_dir = models::stt_model_dir().ok_or("STT model directory not found")?;
+    let transcription_language = state
+        .huddle_audio
+        .tts
+        .lock()
+        .map_err(|error| format!("text-to-speech settings lock poisoned: {error}"))?
+        .transcription_language
+        .clone();
 
     let channel_uuid = parse_channel_uuid(ephemeral_channel_id)?;
 
@@ -353,7 +360,12 @@ pub(crate) async fn maybe_start_stt_pipeline(
     drop(old_stt);
 
     let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(model_dir, ptt_active_for_stt, manual_mic_unmuted_for_stt)
+        stt::SttPipeline::new(
+            model_dir,
+            transcription_language,
+            ptt_active_for_stt,
+            manual_mic_unmuted_for_stt,
+        )
     })
     .await;
     let (pipeline, text_rx) = match constructed {

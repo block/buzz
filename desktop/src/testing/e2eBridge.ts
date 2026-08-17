@@ -182,6 +182,7 @@ type E2eConfig = {
     ttsSettings?: {
       version: number;
       agentTextToSpeech: boolean;
+      transcriptionLanguage: string | null;
       voicePreferences: string[];
     };
     /** Native picker boundary result for Pocket voice import tests. */
@@ -10929,6 +10930,7 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig?.mock?.ttsSettings ?? {
             version: 1,
             agentTextToSpeech: true,
+            transcriptionLanguage: null,
             voicePreferences: ["pocket:mary"],
           }
         );
@@ -11045,8 +11047,35 @@ export function maybeInstallE2eTauriMocks() {
         const settings = {
           version: 1,
           agentTextToSpeech: enabled,
+          transcriptionLanguage:
+            activeConfig?.mock?.ttsSettings?.transcriptionLanguage ?? null,
           voicePreferences: activeConfig?.mock?.ttsSettings
             ?.voicePreferences ?? ["pocket:mary"],
+        };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.ttsSettings = settings;
+        }
+        return settings;
+      }
+      case "set_transcription_language": {
+        const language = (payload as { language?: string | null })?.language;
+        if (
+          language !== undefined &&
+          language !== null &&
+          !/^[a-z]{2}$/.test(language)
+        ) {
+          throw new Error("Invalid transcription language");
+        }
+        const current = activeConfig?.mock?.ttsSettings ?? {
+          version: 1,
+          agentTextToSpeech: true,
+          transcriptionLanguage: null,
+          voicePreferences: ["pocket:mary"],
+        };
+        const settings = {
+          ...current,
+          transcriptionLanguage: language ?? null,
         };
         if (activeConfig) {
           activeConfig.mock ??= {};
@@ -11062,6 +11091,7 @@ export function maybeInstallE2eTauriMocks() {
         const current = activeConfig?.mock?.ttsSettings ?? {
           version: 1,
           agentTextToSpeech: true,
+          transcriptionLanguage: null,
           voicePreferences: ["pocket:mary"],
         };
         const firstPocketIndex = current.voicePreferences.findIndex((key) =>
@@ -11111,6 +11141,7 @@ export function maybeInstallE2eTauriMocks() {
         const current = activeConfig?.mock?.ttsSettings ?? {
           version: 1,
           agentTextToSpeech: true,
+          transcriptionLanguage: null,
           voicePreferences: ["pocket:mary"],
         };
         const settings = {
@@ -11136,6 +11167,7 @@ export function maybeInstallE2eTauriMocks() {
         const current = activeConfig?.mock?.ttsSettings ?? {
           version: 1,
           agentTextToSpeech: true,
+          transcriptionLanguage: null,
           voicePreferences: ["pocket:mary"],
         };
         const settings = {

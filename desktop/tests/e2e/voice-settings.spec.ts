@@ -9,6 +9,30 @@ const SCREENSHOT_PATH = "test-results/voice-settings/pocket-voices.png";
 test.describe("Pocket voice settings", () => {
   test.use({ viewport: { width: 1100, height: 760 } });
 
+  test("sets Turkish for reliable short huddle transcripts", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "voice");
+
+    await expect(
+      page.getByTestId("transcription-language-selector"),
+    ).toContainText("Auto");
+    await page.getByTestId("transcription-language-selector").click();
+    await page.getByRole("menuitemradio", { name: "Turkish" }).click();
+    await expect(
+      page.getByTestId("transcription-language-selector"),
+    ).toContainText("Turkish");
+
+    const mutation = await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+        (entry) => entry.command === "set_transcription_language",
+      ),
+    );
+    expect(mutation?.payload).toEqual({ language: "tr" });
+  });
+
   test("selects and retains a bundled voice while text to speech is off", async ({
     page,
   }) => {
@@ -74,6 +98,7 @@ test.describe("Pocket voice settings", () => {
       ttsSettings: {
         version: 1,
         agentTextToSpeech: true,
+        transcriptionLanguage: "tr",
         voicePreferences: ["pocket:eve"],
       },
     });

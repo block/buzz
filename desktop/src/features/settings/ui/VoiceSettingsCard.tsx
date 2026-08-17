@@ -38,8 +38,15 @@ import {
 export type TtsSettings = {
   version: number;
   agentTextToSpeech: boolean;
+  transcriptionLanguage: string | null;
   voicePreferences: string[];
 };
+
+const TRANSCRIPTION_LANGUAGES = [
+  { value: "auto", label: "Auto" },
+  { value: "tr", label: "Turkish" },
+  { value: "en", label: "English" },
+] as const;
 
 type TtsVoiceMutation = {
   settings: TtsSettings;
@@ -132,6 +139,29 @@ export function VoiceSettingsCard() {
     }
   }, []);
 
+  const saveTranscriptionLanguage = React.useCallback(
+    async (language: string) => {
+      setBusy(true);
+      setError(null);
+      try {
+        const saved = await invokeTauri<TtsSettings>(
+          "set_transcription_language",
+          { language: language === "auto" ? null : language },
+        );
+        setSettings(saved);
+      } catch (saveError) {
+        setError(
+          saveError instanceof Error
+            ? saveError.message
+            : "Transcription language could not be saved.",
+        );
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
   const importPocketVoice = React.useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -192,6 +222,50 @@ export function VoiceSettingsCard() {
       />
 
       <SettingsOptionGroupList>
+        <SettingsOptionGroup title="Transcription">
+          <SettingsOptionRow>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Spoken language</p>
+              <p
+                className="text-sm text-muted-foreground/70"
+                data-settings-subcopy
+              >
+                Used for new huddles. Choose Turkish for reliable short replies.
+              </p>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label="Huddle transcription language"
+                  className="min-w-32 justify-between"
+                  data-testid="transcription-language-selector"
+                  disabled={!settings || busy}
+                  variant="outline"
+                >
+                  {TRANSCRIPTION_LANGUAGES.find(
+                    ({ value }) =>
+                      value === (settings?.transcriptionLanguage ?? "auto"),
+                  )?.label ?? "Auto"}
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuRadioGroup
+                  onValueChange={(language) => {
+                    if (settings) void saveTranscriptionLanguage(language);
+                  }}
+                  value={settings?.transcriptionLanguage ?? "auto"}
+                >
+                  {TRANSCRIPTION_LANGUAGES.map(({ value, label }) => (
+                    <DropdownMenuRadioItem key={value} value={value}>
+                      {label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </SettingsOptionRow>
+        </SettingsOptionGroup>
         <SettingsOptionGroup title="Playback">
           <SettingsOptionRow>
             <div className="min-w-0">

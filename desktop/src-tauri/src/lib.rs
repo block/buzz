@@ -861,6 +861,7 @@ pub fn run() {
             set_tts_enabled,
             huddle::tts_settings::get_tts_settings,
             huddle::tts_settings::list_voice_registry,
+            huddle::transcription_settings::set_transcription_language,
             huddle::tts_settings::set_pocket_voice,
             huddle::tts_settings::preview_pocket_voice,
             huddle::tts_settings::import_pocket_voice,
@@ -978,7 +979,6 @@ pub fn run() {
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
-
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             if restart_requested.load(Ordering::SeqCst) {
                 relaunch_after_mesh_shutdown(app_handle);

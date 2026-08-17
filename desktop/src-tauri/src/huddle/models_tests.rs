@@ -1,5 +1,20 @@
 use super::*;
 
+#[test]
+fn stt_contract_uses_multilingual_whisper_artifacts() {
+    assert_eq!(STT_MODEL_DIR_NAME, "whisper-base-multilingual");
+    assert_eq!(
+        STT_EXPECTED_FILES,
+        &[
+            "base-encoder.int8.onnx",
+            "base-decoder.int8.onnx",
+            "base-tokens.txt",
+            STT_LICENSE_FILE_NAME,
+        ]
+    );
+    assert!(!STT_DOWNLOAD_URL.contains("-en"));
+}
+
 fn create_ready_model_dir(root: &Path) -> PathBuf {
     let model_dir = root.join(TTS_MODEL_DIR_NAME);
     std::fs::create_dir_all(&model_dir).expect("create model dir");
