@@ -189,7 +189,7 @@ export function UserProfilePanel({
   );
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
-  const { linkedPersonaId, managedAgent, personaInstances } =
+  const { instanceBuckets, linkedPersonaId, managedAgent } =
     useCanonicalManagedAgentProfile({
       currentPubkey,
       managedAgents: managedAgentsQuery.data,
@@ -812,7 +812,7 @@ export function UserProfilePanel({
           isFollowing={isFollowing}
           isOwner={viewerIsOwner}
           isSelf={isSelf}
-          instances={personaInstances}
+          instanceBuckets={instanceBuckets}
           activityAgent={activityAgent}
           managedAgent={managedAgent}
           agentInfoFields={agentInfoFields}

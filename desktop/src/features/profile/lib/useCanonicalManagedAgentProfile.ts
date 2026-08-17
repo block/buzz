@@ -63,6 +63,24 @@ export function resolveCanonicalManagedAgent(input: {
   return pickProfileAgent(personaInstances, isArchived) ?? directManagedAgent;
 }
 
+/**
+ * Split a persona's instances into live and archived buckets off the same
+ * archive predicate the selector uses — one policy, no duplication. Fail-open
+ * is inherited: while the archive snapshot loads `isArchived` returns `false`,
+ * so every instance lands in `live` and nothing is labeled or hidden.
+ */
+export function bucketPersonaInstances(
+  personaInstances: readonly ManagedAgent[],
+  isArchived: (pubkey: string) => boolean,
+): { live: ManagedAgent[]; archived: ManagedAgent[] } {
+  const live: ManagedAgent[] = [];
+  const archived: ManagedAgent[] = [];
+  for (const instance of personaInstances) {
+    (isArchived(instance.pubkey) ? archived : live).push(instance);
+  }
+  return { live, archived };
+}
+
 export function useCanonicalManagedAgentProfile(input: {
   currentPubkey: string | undefined;
   managedAgents: readonly ManagedAgent[] | undefined;
@@ -126,6 +144,16 @@ export function useCanonicalManagedAgentProfile(input: {
       pubkey,
     ],
   );
+  // Split the roster for the Instances list off the same predicate the selector
+  // uses — see `bucketPersonaInstances` for the fail-open semantics.
+  const instanceBuckets = React.useMemo(
+    () => bucketPersonaInstances(personaInstances, isArchived),
+    [isArchived, personaInstances],
+  );
 
-  return { linkedPersonaId, managedAgent, personaInstances };
+  return {
+    instanceBuckets,
+    linkedPersonaId,
+    managedAgent,
+  };
 }
