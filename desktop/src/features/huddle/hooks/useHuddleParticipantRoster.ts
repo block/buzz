@@ -60,12 +60,9 @@ export function reconstructHuddleParticipantRoster({
   );
   const sorted = [...events]
     .filter((event) => lifecycleChannelId(event) === ephemeralChannelId)
-    .sort(
-      (left, right) =>
-        left.created_at - right.created_at ||
-        left.kind - right.kind ||
-        left.id.localeCompare(right.id),
-    );
+    // Equal-second lifecycle events must retain relay delivery order: kind/id
+    // are not causal and can invert a leave followed by an immediate rejoin.
+    .sort((left, right) => left.created_at - right.created_at);
   let ended = false;
 
   for (const event of sorted) {

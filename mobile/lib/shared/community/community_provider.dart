@@ -4,6 +4,24 @@ import '../auth/auth_provider.dart';
 import 'community.dart';
 import 'community_storage.dart';
 
+final class CommunityTransitionCoordinator {
+  final Map<Object, Future<void> Function()> _callbacks = {};
+
+  void Function() register(Future<void> Function() callback) {
+    final owner = Object();
+    _callbacks[owner] = callback;
+    return () => _callbacks.remove(owner);
+  }
+
+  Future<void> run() async {
+    await Future.wait(_callbacks.values.map((callback) => callback()));
+  }
+}
+
+final communityTransitionProvider = Provider<CommunityTransitionCoordinator>(
+  (ref) => CommunityTransitionCoordinator(),
+);
+
 final communityStorageProvider = Provider<CommunityStorage>((ref) {
   return CommunityStorage();
 });
@@ -46,17 +64,23 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   Future<void> removeCommunity(String id) async {
     final storage = ref.read(communityStorageProvider);
+    final activeId = await storage.loadActiveId();
+    if (activeId == id) {
+      await ref.read(communityTransitionProvider).run();
+    }
     await storage.remove(id);
 
     final current = state.value ?? [];
     state = AsyncData(current.where((w) => w.id != id).toList());
 
     // If we removed the active community, switch to another or sign out.
-    final activeId = await storage.loadActiveId();
     if (activeId == id) {
       final remaining = state.value ?? [];
       if (remaining.isNotEmpty) {
-        await switchCommunity(remaining.first.id);
+        await storage.saveActiveId(remaining.first.id);
+        // Reassign list state so activeCommunityProvider picks up the new ID.
+        state = AsyncData([...remaining]);
+        ref.invalidate(authProvider);
       } else {
         await storage.clearActiveId();
         // Invalidate auth so it re-evaluates against the now-empty storage
@@ -68,6 +92,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   Future<void> switchCommunity(String id) async {
     final storage = ref.read(communityStorageProvider);
+    final activeId = await storage.loadActiveId();
+    if (activeId == id) return;
+    await ref.read(communityTransitionProvider).run();
     await storage.saveActiveId(id);
     // Reassign list state to trigger activeCommunityProvider (which watches
     // communityListProvider.future) to rebuild and pick up the new active ID.

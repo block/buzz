@@ -209,6 +209,7 @@ Widget _buildTestable({
   HuddleMediaFactory? huddleMediaFactory,
   HuddleTransportFactory? huddleTransportFactory,
   HuddleHumanCountLoader? huddleHumanCountLoader,
+  List<NostrEvent> huddleLifecycle = const [],
   String? huddleCurrentPubkey,
   http.Client? mediaClient,
 }) {
@@ -294,6 +295,9 @@ Widget _buildTestable({
         ),
       if (huddleHumanCountLoader != null)
         huddleHumanCountProvider.overrideWithValue(huddleHumanCountLoader),
+      huddleLifecycleProvider(
+        _channelId,
+      ).overrideWith((ref) async => huddleLifecycle),
       if (huddleCurrentPubkey != null)
         currentPubkeyProvider.overrideWith((ref) => huddleCurrentPubkey),
       appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
@@ -3203,6 +3207,28 @@ void main() {
         find.byKey(const ValueKey('system-message-timestamp-alice')),
         findsOneWidget,
       );
+    });
+
+    testWidgets('top action discovers a Huddle outside the timeline window', (
+      tester,
+    ) async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          huddleLifecycle: [
+            _huddleMsg(
+              id: 'off-window-huddle',
+              kind: EventKind.huddleStarted,
+              createdAt: now,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Open Huddle'), findsOneWidget);
+      expect(find.text('Huddle in progress'), findsNothing);
     });
 
     testWidgets('offers Join for a recent desktop-started huddle', (

@@ -17,6 +17,50 @@ struct HuddleRemoteOpusPacket {
   let opus: Data
 }
 
+struct HuddlePacketJitterQueue {
+  private(set) var packets: [HuddleRemoteOpusPacket] = []
+  private var lastDrainedSequence: Int?
+  private var started = false
+  let capacity: Int
+  let startPackets: Int
+
+  init(capacity: Int, startPackets: Int) {
+    self.capacity = capacity
+    self.startPackets = startPackets
+  }
+
+  mutating func enqueue(_ packet: HuddleRemoteOpusPacket) {
+    if let last = lastDrainedSequence, !sequenceAfter(packet.sequence, last) {
+      return
+    }
+    guard !packets.contains(where: { $0.sequence == packet.sequence }) else {
+      return
+    }
+    let index = packets.firstIndex {
+      sequenceBefore(packet.sequence, $0.sequence)
+    } ?? packets.endIndex
+    packets.insert(packet, at: index)
+    if packets.count > capacity { packets.removeFirst() }
+    if packets.count >= startPackets { started = true }
+  }
+
+  mutating func drainOne() -> HuddleRemoteOpusPacket? {
+    guard started, !packets.isEmpty else { return nil }
+    let packet = packets.removeFirst()
+    lastDrainedSequence = packet.sequence
+    return packet
+  }
+
+  private func sequenceAfter(_ sequence: Int, _ reference: Int) -> Bool {
+    let distance = (sequence - reference) & 0xffff
+    return distance > 0 && distance <= 0x7fff
+  }
+
+  private func sequenceBefore(_ left: Int, _ right: Int) -> Bool {
+    sequenceAfter(right, left)
+  }
+}
+
 struct HuddleCaptureDiagnostics {
   let frameCount: Int64
   let rmsDbovHistogram: [String: Int64]
@@ -867,9 +911,10 @@ final class HuddleAudioEngine {
 private final class HuddlePeerPlayback {
   private let player = AVAudioPlayerNode()
   private let decoder: HuddleOpusDecoder
-  private var jitterQueue: [HuddleRemoteOpusPacket] = []
-  private var playoutStarted = false
-  private var lastSequence: Int?
+  private var jitterQueue = HuddlePacketJitterQueue(
+    capacity: 10,
+    startPackets: 3
+  )
 
   init(
     engine: AVAudioEngine,
@@ -882,20 +927,11 @@ private final class HuddlePeerPlayback {
   }
 
   func enqueue(_ packet: HuddleRemoteOpusPacket) {
-    guard lastSequence != packet.sequence else { return }
-    lastSequence = packet.sequence
-    if jitterQueue.count == 10 {
-      jitterQueue.removeFirst()
-    }
-    jitterQueue.append(packet)
-    if jitterQueue.count >= 3 {
-      playoutStarted = true
-    }
+    jitterQueue.enqueue(packet)
   }
 
   func drainOne() throws {
-    guard playoutStarted, !jitterQueue.isEmpty else { return }
-    let packet = jitterQueue.removeFirst()
+    guard let packet = jitterQueue.drainOne() else { return }
     let decoded = try decoder.decode(packet.opus)
     player.scheduleBuffer(decoded)
     if !player.isPlaying {
@@ -919,6 +955,6 @@ private final class HuddlePeerPlayback {
     player.stop()
     engine.disconnectNodeOutput(player)
     engine.detach(player)
-    jitterQueue.removeAll()
+    jitterQueue = HuddlePacketJitterQueue(capacity: 10, startPackets: 3)
   }
 }

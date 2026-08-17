@@ -155,6 +155,8 @@ class ChannelDetailPage extends HookConsumerWidget {
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
+    final huddleLifecycle =
+        ref.watch(huddleLifecycleProvider(channel.id)).value ?? const [];
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
     final channelsNotifier = ref.read(channelsProvider.notifier);
@@ -361,7 +363,7 @@ class ChannelDetailPage extends HookConsumerWidget {
           if (showsComposer)
             _HuddleButton(
               channel: resolvedChannel,
-              events: messagesState.value ?? const [],
+              events: [...messagesState.value ?? const [], ...huddleLifecycle],
             ),
           if (_showsMembersAction(resolvedChannel))
             _MembersButton(

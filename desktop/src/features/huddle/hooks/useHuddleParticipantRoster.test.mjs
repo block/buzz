@@ -70,6 +70,22 @@ test("ignores other rooms and preserves local and agent participants", () => {
   );
 });
 
+test("preserves delivery order for same-second leave then rejoin", () => {
+  const events = [
+    event({ id: "left", kind: 48102, participant: "mobile", createdAt: 2 }),
+    event({ id: "joined", kind: 48101, participant: "mobile", createdAt: 2 }),
+  ];
+
+  assert.deepEqual(
+    reconstructHuddleParticipantRoster({
+      ephemeralChannelId: room,
+      events,
+      fallbackParticipants: ["mobile"],
+    }),
+    ["mobile"],
+  );
+});
+
 test("an ended lifecycle does not retain stale membership", () => {
   const events = [
     event({ id: "started", kind: 48100, pubkey: "desktop", createdAt: 1 }),

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/community/community_provider.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_management_provider.dart';
@@ -70,6 +71,18 @@ final huddleHumanCountProvider = Provider<HuddleHumanCountLoader>((ref) {
   };
 });
 
+/// Complete parent-channel Huddle lifecycle, independent of timeline paging.
+final huddleLifecycleProvider = FutureProvider.family<List<NostrEvent>, String>(
+  (ref, channelId) async {
+    if (ref.watch(relaySessionProvider).status != SessionStatus.connected) {
+      return const [];
+    }
+    return ref
+        .read(relaySessionProvider.notifier)
+        .fetchHistory(NostrFilters.huddleLifecycle(channelId));
+  },
+);
+
 /// One successful relay admission. Its epoch changes only when a newer join or
 /// start attempt begins, so duplicate teardown calls cannot invalidate the
 /// cleanup already in flight for the same admission.
@@ -91,7 +104,11 @@ final class MobileHuddleController extends Notifier<bool> {
     final unregisterBeforePause = ref
         .read(relaySessionProvider.notifier)
         .registerBeforePause(_leaveForBackground);
+    final unregisterBeforeCommunityTransition = ref
+        .read(communityTransitionProvider)
+        .register(_leaveForTransition);
     ref.onDispose(unregisterBeforePause);
+    ref.onDispose(unregisterBeforeCommunityTransition);
     ref.listen(huddleSessionProvider, (previous, next) {
       if (previous?.wasAdmitted == true &&
           next.phase == HuddleSessionPhase.failed) {
@@ -198,6 +215,11 @@ final class MobileHuddleController extends Notifier<bool> {
 
   Future<void> _leaveForBackground() =>
       _backgroundLeave ??= leave().whenComplete(() => _backgroundLeave = null);
+
+  Future<void> _leaveForTransition() async {
+    if (!ref.read(huddleSessionProvider).isInSession) return;
+    await _leaveForBackground();
+  }
 
   Future<void> leave() async {
     ++_generation;

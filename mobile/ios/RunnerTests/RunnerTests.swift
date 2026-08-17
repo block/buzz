@@ -32,6 +32,27 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(Set(selector.active.keys), Set([4, 9]))
   }
 
+  func testHuddlePacketJitterQueueReordersAndRejectsStaleDuplicates() {
+    var queue = HuddlePacketJitterQueue(capacity: 3, startPackets: 2)
+    queue.enqueue(remotePacket(sequence: 11))
+    queue.enqueue(remotePacket(sequence: 10))
+    XCTAssertEqual(queue.packets.map(\.sequence), [10, 11])
+    XCTAssertEqual(queue.drainOne()?.sequence, 10)
+    queue.enqueue(remotePacket(sequence: 10))
+    queue.enqueue(remotePacket(sequence: 12))
+    XCTAssertEqual(queue.packets.map(\.sequence), [11, 12])
+  }
+
+  private func remotePacket(sequence: Int) -> HuddleRemoteOpusPacket {
+    HuddleRemoteOpusPacket(
+      peerIndex: 1,
+      sequence: sequence,
+      timestamp48k: Int64(sequence * 960),
+      levelDbov: -20,
+      opus: Data([1])
+    )
+  }
+
   func testHuddleOpusCodecRoundTripsFixedV2Frame() throws {
     let encoder = try HuddleOpusEncoder()
     let decoder = try HuddleOpusDecoder()

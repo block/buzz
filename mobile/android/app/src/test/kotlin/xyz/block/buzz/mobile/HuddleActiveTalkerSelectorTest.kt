@@ -38,6 +38,26 @@ class HuddleActiveTalkerSelectorTest {
     }
 
     @Test
+    fun `jitter queue reorders packets and rejects stale duplicates`() {
+        val queue = HuddlePacketJitterQueue(capacity = 3, startPackets = 2)
+        queue.enqueue(packet(11))
+        queue.enqueue(packet(10))
+        assertEquals(listOf(10, 11), queue.sequences())
+        assertEquals(10, queue.drainOne()?.sequence)
+        queue.enqueue(packet(10))
+        queue.enqueue(packet(12))
+        assertEquals(listOf(11, 12), queue.sequences())
+    }
+
+    private fun packet(sequence: Int) = HuddleRemoteOpusPacket(
+        peerIndex = 1,
+        sequence = sequence,
+        timestamp48k = sequence.toLong() * 960,
+        levelDbov = -20,
+        opus = byteArrayOf(1),
+    )
+
+    @Test
     fun `remove clears the slot without allocating roster-only peers`() {
         val selector = HuddleActiveTalkerSelector(capacity = 2)
 

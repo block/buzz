@@ -87,6 +87,39 @@ internal sealed interface HuddlePlaybackCommand {
     data class RemovePeer(val peerIndex: Int) : HuddlePlaybackCommand
 }
 
+internal class HuddlePacketJitterQueue(
+    private val capacity: Int,
+    private val startPackets: Int,
+) {
+    private val packets = mutableListOf<HuddleRemoteOpusPacket>()
+    private var lastDrainedSequence: Int? = null
+    private var started = false
+
+    fun enqueue(packet: HuddleRemoteOpusPacket) {
+        val lastDrained = lastDrainedSequence
+        if (lastDrained != null && !sequenceAfter(packet.sequence, lastDrained)) return
+        if (packets.any { it.sequence == packet.sequence }) return
+        val insertionIndex = packets.indexOfFirst { sequenceBefore(packet.sequence, it.sequence) }
+        if (insertionIndex < 0) packets.add(packet) else packets.add(insertionIndex, packet)
+        if (packets.size > capacity) packets.removeAt(0)
+        if (packets.size >= startPackets) started = true
+    }
+
+    fun drainOne(): HuddleRemoteOpusPacket? {
+        if (!started || packets.isEmpty()) return null
+        return packets.removeAt(0).also { lastDrainedSequence = it.sequence }
+    }
+
+    fun sequences(): List<Int> = packets.map { it.sequence }
+
+    private fun sequenceAfter(sequence: Int, reference: Int): Boolean {
+        val distance = (sequence - reference) and 0xffff
+        return distance in 1..0x7fff
+    }
+
+    private fun sequenceBefore(left: Int, right: Int): Boolean = sequenceAfter(right, left)
+}
+
 /** Aggregate, debug-only microphone telemetry. No PCM or encoded audio is retained. */
 internal data class HuddleCaptureDiagnostics(
     val frameCount: Long,
@@ -468,9 +501,10 @@ internal class HuddleAudioEngine(
     private class PeerPlayback(val peerIndex: Int) {
         private val decoder = createDecoder()
         private val track = createAudioTrack()
-        private val jitterQueue = ArrayDeque<HuddleRemoteOpusPacket>()
-        private var playoutStarted = false
-        private var lastSequence: Int? = null
+        private val jitterQueue = HuddlePacketJitterQueue(
+            capacity = PER_PEER_JITTER_CAPACITY,
+            startPackets = JITTER_START_PACKETS,
+        )
 
         init {
             decoder.start()
@@ -478,18 +512,11 @@ internal class HuddleAudioEngine(
         }
 
         fun enqueue(packet: HuddleRemoteOpusPacket) {
-            if (lastSequence == packet.sequence) return
-            lastSequence = packet.sequence
-            if (jitterQueue.size == PER_PEER_JITTER_CAPACITY) {
-                jitterQueue.removeFirst()
-            }
-            jitterQueue.addLast(packet)
-            if (jitterQueue.size >= JITTER_START_PACKETS) playoutStarted = true
+            jitterQueue.enqueue(packet)
         }
 
         fun drainOne() {
-            if (!playoutStarted || jitterQueue.isEmpty()) return
-            decode(jitterQueue.removeFirst())
+            jitterQueue.drainOne()?.let(::decode)
         }
 
         private fun decode(packet: HuddleRemoteOpusPacket) {
