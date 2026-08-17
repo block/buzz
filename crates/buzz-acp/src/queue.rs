@@ -332,10 +332,34 @@ impl EventQueue {
             }
         };
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
+        // Relay replay delivers stored events newest-first (`ORDER BY
+        // created_at DESC`). Establish chronological order before locating an
+        // edit boundary: partitioning the raw replay deque would otherwise
+        // dispatch a newer ordinary event before an older edit. Stable sort
+        // preserves delivery order for same-second events.
         let queue = self.queues.entry(channel_id).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
-        let mut events: Vec<BatchEvent> = queue
+        queue
+            .make_contiguous()
+            .sort_by_key(|event| event.event.created_at);
+
+        // Drain up to MAX_BATCH_EVENTS, but isolate edit events. Edit routing
+        // is resolved per dispatched prompt, so allowing an edit to share a
+        // batch with a later event would make the later event's reply anchor
+        // hide the edit's original-message anchor.
+        let max_drain = MAX_BATCH_EVENTS.min(queue.len());
+        let drain_count = if queue
+            .front()
+            .is_some_and(|event| edit_target_id(&event.event).is_some())
+        {
+            1
+        } else {
+            queue
+                .iter()
+                .take(max_drain)
+                .position(|event| edit_target_id(&event.event).is_some())
+                .unwrap_or(max_drain)
+        };
+        let events: Vec<BatchEvent> = queue
             .drain(..drain_count)
             .map(|qe| BatchEvent {
                 event: qe.event,
@@ -343,11 +367,6 @@ impl EventQueue {
                 received_at: qe.received_at,
             })
             .collect();
-        // Relay replay delivers stored events newest-first (`ORDER BY
-        // created_at DESC`), but batch consumers — `format_prompt` scope and
-        // reply-anchor selection — require the LAST event to be the newest.
-        // Stable sort: same-second events keep delivery order.
-        events.sort_by_key(|be| be.event.created_at);
 
         // Remove the queue entry if now empty.
         if self.queues.get(&channel_id).is_some_and(|q| q.is_empty()) {
