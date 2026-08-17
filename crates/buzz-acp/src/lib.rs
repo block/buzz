@@ -2750,6 +2750,31 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
+                            // A control command created before this process
+                            // started was addressed to a previous incarnation of
+                            // this harness, which already honoured it. The first
+                            // REQ replays a few seconds of backlog (since =
+                            // watermark - 5s), so under a supervisor that restarts
+                            // on clean exit a !shutdown would otherwise loop:
+                            // exit → restart → replay → exit (seen on a hosted
+                            // harness: five restarts per !shutdown). Consume it —
+                            // never forward it to the agent as a prompt.
+                            if is_stale_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                &pubkey_hex,
+                                owner_cache.get(),
+                                startup_watermark,
+                            ) {
+                                tracing::warn!(
+                                    channel_id = %buzz_event.channel_id,
+                                    created_at = buzz_event.event.created_at.as_secs(),
+                                    startup_watermark,
+                                    "ignoring owner control command from before this harness started"
+                                );
+                                continue;
+                            }
+
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
                             let is_shutdown = is_owner_control_command(
                                 &buzz_event.event,
@@ -3710,6 +3735,37 @@ fn is_owner_control_command(
     kind_u32 == KIND_STREAM_MESSAGE
         && control_command_content_matches(&event.content, command)
         && event_mentions_agent(event, agent_pubkey_hex)
+}
+
+/// The owner control commands the harness consumes instead of forwarding.
+const OWNER_CONTROL_COMMANDS: [&str; 3] = ["!shutdown", "!cancel", "!rotate"];
+
+/// Is `event` an owner control command that predates this process?
+///
+/// True only when the event is a control command ([`is_owner_control_command`]
+/// for any of [`OWNER_CONTROL_COMMANDS`]), is from the resolved owner, and was
+/// created before `startup_watermark` (unix seconds, captured before the relay
+/// connect). Such an event was addressed to an earlier incarnation of this
+/// harness — one that already acted on it — and is replayed only because the
+/// first REQ opens a few seconds before the watermark. Honouring it again is
+/// wrong for every command and loops for `!shutdown` under a supervisor that
+/// restarts on clean exit.
+///
+/// `created_at` is stamped by the owner's client, so a client clock that lags
+/// the harness by more than the time since startup makes a genuine command
+/// look stale; the window is seconds and the command can be re-sent.
+fn is_stale_owner_control_command(
+    event: &nostr::Event,
+    kind_u32: u32,
+    agent_pubkey_hex: &str,
+    owner_pubkey_hex: Option<&str>,
+    startup_watermark: u64,
+) -> bool {
+    event.created_at.as_secs() < startup_watermark
+        && owner_pubkey_hex.is_some_and(|owner| event.pubkey.to_hex() == owner)
+        && OWNER_CONTROL_COMMANDS
+            .iter()
+            .any(|command| is_owner_control_command(event, kind_u32, command, agent_pubkey_hex))
 }
 
 // ── signal_in_flight_task ─────────────────────────────────────────────────────
@@ -5323,6 +5379,55 @@ mod owner_control_command_tests {
             KIND_STREAM_MESSAGE,
             "!rotate",
             &agent
+        ));
+    }
+
+    #[test]
+    fn stale_owner_control_command_is_only_a_pre_startup_owner_command() {
+        let agent = "ab".repeat(32);
+        let event = make_event(KIND_STREAM_MESSAGE, "!shutdown", Some(&agent));
+        let owner = event.pubkey.to_hex();
+        let created = event.created_at.as_secs();
+
+        // Created before startup, from the owner: stale.
+        assert!(is_stale_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            Some(&owner),
+            created + 10,
+        ));
+        // Created at/after startup: live.
+        assert!(!is_stale_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            Some(&owner),
+            created,
+        ));
+        // Not from the owner (or owner unresolved): not ours to swallow.
+        assert!(!is_stale_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            Some(&"cd".repeat(32)),
+            created + 10,
+        ));
+        assert!(!is_stale_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            None,
+            created + 10,
+        ));
+        // Not a control command at all: an old ordinary mention is a prompt.
+        let prompt = make_event(KIND_STREAM_MESSAGE, "@fm hello", Some(&agent));
+        assert!(!is_stale_owner_control_command(
+            &prompt,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            Some(&prompt.pubkey.to_hex()),
+            prompt.created_at.as_secs() + 10,
         ));
     }
 
