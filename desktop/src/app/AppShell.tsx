@@ -715,6 +715,7 @@ export function AppShell() {
             unreadThreadFeedItems,
             unreadThreadChannelIds,
             topLevelUnreadChannelIds,
+            highPriorityUnreadChannelIds,
             hasSidebarUnreadProjections: true,
             feedItemState,
             onOpenSettings: handleOpenSettings,

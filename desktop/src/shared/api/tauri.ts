@@ -571,6 +571,13 @@ export async function sendChannelMessage(
    * rejects any non-`imeta`-prefixed tag.
    */
   supersedesTags?: string[][],
+  /**
+   * `"channel"` or `"here"` — the `@channel` / `@here` marker, as its own arg
+   * for the same reason `supersedesTags` is: every tag group the Rust side
+   * accepts is validated against its own prefix, so there is no general
+   * passthrough to ride.
+   */
+  mentionScope?: string | null,
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -586,6 +593,7 @@ export async function sendChannelMessage(
       supersedesTags: supersedesTags ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
+      mentionScope: mentionScope ?? null,
     },
   );
   return {
@@ -612,32 +620,11 @@ export type BlobDescriptor = {
   filename?: string;
 };
 
-export async function uploadMedia(
-  filePath: string,
-  isTemp: boolean,
-): Promise<BlobDescriptor> {
-  return invokeTauri<BlobDescriptor>("upload_media", {
-    filePath,
-    isTemp,
-  });
-}
-export async function pickAndUploadMedia(
-  progressId?: string,
-): Promise<BlobDescriptor[]> {
-  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", { progressId });
-}
-export async function uploadMediaBytes(
-  data: number[],
-  filename?: string,
-  /** Correlation id for `media-upload-progress` events from the Rust side. */
-  progressId?: string,
-): Promise<BlobDescriptor> {
-  return invokeTauri<BlobDescriptor>("upload_media_bytes", {
-    data,
-    filename,
-    progressId,
-  });
-}
+export {
+  uploadMedia,
+  pickAndUploadMedia,
+  uploadMediaBytes,
+} from "./tauriMedia";
 
 export { editMessage } from "@/shared/api/editMessage";
 

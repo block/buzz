@@ -55,6 +55,35 @@ export async function pickAndUploadImage(): Promise<BlobDescriptor | null> {
   return invokeTauri<BlobDescriptor | null>("pick_and_upload_image", {});
 }
 
+export async function uploadMedia(
+  filePath: string,
+  isTemp: boolean,
+): Promise<BlobDescriptor> {
+  return invokeTauri<BlobDescriptor>("upload_media", {
+    filePath,
+    isTemp,
+  });
+}
+
+export async function pickAndUploadMedia(
+  progressId?: string,
+): Promise<BlobDescriptor[]> {
+  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", { progressId });
+}
+
+export async function uploadMediaBytes(
+  data: number[],
+  filename?: string,
+  /** Correlation id for `media-upload-progress` events from the Rust side. */
+  progressId?: string,
+): Promise<BlobDescriptor> {
+  return invokeTauri<BlobDescriptor>("upload_media_bytes", {
+    data,
+    filename,
+    progressId,
+  });
+}
+
 /**
  * Fetch relay media bytes over IPC (Rust reqwest, VPN-tunneled).
  *

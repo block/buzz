@@ -72,6 +72,11 @@ type AppShellContextValue = {
   // Ordinary unread channel-level activity. Sidebar rows use this for text
   // emphasis only; thread activity owns the dot.
   topLevelUnreadChannelIds: ReadonlySet<string>;
+  // Channels holding something aimed at this user — an unread DM, a message
+  // tagging their pubkey, or a broadcast. Same predicate that decides whether
+  // a desktop notification fired (`isHighPriorityEventForUser`), so surfaces
+  // reading this cannot disagree with what actually pinged.
+  highPriorityUnreadChannelIds: ReadonlySet<string>;
   // Lets isolated component tests retain the legacy hasUnread fallback while
   // the mounted shell uses the split projections above.
   hasSidebarUnreadProjections: boolean;
@@ -110,6 +115,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   unreadThreadFeedItems: [],
   unreadThreadChannelIds: EMPTY_SET,
   topLevelUnreadChannelIds: EMPTY_SET,
+  highPriorityUnreadChannelIds: EMPTY_SET,
   hasSidebarUnreadProjections: false,
   feedItemState: {
     doneSet: EMPTY_SET,

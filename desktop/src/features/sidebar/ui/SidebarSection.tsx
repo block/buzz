@@ -38,6 +38,10 @@ import {
 } from "@/shared/ui/sidebar";
 import { ChannelActivityPopover } from "@/features/sidebar/ui/ChannelActivityPopover";
 import { useAppShell } from "@/app/AppShellContext";
+import {
+  formatSectionUnreadCount,
+  rollUpSectionUnread,
+} from "@/features/sidebar/lib/sectionUnreadRollup.mjs";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -470,12 +474,30 @@ export function SidebarSection({
   onUnmuteChannel?: (channelId: string) => void;
   sectionActionsOpen?: boolean;
 }) {
+  const {
+    highPriorityUnreadChannelIds,
+    topLevelUnreadChannelIds: sectionTopLevelUnreadChannelIds,
+    unreadThreadChannelIds: sectionUnreadThreadChannelIds,
+  } = useAppShell();
+
   if (items.length === 0 && !action && !emptyState) {
     return null;
   }
 
   const contentId = `sidebar-${testId}`;
   const canToggle = Boolean(onToggleCollapsed);
+  // Only while collapsed: an expanded section's rows carry their own badges,
+  // and repeating the total in the header would just be noise.
+  const rollup = isCollapsed
+    ? rollUpSectionUnread({
+        channelIds: items.map((channel) => channel.id),
+        highPriorityUnreadChannelIds,
+        mutedChannelIds,
+        topLevelUnreadChannelIds: sectionTopLevelUnreadChannelIds,
+        unreadChannelCounts,
+        unreadThreadChannelIds: sectionUnreadThreadChannelIds,
+      })
+    : { kind: "none" as const };
 
   return (
     <SidebarGroup
@@ -502,6 +524,26 @@ export function SidebarSection({
                   )}
                 />
               </span>
+              {rollup.kind === "count" ? (
+                <span
+                  className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground tabular-nums group-data-[collapsible=icon]:hidden"
+                  data-testid={`${testId}-section-unread-count`}
+                >
+                  {formatSectionUnreadCount(rollup.count)}
+                  <span className="sr-only">
+                    {" "}
+                    unread message{rollup.count === 1 ? "" : "s"} for you
+                  </span>
+                </span>
+              ) : null}
+              {rollup.kind === "dot" ? (
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-full bg-primary group-data-[collapsible=icon]:hidden"
+                  data-testid={`${testId}-section-unread-dot`}
+                >
+                  <span className="sr-only">unread</span>
+                </span>
+              ) : null}
             </button>
           ) : (
             title

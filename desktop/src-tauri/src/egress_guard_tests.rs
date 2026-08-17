@@ -168,6 +168,7 @@ fn boundary_huddle_stt_blocks_ncryptsec() {
         None,
         &crate::relay::relay_api_base_url(),
         &[],
+        None,
     )
     .unwrap();
     let err = crate::huddle::pipeline::sign_and_guard_stt_body(builder, &keys).unwrap_err();
@@ -186,6 +187,7 @@ fn boundary_huddle_stt_blocks_ncryptsec() {
         None,
         &crate::relay::relay_api_base_url(),
         &[],
+        None,
     )
     .unwrap();
     assert!(crate::huddle::pipeline::sign_and_guard_stt_body(builder, &keys).is_ok());

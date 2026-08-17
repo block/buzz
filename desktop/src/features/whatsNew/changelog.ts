@@ -105,6 +105,15 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Settings → Updates lists upstream Buzz releases alongside this app's own, up to the version this build is based on",
     ],
   },
+  {
+    version: "0.5.14-4",
+    date: "2026-08-17",
+    bullets: [
+      "The Inbox now shows only unread items by default; switch off 'Show unread only' to see everything again",
+      "The conversation you have open stays in the list while you read it, now marked 'Viewing' so it is clear why it is still there",
+      "Collapsed sidebar sections now show what is waiting inside them: a count when someone has mentioned you or sent a DM, a dot for ordinary activity, and nothing when the section is quiet",
+    ],
+  },
 ];
 
 /**

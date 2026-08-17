@@ -55,6 +55,26 @@ pub(super) fn append_client_tags(
     Ok(())
 }
 
+/// Validate and append the `@channel` / `@here` marker.
+pub(super) fn mention_scope_tag(
+    scope: Option<&str>,
+    tags: &mut Vec<Tag>,
+) -> Result<(), String> {
+    let Some(scope) = scope else {
+        return Ok(());
+    };
+    if scope != "channel" && scope != "here" {
+        return Err(format!(
+            "mention scope must be 'channel' or 'here' (got {scope:?})"
+        ));
+    }
+    tags.push(
+        Tag::parse(vec!["mention-scope", scope])
+            .map_err(|e| format!("invalid tag: {e}"))?,
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

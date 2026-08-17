@@ -112,7 +112,11 @@ export function HomeView({
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
-  const [unreadOnly, setUnreadOnly] = React.useState(false);
+  // Defaults on: the Inbox is a list of what still needs attention, so it
+  // should empty out as you work through it. Showing read items by default
+  // made it look like rows were stuck. Not persisted — each launch starts
+  // focused, and turning it off is a deliberate "show me history" action.
+  const [unreadOnly, setUnreadOnly] = React.useState(true);
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
   // restores the detail pane each history entry was showing and reloads
   // restore it from the URL. Default/automatic selection stays local-only —

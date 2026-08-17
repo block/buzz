@@ -14,6 +14,12 @@
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
+> **This is the k2alpha fork of [`block/buzz`](https://github.com/block/buzz).**
+> Everything below describes upstream Buzz and applies here too.
+> For what this fork adds — file versioning, a rebuilt Inbox, Google Meet, and
+> signed Windows builds — see **[FORK.md](FORK.md)**.
+> To contribute, see [`docs/roadmap-and-research.md`](docs/roadmap-and-research.md).
+
 <p align="center">
   <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz project channel where people and an agent coordinate on a release plan" width="100%">
 </p>

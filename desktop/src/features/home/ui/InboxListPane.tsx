@@ -297,6 +297,11 @@ export function InboxListPane({
   const renderItem = (item: InboxItem, dueReminder?: Reminder) => {
     const isSelected = item.conversationId === selectedConversationId;
     const isDone = doneSet.has(item.id);
+    // Under "unread only" a read row survives solely because it is the open
+    // conversation — the list deliberately does not yank out what you are
+    // reading. Without saying so, that row is indistinguishable from one that
+    // refuses to clear, which is exactly how it gets reported.
+    const isKeptWhileViewing = unreadOnly && isDone && isSelected;
     const hasActiveReminder =
       dueReminder !== undefined ||
       [item.id, ...item.groupItems.map((groupItem) => groupItem.id)].some(
@@ -407,6 +412,14 @@ export function InboxListPane({
                       aria-hidden="true"
                       className="h-1.5 w-1.5 rounded-full bg-primary"
                     />
+                  ) : null}
+                  {isKeptWhileViewing ? (
+                    <span
+                      className="rounded-full bg-muted px-1.5 py-0.5 text-2xs font-normal text-muted-foreground"
+                      data-testid="home-inbox-viewing-badge"
+                    >
+                      Viewing
+                    </span>
                   ) : null}
                   {item.unreadCount > 1 ? (
                     <span data-testid="home-inbox-unread-count">

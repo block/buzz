@@ -326,3 +326,122 @@ test("isHighPriorityEventForUser returns false for event with no tags at all", (
   const event = makeEvent([]);
   assert.equal(isHighPriorityEventForUser(event, PUBKEY), false);
 });
+
+// --- global mentions (@channel / @here) ---
+
+const scopeTag = (scope) => ["mention-scope", scope];
+
+const notifyOptions = (overrides = {}) => ({
+  participatedRootIds: EMPTY,
+  followedRootIds: EMPTY,
+  authoredRootIds: EMPTY,
+  ...overrides,
+});
+
+test("@channel notifies a member who was not otherwise addressed", () => {
+  const event = makeEvent([scopeTag("channel")]);
+  assert.equal(shouldNotifyForEvent(event, PUBKEY, notifyOptions()), true);
+});
+
+test("@channel pierces a muted channel", () => {
+  // The one signal allowed to pull someone out of a mute.
+  const event = makeEvent([scopeTag("channel")]);
+  assert.equal(
+    shouldNotifyForEvent(
+      event,
+      PUBKEY,
+      notifyOptions({
+        channelId: "channel-1",
+        mutedChannelIds: new Set(["channel-1"]),
+      }),
+    ),
+    true,
+  );
+});
+
+test("the per-user opt-out restores silence under mute", () => {
+  const event = makeEvent([scopeTag("channel")]);
+  assert.equal(
+    shouldNotifyForEvent(
+      event,
+      PUBKEY,
+      notifyOptions({
+        channelId: "channel-1",
+        mutedChannelIds: new Set(["channel-1"]),
+        allowChannelMentionWhileMuted: false,
+      }),
+    ),
+    false,
+  );
+});
+
+test("@here notifies only while online", () => {
+  const event = makeEvent([scopeTag("here")]);
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, notifyOptions({ presence: "online" })),
+    true,
+  );
+  assert.equal(
+    shouldNotifyForEvent(event, PUBKEY, notifyOptions({ presence: "away" })),
+    false,
+  );
+});
+
+test("@here never pierces a mute", () => {
+  const event = makeEvent([scopeTag("here")]);
+  assert.equal(
+    shouldNotifyForEvent(
+      event,
+      PUBKEY,
+      notifyOptions({
+        presence: "online",
+        channelId: "channel-1",
+        mutedChannelIds: new Set(["channel-1"]),
+      }),
+    ),
+    false,
+  );
+});
+
+test("the author is not notified of their own broadcast", () => {
+  const event = makeEvent([scopeTag("channel")], { pubkey: PUBKEY });
+  assert.equal(shouldNotifyForEvent(event, PUBKEY, notifyOptions()), false);
+});
+
+test("a global mention counts as high priority", () => {
+  assert.equal(
+    isHighPriorityEventForUser(makeEvent([scopeTag("channel")]), PUBKEY),
+    true,
+  );
+  assert.equal(
+    isHighPriorityEventForUser(makeEvent([scopeTag("here")]), PUBKEY, {
+      presence: "online",
+    }),
+    true,
+  );
+});
+
+test("a @here that did not reach you is not high priority either", () => {
+  assert.equal(
+    isHighPriorityEventForUser(makeEvent([scopeTag("here")]), PUBKEY, {
+      presence: "offline",
+    }),
+    false,
+  );
+});
+
+test("an unrecognised scope value is ignored", () => {
+  const event = makeEvent([scopeTag("everyone")]);
+  assert.equal(isHighPriorityEventForUser(event, PUBKEY), false);
+  assert.equal(
+    shouldNotifyForEvent(
+      event,
+      PUBKEY,
+      notifyOptions({
+        channelId: "channel-1",
+        mutedChannelIds: new Set(["channel-1"]),
+      }),
+    ),
+    false,
+  );
+});
