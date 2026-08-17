@@ -27,50 +27,130 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 }
 
 /// Propagate a team's membership *change* to its members' already-running
-/// instances, in one pass over the store. Runs inside the caller's held
-/// `managed_agents_store_lock` after `save_teams`; a persona added/removed on
-/// the team otherwise never reaches its live instances.
+/// instances, best-effort. Loads the agent store, applies the roster delta via
+/// [`apply_team_membership_delta`], and re-saves only when something changed;
+/// any load/save error is logged and swallowed. Called after the authoritative
+/// `save_teams` succeeds — the team already exists on disk and boot repair is
+/// the designed retry for a stale/unset binding, so a secondary-store hiccup
+/// must not fail a command whose team write already landed (a UI retry would
+/// then mint a duplicate team).
+///
+/// `load_agents`/`save_agents` are injected so the command wiring (prior-roster
+/// capture, delta direction, and this best-effort policy) is unit-testable
+/// without an `AppHandle`; the commands pass the real store IO.
+fn propagate_membership_best_effort(
+    team_id: &str,
+    previous_persona_ids: &[String],
+    current_persona_ids: &[String],
+    load_agents: impl FnOnce() -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String>,
+    save_agents: impl FnOnce(&[crate::managed_agents::ManagedAgentRecord]) -> Result<(), String>,
+) {
+    let result = (|| -> Result<(), String> {
+        let mut records = load_agents()?;
+        if apply_team_membership_delta(
+            &mut records,
+            team_id,
+            previous_persona_ids,
+            current_persona_ids,
+        ) {
+            save_agents(&records)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: team-membership-propagate: {e}");
+    }
+}
+
+/// In-memory core of [`create_team`]: push the built team, persist teams
+/// authoritatively, then propagate its whole roster (no prior members ⇒ the
+/// whole roster is the added delta) to live instances best-effort. Decoupled
+/// from the `AppHandle` shell via injected persistence so the create wiring is
+/// unit-testable. A `persist_teams` error propagates; agent IO is best-effort.
+fn commit_team_create(
+    teams: &mut Vec<TeamRecord>,
+    team: TeamRecord,
+    persist_teams: impl FnOnce(&[TeamRecord]) -> Result<(), String>,
+    load_agents: impl FnOnce() -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String>,
+    save_agents: impl FnOnce(&[crate::managed_agents::ManagedAgentRecord]) -> Result<(), String>,
+) -> Result<TeamRecord, String> {
+    teams.push(team.clone());
+    persist_teams(teams)?;
+    propagate_membership_best_effort(&team.id, &[], &team.persona_ids, load_agents, save_agents);
+    Ok(team)
+}
+
+/// In-memory core of [`update_team`]: mutate the matching team, capturing its
+/// roster *before* the edit, persist teams authoritatively, then propagate the
+/// prior→current delta to live instances best-effort. The prior-roster capture
+/// and its use as the delta baseline live here — not at a command call site —
+/// so a miswire to the wrong baseline is caught by a test. Injected persistence
+/// keeps it `AppHandle`-free; a `persist_teams` error propagates, agent IO is
+/// best-effort. Returns the updated team.
+#[allow(clippy::too_many_arguments)]
+fn commit_team_update(
+    teams: &mut [TeamRecord],
+    id: &str,
+    name: String,
+    description: Option<String>,
+    instructions: Option<String>,
+    persona_ids: Vec<String>,
+    now: String,
+    persist_teams: impl FnOnce(&[TeamRecord]) -> Result<(), String>,
+    load_agents: impl FnOnce() -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String>,
+    save_agents: impl FnOnce(&[crate::managed_agents::ManagedAgentRecord]) -> Result<(), String>,
+) -> Result<TeamRecord, String> {
+    let team = teams
+        .iter_mut()
+        .find(|record| record.id == id)
+        .ok_or_else(|| format!("team {id} not found"))?;
+
+    // Capture the pre-edit roster before mutation: the propagation delta
+    // (added → backfill, removed → detach) is computed against it.
+    let previous_persona_ids = team.persona_ids.clone();
+    team.name = name;
+    team.description = description;
+    team.instructions = instructions;
+    team.persona_ids = persona_ids;
+    team.updated_at = now;
+
+    let updated = team.clone();
+    persist_teams(teams)?;
+    propagate_membership_best_effort(
+        &updated.id,
+        &previous_persona_ids,
+        &updated.persona_ids,
+        load_agents,
+        save_agents,
+    );
+    Ok(updated)
+}
+
+/// Pure core of the membership propagation: apply the roster delta to `records`
+/// in place and report whether anything changed. Decoupled from the store IO so
+/// the binding rules are unit-testable.
 ///
 /// Two directions, keyed on the delta between the pre-edit and post-edit
 /// rosters:
 ///
-/// - **Added** (on the team now, not before): backfill `team_id` on the
+/// - **Added** (`current` but not `previous`): backfill `team_id` on the
 ///   persona's *unbound* instances, so an added persona spawns with the team's
 ///   instructions (`spawn_snapshot::effective_team_instructions` keys on
 ///   `record.team_id`). Only an unset field is set — a shared persona keeps an
 ///   existing binding — and an explicit add is legitimate binding evidence even
 ///   when the persona belongs to several teams.
-/// - **Removed** (on the team before, not now): clear `team_id` on instances
+/// - **Removed** (`previous` but not `current`): clear `team_id` on instances
 ///   bound to *this* team, so a "keep agents" removal stops feeding a kept
 ///   instance the instructions of a team it no longer belongs to. Bindings to
 ///   other teams are untouched.
 ///
 /// Delta-scoping is what keeps a metadata-only edit inert: with no roster
 /// change both sets are empty and no instance is re-pointed — a shared unbound
-/// persona is not silently bound to whichever team was last edited. `create_team`
+/// persona is not silently bound to whichever team was last edited. `create`
 /// has no prior roster, so it passes an empty `previous` and the whole roster is
-/// "added" (the pre-fix whole-roster backfill).
-fn propagate_team_membership_change(
-    app: &AppHandle,
-    team_id: &str,
-    previous_persona_ids: &[String],
-    current_persona_ids: &[String],
-) -> Result<(), String> {
-    let mut records = load_managed_agents(app)?;
-    if apply_team_membership_delta(
-        &mut records,
-        team_id,
-        previous_persona_ids,
-        current_persona_ids,
-    ) {
-        save_managed_agents(app, &records)?;
-    }
-    Ok(())
-}
-
-/// Pure core of [`propagate_team_membership_change`]: apply the roster delta to
-/// `records` in place and report whether anything changed. Decoupled from the
-/// `AppHandle` load/save so the binding rules are unit-testable.
+/// "added" (the pre-fix whole-roster backfill). A persona both removed and
+/// re-added in one edit appears in neither set (set difference, not
+/// operation order), so its binding is left as-is.
 fn apply_team_membership_delta(
     records: &mut [crate::managed_agents::ManagedAgentRecord],
     team_id: &str,
@@ -256,17 +336,13 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
             created_at: now.clone(),
             updated_at: now,
         };
-        teams.push(team.clone());
-        save_teams(&app, &teams)?;
-        // Best-effort, like `retain_team_pending` below: the team is already
-        // committed to disk (the authoritative mutation), and boot repair is
-        // the designed retry for a stale/unset binding — a secondary
-        // managed-agents.json write failure must not fail a create whose team
-        // now exists, or a UI retry mints a duplicate team. No prior roster, so
-        // the whole roster is the added delta.
-        if let Err(e) = propagate_team_membership_change(&app, &team.id, &[], &team.persona_ids) {
-            eprintln!("buzz-desktop: team-membership-propagate: {e}");
-        }
+        let team = commit_team_create(
+            &mut teams,
+            team,
+            |teams| save_teams(&app, teams),
+            || load_managed_agents(&app),
+            |records| save_managed_agents(&app, records),
+        )?;
         // Created teams are always non-builtin; publish to the relay.
         retain_team_pending(&app, &state, &team);
         Ok(team)
@@ -291,31 +367,18 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
         let personas = load_personas(&app)?;
         ensure_persona_ids_are_active(&personas, &input.persona_ids)?;
         let mut teams = load_teams(&app)?;
-        let team = teams
-            .iter_mut()
-            .find(|record| record.id == input.id)
-            .ok_or_else(|| format!("team {} not found", input.id))?;
-
-        // Capture the pre-edit roster before mutation: the propagation delta
-        // (added → backfill, removed → detach) is computed against it.
-        let previous_persona_ids = team.persona_ids.clone();
-        team.name = name;
-        team.description = description;
-        team.instructions = instructions;
-        team.persona_ids = input.persona_ids;
-        team.updated_at = now_iso();
-
-        let updated = team.clone();
-        save_teams(&app, &teams)?;
-        // Best-effort after the authoritative `save_teams`, like create above.
-        if let Err(e) = propagate_team_membership_change(
-            &app,
-            &updated.id,
-            &previous_persona_ids,
-            &updated.persona_ids,
-        ) {
-            eprintln!("buzz-desktop: team-membership-propagate: {e}");
-        }
+        let updated = commit_team_update(
+            &mut teams,
+            &input.id,
+            name,
+            description,
+            instructions,
+            input.persona_ids,
+            now_iso(),
+            |teams| save_teams(&app, teams),
+            || load_managed_agents(&app),
+            |records| save_managed_agents(&app, records),
+        )?;
         // Built-in teams are not owner-authored — never publish them.
         if !updated.is_builtin {
             retain_team_pending(&app, &state, &updated);
@@ -328,8 +391,9 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
 
 #[cfg(test)]
 mod tests {
-    use super::apply_team_membership_delta;
-    use crate::managed_agents::ManagedAgentRecord;
+    use super::{apply_team_membership_delta, commit_team_create, commit_team_update};
+    use crate::managed_agents::{ManagedAgentRecord, TeamRecord};
+    use std::cell::RefCell;
 
     /// A running instance: `pubkey` set, linked to a persona, optional binding.
     fn instance(seed: char, persona_id: &str, team_id: Option<&str>) -> ManagedAgentRecord {
@@ -430,6 +494,157 @@ mod tests {
             &[],
         ));
         assert_eq!(records[0].team_id.as_deref(), Some("team-b"));
+    }
+
+    /// A minimal owner-authored team record for wiring tests.
+    fn team(id: &str, persona_ids: &[&str]) -> TeamRecord {
+        TeamRecord {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            instructions: None,
+            persona_ids: ids(persona_ids),
+            is_builtin: false,
+            source_dir: None,
+            is_symlink: false,
+            symlink_target: None,
+            version: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// Records the injected store IO a commit performs, so a test can assert
+    /// the wiring saved (or deliberately did not) the agent store.
+    #[derive(Default)]
+    struct StoreSpy {
+        saved: Option<Vec<ManagedAgentRecord>>,
+    }
+
+    /// Metadata-only `update_team` must pass the TRUE prior roster into the
+    /// delta, so an unchanged roster is an empty delta and no agent write fires.
+    /// The `&previous_persona_ids` → `&[]` miswire would drop the prior roster,
+    /// making the whole roster look "added" and re-pointing the unbound instance.
+    #[test]
+    fn commit_team_update_uses_true_prior_roster() {
+        let mut teams = vec![team("team-a", &["duncan"])];
+        let existing = vec![instance('a', "duncan", None)];
+        let spy = RefCell::new(StoreSpy::default());
+
+        let updated = commit_team_update(
+            &mut teams,
+            "team-a",
+            "Team A".to_string(),
+            None,
+            Some("new instructions".to_string()),
+            ids(&["duncan"]),
+            "2026-02-02T00:00:00Z".to_string(),
+            |_| Ok(()),
+            || Ok(existing.clone()),
+            |records| {
+                spy.borrow_mut().saved = Some(records.to_vec());
+                Ok(())
+            },
+        )
+        .expect("metadata-only update succeeds");
+
+        assert_eq!(updated.instructions.as_deref(), Some("new instructions"));
+        // Empty delta ⇒ nothing changed ⇒ no save (the true-prior-roster gate).
+        assert!(
+            spy.borrow().saved.is_none(),
+            "metadata-only edit must not write the agent store"
+        );
+    }
+
+    /// Removing a persona from the roster must reach the detach branch through
+    /// the command wiring: the instance bound to this team is cleared and saved.
+    #[test]
+    fn commit_team_update_removal_detaches_through_wiring() {
+        let mut teams = vec![team("team-a", &["duncan"])];
+        let existing = vec![instance('a', "duncan", Some("team-a"))];
+        let spy = RefCell::new(StoreSpy::default());
+
+        commit_team_update(
+            &mut teams,
+            "team-a",
+            "team-a".to_string(),
+            None,
+            None,
+            ids(&[]),
+            "2026-02-02T00:00:00Z".to_string(),
+            |_| Ok(()),
+            || Ok(existing.clone()),
+            |records| {
+                spy.borrow_mut().saved = Some(records.to_vec());
+                Ok(())
+            },
+        )
+        .expect("removal update succeeds");
+
+        let saved = spy.borrow().saved.clone().expect("detach must save");
+        assert_eq!(saved[0].team_id, None, "removed persona detaches from team");
+    }
+
+    /// `create_team` has no prior roster, so its whole roster is the added delta:
+    /// the unbound instance of a listed persona is bound through the wiring.
+    #[test]
+    fn commit_team_create_treats_full_roster_as_added() {
+        let mut teams: Vec<TeamRecord> = Vec::new();
+        let existing = vec![instance('a', "duncan", None)];
+        let spy = RefCell::new(StoreSpy::default());
+
+        let created = commit_team_create(
+            &mut teams,
+            team("team-a", &["duncan"]),
+            |_| Ok(()),
+            || Ok(existing.clone()),
+            |records| {
+                spy.borrow_mut().saved = Some(records.to_vec());
+                Ok(())
+            },
+        )
+        .expect("create succeeds");
+
+        assert_eq!(created.id, "team-a");
+        let saved = spy.borrow().saved.clone().expect("backfill must save");
+        assert_eq!(
+            saved[0].team_id.as_deref(),
+            Some("team-a"),
+            "whole roster is the added delta on create"
+        );
+    }
+
+    /// A failing secondary agent write after successful `save_teams` is
+    /// swallowed: both commits still return the persisted team. Otherwise a UI
+    /// retry of a create whose team already landed would mint a duplicate.
+    #[test]
+    fn commit_returns_ok_when_agent_save_fails() {
+        let mut teams: Vec<TeamRecord> = Vec::new();
+        let created = commit_team_create(
+            &mut teams,
+            team("team-a", &["duncan"]),
+            |_| Ok(()),
+            || Ok(vec![instance('a', "duncan", None)]),
+            |_| Err("disk full".to_string()),
+        )
+        .expect("create swallows secondary-store failure");
+        assert_eq!(created.id, "team-a");
+
+        let mut teams = vec![team("team-a", &["duncan"])];
+        let updated = commit_team_update(
+            &mut teams,
+            "team-a",
+            "team-a".to_string(),
+            None,
+            None,
+            ids(&[]),
+            "2026-02-02T00:00:00Z".to_string(),
+            |_| Ok(()),
+            || Err("agent store unreadable".to_string()),
+            |_| Ok(()),
+        )
+        .expect("update swallows secondary-store failure");
+        assert_eq!(updated.persona_ids, Vec::<String>::new());
     }
 }
 
