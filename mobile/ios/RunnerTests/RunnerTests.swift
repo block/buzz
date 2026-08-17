@@ -11,33 +11,72 @@ class RunnerTests: XCTestCase {
     var selector = HuddleActiveTalkerSelector(capacity: 15)
 
     for peer in 0..<15 {
-      XCTAssertNil(selector.activate(peerIndex: peer, levelDbov: -20))
+      XCTAssertEqual(
+        selector.activate(peerIndex: peer, levelDbov: -20),
+        HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+      )
     }
-    XCTAssertNil(selector.activate(peerIndex: 15, levelDbov: -20))
+    let rejected = selector.activate(peerIndex: 15, levelDbov: -20)
+    XCTAssertEqual(
+      rejected,
+      HuddleTalkerSelection(accepted: false, evictedPeerIndex: nil)
+    )
+    var allocationCount = 0
+    XCTAssertNil(rejected.allocateIfAccepted {
+      allocationCount += 1
+      return NSObject()
+    })
+    XCTAssertEqual(allocationCount, 0)
     XCTAssertEqual(Set(selector.active.keys), Set(0..<15))
 
     selector.remove(7)
     XCTAssertFalse(selector.active.keys.contains(7))
-    XCTAssertNil(selector.activate(peerIndex: 7, levelDbov: -10))
+    XCTAssertEqual(
+      selector.activate(peerIndex: 7, levelDbov: -10),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
     XCTAssertTrue(selector.active.keys.contains(7))
   }
 
   func testHuddleActiveTalkerSelectorUsesRecentActivity() {
     var selector = HuddleActiveTalkerSelector(capacity: 2)
 
-    XCTAssertNil(selector.activate(peerIndex: 4, levelDbov: -10))
-    XCTAssertNil(selector.activate(peerIndex: 2, levelDbov: -20))
-    XCTAssertNil(selector.activate(peerIndex: 4, levelDbov: -10))
-    XCTAssertEqual(selector.activate(peerIndex: 9, levelDbov: -5), 2)
+    XCTAssertEqual(
+      selector.activate(peerIndex: 4, levelDbov: -10),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertEqual(
+      selector.activate(peerIndex: 2, levelDbov: -20),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertEqual(
+      selector.activate(peerIndex: 4, levelDbov: -10),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertEqual(
+      selector.activate(peerIndex: 9, levelDbov: -5),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: 2)
+    )
     XCTAssertEqual(Set(selector.active.keys), Set([4, 9]))
   }
 
   func testHuddleActiveTalkerSelectorDoesNotChurnAtEqualLevels() {
     var selector = HuddleActiveTalkerSelector(capacity: 2)
 
-    XCTAssertNil(selector.activate(peerIndex: 4, levelDbov: -127))
-    XCTAssertNil(selector.activate(peerIndex: 2, levelDbov: -127))
-    XCTAssertNil(selector.activate(peerIndex: 9, levelDbov: -127))
+    XCTAssertEqual(
+      selector.activate(peerIndex: 4, levelDbov: -127),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertEqual(
+      selector.activate(peerIndex: 2, levelDbov: -127),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    let rejected = selector.activate(peerIndex: 9, levelDbov: -127)
+    XCTAssertEqual(
+      rejected,
+      HuddleTalkerSelection(accepted: false, evictedPeerIndex: nil)
+    )
+    XCTAssertNil(rejected.allocateIfAccepted { NSObject() })
     XCTAssertNil(selector.active[9])
     XCTAssertEqual(Set(selector.active.keys), Set([2, 4]))
   }

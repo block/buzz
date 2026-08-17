@@ -22,6 +22,7 @@ type HuddleRosterState = {
   agent_voice_settings: Record<string, HuddleAgentVoiceSettings>;
   parent_channel_id: string | null;
   ephemeral_channel_id: string | null;
+  huddle_thread_event_id: string | null;
 };
 
 function isVisible(state: HuddleRosterState | null) {
@@ -42,6 +43,7 @@ export function HuddleRoomHeader() {
     ephemeralChannelId: state?.ephemeral_channel_id ?? null,
     fallbackParticipants: state?.participants ?? [],
     preservedParticipants: state?.agent_pubkeys ?? [],
+    huddleThreadEventId: state?.huddle_thread_event_id ?? null,
   });
   const participantSpeakerLevels = React.useMemo(() => {
     const levels = { ...speakerLevels };

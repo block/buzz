@@ -310,6 +310,16 @@ enum HuddleAudioLevels {
   }
 }
 
+struct HuddleTalkerSelection: Equatable {
+  let accepted: Bool
+  let evictedPeerIndex: Int?
+
+  func allocateIfAccepted<T>(_ allocate: () throws -> T) rethrows -> T? {
+    guard accepted else { return nil }
+    return try allocate()
+  }
+}
+
 /// Fixed-capacity active-talker selector. The UI roster is independent; native
 /// decoder/player resources exist only for peers that actually send packets.
 struct HuddleActiveTalkerSelector {
@@ -327,7 +337,7 @@ struct HuddleActiveTalkerSelector {
     self.capacity = capacity
   }
 
-  mutating func activate(peerIndex: Int, levelDbov: Int) -> Int? {
+  mutating func activate(peerIndex: Int, levelDbov: Int) -> HuddleTalkerSelection {
     ordinal &+= 1
     if active[peerIndex] != nil {
       active[peerIndex] = Activity(
@@ -335,7 +345,7 @@ struct HuddleActiveTalkerSelector {
         lastPacketOrdinal: ordinal,
         levelDbov: levelDbov
       )
-      return nil
+      return HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
     }
     let weakest = active.count >= capacity
       ? active.values.min { left, right in
@@ -351,7 +361,9 @@ struct HuddleActiveTalkerSelector {
     // Equal-level packets (especially continuous -127 dBov silence) must not
     // churn decoder/jitter state. Admit a new peer only when it is louder than
     // the quietest selected peer.
-    if let weakest, levelDbov <= weakest.levelDbov { return nil }
+    if let weakest, levelDbov <= weakest.levelDbov {
+      return HuddleTalkerSelection(accepted: false, evictedPeerIndex: nil)
+    }
     let evicted = weakest?.peerIndex
     if let evicted { active.removeValue(forKey: evicted) }
     active[peerIndex] = Activity(
@@ -359,7 +371,7 @@ struct HuddleActiveTalkerSelector {
       lastPacketOrdinal: ordinal,
       levelDbov: levelDbov
     )
-    return evicted
+    return HuddleTalkerSelection(accepted: true, evictedPeerIndex: evicted)
   }
 
   mutating func remove(_ peerIndex: Int) {
@@ -520,25 +532,28 @@ final class HuddleAudioEngine {
       guard let self else { return }
       defer { completeRemotePacket() }
       do {
-        let evictedIndex = activeTalkers.activate(
+        let selection = activeTalkers.activate(
           peerIndex: packet.peerIndex,
           levelDbov: packet.levelDbov
         )
-        if let evictedIndex,
+        if let evictedIndex = selection.evictedPeerIndex,
           let evicted = peerPlaybacks.removeValue(forKey: evictedIndex)
         {
           evicted.release(from: audioEngine)
         }
-        if activeTalkers.active[packet.peerIndex] == nil { return }
         let playback: HuddlePeerPlayback
         if let existing = peerPlaybacks[packet.peerIndex] {
           playback = existing
-        } else {
-          playback = try HuddlePeerPlayback(
-            engine: audioEngine,
-            pcmFormat: pcmFormat
+        } else if let allocated = try selection.allocateIfAccepted({
+          try HuddlePeerPlayback(
+            engine: self.audioEngine,
+            pcmFormat: self.pcmFormat
           )
-          peerPlaybacks[packet.peerIndex] = playback
+        }) {
+          playback = allocated
+          peerPlaybacks[packet.peerIndex] = allocated
+        } else {
+          return
         }
         playback.enqueue(packet)
       } catch {

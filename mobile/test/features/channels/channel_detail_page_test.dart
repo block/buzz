@@ -36,6 +36,7 @@ import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/huddle/huddle.dart';
@@ -4582,6 +4583,57 @@ void main() {
     );
 
     testWidgets(
+      'community transition cancels and awaits an in-flight Huddle start',
+      (tester) async {
+        final createGate = Completer<void>();
+        final relaySession = _ReconnectingRelaySession(
+          huddleCreatePublishGate: createGate.future,
+        );
+        String? archivedChannelId;
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            users: const {'self': UserProfile(pubkey: 'self')},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relaySession,
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => _HuddleTestTransport(),
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onArchiveChannel: (channelId) async =>
+                  archivedChannelId = channelId,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+        await relaySession.huddleCreatePublishStarted.future;
+        var transitionCompleted = false;
+        final transition =
+            ProviderScope.containerOf(
+              tester.element(find.byType(MobileHuddleShell)),
+            ).read(communityTransitionProvider).run().then((_) {
+              transitionCompleted = true;
+            });
+        await tester.pump();
+
+        expect(transitionCompleted, isFalse);
+        createGate.complete();
+        await transition;
+
+        expect(archivedChannelId, isNotNull);
+        expect(
+          relaySession.publishedKinds,
+          isNot(contains(EventKind.huddleStarted)),
+        );
+        await tester.pump(const Duration(seconds: 1));
+      },
+    );
+
+    testWidgets(
       'creator end publish superseded by rejoin cannot archive new admission',
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -8710,9 +8762,14 @@ class _TestAppLifecycleNotifier extends AppLifecycleNotifier {
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
-  _ReconnectingRelaySession({this.huddleEndPublishGate});
+  _ReconnectingRelaySession({
+    this.huddleCreatePublishGate,
+    this.huddleEndPublishGate,
+  });
 
+  final Future<void>? huddleCreatePublishGate;
   final Future<void>? huddleEndPublishGate;
+  final huddleCreatePublishStarted = Completer<void>();
   final huddleEndPublishStarted = Completer<void>();
   final List<int> publishedKinds = [];
 
@@ -8732,6 +8789,14 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     publishedKinds.add(event.kind);
+    if (event.kind == 9007) {
+      if (huddleCreatePublishGate case final gate?) {
+        if (!huddleCreatePublishStarted.isCompleted) {
+          huddleCreatePublishStarted.complete();
+        }
+        await gate;
+      }
+    }
     if (event.kind == EventKind.huddleEnded) {
       if (huddleEndPublishGate case final gate?) {
         if (!huddleEndPublishStarted.isCompleted) {

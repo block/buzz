@@ -47,7 +47,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::mesh::spawn_remote_peer_sink;
@@ -1293,18 +1293,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                                 .get(CommunityId::from_uuid(community_id), session_id)
                         }) {
                             if let Some(delta) = room.remove_peer(peer_id) {
-                                let left = delta
-                                    .left
-                                    .expect("peer removal deltas always carry the removed peer");
-                                room.broadcast_control(
-                                    serde_json::json!({
-                                        "type": "left",
-                                        "revision": delta.revision,
-                                        "pubkey": left.pubkey,
-                                        "peer_index": left.peer_index,
-                                    })
-                                    .to_string(),
-                                );
+                                broadcast_peer_left(&room, delta, session_id);
                             }
                         }
                     }
@@ -1355,18 +1344,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         }) {
             for (_pubkey, peer_id) in registered {
                 if let Some(delta) = room.remove_peer(peer_id) {
-                    let left = delta
-                        .left
-                        .expect("peer removal deltas always carry the removed peer");
-                    room.broadcast_control(
-                        serde_json::json!({
-                            "type": "left",
-                            "revision": delta.revision,
-                            "pubkey": left.pubkey,
-                            "peer_index": left.peer_index,
-                        })
-                        .to_string(),
-                    );
+                    broadcast_peer_left(&room, delta, session_id);
                 }
             }
         }
@@ -1412,6 +1390,33 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             },
         }
     }
+}
+
+fn broadcast_peer_left(room: &Room, delta: RoomRosterDelta, session_id: Uuid) {
+    let Some(left) = peer_left_control(delta, session_id) else {
+        return;
+    };
+    room.broadcast_control(left);
+}
+
+fn peer_left_control(delta: RoomRosterDelta, session_id: Uuid) -> Option<String> {
+    let Some(left) = delta.left else {
+        warn!(
+            %session_id,
+            revision = delta.revision,
+            "mesh audio peer removal delta did not include the removed peer"
+        );
+        return None;
+    };
+    Some(
+        serde_json::json!({
+            "type": "left",
+            "revision": delta.revision,
+            "pubkey": left.pubkey,
+            "peer_index": left.peer_index,
+        })
+        .to_string(),
+    )
 }
 
 fn roster_snapshot(room: &Room) -> RosterSnapshot {
@@ -1820,6 +1825,21 @@ mod tests {
 
     fn community() -> CommunityId {
         CommunityId::from_uuid(Uuid::from_u128(0xC0FFEE))
+    }
+
+    #[test]
+    fn missing_peer_in_removal_delta_is_non_fatal() {
+        assert_eq!(
+            peer_left_control(
+                RoomRosterDelta {
+                    revision: 7,
+                    joined: None,
+                    left: None,
+                },
+                Uuid::from_u128(42),
+            ),
+            None,
+        );
     }
 
     /// Scripted directory: `owner_of` returns a queued lookup, `acquire`

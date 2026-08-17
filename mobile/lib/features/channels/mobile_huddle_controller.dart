@@ -124,7 +124,21 @@ final class MobileHuddleController extends Notifier<bool> {
     return false;
   }
 
-  Future<void> start({required String parentChannelId}) async {
+  Future<void>? _startFuture;
+
+  Future<void> start({required String parentChannelId}) {
+    final inFlight = _startFuture;
+    if (inFlight != null) return inFlight;
+
+    late final Future<void> startFuture;
+    startFuture = _start(parentChannelId: parentChannelId).whenComplete(() {
+      if (identical(_startFuture, startFuture)) _startFuture = null;
+    });
+    _startFuture = startFuture;
+    return startFuture;
+  }
+
+  Future<void> _start({required String parentChannelId}) async {
     if (state) return;
     final generation = ++_generation;
     final admissionEpoch = ++_admissionEpoch;
@@ -217,8 +231,20 @@ final class MobileHuddleController extends Notifier<bool> {
       _backgroundLeave ??= leave().whenComplete(() => _backgroundLeave = null);
 
   Future<void> _leaveForTransition() async {
-    if (!ref.read(huddleSessionProvider).isInSession) return;
-    await _leaveForBackground();
+    final startFuture = _startFuture;
+    if (startFuture != null) {
+      ++_generation;
+      state = false;
+      try {
+        await startFuture;
+      } catch (_) {
+        // Cancellation is observed by the in-flight start, whose rollback must
+        // settle before the relay is rebound to the next community.
+      }
+    }
+    if (ref.read(huddleSessionProvider).isInSession) {
+      await _leaveForBackground();
+    }
   }
 
   Future<void> leave() async {

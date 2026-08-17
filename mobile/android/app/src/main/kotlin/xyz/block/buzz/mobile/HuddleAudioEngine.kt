@@ -19,6 +19,7 @@ import java.util.ArrayDeque
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.math.log10
 import kotlin.math.max
@@ -42,6 +43,14 @@ internal data class HuddleRemoteOpusPacket(
     val opus: ByteArray,
 )
 
+internal data class HuddleTalkerSelection(
+    val accepted: Boolean,
+    val evictedPeerIndex: Int?,
+) {
+    inline fun <T> allocateIfAccepted(allocate: () -> T): T? =
+        if (accepted) allocate() else null
+}
+
 /// Fixed-capacity active-talker selector. Roster membership stays in Dart;
 /// native decoder/track resources exist only for peers that actually send.
 internal class HuddleActiveTalkerSelector(
@@ -56,11 +65,11 @@ internal class HuddleActiveTalkerSelector(
     private val active = mutableMapOf<Int, Activity>()
     private var ordinal = 0L
 
-    fun activate(peerIndex: Int, levelDbov: Int): Int? {
+    fun activate(peerIndex: Int, levelDbov: Int): HuddleTalkerSelection {
         ordinal += 1
         if (active.containsKey(peerIndex)) {
             active[peerIndex] = Activity(peerIndex, ordinal, levelDbov)
-            return null
+            return HuddleTalkerSelection(accepted = true, evictedPeerIndex = null)
         }
         val weakest = if (active.size >= capacity) {
             active.values.minWithOrNull(
@@ -74,18 +83,18 @@ internal class HuddleActiveTalkerSelector(
         // Equal-level packets (especially continuous -127 dBov silence) must
         // not churn decoder/jitter state. A new peer earns a slot only when it
         // is actually louder than the quietest selected peer.
-        if (weakest != null && levelDbov <= weakest.levelDbov) return null
+        if (weakest != null && levelDbov <= weakest.levelDbov) {
+            return HuddleTalkerSelection(accepted = false, evictedPeerIndex = null)
+        }
         val evicted = weakest?.peerIndex
         evicted?.let(active::remove)
         active[peerIndex] = Activity(peerIndex, ordinal, levelDbov)
-        return evicted
+        return HuddleTalkerSelection(accepted = true, evictedPeerIndex = evicted)
     }
 
     fun remove(peerIndex: Int) {
         active.remove(peerIndex)
     }
-
-    fun contains(peerIndex: Int): Boolean = active.containsKey(peerIndex)
 
     fun indices(): Set<Int> = active.keys.toSet()
 }
@@ -165,6 +174,8 @@ internal class HuddleAudioEngine(
     private val failureReported = AtomicBoolean(false)
     private val playbackQueue = ArrayBlockingQueue<HuddlePlaybackCommand>(PLAYBACK_QUEUE_CAPACITY)
     private val interrupted = AtomicBoolean(false)
+    private val interruptionEpoch = AtomicInteger(0)
+    private val interruptionLock = Object()
 
     @Volatile
     private var muted = false
@@ -222,6 +233,7 @@ internal class HuddleAudioEngine(
         val record = audioRecord
         if (value) {
             interrupted.set(true)
+            interruptionEpoch.incrementAndGet()
             // A focus loss must stop native capture, not merely discard frames
             // after AudioRecord has already read them from the microphone.
             if (record != null) runCatching { record.stop() }
@@ -229,6 +241,7 @@ internal class HuddleAudioEngine(
         }
         if (!running.get() || record == null) {
             interrupted.set(false)
+            synchronized(interruptionLock) { interruptionLock.notifyAll() }
             return
         }
         try {
@@ -237,6 +250,7 @@ internal class HuddleAudioEngine(
                 "Microphone recording did not resume."
             }
             interrupted.set(false)
+            synchronized(interruptionLock) { interruptionLock.notifyAll() }
         } catch (error: Throwable) {
             reportFailure("audio_resume_failed", error)
         }
@@ -270,6 +284,7 @@ internal class HuddleAudioEngine(
 
     fun stop() {
         running.set(false)
+        synchronized(interruptionLock) { interruptionLock.notifyAll() }
         runCatching { audioRecord?.stop() }
         playbackThread?.interrupt()
         runCatching { captureThread?.join(STOP_JOIN_TIMEOUT_MS) }
@@ -329,6 +344,18 @@ internal class HuddleAudioEngine(
 
         try {
             while (running.get()) {
+                // Snapshot before checking [interrupted]. If focus loss starts
+                // after that check, its epoch still marks the stopped read as
+                // expected; if it starts first, the loop waits below.
+                val readEpoch = interruptionEpoch.get()
+                if (interrupted.get()) {
+                    synchronized(interruptionLock) {
+                        while (running.get() && interrupted.get()) {
+                            interruptionLock.wait(INTERRUPTION_WAIT_MS)
+                        }
+                    }
+                    continue
+                }
                 val read = record.read(
                     readBuffer,
                     0,
@@ -336,6 +363,10 @@ internal class HuddleAudioEngine(
                     AudioRecord.READ_BLOCKING,
                 )
                 if (read < 0) {
+                    // AudioRecord.stop() unblocks a pending read with an error.
+                    // A focus interruption that began during this read owns that
+                    // result even if focus was regained before we inspected it.
+                    if (interruptionEpoch.get() != readEpoch) continue
                     throw IllegalStateException("AudioRecord read failed with code $read.")
                 }
                 var sourceOffset = 0
@@ -496,17 +527,20 @@ internal class HuddleAudioEngine(
                 when (command) {
                     is HuddlePlaybackCommand.Packet -> {
                         val packet = command.packet
-                        val evicted = activeTalkers.activate(
+                        val selection = activeTalkers.activate(
                             packet.peerIndex,
                             packet.levelDbov,
                         )
-                        evicted?.let { playbacks.remove(it)?.release() }
-                        if (!activeTalkers.contains(packet.peerIndex)) continue
-                        val playback = playbacks[packet.peerIndex] ?: PeerPlayback(
-                            packet.peerIndex,
-                        ).also {
-                            playbacks[packet.peerIndex] = it
+                        selection.evictedPeerIndex?.let {
+                            playbacks.remove(it)?.release()
                         }
+                        val playback = playbacks[packet.peerIndex]
+                            ?: selection.allocateIfAccepted {
+                                PeerPlayback(packet.peerIndex).also {
+                                    playbacks[packet.peerIndex] = it
+                                }
+                            }
+                            ?: continue
                         playback.enqueue(packet)
                     }
                     is HuddlePlaybackCommand.RemovePeer -> {
@@ -650,6 +684,7 @@ internal class HuddleAudioEngine(
         private const val JITTER_START_PACKETS = 3
         private const val MAX_REMOTE_PEERS = 15
         private const val STOP_JOIN_TIMEOUT_MS = 750L
+        private const val INTERRUPTION_WAIT_MS = 250L
         private const val SILENT_LEVEL_DBOV = -127
         private const val OPUS_SEEK_PREROLL_NS = 80_000_000L
         private const val DIAGNOSTIC_EMIT_FRAME_INTERVAL = 50L

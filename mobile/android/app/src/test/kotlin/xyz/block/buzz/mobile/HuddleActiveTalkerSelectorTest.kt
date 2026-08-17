@@ -10,8 +10,18 @@ class HuddleActiveTalkerSelectorTest {
     fun `sixteen senders retain exactly the active talker capacity`() {
         val selector = HuddleActiveTalkerSelector(capacity = 15)
 
-        repeat(15) { peer -> assertNull(selector.activate(peer, -20)) }
-        assertNull(selector.activate(15, -20))
+        repeat(15) { peer ->
+            assertEquals(
+                HuddleTalkerSelection(accepted = true, evictedPeerIndex = null),
+                selector.activate(peer, -20),
+            )
+        }
+        val rejected = selector.activate(15, -20)
+        assertEquals(
+            HuddleTalkerSelection(accepted = false, evictedPeerIndex = null),
+            rejected,
+        )
+        assertNull(rejected.allocateIfAccepted { Any() })
         assertEquals((0..14).toSet(), selector.indices())
     }
 
@@ -22,10 +32,16 @@ class HuddleActiveTalkerSelectorTest {
         selector.activate(4, -40)
         selector.activate(2, -20)
         selector.activate(4, -10)
-        assertEquals(2, selector.activate(9, -5))
+        assertEquals(
+            HuddleTalkerSelection(accepted = true, evictedPeerIndex = 2),
+            selector.activate(9, -5),
+        )
         assertEquals(setOf(4, 9), selector.indices())
 
-        assertEquals(4, selector.activate(2, -1))
+        assertEquals(
+            HuddleTalkerSelection(accepted = true, evictedPeerIndex = 4),
+            selector.activate(2, -1),
+        )
         assertEquals(setOf(2, 9), selector.indices())
     }
 
@@ -34,7 +50,10 @@ class HuddleActiveTalkerSelectorTest {
         val selector = HuddleActiveTalkerSelector(capacity = 1)
 
         selector.activate(7, -30)
-        assertNull(selector.activate(3, -30))
+        assertEquals(
+            HuddleTalkerSelection(accepted = false, evictedPeerIndex = null),
+            selector.activate(3, -30),
+        )
         assertEquals(setOf(7), selector.indices())
     }
 
@@ -44,8 +63,11 @@ class HuddleActiveTalkerSelectorTest {
 
         selector.activate(4, -127)
         selector.activate(2, -127)
-        assertNull(selector.activate(9, -127))
-        assertFalse(selector.contains(9))
+        assertEquals(
+            HuddleTalkerSelection(accepted = false, evictedPeerIndex = null),
+            selector.activate(9, -127),
+        )
+        assertFalse(9 in selector.indices())
         assertEquals(setOf(2, 4), selector.indices())
     }
 
@@ -55,7 +77,10 @@ class HuddleActiveTalkerSelectorTest {
 
         selector.activate(4, -40)
         selector.activate(2, -20)
-        assertEquals(4, selector.activate(9, -30))
+        assertEquals(
+            HuddleTalkerSelection(accepted = true, evictedPeerIndex = 4),
+            selector.activate(9, -30),
+        )
         assertEquals(setOf(2, 9), selector.indices())
     }
 
@@ -87,6 +112,9 @@ class HuddleActiveTalkerSelectorTest {
         selector.activate(7, -20)
         selector.remove(7)
         assertEquals(emptySet<Int>(), selector.indices())
-        assertNull(selector.activate(7, -20))
+        assertEquals(
+            HuddleTalkerSelection(accepted = true, evictedPeerIndex = null),
+            selector.activate(7, -20),
+        )
     }
 }

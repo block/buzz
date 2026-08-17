@@ -382,6 +382,7 @@ export function HuddleBar({
     ephemeralChannelId: barState?.ephemeral_channel_id ?? null,
     fallbackParticipants: barState?.participants ?? [],
     preservedParticipants: barState?.agent_pubkeys ?? [],
+    huddleThreadEventId: barState?.huddle_thread_event_id ?? null,
   });
   const participantSpeakerLevels = React.useMemo(() => {
     const levels = { ...speakerLevels };

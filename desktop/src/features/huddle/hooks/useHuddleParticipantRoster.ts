@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import {
@@ -14,6 +15,8 @@ type ParticipantRosterOptions = {
   events: Iterable<RelayEvent>;
   fallbackParticipants?: readonly string[];
   preservedParticipants?: readonly (string | null | undefined)[];
+  relaySelfPubkey?: string | null;
+  huddleThreadEventId?: string | null;
 };
 
 function normalizedPubkey(value: string | null | undefined): string | null {
@@ -64,8 +67,21 @@ function compareLifecycleEvents(left: RelayEvent, right: RelayEvent): number {
   const phaseOrder = lifecyclePhase(left.kind) - lifecyclePhase(right.kind);
   if (phaseOrder !== 0) return phaseOrder;
 
+  const leftParticipant = lifecycleParticipant(left);
+  const rightParticipant = lifecycleParticipant(right);
+  const sameParticipant =
+    leftParticipant !== null && leftParticipant === rightParticipant;
   const leftRevision = lifecycleContent(left).rosterRevision;
   const rightRevision = lifecycleContent(right).rosterRevision;
+  if (sameParticipant && leftRevision !== rightRevision) {
+    if (leftRevision === null) {
+      return left.kind === KIND_HUDDLE_PARTICIPANT_LEFT ? -1 : 1;
+    }
+    if (rightRevision === null) {
+      return right.kind === KIND_HUDDLE_PARTICIPANT_LEFT ? 1 : -1;
+    }
+    return leftRevision - rightRevision;
+  }
   if (
     leftRevision !== null &&
     rightRevision !== null &&
@@ -83,6 +99,43 @@ function lifecycleParticipant(event: RelayEvent): string | null {
   );
 }
 
+function authenticatedLifecycleEvents({
+  events,
+  relaySelfPubkey,
+  huddleThreadEventId,
+}: Pick<
+  ParticipantRosterOptions,
+  "events" | "relaySelfPubkey" | "huddleThreadEventId"
+>): RelayEvent[] {
+  const relaySelf = normalizedPubkey(relaySelfPubkey);
+  const lifecycle = [...events];
+  const started = huddleThreadEventId
+    ? (lifecycle.find(
+        (event) =>
+          event.kind === KIND_HUDDLE_STARTED &&
+          event.id === huddleThreadEventId,
+      ) ?? null)
+    : null;
+  const creator = started ? normalizedPubkey(started.pubkey) : null;
+
+  return lifecycle.filter((event) => {
+    if (
+      event.kind === KIND_HUDDLE_PARTICIPANT_JOINED ||
+      event.kind === KIND_HUDDLE_PARTICIPANT_LEFT
+    ) {
+      return relaySelf !== null && normalizedPubkey(event.pubkey) === relaySelf;
+    }
+    if (event.kind === KIND_HUDDLE_STARTED) {
+      return started !== null && event.id === started.id;
+    }
+    if (event.kind === KIND_HUDDLE_ENDED) {
+      const signer = normalizedPubkey(event.pubkey);
+      return signer !== null && (signer === creator || signer === relaySelf);
+    }
+    return false;
+  });
+}
+
 /**
  * Reconstruct the live media roster from relay-signed Huddle lifecycle events.
  *
@@ -95,13 +148,19 @@ export function reconstructHuddleParticipantRoster({
   events,
   fallbackParticipants = [],
   preservedParticipants = [],
+  relaySelfPubkey = null,
+  huddleThreadEventId = null,
 }: ParticipantRosterOptions): string[] {
   const participants = new Set(
     fallbackParticipants
       .map(normalizedPubkey)
       .filter((pubkey): pubkey is string => pubkey !== null),
   );
-  const sorted = [...events]
+  const sorted = authenticatedLifecycleEvents({
+    events,
+    relaySelfPubkey,
+    huddleThreadEventId,
+  })
     .filter((event) => lifecycleChannelId(event) === ephemeralChannelId)
     // Nostr timestamps have second precision and relay history arrives newest
     // first. Session phases break start/end ties; owner roster revisions order
@@ -152,6 +211,7 @@ type UseHuddleParticipantRosterOptions = {
   ephemeralChannelId: string | null;
   fallbackParticipants: readonly string[];
   preservedParticipants?: readonly (string | null | undefined)[];
+  huddleThreadEventId?: string | null;
 };
 
 /** Subscribe the active desktop roster to the canonical signed lifecycle. */
@@ -160,7 +220,9 @@ export function useHuddleParticipantRoster({
   ephemeralChannelId,
   fallbackParticipants,
   preservedParticipants = [],
+  huddleThreadEventId = null,
 }: UseHuddleParticipantRosterOptions): string[] {
+  const relaySelfPubkey = useRelaySelfQuery(Boolean(parentChannelId)).data;
   const sessionKey =
     parentChannelId && ephemeralChannelId
       ? `${parentChannelId}:${ephemeralChannelId}`
@@ -219,6 +281,8 @@ export function useHuddleParticipantRoster({
       events: [],
       fallbackParticipants,
       preservedParticipants,
+      relaySelfPubkey,
+      huddleThreadEventId,
     });
   }
   return reconstructHuddleParticipantRoster({
@@ -226,5 +290,7 @@ export function useHuddleParticipantRoster({
     events,
     fallbackParticipants,
     preservedParticipants,
+    relaySelfPubkey,
+    huddleThreadEventId,
   });
 }
