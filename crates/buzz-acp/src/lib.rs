@@ -4865,7 +4865,10 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
-    let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
+    let mut raw_agent_args = args.agent.agent_args;
+    raw_agent_args.extend(args.additional_agent_args);
+    let agent_args = config::normalize_agent_args(&args.agent.agent_command, raw_agent_args);
+    let models_timeout = Duration::from_secs(args.timeout);
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("/"))
         .to_string_lossy()
@@ -4884,7 +4887,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
     // Initialize + session/new under a timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).
-    let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
+    let protocol_result = tokio::time::timeout(models_timeout, async {
         let init = client.initialize().await?;
         let session = client.session_new_full(&cwd, vec![], None, None).await?;
         Ok::<_, acp::AcpError>((init, session))
@@ -4900,7 +4903,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent timed out ({models_timeout:?})");
             std::process::exit(1);
         }
     };

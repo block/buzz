@@ -23,6 +23,26 @@ cargo build --release -p buzz-acp
 export PATH="$PWD/target/release:$PATH"
 ```
 
+## Validate an ACP command
+
+The repository includes a command-neutral acceptance probe for ACP adapters. It
+starts the supplied executable through `buzz-acp models` and requires successful
+`initialize` and `session/new` responses with the expected structured output.
+No relay, Buzz identity, or deployment configuration is involved.
+
+```bash
+./scripts/agent-harness-acceptance.sh \
+  --agent-command /path/to/acp-adapter \
+  --agent-arg serve \
+  --agent-arg "value with spaces" \
+  --timeout 15
+```
+
+Repeat `--agent-arg` to preserve exact argument boundaries. The timeout applies
+to the ACP handshake and accepts an integer from 1 to 300 seconds. Exit code 2
+means the supplied executable is missing; other probe or contract failures use
+exit code 1.
+
 ## Generating Keys
 
 Each agent needs a Nostr keypair — this is the agent's identity in Buzz. Use `buzz-admin` to generate one:

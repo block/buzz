@@ -179,6 +179,15 @@ pub struct ModelsArgs {
     #[command(flatten)]
     pub agent: AuthAgentArgs,
 
+    /// One argument passed to the agent binary. Repeat to preserve argument
+    /// boundaries, including spaces and commas.
+    #[arg(long = "agent-arg", action = clap::ArgAction::Append)]
+    pub additional_agent_args: Vec<String>,
+
+    /// Maximum seconds for ACP initialize plus session/new.
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=300))]
+    pub timeout: u64,
+
     /// Output structured JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
@@ -1560,6 +1569,33 @@ mod tests {
     fn normalizes_goose_args_to_acp() {
         assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
         assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+    }
+
+    #[test]
+    fn models_args_preserve_repeated_argument_boundaries_and_timeout() {
+        let args = ModelsArgs::parse_from([
+            "buzz-acp models",
+            "--agent-command",
+            "custom-acp",
+            "--agent-args",
+            "",
+            "--agent-arg",
+            "serve",
+            "--agent-arg",
+            "two words",
+            "--agent-arg",
+            "comma,value",
+            "--timeout",
+            "17",
+        ]);
+
+        assert_eq!(args.agent.agent_command, "custom-acp");
+        assert_eq!(args.agent.agent_args, vec![""]);
+        assert_eq!(
+            args.additional_agent_args,
+            vec!["serve", "two words", "comma,value"]
+        );
+        assert_eq!(args.timeout, 17);
     }
 
     #[test]
