@@ -18,9 +18,13 @@ Future<void> _presentIosEmojiPicker({
   required void Function(String emoji) onSelect,
   VoidCallback? onDismiss,
 }) async {
-  // Only one native sheet owns the handler at a time; coalesce a reentrant open
-  // so it cannot steal the live sheet's callbacks from its original owner.
-  if (_iosEmojiPickerPresenting) return;
+  // Only one native sheet owns the handler at a time. Reject a reentrant open
+  // without replacing the live sheet's callbacks, and complete the rejected
+  // caller so its local picker-open lifecycle is not stranded.
+  if (_iosEmojiPickerPresenting) {
+    onDismiss?.call();
+    return;
+  }
   _iosEmojiPickerPresenting = true;
 
   final container = ProviderScope.containerOf(context, listen: false);

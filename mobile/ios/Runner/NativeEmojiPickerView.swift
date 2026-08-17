@@ -420,6 +420,7 @@ actor NativeEmojiRemoteImageLoader {
 
   private let maximumConcurrentDownloads: Int
   private let downloader: Downloader
+  private let admissionAttemptForTesting: (() -> Void)?
   private let cache = NSCache<NSURLRequest, UIImage>()
   private var activeDownloadCount = 0
   private var waiters: [Waiter] = []
@@ -427,11 +428,13 @@ actor NativeEmojiRemoteImageLoader {
   init(
     maximumConcurrentDownloads: Int = defaultMaximumConcurrentDownloads,
     cacheByteLimit: Int = defaultCacheByteLimit,
+    admissionAttemptForTesting: (() -> Void)? = nil,
     downloader: @escaping Downloader = NativeEmojiRemoteImageLoader.download
   ) {
     precondition(maximumConcurrentDownloads > 0)
     precondition(cacheByteLimit >= 0)
     self.maximumConcurrentDownloads = maximumConcurrentDownloads
+    self.admissionAttemptForTesting = admissionAttemptForTesting
     self.downloader = downloader
     cache.totalCostLimit = cacheByteLimit
   }
@@ -442,6 +445,7 @@ actor NativeEmojiRemoteImageLoader {
       return cached
     }
 
+    recordAdmissionAttemptForTesting()
     try await acquireDownloadSlot()
     defer { releaseDownloadSlot() }
 
@@ -453,6 +457,10 @@ actor NativeEmojiRemoteImageLoader {
     let image = try await downloader(request)
     cache.setObject(image, forKey: cacheKey, cost: Self.cacheCost(for: image))
     return image
+  }
+
+  private func recordAdmissionAttemptForTesting() {
+    admissionAttemptForTesting?()
   }
 
   private func acquireDownloadSlot() async throws {

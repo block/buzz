@@ -458,15 +458,22 @@ class RunnerTests: XCTestCase {
 
   func testRemoteEmojiLoaderLimitsConcurrentDownloads() async throws {
     let maximumConcurrentDownloads = 3
+    let taskCount = 8
     let probe = NativeEmojiDownloadProbe()
+    let tasksAttemptedAdmission = XCTestExpectation(
+      description: "all download tasks attempted admission"
+    )
+    tasksAttemptedAdmission.expectedFulfillmentCount = taskCount
     let loader = NativeEmojiRemoteImageLoader(
       maximumConcurrentDownloads: maximumConcurrentDownloads,
-      cacheByteLimit: 0
-    ) { _ in
-      await probe.holdDownload()
-      return UIImage()
-    }
-    let tasks = (0..<8).map { index in
+      cacheByteLimit: 0,
+      admissionAttemptForTesting: { tasksAttemptedAdmission.fulfill() },
+      downloader: { _ in
+        await probe.holdDownload()
+        return UIImage()
+      }
+    )
+    let tasks = (0..<taskCount).map { index in
       Task {
         try await loader.image(
           for: URLRequest(
@@ -476,8 +483,8 @@ class RunnerTests: XCTestCase {
       }
     }
 
+    await fulfillment(of: [tasksAttemptedAdmission], timeout: 2)
     await probe.waitUntilStarted(maximumConcurrentDownloads)
-    try await Task.sleep(nanoseconds: 50_000_000)
     var snapshot = await probe.snapshot()
     XCTAssertEqual(snapshot.started, maximumConcurrentDownloads)
     XCTAssertEqual(snapshot.peakActive, maximumConcurrentDownloads)

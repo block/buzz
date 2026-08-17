@@ -941,11 +941,13 @@ void main() {
         await tester.pumpAndSettle();
         expect(presents, 1);
 
-        // A second open while the first sheet is live is coalesced: it neither
-        // presents again nor replaces the live sheet's method-call handler.
+        // A second open while the first sheet is live is rejected: it neither
+        // presents again nor replaces the live sheet's method-call handler,
+        // and its independent lifecycle is completed immediately.
         await tester.tap(find.text('Open second'));
         await tester.pumpAndSettle();
         expect(presents, 1);
+        expect(secondDismissals, 1);
 
         // Native events still reach the original owner, and only it.
         await _sendNativeEmojiPickerCall(tester, 'selected', '\u{1F525}');
@@ -953,7 +955,7 @@ void main() {
         expect(firstSelected, ['\u{1F525}']);
         expect(secondSelected, isEmpty);
         expect(firstDismissals, 1);
-        expect(secondDismissals, 0);
+        expect(secondDismissals, 1);
       } finally {
         _setMockNativeEmojiPickerHandler(null);
         debugDefaultTargetPlatformOverride = previousPlatform;
