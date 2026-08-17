@@ -57,6 +57,13 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { Textarea } from "@/shared/ui/textarea";
 
 export function ChannelTemplatesSettingsCard() {
@@ -742,6 +749,13 @@ function RuntimeAssignments({
   );
 }
 
+/**
+ * Sentinel for the "Default" (no runtime override) option. Radix Select items
+ * cannot have an empty-string value, so the empty runtime id is translated to
+ * and from this sentinel at the boundary.
+ */
+const DEFAULT_RUNTIME_VALUE = "__default__";
+
 function RuntimeRow({
   avatarUrl,
   disabled,
@@ -773,19 +787,25 @@ function RuntimeRow({
         )}
         <span className="truncate text-sm">{label}</span>
       </div>
-      <select
-        className="h-7 rounded-md border border-input bg-background px-2 text-xs shadow-xs focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+      <Select
         disabled={disabled}
-        onChange={(e) => onChange(e.target.value)}
-        value={value}
+        onValueChange={(runtimeId) =>
+          onChange(runtimeId === DEFAULT_RUNTIME_VALUE ? "" : runtimeId)
+        }
+        value={value === "" ? DEFAULT_RUNTIME_VALUE : value}
       >
-        <option value="">Default</option>
-        {providers.map((runtime) => (
-          <option key={runtime.id} value={runtime.id}>
-            {runtime.label}
-          </option>
-        ))}
-      </select>
+        <SelectTrigger className="h-7 px-2 py-0 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={DEFAULT_RUNTIME_VALUE}>Default</SelectItem>
+          {providers.map((runtime) => (
+            <SelectItem key={runtime.id} value={runtime.id}>
+              {runtime.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }

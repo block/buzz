@@ -13,6 +13,13 @@ import type {
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 function formatSearchUserName(user: UserSearchResult) {
@@ -332,24 +339,28 @@ export function ChannelMemberInviteCard({
         </label>
         <div className="flex items-center gap-2">
           <span className="text-xs text-muted-foreground">Role</span>
-          <select
-            className="h-8 rounded-md border border-input bg-background px-2.5 text-sm"
-            data-testid="channel-management-add-role"
+          <Select
             disabled={isPending}
-            id="channel-member-role"
-            onChange={(event) =>
-              setInviteRole(
-                event.target.value as Exclude<ChannelMember["role"], "owner">,
-              )
+            onValueChange={(value) =>
+              setInviteRole(value as Exclude<ChannelMember["role"], "owner">)
             }
             value={inviteRole}
           >
-            {availableRoles.map((role) => (
-              <option key={role} value={role}>
-                {role}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger
+              className="h-8 px-2.5 py-0 text-sm"
+              data-testid="channel-management-add-role"
+              id="channel-member-role"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {availableRoles.map((role) => (
+                <SelectItem key={role} value={role}>
+                  {role}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <Button
           className="min-w-24"

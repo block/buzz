@@ -20,10 +20,13 @@ for (const label of ["Only me (default)", "Selected people", "Anyone"]) {
   });
 }
 
-test("native and persona controls share one option list", () => {
+test("the default and persona controls share one option list", () => {
+  // The non-persona variant renders through the shared Select primitive; the
+  // persona variant through PersonaDropdownField. Both must map the same
+  // RESPOND_TO_OPTIONS list so the options never drift apart.
   assert.match(
     respondToFieldSource,
-    /<select[\s\S]*RESPOND_TO_OPTIONS\.map\(\(option\) => \([\s\S]*<option/,
+    /RESPOND_TO_OPTIONS\.map\(\(option\) => \([\s\S]*<SelectItem/,
   );
 });
 

@@ -19,6 +19,13 @@ import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { Switch } from "@/shared/ui/switch";
 import {
   SettingsOptionGroup,
@@ -335,20 +342,25 @@ function AddSubscriptionForm({
           >
             Channel
           </label>
-          <select
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            data-testid="local-archive-channel-select"
-            id="local-archive-channel-select"
-            onChange={(e) => setSelectedChannelId(e.target.value)}
+          <Select
+            onValueChange={setSelectedChannelId}
             value={selectedChannelId}
           >
-            <option value="">Select a channel…</option>
-            {channels.map((ch) => (
-              <option key={ch.id} value={ch.id}>
-                {ch.name}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger
+              className="w-full"
+              data-testid="local-archive-channel-select"
+              id="local-archive-channel-select"
+            >
+              <SelectValue placeholder="Select a channel…" />
+            </SelectTrigger>
+            <SelectContent>
+              {channels.map((ch) => (
+                <SelectItem key={ch.id} value={ch.id}>
+                  {ch.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         {/* Event types (per-kind checklist) */}
