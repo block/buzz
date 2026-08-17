@@ -31,9 +31,6 @@ export type PendingNonMemberMentionSend = {
   sentDraftKey: string | null | undefined;
   recoveryDraftKey: string | null | undefined;
   savedMentionRefs: DraftMentionRef[];
-  audienceGeneration: number;
-  audienceRevision: number | null;
-  explicitAgentPubkeys: string[];
 };
 
 export type SendMessageWithMentionFlowInput = {
@@ -47,8 +44,6 @@ export type SendMessageWithMentionFlowInput = {
   recoveryDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
   trimmed: string;
-  audienceGeneration?: number;
-  audienceRevision?: number | null;
 };
 
 export async function resolvePreviewTags(

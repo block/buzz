@@ -7,14 +7,12 @@ import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTex
 export function usePersistentAgentMentionHydration({
   audienceScope,
   hydrationKey,
-  initialAgentPubkeys,
   isEditing,
   mentions,
   richText,
 }: {
   audienceScope: string | null;
   hydrationKey: string | null | undefined;
-  initialAgentPubkeys?: readonly string[];
   isEditing: boolean;
   mentions: UseMentionsResult;
   richText: UseRichTextEditorResult;
@@ -26,10 +24,6 @@ export function usePersistentAgentMentionHydration({
   scopeRef.current = audienceScope;
   const isEditingRef = React.useRef(isEditing);
   isEditingRef.current = isEditing;
-  React.useEffect(() => {
-    if (!audienceScope || !initialAgentPubkeys) return;
-    audience.initialize(initialAgentPubkeys);
-  }, [audience.initialize, audienceScope, initialAgentPubkeys]);
   const isRestoringRef = React.useRef(false);
   const isSubmittingRef = React.useRef(false);
   const cancelHydrationAutocompleteRef = React.useRef(false);
@@ -38,7 +32,6 @@ export function usePersistentAgentMentionHydration({
   const hydrate = React.useCallback(() => {
     const capturedScope = audienceScope;
     if (
-      !audience.enabled ||
       !capturedScope ||
       isEditingRef.current ||
       audience.pubkeys.length === 0
@@ -92,7 +85,7 @@ export function usePersistentAgentMentionHydration({
       // only when its editor updates actually scheduled autocomplete work.
       mentions.cancelMentionAutocomplete();
     }
-  }, [audience.enabled, audience.pubkeys, audienceScope, mentions, richText]);
+  }, [audience.pubkeys, audienceScope, mentions, richText]);
 
   const reconcile = React.useCallback(
     (text: string) => {
@@ -128,36 +121,29 @@ export function usePersistentAgentMentionHydration({
     return () => cancelAnimationFrame(frame);
   }, [hydrationKey, scheduleHydration]);
 
-  const resolvePostSendContent = React.useCallback(
-    (explicitAgentPubkeys: string[]) => {
-      if (!audience.enabled || !audienceScope || isEditingRef.current)
-        return "";
-      const orderedPubkeys = [
-        ...new Set([...explicitAgentPubkeys, ...audience.pubkeys]),
-      ];
-      const targets = orderedPubkeys
-        .map((pubkey) => ({
-          pubkey,
-          displayName: mentions.getMentionDisplayName(pubkey),
-        }))
-        .filter((target): target is { pubkey: string; displayName: string } =>
-          Boolean(target.displayName),
-        );
-      mentions.clearMentions();
-      for (const target of targets) {
-        mentions.registerMentionPubkey(target.displayName, target.pubkey, {
-          isAgent: true,
-        });
-      }
-      isRestoringRef.current = true;
-      hydratedRef.current = true;
-      return (
-        targets.map((target) => `@${target.displayName}`).join(" ") +
-        (targets.length > 0 ? " " : "")
+  const resolvePostSendContent = React.useCallback(() => {
+    if (!audienceScope || isEditingRef.current) return "";
+    const targets = audience.pubkeys
+      .map((pubkey) => ({
+        pubkey,
+        displayName: mentions.getMentionDisplayName(pubkey),
+      }))
+      .filter((target): target is { pubkey: string; displayName: string } =>
+        Boolean(target.displayName),
       );
-    },
-    [audience.enabled, audience.pubkeys, audienceScope, mentions],
-  );
+    mentions.clearMentions();
+    for (const target of targets) {
+      mentions.registerMentionPubkey(target.displayName, target.pubkey, {
+        isAgent: true,
+      });
+    }
+    isRestoringRef.current = true;
+    hydratedRef.current = true;
+    return (
+      targets.map((target) => `@${target.displayName}`).join(" ") +
+      (targets.length > 0 ? " " : "")
+    );
+  }, [audience.pubkeys, audienceScope, mentions]);
 
   return {
     audience,

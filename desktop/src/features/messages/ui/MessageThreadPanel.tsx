@@ -1,11 +1,7 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
-import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
-import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
-import { normalizePubkey } from "@/shared/lib/pubkey";
-import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import {
   buildThreadSummaryFromVisibleEntries,
   hasNestedThreadBranches,
@@ -533,29 +529,6 @@ export function MessageThreadPanel({
     "padding",
     settleAtBottomAfterLayout,
   );
-  const knownAgentPubkeys = useKnownAgentPubkeys();
-  const initialAgentPubkeys = React.useMemo(() => {
-    if (
-      !threadHead ||
-      !currentPubkey ||
-      normalizePubkey(threadHead.signerPubkey ?? threadHead.pubkey ?? "") !==
-        normalizePubkey(currentPubkey)
-    ) {
-      return [];
-    }
-    const { mentionPubkeysByName } = resolveMentionProps(
-      threadHead.tags,
-      profiles,
-    );
-    if (!mentionPubkeysByName) return [];
-
-    return orderMentionPubkeysByText(
-      threadHead.body,
-      mentionPubkeysByName,
-      (pubkey) =>
-        knownAgentPubkeys.has(pubkey) || profiles?.[pubkey]?.isAgent === true,
-    );
-  }, [currentPubkey, knownAgentPubkeys, profiles, threadHead]);
   const stableSendToChannel = useStableSendToChannel(
     channelId,
     threadHead,
@@ -897,7 +870,6 @@ export function MessageThreadPanel({
               audienceContext={{
                 type: "thread",
                 threadRootId: threadHead.id,
-                initialAgentPubkeys,
               }}
               channelId={channelId}
               channelName={channelName}

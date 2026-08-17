@@ -1,22 +1,14 @@
 import * as React from "react";
 
-const ENABLED_STORAGE_KEY = "buzz:keep-addressed-agents-active";
 const AUDIENCES_STORAGE_KEY = "buzz:persistent-agent-audiences:v2";
 export const MAX_PERSISTENT_AGENT_AUDIENCES = 200;
 
 const listeners = new Set<() => void>();
-const revisions = new Map<string, number>();
-let revisionClock = 0;
-let defaultRevision = 0;
-let generation = 0;
-let enabled = readEnabled();
 let audiences = readAudiences();
 let snapshot = buildSnapshot();
 
 export type PersistentAgentAudienceSnapshot = Readonly<{
-  enabled: boolean;
   audiences: Readonly<Record<string, readonly string[]>>;
-  generation: number;
 }>;
 
 type PersistentAgentAudienceScopeInput = {
@@ -29,15 +21,6 @@ function normalizePubkeys(pubkeys: Iterable<string>): string[] {
   return [
     ...new Set([...pubkeys].map((pubkey) => pubkey.trim().toLowerCase())),
   ].filter((pubkey) => /^[0-9a-f]{64}$/.test(pubkey));
-}
-
-function readEnabled(): boolean {
-  if (typeof window === "undefined") return false;
-  try {
-    return window.localStorage.getItem(ENABLED_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
 }
 
 function boundAudiences(
@@ -73,7 +56,7 @@ function readAudiences(): Record<string, string[]> {
 }
 
 function buildSnapshot(): PersistentAgentAudienceSnapshot {
-  return { enabled, audiences, generation };
+  return { audiences };
 }
 
 function emit(): void {
@@ -92,30 +75,6 @@ function persistAudiences(): void {
   }
 }
 
-function advanceRevision(scope: string): void {
-  revisionClock += 1;
-  revisions.set(scope, revisionClock);
-}
-
-export function setPersistentAgentAudienceEnabled(nextEnabled: boolean): void {
-  if (enabled === nextEnabled) return;
-  enabled = nextEnabled;
-  if (!nextEnabled) {
-    generation += 1;
-    revisionClock += 1;
-    defaultRevision = revisionClock;
-    revisions.clear();
-    audiences = {};
-    persistAudiences();
-  }
-  try {
-    window.localStorage.setItem(ENABLED_STORAGE_KEY, nextEnabled ? "1" : "0");
-  } catch {
-    // Persistence is best-effort.
-  }
-  emit();
-}
-
 export function getPersistentAgentAudienceScope({
   ownerPubkey,
   channelId,
@@ -123,27 +82,9 @@ export function getPersistentAgentAudienceScope({
 }: PersistentAgentAudienceScopeInput): string | null {
   const owner = ownerPubkey.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(owner) || !channelId) return null;
-  if (!threadRootId) return null;
-  return `${owner}:${channelId}:thread:${threadRootId}`;
-}
-
-export function getPersistentAgentAudienceGeneration(): number {
-  return generation;
-}
-
-export function getPersistentAgentAudienceRevision(scope: string): number {
-  return revisions.get(scope) ?? defaultRevision;
-}
-
-export function initializePersistentAgentAudience(
-  scope: string,
-  pubkeys: Iterable<string>,
-): void {
-  if (!enabled || !scope) return;
-  setPersistentAgentAudience(
-    scope,
-    Object.hasOwn(audiences, scope) ? audiences[scope] : pubkeys,
-  );
+  return threadRootId
+    ? `${owner}:${channelId}:thread:${threadRootId}`
+    : `${owner}:${channelId}:channel`;
 }
 
 export function setPersistentAgentAudience(
@@ -169,38 +110,15 @@ export function setPersistentAgentAudience(
   const nextAudiences = { ...audiences };
   delete nextAudiences[scope];
   audiences = boundAudiences({ ...nextAudiences, [scope]: normalized });
-  for (const revisedScope of revisions.keys()) {
-    if (!Object.hasOwn(audiences, revisedScope)) revisions.delete(revisedScope);
-  }
-  advanceRevision(scope);
   persistAudiences();
   emit();
 }
 
-export function promotePersistentAgentAudience({
-  expectedGeneration,
-  expectedRevision,
-  explicitAgentPubkeys,
-  scope,
-}: {
-  expectedGeneration: number;
-  expectedRevision: number | null;
-  explicitAgentPubkeys: string[];
-  scope: string | null;
-}): void {
-  if (
-    !enabled ||
-    expectedGeneration !== generation ||
-    !scope ||
-    (expectedRevision !== null &&
-      getPersistentAgentAudienceRevision(scope) !== expectedRevision)
-  ) {
-    return;
-  }
-  setPersistentAgentAudience(scope, [
-    ...explicitAgentPubkeys,
-    ...(audiences[scope] ?? []),
-  ]);
+export function addPersistentAgentAudienceMember(
+  scope: string,
+  pubkey: string,
+): void {
+  setPersistentAgentAudience(scope, [...(audiences[scope] ?? []), pubkey]);
 }
 
 export function removePersistentAgentAudienceMember(
@@ -225,21 +143,14 @@ function getSnapshot(): PersistentAgentAudienceSnapshot {
 }
 
 const serverSnapshot: PersistentAgentAudienceSnapshot = {
-  enabled: false,
   audiences: {},
-  generation: 0,
 };
 
 export function usePersistentAgentAudience(scope: string | null): {
-  enabled: boolean;
   pubkeys: readonly string[];
-  generation: number;
-  revision: number;
-  setEnabled: (enabled: boolean) => void;
-  promotePubkeys: typeof promotePersistentAgentAudience;
+  addPubkey: (pubkey: string) => void;
   removePubkey: (pubkey: string) => void;
   clear: () => void;
-  initialize: (pubkeys: Iterable<string>) => void;
 } {
   const state = React.useSyncExternalStore(
     subscribe,
@@ -248,24 +159,17 @@ export function usePersistentAgentAudience(scope: string | null): {
   );
   const resolvedScope = scope ?? "";
   return {
-    enabled: state.enabled,
     pubkeys: resolvedScope ? (state.audiences[resolvedScope] ?? []) : [],
-    generation: state.generation,
-    revision: resolvedScope
-      ? getPersistentAgentAudienceRevision(resolvedScope)
-      : 0,
-    setEnabled: setPersistentAgentAudienceEnabled,
-    promotePubkeys: promotePersistentAgentAudience,
+    addPubkey: React.useCallback(
+      (pubkey) => addPersistentAgentAudienceMember(resolvedScope, pubkey),
+      [resolvedScope],
+    ),
     removePubkey: React.useCallback(
       (pubkey) => removePersistentAgentAudienceMember(resolvedScope, pubkey),
       [resolvedScope],
     ),
     clear: React.useCallback(
       () => setPersistentAgentAudience(resolvedScope, []),
-      [resolvedScope],
-    ),
-    initialize: React.useCallback(
-      (pubkeys) => initializePersistentAgentAudience(resolvedScope, pubkeys),
       [resolvedScope],
     ),
   };

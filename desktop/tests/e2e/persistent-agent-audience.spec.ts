@@ -10,11 +10,11 @@ const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
 const SCOPE = `${OWNER}:${CHANNEL_ID}:thread:${THREAD_ROOT_ID}`;
+const CHANNEL_SCOPE = `${OWNER}:${CHANNEL_ID}:channel`;
 
 async function seedAudience(page: Page, pubkeys: string[], theme = "buzz") {
   await page.addInitScript(
     ({ audience, scope, selectedTheme }) => {
-      window.localStorage.setItem("buzz:keep-addressed-agents-active", "1");
       window.localStorage.setItem(
         "buzz:persistent-agent-audiences:v2",
         JSON.stringify({ [scope]: audience }),
@@ -38,32 +38,6 @@ async function openThread(page: Page, threadRootId = THREAD_ROOT_ID) {
     { waitUntil: "domcontentloaded" },
   );
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-}
-
-async function emitRootMessage(
-  page: Page,
-  content: string,
-  mentionPubkeys: string[],
-) {
-  const event = await page.evaluate(
-    ({ message, pubkeys }) =>
-      (
-        window as Window & {
-          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
-            channelName: string;
-            content: string;
-            mentionPubkeys: string[];
-          }) => { id: string };
-        }
-      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
-        content: message,
-        mentionPubkeys: pubkeys,
-      }),
-    { message: content, pubkeys: mentionPubkeys },
-  );
-  if (!event) throw new Error("Mock message emitter is not installed");
-  return event;
 }
 
 function channelComposer(page: Page) {
@@ -97,42 +71,55 @@ async function installAudienceFixtures(
   });
 }
 
-test("first thread open inherits explicitly addressed agents in authored order", async ({
+test("locks multiple agents from the mention picker without closing it", async ({
   page,
 }) => {
-  await page.addInitScript(() => {
-    window.localStorage.setItem("buzz:keep-addressed-agents-active", "1");
-  });
   await installAudienceFixtures(page);
   await openGeneral(page);
-  const root = await emitRootMessage(
-    page,
-    "@Vogue please pair with @Morgarita",
-    // Event tag order deliberately opposes authored mention order.
-    [AGENT_A, AGENT_B],
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await composer.getByTestId("message-insert-mention").click();
+
+  const menu = composer.getByTestId("mention-autocomplete");
+  await expect(menu).toBeVisible();
+  await expect(menu.getByTestId("mention-address-lock-hint")).toHaveText(
+    "Hover an agent avatar to keep it addressed",
   );
 
-  await openThread(page, root.id);
+  const morgaritaRow = menu.getByTestId(`mention-suggestion-${AGENT_A}`);
+  const morgaritaLock = menu.getByTestId(`mention-address-lock-${AGENT_A}`);
+  await morgaritaRow.hover();
+  await expect(morgaritaLock).toBeVisible();
+  await morgaritaLock.click();
+  await expect(menu).toBeVisible();
+  await expect(morgaritaLock).toHaveAttribute("aria-pressed", "true");
 
-  const input = threadComposer(page).getByTestId("message-input");
-  await expect(input).toHaveText("@Vogue @Morgarita ");
+  const vogueRow = menu.getByTestId(`mention-suggestion-${AGENT_B}`);
+  const vogueLock = menu.getByTestId(`mention-address-lock-${AGENT_B}`);
+  await vogueRow.hover();
+  await vogueLock.click();
+
+  await expect(menu).toBeVisible();
+  await expect(vogueLock).toHaveAttribute("aria-pressed", "true");
+  await expect(input).toHaveText("@Morgarita @Vogue ");
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(2);
   await expect
     .poll(() =>
       page.evaluate(
-        ({ owner, channelId, rootId }) => {
+        ({ scope }) => {
           const stored = JSON.parse(
             localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
           );
-          return stored[`${owner}:${channelId}:thread:${rootId}`] ?? null;
+          return stored[scope] ?? null;
         },
-        { owner: OWNER, channelId: CHANNEL_ID, rootId: root.id },
+        { scope: CHANNEL_SCOPE },
       ),
     )
-    .toEqual([AGENT_B, AGENT_A]);
+    .toEqual([AGENT_A, AGENT_B]);
 });
 
-test("persistent agents transition atomically before Enter-send resolves", async ({
+test("locked agents transition atomically before Enter-send resolves", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -199,10 +186,9 @@ test("persistent agents transition atomically before Enter-send resolves", async
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
 });
 
-test("timeline agent send remains one-shot and returns to the placeholder", async ({
+test("ordinary agent mentions remain one-shot and return to the placeholder", async ({
   page,
 }) => {
-  await seedAudience(page, [AGENT_A]);
   await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
   await openGeneral(page);
 
@@ -239,7 +225,7 @@ test("timeline agent send remains one-shot and returns to the placeholder", asyn
     .toEqual({ collapsed: true, inside: true });
 });
 
-test("persistent agents restore through the native inline mention UI", async ({
+test("locked agents restore through the native inline mention UI", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_B, AGENT_A]);
@@ -274,7 +260,9 @@ test("persistent agents restore through the native inline mention UI", async ({
 });
 
 for (const theme of ["buzz", "buzz-dark"]) {
-  test(`captures native persistent mentions in ${theme}`, async ({ page }) => {
+  test(`captures native address-locked mentions in ${theme}`, async ({
+    page,
+  }) => {
     await seedAudience(page, [AGENT_A, AGENT_B], theme);
     await installAudienceFixtures(page);
     await openThread(page);
@@ -288,7 +276,9 @@ for (const theme of ["buzz", "buzz-dark"]) {
   });
 }
 
-test("native persistent mentions fit the narrow composer", async ({ page }) => {
+test("native address-locked mentions fit the narrow composer", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 700, height: 760 });
   await seedAudience(page, [AGENT_A, AGENT_B]);
   await installAudienceFixtures(page);

@@ -32,19 +32,18 @@ import {
 } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { AutocompleteEdit } from "./useRichTextEditor";
-import type {
-  AgentPersona,
-  ChannelMember,
-  ChannelType,
-} from "@/shared/api/types";
+import type { ChannelMember, ChannelType } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
 import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
-import { hasMention } from "./hasMention";
 import { extractMentionPubkeys } from "./extractMentionPubkeys";
+import {
+  extractMentionPersonasFromMaps,
+  type PersonaMentionTarget,
+} from "./extractMentionPersonas";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
@@ -60,10 +59,6 @@ import {
 } from "./mentionCandidates";
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
-export type PersonaMentionTarget = {
-  displayName: string;
-  persona: AgentPersona;
-};
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
@@ -794,6 +789,18 @@ export function useMentions(
     [],
   );
 
+  const openMentionPicker = React.useCallback((cursorPosition: number) => {
+    autocompleteGenerationRef.current += 1;
+    if (debounceTimerRef.current !== null) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    flushedMentionStartIndexRef.current = null;
+    setMentionQuery("");
+    setMentionStartIndex(cursorPosition);
+    setMentionSelectedIndex(0);
+  }, []);
+
   const extractMentionPubkeysForCurrentMentions = React.useCallback(
     (text: string): string[] => {
       const extracted = extractMentionPubkeys({
@@ -830,26 +837,12 @@ export function useMentions(
   });
 
   const extractMentionPersonas = React.useCallback(
-    (text: string): PersonaMentionTarget[] => {
-      const targets: PersonaMentionTarget[] = [];
-      const seen = new Set<string>();
-
-      for (const [displayName, personaId] of personaMentionMapRef.current) {
-        if (seen.has(personaId) || !hasMention(text, displayName)) {
-          continue;
-        }
-
-        const persona = activePersonaById.get(personaId);
-        if (!persona) {
-          continue;
-        }
-
-        targets.push({ displayName, persona });
-        seen.add(personaId);
-      }
-
-      return targets;
-    },
+    (text: string): PersonaMentionTarget[] =>
+      extractMentionPersonasFromMaps(
+        text,
+        personaMentionMapRef.current,
+        activePersonaById,
+      ),
     [activePersonaById],
   );
 
@@ -985,6 +978,7 @@ export function useMentions(
     knownNames: highlightNames,
     memberPubkeys,
     mentionSelectedIndex,
+    openMentionPicker,
     registerMentionPubkey,
     restoreDraftMentionRefs,
     suggestions,

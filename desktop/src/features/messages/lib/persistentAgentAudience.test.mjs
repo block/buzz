@@ -66,94 +66,36 @@ test("conversation scopes isolate identities, channels, and threads", async () =
   assert.equal(new Set(Object.keys(savedAudiences())).size, 4);
 });
 
-test("successful fast send promotes without a persisted draft key", async () => {
+test("address locks can be added independently", async () => {
   const store = await loadStore(1);
   const scope = store.getPersistentAgentAudienceScope({
     ownerPubkey: ownerA,
     channelId: "channel-a",
     threadRootId: "root",
   });
-  store.setPersistentAgentAudienceEnabled(true);
-
-  store.promotePersistentAgentAudience({
-    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
-    scope,
-    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
-    explicitAgentPubkeys: [agentA],
-  });
-
-  assert.deepEqual(savedAudiences(), { [scope]: [agentA] });
-});
-
-test("explicit recipients merge and dedupe after successful send", async () => {
-  const store = await loadStore(2);
-  const scope = `${ownerA}:channel-a:timeline`;
-  store.setPersistentAgentAudienceEnabled(true);
-  store.setPersistentAgentAudience(scope, [agentA]);
-  const revision = store.getPersistentAgentAudienceRevision(scope);
-
-  store.promotePersistentAgentAudience({
-    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
-    scope,
-    expectedRevision: revision,
-    explicitAgentPubkeys: [agentA, agentB],
-  });
+  store.addPersistentAgentAudienceMember(scope, agentA);
+  store.addPersistentAgentAudienceMember(scope, agentB);
 
   assert.deepEqual(savedAudiences(), { [scope]: [agentA, agentB] });
 });
 
-test("successful send makes authored mention order authoritative", async () => {
-  const store = await loadStore(100);
-  const scope = `${ownerA}:channel-a:timeline`;
-  store.setPersistentAgentAudienceEnabled(true);
+test("adding an existing address lock preserves order and dedupes", async () => {
+  const store = await loadStore(2);
+  const scope = `${ownerA}:channel-a:channel`;
+  store.setPersistentAgentAudience(scope, [agentA, agentB]);
+  store.addPersistentAgentAudienceMember(scope, agentA);
+
+  assert.deepEqual(savedAudiences(), { [scope]: [agentA, agentB] });
+});
+
+test("address locks can be removed independently", async () => {
+  const store = await loadStore(3);
+  const scope = `${ownerA}:channel-a:channel`;
   store.setPersistentAgentAudience(scope, [agentA, agentB]);
 
-  store.promotePersistentAgentAudience({
-    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
-    scope,
-    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
-    explicitAgentPubkeys: [agentB, agentA, agentC],
-  });
-
-  assert.deepEqual(savedAudiences(), {
-    [scope]: [agentB, agentA, agentC],
-  });
-});
-
-test("successful send retains saved targets absent from the draft", async () => {
-  const store = await loadStore(101);
-  const scope = `${ownerA}:channel-a:timeline`;
-  store.setPersistentAgentAudienceEnabled(true);
-  store.setPersistentAgentAudience(scope, [agentA, agentC]);
-
-  store.promotePersistentAgentAudience({
-    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
-    scope,
-    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
-    explicitAgentPubkeys: [agentB, agentA],
-  });
-
-  assert.deepEqual(savedAudiences(), {
-    [scope]: [agentB, agentA, agentC],
-  });
-});
-
-test("removal while send awaits wins over late success", async () => {
-  const store = await loadStore(3);
-  const scope = `${ownerA}:channel-a:timeline`;
-  store.setPersistentAgentAudienceEnabled(true);
-  store.setPersistentAgentAudience(scope, [agentA]);
-  const revisionAtSubmit = store.getPersistentAgentAudienceRevision(scope);
-
   store.removePersistentAgentAudienceMember(scope, agentA);
-  store.promotePersistentAgentAudience({
-    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
-    scope,
-    expectedRevision: revisionAtSubmit,
-    explicitAgentPubkeys: [agentA],
-  });
 
-  assert.deepEqual(savedAudiences(), { [scope]: [] });
+  assert.deepEqual(savedAudiences(), { [scope]: [agentB] });
 });
 
 test("removing final chip preserves an explicit empty scope", async () => {
@@ -163,24 +105,6 @@ test("removing final chip preserves an explicit empty scope", async () => {
   store.removePersistentAgentAudienceMember(scope, agentA);
 
   assert.deepEqual(savedAudiences(), { [scope]: [] });
-});
-
-test("completion after disabling cannot repopulate audiences", async () => {
-  const store = await loadStore(5);
-  const scope = `${ownerA}:channel-a:timeline`;
-  store.setPersistentAgentAudienceEnabled(true);
-  store.setPersistentAgentAudience(scope, [agentA]);
-  const revisionAtSubmit = store.getPersistentAgentAudienceRevision(scope);
-  store.setPersistentAgentAudienceEnabled(false);
-
-  store.promotePersistentAgentAudience({
-    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
-    scope,
-    expectedRevision: revisionAtSubmit,
-    explicitAgentPubkeys: [agentB],
-  });
-
-  assert.deepEqual(savedAudiences(), {});
 });
 
 test("invalid, duplicate, and differently-cased pubkeys normalize", async () => {
@@ -193,21 +117,6 @@ test("invalid, duplicate, and differently-cased pubkeys normalize", async () => 
   ]);
 
   assert.deepEqual(savedAudiences(), { [scope]: [agentA] });
-});
-
-test("new recipients retain explicit mention order", async () => {
-  const store = await loadStore(9);
-  const scope = `${ownerA}:channel-a:timeline`;
-  store.setPersistentAgentAudienceEnabled(true);
-
-  store.promotePersistentAgentAudience({
-    expectedGeneration: store.getPersistentAgentAudienceGeneration(),
-    scope,
-    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
-    explicitAgentPubkeys: [agentB, agentA],
-  });
-
-  assert.deepEqual(savedAudiences(), { [scope]: [agentB, agentA] });
 });
 
 test("persistent audiences retain only the 200 most recently touched scopes", async () => {
@@ -273,7 +182,6 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
     return null;
   }
   await React.act(async () => root.render(React.createElement(Probe)));
-  const revision = store.getPersistentAgentAudienceRevision(touchedScope);
   const renderCountBeforeTouch = renderCount;
   writes.length = 0;
 
@@ -285,10 +193,6 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
   assert.equal(writes[0][0], storageKey);
   assert.deepEqual(JSON.parse(writes[0][1])[touchedScope], [agentA]);
   assert.equal(Object.keys(JSON.parse(writes[0][1])).at(-1), touchedScope);
-  assert.equal(
-    store.getPersistentAgentAudienceRevision(touchedScope),
-    revision,
-  );
   assert.equal(renderCount, renderCountBeforeTouch);
 
   writes.length = 0;
@@ -296,10 +200,6 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
     store.setPersistentAgentAudience(touchedScope, [agentA]);
   });
   assert.equal(writes.length, 0);
-  assert.equal(
-    store.getPersistentAgentAudienceRevision(touchedScope),
-    revision,
-  );
   assert.equal(renderCount, renderCountBeforeTouch);
 
   await React.act(async () => {
@@ -309,35 +209,22 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
   assert.deepEqual(saved[touchedScope], [agentA]);
   assert.equal(saved["scope-1"], undefined);
   assert.deepEqual(saved["scope-new"], [agentB]);
-  assert.equal(
-    store.getPersistentAgentAudienceRevision(touchedScope),
-    revision,
-  );
-
   await React.act(async () => root.unmount());
   dom.window.close();
 });
 
-test("timeline scope is intentionally unsupported", async () => {
+test("channel and thread scopes are distinct", async () => {
   const store = await loadStore(7);
-  assert.equal(
-    store.getPersistentAgentAudienceScope({
-      ownerPubkey: ownerA,
-      channelId: "channel-a",
-    }),
-    null,
-  );
-});
+  const channelScope = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "channel-a",
+  });
+  const threadScope = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "channel-a",
+    threadRootId: "root",
+  });
 
-test("thread root audience initializes once and explicit clear wins on reopen", async () => {
-  const store = await loadStore(10);
-  const scope = `${ownerA}:channel-a:thread:root`;
-  store.setPersistentAgentAudienceEnabled(true);
-
-  store.initializePersistentAgentAudience(scope, [agentB, agentA]);
-  assert.deepEqual(savedAudiences(), { [scope]: [agentB, agentA] });
-
-  store.setPersistentAgentAudience(scope, []);
-  store.initializePersistentAgentAudience(scope, [agentA]);
-  assert.deepEqual(savedAudiences(), { [scope]: [] });
+  assert.equal(channelScope, `${ownerA}:channel-a:channel`);
+  assert.equal(threadScope, `${ownerA}:channel-a:thread:root`);
 });

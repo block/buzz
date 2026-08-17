@@ -54,6 +54,7 @@ import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
+import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
@@ -122,9 +123,12 @@ function MessageComposerImpl({
   const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
-  const audienceThreadRootId = audienceContext?.threadRootId ?? null;
+  const audienceThreadRootId =
+    audienceContext?.type === "thread"
+      ? (audienceContext.threadRootId ?? null)
+      : null;
   const audienceScope =
-    audienceThreadRootId && channelId && ownerPubkey
+    audienceContext && channelId && ownerPubkey
       ? getPersistentAgentAudienceScope({
           ownerPubkey,
           channelId,
@@ -291,7 +295,6 @@ function MessageComposerImpl({
   const persistentMentionHydration = usePersistentAgentMentionHydration({
     audienceScope,
     hydrationKey: effectiveDraftKey,
-    initialAgentPubkeys: audienceContext?.initialAgentPubkeys,
     isEditing: editTarget != null,
     mentions,
     richText,
@@ -322,17 +325,6 @@ function MessageComposerImpl({
     clearQueuedAttachments: media.clearQueuedAttachments,
     restoreQueuedAttachments: media.restoreQueuedAttachments,
     setSpoileredAttachmentUrls,
-    onSuccessfulExplicitAgentAudience:
-      persistentAudience.enabled && audienceContext && ownerPubkey
-        ? ({ channelId: successfulChannelId, ...promotion }) => {
-            const scope = getPersistentAgentAudienceScope({
-              ownerPubkey,
-              channelId: successfulChannelId,
-              threadRootId: audienceThreadRootId,
-            });
-            persistentAudience.promotePubkeys({ ...promotion, scope });
-          }
-        : undefined,
     resolvePostSendContent: persistentMentionHydration.resolvePostSendContent,
   });
   React.useEffect(() => {
@@ -401,7 +393,6 @@ function MessageComposerImpl({
   }, [composerDisabled, replyTarget, richText.focusPreserve]);
   // ── Autofocus on mount / channel switch ─────────────────────────────
   useComposerAutofocus(richText.focus, effectiveDraftKey, composerDisabled);
-  // ── Mention / channel / emoji autocomplete insertion ────────────────
   // Hooks return a plain-text edit descriptor; `replacePlainTextRange`
   // applies it as a single ProseMirror transaction (no markdown round-trip).
   const applyAutocompleteEdit = React.useCallback(
@@ -426,6 +417,14 @@ function MessageComposerImpl({
       richText.getPlainTextAndCursor,
     ],
   );
+  const { lockedAgentPubkeys, toggleAgentAddressLock } =
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit,
+      audience: persistentAudience,
+      audienceScope,
+      mentions,
+      richText,
+    });
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();
@@ -494,20 +493,14 @@ function MessageComposerImpl({
       richText.focus();
       return;
     }
-    // Insert @ at cursor
-    const previousChar = text.slice(0, cursor).slice(-1);
-    const prefix =
-      cursor > 0 && previousChar && !/\s/.test(previousChar) ? " @" : "@";
-    richText.editor.chain().focus().insertContent(prefix).run();
     setIsEmojiPickerOpen(false);
-    // Trigger mention detection after inserting @
-    const { text: updatedText, cursor: updatedCursor } =
-      richText.getPlainTextAndCursor();
-    mentions.updateMentionQuery(updatedText, updatedCursor);
+    mentions.openMentionPicker(cursor);
+    richText.focus();
   }, [
     richText.editor,
     richText.getPlainTextAndCursor,
     richText.focus,
+    mentions.openMentionPicker,
     mentions.updateMentionQuery,
   ]);
   const submitMessage = React.useCallback(async () => {
@@ -601,8 +594,6 @@ function MessageComposerImpl({
         recoveryDraftKey: effectiveDraftKey,
         spoileredAttachmentUrls,
         trimmed,
-        audienceGeneration: persistentAudience.generation,
-        audienceRevision: audienceScope ? persistentAudience.revision : null,
       });
     } finally {
       isSubmitLockedRef.current = false;
@@ -633,10 +624,7 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     onCaptureSendContext,
     onPreparingMentionSendChange,
-    audienceScope,
     persistentMentionHydration,
-    persistentAudience.generation,
-    persistentAudience.revision,
     isEditSubmissionLocked,
     effectiveDraftKey,
     mentions.getDraftMentionRefs,
@@ -920,8 +908,14 @@ function MessageComposerImpl({
               }
             />
             <MentionAutocomplete
+              lockedAgentPubkeys={lockedAgentPubkeys}
               onFetchMore={mentions.fetchMoreSuggestions}
               onSelect={applyMentionInsert}
+              onToggleAgentLock={
+                audienceScope && editTarget == null
+                  ? toggleAgentAddressLock
+                  : undefined
+              }
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
             />

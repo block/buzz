@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Bot, Users } from "lucide-react";
+import { Bot, Lock, LockOpen, Users } from "lucide-react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 
 import { Badge } from "@/shared/ui/badge";
@@ -32,6 +32,8 @@ type MentionAutocompleteProps = {
   selectedIndex: number;
   onFetchMore?: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
+  lockedAgentPubkeys?: ReadonlySet<string>;
+  onToggleAgentLock?: (suggestion: MentionSuggestion) => void;
   position?: "above" | "below";
 };
 
@@ -40,14 +42,16 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   selectedIndex,
   onFetchMore,
   onSelect,
+  lockedAgentPubkeys,
+  onToggleAgentLock,
   position = "above",
 }: MentionAutocompleteProps) {
   const listRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
-    const activeItem = listRef.current?.children[selectedIndex] as
-      | HTMLElement
-      | undefined;
+    const activeItem = listRef.current?.querySelector<HTMLElement>(
+      `[data-mention-suggestion-index="${selectedIndex}"]`,
+    );
     activeItem?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
@@ -94,6 +98,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
         ref={listRef}
         style={POPOVER_SHADOW_STYLE}
       >
+        {onToggleAgentLock ? (
+          <div
+            className="px-3 py-1.5 text-2xs font-medium text-muted-foreground"
+            data-testid="mention-address-lock-hint"
+          >
+            Hover an agent avatar to keep it addressed
+          </div>
+        ) : null}
         {suggestions.map((suggestion, index) => {
           const suggestionKey =
             suggestion.pubkey ??
@@ -107,114 +119,175 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             hasNameCollision && suggestion.pubkey
               ? safeNpub(suggestion.pubkey)
               : null;
+          const canAddressLock = Boolean(
+            onToggleAgentLock && suggestion.isAgent && suggestion.pubkey,
+          );
+          const isAddressLocked = Boolean(
+            suggestion.pubkey &&
+              lockedAgentPubkeys?.has(suggestion.pubkey.toLowerCase()),
+          );
 
           return (
-            <button
+            <div
               className={cn(
-                "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
+                "group flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
                 index === selectedIndex
                   ? "bg-accent text-accent-foreground"
                   : "text-popover-foreground hover:bg-accent/50",
               )}
               data-testid={`mention-suggestion-${suggestionKey}`}
+              data-mention-suggestion-index={index}
               key={suggestionKey}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                onSelect(suggestion);
-              }}
-              tabIndex={-1}
-              type="button"
             >
-              {suggestion.kind === "team" ? (
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-                  <Users aria-hidden="true" className="h-4 w-4" />
-                </span>
-              ) : (
-                <UserAvatar
-                  avatarUrl={suggestion.avatarUrl ?? null}
-                  displayName={suggestion.displayName}
-                  size="xs"
-                  testId="mention-suggestion-avatar"
-                />
-              )}
-              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span
-                  className="min-w-0 break-words font-medium leading-snug"
-                  title={suggestion.displayName}
+              <span className="relative h-6 w-6 shrink-0">
+                <button
+                  aria-label={`Mention ${suggestion.displayName}`}
+                  className={cn(
+                    "absolute inset-0 transition-opacity",
+                    canAddressLock &&
+                      (isAddressLocked
+                        ? "pointer-events-none opacity-0"
+                        : "group-hover:pointer-events-none group-hover:opacity-0 group-focus-within:pointer-events-none group-focus-within:opacity-0"),
+                  )}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    onSelect(suggestion);
+                  }}
+                  tabIndex={-1}
+                  type="button"
                 >
-                  {suggestion.displayName}
-                </span>
-                {suggestion.kind === "team" ||
-                suggestion.isAgent ||
-                suggestion.role ||
-                suggestion.ownerLabel ||
-                suggestion.notInChannel ? (
-                  <span
+                  {suggestion.kind === "team" ? (
+                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-primary">
+                      <Users aria-hidden="true" className="h-4 w-4" />
+                    </span>
+                  ) : (
+                    <UserAvatar
+                      avatarUrl={suggestion.avatarUrl ?? null}
+                      displayName={suggestion.displayName}
+                      size="xs"
+                      testId="mention-suggestion-avatar"
+                    />
+                  )}
+                </button>
+                {canAddressLock ? (
+                  <button
+                    aria-label={`${isAddressLocked ? "Stop keeping" : "Keep"} ${suggestion.displayName} addressed`}
+                    aria-pressed={isAddressLocked}
                     className={cn(
-                      "flex min-w-0 items-center gap-1.5 text-2xs leading-none",
-                      index === selectedIndex
-                        ? "text-accent-foreground/60"
-                        : "text-muted-foreground",
+                      "absolute -inset-0.5 inline-flex h-7 w-7 items-center justify-center rounded-full border transition-[background-color,border-color,color,opacity]",
+                      isAddressLocked
+                        ? "pointer-events-auto border-primary/30 bg-primary/15 text-primary opacity-100"
+                        : "pointer-events-none border-border/60 bg-background text-muted-foreground opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100 hover:bg-accent hover:text-foreground",
                     )}
+                    data-testid={`mention-address-lock-${suggestion.pubkey}`}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onToggleAgentLock?.(suggestion);
+                    }}
+                    title={
+                      isAddressLocked
+                        ? "Address locked — click to make one-shot"
+                        : "Keep addressed after sending"
+                    }
+                    type="button"
                   >
-                    {suggestion.kind === "team" ? (
-                      <span className="inline-flex shrink-0 items-center gap-1">
-                        <Users aria-hidden="true" className="h-3.5 w-3.5" />
-                        team · {suggestion.teamMembers?.length ?? 0} agents
-                      </span>
-                    ) : suggestion.isAgent ? (
-                      <span className="inline-flex shrink-0 items-center gap-1">
-                        <Bot
-                          aria-hidden="true"
-                          className="h-3.5 w-3.5"
-                          data-testid="mention-agent-icon"
-                        />
-                        {agentLabel}
-                      </span>
-                    ) : suggestion.role ? (
-                      <Badge
-                        className="max-w-24 shrink-0 truncate"
-                        variant="secondary"
-                      >
-                        {suggestion.role}
-                      </Badge>
-                    ) : null}
-                    {suggestion.ownerLabel || suggestion.notInChannel ? (
-                      <span
-                        className="min-w-0 truncate"
-                        title={
-                          suggestion.ownerLabel && suggestion.notInChannel
+                    {isAddressLocked ? (
+                      <Lock aria-hidden="true" className="h-3.5 w-3.5" />
+                    ) : (
+                      <LockOpen aria-hidden="true" className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                ) : null}
+              </span>
+              <button
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  onSelect(suggestion);
+                }}
+                tabIndex={-1}
+                type="button"
+              >
+                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span
+                    className="min-w-0 break-words font-medium leading-snug"
+                    title={suggestion.displayName}
+                  >
+                    {suggestion.displayName}
+                  </span>
+                  {suggestion.kind === "team" ||
+                  suggestion.isAgent ||
+                  suggestion.role ||
+                  suggestion.ownerLabel ||
+                  suggestion.notInChannel ? (
+                    <span
+                      className={cn(
+                        "flex min-w-0 items-center gap-1.5 text-2xs leading-none",
+                        index === selectedIndex
+                          ? "text-accent-foreground/60"
+                          : "text-muted-foreground",
+                      )}
+                    >
+                      {suggestion.kind === "team" ? (
+                        <span className="inline-flex shrink-0 items-center gap-1">
+                          <Users aria-hidden="true" className="h-3.5 w-3.5" />
+                          team · {suggestion.teamMembers?.length ?? 0} agents
+                        </span>
+                      ) : suggestion.isAgent ? (
+                        <span className="inline-flex shrink-0 items-center gap-1">
+                          <Bot
+                            aria-hidden="true"
+                            className="h-3.5 w-3.5"
+                            data-testid="mention-agent-icon"
+                          />
+                          {agentLabel}
+                        </span>
+                      ) : suggestion.role ? (
+                        <Badge
+                          className="max-w-24 shrink-0 truncate"
+                          variant="secondary"
+                        >
+                          {suggestion.role}
+                        </Badge>
+                      ) : null}
+                      {suggestion.ownerLabel || suggestion.notInChannel ? (
+                        <span
+                          className="min-w-0 truncate"
+                          title={
+                            suggestion.ownerLabel && suggestion.notInChannel
+                              ? `managed by ${suggestion.ownerLabel} · not in channel`
+                              : suggestion.ownerLabel
+                                ? `managed by ${suggestion.ownerLabel}`
+                                : "not in channel"
+                          }
+                        >
+                          {suggestion.ownerLabel && suggestion.notInChannel
                             ? `managed by ${suggestion.ownerLabel} · not in channel`
                             : suggestion.ownerLabel
                               ? `managed by ${suggestion.ownerLabel}`
-                              : "not in channel"
-                        }
-                      >
-                        {suggestion.ownerLabel && suggestion.notInChannel
-                          ? `managed by ${suggestion.ownerLabel} · not in channel`
-                          : suggestion.ownerLabel
-                            ? `managed by ${suggestion.ownerLabel}`
-                            : "not in channel"}
-                      </span>
-                    ) : null}
-                  </span>
-                ) : null}
-                {collisionNpub ? (
-                  <span
-                    className={cn(
-                      "min-w-0 truncate font-mono text-2xs leading-snug",
-                      index === selectedIndex
-                        ? "text-accent-foreground/60"
-                        : "text-muted-foreground",
-                    )}
-                    data-testid="mention-collision-npub"
-                    title={collisionNpub}
-                  >
-                    {truncatePubkey(collisionNpub)}
-                  </span>
-                ) : null}
-              </span>
-            </button>
+                              : "not in channel"}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : null}
+                  {collisionNpub ? (
+                    <span
+                      className={cn(
+                        "min-w-0 truncate font-mono text-2xs leading-snug",
+                        index === selectedIndex
+                          ? "text-accent-foreground/60"
+                          : "text-muted-foreground",
+                      )}
+                      data-testid="mention-collision-npub"
+                      title={collisionNpub}
+                    >
+                      {truncatePubkey(collisionNpub)}
+                    </span>
+                  ) : null}
+                </span>
+              </button>
+            </div>
           );
         })}
       </div>
