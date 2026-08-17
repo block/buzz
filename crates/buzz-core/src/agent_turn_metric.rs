@@ -63,6 +63,70 @@ pub enum StopReason {
     Unknown,
 }
 
+/// Normalized terminal outcome of an ACP turn.
+///
+/// Consumers must preserve the metric when a newer producer sends an unknown
+/// value; such values degrade to [`TurnOutcome::Unknown`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOutcome {
+    /// The ACP prompt completed successfully.
+    Success,
+    /// The turn was intentionally cancelled.
+    Cancelled,
+    /// The turn terminated unsuccessfully.
+    Failed,
+    /// The producer or a newer wire value cannot be classified.
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for TurnOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "success" => Self::Success,
+            "cancelled" => Self::Cancelled,
+            "failed" => Self::Failed,
+            _ => Self::Unknown,
+        })
+    }
+}
+
+/// Evidence at the ACP boundary that made a turn terminal.
+///
+/// This describes the terminal protocol path, not whether every tool invoked
+/// during the turn succeeded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalEvidence {
+    /// A successful `session/prompt` response made the turn terminal.
+    PromptResponse,
+    /// A successful `session/cancel` response made the turn terminal.
+    CancelResponse,
+    /// The adapter process exited while the turn was active.
+    AgentExit,
+    /// An idle or hard deadline made the turn terminal.
+    Timeout,
+    /// An ACP protocol or adapter error made the turn terminal.
+    Error,
+    /// The producer or a newer wire value cannot be classified.
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for TerminalEvidence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "prompt_response" => Self::PromptResponse,
+            "cancel_response" => Self::CancelResponse,
+            "agent_exit" => Self::AgentExit,
+            "timeout" => Self::Timeout,
+            "error" => Self::Error,
+            _ => Self::Unknown,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for StopReason {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
@@ -125,6 +189,46 @@ pub struct AgentTurnMetricPayload {
 
     /// Turn identifier (harness-internal).
     pub turn_id: Option<String>,
+
+    /// Signed Buzz events that caused this ACP turn, in batch order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggering_event_ids: Vec<String>,
+
+    /// NIP-10 root of the newest triggering reply, when threaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_event_id: Option<String>,
+
+    /// Immediate NIP-10 parent of the newest triggering reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<String>,
+
+    /// RFC 3339 timestamp captured before session/context preparation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+
+    /// Normalized terminal outcome at the ACP boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<TurnOutcome>,
+
+    /// Protocol evidence that made the turn terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<TerminalEvidence>,
+
+    /// ACP adapter session identifier used for `session/prompt`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter_session_id: Option<String>,
+
+    /// Distinct runtime-native session identifier, when explicitly reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_session_id: Option<String>,
+
+    /// Runtime/provider request identifier, when explicitly reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_request_id: Option<String>,
+
+    /// Exact runtime stop value, when available without inference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_stop_reason: Option<String>,
 
     /// Monotonically increasing per-session sequence number.
     /// REQUIRED when `cumulative` is present; strictly increasing within one
@@ -235,6 +339,16 @@ mod tests {
             channel_id: Some("12345678-1234-1234-1234-123456789abc".to_string()),
             session_id: Some("sess-abc".to_string()),
             turn_id: Some("turn-1".to_string()),
+            triggering_event_ids: vec!["event-1".to_string(), "event-2".to_string()],
+            root_event_id: Some("root-1".to_string()),
+            parent_event_id: Some("parent-1".to_string()),
+            started_at: Some("2026-07-01T20:10:59.000Z".to_string()),
+            outcome: Some(TurnOutcome::Success),
+            terminal_evidence: Some(TerminalEvidence::PromptResponse),
+            adapter_session_id: Some("sess-abc".to_string()),
+            runtime_session_id: None,
+            runtime_request_id: None,
+            native_stop_reason: Some("EndTurn".to_string()),
             turn_seq: Some(1),
             timestamp: "2026-07-01T20:11:03.213Z".to_string(),
             turn: Some(TokenCounts {
@@ -315,6 +429,47 @@ mod tests {
     }
 
     #[test]
+    fn old_payload_omits_new_provenance_fields() {
+        let json = r#"{"harness":"goose","timestamp":"2026-07-01T20:11:03Z"}"#;
+        let payload: AgentTurnMetricPayload = serde_json::from_str(json).expect("old payload");
+        assert!(payload.triggering_event_ids.is_empty());
+        assert!(payload.root_event_id.is_none());
+        assert!(payload.parent_event_id.is_none());
+        assert!(payload.started_at.is_none());
+        assert!(payload.outcome.is_none());
+        assert!(payload.terminal_evidence.is_none());
+        assert!(payload.adapter_session_id.is_none());
+    }
+
+    #[test]
+    fn unknown_terminal_values_degrade_to_unknown() {
+        let json = r#"{
+            "harness":"future-adapter",
+            "timestamp":"2026-07-01T20:11:03Z",
+            "outcome":"partially_successful",
+            "terminalEvidence":"future_protocol_signal"
+        }"#;
+        let payload: AgentTurnMetricPayload = serde_json::from_str(json).expect("future payload");
+        assert_eq!(payload.outcome, Some(TurnOutcome::Unknown));
+        assert_eq!(payload.terminal_evidence, Some(TerminalEvidence::Unknown));
+    }
+
+    #[test]
+    fn no_usage_payload_is_valid() {
+        let mut payload = sample_payload();
+        payload.turn = None;
+        payload.cumulative = None;
+        payload.turn_seq = None;
+        payload.delta_reliable = false;
+        assert!(payload.validate().is_ok());
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let decoded: AgentTurnMetricPayload = serde_json::from_str(&json).expect("deserialize");
+        assert!(decoded.turn.is_none());
+        assert!(decoded.cumulative.is_none());
+        assert!(!decoded.delta_reliable);
+    }
+
+    #[test]
     fn stop_reason_round_trips() {
         for (variant, json_val) in [
             (StopReason::EndTurn, "\"end_turn\""),
@@ -388,6 +543,16 @@ mod tests {
             channel_id: None,
             session_id: None,
             turn_id: None,
+            triggering_event_ids: Vec::new(),
+            root_event_id: None,
+            parent_event_id: None,
+            started_at: None,
+            outcome: None,
+            terminal_evidence: None,
+            adapter_session_id: None,
+            runtime_session_id: None,
+            runtime_request_id: None,
+            native_stop_reason: None,
             turn_seq: None,
             timestamp: "2026-07-01T00:00:00Z".to_string(),
             turn: Some(TokenCounts {
@@ -412,6 +577,16 @@ mod tests {
             channel_id: None,
             session_id: None,
             turn_id: None,
+            triggering_event_ids: Vec::new(),
+            root_event_id: None,
+            parent_event_id: None,
+            started_at: None,
+            outcome: None,
+            terminal_evidence: None,
+            adapter_session_id: None,
+            runtime_session_id: None,
+            runtime_request_id: None,
+            native_stop_reason: None,
             turn_seq: None,
             timestamp: "2026-07-01T00:00:00Z".to_string(),
             turn: None,

@@ -83,6 +83,16 @@ The `content` field decrypts to a UTF-8 JSON object:
   "channelId": "<channel_uuid>" | null,
   "sessionId": "<session_id>"  | null,   // REQUIRED when "cumulative" is present
   "turnId":    "<turn_id>"     | null,
+  "triggeringEventIds": ["<event_id>", "..."], // OPTIONAL; signed Buzz inputs, batch order
+  "rootEventId":   "<event_id>" | null, // OPTIONAL NIP-10 root
+  "parentEventId": "<event_id>" | null, // OPTIONAL immediate NIP-10 parent
+  "startedAt": "2026-07-01T20:10:58.100Z" | null, // OPTIONAL ACP-boundary start
+  "outcome": "success",                  // OPTIONAL normalized terminal outcome
+  "terminalEvidence": "prompt_response", // OPTIONAL ACP terminal evidence
+  "adapterSessionId": "<acp_session_id>" | null,
+  "runtimeSessionId": "<native_session_id>" | null,
+  "runtimeRequestId": "<native_request_id>" | null,
+  "nativeStopReason": "EndTurn" | null,
   "turnSeq":   17 | null,                // REQUIRED when "cumulative" is present
   "timestamp": "2026-07-01T20:11:03.213Z", // REQUIRED: RFC 3339, end of turn
 
@@ -132,6 +142,36 @@ The `content` field decrypts to a UTF-8 JSON object:
 nullable, except as constrained below: `pricingIdentity` is optional but not
 nullable (omit it entirely rather than set it to null). Consumers MUST ignore
 unknown fields (forward compatibility).
+
+### Field classes and provenance
+
+Fields captured directly by the ACP normalization boundary are **core ACP
+fields**: `channelId`, `turnId`, `triggeringEventIds`, `rootEventId`,
+`parentEventId`, `startedAt`, `timestamp`, `outcome`, `terminalEvidence`, and
+`adapterSessionId`. A batch can legitimately contain multiple signed inputs;
+publishers preserve every ID in batch order and MUST NOT invent one canonical
+trigger. `rootEventId` and `parentEventId` follow NIP-10 semantics of the newest
+triggering reply. Unthreaded and internal turns omit them; internal turns have
+an empty or omitted `triggeringEventIds` array.
+
+`runtimeSessionId`, `runtimeRequestId`, and `nativeStopReason` are
+**runtime-declared fields**. Publishers include them only when the adapter or
+runtime explicitly provides the value. `adapterSessionId` names the ACP
+session used for `session/prompt`; consumers MUST NOT assume it is identical
+to a runtime-native namespace merely because sampled values match.
+
+Diagnostic coverage fields are a **future optional class**. This revision
+defines no observer-coverage, context-pressure, compaction, or response-event
+linkage fields. Observer telemetry remains diagnostic rather than accounting
+authority.
+
+`startedAt` is captured before session and prompt-context preparation;
+`timestamp` is the completion/report time. `outcome` is one of `success`,
+`cancelled`, `failed`, or `unknown`. `terminalEvidence` is one of
+`prompt_response`, `cancel_response`, `agent_exit`, `timeout`, `error`, or
+`unknown`. Consumers MUST map unrecognized values of either enum to `unknown`
+without rejecting the metric. A tool failure does not imply `failed`; outcome
+describes the terminal ACP turn.
 
 ### Ordering and delta recomputation
 
