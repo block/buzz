@@ -9,12 +9,17 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
-import { useAgentCircuitStatus } from "@/features/agents/observerRelayStore";
+import {
+  circuitCooldownRemainingMs,
+  useAgentCircuitStatus,
+} from "@/features/agents/observerRelayStore";
+import { formatDurationMs } from "@/features/agents/ui/agentSessionUtils";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
+import { useNow } from "@/shared/lib/useNow";
 import { Badge } from "@/shared/ui/badge";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -228,12 +233,23 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
  * reachable, mirroring RestartDiffBadge's non-interactive tooltip pattern.
  */
 function CircuitOpenStatusBadge({
+  circuitStatus,
   dataTestId,
-  message,
 }: {
+  circuitStatus: ReturnType<typeof useAgentCircuitStatus>;
   dataTestId: string | undefined;
-  message: string | null;
 }) {
+  // See CircuitOpenBadge in ManagedAgentRow.tsx for why this ticks every
+  // second — same shared-timer useNow, cheap even with many suspended agents.
+  const now = useNow(1000);
+  const remainingMs = circuitCooldownRemainingMs(circuitStatus, now);
+  const label =
+    remainingMs === null
+      ? "Suspended — repeated crashes"
+      : remainingMs > 0
+        ? `Suspended — retrying in ${formatDurationMs(remainingMs)}`
+        : "Suspended — health check pending";
+
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -241,14 +257,14 @@ function CircuitOpenStatusBadge({
           className="gap-1"
           data-testid={dataTestId}
           tabIndex={0}
-          variant="destructive"
+          variant={remainingMs === 0 ? "warning" : "destructive"}
         >
           <AlertTriangle className="h-3 w-3" />
-          Suspended — repeated crashes
+          {label}
         </Badge>
       </TooltipTrigger>
       <TooltipContent className="max-w-72 text-xs" side="bottom">
-        {message ?? "Agent suspended (repeated crashes)."}
+        {circuitStatus.message ?? "Agent suspended (repeated crashes)."}
       </TooltipContent>
     </Tooltip>
   );
@@ -364,10 +380,10 @@ function AgentPersonaCard({
       statusBadge={
         circuitStatus.isOpen ? (
           <CircuitOpenStatusBadge
+            circuitStatus={circuitStatus}
             dataTestId={
               agent ? `managed-agent-circuit-open-${agent.pubkey}` : undefined
             }
-            message={circuitStatus.message}
           />
         ) : agent?.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
@@ -453,8 +469,8 @@ function StandaloneAgentCard({
       statusBadge={
         circuitStatus.isOpen ? (
           <CircuitOpenStatusBadge
+            circuitStatus={circuitStatus}
             dataTestId={`managed-agent-circuit-open-${agent.pubkey}`}
-            message={circuitStatus.message}
           />
         ) : agent.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">

@@ -7,9 +7,15 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
-import { useAgentCircuitStatus } from "@/features/agents/observerRelayStore";
+import {
+  circuitCooldownRemainingMs,
+  useAgentCircuitStatus,
+} from "@/features/agents/observerRelayStore";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import {
+  formatDurationMs,
+  formatElapsed,
+} from "@/features/agents/ui/agentSessionUtils";
 import { useNow } from "@/shared/lib/useNow";
 import type {
   ManagedAgent,
@@ -359,18 +365,29 @@ function WorkingBadge({
 }
 
 function CircuitOpenBadge({
-  channelId,
-  message,
+  circuitStatus,
 }: {
-  channelId: string | null;
-  message: string | null;
+  circuitStatus: ReturnType<typeof useAgentCircuitStatus>;
 }) {
   const { goChannel } = useAppNavigation();
+  const { channelId, message } = circuitStatus;
   const activate = channelId
     ? () => {
         void goChannel(channelId);
       }
     : undefined;
+
+  // Ticks every second so the cooldown countdown stays live. Shared timer
+  // across same-interval useNow consumers (see this repo's CLAUDE.md) — cheap
+  // even with many suspended agents in the list at once.
+  const now = useNow(1000);
+  const remainingMs = circuitCooldownRemainingMs(circuitStatus, now);
+  const label =
+    remainingMs === null
+      ? "Suspended — repeated crashes"
+      : remainingMs > 0
+        ? `Suspended — retrying in ${formatDurationMs(remainingMs)}`
+        : "Suspended — health check pending";
 
   return (
     <Tooltip>
@@ -383,7 +400,10 @@ function CircuitOpenBadge({
           data-testid="managed-agent-circuit-open"
           role={activate ? "button" : undefined}
           tabIndex={0}
-          variant="destructive"
+          // Amber once the cooldown window has elapsed — a still-open circuit
+          // at that point means a health probe should be underway, not a
+          // fresh crash, so it reads as "recovering" rather than "on fire".
+          variant={remainingMs === 0 ? "warning" : "destructive"}
           onClick={
             activate
               ? (e) => {
@@ -405,7 +425,7 @@ function CircuitOpenBadge({
           }
         >
           <AlertTriangle className="h-3 w-3" />
-          Suspended — repeated crashes
+          {label}
         </Badge>
       </TooltipTrigger>
       <TooltipContent className="max-w-72 text-xs" side="bottom">
@@ -443,10 +463,7 @@ function StatusBlock({
           status={status}
         />
         {circuitStatus.isOpen ? (
-          <CircuitOpenBadge
-            channelId={circuitStatus.channelId}
-            message={circuitStatus.message}
-          />
+          <CircuitOpenBadge circuitStatus={circuitStatus} />
         ) : null}
       </div>
       <p className="text-xs text-muted-foreground">{processDetail}</p>

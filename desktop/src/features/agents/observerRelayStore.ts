@@ -32,6 +32,7 @@ import {
 import {
   applyCircuitEvent,
   getAgentCircuitStatus,
+  getOpenCircuitPubkeySignature,
   resetCircuitState,
   type AgentCircuitStatus,
 } from "./agentCircuitStatus";
@@ -41,7 +42,9 @@ export {
   isObserverEventAfter,
 } from "./lib/observerEventOrdering";
 export {
+  circuitCooldownRemainingMs,
   getAgentCircuitStatus,
+  getOpenCircuitPubkeySignature,
   type AgentCircuitStatus,
 } from "./agentCircuitStatus";
 
@@ -91,6 +94,32 @@ export function useAgentCircuitStatus(
   return React.useSyncExternalStore(subscribeAgentObserverStore, () =>
     getAgentCircuitStatus(agentPubkey),
   );
+}
+
+/**
+ * The subset of `agents` whose circuit is currently open. Generic over the
+ * caller's own agent shape so it works with any `{ pubkey: string }`-shaped
+ * roster (e.g. a channel's bot list) without this module needing to know
+ * about it. The `useSyncExternalStore` snapshot is a primitive signature
+ * string (see `getOpenCircuitPubkeySignature`) rather than an array, so it's
+ * reference-stable across renders where nothing changed without this module
+ * needing a cache; the actual `T[]` is then derived per-render via a normal
+ * `useMemo` keyed on both `agents` and that signature.
+ */
+export function useOpenCircuitAgents<T extends { pubkey: string }>(
+  agents: readonly T[],
+): T[] {
+  const signature = React.useSyncExternalStore(
+    subscribeAgentObserverStore,
+    () => getOpenCircuitPubkeySignature(agents.map((agent) => agent.pubkey)),
+  );
+  return React.useMemo(() => {
+    if (!signature) return [];
+    const openPubkeys = new Set(signature.split(","));
+    return agents.filter((agent) =>
+      openPubkeys.has(normalizePubkey(agent.pubkey)),
+    );
+  }, [agents, signature]);
 }
 
 // Per-agent eviction floor: the ordering key of the newest event that eviction

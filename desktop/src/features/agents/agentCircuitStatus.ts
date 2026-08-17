@@ -7,6 +7,11 @@ export type AgentCircuitStatus = {
   message: string | null;
   channelId: string | null;
   timestamp: string | null;
+  /** Backend cooldown window in seconds (`CIRCUIT_BREAKER_COOLDOWN`), from the
+   *  circuit_open event's payload. Anchored at `timestamp`, so the caller
+   *  computes remaining time itself — see `circuitCooldownRemainingMs`. Null
+   *  when unknown (e.g. a circuit_recovered event, which carries no cooldown). */
+  cooldownSecs: number | null;
 };
 
 const IDLE_CIRCUIT_STATUS: AgentCircuitStatus = {
@@ -14,6 +19,7 @@ const IDLE_CIRCUIT_STATUS: AgentCircuitStatus = {
   message: null,
   channelId: null,
   timestamp: null,
+  cooldownSecs: null,
 };
 
 // Latest known circuit-breaker state per (agent, slot). Slots are independent
@@ -27,6 +33,7 @@ type CircuitSlotState = {
   channelId: string | null;
   timestamp: string;
   seq: number;
+  cooldownSecs: number | null;
 };
 const circuitStateBySlot = new Map<string, CircuitSlotState>();
 
@@ -59,19 +66,28 @@ export function applyCircuitEvent(
   if (existing && !isObserverEventAfter(event, existing)) {
     return false;
   }
-  const payload = event.payload as { error?: unknown } | null;
+  const payload = event.payload as {
+    error?: unknown;
+    cooldown_secs?: unknown;
+  } | null;
   const message =
     typeof payload?.error === "string"
       ? payload.error
       : event.kind === "circuit_open"
         ? "Agent suspended (repeated crashes)"
         : "Agent recovered";
+  const cooldownSecs =
+    typeof payload?.cooldown_secs === "number" &&
+    Number.isFinite(payload.cooldown_secs)
+      ? payload.cooldown_secs
+      : null;
   circuitStateBySlot.set(key, {
     isOpen: event.kind === "circuit_open",
     message,
     channelId: event.channelId ?? null,
     timestamp: event.timestamp,
     seq: event.seq,
+    cooldownSecs,
   });
   circuitStatusCache.delete(normalizePubkey(agentPubkey));
   return true;
@@ -107,10 +123,58 @@ export function getAgentCircuitStatus(
         message: openSlot.message,
         channelId: openSlot.channelId,
         timestamp: openSlot.timestamp,
+        cooldownSecs: openSlot.cooldownSecs,
       }
     : IDLE_CIRCUIT_STATUS;
   circuitStatusCache.set(key, status);
   return status;
+}
+
+/**
+ * Comma-joined, sorted normalized pubkeys (from the given candidates) whose
+ * circuit is currently open. A primitive string rather than an array so
+ * callers can drive `useSyncExternalStore` directly with it — string equality
+ * gives reference-stability for free (`Object.is` on equal strings), with no
+ * cache to invalidate or leak, unlike returning a fresh array each call would
+ * require. Callers needing the actual agent objects re-derive them from this
+ * signature with a plain `useMemo` (see `BotActivityComposerAction`).
+ */
+export function getOpenCircuitPubkeySignature(
+  agentPubkeys: readonly string[],
+): string {
+  return agentPubkeys
+    .filter((pubkey) => getAgentCircuitStatus(pubkey).isOpen)
+    .map(normalizePubkey)
+    .sort()
+    .join(",");
+}
+
+/**
+ * Milliseconds remaining in the circuit's cooldown window, or null when not
+ * open or the cooldown is unknown. Clamped to 0 rather than negative once the
+ * window has elapsed — callers use that to distinguish "still cooling down"
+ * from "cooldown elapsed, health probe should be underway" without needing to
+ * re-derive the sign themselves. Pure function of `status` and `nowMs` so the
+ * caller supplies its own ticking clock (e.g. `useNow`) rather than this
+ * module owning a timer.
+ */
+export function circuitCooldownRemainingMs(
+  status: AgentCircuitStatus,
+  nowMs: number,
+): number | null {
+  if (
+    !status.isOpen ||
+    status.timestamp == null ||
+    status.cooldownSecs == null
+  ) {
+    return null;
+  }
+  const openedAtMs = Date.parse(status.timestamp);
+  if (!Number.isFinite(openedAtMs)) {
+    return null;
+  }
+  const remaining = openedAtMs + status.cooldownSecs * 1000 - nowMs;
+  return remaining > 0 ? remaining : 0;
 }
 
 /** Clears all per-agent circuit state. Called from resetAgentObserverStore so
