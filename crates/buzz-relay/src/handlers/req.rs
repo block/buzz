@@ -186,6 +186,28 @@ pub async fn handle_req(
         }
     }
 
+    let authorized_requested_channels = requested_channel_ids.as_ref().map(|requested| {
+        requested
+            .iter()
+            .copied()
+            .filter(|channel_id| accessible_channels.contains(channel_id))
+            .collect::<Vec<_>>()
+    });
+    // Partial authorization preserves NIP-01 OR semantics by omitting only
+    // inaccessible branches. If no valid requested channel survives, retain the
+    // established single-channel contract: reject instead of registering a
+    // subscription that can never produce an event or a terminal notice.
+    if authorized_requested_channels
+        .as_ref()
+        .is_some_and(|authorized| authorized.is_empty())
+    {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "restricted: not a channel member",
+        ));
+        return;
+    }
+
     // Applied BEFORE the NIP-50 search branch so that an authenticated member
     // cannot use `{"search":"...","kinds":[30174]}` (or similar for p-gated
     // kinds) to harvest indexed-but-globally-stored sensitive events. Search
@@ -252,13 +274,6 @@ pub async fn handle_req(
         subs.insert(sub_id.clone(), filters.clone());
     }
 
-    let authorized_requested_channels = requested_channel_ids.as_ref().map(|requested| {
-        requested
-            .iter()
-            .copied()
-            .filter(|channel_id| accessible_channels.contains(channel_id))
-            .collect::<Vec<_>>()
-    });
     let replaced = if let Some(channel_ids) = authorized_requested_channels.as_ref() {
         state.sub_registry.register_channels_scoped(
             conn.tenant.community(),

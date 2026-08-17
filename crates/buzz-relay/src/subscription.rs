@@ -72,6 +72,15 @@ pub struct RemovedSubscription {
     pub scope: SubscriptionScope,
 }
 
+/// Result of removing one revoked channel from a live subscription scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelSubscriptionUpdate {
+    /// Client-supplied subscription identifier.
+    pub sub_id: SubId,
+    /// Whether no authorized channels remain and the subscription was removed.
+    pub removed: bool,
+}
+
 /// Thread-safe registry of active subscriptions with targeted in-memory fan-out indexes.
 #[derive(Debug, Default)]
 pub struct SubscriptionRegistry {
@@ -274,13 +283,15 @@ impl SubscriptionRegistry {
         removed
     }
 
-    /// Remove all subscriptions on `conn_id` scoped to `channel_id` in one community.
+    /// Remove one revoked channel from every matching subscription in a community.
+    /// Multi-channel subscriptions are re-indexed with their remaining scope;
+    /// subscriptions with no channels left are removed entirely.
     pub fn remove_channel_subscriptions_scoped(
         &self,
         community_id: CommunityId,
         conn_id: ConnId,
         channel_id: Uuid,
-    ) -> Vec<(SubId, RemovedSubscription)> {
+    ) -> Vec<ChannelSubscriptionUpdate> {
         let sub_ids: Vec<SubId> = self
             .subs
             .get(&conn_id)
@@ -296,13 +307,34 @@ impl SubscriptionRegistry {
             })
             .unwrap_or_default();
 
-        sub_ids
-            .into_iter()
-            .filter_map(|sub_id| {
-                let removed = self.remove_subscription(conn_id, &sub_id)?;
-                Some((sub_id, removed))
-            })
-            .collect()
+        let mut updates = Vec::with_capacity(sub_ids.len());
+        for sub_id in sub_ids {
+            let Some(mut conn_subs) = self.subs.get_mut(&conn_id) else {
+                break;
+            };
+            let Some((filters, _, scope)) = conn_subs.get_mut(&sub_id) else {
+                continue;
+            };
+            let filters = filters.clone();
+            let SubscriptionScope::Channels(channel_ids) = scope else {
+                continue;
+            };
+            channel_ids.retain(|candidate| *candidate != channel_id);
+            let removed = channel_ids.is_empty();
+            self.remove_from_index(
+                conn_id,
+                &sub_id,
+                &filters,
+                community_id,
+                &SubscriptionScope::Channels(vec![channel_id]),
+            );
+            if removed {
+                conn_subs.remove(&sub_id);
+                metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
+            }
+            updates.push(ChannelSubscriptionUpdate { sub_id, removed });
+        }
+        updates
     }
 
     /// Test-only convenience wrapper preserving the original single-tenant test API.
@@ -310,7 +342,8 @@ impl SubscriptionRegistry {
     pub fn remove_channel_subscriptions(&self, conn_id: ConnId, channel_id: Uuid) -> Vec<SubId> {
         self.remove_channel_subscriptions_scoped(test_community(), conn_id, channel_id)
             .into_iter()
-            .map(|(sub_id, _)| sub_id)
+            .filter(|update| update.removed)
+            .map(|update| update.sub_id)
             .collect()
     }
 
@@ -1799,6 +1832,54 @@ mod tests {
         assert_eq!(
             registry.fan_out_scoped(community_b, &event),
             vec![(conn_b, "b".to_string())]
+        );
+    }
+
+    #[test]
+    fn revoking_one_channel_keeps_multi_channel_subscription_live() {
+        let registry = SubscriptionRegistry::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xaaaa));
+        let conn = Uuid::new_v4();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let filters = vec![Filter::new().kind(Kind::TextNote)];
+        registry.register_channels_scoped(
+            community,
+            conn,
+            "multi".to_string(),
+            filters,
+            vec![channel_a, channel_b],
+        );
+
+        let updates = registry.remove_channel_subscriptions_scoped(community, conn, channel_a);
+        assert_eq!(
+            updates,
+            vec![ChannelSubscriptionUpdate {
+                sub_id: "multi".to_string(),
+                removed: false,
+            }]
+        );
+        assert!(registry
+            .fan_out_scoped(
+                community,
+                &make_stored_event(Kind::TextNote, Some(channel_a))
+            )
+            .is_empty());
+        assert_eq!(
+            registry.fan_out_scoped(
+                community,
+                &make_stored_event(Kind::TextNote, Some(channel_b))
+            ),
+            vec![(conn, "multi".to_string())]
+        );
+
+        let updates = registry.remove_channel_subscriptions_scoped(community, conn, channel_b);
+        assert_eq!(
+            updates,
+            vec![ChannelSubscriptionUpdate {
+                sub_id: "multi".to_string(),
+                removed: true,
+            }]
         );
     }
 

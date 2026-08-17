@@ -116,28 +116,24 @@ async fn evict_conn_channel_subscriptions(
 
     if let Some(subscriptions) = state.conn_manager.subscriptions_for(conn_id) {
         let mut conn_subscriptions = subscriptions.lock().await;
-        for (sub_id, _) in &removed {
-            conn_subscriptions.remove(sub_id);
+        for update in &removed {
+            if update.removed {
+                conn_subscriptions.remove(&update.sub_id);
+            }
         }
     }
 
-    for (sub_id, removed_scope) in removed {
-        if removed_scope.scope.is_global() {
-            state
-                .pubsub
-                .release_topic(tenant, buzz_pubsub::EventTopic::Global)
-                .await;
+    for update in removed {
+        state
+            .pubsub
+            .release_topic(tenant, buzz_pubsub::EventTopic::Channel(channel_id))
+            .await;
+        if update.removed {
+            let _ = state.conn_manager.send_to(
+                conn_id,
+                RelayMessage::closed(&update.sub_id, "restricted: channel access revoked"),
+            );
         }
-        for &channel_id in removed_scope.scope.channel_ids() {
-            state
-                .pubsub
-                .release_topic(tenant, buzz_pubsub::EventTopic::Channel(channel_id))
-                .await;
-        }
-        let _ = state.conn_manager.send_to(
-            conn_id,
-            RelayMessage::closed(&sub_id, "restricted: channel access revoked"),
-        );
     }
 }
 
