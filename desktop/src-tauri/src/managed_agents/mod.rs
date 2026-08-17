@@ -12,6 +12,10 @@ mod backend;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
 mod definition_validation;
+#[cfg(debug_assertions)]
+mod dev_service_migration;
+#[cfg(debug_assertions)]
+pub(crate) use dev_service_migration::migrate_agent_secrets_to_dev_service;
 mod discovery;
 pub(crate) mod effective_config;
 mod env_vars;
@@ -34,6 +38,8 @@ pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+pub(crate) mod secret_projection;
+pub(crate) mod secret_seam;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;
 pub(crate) mod storage;
@@ -52,6 +58,7 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub use backend::*;
+pub(crate) use custom_harnesses::{effective_secrets_unavailable, unavailable_harness_id};
 pub(crate) use definition_validation::{
     validate_agent_definition_text, validate_managed_agent_definition_text,
 };

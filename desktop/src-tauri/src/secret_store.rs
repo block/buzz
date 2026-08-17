@@ -86,6 +86,78 @@ fn blob_lockfile_path(service: &str) -> PathBuf {
     }
 }
 
+/// Resolve the directory whose inode is the cross-process *transaction* lock
+/// target for the store physically held by `store_file`
+/// (`managed-agents.json`).
+///
+/// The transaction lock is deliberately NOT keyed like the per-operation blob
+/// lock. That lock is a service-keyed lockfile under `/tmp`; this one is the
+/// store's own **directory inode**. Two properties fall out of that choice,
+/// and both are load-bearing:
+///
+/// - **Stable shared identity, independent of keyring service.**
+///   `managed-agents.json` is symlinked *per file* across dev worktrees while
+///   its parent directory is not (see `migration::SHARED_AGENT_FILES`), so
+///   resolving the file through its symlink and taking the real parent yields
+///   the one canonical directory every process sharing the store contends on —
+///   even when `keyring_service()` hands those processes different scoped
+///   services. Keying by service would let two processes share one JSON inode
+///   while taking different locks; keying by the resolved directory cannot.
+///
+/// - **Immunity to the unlink/recreate split.** A `/tmp` lockfile can be
+///   unlinked by a temp cleaner while a process holds its `flock`; a second
+///   process then recreates the pathname, locks a fresh inode, and both
+///   "hold" the lock. A directory that holds the store files is non-empty and
+///   lives in the owner's app-data tree: no tmp-cleaner unlinks it and
+///   `rmdir` refuses a non-empty directory, so the inode a held lock refers to
+///   cannot be swapped out underneath a second participant.
+///
+/// Falls back to the file's own parent when the file does not exist yet (first
+/// boot, before anything is written or shared) — there is no committed record
+/// to lose in that window.
+pub fn store_txn_lock_dir(store_file: &std::path::Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(store_file) {
+        if let Some(parent) = real.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    store_file
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| store_file.to_path_buf())
+}
+
+/// Upper bound on lockfile re-acquisition attempts when a tmp cleaner keeps
+/// unlinking the blob lockfile out from under us. Reaching it means the file is
+/// being churned faster than we can lock a live inode — fail loudly rather than
+/// spin forever.
+#[cfg(all(unix, feature = "system-keyring"))]
+const MAX_BLOB_LOCK_REACQUIRE: u32 = 100;
+
+/// True iff `file` (an open, `flock`-held fd) is locked on the same inode the
+/// pathname currently resolves to.
+///
+/// Called after the lock is granted to detect a tmp-cleaner unlink/recreate: a
+/// mismatch means our fd holds a lock on a now-nameless dead inode while the
+/// live pathname is a *different* inode another process can lock in parallel —
+/// two processes each "holding" the lock over different inodes, mutual
+/// exclusion lost. A missing pathname (`stat` fails) counts as not-live so the
+/// caller re-creates and re-locks the live inode.
+#[cfg(all(unix, feature = "system-keyring"))]
+fn locked_inode_is_live(file: &std::fs::File, path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(locked) = file.metadata() else {
+        return false;
+    };
+    // Compare (dev, ino): inode numbers are only unique within a device, and
+    // the open fd pins its inode number so a recreate under the same pathname
+    // is guaranteed a different one.
+    matches!(
+        std::fs::metadata(path),
+        Ok(live) if live.dev() == locked.dev() && live.ino() == locked.ino()
+    )
+}
+
 /// Acquire an exclusive advisory file lock for the blob identified by `service`.
 ///
 /// Opens (or creates) the lockfile and blocks until the lock is acquired.
@@ -119,20 +191,40 @@ impl BlobLockGuard {
     fn acquire(path: &std::path::Path) -> Result<Self, String> {
         #[cfg(unix)]
         {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(path)
-                .map_err(|e| format!("blob lock open {}: {e}", path.display()))?;
             use std::os::unix::io::AsRawFd;
-            // LOCK_EX blocks until the lock is acquired (no LOCK_NB).
-            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(format!("blob lock flock: {err}"));
+            // Loop to survive a tmp cleaner unlinking the lockfile out from
+            // under us. The classic `/tmp` lock split: we `flock` an inode, the
+            // pathname is unlinked and recreated as a fresh inode, and a second
+            // process locks that fresh inode — both "hold" the lock over
+            // different inodes. Defeat it by rechecking, after the lock is
+            // granted, that the pathname still resolves to the inode we locked.
+            // If it does not, our lock is on a dead inode: drop it and retry so
+            // we contend on the live one. LOCK_EX blocks until granted, so a
+            // stable inode converges in one pass.
+            for _ in 0..MAX_BLOB_LOCK_REACQUIRE {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(path)
+                    .map_err(|e| format!("blob lock open {}: {e}", path.display()))?;
+                // LOCK_EX blocks until the lock is acquired (no LOCK_NB).
+                let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+                if ret != 0 {
+                    let err = std::io::Error::last_os_error();
+                    return Err(format!("blob lock flock: {err}"));
+                }
+                if locked_inode_is_live(&file, path) {
+                    return Ok(BlobLockGuard { file });
+                }
+                // Stale inode: the pathname was unlinked/recreated while we
+                // blocked. Drop this fd (releasing the dead-inode lock) and
+                // retry against the live pathname.
             }
-            return Ok(BlobLockGuard { file });
+            return Err(format!(
+                "blob lock: pathname {} churned {MAX_BLOB_LOCK_REACQUIRE} times without a stable inode",
+                path.display()
+            ));
         }
 
         #[cfg(windows)]
@@ -243,6 +335,143 @@ impl SecretStore {
         use std::sync::OnceLock;
         static INSTANCE: OnceLock<SecretStore> = OnceLock::new();
         INSTANCE.get_or_init(|| SecretStore::keyring(service))
+    }
+}
+
+/// Acquire the cross-process secret **transaction** lock on the store
+/// directory identified by `store_dir` (the resolved canonical directory from
+/// [`store_txn_lock_dir`]) and hold it for the returned guard's lifetime.
+///
+/// This is the coarse lock every multi-step secret transaction must hold so
+/// two Desktop processes sharing the store cannot interleave: a save holds it
+/// from the other-half read through generation writes to the atomic JSON
+/// commit; GC holds it from the live-ref read through the blob `remove_batch`.
+/// Without it, process B's GC could delete a generation that process A wrote
+/// but has not yet committed to JSON, leaving A's committed ref dangling; or A
+/// could commit a stale pre-lock snapshot over B's committed record.
+///
+/// The lock target is the store **directory inode**, not a `/tmp` lockfile and
+/// not the keyring service — see [`store_txn_lock_dir`] for why (stable shared
+/// identity across worktrees + immunity to the unlink/recreate split).
+///
+/// Orthogonal to the per-operation `mutate_blob` lock, which flocks a separate
+/// `/tmp` lockfile ([`blob_lockfile_path`]): a `mutate_blob` inside a
+/// transaction takes a lock on a *different* object, so the two never
+/// self-deadlock. Transaction callers must not nest this lock within
+/// themselves (a second acquire in the same process blocks on its own held
+/// exclusive lock); the save/GC/global-config entry points are all leaf-level.
+///
+/// The guard is `#[must_use]` — dropping it early releases the lock. On a
+/// build without the keyring feature this is a no-op guard.
+#[cfg(feature = "system-keyring")]
+#[must_use = "the transaction lock is released when the guard is dropped"]
+pub fn transaction_lock_at(store_dir: &std::path::Path) -> Result<SecretTxnGuard, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // Open the directory read-only (never create/truncate — the store dir
+        // already exists, created by `managed_agents_base_dir`). `flock` on the
+        // directory inode blocks until the lock is acquired; no file inside can
+        // split it because a non-empty directory cannot be `rmdir`'d and its
+        // inode is fixed for the directory's lifetime.
+        let dir = std::fs::File::open(store_dir)
+            .map_err(|e| format!("txn lock open dir {}: {e}", store_dir.display()))?;
+        let ret = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(format!("txn lock flock {}: {err}", store_dir.display()));
+        }
+        Ok(SecretTxnGuard { _dir: dir })
+    }
+    #[cfg(windows)]
+    {
+        // Windows cannot `flock` a directory handle the same way, so use a
+        // named kernel mutex whose name is a deterministic hash of the
+        // resolved directory path — the same stable-identity property as the
+        // Unix directory inode, and cross-build stable so a signed build and a
+        // dev build sharing the store contend on one mutex.
+        let name_str = format!("Local\\BuzzSecretTxn-{:016x}", fnv1a64(store_dir));
+        let name_wide: Vec<u16> = name_str
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .collect();
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, INFINITE};
+        let handle = unsafe {
+            CreateMutexW(
+                std::ptr::null::<SECURITY_ATTRIBUTES>(),
+                0,
+                name_wide.as_ptr(),
+            )
+        };
+        if handle.is_null() {
+            let err = std::io::Error::last_os_error();
+            return Err(format!("txn lock CreateMutexW: {err}"));
+        }
+        let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
+        if wait_result != WAIT_OBJECT_0
+            && wait_result != windows_sys::Win32::Foundation::WAIT_ABANDONED
+        {
+            let err = std::io::Error::last_os_error();
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err(format!(
+                "txn lock WaitForSingleObject: {wait_result} / {err}"
+            ));
+        }
+        Ok(SecretTxnGuard {
+            mutex_handle: handle,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = store_dir;
+        Err("txn lock: unsupported platform".to_string())
+    }
+}
+
+/// No-op transaction lock when the keyring feature is disabled: there are no
+/// generation writes to serialize, so the guard holds nothing.
+#[cfg(not(feature = "system-keyring"))]
+#[must_use = "the transaction lock is released when the guard is dropped"]
+pub fn transaction_lock_at(_store_dir: &std::path::Path) -> Result<SecretTxnGuard, String> {
+    Ok(SecretTxnGuard {})
+}
+
+/// Deterministic 64-bit FNV-1a over a path's bytes, used only to name the
+/// Windows transaction mutex. Stable across builds (no random seed), so two
+/// Desktop builds sharing a store derive the same mutex name.
+#[cfg(all(feature = "system-keyring", windows))]
+fn fnv1a64(path: &std::path::Path) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// RAII guard for the cross-process secret transaction lock. Held for the full
+/// duration of a save (other-half read → generation writes → JSON commit) or a
+/// GC pass (live-ref read → blob remove). See [`transaction_lock_at`].
+#[must_use = "the transaction lock is released when the guard is dropped"]
+pub struct SecretTxnGuard {
+    /// The open directory fd. Never read — held purely for RAII: closing it
+    /// releases the `flock(LOCK_EX)` on the directory inode.
+    #[cfg(all(feature = "system-keyring", unix))]
+    #[allow(dead_code)]
+    _dir: std::fs::File,
+    #[cfg(all(feature = "system-keyring", windows))]
+    mutex_handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(all(feature = "system-keyring", windows))]
+impl Drop for SecretTxnGuard {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Threading::ReleaseMutex(self.mutex_handle);
+            windows_sys::Win32::Foundation::CloseHandle(self.mutex_handle);
+        }
     }
 }
 
@@ -368,13 +597,14 @@ impl SecretStore {
     /// Atomically load the blob, apply `f` to a candidate map, write back if
     /// changed, and only then advance the cache.
     ///
-    /// **Cross-process safety**: acquires an exclusive advisory file lock
-    /// (`flock(2)` on Unix, `LockFileEx` on Windows) before reading, mutating,
-    /// and writing. The lock is keyed by service name and stored in the system
-    /// temp directory, making it reachable from both the signed DMG build and
-    /// unsigned dev builds. Inside the lock a fresh `read_blob_raw()` is always
-    /// performed (even when the cache is warm) so a concurrent process's write
-    /// is never silently dropped.
+    /// **Cross-process safety**: acquires an exclusive cross-process lock
+    /// (`flock(2)` on a service-keyed lockfile in the system temp directory on
+    /// Unix, a named kernel mutex via `CreateMutexW` on Windows — see
+    /// [`BlobLockGuard`]) before reading, mutating, and writing. The Unix
+    /// lockfile is reachable from both the signed DMG build and unsigned dev
+    /// builds. Inside the lock a fresh `read_blob_raw()` is always performed
+    /// (even when the cache is warm) so a concurrent process's write is never
+    /// silently dropped.
     ///
     /// **Idempotent**: when `f` leaves the candidate equal to the freshly-read
     /// map, `write_blob_raw` is skipped entirely. On macOS the legacy
@@ -922,385 +1152,5 @@ impl SecretStore {
 }
 
 #[cfg(all(test, feature = "system-keyring"))]
-mod tests {
-    use super::*;
-
-    // Test-only constructor: pre-seed the cache without touching the OS keychain.
-    impl SecretStore {
-        fn with_cache(service: &str, cache: Option<HashMap<String, String>>) -> Self {
-            SecretStore {
-                service: service.to_string(),
-                cache: Mutex::new(cache),
-            }
-        }
-    }
-
-    #[test]
-    fn probe_returns_present_when_key_in_cache() {
-        let mut map = HashMap::new();
-        map.insert("identity".to_string(), "nsec1test".to_string());
-        let store = SecretStore::with_cache("buzz-test-cache-hit", Some(map));
-        // Cache is warm and contains "identity" — probe must return Present
-        // without touching the keychain.
-        assert_eq!(store.probe("identity"), KeyringProbe::Present);
-    }
-
-    #[test]
-    fn load_returns_value_when_key_in_cache() {
-        let mut map = HashMap::new();
-        map.insert("identity".to_string(), "nsec1test".to_string());
-        let store = SecretStore::with_cache("buzz-test-load-cache-hit", Some(map));
-        // Cache is warm and contains "identity" — load must return the value
-        // without touching the keychain.
-        assert_eq!(
-            store.load("identity").unwrap(),
-            Some("nsec1test".to_string())
-        );
-    }
-
-    // ── Cross-process race tests (require real OS keychain) ────────────────
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn test_stale_warm_cache_add_observes_prior_write() {
-        // Simulates the cross-process race that stranded Will's agent keys.
-        //
-        // Setup: two SecretStore instances for the same service (= two
-        // "processes" with separate caches). Process A warms its cache to
-        // {k1}. Process B then writes {k1, k2}. Without the fix, A's next
-        // mutate_blob would build from its stale {k1} cache and write
-        // {k1, k3}, silently dropping k2. With the fix, A always re-reads
-        // from the keychain inside the lock, so the result is {k1, k2, k3}.
-        let svc = "buzz-test-race-stale-cache";
-
-        // Clean state.
-        let setup = SecretStore::keyring(svc);
-        let _ = setup.delete("k1");
-        let _ = setup.delete("k2");
-        let _ = setup.delete("k3");
-
-        // Process A: write k1, warming its cache.
-        let store_a = SecretStore::keyring(svc);
-        store_a.store("k1", "v1").unwrap();
-
-        // Process B: write k2 (separate instance = separate cache).
-        let store_b = SecretStore::keyring(svc);
-        store_b.store("k2", "v2").unwrap();
-
-        // Process A: write k3. With the fix, A re-reads inside the lock and
-        // sees {k1, k2} before appending k3 — result must be {k1, k2, k3}.
-        store_a.store("k3", "v3").unwrap();
-
-        // Verify via a third reader (clean cache).
-        let reader = SecretStore::keyring(svc);
-        assert_eq!(
-            reader.load("k1").unwrap(),
-            Some("v1".to_string()),
-            "k1 must survive"
-        );
-        assert_eq!(
-            reader.load("k2").unwrap(),
-            Some("v2".to_string()),
-            "k2 must not be dropped"
-        );
-        assert_eq!(
-            reader.load("k3").unwrap(),
-            Some("v3".to_string()),
-            "k3 must be written"
-        );
-
-        // Cleanup.
-        let _ = reader.delete("k1");
-        let _ = reader.delete("k2");
-        let _ = reader.delete("k3");
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn test_concurrent_adds_neither_key_dropped() {
-        // Two sequential stores from distinct instances (simulating two
-        // processes each adding one key) must both be durably visible.
-        let svc = "buzz-test-race-concurrent-add";
-
-        let setup = SecretStore::keyring(svc);
-        let _ = setup.delete("agent_a");
-        let _ = setup.delete("agent_b");
-
-        let store1 = SecretStore::keyring(svc);
-        store1.store("agent_a", "nsec1aaa").unwrap();
-
-        let store2 = SecretStore::keyring(svc);
-        store2.store("agent_b", "nsec1bbb").unwrap();
-
-        let reader = SecretStore::keyring(svc);
-        assert_eq!(
-            reader.load("agent_a").unwrap(),
-            Some("nsec1aaa".to_string()),
-            "agent_a must not be dropped"
-        );
-        assert_eq!(
-            reader.load("agent_b").unwrap(),
-            Some("nsec1bbb".to_string()),
-            "agent_b must not be dropped"
-        );
-
-        // Cleanup.
-        let _ = reader.delete("agent_a");
-        let _ = reader.delete("agent_b");
-    }
-
-    #[test]
-    fn test_blob_lockfile_path_is_in_tmp_with_uid() {
-        // The lockfile must be at a deterministic per-user path under /tmp —
-        // invariant to $TMPDIR — so both a GUI-launched DMG (env-stripped by
-        // launchd) and a terminal-launched dev build resolve the same inode and
-        // achieve mutual exclusion.
-        let path = blob_lockfile_path("buzz-desktop");
-        #[cfg(unix)]
-        {
-            let uid = unsafe { libc::getuid() };
-            assert!(
-                path.starts_with("/tmp"),
-                "lockfile {path:?} must start with /tmp (not $TMPDIR)"
-            );
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            assert!(
-                name.contains(&uid.to_string()),
-                "lockfile {path:?} must contain uid {uid}"
-            );
-            assert!(
-                name.contains("buzz-keychain"),
-                "lockfile name must contain 'buzz-keychain'"
-            );
-        }
-        #[cfg(not(unix))]
-        {
-            assert!(
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.contains("buzz-keychain")),
-                "lockfile name must contain 'buzz-keychain'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_blob_lock_acquire_and_release() {
-        // Verify the advisory lock can be acquired and released without errors.
-        // This exercises the real flock/mutex path on the current platform.
-        let guard = acquire_blob_lock("buzz-test-lock-smoke");
-        assert!(
-            guard.is_ok(),
-            "advisory lock acquire must succeed: {:?}",
-            guard.err()
-        );
-        // Drop the guard — lock is released. A second acquire must succeed.
-        drop(guard);
-        let guard2 = acquire_blob_lock("buzz-test-lock-smoke");
-        assert!(
-            guard2.is_ok(),
-            "advisory lock re-acquire after release must succeed: {:?}",
-            guard2.err()
-        );
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn mutate_blob_does_not_advance_cache_on_write_failure() {
-        // Copy-on-write safety: if `write_blob_raw` fails (denied prompt,
-        // transient outage, ACL rejection), the cache must stay at the last
-        // known durable state. A subsequent `store()` for the same key/value
-        // must NOT be skipped as a no-op — the equality check must compare
-        // against the durable cache, not an unpersisted candidate.
-        //
-        // This is a real-keychain integration test. Run locally with:
-        //   cargo test -p buzz-desktop -- --ignored mutate_blob_does_not_advance
-        //
-        // On a machine with a reachable keychain the `store()` call succeeds
-        // (result.is_ok()) and the write-failure branch is skipped — the test
-        // still passes. On a machine where the write is denied (e.g., user
-        // clicks Deny in the macOS prompt) result.is_err() and the assertions
-        // below verify the cache invariant. We verify that after an error:
-        //   1. The cache is not advanced (the previously cached key is intact).
-        //   2. The failed key is not present (the dirty candidate was discarded).
-        let mut map = HashMap::new();
-        map.insert("existing".to_string(), "durable_val".to_string());
-        let store = SecretStore::with_cache("buzz-test-cow-write-fail", Some(map));
-
-        // Attempt to add a new key — this calls write_blob_raw against the
-        // real keychain; with copy-on-write the cache must remain at {existing}
-        // if the write fails.
-        let result = store.store("new_key", "new_val");
-
-        if result.is_err() {
-            // Write failed (e.g., user denied the keychain prompt): confirm
-            // cache was not advanced — the existing key is still intact and
-            // the new key was never committed to the in-memory state.
-            assert_eq!(
-                store.load("existing").unwrap(),
-                Some("durable_val".to_string()),
-                "cache must remain at last durable state after write failure"
-            );
-            // load("new_key") goes through the unchanged cache (no entry),
-            // then attempts migrate_legacy_key which also fails on a denied
-            // keychain, returning either Ok(None) or Err — either is correct
-            // since the key was never durably stored.
-            let after = store.load("new_key");
-            assert!(
-                matches!(after, Ok(None) | Err(_)),
-                "a key whose write failed must not be visible via load: {after:?}"
-            );
-        }
-        // If result.is_ok() the write succeeded — the cache-integrity invariant
-        // does not apply to the success path; no assertion needed here.
-    }
-
-    #[test]
-    fn availability_error_discriminator() {
-        assert!(is_keyring_availability_error("dbus connection failed"));
-        assert!(is_keyring_availability_error(
-            "org.freedesktop.secrets not provided"
-        ));
-        assert!(is_keyring_availability_error("No Secret Service"));
-        assert!(is_keyring_availability_error(
-            "Platform secure storage failure"
-        ));
-        // A plain "not found" is per-entry, not an availability failure.
-        assert!(!is_keyring_availability_error("entry not found"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn dpk_error_discriminators() {
-        // errSecMissingEntitlement = -34018 signals unsigned dev build.
-        let e = SFError::from_code(-34018);
-        assert!(is_dpk_unavailable(&e));
-        assert!(!is_not_found(&e));
-        // errSecItemNotFound = -25300 is not a DPK-unavailable error.
-        let e = SFError::from_code(-25300);
-        assert!(is_not_found(&e));
-        assert!(!is_dpk_unavailable(&e));
-    }
-
-    // Integration tests that exercise the real OS keychain. Skipped in CI
-    // (unsigned builds lack keychain entitlements); run locally with:
-    //   cargo test -p buzz-desktop -- --ignored blob_
-    //
-    // Each test uses a unique service name to avoid cross-test pollution.
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn blob_stores_and_retrieves_multiple_keys() {
-        let store = SecretStore::keyring("buzz-test-blob-multi");
-        store.store("key_a", "val_a").unwrap();
-        store.store("key_b", "val_b").unwrap();
-        assert_eq!(store.load("key_a").unwrap(), Some("val_a".to_string()));
-        assert_eq!(store.load("key_b").unwrap(), Some("val_b".to_string()));
-        assert_eq!(store.load("key_c").unwrap(), None);
-        // Cleanup.
-        let _ = store.delete("key_a");
-        let _ = store.delete("key_b");
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn blob_probe_present_absent_unreachable() {
-        let store = SecretStore::keyring("buzz-test-blob-probe");
-        // No blob yet — key absent, backend reachable.
-        assert_eq!(store.probe("identity"), KeyringProbe::ReachableButEmpty);
-        store.store("identity", "nsec1test").unwrap();
-        // Key now present.
-        assert_eq!(store.probe("identity"), KeyringProbe::Present);
-        // Different key — blob exists but key absent.
-        assert_eq!(store.probe("other"), KeyringProbe::ReachableButEmpty);
-        // Cleanup.
-        let _ = store.delete("identity");
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn blob_delete_removes_key_not_others() {
-        let store = SecretStore::keyring("buzz-test-blob-delete");
-        store.store("keep", "keep_val").unwrap();
-        store.store("remove", "remove_val").unwrap();
-        store.delete("remove").unwrap();
-        assert_eq!(store.load("keep").unwrap(), Some("keep_val".to_string()));
-        assert_eq!(store.load("remove").unwrap(), None);
-        // Cleanup.
-        let _ = store.delete("keep");
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn blob_migration_from_per_key_entry() {
-        let svc = "buzz-test-blob-migration";
-        let key = "identity";
-        let value = "nsec1migrationtest";
-
-        // Seed a per-key entry (old format) — no blob exists.
-        let entry = keyring_entry(svc, key).unwrap();
-        entry.set_password(value).unwrap();
-
-        // Fresh store — no blob in the keychain yet.
-        let store = SecretStore::keyring(svc);
-
-        // probe should find the legacy key.
-        assert_eq!(store.probe(key), KeyringProbe::Present);
-
-        // load should migrate it into the blob and return the value.
-        assert_eq!(store.load(key).unwrap(), Some(value.to_string()));
-
-        // Old per-key entry should be cleaned up.
-        let entry = keyring_entry(svc, key).unwrap();
-        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
-
-        // Key is now in the blob — probe confirms.
-        let store2 = SecretStore::keyring(svc);
-        assert_eq!(store2.probe(key), KeyringProbe::Present);
-        assert_eq!(store2.load(key).unwrap(), Some(value.to_string()));
-
-        // Cleanup.
-        let _ = store2.delete(key);
-    }
-
-    #[ignore = "requires real OS keychain (run locally)"]
-    #[test]
-    fn delete_all_with_legacy_cleanup_removes_per_key_identity() {
-        let svc = "buzz-test-delete-all-legacy";
-        let key = "identity";
-        let value = "nsec1legacytest";
-
-        // Seed a legacy per-key entry (old format, pre-blob migration).
-        let entry = keyring_entry(svc, key).unwrap();
-        entry.set_password(value).unwrap();
-
-        // Also seed a blob with a different key to exercise the full path.
-        let store = SecretStore::keyring(svc);
-        store.store("agent:abc123", "nsec1agent").unwrap();
-
-        // Legacy per-key identity should be discoverable via probe.
-        let store2 = SecretStore::keyring(svc);
-        assert_eq!(store2.probe(key), KeyringProbe::Present);
-
-        // Wipe everything via the sign-out path.
-        store2.delete_all_with_legacy_cleanup().unwrap();
-
-        // Fresh store — neither the blob nor the per-key entry should remain.
-        let store3 = SecretStore::keyring(svc);
-        assert_eq!(
-            store3.probe(key),
-            KeyringProbe::ReachableButEmpty,
-            "per-key identity must not survive delete_all_with_legacy_cleanup"
-        );
-        assert_eq!(
-            store3.load(key).unwrap(),
-            None,
-            "load must not resurrect the legacy per-key identity"
-        );
-        // Agent key should also be gone.
-        assert_eq!(store3.load("agent:abc123").unwrap(), None);
-    }
-}
+#[path = "secret_store_tests.rs"]
+mod tests;

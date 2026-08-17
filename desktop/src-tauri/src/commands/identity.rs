@@ -362,12 +362,21 @@ pub async fn import_identity(
         let key_path = data_dir.join("identity.key");
 
         let (pubkey, storage) = commit_imported_identity(&state, &data_dir, keys, |keys| {
+            // Serialize the shared-keyring blob write against a concurrent agent
+            // save/GC on the same SecretStore through the lock-owning
+            // `persist_identity_locked` seam: it acquires the cross-process
+            // secret transaction lock (the same store-directory inode every
+            // agent save takes) and persists under it, so identity and agent
+            // secrets can never interleave on the shared blob. Held across the
+            // persist span only — the in-memory key swap that follows this
+            // closure touches no keyring blob.
+            let lock_dir = crate::managed_agents::storage::secret_txn_lock_dir(&app_handle)?;
             // Persist into the OS keyring first (store → read-back verify →
             // marker → delete file). Falls back to the 0o600 file when the
             // keyring is unavailable; returns Err only when both backends fail.
             let store =
                 crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-            crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
+            persist_identity_locked(store, keys, &key_path, &data_dir, &lock_dir)
         })?;
 
         let pubkey_hex = pubkey.to_hex();
@@ -451,6 +460,33 @@ pub(crate) fn commit_imported_identity(
     Ok((pubkey, storage))
 }
 
+/// Lock-owning identity-persist seam: acquire the cross-process secret
+/// transaction lock on `lock_dir`, then persist the identity under it. This is
+/// the single seam every identity-persist entry point (`import_identity`,
+/// `persist_current_identity`, and the pairing recover path) routes through —
+/// so the lock and the keyring blob write it protects are one unit.
+///
+/// Identity and agent secrets share one `SecretStore` blob, so an unserialized
+/// identity persist could interleave with a concurrent agent save/GC projection
+/// transaction on the same blob. The lock target is the store **directory
+/// inode** ([`crate::secret_store::store_txn_lock_dir`]) — the same one every
+/// agent save takes — so the two surfaces mutually exclude. Held across the
+/// persist span only; the in-memory key swap that follows touches no blob.
+///
+/// AppHandle-free (takes `store` and `lock_dir` directly) so the interleave
+/// regression can drive this exact seam: delete the acquisition here and the
+/// concurrent-save probe acquires instead of reporting exclusion.
+pub(crate) fn persist_identity_locked<S: crate::app_state::IdentityKeyStore>(
+    store: &S,
+    keys: &Keys,
+    legacy_path: &std::path::Path,
+    data_dir: &std::path::Path,
+    lock_dir: &std::path::Path,
+) -> Result<crate::app_state::IdentityStorage, String> {
+    let _txn = crate::secret_store::transaction_lock_at(lock_dir)?;
+    crate::app_state::persist_imported_identity_impl(store, keys, legacy_path, data_dir)
+}
+
 /// Make the current ephemeral identity durable by persisting it to the OS
 /// keyring (or falling back to identity.key). This is called when the user
 /// chooses to start a new identity instead of re-importing their previous one
@@ -494,8 +530,14 @@ pub async fn persist_current_identity(
         let key_path = data_dir.join("identity.key");
 
         let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-        let storage =
-            crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
+        let storage = {
+            // Serialize the shared-keyring blob write against a concurrent agent
+            // save/GC on the same SecretStore through the lock-owning
+            // `persist_identity_locked` seam. Scoped to the persist span only —
+            // the identity_lost clear that follows touches no keyring blob.
+            let lock_dir = crate::managed_agents::storage::secret_txn_lock_dir(&app_handle)?;
+            persist_identity_locked(store, &keys, &key_path, &data_dir, &lock_dir)?
+        };
 
         // Keys are already the live identity. Record where the durable write
         // landed before clearing identity_lost.
@@ -788,3 +830,7 @@ mod nostr_identity_binding_tests {
 #[cfg(test)]
 #[path = "identity_key_backup_tests.rs"]
 mod identity_key_backup_tests;
+
+#[cfg(all(test, unix, feature = "system-keyring"))]
+#[path = "identity_txn_lock_tests.rs"]
+mod identity_txn_lock_tests;

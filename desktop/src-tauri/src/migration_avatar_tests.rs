@@ -45,6 +45,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         parallelism: None,
         created_at: "before".to_string(),
         updated_at: "before".to_string(),
+        secrets_unavailable: false,
     };
     let old_persona_version = crate::managed_agents::persona_events::persona_content_hash(
         &crate::managed_agents::persona_events::persona_event_content(&definition),

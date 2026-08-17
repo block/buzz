@@ -584,6 +584,7 @@ pub async fn confirm_agent_snapshot_import(
             parallelism: minted_parallelism,
             created_at: now.clone(),
             updated_at: now.clone(),
+            secrets_unavailable: false,
         };
 
         personas.push(persona.clone());
@@ -592,8 +593,7 @@ pub async fn confirm_agent_snapshot_import(
         // Enqueue the kind:30175 persona event via the retention path.
         super::super::pending::retain_persona_pending(&app, &state, &persona);
 
-        // Build the managed agent record — no machine-local commands, no
-        // secrets, no lineage from the snapshot.
+        // Build the managed agent record — no machine-local commands, no secrets, no lineage.
         let record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: display_name.clone(),
@@ -654,6 +654,10 @@ pub async fn confirm_agent_snapshot_import(
             relay_mesh: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
+            auth_tag_ref: None,
+            env_vars_ref: None,
+            provider_config_ref: None,
+            secrets_unavailable: false,
         };
 
         records.push(record.clone());
@@ -980,10 +984,8 @@ mod import_avatar_tests {
             |_| async { Err("relay upload failed".to_string()) },
         )
         .await;
-
         assert_eq!(result.unwrap_err(), "relay upload failed");
     }
-
     #[tokio::test]
     async fn malformed_inline_avatar_fails_before_upload() {
         let result =

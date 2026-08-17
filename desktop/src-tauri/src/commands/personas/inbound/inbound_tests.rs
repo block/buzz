@@ -30,6 +30,7 @@ fn local_in_app() -> AgentDefinition {
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
+        secrets_unavailable: false,
     }
 }
 
@@ -57,6 +58,7 @@ fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
         parallelism: None,
         created_at: "2025-06-01T00:00:00Z".to_string(),
         updated_at: "2025-06-01T00:00:00Z".to_string(),
+        secrets_unavailable: false,
     }
 }
 
@@ -215,6 +217,10 @@ fn local_agent() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        auth_tag_ref: None,
+        env_vars_ref: None,
+        provider_config_ref: None,
+        secrets_unavailable: false,
     }
 }
 

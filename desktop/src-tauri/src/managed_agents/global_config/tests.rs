@@ -267,6 +267,7 @@ fn roundtrip_serialization() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
         preferred_runtime: Some("claude".to_string()),
+        env_vars_ref: None,
     };
     let json = serde_json::to_string(&config).expect("serialize");
     let back: GlobalAgentConfig = serde_json::from_str(&json).expect("deserialize");
@@ -352,6 +353,10 @@ fn bare_record() -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        auth_tag_ref: None,
+        env_vars_ref: None,
+        provider_config_ref: None,
+        secrets_unavailable: false,
     }
 }
 
@@ -377,6 +382,7 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefini
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
+        secrets_unavailable: false,
     }
 }
 
@@ -592,6 +598,7 @@ fn populated_global_config_round_trips() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
         preferred_runtime: None,
+        env_vars_ref: None,
     };
     let json = serde_json::to_string(&original).expect("serialization must not fail");
     let decoded: GlobalAgentConfig =
@@ -638,6 +645,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
+        secrets_unavailable: false,
     };
 
     let cmd = crate::managed_agents::record_agent_command(&record, &[persona]);

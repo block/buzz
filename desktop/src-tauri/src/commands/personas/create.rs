@@ -75,6 +75,7 @@ pub async fn create_persona(
             parallelism: None,
             created_at: now.clone(),
             updated_at: now,
+            secrets_unavailable: false,
         };
         apply_persona_behavior(&mut persona, input.behavior)?;
         personas.push(persona.clone());

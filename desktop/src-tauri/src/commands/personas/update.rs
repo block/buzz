@@ -7,9 +7,10 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        apply_persona_behavior, effective_agent_command, load_managed_agents, load_personas,
-        managed_agent_avatar_url, save_managed_agents, save_personas, try_regenerate_nest,
-        validate_agent_definition_text, AgentDefinition, ManagedAgentRecord, UpdatePersonaRequest,
+        apply_persona_behavior, effective_agent_command, load_global_agent_config,
+        load_managed_agents, load_personas, managed_agent_avatar_url, save_managed_agents,
+        save_personas, try_regenerate_nest, validate_agent_definition_text, AgentDefinition,
+        ManagedAgentRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -145,6 +146,11 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
                 let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
+                // Loaded once for the per-instance signing gate below. `global`
+                // is the strict loader Result — cloned per instance because the
+                // gate consumes it by value.
+                let personas = load_personas(&app).unwrap_or_default();
+                let global = load_global_agent_config(&app);
 
                 // Propagate the display_name rename to instances that still
                 // carry the old definition display_name (pool-named instances
@@ -187,7 +193,27 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
 
                     if record_changed {
                         agents_modified = true;
-                        if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
+                        // Refuse to publish a signed profile for an instance
+                        // whose effective secrets are unavailable: a failed
+                        // `auth_tag_ref` hydration leaves the in-memory
+                        // `auth_tag` empty, so signing would strip the NIP-OA
+                        // tag. Skip only this instance — one stale record must
+                        // not block the rest of the persona rename. The local
+                        // record edits above still persist, so this instance's
+                        // profile converges on its next successful start/reconcile
+                        // (once its secrets hydrate), not merely on a reachable boot.
+                        let secrets_ok =
+                            crate::managed_agents::effective_config::require_effective_secrets_available(
+                                record,
+                                &personas,
+                                global.clone(),
+                            );
+                        if let Err(e) = secrets_ok {
+                            eprintln!(
+                                "buzz-desktop: skipping relay profile sync for {}: {e}",
+                                record.pubkey
+                            );
+                        } else if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
                             let relay_url = crate::relay::effective_agent_relay_url(
                                 &record.relay_url,
                                 &workspace_relay,

@@ -8,8 +8,8 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        spawn_key_refusal, unavailable_definition_id, KnownAcpRuntime, ManagedAgentPairRuntime,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -68,34 +68,8 @@ mod lifecycle;
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
 
-/// Classify an agent's persona against the live catalog for the Agents-menu
-/// drift indicator. Returns `(out_of_date, orphaned)`.
-///
-/// Drift basis is the RECORD's `persona_source_version`, never the engram:
-/// - persona_id set + persona present: out_of_date when the snapshot hash
-///   differs from the persona's current content hash.
-/// - persona_id set + persona gone: orphaned (no current hash to respawn into,
-///   so never out_of_date — we must not tell the user to respawn into nothing).
-/// - no persona_id: neither — a hand-built agent has no persona to drift from.
-fn persona_drift_state(
-    record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::types::AgentDefinition],
-) -> (bool, bool) {
-    let Some(persona_id) = record.persona_id.as_deref() else {
-        return (false, false);
-    };
-    let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
-        return (false, true);
-    };
-    let current = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(persona),
-    );
-    let out_of_date = record
-        .persona_source_version
-        .as_deref()
-        .is_some_and(|pinned| pinned != current);
-    (out_of_date, false)
-}
+mod drift;
+pub(crate) use drift::persona_drift_state;
 
 /// Resolve the runtime-pair key this record maps to for the active
 /// workspace: always the active workspace relay (the legacy per-record relay
@@ -195,6 +169,16 @@ pub fn build_managed_agent_summary(
 
     let (persona_out_of_date, persona_orphaned) = persona_drift_state(record, personas);
 
+    // Degraded-empty on load failure is deliberate here. Among the consumers
+    // that gate a *launch decision* on the global config, this is the lone one
+    // that degrades instead of failing closed — its siblings all block the
+    // launch when a global env ref cannot be resolved: the readiness rows
+    // (`status_for*`, which capture `global_unavailable` and force
+    // local_setup=false) and the spawn/deploy gates (`spawn_agent_child`,
+    // `deploy`, which propagate with `?`). This summary is not a launch gate:
+    // it only derives the effective model/provider/prompt for display, so on
+    // load failure the fields read as unresolved — the correct degraded view,
+    // which never authorizes a launch.
     let global_for_summary =
         crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
@@ -419,9 +403,26 @@ pub fn spawn_agent_child(
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
     let teams = super::load_teams(app).unwrap_or_default();
-    // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
-    // and for the env-var merge at spawn time.
-    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    // Fail-closed on unavailable definition secrets: mirrors `spawn_key_refusal`
+    // and the global-config gate below — refuse rather than launch empty.
+    if let Some(pid) = unavailable_definition_id(record, &personas) {
+        return Err(format!(
+            "agent {} cannot start: definition ({pid}) secrets unavailable from keyring",
+            record.pubkey
+        ));
+    }
+    // Fail-closed on an unavailable harness env projection: the effective
+    // harness carries an `env_ref` that could not be hydrated (missing,
+    // unreadable, or malformed), so its definition env would layer in empty.
+    // The harness tier of the instance/definition/global fail-closed gate.
+    if let Some(hid) = crate::managed_agents::unavailable_harness_id(record, &personas) {
+        return Err(format!(
+            "agent {} cannot start: harness ({hid}) env unavailable from keyring",
+            record.pubkey
+        ));
+    }
+    // Load global config; fail closed if a ref cannot be resolved.
+    let global = crate::managed_agents::load_global_agent_config(app)?;
 
     // Resolve model/provider/prompt ONCE, here, at the shared spawn boundary —
     // the single source both the env writes below and the spawn-config snapshot
@@ -992,5 +993,7 @@ pub fn start_managed_agent_process(
 #[cfg(test)]
 mod test_fixtures;
 
+#[cfg(test)]
+mod definition_tier_tests;
 #[cfg(test)]
 mod tests;

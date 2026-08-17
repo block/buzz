@@ -59,6 +59,7 @@ mod project_terminal;
 mod qr_download;
 mod relay_members;
 mod relay_reconnect;
+mod restart_ops;
 mod social;
 mod team_snapshot;
 mod teams;

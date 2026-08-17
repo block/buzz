@@ -18,6 +18,13 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::managed_agents::secret_projection::{
+    cancel_gc_candidacy, deserialize_env_map, load_secret, serialize_env_map, write_secret,
+    ProjectionStore, WriteOutcome,
+};
+use crate::managed_agents::secret_seam::{migrate_inline_field, FieldMigration};
+use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
+
 /// Regex-equivalent predicate for a valid harness ID.
 ///
 /// IDs must match `[a-z0-9_][a-z0-9_-]*` — lowercase alphanumeric plus
@@ -59,8 +66,29 @@ pub(crate) struct HarnessDefinition {
     /// Environment variables injected at spawn time. Definition env is applied
     /// first and LOSES on conflict with Buzz-injected vars — `BUZZ_MANAGED_AGENT`
     /// is always authoritative and cannot be overridden here.
+    ///
+    /// Secret-projection contract (mirrors `ManagedAgentRecord.env_vars`): on a
+    /// keyring-backed save this map is stripped to the OS keyring and left empty
+    /// on disk, with [`env_ref`](Self::env_ref) pointing at the generation. When
+    /// non-empty on disk it is the authoritative inline-fallback state (keyring
+    /// unavailable) and wins over any stale `env_ref` on hydration.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Generation reference for the keyring-projected `env` map, set when the
+    /// inline `env` was stripped into the keyring under `harness:<id>:env:<gen>`.
+    /// Non-secret pointer only. Absent when the definition carries no env, or on
+    /// a keyless build where env stays inline in the `0o600` JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_ref: Option<String>,
+    /// Runtime-only marker: set when [`env_ref`](Self::env_ref) is present but
+    /// its keyring generation could not be hydrated (missing, unreadable, or
+    /// malformed bytes). Never serialized — reconstructed on every load by
+    /// [`hydrate_harness_env`], mirroring `ManagedAgentRecord::secrets_unavailable`.
+    /// Distinguishes a keyring outage from a genuinely-empty `env`: the spawn,
+    /// deploy, readiness, and model-discovery gates fail closed on it, and a
+    /// metadata save preserves the raw persisted ref instead of erasing it.
+    #[serde(skip)]
+    pub env_unavailable: bool,
     /// Link to external docs for manual install/setup instructions.
     #[serde(default)]
     pub install_instructions_url: String,
@@ -69,7 +97,193 @@ pub(crate) struct HarnessDefinition {
     pub install_hint: String,
 }
 
-/// Scan `dir` for `*.json` files and deserialize each into a `HarnessDefinition`.
+/// Keyring blob coordinate for a harness definition's projected `env` map.
+///
+/// The `harness:` namespace is deliberately distinct from the agent-store
+/// namespaces (`global:env:` / `agent:…` / `definition:…`) that
+/// [`crate::managed_agents::secret_projection::is_projection_key`] matches, so
+/// the agent-store GC sweeps never touch harness generations. Harness env edits
+/// are rare, so the un-reclaimed generations accrete slowly (there is no harness
+/// namespace GC) as an encrypted-at-rest cost documented as a known limitation.
+pub(crate) fn harness_env_key(id: &str, gen: &str) -> String {
+    format!("harness:{id}:env:{gen}")
+}
+
+// ── Env secret projection (mirrors the agent-store `secret_seam`) ────────────
+//
+// A harness definition carries a single `env` map that can hold provider
+// secrets (e.g. `ANTHROPIC_API_KEY`). These three helpers move it between the
+// on-disk JSON and the OS keyring under the `harness:<id>:env:<gen>` coordinate.
+// Each is generic over [`ProjectionStore`] so tests drive a fake and never the
+// live OS keyring (the default `system-keyring` feature makes the live store
+// real under `cargo test`).
+
+/// Save-path strip: project a non-empty inline `env` into the keyring under a
+/// fresh generation and clear it on disk. Mutates `def` in place.
+///
+/// # Empty inline `env`: clear vs. preserve
+///
+/// An empty inline `env` is normally a user-clear (a UI save carries the user's
+/// full intent — empty means "no env") and clears the ref. But the TS edit form
+/// never round-trips `env_ref`, and it seeds its env from the catalog entry —
+/// which is EMPTY for a record whose keyring env could not be hydrated. Saving
+/// that partially-hydrated view would erase the still-live ref, turning a
+/// keyring outage into permanent pointer loss. So `preserved_ref` carries the
+/// raw persisted ref of an on-disk record that is currently `env_unavailable`
+/// (computed by [`persisted_unavailable_env_ref`]): on the empty-projection
+/// branch it is kept instead of cleared, mirroring the agent seam's
+/// `WriteOutcome::Nothing if unavailable` guard. A genuine clear of a healthy
+/// record passes `None` and clears normally.
+///
+/// On a keyring write failure the value stays inline (`0o600` fallback) with the
+/// ref cleared (the inline map is now the authoritative fallback state).
+fn strip_harness_env<S: ProjectionStore>(
+    store: &S,
+    def: &mut HarnessDefinition,
+    preserved_ref: Option<&str>,
+) {
+    let id = def.id.clone();
+    let inline_env = if !def.env.is_empty() {
+        serialize_env_map(&def.env).ok()
+    } else {
+        None
+    };
+    match write_secret(
+        store,
+        |gen| harness_env_key(&id, gen),
+        inline_env.as_deref(),
+        &format!("harness:{id} env"),
+    ) {
+        WriteOutcome::Persisted { gen } => {
+            cancel_gc_candidacy(store, &harness_env_key(&id, &gen));
+            def.env.clear();
+            def.env_ref = Some(gen);
+        }
+        // Empty inline env. Preserve the ref when the persisted record was
+        // `env_unavailable` (a save over a partially-hydrated view is not a
+        // user-clear); otherwise this is a genuine clear.
+        WriteOutcome::Nothing => {
+            def.env_ref = preserved_ref.map(str::to_string);
+        }
+        // Keyring write of a non-empty env failed: value kept inline, ref cleared.
+        WriteOutcome::KeptInline { .. } => {
+            def.env_ref = None;
+        }
+    }
+}
+
+/// Re-read the on-disk record for `id` and rehydrate it, returning its raw
+/// `env_ref` **iff** that record is currently `env_unavailable` (a ref is
+/// present but its keyring generation could not be hydrated). Returns `None`
+/// when the file is absent, healthy, or carries no ref.
+///
+/// This is the save-path signal that distinguishes a keyring outage from a
+/// genuine user-clear. The TS edit form never round-trips `env_ref` (it always
+/// arrives `None`) and seeds its env from the catalog entry — which is empty
+/// for an unavailable record — so without this the naive empty-env save would
+/// erase the live ref. Taking `dir` as a parameter (rather than a global
+/// lookup) keeps the store-injected save tests hermetic.
+fn persisted_unavailable_env_ref<S: ProjectionStore>(
+    store: &S,
+    dir: &Path,
+    id: &str,
+) -> Option<String> {
+    let path = dir.join(format!("{id}.json"));
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let mut def: HarnessDefinition = serde_json::from_str(&contents).ok()?;
+    let raw_ref = def.env_ref.clone();
+    hydrate_harness_env(store, &mut def);
+    if def.env_unavailable {
+        raw_ref
+    } else {
+        None
+    }
+}
+
+/// Load-path hydrate: fill an empty on-disk `env` from the keyring generation
+/// named by `env_ref`. A non-empty inline `env` is the authoritative
+/// keyring-unavailable fallback and wins over any ref.
+///
+/// When `env_ref` is present but its generation cannot be hydrated — missing,
+/// unreadable, or malformed bytes — this sets [`HarnessDefinition::env_unavailable`]
+/// and leaves `env` empty. That marker is distinct from a genuinely-empty `env`
+/// (no ref): the spawn/deploy/readiness/model-discovery gates fail closed on it,
+/// and the save path preserves the raw ref rather than erasing it. Mirrors the
+/// agent tier's `secrets_unavailable`, which `hydrate_all_secrets_for_records`
+/// sets on the same failure. The load still succeeds so a single unavailable
+/// harness never fails discovery for the rest.
+fn hydrate_harness_env<S: ProjectionStore>(store: &S, def: &mut HarnessDefinition) {
+    if !def.env.is_empty() {
+        return; // inline fallback is authoritative
+    }
+    let id = def.id.clone();
+    match load_secret(
+        store,
+        def.env_ref.as_deref(),
+        |gen| harness_env_key(&id, gen),
+        &format!("harness:{id} env"),
+    ) {
+        Ok(Some(s)) => match deserialize_env_map(&s) {
+            Ok(map) => def.env = map,
+            Err(e) => {
+                tracing::warn!("custom_harnesses: harness {id} env deserialize failed: {e}");
+                def.env_unavailable = true;
+            }
+        },
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("custom_harnesses: {e}");
+            def.env_unavailable = true;
+        }
+    }
+}
+
+/// Boot-migration transition: W1-safe field migration of one definition's
+/// `env`. An absent inline value here means "already projected on a prior
+/// launch," so an existing ref is preserved rather than cleared (the
+/// distinction from [`strip_harness_env`], which reads empty as a user-clear).
+/// Returns `true` when the ref changed and the file must be rewritten.
+///
+/// Shares the single W1-safe seam
+/// ([`crate::managed_agents::secret_seam::migrate_inline_field`]) with the agent
+/// tiers so the two surfaces cannot diverge on the empty-inline semantics.
+pub(crate) fn migrate_harness_env<S: ProjectionStore>(
+    store: &S,
+    def: &mut HarnessDefinition,
+) -> bool {
+    let id = def.id.clone();
+    let inline_env = if !def.env.is_empty() {
+        serialize_env_map(&def.env).ok()
+    } else {
+        None
+    };
+    match migrate_inline_field(
+        store,
+        |gen| harness_env_key(&id, gen),
+        inline_env.as_deref(),
+        def.env_ref.as_deref(),
+        &format!("harness:{id} env"),
+    ) {
+        FieldMigration::Projected { gen } => {
+            def.env.clear();
+            def.env_ref = Some(gen);
+            true
+        }
+        FieldMigration::Preserved | FieldMigration::Cleared => false,
+    }
+}
+
+/// Resolve the live secret-projection store, or `None` on a keyless build.
+///
+/// Consumes the agent-store resolver so harness env shares the exact same
+/// `SecretStore` instance (one cache, one mutex) as every other projected
+/// secret — never a second handle that could race on the blob.
+fn live_projection_store() -> Option<&'static crate::secret_store::SecretStore> {
+    crate::managed_agents::storage::agent_secret_store_pub()
+}
+
+/// Scan `dir` for `*.json` files and deserialize each into a `HarnessDefinition`,
+/// hydrating each definition's `env` from the live keyring.
 ///
 /// Errors per file are logged with `tracing::warn` and skipped — a single
 /// malformed file never fails discovery for the rest.  Returns only
@@ -86,6 +300,28 @@ pub(crate) struct HarnessDefinition {
 /// call** — this function performs no caching, mirroring goose's
 /// `refresh_custom_providers()` pattern.
 pub(crate) fn load_custom_harnesses(dir: &Path) -> Vec<HarnessDefinition> {
+    load_custom_harnesses_with(live_projection_store(), dir)
+}
+
+/// Testable core of [`load_custom_harnesses`], generic over the projection
+/// store so tests drive a [`ProjectionStore`] fake instead of the live keyring.
+/// Scans + validates the directory, then hydrates each definition's `env`.
+pub(crate) fn load_custom_harnesses_with<S: ProjectionStore>(
+    store: Option<&S>,
+    dir: &Path,
+) -> Vec<HarnessDefinition> {
+    let mut definitions = load_custom_harnesses_from_disk(dir);
+    if let Some(store) = store {
+        for def in &mut definitions {
+            hydrate_harness_env(store, def);
+        }
+    }
+    definitions
+}
+
+/// Raw directory scan + per-file validation, WITHOUT env hydration. The
+/// store-independent half of [`load_custom_harnesses_with`].
+fn load_custom_harnesses_from_disk(dir: &Path) -> Vec<HarnessDefinition> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return vec![],
@@ -308,6 +544,80 @@ pub(crate) fn lookup_loaded_harness_by_id(id: &str) -> Option<Arc<HarnessDefinit
     guard.iter().find(|d| d.id == id).cloned()
 }
 
+/// The effective harness runtime id for `record`: an explicit per-record
+/// `runtime` pin wins, else the linked persona's `runtime`, else `""`.
+///
+/// This is the single source of the resolution order that
+/// [`crate::managed_agents::resolve_effective_harness_descriptor`] and
+/// [`crate::managed_agents::resolve_effective_agent_env`] use to find the
+/// harness definition, so the fail-closed [`unavailable_harness_id`] gate
+/// consults exactly the harness a spawn would launch — never a different one.
+pub(crate) fn effective_runtime_id<'a>(
+    record: &'a ManagedAgentRecord,
+    personas: &'a [AgentDefinition],
+) -> &'a str {
+    record
+        .runtime
+        .as_deref()
+        .or_else(|| {
+            record.persona_id.as_deref().and_then(|pid| {
+                personas
+                    .iter()
+                    .find(|p| p.id == pid)
+                    .and_then(|p| p.runtime.as_deref())
+            })
+        })
+        .unwrap_or("")
+}
+
+/// The effective harness id when that harness's projected `env` is unavailable —
+/// its `env_ref` is present but could not be hydrated from the keyring
+/// (missing, unreadable, or malformed generation).
+///
+/// This is the harness tier of the fail-closed spawn gate, alongside
+/// [`crate::managed_agents::spawn_key_refusal`]'s instance-tier check,
+/// [`crate::managed_agents::unavailable_definition_id`]'s definition tier, and
+/// the global-tier check in `spawn_agent_child`. Returns the offending id
+/// (rather than a bool) so the spawn path can name it in the refusal without a
+/// second lookup; status callers use `.is_some()`. A record whose effective
+/// harness is a healthy definition, a builtin (no registry entry), or a
+/// dangling id yields `None`.
+pub(crate) fn unavailable_harness_id(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+) -> Option<String> {
+    let runtime_id = effective_runtime_id(record, personas);
+    lookup_loaded_harness_by_id(runtime_id)
+        .filter(|def| def.env_unavailable)
+        .map(|def| def.id.clone())
+}
+
+/// Whether ANY secret tier for `record` is currently unavailable — its ref is
+/// present but could not be hydrated from the keyring (missing, unreadable, or
+/// malformed generation). ORs the three registry-derivable tiers that every
+/// fail-closed spawn seam already consults individually:
+///
+/// - the instance tier (`record.secrets_unavailable`),
+/// - the definition tier ([`crate::managed_agents::unavailable_definition_id`]),
+/// - the harness tier ([`unavailable_harness_id`]).
+///
+/// This is the single predicate the restart-eligibility boundaries call before
+/// any `stop_managed_agent_process`: an unavailable record's hydrated env is
+/// empty and therefore indistinguishable from an intentionally-empty one at the
+/// `agent_readiness`/`resolve_effective_agent_env` layer, so those raw signals
+/// cannot be trusted to gate a destructive stop-then-respawn. Gating here keeps
+/// a running/setup process alive rather than stopping it and only discovering
+/// the refusal at respawn (`FailedAfterStop`). The global tier is not
+/// registry-derivable from a record and is covered by the spawn-time gate.
+pub(crate) fn effective_secrets_unavailable(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+) -> bool {
+    record.secrets_unavailable
+        || crate::managed_agents::unavailable_definition_id(record, personas).is_some()
+        || unavailable_harness_id(record, personas).is_some()
+}
+
 /// Warm the loaded-harness registry synchronously from `custom_dir`.
 ///
 /// Must be called **before** `restore_managed_agents_on_launch` so that cold
@@ -397,18 +707,9 @@ pub(crate) struct SaveOutcome {
     pub removed_old_path: Option<std::path::PathBuf>,
 }
 
-/// Write a harness definition to `dir/<id>.json` using a backup-swap strategy
-/// that is safe on all platforms (including Windows where `fs::rename` over an
-/// existing file fails with "access denied"):
-///
-/// 1. Serialize the definition and write it to a unique temp file via
-///    `atomic_write_file`.
-/// 2. If the target already exists, rename it to `<target>.bak` (the backup).
-/// 3. `commit()` the temp file (renames temp → target).
-///    * On success: delete `.bak` (best-effort; a stale `.bak` is harmless).
-///    * On failure: restore `.bak` → target so the original is never lost.
-/// 4. If `rename_old_id` is `Some`, remove `<dir>/<old_id>.json` after the
-///    new file is committed (non-fatal if NotFound).
+/// Write a harness definition to `dir/<id>.json`, projecting its `env` secrets
+/// into the OS keyring first. The resolved live [`ProjectionStore`] is used;
+/// see [`save_custom_harness_to_dir_with`] for the store-injected core.
 ///
 /// The caller is responsible for full validation (id, env, etc.) BEFORE
 /// calling this function — no validation is performed here.
@@ -417,18 +718,97 @@ pub(crate) fn save_custom_harness_to_dir(
     definition: &HarnessDefinition,
     rename_old_id: Option<&str>,
 ) -> Result<SaveOutcome, String> {
+    save_custom_harness_to_dir_with(live_projection_store(), dir, definition, rename_old_id)
+}
+
+/// Store-injected core of [`save_custom_harness_to_dir`]: strip `env` secrets
+/// into `store`, then write the stripped definition to `dir/<id>.json` using a
+/// backup-swap strategy that is safe on all platforms (including Windows where
+/// `fs::rename` over an existing file fails with "access denied"):
+///
+/// 1. Serialize the STRIPPED definition and write it to a unique temp file via
+///    `atomic_write_file`, created `0o600` before any bytes hit disk (the JSON
+///    carries inline env in the keyless / keyring-unavailable fallback).
+/// 2. If the target already exists, rename it to `<target>.bak` (the backup).
+/// 3. `commit()` the temp file (renames temp → target).
+///    * On success: delete `.bak` (best-effort). A leaked `.bak` is harmless
+///      when the file it backs up had its env projected into the keyring, but
+///      carries inline secrets in the keyring-unavailable fallback — which is
+///      why the boot migration scrubs `*.json.bak` (see
+///      [`crate::migration::migration_harness_secrets`]).
+///    * On failure: restore `.bak` → target so the original is never lost.
+/// 4. If `rename_old_id` is `Some`, remove `<dir>/<old_id>.json` after the
+///    new file is committed (non-fatal if NotFound).
+///
+/// `definition` is NOT mutated — a clone is stripped so the caller keeps the
+/// full `env` for the returned catalog entry (edit round-trip). On a keyless
+/// build (`store` is `None`) the `env` stays inline in the `0o600` JSON.
+///
+/// Renaming a record whose env is currently `env_unavailable` (a live keyring
+/// ref that could not be hydrated) is refused with an error: the ref is keyed by
+/// id, so a rename can neither re-read it under the new id nor safely carry it
+/// forward without stranding it at an unwritten coordinate.
+///
+/// No cross-process secret-transaction lock is taken here: the `harness:`
+/// keyring namespace is deliberately excluded from the agent-store GC
+/// ([`crate::managed_agents::secret_projection::is_projection_key`]), so no
+/// concurrent sweep can ever delete a harness generation between its write and
+/// its JSON commit — the window that lock exists to close does not exist here.
+pub(crate) fn save_custom_harness_to_dir_with<S: ProjectionStore>(
+    store: Option<&S>,
+    dir: &Path,
+    definition: &HarnessDefinition,
+    rename_old_id: Option<&str>,
+) -> Result<SaveOutcome, String> {
     use atomic_write_file::AtomicWriteFile;
     use std::io::Write;
 
-    let json = serde_json::to_string_pretty(definition)
+    // Strip env → keyring on a clone. The keyring write happens BEFORE the
+    // atomic JSON commit (the commit point), mirroring the agent-store seam.
+    let mut to_write = definition.clone();
+    if let Some(store) = store {
+        // Preserve a live-but-unhydrated ref across a same-id metadata save; the
+        // TS form round-trips neither the ref nor the marker and seeds `env`
+        // from the (empty) catalog entry, so without this the empty-env save
+        // would erase the ref — turning a keyring outage into pointer loss.
+        //
+        // A rename of an `env_unavailable` record has no safe outcome: the ref
+        // is keyed by id (`harness:<id>:env:<gen>`), so re-reading under the new
+        // id sees "new harness, empty env" (ref erased), and carrying the ref
+        // forward would resolve to `harness:<new_id>:env:<gen>` — a coordinate
+        // that was never written, leaving the record permanently unavailable.
+        // Refuse it until the keyring hydrates or the env is re-entered.
+        let preserved_ref = match rename_old_id {
+            Some(old_id) => {
+                if persisted_unavailable_env_ref(store, dir, old_id).is_some() {
+                    return Err(format!(
+                        "cannot rename harness {old_id:?}: its keyring env is currently \
+                         unavailable, so the ref cannot be carried to the new id \
+                         (retry once the keyring hydrates or re-enter the env)"
+                    ));
+                }
+                None
+            }
+            None => persisted_unavailable_env_ref(store, dir, &to_write.id),
+        };
+        strip_harness_env(store, &mut to_write, preserved_ref.as_deref());
+    }
+
+    let json = serde_json::to_string_pretty(&to_write)
         .map_err(|e| format!("failed to serialize harness definition: {e}"))?;
 
-    let target_path = dir.join(format!("{}.json", definition.id));
-    let bak_path = dir.join(format!("{}.json.bak", definition.id));
+    let target_path = dir.join(format!("{}.json", to_write.id));
+    let bak_path = dir.join(format!("{}.json.bak", to_write.id));
 
-    // Stage write to temp file.
+    // Stage write to temp file, owner-only before any bytes hit disk.
     let mut file = AtomicWriteFile::open(&target_path)
         .map_err(|e| format!("failed to open {}: {e}", target_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to set {} permissions: {e}", target_path.display()))?;
+    }
     file.write_all(json.as_bytes())
         .map_err(|e| format!("failed to write harness definition: {e}"))?;
 
@@ -462,7 +842,9 @@ pub(crate) fn save_custom_harness_to_dir(
         return Err(format!("failed to finalize harness definition: {e}"));
     }
 
-    // Commit succeeded — remove the backup (best-effort; stale .bak is harmless).
+    // Commit succeeded — remove the backup (best-effort). A leaked `.bak` is
+    // harmless once env was projected to the keyring, but secret-bearing in the
+    // inline fallback; the boot migration scrubs `*.json.bak` for that case.
     if had_backup {
         let _ = std::fs::remove_file(&bak_path);
     }
@@ -491,741 +873,5 @@ pub(crate) fn save_custom_harness_to_dir(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    // ── ID validation ────────────────────────────────────────────────────────
-
-    #[test]
-    fn valid_id_lowercase_with_hyphen() {
-        assert!(is_valid_harness_id("my-agent"));
-    }
-
-    #[test]
-    fn valid_id_underscore_start() {
-        assert!(is_valid_harness_id("_my_agent"));
-    }
-
-    #[test]
-    fn valid_id_alphanumeric() {
-        assert!(is_valid_harness_id("agent42"));
-    }
-
-    #[test]
-    fn invalid_id_uppercase() {
-        assert!(!is_valid_harness_id("MyAgent"));
-    }
-
-    #[test]
-    fn invalid_id_starts_with_hyphen() {
-        assert!(!is_valid_harness_id("-bad-id"));
-    }
-
-    #[test]
-    fn invalid_id_empty() {
-        assert!(!is_valid_harness_id(""));
-    }
-
-    #[test]
-    fn invalid_id_path_traversal() {
-        assert!(!is_valid_harness_id("../etc/passwd"));
-    }
-
-    // ── Collision check ──────────────────────────────────────────────────────
-
-    #[test]
-    fn builtin_ids_are_rejected() {
-        // Tier-1 hard-coded IDs must always be reserved.
-        for id in &["goose", "claude", "codex", "buzz-agent"] {
-            assert!(check_id_collision(id).is_err(), "{id} should be rejected");
-        }
-        // Tier-2 preset IDs must also be reserved (derived from PRESET_HARNESSES).
-        for id in crate::managed_agents::discovery::preset_harness_ids() {
-            assert!(check_id_collision(id).is_err(), "{id} should be rejected");
-        }
-    }
-
-    #[test]
-    fn unknown_id_passes_collision_check() {
-        assert!(check_id_collision("my-custom-agent").is_ok());
-    }
-
-    // ── File loading ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn load_valid_json_returns_definition() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("my-agent.json"),
-            r#"{"id":"my-agent","label":"My Agent","command":"my-agent-bin"}"#,
-        )
-        .unwrap();
-
-        let defs = load_custom_harnesses(dir.path());
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].id, "my-agent");
-        assert_eq!(defs[0].label, "My Agent");
-        assert_eq!(defs[0].command, "my-agent-bin");
-    }
-
-    #[test]
-    fn load_skips_non_json_files() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("my-agent.toml"), r#"id = "my-agent""#).unwrap();
-
-        let defs = load_custom_harnesses(dir.path());
-        assert_eq!(defs.len(), 0, "non-JSON file should be ignored");
-    }
-
-    #[test]
-    fn load_skips_invalid_json_without_panicking() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("bad.json"), "{ not valid json").unwrap();
-
-        // Must not panic or propagate an error.
-        let defs = load_custom_harnesses(dir.path());
-        assert_eq!(defs.len(), 0);
-    }
-
-    #[test]
-    fn load_skips_definition_with_invalid_id() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("Bad.json"),
-            r#"{"id":"Bad-Id","label":"Bad","command":"bad"}"#,
-        )
-        .unwrap();
-
-        let defs = load_custom_harnesses(dir.path());
-        assert_eq!(
-            defs.len(),
-            0,
-            "invalid id should cause the entry to be skipped"
-        );
-    }
-
-    #[test]
-    fn load_skips_definition_with_empty_command() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("empty-cmd.json"),
-            r#"{"id":"empty-cmd","label":"Empty","command":""}"#,
-        )
-        .unwrap();
-
-        let defs = load_custom_harnesses(dir.path());
-        assert_eq!(
-            defs.len(),
-            0,
-            "empty command should cause the entry to be skipped"
-        );
-    }
-
-    #[test]
-    fn load_skips_definition_with_non_http_install_url() {
-        // installInstructionsUrl must start with https:// or http://.
-        // A bare path, javascript: URI, or other scheme is rejected.
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("bad-url.json"),
-            r#"{"id":"bad-url","label":"Bad","command":"bad-bin","installInstructionsUrl":"file:///etc/passwd"}"#,
-        )
-        .unwrap();
-
-        let defs = load_custom_harnesses(dir.path());
-        assert_eq!(
-            defs.len(),
-            0,
-            "non-http install URL should cause the entry to be skipped"
-        );
-    }
-
-    #[test]
-    fn load_accepts_empty_or_https_install_url() {
-        let dir = tempfile::tempdir().unwrap();
-        // Empty URL is fine (optional field).
-        fs::write(
-            dir.path().join("no-url.json"),
-            r#"{"id":"no-url","label":"No URL","command":"no-url-bin"}"#,
-        )
-        .unwrap();
-        // https:// is accepted.
-        fs::write(
-            dir.path().join("good-url.json"),
-            r#"{"id":"good-url","label":"Good URL","command":"good-bin","installInstructionsUrl":"https://example.com/install"}"#,
-        )
-        .unwrap();
-
-        let defs = load_custom_harnesses(dir.path());
-        assert_eq!(
-            defs.len(),
-            2,
-            "empty and https:// URLs must both be accepted"
-        );
-    }
-
-    #[test]
-    fn load_missing_dir_returns_empty_vec() {
-        let dir = tempfile::tempdir().unwrap();
-        let nonexistent = dir.path().join("does_not_exist");
-
-        let defs = load_custom_harnesses(&nonexistent);
-        assert_eq!(defs.len(), 0);
-    }
-
-    #[test]
-    fn load_continues_after_one_bad_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("bad.json"), "!!!").unwrap();
-        fs::write(
-            dir.path().join("good.json"),
-            r#"{"id":"good-one","label":"Good","command":"good-binary"}"#,
-        )
-        .unwrap();
-
-        let defs = load_custom_harnesses(dir.path());
-        assert_eq!(defs.len(), 1, "bad entry skipped, good entry loaded");
-        assert_eq!(defs[0].id, "good-one");
-    }
-
-    #[test]
-    fn load_applies_id_collision_check() {
-        // A custom file whose id shadows a built-in ("goose") must be dropped
-        // BY THE LOADER — `load_custom_harnesses` is the enforcement boundary
-        // shared by both the warm path and discovery. This exercises the real
-        // loader against a real file, not just the helper predicate.
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("goose.json"),
-            r#"{"id":"goose","label":"Not Goose","command":"goose","args":["--evil"]}"#,
-        )
-        .unwrap();
-        assert!(
-            load_custom_harnesses(dir.path()).is_empty(),
-            "loader must drop a file shadowing a builtin id"
-        );
-        assert!(check_id_collision("goose").is_err());
-        assert!(check_id_collision("custom-goose").is_ok());
-    }
-
-    #[test]
-    fn load_dedups_duplicate_ids_first_file_wins() {
-        // Two files carrying the same custom id: the loader must keep exactly
-        // one definition (directory-order first wins; the duplicate is dropped).
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("a.json"),
-            r#"{"id":"custom-dup","label":"First","command":"first-cmd"}"#,
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("b.json"),
-            r#"{"id":"custom-dup","label":"Second","command":"second-cmd"}"#,
-        )
-        .unwrap();
-        let loaded = load_custom_harnesses(dir.path());
-        assert_eq!(
-            loaded.len(),
-            1,
-            "loader must dedup duplicate ids within the directory"
-        );
-        assert_eq!(loaded[0].id, "custom-dup");
-    }
-
-    // ── Round-trip via save_custom_harness_to_dir (B-4) ─────────────────────
-    //
-    // These tests exercise the REAL persistence helper, not raw fs::write.
-    // They prove: create, same-ID edit (backup-swap), rename (old file removed),
-    // backup file cleaned up on success.
-
-    fn make_def(id: &str, label: &str) -> HarnessDefinition {
-        HarnessDefinition {
-            id: id.to_string(),
-            label: label.to_string(),
-            command: format!("{id}-bin"),
-            args: vec![],
-            env: BTreeMap::new(),
-            install_instructions_url: String::new(),
-            install_hint: String::new(),
-        }
-    }
-
-    #[test]
-    fn save_to_dir_create_writes_file_and_loads_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let def = make_def("my-harness", "My Harness");
-
-        let outcome = save_custom_harness_to_dir(dir.path(), &def, None).unwrap();
-
-        assert_eq!(outcome.target_path, dir.path().join("my-harness.json"));
-        assert!(outcome.removed_old_path.is_none(), "no old file on create");
-
-        let loaded = load_custom_harnesses(dir.path());
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, "my-harness");
-        assert_eq!(loaded[0].label, "My Harness");
-    }
-
-    #[test]
-    fn save_to_dir_same_id_edit_replaces_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let v1 = make_def("my-harness", "V1 Label");
-        save_custom_harness_to_dir(dir.path(), &v1, None).unwrap();
-
-        // Same-ID edit: label changes.
-        let v2 = make_def("my-harness", "V2 Label");
-        let outcome = save_custom_harness_to_dir(dir.path(), &v2, None).unwrap();
-
-        // No old-path reported (id unchanged).
-        assert!(outcome.removed_old_path.is_none());
-
-        let loaded = load_custom_harnesses(dir.path());
-        assert_eq!(loaded.len(), 1, "same-id edit must not duplicate entries");
-        assert_eq!(loaded[0].label, "V2 Label", "v2 content must be present");
-    }
-
-    #[test]
-    fn save_to_dir_backup_is_cleaned_up_after_same_id_edit() {
-        let dir = tempfile::tempdir().unwrap();
-        let v1 = make_def("my-harness", "V1");
-        save_custom_harness_to_dir(dir.path(), &v1, None).unwrap();
-
-        let v2 = make_def("my-harness", "V2");
-        save_custom_harness_to_dir(dir.path(), &v2, None).unwrap();
-
-        // .bak file must be gone after a successful commit.
-        let bak = dir.path().join("my-harness.json.bak");
-        assert!(
-            !bak.exists(),
-            ".bak file must be removed after successful same-id edit"
-        );
-    }
-
-    #[test]
-    fn save_to_dir_rename_removes_old_file_and_creates_new() {
-        let dir = tempfile::tempdir().unwrap();
-        let old_def = make_def("old-id", "Old");
-        save_custom_harness_to_dir(dir.path(), &old_def, None).unwrap();
-
-        // Rename: new id, old_id supplied.
-        let new_def = make_def("new-id", "New");
-        let outcome = save_custom_harness_to_dir(dir.path(), &new_def, Some("old-id")).unwrap();
-
-        // The outcome carries the old path that was removed.
-        let expected_old = dir.path().join("old-id.json");
-        assert_eq!(
-            outcome.removed_old_path,
-            Some(expected_old.clone()),
-            "removed_old_path must be the old file"
-        );
-
-        // Old file gone, new file present.
-        assert!(!expected_old.exists(), "old-id.json must be removed");
-        let loaded = load_custom_harnesses(dir.path());
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, "new-id");
-    }
-
-    #[test]
-    fn save_to_dir_rename_nonexistent_old_id_is_non_fatal() {
-        // rename_old_id pointing to a file that does not exist must succeed
-        // (NotFound is silently ignored by the helper).
-        let dir = tempfile::tempdir().unwrap();
-        let def = make_def("alpha", "Alpha");
-        let outcome = save_custom_harness_to_dir(dir.path(), &def, Some("ghost-id")).unwrap();
-
-        // New file created, no old path removed.
-        assert_eq!(outcome.target_path, dir.path().join("alpha.json"));
-        assert!(
-            outcome.removed_old_path.is_none(),
-            "NotFound old-id must not be reported as removed"
-        );
-        assert!(load_custom_harnesses(dir.path()).len() == 1);
-    }
-
-    #[test]
-    fn save_to_dir_roundtrip_with_env_preserves_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut env = BTreeMap::new();
-        env.insert("MY_KEY".to_string(), "my_value".to_string());
-        let def = HarnessDefinition {
-            id: "env-harness".to_string(),
-            label: "Env Harness".to_string(),
-            command: "env-bin".to_string(),
-            args: vec!["--flag".to_string()],
-            env,
-            install_instructions_url: "https://example.com".to_string(),
-            install_hint: "Install from example.com".to_string(),
-        };
-
-        save_custom_harness_to_dir(dir.path(), &def, None).unwrap();
-
-        let loaded = load_custom_harnesses(dir.path());
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].args, vec!["--flag"]);
-        assert_eq!(
-            loaded[0].env.get("MY_KEY").map(String::as_str),
-            Some("my_value"),
-            "env must round-trip through save_custom_harness_to_dir"
-        );
-    }
-
-    // ── B-3: env validation boundary (validate_harness_definition_pub integration) ──
-
-    #[test]
-    fn validate_rejects_malformed_key_with_equals_sign() {
-        // BUZZ_AUTH_TAG=x is the documented reserved-key bypass shape:
-        // the key contains '=' so Command::env would produce
-        // `BUZZ_AUTH_TAG=x=forged` in the child env.
-        let mut env = BTreeMap::new();
-        env.insert("BUZZ_AUTH_TAG=x".to_string(), "forged".to_string());
-        let def = HarnessDefinition {
-            id: "bad-env".to_string(),
-            label: "Bad".to_string(),
-            command: "bad-bin".to_string(),
-            args: vec![],
-            env,
-            install_instructions_url: String::new(),
-            install_hint: String::new(),
-        };
-        let err = validate_harness_definition_pub(&def).unwrap_err();
-        assert!(
-            err.contains("env var keys must match"),
-            "malformed key must be rejected: {err}"
-        );
-        assert!(
-            err.contains("BUZZ_AUTH_TAG"),
-            "error must name the offending key: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_reserved_key_buzz_managed_agent() {
-        // BUZZ_MANAGED_AGENT and BUZZ_MANAGED_AGENT_START_NONCE are the
-        // ownership markers — supplying them in a definition must be rejected.
-        let mut env = BTreeMap::new();
-        env.insert(
-            "BUZZ_MANAGED_AGENT".to_string(),
-            "fake-instance".to_string(),
-        );
-        let def = HarnessDefinition {
-            id: "bad-marker".to_string(),
-            label: "Bad".to_string(),
-            command: "bad-bin".to_string(),
-            args: vec![],
-            env,
-            install_instructions_url: String::new(),
-            install_hint: String::new(),
-        };
-        let err = validate_harness_definition_pub(&def).unwrap_err();
-        assert!(
-            err.contains("reserved by Buzz"),
-            "ownership marker key must be rejected: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_reserved_key_case_insensitive() {
-        // BUZZ_PRIVATE_KEY in any casing must be blocked.
-        let mut env = BTreeMap::new();
-        env.insert("buzz_private_key".to_string(), "secret".to_string());
-        let def = HarnessDefinition {
-            id: "ci-marker".to_string(),
-            label: "CI".to_string(),
-            command: "ci-bin".to_string(),
-            args: vec![],
-            env,
-            install_instructions_url: String::new(),
-            install_hint: String::new(),
-        };
-        let err = validate_harness_definition_pub(&def).unwrap_err();
-        assert!(
-            err.contains("reserved by Buzz"),
-            "reserved key must be blocked case-insensitively: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_nul_byte_in_value() {
-        // A NUL in a value would cause Command::env to panic at spawn time.
-        let mut env = BTreeMap::new();
-        env.insert("MY_KEY".to_string(), "val\x00ue".to_string());
-        let def = HarnessDefinition {
-            id: "nul-val".to_string(),
-            label: "NUL".to_string(),
-            command: "nul-bin".to_string(),
-            args: vec![],
-            env,
-            install_instructions_url: String::new(),
-            install_hint: String::new(),
-        };
-        let err = validate_harness_definition_pub(&def).unwrap_err();
-        assert!(
-            err.contains("NUL bytes"),
-            "NUL value must be rejected at validation: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_value_over_per_value_size_limit() {
-        use crate::managed_agents::env_vars::MAX_ENV_VALUE_BYTES;
-        let mut env = BTreeMap::new();
-        // One byte over the per-value cap.
-        env.insert("BIG_VAL".to_string(), "x".repeat(MAX_ENV_VALUE_BYTES + 1));
-        let def = HarnessDefinition {
-            id: "big-val".to_string(),
-            label: "Big".to_string(),
-            command: "big-bin".to_string(),
-            args: vec![],
-            env,
-            install_instructions_url: String::new(),
-            install_hint: String::new(),
-        };
-        let err = validate_harness_definition_pub(&def).unwrap_err();
-        assert!(
-            err.contains("per-value limit"),
-            "oversized value must be rejected: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_accepts_well_formed_env() {
-        let mut env = BTreeMap::new();
-        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test-123".to_string());
-        env.insert("MODEL_VERSION".to_string(), "claude-3".to_string());
-        let def = HarnessDefinition {
-            id: "good-env".to_string(),
-            label: "Good".to_string(),
-            command: "good-bin".to_string(),
-            args: vec![],
-            env,
-            install_instructions_url: String::new(),
-            install_hint: String::new(),
-        };
-        assert!(
-            validate_harness_definition_pub(&def).is_ok(),
-            "well-formed definition must pass validation"
-        );
-    }
-
-    // ── Comma-in-args validation (transport-lossiness guard) ─────────────────
-
-    /// A definition whose args contain a literal comma must be rejected at the
-    /// validation boundary — the comma-delimited `BUZZ_ACP_AGENT_ARGS`
-    /// transport would silently split it into two args at spawn time.
-    #[test]
-    fn validate_rejects_comma_in_args() {
-        let mut def = make_def("comma-args", "Comma");
-        def.args = vec!["--name".to_string(), "a,b".to_string()];
-        let err = validate_harness_definition_pub(&def).unwrap_err();
-        assert!(
-            err.contains("comma"),
-            "error must explain the comma transport limit, got: {err}"
-        );
-    }
-
-    /// Comma-free args pass — including args with spaces and special chars.
-    #[test]
-    fn validate_accepts_comma_free_args() {
-        let mut def = make_def("clean-args", "Clean");
-        def.args = vec!["acp".to_string(), "--flag=x y".to_string()];
-        assert!(validate_harness_definition_pub(&def).is_ok());
-    }
-
-    /// The loader shares the same validator: a hand-authored file with a comma
-    /// in args is skipped, so the invariant holds regardless of how the
-    /// definition arrives (UI save or hand-edited JSON).
-    #[test]
-    fn load_skips_definition_with_comma_in_args() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("comma.json"),
-            r#"{"id":"comma-file","label":"Comma","command":"comma-bin","args":["a,b"]}"#,
-        )
-        .unwrap();
-        assert!(
-            load_custom_harnesses(dir.path()).is_empty(),
-            "comma-in-args definition must be skipped at the loader boundary"
-        );
-    }
-
-    // ── Discovery publish under persist_mutex (stale-snapshot regression) ────
-
-    /// Discovery's registry publish must re-read the directory at publish time
-    /// (under the persist mutex), not push a snapshot taken before the auth
-    /// probes ran. Regression shape: discovery scans dir → user saves harness X
-    /// (save_and_warm warms the registry with X) → discovery finishes. If
-    /// discovery published its pre-save snapshot, X would be on disk but
-    /// unresolvable at spawn until the next discover.
-    ///
-    /// Deterministic interleaving: we simulate it by calling the publish seam
-    /// (`warm_harness_registry_locked`) after a save that happened "during"
-    /// discovery — the fresh-read semantics mean the just-saved definition
-    /// survives the publish.
-    #[test]
-    fn discovery_publish_after_concurrent_save_keeps_saved_harness() {
-        let _lock = registry_test_lock();
-        let dir = tempfile::tempdir().unwrap();
-
-        // Discovery "scans" the dir while it is empty (stale snapshot would be []).
-        let stale_snapshot = load_custom_harnesses(dir.path());
-        assert!(stale_snapshot.is_empty());
-
-        // A save lands mid-discovery (save_and_warm: write + warm).
-        let def = make_def("mid-save", "Mid Save");
-        save_and_warm(dir.path(), &def, None).unwrap();
-        assert!(lookup_loaded_harness_by_id("mid-save").is_some());
-
-        // Discovery publishes — the locked warm re-reads the directory, so the
-        // just-saved harness must survive (a stale-snapshot publish would
-        // clobber it).
-        warm_harness_registry_locked(Some(dir.path()));
-        assert!(
-            lookup_loaded_harness_by_id("mid-save").is_some(),
-            "publish must re-read the directory, not clobber the mid-discovery save"
-        );
-    }
-
-    /// Same shape for delete: a delete landing mid-discovery must not be
-    /// resurrected by the discovery publish.
-    #[test]
-    fn discovery_publish_after_concurrent_delete_keeps_harness_gone() {
-        let _lock = registry_test_lock();
-        let dir = tempfile::tempdir().unwrap();
-
-        let def = make_def("mid-delete", "Mid Delete");
-        save_and_warm(dir.path(), &def, None).unwrap();
-
-        // Discovery "scans" while the file exists (stale snapshot would contain it).
-        let stale_snapshot = load_custom_harnesses(dir.path());
-        assert_eq!(stale_snapshot.len(), 1);
-
-        // Delete lands mid-discovery.
-        delete_and_warm(dir.path(), "mid-delete").unwrap();
-        assert!(lookup_loaded_harness_by_id("mid-delete").is_none());
-
-        // Discovery publishes — fresh read keeps it gone.
-        warm_harness_registry_locked(Some(dir.path()));
-        assert!(
-            lookup_loaded_harness_by_id("mid-delete").is_none(),
-            "publish must not resurrect a harness deleted mid-discovery"
-        );
-    }
-
-    // ── Registry warm path ───────────────────────────────────────────────────
-
-    /// After `warm_harness_registry_from_dir` the registry contains preset +
-    /// custom definitions and `lookup_loaded_harness_by_id` resolves them.
-    #[test]
-    fn warm_registry_then_lookup_finds_custom_and_preset_entries() {
-        let _lock = registry_test_lock();
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("my-custom.json"),
-            r#"{"id":"my-custom","label":"My Custom","command":"my-custom-bin"}"#,
-        )
-        .unwrap();
-
-        warm_harness_registry_from_dir(Some(dir.path()));
-
-        // Custom entry must be findable.
-        let found = lookup_loaded_harness_by_id("my-custom");
-        assert!(
-            found.is_some(),
-            "warm registry must contain the custom entry"
-        );
-        assert_eq!(found.unwrap().command, "my-custom-bin");
-
-        // At least one preset entry must be in the registry (e.g. "cursor").
-        let preset = lookup_loaded_harness_by_id("cursor");
-        assert!(
-            preset.is_some(),
-            "warm registry must contain preset entries"
-        );
-    }
-
-    /// `warm_harness_registry_from_dir` with `None` still loads presets.
-    #[test]
-    fn warm_registry_with_no_custom_dir_loads_presets_only() {
-        let _lock = registry_test_lock();
-        warm_harness_registry_from_dir(None);
-        // At least the "cursor" preset must be present.
-        assert!(
-            lookup_loaded_harness_by_id("cursor").is_some(),
-            "presets must be reachable even without a custom dir"
-        );
-    }
-
-    /// `warm_harness_registry_from_dir` followed by `update_loaded_harness_registry`
-    /// with an empty slice clears the registry (transactional save/delete contract).
-    #[test]
-    fn warm_then_clear_registry_empties_lookup() {
-        let _lock = registry_test_lock();
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("tmp-agent.json"),
-            r#"{"id":"tmp-agent","label":"Tmp","command":"tmp-bin"}"#,
-        )
-        .unwrap();
-
-        warm_harness_registry_from_dir(Some(dir.path()));
-        assert!(lookup_loaded_harness_by_id("tmp-agent").is_some());
-
-        // Simulate delete — re-warm with empty dir.
-        let empty_dir = tempfile::tempdir().unwrap();
-        warm_harness_registry_from_dir(Some(empty_dir.path()));
-        assert!(
-            lookup_loaded_harness_by_id("tmp-agent").is_none(),
-            "deleted harness must not appear after re-warm"
-        );
-    }
-
-    // ── Legacy avatarUrl regression (F1) ─────────────────────────────────────
-
-    /// A JSON file that contains a legacy `avatarUrl` field (from pre-BYOH code)
-    /// must still deserialize without error (unknown-field handling) and the
-    /// loaded `HarnessDefinition` must NOT carry the URL — the field is absent
-    /// from the struct so serde drops it.
-    #[test]
-    fn legacy_avatar_url_in_json_is_silently_dropped_on_load() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("legacy.json"),
-            r#"{
-                "id": "legacy-agent",
-                "label": "Legacy Agent",
-                "command": "legacy-bin",
-                "avatarUrl": "https://tracking.example.com/logo.png"
-            }"#,
-        )
-        .unwrap();
-
-        let defs = load_custom_harnesses(dir.path());
-        // The file must deserialize successfully (serde ignores unknown fields).
-        assert_eq!(defs.len(), 1, "legacy file with avatarUrl must still load");
-        assert_eq!(defs[0].id, "legacy-agent");
-        // HarnessDefinition has no avatar_url field — prove the URL cannot
-        // be routed to a catalog entry by serializing back and checking.
-        let json = serde_json::to_string(&defs[0]).unwrap();
-        assert!(
-            !json.contains("https://tracking.example.com"),
-            "serialized HarnessDefinition must not contain the legacy avatar URL"
-        );
-    }
-
-    // ── Preset id reservation ────────────────────────────────────────────────
-
-    /// All preset ids must be blocked by `check_id_collision`.
-    #[test]
-    fn preset_ids_are_reserved_and_cannot_be_used_as_custom_ids() {
-        // Derived from PRESET_HARNESSES — no hard-coded copy here so this test
-        // automatically covers any future preset additions.
-        for id in crate::managed_agents::discovery::preset_harness_ids() {
-            assert!(
-                check_id_collision(id).is_err(),
-                "preset id {id:?} should be rejected by check_id_collision"
-            );
-        }
-    }
-}
+#[path = "custom_harnesses_tests.rs"]
+mod tests;

@@ -905,6 +905,10 @@ pub async fn create_managed_agent(
             } else {
                 relay_mesh.clone()
             },
+            auth_tag_ref: None,
+            env_vars_ref: None,
+            provider_config_ref: None,
+            secrets_unavailable: false,
         };
 
         records.push(record);
@@ -1345,12 +1349,10 @@ pub async fn delete_managed_agent(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
-
 // Remote agent shutdown is handled entirely by the frontend:
 // 1. Frontend sends "!shutdown" @mention via WebSocket (signed by user's key)
 // 2. Harness sees it, exits gracefully, sets presence to "offline"
-// 3. Desktop's existing presence polling sees "offline" — UI updates automatically
-// No backend Tauri command needed. Presence IS the status.
+// 3. Desktop's existing presence polling sees "offline" — UI updates automatically. No backend command needed; presence IS the status.
 #[path = "agents_deploy.rs"]
 mod deploy;
 pub(super) mod provider_access;
@@ -1359,13 +1361,11 @@ use deploy::build_deploy_payload;
 use deploy::{deploy_payload_json, DeployProjections};
 #[cfg(test)]
 use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
-
 #[path = "agents_profile.rs"]
 mod profile;
 #[cfg(test)]
 use profile::{profile_needs_sync, resolve_legacy_avatar};
 pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
-
 #[cfg(test)]
 #[path = "agents_tests.rs"]
 mod tests;

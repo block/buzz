@@ -58,6 +58,10 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        auth_tag_ref: None,
+        env_vars_ref: None,
+        provider_config_ref: None,
+        secrets_unavailable: false,
     }
 }
 

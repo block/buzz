@@ -30,8 +30,13 @@ use tauri::AppHandle;
 use crate::managed_agents::env_vars::{
     validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
 };
+use crate::managed_agents::secret_projection::{
+    cancel_gc_candidacy, deserialize_env_map, global_env_key, load_secret, serialize_env_map,
+    write_secret, WriteOutcome,
+};
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
 use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
+use crate::secret_store::SecretStore;
 
 /// The global agent configuration record.
 ///
@@ -52,6 +57,15 @@ pub struct GlobalAgentConfig {
     /// stripped at spawn time.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
+
+    /// Keyring generation reference for `env_vars`. When present and `env_vars`
+    /// is empty, the env map is stored in the keyring under
+    /// `global:env:<env_vars_ref>`. When absent with empty `env_vars`, the env
+    /// map is intentionally empty.
+    ///
+    /// Inline (`env_vars` non-empty) takes precedence over any ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_vars_ref: Option<String>,
 
     /// Global fallback provider (e.g. `"databricks_v2"`, `"anthropic"`).
     ///
@@ -178,9 +192,30 @@ fn global_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("global-agent-config.json"))
 }
 
+fn global_config_secret_store() -> Option<&'static SecretStore> {
+    if cfg!(feature = "system-keyring") {
+        Some(SecretStore::shared(crate::app_state::keyring_service()))
+    } else {
+        None
+    }
+}
+
 /// Load the global agent config from disk.
 ///
 /// Returns the default (all-empty) config if the file does not exist yet.
+/// Hydrates `env_vars` from the keyring when an `env_vars_ref` is present
+/// and `env_vars` is empty (inline fallback: non-empty `env_vars` wins).
+///
+/// # Fail-closed on unavailability
+///
+/// Returns `Err` (rather than a silently-empty config) when the record
+/// carries an `env_vars_ref` but the keyring entry is missing/unreachable or
+/// its bytes fail to deserialize. Global env applies to ALL agents; silently
+/// dropping it would spawn every agent with an incomplete env under the exact
+/// keyring-failure the gen-ref protocol exists to fail closed on. Spawn/deploy
+/// gates propagate this `Err` to refuse the launch; display/readiness callers
+/// choose degraded-empty via `.unwrap_or_default()` and reflect the failure as
+/// not-ready. Absent file and the no-ref empty case remain `Ok(default)`.
 pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, String> {
     let path = global_config_path(app)?;
     if !path.exists() {
@@ -188,7 +223,36 @@ pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, St
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read global agent config: {e}"))?;
-    serde_json::from_str(&content).map_err(|e| format!("failed to parse global agent config: {e}"))
+    let mut config: GlobalAgentConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse global agent config: {e}"))?;
+
+    // Hydrate env_vars from keyring if inline is empty and a ref is present.
+    if config.env_vars.is_empty() {
+        if let Some(store) = global_config_secret_store() {
+            match load_secret(
+                store,
+                config.env_vars_ref.as_deref(),
+                global_env_key,
+                "global env_vars",
+            ) {
+                Ok(Some(serialized)) => match deserialize_env_map(&serialized) {
+                    Ok(map) => config.env_vars = map,
+                    // Ref present, bytes retrieved, but unparseable — fail closed.
+                    Err(e) => {
+                        return Err(format!(
+                            "global env_vars unavailable: deserialize failed: {e}"
+                        ))
+                    }
+                },
+                Ok(None) => {} // no ref: intentionally empty
+                // Ref present but keyring entry missing/unreachable — fail closed.
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    // else: inline is authoritative.
+
+    Ok(config)
 }
 
 /// Save the global agent config to disk.
@@ -196,10 +260,55 @@ pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, St
 /// Strips empty env values and normalizes blank provider/model to `None`
 /// before writing (empty = "inherit" semantics).
 /// Written `0o600` — same protection as `managed-agents.json`.
+/// Persists `env_vars` to the keyring before writing JSON when the keyring
+/// is available (generation-reference protocol).
 pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> Result<(), String> {
     let mut config = config.clone();
     strip_empty_env_vars(&mut config);
     normalize_global_config_fields(&mut config);
+
+    // Persist env_vars to keyring (generation-reference protocol).
+    if let Some(store) = global_config_secret_store() {
+        // Cross-process transaction lock: hold across the generation write and
+        // the atomic JSON commit below so a second Desktop process's GC cannot
+        // delete the just-written generation before its ref lands in JSON. The
+        // lock releases when `_txn` drops at end of function. Callers never hold
+        // it already (boot migration releases its agent-store span before
+        // calling here), so this does not nest. Keyed by the SAME canonical
+        // store directory as the agent-store saves and GC (via
+        // `acquire_secret_txn_lock`) so every mutator of the shared keyring
+        // blob serializes on one inode — global-agent-config.json is not itself
+        // shared, but it writes the same blob the agent store does.
+        let _txn = crate::managed_agents::storage::acquire_secret_txn_lock(app)?;
+        let inline_env = if !config.env_vars.is_empty() {
+            serialize_env_map(&config.env_vars).ok()
+        } else {
+            None
+        };
+        match write_secret(
+            store,
+            global_env_key,
+            inline_env.as_deref(),
+            "global env_vars",
+        ) {
+            WriteOutcome::Persisted { gen } => {
+                cancel_gc_candidacy(store, &global_env_key(&gen));
+                config.env_vars.clear();
+                config.env_vars_ref = Some(gen);
+            }
+            WriteOutcome::KeptInline { .. } => {
+                config.env_vars_ref = None;
+            }
+            WriteOutcome::Nothing => {
+                config.env_vars_ref = None;
+            }
+        }
+
+        let path = global_config_path(app)?;
+        let payload = serde_json::to_vec_pretty(&config)
+            .map_err(|e| format!("failed to serialize global agent config: {e}"))?;
+        return atomic_write_json_restricted(&path, &payload);
+    }
 
     let path = global_config_path(app)?;
     let payload = serde_json::to_vec_pretty(&config)

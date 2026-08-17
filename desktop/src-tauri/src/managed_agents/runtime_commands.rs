@@ -7,9 +7,9 @@ use super::{
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
     process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
     spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    unavailable_definition_id, unavailable_harness_id, write_agent_runtime_receipt, AgentReadiness,
+    BackendKind, ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -23,7 +23,13 @@ fn status_for(
     requested_relay_url: Option<String>,
 ) -> ManagedAgentRuntimeStatus {
     let personas = load_personas(app).unwrap_or_default();
-    let global = load_global_agent_config(app).unwrap_or_default();
+    // A global env_vars ref that cannot be resolved makes spawn refuse (see the
+    // fail-closed gate in `spawn_agent_child`). Reflect that here so a
+    // secrets-unavailable agent reads not-ready instead of advertising a
+    // local_setup it cannot honor.
+    let global_result = load_global_agent_config(app);
+    let global_unavailable = global_result.is_err();
+    let global = global_result.unwrap_or_default();
     status_for_with(
         app,
         record,
@@ -33,6 +39,7 @@ fn status_for(
         StatusInputs {
             personas: &personas,
             global: &global,
+            global_unavailable,
         },
     )
 }
@@ -42,6 +49,10 @@ fn status_for(
 struct StatusInputs<'a> {
     personas: &'a [super::AgentDefinition],
     global: &'a super::GlobalAgentConfig,
+    /// The global config's env_vars ref could not be resolved from the keyring.
+    /// Forces `local_setup` false: spawn refuses (see `spawn_agent_child`), so
+    /// advertising readiness would promise a launch the agent cannot honor.
+    global_unavailable: bool,
 }
 
 fn status_for_with(
@@ -52,11 +63,31 @@ fn status_for_with(
     requested_relay_url: Option<String>,
     inputs: StatusInputs<'_>,
 ) -> ManagedAgentRuntimeStatus {
-    let StatusInputs { personas, global } = inputs;
+    let StatusInputs {
+        personas,
+        global,
+        global_unavailable,
+    } = inputs;
     let command = record_agent_command(record, personas);
     let metadata = super::known_acp_runtime(&command);
     let effective = resolve_effective_agent_env(record, personas, metadata, global);
-    let local_setup = matches!(agent_readiness(&effective), AgentReadiness::Ready);
+    // `secrets_unavailable` means at least one keyring ref exists but the
+    // entry is missing/unreadable.  Spawn will refuse via `spawn_key_refusal`,
+    // so `local_setup` must also be false — the agent cannot start even if the
+    // effective env happens to satisfy the runtime's credential check.
+    // `global_unavailable` is the same failure at the global tier: spawn refuses
+    // in `spawn_agent_child` when the global env_vars ref cannot be resolved.
+    // `definition_unavailable` is the third tier: a linked instance whose
+    // definition's env could not be hydrated is refused at spawn time.
+    // `harness_unavailable` is the fourth tier: the effective harness's own
+    // `env_ref` could not be hydrated, which `spawn_agent_child` also refuses.
+    let definition_unavailable = unavailable_definition_id(record, personas).is_some();
+    let harness_unavailable = unavailable_harness_id(record, personas).is_some();
+    let local_setup = !record.secrets_unavailable
+        && !global_unavailable
+        && !definition_unavailable
+        && !harness_unavailable
+        && matches!(agent_readiness(&effective), AgentReadiness::Ready);
     ManagedAgentRuntimeStatus {
         pubkey: key.pubkey.clone(),
         relay_url: key.relay_url.clone(),
@@ -145,7 +176,9 @@ pub fn list_managed_agent_runtimes(
     // on every status event — load the per-row status inputs once, outside
     // the locks, instead of hitting disk per row while holding them.
     let personas = load_personas(&app).unwrap_or_default();
-    let global = load_global_agent_config(&app).unwrap_or_default();
+    let global_result = load_global_agent_config(&app);
+    let global_unavailable = global_result.is_err();
+    let global = global_result.unwrap_or_default();
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -188,6 +221,7 @@ pub fn list_managed_agent_runtimes(
                 StatusInputs {
                     personas: &personas,
                     global: &global,
+                    global_unavailable,
                 },
             );
             emit_status(&app, &status);
@@ -207,6 +241,7 @@ pub fn list_managed_agent_runtimes(
             StatusInputs {
                 personas: &personas,
                 global: &global,
+                global_unavailable,
             },
         ))
     }));
@@ -430,15 +465,22 @@ fn unkeyable_failed_status(
     error: String,
     personas: &[super::AgentDefinition],
     global: &super::GlobalAgentConfig,
+    global_unavailable: bool,
 ) -> ManagedAgentRuntimeStatus {
     let command = record_agent_command(record, personas);
     let metadata = super::known_acp_runtime(&command);
     let effective = resolve_effective_agent_env(record, personas, metadata, global);
+    let definition_unavailable = unavailable_definition_id(record, personas).is_some();
+    let harness_unavailable = unavailable_harness_id(record, personas).is_some();
     ManagedAgentRuntimeStatus {
         pubkey: record.pubkey.clone(),
         relay_url: requested.clone(),
         requested_relay_url: Some(requested),
-        local_setup: matches!(agent_readiness(&effective), AgentReadiness::Ready),
+        local_setup: !record.secrets_unavailable
+            && !global_unavailable
+            && !definition_unavailable
+            && !harness_unavailable
+            && matches!(agent_readiness(&effective), AgentReadiness::Ready),
         lifecycle: ManagedAgentRuntimeLifecycle::Failed,
         pid: None,
         error: Some(error),
@@ -497,7 +539,9 @@ pub async fn reconcile_managed_agent_runtimes(
     // restart flows.
     tokio::task::spawn_blocking(move || {
         let personas = load_personas(&app).unwrap_or_default();
-        let global = load_global_agent_config(&app).unwrap_or_default();
+        let global_result = load_global_agent_config(&app);
+        let global_unavailable = global_result.is_err();
+        let global = global_result.unwrap_or_default();
         let mut rows = Vec::new();
         for probe in probes {
             match probe {
@@ -523,6 +567,7 @@ pub async fn reconcile_managed_agent_runtimes(
                                 StatusInputs {
                                     personas: &personas,
                                     global: &global,
+                                    global_unavailable,
                                 },
                             );
                             status.lifecycle = ManagedAgentRuntimeLifecycle::Failed;
@@ -548,6 +593,7 @@ pub async fn reconcile_managed_agent_runtimes(
                                     StatusInputs {
                                         personas: &personas,
                                         global: &global,
+                                        global_unavailable,
                                     },
                                 );
                                 status.lifecycle = ManagedAgentRuntimeLifecycle::Failed;
@@ -555,7 +601,12 @@ pub async fn reconcile_managed_agent_runtimes(
                                 status
                             }
                             Err(_) => unkeyable_failed_status(
-                                &record, requested, error, &personas, &global,
+                                &record,
+                                requested,
+                                error,
+                                &personas,
+                                &global,
+                                global_unavailable,
                             ),
                         };
                     rows.push(status);
@@ -569,148 +620,5 @@ pub async fn reconcile_managed_agent_runtimes(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn payload(
-        relay_url: &str,
-        lifecycle: ManagedAgentRuntimeLifecycle,
-        error: Option<&str>,
-    ) -> super::super::ManagedAgentRuntimeLifecycleObserverPayload {
-        super::super::ManagedAgentRuntimeLifecycleObserverPayload {
-            pubkey: "aa".repeat(32),
-            relay_url: relay_url.into(),
-            start_nonce: "test-generation".into(),
-            lifecycle,
-            error: error.map(str::to_owned),
-        }
-    }
-
-    fn record_with_relay(relay_url: &str) -> super::super::ManagedAgentRecord {
-        serde_json::from_str(&format!(
-            r#"{{
-                "pubkey": "{}",
-                "name": "pin-test",
-                "relay_url": "{relay_url}",
-                "acp_command": "buzz-acp",
-                "agent_command": "goose",
-                "agent_args": [],
-                "mcp_command": "",
-                "turn_timeout_seconds": 320,
-                "system_prompt": "",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z"
-            }}"#,
-            "aa".repeat(32)
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn legacy_relay_pin_is_ignored_for_fan_out() {
-        // Zero-touch cutover (#2122): a record carrying a creation-era
-        // `relay_url` pin must fan out exactly like an unpinned one — the
-        // stored field is parsed but never consulted. See
-        // `effective_agent_relay_url`.
-        let unpinned = record_with_relay("");
-        let pinned = record_with_relay("wss://one.example");
-        for record in [&unpinned, &pinned] {
-            assert_eq!(
-                crate::relay::effective_agent_relay_url(&record.relay_url, "wss://two.example"),
-                "wss://two.example"
-            );
-        }
-    }
-
-    #[test]
-    fn unkeyable_relay_degrades_to_failed_row() {
-        // A requested URL that cannot form a pair key must still yield a
-        // Failed row keyed by the raw requested string, so one bad community
-        // never aborts the rest of the reconcile batch.
-        let record = record_with_relay("");
-        let status = unkeyable_failed_status(
-            &record,
-            "not a url".to_string(),
-            "relay access probe timed out".to_string(),
-            &[],
-            &super::super::GlobalAgentConfig::default(),
-        );
-        assert!(matches!(
-            status.lifecycle,
-            ManagedAgentRuntimeLifecycle::Failed
-        ));
-        assert_eq!(status.relay_url, "not a url");
-        assert_eq!(status.requested_relay_url.as_deref(), Some("not a url"));
-        assert_eq!(status.pubkey, record.pubkey);
-        assert_eq!(
-            status.error.as_deref(),
-            Some("relay access probe timed out")
-        );
-        assert!(status.pid.is_none());
-    }
-
-    #[test]
-    fn runtime_key_rejects_non_hex_pubkeys() {
-        assert!(ManagedAgentRuntimeKey::new("../not-a-key", "wss://relay.example").is_err());
-        assert!(ManagedAgentRuntimeKey::new("gg".repeat(32), "wss://relay.example").is_err());
-    }
-
-    #[test]
-    fn runtime_key_canonicalizes_hex_pubkeys() {
-        let key = ManagedAgentRuntimeKey::new("AA".repeat(32), "wss://relay.example").unwrap();
-        assert_eq!(key.pubkey, "aa".repeat(32));
-    }
-
-    #[test]
-    fn observer_lifecycle_key_preserves_exact_canonical_pair() {
-        let first = payload(
-            "WSS://Relay.Example:443/",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        let key = observer_lifecycle_key(&first.pubkey, &first).unwrap();
-        assert_eq!(key.pubkey, first.pubkey);
-        assert_eq!(key.relay_url, "wss://relay.example");
-
-        let other = payload(
-            "wss://other.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        assert_ne!(key, observer_lifecycle_key(&other.pubkey, &other).unwrap());
-    }
-
-    #[test]
-    fn observer_lifecycle_rejects_cross_agent_and_desktop_states() {
-        let ready = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            None,
-        );
-        assert!(observer_lifecycle_key(&"bb".repeat(32), &ready).is_err());
-
-        let stopped = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Stopped,
-            None,
-        );
-        assert!(observer_lifecycle_key(&stopped.pubkey, &stopped).is_err());
-    }
-
-    #[test]
-    fn observer_lifecycle_enforces_failed_error_contract() {
-        let failed = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Failed,
-            None,
-        );
-        assert!(observer_lifecycle_key(&failed.pubkey, &failed).is_err());
-
-        let ready_with_error = payload(
-            "wss://relay.example",
-            ManagedAgentRuntimeLifecycle::Ready,
-            Some("unexpected"),
-        );
-        assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
-    }
-}
+#[path = "runtime_commands_tests.rs"]
+mod tests;

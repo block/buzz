@@ -16,11 +16,9 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-        load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-        resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
-        AgentReadiness, BackendKind, GlobalAgentConfig,
+        current_instance_id, find_managed_agent_mut, load_global_agent_config, load_managed_agents,
+        load_personas, save_global_agent_config, save_managed_agents, stop_managed_agent_process,
+        sync_managed_agent_processes, validate_global_config, BackendKind, GlobalAgentConfig,
     },
 };
 
@@ -72,9 +70,27 @@ pub async fn set_global_agent_config(
     // lock in Phase 2 after sync_managed_agent_processes.
     let app_for_write = app.clone();
     let phase1 = tokio::task::spawn_blocking(move || {
+        use tauri::Manager;
+        // Serialize the whole read-modify-write (validate → snapshot old →
+        // save → re-read → candidate scan) against boot-time GC and the card
+        // mint save path, which take the same lock. Without it, GC could read
+        // the JSON between this save's keyring write and its atomic JSON commit
+        // and delete the just-written generation. `save_global_agent_config`
+        // itself must NOT take the lock (card mint and the boot migration hold
+        // it around their own save call — a second acquire would deadlock).
+        let state = app_for_write.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
         validate_global_config(&config)?;
 
-        let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
+        // Fail closed when the CURRENTLY committed global config cannot load —
+        // see `refuse_save_on_unavailable_current` for why `unwrap_or_default()`
+        // here would orphan a live-but-dangling generation.
+        let old_global =
+            refuse_save_on_unavailable_current(load_global_agent_config(&app_for_write))?;
 
         save_global_agent_config(&app_for_write, &config)?;
 
@@ -185,38 +201,18 @@ fn collect_restart_candidates(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let candidates = records
-        .iter()
-        .filter(|record| {
-            if record.backend != BackendKind::Local {
-                return false;
-            }
-            let has_live_runtime = runtimes.iter_mut().any(|(key, runtime)| {
+    let candidates = super::restart_ops::select_config_change_restart_candidates(
+        &records,
+        &all_personas,
+        old_global,
+        new_global,
+        |record| {
+            runtimes.iter_mut().any(|(key, runtime)| {
                 key.pubkey.eq_ignore_ascii_case(&record.pubkey)
                     && runtime.child.try_wait().ok().flatten().is_none()
-            });
-            if !has_live_runtime {
-                return false;
-            }
-            let effective_cmd = record_agent_command(record, &all_personas);
-            let runtime_meta = known_acp_runtime(&effective_cmd);
-            let old_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, old_global);
-            let new_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, new_global);
-            let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
-            let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
-            // For a Ready+running agent: the process must be alive now and the
-            // process-env map must differ.  The alive check avoids queuing a
-            // restart for a process that already exited between the pre-filter
-            // scan and Phase 2.  NotReady→Ready bypasses the alive check
-            // because Phase 2 will stop-then-start unconditionally.
-            let env_changed = old_ready && old_effective.env != new_effective.env;
-
-            should_restart_on_config_change(old_ready, new_ready, env_changed)
-        })
-        .map(|r| r.pubkey.clone())
-        .collect();
+            })
+        },
+    );
 
     (candidates, all_personas)
 }
@@ -300,32 +296,28 @@ async fn restart_local_agent_on_config_change(
             ));
         }
 
-        // Re-check the eligibility predicate under lock:
-        //   (old NotReady && new Ready)  OR  (old Ready && env changed)
-        // TODO: busy/mid-turn deferral would slot in here
-        //
+        // Re-check eligibility and re-read the committed global strictly under
+        // lock, then stop — all inside `authorize_config_change_restart`, which
+        // owns the gate order and runs the injected stop only on full Ok.
         // Reuse personas_snapshot from Phase 1 — avoids loading personas again
         // per agent when the save-command personas haven't changed.
-        let effective_cmd = record_agent_command(record, &personas_owned);
-        let runtime_meta = known_acp_runtime(&effective_cmd);
-        let old_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &old_global_clone);
-        let new_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &new_global_clone);
-        let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
-        let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
-        // Under lock, the alive check was already done above via process_is_running.
-        let env_changed = old_ready && old_effective.env != new_effective.env;
-        if !should_restart_on_config_change(old_ready, new_ready, env_changed) {
-            return Err(format!(
-                "agent {pubkey_owned} restart condition no longer valid under lock"
-            ));
-        }
-
-        // Stop the process.
-        let record_mut = find_managed_agent_mut(&mut records, &pubkey_owned)?;
-        stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
-        save_managed_agents(&app_for_stop, &records)?;
+        //
+        // The decision reads a cloned record (immutable); the stop closure
+        // re-finds the mutable record so the immutable-decision / mutable-stop
+        // borrow split stays clean.
+        let record = record.clone();
+        super::restart_ops::authorize_config_change_restart(
+            &record,
+            &personas_owned,
+            &old_global_clone,
+            &new_global_clone,
+            || load_global_agent_config(&app_for_stop),
+            || {
+                let record_mut = find_managed_agent_mut(&mut records, &pubkey_owned)?;
+                stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
+                save_managed_agents(&app_for_stop, &records)
+            },
+        )?;
 
         Ok(runtime_keys)
     })
@@ -411,20 +403,89 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
 /// restart would not repair the missing auth token. If the binary disappears,
 /// the process would already be dead and the PID alive-check in the candidate
 /// scan would have excluded it.
-fn should_restart_on_config_change(old_ready: bool, new_ready: bool, env_changed: bool) -> bool {
-    (!old_ready && new_ready) || (old_ready && env_changed)
+///
+/// **Fail-closed on unavailable secrets:** when any secret tier is unavailable
+/// (`secrets_unavailable`) the record's empty hydrated env can look `Ready` and
+/// its env can differ from the old config for unrelated reasons, so restart is
+/// refused — a stop-then-respawn would stop a live process only to hit the
+/// spawn refusal (`FailedAfterStop`).
+pub(super) fn should_restart_on_config_change(
+    old_ready: bool,
+    new_ready: bool,
+    env_changed: bool,
+    secrets_unavailable: bool,
+) -> bool {
+    !secrets_unavailable && ((!old_ready && new_ready) || (old_ready && env_changed))
+}
+
+/// Fail closed when the CURRENTLY committed global config cannot load before an
+/// overwrite: its `env_vars_ref` points at a keyring entry that is missing or
+/// unreadable this boot. `unwrap_or_default()` here would silently replace a
+/// dangling-but-live committed ref with the caller's config, orphaning the
+/// generation the ref still points at. No destructive "replace despite
+/// unavailability" action is modeled, so refusing is the only correct arm —
+/// retry once the keyring is reachable.
+///
+/// Extracted as the AppHandle-free seam so the refusal is unit-testable (the
+/// command obtains its `Result` from `load_global_agent_config(&app)`).
+fn refuse_save_on_unavailable_current(
+    current_load: Result<GlobalAgentConfig, String>,
+) -> Result<GlobalAgentConfig, String> {
+    current_load.map_err(|e| {
+        format!(
+            "cannot save global agent config: the current global config has \
+             secrets that could not be loaded from the keyring ({e}). \
+             Refusing to overwrite it while its secrets are unavailable; \
+             retry once the keyring is reachable."
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::should_restart_on_config_change;
+    use super::{refuse_save_on_unavailable_current, GlobalAgentConfig};
+
+    /// A global loader `Err` (the current committed `env_vars_ref` could not
+    /// hydrate) must refuse the overwrite rather than fall through to
+    /// `unwrap_or_default()`, which would orphan the live-but-dangling
+    /// generation. Mutation check: swap the seam's body for
+    /// `Ok(current_load.unwrap_or_default())` and this fails — `Ok` not `Err`.
+    #[test]
+    fn save_refuses_when_current_global_unavailable() {
+        let out = refuse_save_on_unavailable_current(Err(
+            "global env_vars unavailable: gen abc123 not found in keyring".to_string(),
+        ));
+        let err = out.expect_err("an unavailable current global must refuse the save");
+        assert!(
+            err.contains("cannot save global agent config") && err.contains("not found in keyring"),
+            "refusal must explain the save is blocked and carry the loader cause: {err}"
+        );
+    }
+
+    /// A successful load passes through so the caller reuses it as `old_global`
+    /// for the restart-candidate scan. Pins that only the `Err` arm is mapped.
+    #[test]
+    fn save_passes_through_available_current_global() {
+        let current = GlobalAgentConfig {
+            model: Some("gpt-5".to_string()),
+            ..Default::default()
+        };
+        let out = refuse_save_on_unavailable_current(Ok(current.clone()));
+        assert_eq!(
+            out.expect("an available current global must pass through")
+                .model,
+            current.model,
+            "the seam must return the loaded config unchanged on success"
+        );
+    }
 
     /// Running agent (Ready) whose effective env changed → restart candidate.
     #[test]
     fn env_changed_running_agent_is_candidate() {
         // old_ready=true, new_ready=true, env_changed=true
         assert!(
-            should_restart_on_config_change(true, true, true),
+            should_restart_on_config_change(true, true, true, false),
             "running agent with changed env must be restarted"
         );
     }
@@ -434,7 +495,7 @@ mod tests {
     fn unchanged_running_agent_is_not_candidate() {
         // old_ready=true, new_ready=true, env_changed=false
         assert!(
-            !should_restart_on_config_change(true, true, false),
+            !should_restart_on_config_change(true, true, false, false),
             "running agent with identical env must NOT be restarted"
         );
     }
@@ -444,7 +505,7 @@ mod tests {
     fn not_ready_to_ready_is_candidate() {
         // old_ready=false, new_ready=true, env_changed=false (env_changed irrelevant)
         assert!(
-            should_restart_on_config_change(false, true, false),
+            should_restart_on_config_change(false, true, false, false),
             "NotReady → Ready must be a restart candidate"
         );
     }
@@ -455,7 +516,7 @@ mod tests {
     fn ready_to_not_ready_env_changed_is_candidate() {
         // old_ready=true (had key), new_ready=false (key removed), env_changed=true
         assert!(
-            should_restart_on_config_change(true, false, true),
+            should_restart_on_config_change(true, false, true, false),
             "Ready → NotReady with env change must be a restart candidate"
         );
     }
@@ -465,7 +526,7 @@ mod tests {
     fn both_not_ready_unchanged_is_not_candidate() {
         // old_ready=false, new_ready=false, env_changed=false
         assert!(
-            !should_restart_on_config_change(false, false, false),
+            !should_restart_on_config_change(false, false, false, false),
             "both NotReady with no env change must NOT be a candidate"
         );
     }
@@ -476,7 +537,7 @@ mod tests {
         // Changed one unrelated env var but still missing the required key.
         // old_ready=false, new_ready=false, env_changed=true
         assert!(
-            !should_restart_on_config_change(false, false, true),
+            !should_restart_on_config_change(false, false, true, false),
             "NotReady→NotReady (env changed but still broken) must NOT be a candidate"
         );
     }
@@ -490,8 +551,28 @@ mod tests {
     fn not_ready_to_ready_with_env_change_is_candidate() {
         // old_ready=false, new_ready=true, env_changed=true
         assert!(
-            should_restart_on_config_change(false, true, true),
+            should_restart_on_config_change(false, true, true, false),
             "NotReady → Ready (with env change) must be a restart candidate"
+        );
+    }
+
+    /// An agent that would otherwise be a restart candidate (`NotReady → Ready`,
+    /// or Ready with env changed) but whose secrets are unavailable → NO
+    /// restart. An unavailable tier's empty hydrated env can make readiness
+    /// compute `Ready` and can differ from the old config for unrelated
+    /// reasons, so this flag is the sole guard against stopping a live process
+    /// only to hit the spawn refusal (`FailedAfterStop`). Mutation check: drop
+    /// the leading `!secrets_unavailable &&` and both asserts below flip while
+    /// the healthy-restart controls above stay green.
+    #[test]
+    fn secrets_unavailable_is_never_a_candidate() {
+        assert!(
+            !should_restart_on_config_change(false, true, false, true),
+            "an unblocked (NotReady → Ready) agent with unavailable secrets must NOT be restarted"
+        );
+        assert!(
+            !should_restart_on_config_change(true, true, true, true),
+            "a running agent with changed env but unavailable secrets must NOT be restarted"
         );
     }
 }

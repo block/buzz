@@ -405,7 +405,7 @@ const MIGRATION_MARKER_NAME: &str = "identity.migrated";
 /// The keyring operations the identity resolution flow needs. Abstracted so the
 /// corrupt-keyring recovery decision ([`recover_from_keyring`]) can be
 /// unit-tested against a fake without touching the live OS keyring.
-trait IdentityKeyStore {
+pub(crate) trait IdentityKeyStore {
     fn probe(&self, name: &str) -> crate::secret_store::KeyringProbe;
     fn load(&self, name: &str) -> Result<Option<String>, String>;
     fn store(&self, name: &str, value: &str) -> Result<(), String>;
@@ -869,7 +869,7 @@ fn persist_identity_to_keyring(
 /// first via [`persist_identity_to_keyring`]; if the keyring is unavailable,
 /// falls back to the `0o600` identity.key file. Returns `Err` only when both
 /// the keyring write and the file fallback fail.
-fn persist_imported_identity_impl(
+pub(crate) fn persist_imported_identity_impl(
     store: &impl IdentityKeyStore,
     keys: &Keys,
     legacy_path: &std::path::Path,
@@ -886,17 +886,6 @@ fn persist_imported_identity_impl(
             Ok(IdentityStorage::LocalFile)
         }
     }
-}
-
-/// Public entry point binding [`persist_imported_identity_impl`] to the shared
-/// [`crate::secret_store::SecretStore`]. See the impl for the persistence policy.
-pub(crate) fn persist_imported_identity(
-    store: &crate::secret_store::SecretStore,
-    keys: &Keys,
-    legacy_path: &std::path::Path,
-    data_dir: &std::path::Path,
-) -> Result<IdentityStorage, String> {
-    persist_imported_identity_impl(store, keys, legacy_path, data_dir)
 }
 
 /// Path of the migration-completed marker within `data_dir`.

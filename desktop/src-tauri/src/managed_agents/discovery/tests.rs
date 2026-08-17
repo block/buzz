@@ -18,7 +18,6 @@ fn resolves_known_avatar_for_bare_command() {
 
     assert_eq!(avatar_url, GOOSE_AVATAR_URL);
 }
-
 #[test]
 fn resolves_known_avatar_for_command_paths_and_aliases() {
     assert_eq!(
@@ -38,12 +37,10 @@ fn resolves_known_avatar_for_command_paths_and_aliases() {
         Some(CLAUDE_CODE_AVATAR_URL.to_string())
     );
 }
-
 #[test]
 fn returns_none_for_unknown_commands() {
     assert!(managed_agent_avatar_url("custom-agent").is_none());
 }
-
 #[test]
 fn default_agent_command_resolves_bundled_buzz_agent() {
     // The default must be bundled buzz-agent, never bare `goose` on a stock Windows install.
@@ -191,24 +188,9 @@ fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agent
     crate::managed_agents::AgentDefinition {
         id: id.to_string(),
         display_name: id.to_string(),
-        avatar_url: None,
-        system_prompt: String::new(),
         runtime: runtime.map(str::to_string),
-        model: None,
-        provider: None,
-        name_pool: Vec::new(),
-        is_builtin: false,
         is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        env_vars: std::collections::BTreeMap::new(),
-        respond_to: None,
-        respond_to_allowlist: Vec::new(),
-        parallelism: None,
-        created_at: "2026-06-09T00:00:00Z".to_string(),
-        updated_at: "2026-06-09T00:00:00Z".to_string(),
+        ..Default::default()
     }
 }
 
@@ -283,9 +265,12 @@ fn record_with(
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        auth_tag_ref: None,
+        env_vars_ref: None,
+        provider_config_ref: None,
+        secrets_unavailable: false,
     }
 }
-
 #[test]
 fn record_agent_command_own_runtime_wins_over_persona() {
     // A record with its own materialized runtime never consults the
@@ -1623,6 +1608,8 @@ fn deleted_harness_summary_display_and_spawn_sentence_agree() {
         command: "doomed-bin".to_string(),
         args: vec![],
         env: Default::default(),
+        env_ref: None,
+        env_unavailable: false,
         install_instructions_url: String::new(),
         install_hint: String::new(),
     };
@@ -1767,6 +1754,8 @@ fn harness_def(
         command: command.to_string(),
         args: vec![],
         env: Default::default(),
+        env_ref: None,
+        env_unavailable: false,
         install_instructions_url: String::new(),
         install_hint: String::new(),
     }

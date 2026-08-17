@@ -139,6 +139,7 @@ fn definition_from_snapshot(
         parallelism: behavior.parallelism,
         created_at: now.to_string(),
         updated_at: now.to_string(),
+        secrets_unavailable: false,
     })
 }
 
@@ -611,6 +612,10 @@ pub async fn confirm_team_snapshot_import(
             relay_mesh: None,
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),
+            auth_tag_ref: None,
+            env_vars_ref: None,
+            provider_config_ref: None,
+            secrets_unavailable: false,
         };
 
         minted.push(MintedMember {

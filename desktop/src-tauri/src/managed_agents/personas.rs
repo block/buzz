@@ -131,6 +131,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             parallelism: None,
             created_at: now.to_string(),
             updated_at: now.to_string(),
+            secrets_unavailable: false,
         })
         .collect()
 }

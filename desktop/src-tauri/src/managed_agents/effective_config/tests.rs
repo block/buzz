@@ -28,6 +28,7 @@ fn definition(
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
+        secrets_unavailable: false,
     }
 }
 
@@ -92,6 +93,10 @@ fn record(
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        auth_tag_ref: None,
+        env_vars_ref: None,
+        provider_config_ref: None,
+        secrets_unavailable: false,
     }
 }
 
@@ -873,4 +878,94 @@ fn linked_record_with_legacy_bytes_inherits_global_not_mesh() {
     assert_eq!(cfg.provider.value.as_deref(), Some("openai"));
     assert_eq!(cfg.model.value.as_deref(), Some("gpt-5"));
     assert_eq!(cfg.relay_mesh_model_id(), None);
+}
+
+// ── F3: require_effective_secrets_available — the single gate every ────────
+//       side-effecting caller (model discovery, card mint, profile sign,
+//       global save, snapshot export) consumes. Covers all three tiers.
+
+#[test]
+fn gate_ok_when_all_tiers_available() {
+    let rec = record(Some("d1"), None, None, None);
+    let defs = vec![definition("d1", None, None, "")];
+    let global = global(Some("gpt-5"), Some("openai"));
+    let out = require_effective_secrets_available(&rec, &defs, Ok(global.clone()));
+    assert!(out.is_ok(), "healthy config must pass the gate");
+    assert_eq!(
+        out.unwrap().model,
+        global.model,
+        "the gate returns the loaded global for the caller to reuse"
+    );
+}
+
+#[test]
+fn gate_refuses_when_global_loader_errs() {
+    // The strict loader Err (a global env_vars_ref that could not hydrate) must
+    // become a refusal, not a silent unwrap_or_default fall-through.
+    let rec = record(Some("d1"), None, None, None);
+    let defs = vec![definition("d1", None, None, "")];
+    let out = require_effective_secrets_available(
+        &rec,
+        &defs,
+        Err("global env_vars unavailable: keyring outage".to_string()),
+    );
+    let err = out.expect_err("global loader Err must refuse");
+    assert!(
+        err.contains("global agent config") && err.contains("keyring outage"),
+        "refusal must name the global tier and carry the loader cause: {err}"
+    );
+}
+
+#[test]
+fn gate_refuses_when_instance_secrets_unavailable() {
+    let mut rec = record(None, None, None, None);
+    rec.secrets_unavailable = true;
+    let out = require_effective_secrets_available(&rec, &[], Ok(global(None, None)));
+    let err = out.expect_err("instance-unavailable must refuse");
+    assert!(
+        err.contains(&rec.pubkey),
+        "refusal must identify the instance: {err}"
+    );
+}
+
+#[test]
+fn gate_refuses_when_linked_definition_secrets_unavailable() {
+    let rec = record(Some("d1"), None, None, None);
+    let mut def = definition("d1", None, None, "");
+    def.secrets_unavailable = true;
+    let out = require_effective_secrets_available(&rec, &[def], Ok(global(None, None)));
+    let err = out.expect_err("definition-unavailable must refuse");
+    assert!(
+        err.contains("definition (d1)"),
+        "refusal must identify the definition tier: {err}"
+    );
+}
+
+#[test]
+fn gate_ignores_unavailable_definition_that_is_not_linked() {
+    // A definition the record is NOT linked to must not gate the record — only
+    // its own linked definition matters.
+    let rec = record(Some("d1"), None, None, None);
+    let mut other = definition("d2", None, None, "");
+    other.secrets_unavailable = true;
+    let linked = definition("d1", None, None, "");
+    let out = require_effective_secrets_available(&rec, &[linked, other], Ok(global(None, None)));
+    assert!(
+        out.is_ok(),
+        "an unlinked definition's unavailability must not gate this record"
+    );
+}
+
+#[test]
+fn gate_global_tier_checked_before_instance_tier() {
+    // Precedence: a global loader Err refuses even when the instance is also
+    // unavailable — the global message must win (it is checked first).
+    let mut rec = record(None, None, None, None);
+    rec.secrets_unavailable = true;
+    let out = require_effective_secrets_available(&rec, &[], Err("global boom".to_string()));
+    let err = out.expect_err("must refuse");
+    assert!(
+        err.contains("global agent config"),
+        "global tier is checked first: {err}"
+    );
 }

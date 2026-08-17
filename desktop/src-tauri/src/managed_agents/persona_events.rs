@@ -202,6 +202,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         parallelism: content.parallelism,
         created_at: created_at.clone(),
         updated_at: created_at,
+        secrets_unavailable: false,
     })
 }
 

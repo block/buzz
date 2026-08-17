@@ -190,6 +190,32 @@ fn parse_format_is_png(s: &str) -> Result<bool, String> {
     }
 }
 
+/// Resolve the global config for a snapshot export, failing closed when its
+/// committed `env_vars_ref` cannot be hydrated.
+///
+/// Extracted from [`materialize_snapshot_bytes`] as the AppHandle-free seam so
+/// the refusal can be driven to `Err` in a unit test (the command itself only
+/// obtains its `Result` from `load_global_agent_config(&app)`, which needs a
+/// full app). A snapshot is a verbatim portable copy of the effective runtime,
+/// provider, and model configuration. `unwrap_or_default()` would coerce a
+/// loader `Err` into an all-empty config and then materialize empty
+/// runtime/provider/model defaults for an agent that inherits them — silently
+/// shipping a snapshot that is NOT the documented verbatim copy and imports
+/// with different behavior. Refuse export/send instead; retry once the keyring
+/// is reachable.
+fn resolve_snapshot_global(
+    global_load: Result<crate::managed_agents::GlobalAgentConfig, String>,
+) -> Result<crate::managed_agents::GlobalAgentConfig, String> {
+    global_load.map_err(|e| {
+        format!(
+            "cannot export this agent snapshot: the global agent config has \
+             secrets that could not be loaded from the keyring ({e}), so the \
+             snapshot's inherited runtime/provider/model defaults cannot be \
+             resolved faithfully. Retry once the keyring is reachable."
+        )
+    })
+}
+
 fn materialize_portable_runtime_defaults(
     record: &mut ManagedAgentRecord,
     global: &crate::managed_agents::GlobalAgentConfig,
@@ -254,7 +280,12 @@ pub(crate) async fn materialize_snapshot_bytes(
         // provider, and model configuration, not a pointer to the sender's
         // machine-wide defaults. This does not translate or substitute values
         // for a different recipient setup.
-        let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        //
+        // Fail closed when the global config cannot load — see
+        // `resolve_snapshot_global` for why `unwrap_or_default()` would ship a
+        // silently-degraded snapshot instead.
+        let global =
+            resolve_snapshot_global(crate::managed_agents::load_global_agent_config(&app))?;
         materialize_portable_runtime_defaults(&mut def_record, &global);
 
         let memory_pubkey = if memory_level != MemoryLevel::None {

@@ -70,6 +70,10 @@ fn record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        auth_tag_ref: None,
+        env_vars_ref: None,
+        provider_config_ref: None,
+        secrets_unavailable: false,
     }
 }
 
@@ -95,6 +99,7 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
         parallelism: None,
         created_at: "now".into(),
         updated_at: "now".into(),
+        secrets_unavailable: false,
     }
 }
 

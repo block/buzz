@@ -262,55 +262,12 @@ pub fn load_agent_card(stored_file_name: String, app: AppHandle) -> Result<Strin
 
 // ── Key resolution ────────────────────────────────────────────────────────────
 
-/// Pure layering: global env < persona env < agent record env, then the
-/// process environment as a development fallback. Returns the first
-/// non-empty value for `key`.
-pub(crate) fn resolve_env_from_layers(
-    key: &str,
-    global_env: &std::collections::BTreeMap<String, String>,
-    persona_env: &std::collections::BTreeMap<String, String>,
-    record_env: &std::collections::BTreeMap<String, String>,
-    process_value: Option<String>,
-) -> Option<String> {
-    for layer in [record_env, persona_env, global_env] {
-        if let Some(v) = layer.get(key) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
-        }
-    }
-    process_value.filter(|k| !k.trim().is_empty())
-}
-
-/// Pure classification: same four env inputs as `resolve_env_from_layers`,
-/// returns which layer supplies `OPENAI_API_KEY` (agent > persona > global >
-/// process > none).
-pub(crate) fn resolve_key_layer(
-    global_env: &std::collections::BTreeMap<String, String>,
-    persona_env: &std::collections::BTreeMap<String, String>,
-    record_env: &std::collections::BTreeMap<String, String>,
-    process_value: Option<String>,
-) -> &'static str {
-    let key = "OPENAI_API_KEY";
-    let nonempty = |m: &std::collections::BTreeMap<String, String>| {
-        m.get(key).is_some_and(|v| !v.trim().is_empty())
-    };
-    if nonempty(record_env) {
-        return "agent";
-    }
-    if nonempty(persona_env) {
-        return "persona";
-    }
-    if nonempty(global_env) {
-        return "global";
-    }
-    let proc = process_value.as_deref().unwrap_or("");
-    if !proc.trim().is_empty() {
-        return "process";
-    }
-    "none"
-}
+/// Pure env-layer key resolution (`resolve_env_from_layers`,
+/// `resolve_key_layer`), split to a sibling to keep this file under the
+/// desktop file-size ratchet.
+#[path = "card/key_layers.rs"]
+mod key_layers;
+pub(crate) use key_layers::{resolve_env_from_layers, resolve_key_layer};
 
 /// The Responses endpoint to post mints to. `OPENAI_BASE_URL` (same env
 /// layering as the key) overrides the default host, supporting endpoints and
@@ -554,8 +511,14 @@ pub async fn mint_agent_card(
         let (record, is_definition) =
             resolve_from_lists(&id, &instances, &definitions).map(|(r, d)| (r.clone(), d))?;
 
-        let global = load_global_agent_config(&app).unwrap_or_default();
         let personas = load_personas(&app).unwrap_or_default();
+        // Fail closed on unavailable effective secrets before the OpenAI key
+        // resolution, owner signing, and the bearer-auth API spend.
+        let global = crate::managed_agents::effective_config::require_effective_secrets_available(
+            &record,
+            &personas,
+            load_global_agent_config(&app),
+        )?;
         let persona_env = record
             .persona_id
             .as_deref()

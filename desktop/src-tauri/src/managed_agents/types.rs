@@ -12,7 +12,7 @@ pub enum BackendKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,
@@ -90,13 +90,13 @@ pub struct AgentDefinition {
     pub parallelism: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
+    /// Runtime-only unavailability flag. Never serialized; reconstructed on boot.
+    #[serde(skip)]
+    pub secrets_unavailable: bool,
 }
 
 impl AgentDefinition {
-    /// Project this persona onto a key-less unified [`ManagedAgentRecord`]
-    /// (Phase 1A store fold). Identity fields stay empty — keys are minted on
-    /// first start. `AgentDefinition.id` becomes `slug`, preserving the 30175
-    /// event coordinate (`d_tag = slug`) across the fold.
+    /// Project this persona onto a unified [`ManagedAgentRecord`] (Phase 1A fold).
     pub fn into_agent_record(self) -> ManagedAgentRecord {
         ManagedAgentRecord {
             pubkey: String::new(),
@@ -104,6 +104,9 @@ impl AgentDefinition {
             persona_id: None,
             private_key_nsec: String::new(),
             auth_tag: None,
+            auth_tag_ref: None,
+            env_vars_ref: None,
+            provider_config_ref: None,
             relay_url: String::new(),
             avatar_url: self.avatar_url,
             acp_command: DEFAULT_ACP_COMMAND.to_string(),
@@ -153,15 +156,15 @@ impl AgentDefinition {
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
             relay_mesh: None,
+            secrets_unavailable: false,
         }
     }
 }
 
 impl ManagedAgentRecord {
     /// Present a key-less definition record back in the legacy
-    /// [`AgentDefinition`] shape — the compatibility view the persona command
-    /// surface serves until Phase 1B unifies the UI. Inverse of
-    /// [`AgentDefinition::into_agent_record`] for the fields personas carry.
+    /// [`AgentDefinition`] shape (compatibility view for the persona command
+    /// surface). Inverse of [`AgentDefinition::into_agent_record`].
     pub fn to_definition_view(&self) -> Option<AgentDefinition> {
         let slug = self.slug.clone()?;
         Some(AgentDefinition {
@@ -189,6 +192,7 @@ impl ManagedAgentRecord {
             parallelism: self.definition_parallelism,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
+            secrets_unavailable: self.secrets_unavailable,
         })
     }
 }
@@ -217,24 +221,20 @@ pub struct ManagedAgentRecord {
     /// Team this instance was deployed from. Resolves runtime team instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
-    /// nsec private key. Held in memory but persisted to the OS keyring (keyed
-    /// by `pubkey`) rather than serialized to `managed-agents.json`. The
-    /// storage layer blanks this before writing JSON once the key is safely in
-    /// the keyring, and re-hydrates it from the keyring on load.
-    ///
-    /// It is only serialized inline (the `0o600` JSON fallback) when the
-    /// keyring is unreachable — `skip_serializing_if` keeps it out of JSON in
-    /// the normal keyring-backed case. `default` also lets an old build parse a
-    /// store whose inline key was already migrated out and blanked.
+    /// nsec private key. Stored in the OS keyring (keyed by `pubkey`); blanked
+    /// before JSON write, re-hydrated on load. Inline only when keyring is unreachable.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub private_key_nsec: String,
-    /// NIP-OA auth tag JSON. Computed at agent creation time.
-    ///
-    /// Pre-existing agents created before NIP-OA will have `None` here.
-    /// This is intentional — they continue to work without attestation.
-    /// Re-attestation requires agent recreation (v2 migration scope).
+    /// NIP-OA auth tag JSON. Pre-existing agents (pre-NIP-OA) have `None`.
     #[serde(default)]
     pub auth_tag: Option<String>,
+    /// Keyring gen refs; absent = intentionally empty (`provider_config_ref` is `None` for `Local`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_tag_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_vars_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_config_ref: Option<String>,
     pub relay_url: String,
     /// Avatar URL resolved at creation time (user-supplied input, else the
     /// command-based fallback). Persisted so startup reconciliation compares
@@ -438,6 +438,10 @@ pub struct ManagedAgentRecord {
     /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Set by the load path when a secret field's keyring `*_ref` points to an
+    /// unavailable entry. Never serialized; `true` means spawn must refuse.
+    #[serde(skip)]
+    pub secrets_unavailable: bool,
 }
 
 /// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].
@@ -700,9 +704,7 @@ pub struct InstallRuntimeResult {
     /// Number of agents whose stop succeeded but respawn failed.
     /// Mirrors `GlobalAgentConfigSaveResult.failed_restart_count`.
     pub failed_restart_count: u32,
-    /// Install log file for this run, when one was written. The UI surfaces it
-    /// on failure so a user can read the full retry history instead of only the
-    /// last step's truncated output. `None` when no log could be opened.
+    /// Install log file for this run. `None` when no log could be opened.
     pub log_path: Option<String>,
 }
 

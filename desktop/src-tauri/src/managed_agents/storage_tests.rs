@@ -5,11 +5,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write as _;
-use std::path::Path;
-
-use tempfile::NamedTempFile;
 
 use super::{
     agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
@@ -252,6 +247,29 @@ fn spawn_allowed_when_private_key_present() {
 }
 
 #[test]
+fn spawn_refused_when_secrets_unavailable() {
+    // A record whose keyring ref exists but the entry is unavailable must be
+    // refused at spawn time — same semantics as a missing private key.
+    let mut record = record_with_key("nsec1realkey");
+    record.secrets_unavailable = true;
+    assert!(
+        super::spawn_key_refusal(&record).is_some(),
+        "an agent with unavailable secrets must be refused at spawn"
+    );
+}
+
+#[test]
+fn spawn_allowed_when_key_present_and_no_unavailable_secrets() {
+    // A fully hydrated record must not be blocked.
+    let mut record = record_with_key("nsec1realkey");
+    record.secrets_unavailable = false;
+    assert!(
+        super::spawn_key_refusal(&record).is_none(),
+        "an agent with key and reachable secrets must be allowed"
+    );
+}
+
+#[test]
 fn persist_agent_keys_issues_zero_writes_when_inline_keys_already_cleared() {
     // This is the dominant prompt-storm scenario: after the first successful
     // persist all inline copies are cleared, so subsequent saves (e.g. a
@@ -313,12 +331,6 @@ fn persist_agent_keys_writes_once_per_record_with_inline_key() {
     assert!(records[1].private_key_nsec.is_empty());
 }
 
-fn write_log(content: &str) -> NamedTempFile {
-    let mut file = NamedTempFile::new().expect("temp log");
-    file.write_all(content.as_bytes()).expect("write log");
-    file
-}
-
 /// The keyringless fallback write must land `0o600` from the write itself —
 /// not a post-write `chmod` — so a crash in the umask window can never leave
 /// plaintext agent nsecs world-readable (Wes storage.rs:239, SECURITY.md:90).
@@ -342,163 +354,6 @@ fn restricted_write_lands_owner_only_without_post_write_chmod() {
     assert_eq!(
         std::fs::read_to_string(&path).expect("read back"),
         r#"[{"private_key_nsec":"nsec1secret"}]"#
-    );
-}
-
-#[test]
-fn meaningful_agent_error_from_log_promotes_wrapped_llm_auth() {
-    let file =
-        write_log("noise\nAgent reported error (code -32001): llm auth: 401 unauthorized: ...\n");
-    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-    assert!(result.message.contains("llm auth"));
-    assert_eq!(result.code, Some(-32001));
-}
-
-#[test]
-fn meaningful_agent_error_from_log_promotes_unwrapped_llm_auth() {
-    let file = write_log("noise\nllm auth: denied\n");
-    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-    assert_eq!(result.message, "Agent reported error: llm auth: denied");
-    assert_eq!(result.code, Some(-32001));
-}
-
-#[test]
-fn meaningful_agent_error_from_log_promotes_bare_model_not_found() {
-    let file = write_log("noise\nllm model not found: (some-model) 404\n");
-    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-    assert_eq!(
-        result.message,
-        "Agent reported error: llm model not found: (some-model) 404"
-    );
-    assert_eq!(result.code, Some(-32002));
-}
-
-#[test]
-fn meaningful_agent_error_from_log_promotes_legacy_format() {
-    let file = write_log("noise\nAgent reported error: llm: 500 internal\n");
-    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-    assert_eq!(result.message, "Agent reported error: llm: 500 internal");
-    assert_eq!(result.code, None);
-}
-
-#[test]
-fn meaningful_agent_error_from_log_does_not_promote_midline_auth_text() {
-    let file = write_log("noise before llm auth: denied\n");
-    assert!(super::meaningful_agent_error_from_log(file.path()).is_none());
-}
-
-#[test]
-fn strips_ansi_from_typical_tracing_line() {
-    let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mbuzz_acp\x1b[0m\x1b[2m:\x1b[0m starting";
-    assert_eq!(
-        strip_ansi_escapes::strip_str(input),
-        "2026-05-27T15:16:32  INFO buzz_acp: starting"
-    );
-}
-
-// ── harness-log selection tests ────────────────────────────────────────
-
-const PUBKEY_A: &str = "aa11223344556677889900aabbccddeeff00112233445566778899aabbccddee";
-const PUBKEY_B: &str = "bb11223344556677889900aabbccddeeff00112233445566778899aabbccddee";
-
-/// Write `name` into `dir` and stamp it `age_secs` before now, so selection
-/// order is asserted against explicit mtimes rather than write order.
-fn write_log_in(dir: &Path, name: &str, age_secs: u64) {
-    let path = dir.join(name);
-    let file = File::create(&path).expect("create log");
-    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs))
-        .expect("stamp mtime");
-}
-
-#[test]
-fn newest_agent_log_prefers_pair_scoped_when_it_is_freshest() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    write_log_in(dir.path(), &format!("{PUBKEY_A}.log"), 600);
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__cafe.log"), 5);
-
-    assert_eq!(
-        super::newest_agent_log_in_dir(dir.path(), PUBKEY_A),
-        Some(dir.path().join(format!("{PUBKEY_A}__cafe.log")))
-    );
-}
-
-#[test]
-fn newest_agent_log_prefers_legacy_when_it_is_freshest() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    write_log_in(dir.path(), &format!("{PUBKEY_A}.log"), 5);
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__cafe.log"), 600);
-
-    assert_eq!(
-        super::newest_agent_log_in_dir(dir.path(), PUBKEY_A),
-        Some(dir.path().join(format!("{PUBKEY_A}.log"))),
-        "mtime decides, not the filename shape"
-    );
-}
-
-#[test]
-fn newest_agent_log_finds_sole_pair_scoped_log() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__cafe.log"), 5);
-
-    assert_eq!(
-        super::newest_agent_log_in_dir(dir.path(), PUBKEY_A),
-        Some(dir.path().join(format!("{PUBKEY_A}__cafe.log")))
-    );
-}
-
-#[test]
-fn newest_agent_log_picks_freshest_of_several_relays() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__aaa.log"), 900);
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__bbb.log"), 5);
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__ccc.log"), 300);
-
-    assert_eq!(
-        super::newest_agent_log_in_dir(dir.path(), PUBKEY_A),
-        Some(dir.path().join(format!("{PUBKEY_A}__bbb.log")))
-    );
-}
-
-#[test]
-fn newest_agent_log_ignores_other_agents_and_non_log_files() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    write_log_in(dir.path(), &format!("{PUBKEY_B}__cafe.log"), 1);
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__cafe.log.gz"), 2);
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__cafe.log"), 600);
-
-    assert_eq!(
-        super::newest_agent_log_in_dir(dir.path(), PUBKEY_A),
-        Some(dir.path().join(format!("{PUBKEY_A}__cafe.log"))),
-        "a fresher log belonging to another agent must never be selected"
-    );
-}
-
-#[test]
-fn newest_agent_log_is_none_when_agent_has_no_logs() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    write_log_in(dir.path(), &format!("{PUBKEY_B}.log"), 1);
-
-    assert_eq!(super::newest_agent_log_in_dir(dir.path(), PUBKEY_A), None);
-}
-
-#[test]
-fn newest_agent_log_is_none_when_dir_is_missing() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let missing = dir.path().join("absent");
-
-    assert_eq!(super::newest_agent_log_in_dir(&missing, PUBKEY_A), None);
-}
-
-#[test]
-fn newest_agent_log_breaks_mtime_ties_deterministically() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__aaa.log"), 60);
-    write_log_in(dir.path(), &format!("{PUBKEY_A}__bbb.log"), 60);
-
-    assert_eq!(
-        super::newest_agent_log_in_dir(dir.path(), PUBKEY_A),
-        Some(dir.path().join(format!("{PUBKEY_A}__bbb.log"))),
-        "equal mtimes must resolve to the same file on every read_dir order"
     );
 }
 
@@ -699,134 +554,325 @@ fn try_delete_agent_key_returns_result() {
     let _: fn(&str) -> Result<(), String> = super::try_delete_agent_key;
 }
 
-// ── install logs ─────────────────────────────────────────────────────────────
-
-/// Install output can carry registry tokens and proxy credentials a failing
-/// installer echoed, and the file is written unattended. `0o600` must come from
-/// the create itself: a post-write `chmod` leaves a window where the umask
-/// decides, and a crash inside it leaves the log readable to other local users.
-#[cfg(unix)]
+/// Regression test: after secret extraction, the serialized store must not
+/// contain any secret-shaped values.  This is the grep-empty criterion from
+/// the v5 spec acceptance criteria, exercised at the type level.
+///
+/// The test constructs records with inline secrets, runs the strip path via
+/// the secret seam, and verifies the resulting JSON is free of the known
+/// secret values.
 #[test]
-fn install_log_is_created_owner_only_without_post_write_chmod() {
-    use std::os::unix::fs::PermissionsExt;
+fn serialized_store_is_empty_of_secret_values_after_strip() {
+    use crate::managed_agents::secret_seam::strip_and_persist_agent_secrets_with;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
 
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("install-goose.log");
-
-    let mut file = super::open_install_log_file(&path).expect("open install log");
-    file.write_all(b"npm ERR!\n").expect("write");
-
-    let mode = std::fs::metadata(&path)
-        .expect("metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o600, "install logs must be owner-only");
-}
-
-/// A run starts a new current file and keeps the previous run as `.1`, so the
-/// two runs are never mixed and the history on disk stays bounded at two.
-#[test]
-fn install_log_session_keeps_the_previous_run_as_dot_one() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("install-goose.log");
-
-    let mut first = super::start_install_log_session(&path).expect("first session");
-    first.write_all(b"run-one\n").expect("write");
-    let mut second = super::start_install_log_session(&path).expect("second session");
-    second.write_all(b"run-two\n").expect("write");
-
-    assert_eq!(
-        std::fs::read_to_string(&path).expect("read current"),
-        "run-two\n",
-        "the current file must hold only the newest run"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("install-goose.log.1")).expect("read .1"),
-        "run-one\n",
-        "the previous run must be preserved as .1"
-    );
-}
-
-/// The third run must still rotate when `.1` already exists. Windows `rename`
-/// does not replace its destination, so a rename-only rotation silently stops
-/// working here and leaves the current file to grow across every later run —
-/// the old `.1` is removed first precisely so this cannot happen. Runs on the
-/// Windows target too: this is the path that fails there.
-#[test]
-fn install_log_session_replaces_an_existing_dot_one() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("install-goose.log");
-    let rotated = dir.path().join("install-goose.log.1");
-    // Seed the state a rename-only rotation cannot get out of: both files exist.
-    std::fs::write(&path, b"previous-run\n").expect("seed current");
-    std::fs::write(&rotated, b"ancient-run\n").expect("seed .1");
-
-    let mut file = super::start_install_log_session(&path).expect("session");
-    file.write_all(b"fresh-run\n").expect("write");
-
-    assert_eq!(
-        std::fs::read_to_string(&path).expect("read current"),
-        "fresh-run\n",
-        "the current file must restart even when .1 was already present"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&rotated).expect("read .1"),
-        "previous-run\n",
-        ".1 must be replaced by the run that just ended, not kept"
-    );
-}
-
-/// Records written after the session starts append to it — a run's later
-/// records must not erase its earlier ones.
-#[test]
-fn install_log_appends_within_a_session() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("install-goose.log");
-
-    let mut session = super::start_install_log_session(&path).expect("session");
-    session.write_all(b"header\n").expect("write");
-    for record in ["first\n", "second\n"] {
-        let mut file = super::open_install_log_file(&path).expect("open install log");
-        file.write_all(record.as_bytes()).expect("write");
+    // ── FakeProjectionStore (minimal, for this test) ──────────────────
+    struct FakePS {
+        data: RefCell<HashMap<String, String>>,
+    }
+    impl crate::managed_agents::secret_projection::ProjectionStore for FakePS {
+        fn write_and_verify(&self, key: &str, value: &str) -> Result<(), String> {
+            self.data
+                .borrow_mut()
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        }
+        fn load_key(&self, key: &str) -> Result<Option<String>, String> {
+            Ok(self.data.borrow().get(key).cloned())
+        }
+        fn load_all(&self) -> Result<Option<HashMap<String, String>>, String> {
+            Ok(Some(self.data.borrow().clone()))
+        }
+        fn store_batch(&self, entries: &HashMap<String, String>) -> Result<(), String> {
+            for (k, v) in entries {
+                self.data.borrow_mut().insert(k.clone(), v.clone());
+            }
+            Ok(())
+        }
+        fn remove_batch(&self, keys: &[&str]) -> Result<(), String> {
+            let mut d = self.data.borrow_mut();
+            for k in keys {
+                d.remove(*k);
+            }
+            Ok(())
+        }
     }
 
-    assert_eq!(
-        std::fs::read_to_string(&path).expect("read back"),
-        "header\nfirst\nsecond\n"
-    );
-}
+    let store = FakePS {
+        data: RefCell::new(HashMap::new()),
+    };
 
-/// A runtime id becomes part of a filename. Ids reach this from user-defined
-/// custom harnesses as well as the catalog, so anything that could traverse or
-/// escape the logs directory is rejected rather than sanitized — a rejected id
-/// simply means no log, while a silently rewritten one could collide with
-/// another runtime's log.
-#[test]
-fn install_log_filename_rejects_ids_that_would_escape_the_logs_dir() {
-    for id in [
-        "../../etc/passwd",
-        "goose/../../evil",
-        "sub/dir",
-        "back\\slash",
-        "with.dot",
-        "",
-    ] {
+    let secret_env_value = "sk-ant-api03-very-secret-key";
+    let secret_auth_tag = "auth-tag-secret";
+
+    // Build a record via JSON deserialization (avoids Default dependency).
+    let mut record: ManagedAgentRecord = serde_json::from_str(&format!(
+        r#"{{
+            "pubkey": "testpubkey123",
+            "name": "test-agent",
+            "env_vars": {{"ANTHROPIC_API_KEY": "{secret_env_value}"}},
+            "auth_tag": "{secret_auth_tag}",
+            "backend": {{"type": "provider", "id": "anthropic", "config": {{"api_key": "provider-secret"}}}},
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01"
+        }}"#
+    ))
+    .expect("sample record with inline secrets");
+
+    // Strip: moves secrets from inline fields into the fake keyring.
+    strip_and_persist_agent_secrets_with(&store, &mut record);
+
+    // After strip: inline fields must be empty/null.
+    assert!(
+        record.env_vars.is_empty(),
+        "env_vars must be cleared after strip"
+    );
+    assert!(
+        record.auth_tag.is_none(),
+        "auth_tag must be cleared after strip"
+    );
+    if let crate::managed_agents::types::BackendKind::Provider { config, .. } = &record.backend {
         assert!(
-            super::install_log_filename(id).is_err(),
-            "id {id:?} must not be accepted as a filename component"
+            config.is_null(),
+            "provider config must be cleared after strip"
         );
+    }
+
+    // Serialize to JSON and verify no secret bytes appear.
+    let json = serde_json::to_string(&record).expect("serialize");
+    assert!(
+        !json.contains(secret_env_value),
+        "serialized JSON must not contain env_vars secret"
+    );
+    assert!(
+        !json.contains(secret_auth_tag),
+        "serialized JSON must not contain auth_tag secret"
+    );
+    assert!(
+        !json.contains("provider-secret"),
+        "serialized JSON must not contain provider config secret"
+    );
+    // Refs must be present (the keyring round-trip worked).
+    assert!(
+        record.env_vars_ref.is_some(),
+        "env_vars_ref must be set after successful strip"
+    );
+    assert!(
+        record.auth_tag_ref.is_some(),
+        "auth_tag_ref must be set after successful strip"
+    );
+    assert!(
+        record.provider_config_ref.is_some(),
+        "provider_config_ref must be set after successful strip"
+    );
+}
+
+// ── W2: instance-side save preserves the definition half raw ───────────────
+//
+// `save_managed_agents` re-reads the definition half RAW under the txn lock
+// (never through the hydrating loader) before committing the unified store, so
+// an instance-only save can never re-inline a definition's projected secrets
+// into plaintext JSON, and a store parse error propagates instead of silently
+// collapsing the definition half to empty.
+
+/// In-memory store implementing BOTH seams `save_managed_agents_at` requires:
+/// [`KeyStore`] (nsec persistence) and `ProjectionStore` (env/auth/provider
+/// projection). A single backing map so a written secret reads back verified.
+struct FakeCombinedStore {
+    data: RefCell<HashMap<String, String>>,
+}
+
+impl FakeCombinedStore {
+    fn new() -> Self {
+        Self {
+            data: RefCell::new(HashMap::new()),
+        }
     }
 }
 
-/// Ordinary catalog and custom-harness ids are accepted — the guard must not
-/// reject the ids it exists to serve.
-#[test]
-fn install_log_filename_accepts_ordinary_runtime_ids() {
-    for id in ["goose", "claude-code", "buzz_agent", "codex2"] {
-        assert_eq!(
-            super::install_log_filename(id).expect("id must be usable in a log filename"),
-            format!("install-{id}.log")
-        );
+impl KeyStore for FakeCombinedStore {
+    fn probe(&self, _name: &str) -> KeyringProbe {
+        KeyringProbe::ReachableButEmpty
+    }
+    fn load(&self, name: &str) -> Result<Option<String>, String> {
+        Ok(self.data.borrow().get(name).cloned())
+    }
+    fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
+        Ok(Some(self.data.borrow().clone()))
+    }
+    fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
+        self.data
+            .borrow_mut()
+            .insert(name.to_string(), value.to_string());
+        Ok(())
+    }
+    fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String> {
+        for (k, v) in entries {
+            self.data.borrow_mut().insert(k.clone(), v.clone());
+        }
+        Ok(())
     }
 }
+
+impl crate::managed_agents::secret_projection::ProjectionStore for FakeCombinedStore {
+    fn write_and_verify(&self, key: &str, value: &str) -> Result<(), String> {
+        self.data
+            .borrow_mut()
+            .insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+    fn load_key(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(self.data.borrow().get(key).cloned())
+    }
+    fn load_all(&self) -> Result<Option<HashMap<String, String>>, String> {
+        Ok(Some(self.data.borrow().clone()))
+    }
+    fn store_batch(&self, entries: &HashMap<String, String>) -> Result<(), String> {
+        for (k, v) in entries {
+            self.data.borrow_mut().insert(k.clone(), v.clone());
+        }
+        Ok(())
+    }
+    fn remove_batch(&self, keys: &[&str]) -> Result<(), String> {
+        let mut d = self.data.borrow_mut();
+        for k in keys {
+            d.remove(*k);
+        }
+        Ok(())
+    }
+}
+
+/// A key-less definition record carrying an already-projected `env_vars_ref`
+/// (no inline env) — the on-disk shape after the definition's secrets were
+/// stripped into the keyring on a prior save.
+fn projected_definition(slug: &str, env_ref: &str) -> ManagedAgentRecord {
+    let mut record: ManagedAgentRecord = serde_json::from_str(&format!(
+        r#"{{
+            "pubkey": "",
+            "name": "def-{slug}",
+            "slug": "{slug}",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }}"#
+    ))
+    .expect("definition record");
+    record.env_vars_ref = Some(env_ref.to_string());
+    record
+}
+
+#[test]
+fn save_managed_agents_preserves_projected_definition_ref_without_reinlining() {
+    // Seed a store whose definition half is already projected: `env_vars_ref`
+    // set, NO inline env bytes. Save an UNRELATED instance. The committed store
+    // must keep the definition's ref verbatim and must not resurrect its inline
+    // env — the W2 regression was that the hydrating re-read re-inlined it.
+    use crate::managed_agents::secret_projection::definition_env_key;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_path = dir.path().join("managed-agents.json");
+
+    // The keyring already holds the definition's projected env under its ref.
+    let store = FakeCombinedStore::new();
+    let def_env_gen = "gendef123";
+    store.data.borrow_mut().insert(
+        definition_env_key("shared-def", def_env_gen),
+        r#"{"DEF_SECRET":"def-secret-value"}"#.to_string(),
+    );
+
+    // On-disk starting store: one projected definition, no instances.
+    let definition = projected_definition("shared-def", def_env_gen);
+    std::fs::write(
+        &store_path,
+        serde_json::to_string(&[&definition]).expect("serialize seed"),
+    )
+    .expect("write seed store");
+
+    // Save an unrelated instance (carries its own inline env to project).
+    let mut instance = record_with_pubkey_and_key("instance-pubkey", "nsec1instkey");
+    instance.env_vars = [("INSTANCE_KEY".to_string(), "inst-secret".to_string())]
+        .into_iter()
+        .collect();
+
+    super::save_managed_agents_at(&store_path, Some(&store), std::slice::from_ref(&instance))
+        .expect("save must succeed");
+
+    // Re-read the committed store RAW (no hydration).
+    let committed = std::fs::read_to_string(&store_path).expect("read committed");
+
+    // The definition's plaintext secret must NOT be in the JSON.
+    assert!(
+        !committed.contains("def-secret-value"),
+        "an instance-side save must not re-inline the definition's projected secret"
+    );
+
+    // The definition's ref must survive verbatim.
+    let records: Vec<ManagedAgentRecord> =
+        serde_json::from_str(&committed).expect("parse committed");
+    let def = records
+        .iter()
+        .find(|r| r.pubkey.is_empty() && r.slug.as_deref() == Some("shared-def"))
+        .expect("definition must survive the instance save");
+    assert_eq!(
+        def.env_vars_ref.as_deref(),
+        Some(def_env_gen),
+        "the definition's projected ref must be preserved unchanged"
+    );
+    assert!(
+        def.env_vars.is_empty(),
+        "the definition must carry no inline env after the save"
+    );
+    // The instance was persisted alongside it.
+    assert!(
+        records.iter().any(|r| r.pubkey == "instance-pubkey"),
+        "the saved instance must be present in the committed store"
+    );
+}
+
+#[test]
+fn save_managed_agents_propagates_store_parse_error_instead_of_dropping_definitions() {
+    // A malformed on-disk store must fail the save with an error — NEVER be
+    // read as an empty definition half, because the wholesale rewrite would
+    // then delete every definition from the live store. W2/F2: the re-read uses
+    // `?`, not `unwrap_or_default()`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_path = dir.path().join("managed-agents.json");
+    std::fs::write(&store_path, b"{ this is not valid json ]").expect("write malformed");
+
+    let store = FakeCombinedStore::new();
+    let instance = record_with_pubkey_and_key("instance-pubkey", "nsec1instkey");
+
+    let result =
+        super::save_managed_agents_at(&store_path, Some(&store), std::slice::from_ref(&instance));
+
+    assert!(
+        result.is_err(),
+        "a malformed store must fail the save, not silently drop definitions"
+    );
+    assert!(
+        result.unwrap_err().contains("parse"),
+        "the error must surface the parse failure"
+    );
+}
+
+// The concurrent instance/definition-save interleave test lives in the sibling
+// `storage_interleave_tests.rs` — a child of this `tests` module so it reuses
+// the `FakeCombinedStore` and `record_with_pubkey_and_key` helpers above
+// without duplication, while keeping this file under the desktop file-size
+// gate. Unix-only + `system-keyring`: it drives `libc::flock` and the real
+// cross-process transaction lock.
+#[cfg(all(unix, feature = "system-keyring"))]
+#[path = "storage_interleave_tests.rs"]
+mod interleave;

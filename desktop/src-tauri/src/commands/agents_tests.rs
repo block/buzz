@@ -62,6 +62,10 @@ fn bare_agent_record(
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        auth_tag_ref: None,
+        env_vars_ref: None,
+        provider_config_ref: None,
+        secrets_unavailable: false,
     }
 }
 fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
@@ -87,6 +91,7 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
+        secrets_unavailable: false,
     }
 }
 

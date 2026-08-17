@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
-    io::{Read as _, Seek, SeekFrom, Write},
+    fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -9,9 +9,13 @@ use tauri::{AppHandle, Manager};
 
 use crate::app_state::keyring_service;
 use crate::managed_agents::{
-    ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
+    secret_seam::{hydrate_all_secrets_for_records, strip_and_persist_all_for_records},
+    AgentDefinition, ManagedAgentRecord,
 };
 use crate::secret_store::{KeyringProbe, SecretStore};
+
+mod logs;
+pub use logs::*;
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
@@ -44,88 +48,6 @@ pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub(crate) fn managed_agents_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("managed-agents.json"))
-}
-
-fn managed_agents_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = managed_agents_base_dir(app)?.join("logs");
-    fs::create_dir_all(&dir).map_err(|error| format!("failed to create logs dir: {error}"))?;
-    Ok(dir)
-}
-
-/// Install-log path for `runtime_id`, alongside the agent logs.
-pub fn install_log_path(app: &AppHandle, runtime_id: &str) -> Result<PathBuf, String> {
-    Ok(managed_agents_logs_dir(app)?.join(install_log_filename(runtime_id)?))
-}
-
-/// Filename for a runtime's install log, or an error for an id that must not
-/// become one.
-///
-/// The id is validated rather than trusted: ids reach this from user-defined
-/// custom harnesses as well as the catalog, and a `../` or a separator in one
-/// would place the log outside the logs directory. Rejecting beats sanitizing —
-/// a rejected id means no log, while a rewritten one could collide with another
-/// runtime's.
-fn install_log_filename(runtime_id: &str) -> Result<String, String> {
-    if runtime_id.is_empty() || !runtime_id.chars().all(is_safe_id_char) {
-        return Err(format!(
-            "unsafe runtime id for a log filename: {runtime_id}"
-        ));
-    }
-    Ok(format!("install-{runtime_id}.log"))
-}
-
-/// Characters allowed in a runtime id used as a filename. Excludes `/`, `\`,
-/// `:` and `.`, so no id can traverse or escape the logs directory.
-fn is_safe_id_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_'
-}
-
-pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
-    Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
-}
-
-/// Pair-scoped log path for a managed runtime. The relay URL never appears in
-/// the filename; the suffix is a hash of the canonical URL.
-pub fn managed_agent_runtime_log_path(
-    app: &AppHandle,
-    key: &ManagedAgentRuntimeKey,
-) -> Result<PathBuf, String> {
-    Ok(managed_agents_logs_dir(app)?.join(format!("{}.log", key.runtime_id())))
-}
-
-/// Log path to surface for an agent whose runtime is not tracked in memory:
-/// the most recently written of its pair-scoped logs, falling back to the
-/// legacy single-runtime path when the agent has not run since harnesses
-/// became per (agent, relay) pair.
-pub fn latest_managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
-    match newest_agent_log_in_dir(&managed_agents_logs_dir(app)?, pubkey) {
-        Some(path) => Ok(path),
-        None => managed_agent_log_path(app, pubkey),
-    }
-}
-
-/// Newest log in `dir` belonging to `pubkey` — either a pair-scoped
-/// `{pubkey}__{relay_hash}.log` or the legacy `{pubkey}.log`. Ties break
-/// toward the higher filename so the choice is deterministic.
-fn newest_agent_log_in_dir(dir: &Path, pubkey: &str) -> Option<PathBuf> {
-    let legacy_name = format!("{pubkey}.log");
-    let pair_prefix = format!("{pubkey}__");
-    fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let matches = name.to_str().is_some_and(|name| {
-                name == legacy_name || (name.starts_with(&pair_prefix) && name.ends_with(".log"))
-            });
-            if !matches {
-                return None;
-            }
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, name, entry.path()))
-        })
-        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
-        .map(|(_, _, path)| path)
 }
 
 /// The keyring operations the migration chokepoint needs. Abstracted so the
@@ -191,7 +113,7 @@ enum KeyMigration {
 ///
 /// The single source of truth for the migrate-vs-keep decision, shared by the
 /// load-time opportunistic re-migrate ([`hydrate_keys`]) and the save-time
-/// chokepoint ([`persist_agent_keys`]). An empty key returns
+/// chokepoint ([`persist_agent_keys_with`]). An empty key returns
 /// [`KeyMigration::Nothing`] — never [`KeyMigration::Persisted`], so a record
 /// left empty by a keyring outage is not mistaken for one verified present.
 fn migrate_inline_key(store: &impl KeyStore, record: &ManagedAgentRecord) -> KeyMigration {
@@ -224,26 +146,67 @@ fn migrate_inline_key(store: &impl KeyStore, record: &ManagedAgentRecord) -> Key
 /// deliberately keyless agent. Spawning anyway would inject an empty
 /// `BUZZ_PRIVATE_KEY`/`NOSTR_PRIVATE_KEY`, launching with no identity. Callers
 /// (the spawn path) must fail closed (Wes storage.rs:158).
+///
+/// Also refuses when `record.secrets_unavailable` is set — at least one secret
+/// field (env_vars, auth_tag, provider_config) has a keyring ref that points to
+/// a missing or unreachable entry. Spawning with silently empty secrets is the
+/// exact failure mode the gen-ref protocol exists to prevent.
 pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
-    record.private_key_nsec.is_empty().then(|| {
-        format!(
+    if record.private_key_nsec.is_empty() {
+        return Some(format!(
             "agent {} has no private key available — the OS keyring may be unreachable. \
              Refusing to start without an identity; retry once the keyring is reachable.",
             record.pubkey
-        )
-    })
+        ));
+    }
+    if record.secrets_unavailable {
+        return Some(format!(
+            "agent {} has one or more secrets (env vars, auth tag, or provider config) \
+             that could not be loaded from the keyring. Refusing to start with missing \
+             secrets; retry once the keyring is reachable.",
+            record.pubkey
+        ));
+    }
+    None
+}
+
+/// The linked definition's id when that definition's secrets are unavailable —
+/// its `env_vars_ref` is present but could not be hydrated from the keyring.
+///
+/// This is the definition tier of the fail-closed spawn gate, alongside
+/// [`spawn_key_refusal`]'s instance-tier `secrets_unavailable` check and the
+/// global-tier check in `spawn_agent_child`. Returning the offending id (rather
+/// than a bool) lets the spawn path name it in the refusal message without a
+/// second lookup; status callers use `.is_some()`. An unlinked record, or one
+/// whose linked definition is absent from `personas`, yields `None`.
+pub(crate) fn unavailable_definition_id<'a>(
+    record: &'a ManagedAgentRecord,
+    personas: &[AgentDefinition],
+) -> Option<&'a str> {
+    let pid = record.persona_id.as_deref()?;
+    personas
+        .iter()
+        .find(|p| p.id == pid)
+        .filter(|d| d.secrets_unavailable)
+        .map(|_| pid)
 }
 
 /// Read the raw unified store — keyed instances AND key-less definitions —
 /// with fail-loud parse handling. Internal seam; public readers filter.
 fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
-    let path = managed_agents_store_path(app)?;
+    load_agent_store_at(&managed_agents_store_path(app)?)
+}
+
+/// Path-based core of [`load_agent_store`]: reads and parses the raw store at
+/// `path`. Split out so the save path and tests can drive the load/split/write
+/// merge against a tempdir without an `AppHandle`.
+fn load_agent_store_at(path: &Path) -> Result<Vec<ManagedAgentRecord>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read agent store: {error}"))?;
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("failed to read agent store: {error}"))?;
     serde_json::from_str(&content).map_err(|error| {
         // Fail loudly and preserve the evidence: a later in-app save rewrites
         // this file wholesale, which would silently destroy a malformed hand
@@ -251,7 +214,7 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
         // reconcile): the broken content survives as `.invalid` for the user
         // to recover, and the parse error propagates instead of being
         // swallowed into an empty store.
-        backup_invalid_store(&path);
+        backup_invalid_store(path);
         format!("failed to parse agent store (preserved as .invalid): {error}")
     })
 }
@@ -263,6 +226,14 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);
+    // Hydrate env/auth_tag/provider_config from keyring.
+    if let Some(store) = agent_secret_store() {
+        let _ = hydrate_all_secrets_for_records(store, &mut records);
+        // Unavailability is set directly on each record (`secrets_unavailable`);
+        // the returned Vec is a secondary summary, not needed here.  The spawn
+        // path consults `spawn_key_refusal`, which checks `secrets_unavailable`
+        // and refuses to start any agent whose secrets could not be loaded.
+    }
     Ok(records)
 }
 
@@ -272,6 +243,10 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
 pub(crate) fn load_agent_definitions(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| record.pubkey.is_empty());
+    // Hydrate definition env_vars from keyring.
+    if let Some(store) = agent_secret_store() {
+        let _ = hydrate_all_secrets_for_records(store, &mut records);
+    }
     Ok(records)
 }
 
@@ -361,10 +336,64 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
 /// before the wholesale rewrite so a definition is never dropped by an
 /// instance-side save (and vice versa via [`save_agent_definitions`]).
 pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
-    let definitions = load_agent_definitions(app).unwrap_or_default();
+    save_managed_agents_locked_at(
+        &managed_agents_store_path(app)?,
+        agent_secret_store(),
+        records,
+    )
+}
+
+/// Lock-owning path-based entry point for the instance-side save: acquires the
+/// cross-process secret transaction lock on the store directory, then runs the
+/// definition-preserving [`save_managed_agents_at`] under it. The lock and the
+/// mutation it protects live in ONE seam — the same one the interleave test
+/// drives — so the wiring is provable: delete the acquisition here and the
+/// concurrent-save regression stops observing exclusion. See
+/// [`acquire_secret_txn_lock`] for the lock span + residual.
+fn save_managed_agents_locked_at<S>(
+    store_path: &Path,
+    store: Option<&S>,
+    records: &[ManagedAgentRecord],
+) -> Result<(), String>
+where
+    S: KeyStore + crate::managed_agents::secret_projection::ProjectionStore,
+{
+    // Lock FIRST — the definition half re-read inside `save_managed_agents_at`
+    // must be under the lock (Race 1).
+    let _txn = crate::secret_store::transaction_lock_at(&crate::secret_store::store_txn_lock_dir(
+        store_path,
+    ))?;
+    save_managed_agents_at(store_path, store, records)
+}
+
+/// Path-based core of [`save_managed_agents`]: merges the caller's instance
+/// records with the definition half re-read from disk and commits the unified
+/// store. Split out so the definition-preservation contract can be exercised
+/// over a tempdir without an `AppHandle`.
+///
+/// The definition half is re-read RAW ([`load_agent_store_at`] + retain), NOT
+/// through the hydrating `load_agent_definitions`: a hydrated definition holds
+/// its `env_vars` inline, so writing it back would re-inline the definition's
+/// provider secrets into plaintext JSON on every instance-side save — the exact
+/// regression the projection protocol exists to prevent — and would create the
+/// inline+ref conflict that freezes GC. A raw definition is already stripped on
+/// disk, so it needs no strip pass. The parse error propagates with `?` instead
+/// of collapsing into an empty definition half: the wholesale rewrite below
+/// would otherwise delete every definition from the live store.
+fn save_managed_agents_at<S>(
+    store_path: &Path,
+    store: Option<&S>,
+    records: &[ManagedAgentRecord],
+) -> Result<(), String>
+where
+    S: KeyStore + crate::managed_agents::secret_projection::ProjectionStore,
+{
+    let mut definitions = load_agent_store_at(store_path)?;
+    definitions.retain(|record| record.pubkey.is_empty());
+
     let mut sorted = records.to_vec();
     // A caller-supplied key-less record would collide with the definition
-    // half re-read below; instances always carry a pubkey.
+    // half re-read above; instances always carry a pubkey.
     sorted.retain(|record| !record.pubkey.is_empty());
     sorted.sort_by(|left, right| {
         left.name
@@ -373,12 +402,15 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
             .then_with(|| left.pubkey.cmp(&right.pubkey))
     });
 
-    // Persist each key to the keyring; on success blank the inline copy so it
-    // is skipped from JSON (`skip_serializing_if = "String::is_empty"`). If the
-    // keyring is unreachable, the key stays inline.
-    persist_agent_keys(&mut sorted);
+    if let Some(store) = store {
+        // Persist each nsec to the keyring; on success blank the inline copy.
+        persist_agent_keys_with(store, &mut sorted);
+        // Persist env/auth_tag/provider_config to the keyring; on success blank
+        // inline values and set *_ref. On failure keep inline and clear *_ref.
+        strip_and_persist_all_for_records(store, &mut sorted);
+    }
 
-    write_agent_store(app, definitions, sorted)
+    write_agent_store_at(store_path, definitions, sorted)
 }
 
 /// Save the key-less agent *definitions*, preserving the keyed instances —
@@ -387,18 +419,72 @@ pub(crate) fn save_agent_definitions(
     app: &AppHandle,
     definitions: &[ManagedAgentRecord],
 ) -> Result<(), String> {
-    let mut instances = load_agent_store(app)?;
+    save_agent_definitions_locked_at(
+        &managed_agents_store_path(app)?,
+        agent_secret_store(),
+        definitions,
+    )
+}
+
+/// Lock-owning path-based entry point for the definition-side save — the mirror
+/// of [`save_managed_agents_locked_at`]. Acquires the cross-process secret
+/// transaction lock on the store directory, then runs [`save_agent_definitions_at`]
+/// under it, so the lock and the instance-half re-read it protects are one seam
+/// the interleave test drives directly.
+fn save_agent_definitions_locked_at<S>(
+    store_path: &Path,
+    store: Option<&S>,
+    definitions: &[ManagedAgentRecord],
+) -> Result<(), String>
+where
+    S: crate::managed_agents::secret_projection::ProjectionStore,
+{
+    // Lock FIRST — the instance half re-read inside `save_agent_definitions_at`
+    // must be under the lock (Race 1); mirror of `save_managed_agents`.
+    let _txn = crate::secret_store::transaction_lock_at(&crate::secret_store::store_txn_lock_dir(
+        store_path,
+    ))?;
+    save_agent_definitions_at(store_path, store, definitions)
+}
+
+/// Path-based core of [`save_agent_definitions`]: merges the caller's definition
+/// records with the instance half re-read from disk and commits the unified
+/// store — the definition-side mirror of [`save_managed_agents_at`]. Split out
+/// so the instance-preservation contract can be exercised over a tempdir
+/// without an `AppHandle`.
+///
+/// The instance half is re-read RAW ([`load_agent_store_at`] + retain): a
+/// definition-side save must never drop a concurrently-committed instance, and
+/// the raw records already carry their secrets as `*_ref` (keys in the keyring,
+/// inline blanked), so writing them back cannot re-inline anything. The parse
+/// error propagates with `?` rather than collapsing into an empty instance half
+/// — the wholesale rewrite below would otherwise delete every instance.
+fn save_agent_definitions_at<S>(
+    store_path: &Path,
+    store: Option<&S>,
+    definitions: &[ManagedAgentRecord],
+) -> Result<(), String>
+where
+    S: crate::managed_agents::secret_projection::ProjectionStore,
+{
+    let mut instances = load_agent_store_at(store_path)?;
     instances.retain(|record| !record.pubkey.is_empty());
     let mut definitions = definitions.to_vec();
     definitions.retain(|record| record.pubkey.is_empty());
-    write_agent_store(app, definitions, instances)
+
+    // Persist definition env_vars to the keyring before writing JSON.
+    if let Some(store) = store {
+        strip_and_persist_all_for_records(store, &mut definitions);
+    }
+
+    write_agent_store_at(store_path, definitions, instances)
 }
 
 /// Serialize definitions + instances into the single unified store file.
 /// Definitions sort first (by slug) for stable diffs; instances keep the
 /// name/pubkey order their save path established.
-fn write_agent_store(
-    app: &AppHandle,
+fn write_agent_store_at(
+    path: &Path,
     mut definitions: Vec<ManagedAgentRecord>,
     instances: Vec<ManagedAgentRecord>,
 ) -> Result<(), String> {
@@ -406,7 +492,6 @@ fn write_agent_store(
     let mut all = definitions;
     all.extend(instances);
 
-    let path = managed_agents_store_path(app)?;
     let payload = serde_json::to_vec_pretty(&all)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
@@ -414,22 +499,13 @@ fn write_agent_store(
     // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
     // keyring-backed case (it is the user's own agent store) and closes the
     // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)
+    atomic_write_json_restricted(path, &payload)
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy
 /// on success. Keys that cannot be persisted (keyring unreachable) stay inline
 /// in the JSON. Mutates `records` (a save-local clone) — the caller's in-memory
 /// records keep their keys.
-fn persist_agent_keys(records: &mut [ManagedAgentRecord]) {
-    let Some(store) = agent_secret_store() else {
-        // No keyring backend: keys stay inline.
-        return;
-    };
-    persist_agent_keys_with(store, records);
-}
-
-/// Testable core of [`persist_agent_keys`], generic over the [`KeyStore`] seam.
 fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
     for record in records.iter_mut() {
         // Only a verified keyring entry lets us drop the inline copy. Both
@@ -595,6 +671,64 @@ pub fn delete_agent_key(pubkey: &str) {
     }
 }
 
+// ── Migration-seam helpers (pub(crate) for use by migration.rs) ───────────
+
+/// Load the raw unified store (instances + definitions) without any keyring
+/// hydration. Used by the boot migration to read inline secrets before
+/// extracting them into the keyring. After extraction, call
+/// [`write_agent_store_raw`] to persist the updated records.
+pub(crate) fn load_agent_store_raw(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+    load_agent_store(app)
+}
+
+/// Write the raw unified store (instances + definitions) without any keyring
+/// strip step. Used by the boot migration after inline secrets have been
+/// extracted into the keyring and the `*_ref` fields set accordingly.
+pub(crate) fn write_agent_store_raw(
+    app: &AppHandle,
+    records: &[ManagedAgentRecord],
+) -> Result<(), String> {
+    let path = managed_agents_store_path(app)?;
+    let payload = serde_json::to_vec_pretty(records)
+        .map_err(|e| format!("failed to serialize agent store: {e}"))?;
+    atomic_write_json_restricted(&path, &payload)
+}
+
+/// Return the shared secret store used for agent secrets, or `None` when the
+/// build has no keyring backend. Exposed as `pub(crate)` so `migration.rs`
+/// can run GC sweeps and the secret-migration function against the same store
+/// instance used by the normal save/load path.
+pub(crate) fn agent_secret_store_pub() -> Option<&'static crate::secret_store::SecretStore> {
+    agent_secret_store()
+}
+
+/// Acquire the cross-process secret transaction lock for the agent store, or
+/// `Ok(None)` on a keyless build. A save and GC hold it for their full span so
+/// two Desktop processes cannot interleave. Keyed by the resolved store dir
+/// ([`crate::secret_store::store_txn_lock_dir`]). Residual (deferred, PR body):
+/// the lock makes each `save_*` atomic cross-process but cannot make a caller's
+/// pre-lock snapshot transactional — caller races stay last-writer-wins (pre-existing).
+pub(crate) fn acquire_secret_txn_lock(
+    app: &AppHandle,
+) -> Result<Option<crate::secret_store::SecretTxnGuard>, String> {
+    if agent_secret_store().is_none() {
+        return Ok(None);
+    }
+    let dir = crate::secret_store::store_txn_lock_dir(&managed_agents_store_path(app)?);
+    crate::secret_store::transaction_lock_at(&dir).map(Some)
+}
+
+/// Resolve the store-directory lock target the secret transaction lock uses,
+/// from the same `managed-agents.json` path [`acquire_secret_txn_lock`] resolves.
+/// Exposed so the identity-persist seam ([`crate::commands::identity::persist_identity_locked`])
+/// contends on the exact directory inode every agent save takes — keeping the
+/// lock-target resolution in one place.
+pub(crate) fn secret_txn_lock_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(crate::secret_store::store_txn_lock_dir(
+        &managed_agents_store_path(app)?,
+    ))
+}
+
 /// Atomic, symlink-preserving JSON write.
 /// Resolves symlinks so the tmp+rename happens at the real target path,
 /// preserving any symlink at `path`.
@@ -632,276 +766,6 @@ pub(crate) fn atomic_write_json_restricted(path: &Path, payload: &[u8]) -> Resul
         .map_err(|e| format!("write {}: {e}", resolved.display()))?;
     file.commit()
         .map_err(|e| format!("commit {}: {e}", resolved.display()))
-}
-
-/// Maximum log file size before rotation (10 MB).
-const MAX_LOG_FILE_SIZE: u64 = 10 * 1024 * 1024;
-
-/// If `path` exceeds [`MAX_LOG_FILE_SIZE`], rotate it to `<path>.1`.
-fn maybe_rotate_log(path: &Path) {
-    let size = match fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(_) => return,
-    };
-    if size <= MAX_LOG_FILE_SIZE {
-        return;
-    }
-    let mut rotated = path.as_os_str().to_owned();
-    rotated.push(".1");
-    let _ = fs::rename(path, &rotated);
-}
-
-pub(crate) fn open_log_file(path: &Path) -> Result<File, String> {
-    maybe_rotate_log(path);
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
-}
-
-/// Start a new install-log session at `path`: keep the previous run as
-/// `<path>.1` and return a freshly created, empty current file.
-///
-/// Rotating per *run* rather than by size is what bounds this file. A run
-/// writes one record per executed attempt, each capped by the log-scale
-/// capture, so one run's file is bounded by steps × attempts × cap and the
-/// history on disk is bounded at two runs. Size-triggered rotation could not
-/// promise either: it never replaced an existing `.1`, and on Windows —
-/// where rename does not replace its destination — it stopped working
-/// altogether once `.1` existed, leaving the current file to grow.
-///
-/// The old `.1` is therefore *removed* before the rename rather than renamed
-/// over. Every step is best-effort: a rotation that fails must not cost the
-/// user the install, so the session continues with a truncated current file.
-pub(crate) fn start_install_log_session(path: &Path) -> Result<File, String> {
-    if path.exists() {
-        let mut previous = path.as_os_str().to_owned();
-        previous.push(".1");
-        let previous = PathBuf::from(previous);
-        let _ = fs::remove_file(&previous);
-        let _ = fs::rename(path, &previous);
-    }
-    open_install_log(path, /* truncate */ true)
-}
-
-/// Open an install log for appending one more record to the current session.
-pub(crate) fn open_install_log_file(path: &Path) -> Result<File, String> {
-    open_install_log(path, /* truncate */ false)
-}
-
-/// Open an install log owner-only.
-///
-/// The mode is set *in the create* rather than chmod'd afterwards, so the file
-/// is never briefly group/world-readable. Install output can carry registry
-/// tokens and proxy credentials echoed by a failing installer, so the window
-/// matters even though it is short. An existing file's mode is left as-is —
-/// `OpenOptions::mode` only applies on creation, and silently re-tightening a
-/// file the user relaxed is not this function's call to make.
-fn open_install_log(path: &Path, truncate: bool) -> Result<File, String> {
-    let mut options = OpenOptions::new();
-    options.create(true);
-    if truncate {
-        options.write(true).truncate(true);
-    } else {
-        options.append(true);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options
-        .open(path)
-        .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
-}
-
-pub(crate) fn append_log_marker(path: &Path, message: &str) -> Result<(), String> {
-    let mut file = open_log_file(path)?;
-    writeln!(file, "{message}").map_err(|error| format!("failed to write log marker: {error}"))
-}
-
-fn agent_pids_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = managed_agents_base_dir(app)?.join("agent-pids");
-    fs::create_dir_all(&dir)
-        .map_err(|error| format!("failed to create agent-pids dir: {error}"))?;
-    Ok(dir)
-}
-
-/// Persist a pair-scoped runtime receipt atomically. Callers must register the
-/// process in memory in the same runtime transition; on write failure they must
-/// terminate the child before releasing that transition.
-pub fn write_agent_runtime_receipt(
-    app: &AppHandle,
-    receipt: &ManagedAgentRuntimeReceipt,
-) -> Result<(), String> {
-    let path = agent_pids_dir(app)?.join(format!("{}.json", receipt.key.runtime_id()));
-    let payload = serde_json::to_vec(receipt)
-        .map_err(|error| format!("failed to serialize runtime receipt: {error}"))?;
-    atomic_write_json_restricted(&path, &payload)
-}
-
-pub fn remove_agent_runtime_receipt(app: &AppHandle, key: &ManagedAgentRuntimeKey) {
-    if let Ok(dir) = agent_pids_dir(app) {
-        let _ = fs::remove_file(dir.join(format!("{}.json", key.runtime_id())));
-    }
-}
-
-pub fn remove_agent_runtime_receipt_path(path: &Path) {
-    let _ = fs::remove_file(path);
-}
-
-pub fn read_all_agent_runtime_receipts(
-    app: &AppHandle,
-) -> Vec<(PathBuf, ManagedAgentRuntimeReceipt)> {
-    let Ok(dir) = agent_pids_dir(app) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|entry| {
-            let path = entry.path();
-            let bytes = fs::read(&path).ok()?;
-            serde_json::from_slice(&bytes)
-                .ok()
-                .map(|receipt| (path, receipt))
-        })
-        .collect()
-}
-
-/// Remove the PID file for an agent (e.g. on normal stop).
-pub fn remove_agent_pid_file(app: &AppHandle, pubkey: &str) {
-    if let Ok(dir) = agent_pids_dir(app) {
-        let _ = fs::remove_file(dir.join(format!("{pubkey}.pid")));
-    }
-}
-
-/// Read all PID files from `agent-pids/`, returning `(pubkey, pid)` pairs.
-pub fn read_all_agent_pid_files(app: &AppHandle) -> Vec<(String, u32)> {
-    let Ok(dir) = agent_pids_dir(app) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            let pubkey = name.strip_suffix(".pid")?;
-            let pid: u32 = fs::read_to_string(entry.path()).ok()?.trim().parse().ok()?;
-            Some((pubkey.to_string(), pid))
-        })
-        .collect()
-}
-
-pub fn read_log_tail(path: &Path, max_lines: usize) -> Result<String, String> {
-    if !path.exists() {
-        return Ok(String::new());
-    }
-
-    let mut file = File::open(path)
-        .map_err(|error| format!("failed to read log file {}: {error}", path.display()))?;
-
-    let file_len = file
-        .seek(SeekFrom::End(0))
-        .map_err(|error| format!("failed to seek log file: {error}"))?;
-
-    if file_len == 0 {
-        return Ok(String::new());
-    }
-
-    // Read backward in chunks to find enough newlines.
-    const CHUNK_SIZE: u64 = 8 * 1024;
-    let mut buf = Vec::new();
-    let mut remaining = file_len;
-    let mut newline_count: usize = 0;
-    // We need max_lines + 1 newlines to delimit max_lines lines (the trailing
-    // newline of the last line counts as one).
-    let target_newlines = max_lines + 1;
-
-    while remaining > 0 && newline_count < target_newlines {
-        let chunk = remaining.min(CHUNK_SIZE);
-        remaining -= chunk;
-        file.seek(SeekFrom::Start(remaining))
-            .map_err(|error| format!("failed to seek log file: {error}"))?;
-
-        let mut tmp = vec![0u8; chunk as usize];
-        file.read_exact(&mut tmp)
-            .map_err(|error| format!("failed to read log chunk: {error}"))?;
-
-        // Prepend this chunk so buf always has the tail of the file.
-        tmp.append(&mut buf);
-        buf = tmp;
-
-        newline_count = bytecount_newlines(&buf);
-    }
-
-    // Strip ANSI escapes here (not in the harness) so the desktop log view
-    // renders cleanly while terminals and other tools still get the colors
-    // buzz-acp emits.
-    let cleaned = strip_ansi_escapes::strip_str(String::from_utf8_lossy(&buf));
-    let lines: Vec<&str> = cleaned.lines().collect();
-    let start = lines.len().saturating_sub(max_lines);
-    Ok(lines[start..].join("\n"))
-}
-
-fn bytecount_newlines(buf: &[u8]) -> usize {
-    buf.iter().filter(|&&b| b == b'\n').count()
-}
-
-/// A meaningful error recovered from an exited agent's log tail.
-pub struct AgentLogError {
-    /// The full log line, wrapped as `Agent reported error…` for display.
-    pub message: String,
-    /// JSON-RPC error code parsed from the line's `(code N)` marker, or a
-    /// synthetic code for known bare prefixes. `None` for legacy-format
-    /// lines that carry no code (or when the code fails to parse as i64).
-    pub code: Option<i64>,
-}
-
-pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
-    let tail = read_log_tail(path, 200).ok()?;
-    tail.lines().rev().map(str::trim).find_map(|line| {
-        // New format: "Agent reported error (code -32002): ..."
-        if let Some(rest) = line.strip_prefix("Agent reported error (code ") {
-            if let Some(paren_end) = rest.find("): ") {
-                let code = rest[..paren_end].parse::<i64>().ok();
-                return Some(AgentLogError {
-                    message: line.to_string(),
-                    code,
-                });
-            }
-        }
-        // Legacy format (older buzz-acp builds): "Agent reported error: ..."
-        if line.starts_with("Agent reported error:") {
-            return Some(AgentLogError {
-                message: line.to_string(),
-                code: None,
-            });
-        }
-        // Bare prefixes emitted by older agent binaries whose Display still leaks
-        // unwrapped errors. Promote these so they surface instead of the generic
-        // "harness exited with status N" fallback.
-        if line.starts_with("llm auth:") {
-            return Some(AgentLogError {
-                message: format!("Agent reported error: {line}"),
-                code: Some(-32001),
-            });
-        }
-        if line.starts_with("llm model not found:") {
-            return Some(AgentLogError {
-                message: format!("Agent reported error: {line}"),
-                code: Some(-32002),
-            });
-        }
-        None
-    })
 }
 
 #[cfg(test)]

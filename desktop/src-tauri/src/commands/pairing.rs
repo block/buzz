@@ -482,9 +482,18 @@ async fn import_recovered_identity(
             std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
             let key_path = data_dir.join("identity.key");
             crate::commands::identity::commit_imported_identity(&state, &data_dir, keys, |keys| {
+                // Serialize the shared-keyring blob write against a concurrent
+                // agent save/GC on the same SecretStore through the lock-owning
+                // `persist_identity_locked` seam, held across the persist span
+                // only. Lock order on this path is identity_mutation → pairing
+                // generation_fence → txn; no save/GC path touches either of the
+                // first two, so there is no inversion.
+                let lock_dir = crate::managed_agents::storage::secret_txn_lock_dir(&app)?;
                 let store =
                     crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-                crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
+                crate::commands::identity::persist_identity_locked(
+                    store, keys, &key_path, &data_dir, &lock_dir,
+                )
             })?;
             Ok(())
         })

@@ -130,8 +130,34 @@ pub(super) fn build_deploy_payload(
         return Err(err);
     }
 
-    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    // Fail closed on an unresolvable global env_vars ref: refuse the deploy
+    // rather than shipping a payload with a silently-incomplete env (mirrors
+    // the `spawn_key_refusal` record-level gate above, for the global tier).
+    let global = crate::managed_agents::load_global_agent_config(app)?;
     let personas = load_personas(app).unwrap_or_default();
+    // Fail closed on a definition with unavailable secrets: refuse deploy if
+    // the linked definition's env_vars could not be hydrated (definition tier,
+    // mirrors the instance-tier `spawn_key_refusal` and global-tier gates above).
+    if let Some(pid) = crate::managed_agents::unavailable_definition_id(record, &personas) {
+        return Err(format!(
+            "agent {} cannot be deployed: its definition ({pid}) has one or more secrets \
+             that could not be loaded from the keyring. \
+             Refusing to deploy with missing definition secrets; \
+             retry once the keyring is reachable.",
+            record.pubkey
+        ));
+    }
+    // Fail closed on an unavailable harness env projection: the effective
+    // harness's `env_ref` could not be hydrated, so its definition env would
+    // deploy empty (harness tier, mirrors the instance/definition/global gates).
+    if let Some(hid) = crate::managed_agents::unavailable_harness_id(record, &personas) {
+        return Err(format!(
+            "agent {} cannot be deployed: its harness ({hid}) env could not be loaded \
+             from the keyring. Refusing to deploy with missing harness env; \
+             retry once the keyring is reachable.",
+            record.pubkey
+        ));
+    }
     let teams = crate::managed_agents::load_teams(app).unwrap_or_default();
     let persona_env =
         crate::managed_agents::live_persona_env(&personas, record.persona_id.as_deref());

@@ -290,6 +290,7 @@ fn persona_with_provider(
         parallelism: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
+        secrets_unavailable: false,
     }
 }
 
@@ -301,7 +302,6 @@ fn persona_with_provider(
 // provider — reach the agent on the next spawn without delete+recreate.
 // The merge assertions are load-bearing: they witness the credential refresh
 // that the old create-time env baking silently blocked.
-
 use crate::managed_agents::env_vars::{live_persona_env, merged_user_env};
 use std::collections::BTreeMap;
 

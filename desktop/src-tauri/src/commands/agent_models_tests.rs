@@ -404,6 +404,7 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
+        secrets_unavailable: false,
     };
 
     // agent_model_discovery_config is the single helper get_agent_models

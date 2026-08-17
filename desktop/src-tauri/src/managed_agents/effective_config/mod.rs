@@ -314,5 +314,85 @@ impl EffectiveConfigResult {
     }
 }
 
+/// A human-readable identifier for a record in a refusal message: the pubkey
+/// for a keyed instance, the slug/name for a key-less definition.
+fn record_ref(record: &ManagedAgentRecord) -> String {
+    if record.pubkey.is_empty() {
+        record.slug.clone().unwrap_or_else(|| record.name.clone())
+    } else {
+        record.pubkey.clone()
+    }
+}
+
+/// Fail-closed availability gate for every side-effecting consumer of an
+/// agent's effective secrets — model discovery, card minting, profile
+/// signing, snapshot export, and destructive global saves.
+///
+/// The three effective-secret tiers are checked in precedence order and the
+/// first unavailable one refuses:
+///
+/// 1. **Global** — `global_load` is the strict [`load_global_agent_config`]
+///    result. When a committed `env_vars_ref` cannot be resolved the loader
+///    returns `Err`; this gate propagates it as a refusal rather than letting
+///    the caller fall back to `unwrap_or_default()` (which would drop the
+///    global env and run/sign/export with a silently-incomplete config). On
+///    success the loaded config is returned so the caller reuses it without a
+///    second load.
+/// 2. **Instance** — the record's own `secrets_unavailable` (an
+///    `env_vars`/`auth_tag`/`provider_config` ref that failed to hydrate).
+/// 3. **Definition** — for a linked instance, the definition's
+///    `secrets_unavailable`.
+///
+/// This mirrors the spawn/deploy boundaries (`spawn_key_refusal`, the
+/// definition inline check, and `load_global_agent_config(app)?`) so every
+/// external-effect path fails closed on the exact same conditions.
+///
+/// [`load_global_agent_config`]: super::global_config::load_global_agent_config
+pub fn require_effective_secrets_available(
+    record: &ManagedAgentRecord,
+    definitions: &[AgentDefinition],
+    global_load: Result<GlobalAgentConfig, String>,
+) -> Result<GlobalAgentConfig, String> {
+    // Global tier: an unresolvable committed ref is a hard refusal.
+    let global = global_load.map_err(|e| {
+        format!(
+            "agent {} cannot proceed: the global agent config has one or more \
+             secrets that could not be loaded from the keyring ({e}). Refusing \
+             with missing secrets; retry once the keyring is reachable.",
+            record_ref(record)
+        )
+    })?;
+
+    // Instance tier: the record's own secret refs failed to hydrate.
+    if record.secrets_unavailable {
+        return Err(format!(
+            "agent {} cannot proceed: one or more of its secrets (env vars, \
+             auth tag, or provider config) could not be loaded from the \
+             keyring. Refusing with missing secrets; retry once the keyring is \
+             reachable.",
+            record_ref(record)
+        ));
+    }
+
+    // Definition tier: a linked instance whose definition's env could not hydrate.
+    if let Some(pid) = record.persona_id.as_deref() {
+        if definitions
+            .iter()
+            .find(|d| d.id == pid)
+            .map(|d| d.secrets_unavailable)
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "agent {} cannot proceed: its definition ({pid}) has one or more \
+                 secrets that could not be loaded from the keyring. Refusing with \
+                 missing secrets; retry once the keyring is reachable.",
+                record_ref(record)
+            ));
+        }
+    }
+
+    Ok(global)
+}
+
 #[cfg(test)]
 mod tests;
