@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  appendCanvasBoardCard,
   classifyCanvasBoardCard,
   parseCanvasBoard,
+  reorderCanvasBoardCard,
   resolveChannelViewMode,
+  updateCanvasBoardCard,
+  validateCanvasBoardCardDraft,
 } from "./canvasBoard.ts";
 
 test("parseCanvasBoard turns level-two sections into durable cards", () => {
@@ -97,6 +101,150 @@ test("parseCanvasBoard falls back to one overview card", () => {
 test("classifyCanvasBoardCard keeps stewardship language visible", () => {
   assert.equal(classifyCanvasBoardCard("People and stewards"), "people");
   assert.equal(classifyCanvasBoardCard("Source and story boundary"), "note");
+});
+
+test("appendCanvasBoardCard preserves the board preamble and adds one card", () => {
+  const content = `# Dispatch
+
+Shared introduction.
+
+## Start here
+
+Read the welcome.
+`;
+
+  const updated = appendCanvasBoardCard(content, {
+    body: "Bring one seed.",
+    title: "Next action",
+  });
+  const board = parseCanvasBoard(updated);
+
+  assert.equal(board.title, "Dispatch");
+  assert.equal(board.introduction, "Shared introduction.");
+  assert.deepEqual(
+    board.cards.map(({ body, title }) => ({ body, title })),
+    [
+      { body: "Read the welcome.", title: "Start here" },
+      { body: "Bring one seed.", title: "Next action" },
+    ],
+  );
+});
+
+test("updateCanvasBoardCard edits only the selected source section", () => {
+  const content = `# Dispatch
+
+## Start here
+
+Old instructions.
+
+## Finished example
+
+Keep this intact.
+`;
+
+  const updated = updateCanvasBoardCard(content, "start-here-1", {
+    body: "New **Markdown** instructions.",
+    title: "Start here now",
+  });
+  assert.ok(updated);
+
+  const board = parseCanvasBoard(updated);
+  assert.deepEqual(
+    board.cards.map(({ body, title }) => ({ body, title })),
+    [
+      {
+        body: "New **Markdown** instructions.",
+        title: "Start here now",
+      },
+      { body: "Keep this intact.", title: "Finished example" },
+    ],
+  );
+});
+
+test("updateCanvasBoardCard turns a fallback overview into a durable section", () => {
+  const updated = updateCanvasBoardCard(
+    "# A small room\n\nEverything useful lives here.\n",
+    "overview-1",
+    {
+      body: "The overview is now editable from the Board.",
+      title: "Start here",
+    },
+  );
+  assert.ok(updated);
+
+  const board = parseCanvasBoard(updated);
+  assert.equal(board.title, "A small room");
+  assert.equal(board.introduction, "");
+  assert.deepEqual(
+    board.cards.map(({ body, title }) => ({ body, title })),
+    [
+      {
+        body: "The overview is now editable from the Board.",
+        title: "Start here",
+      },
+    ],
+  );
+});
+
+test("reorderCanvasBoardCard moves raw fenced sections without losing content", () => {
+  const content = `# Dispatch
+
+## Notes
+
+\`\`\`\`md
+\`\`\`md
+## Not a card
+\`\`\`
+\`\`\`\`
+
+## Next action
+
+Ship the proof.
+
+## Finished example
+
+Keep this too.
+`;
+
+  const updated = reorderCanvasBoardCard(
+    content,
+    "finished-example-3",
+    "notes-1",
+  );
+  assert.ok(updated);
+
+  const board = parseCanvasBoard(updated);
+  assert.deepEqual(
+    board.cards.map(({ title }) => title),
+    ["Finished example", "Notes", "Next action"],
+  );
+  assert.match(board.cards[1].body, /## Not a card/u);
+  assert.match(board.cards[2].body, /Ship the proof/u);
+});
+
+test("canvas card draft validation rejects nested level-two card headings", () => {
+  assert.equal(
+    validateCanvasBoardCardDraft({ body: "Body", title: "" }),
+    "Add a card title.",
+  );
+  assert.equal(
+    validateCanvasBoardCardDraft({ body: "Body", title: "x".repeat(121) }),
+    "Keep the card title to 120 characters or fewer.",
+  );
+  assert.equal(
+    validateCanvasBoardCardDraft({
+      body: "## Accidental second card",
+      title: "First card",
+    }),
+    "Use level-three headings inside a card. Level-two headings create separate cards.",
+  );
+  assert.equal(
+    validateCanvasBoardCardDraft({
+      body: "```md\n## Safe example\n```",
+      title: "Code sample",
+    }),
+    null,
+  );
 });
 
 test("resolveChannelViewMode makes Dispatch board-first without hiding targets", () => {

@@ -1,9 +1,28 @@
 import {
+  closestCenter,
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
+import {
+  rectSortingStrategy,
+  sortableKeyboardCoordinates,
+  SortableContext,
+  useSortable,
+} from "@dnd-kit/sortable";
+import {
   Boxes,
   Compass,
+  GripVertical,
   HandHeart,
   MessageSquareText,
   PackageCheck,
+  Pencil,
+  Plus,
   Settings2,
   Sparkles,
   StickyNote,
@@ -52,14 +71,20 @@ const CARD_ICONS = {
 } satisfies Record<CanvasBoardCardKind, typeof StickyNote>;
 
 type ChannelBoardProps = {
+  actionErrorMessage?: string;
   agentCount: number;
   author: string | null;
+  canEdit: boolean;
   channelName: string;
   content: string | null;
   errorMessage?: string;
   isLoading: boolean;
+  isSaving: boolean;
   memberCount: number;
+  onCreateCard: () => void;
+  onEditCard: (card: CanvasBoardCard) => void;
   onManageBoard: () => void;
+  onMoveCard: (activeCardId: string, overCardId: string) => void;
   onOpenMembers: () => void;
   onOpenStream: () => void;
   updatedAt: number | null;
@@ -77,34 +102,114 @@ function formatCanvasUpdatedAt(updatedAt: number | null): string | null {
 
 function BoardCard({
   card,
+  canEdit,
   channelNames,
+  isSaving,
+  onEdit,
 }: {
   card: CanvasBoardCard;
+  canEdit: boolean;
   channelNames: string[];
+  isSaving: boolean;
+  onEdit: () => void;
 }) {
+  const Icon = CARD_ICONS[card.kind];
+  const dragDisabled = !canEdit || isSaving;
+  const {
+    attributes,
+    isDragging,
+    isOver,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+  } = useSortable({
+    id: card.id,
+    disabled: dragDisabled,
+  });
+
+  return (
+    <div
+      className={cn(
+        "mb-4 break-inside-avoid rounded-xl transition-shadow",
+        isDragging && "opacity-35",
+        isOver && !isDragging && "ring-2 ring-primary/50 ring-offset-2",
+      )}
+      data-board-kind={card.kind}
+      data-testid={`magic-board-card-${card.id}`}
+      ref={setNodeRef}
+    >
+      <Card
+        className={cn(
+          "overflow-hidden shadow-sm transition-shadow duration-200 hover:shadow-md",
+          CARD_STYLES[card.kind],
+        )}
+      >
+        <CardHeader className="gap-3 p-5 pb-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2 pt-1 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              <Icon className="h-3.5 w-3.5" />
+              {CARD_LABELS[card.kind]}
+            </div>
+            {canEdit ? (
+              <div className="flex shrink-0 items-center gap-1">
+                <Button
+                  aria-label={`Move ${card.title}`}
+                  className="touch-none cursor-grab text-muted-foreground active:cursor-grabbing"
+                  data-testid={`magic-board-drag-${card.id}`}
+                  disabled={isSaving}
+                  ref={setActivatorNodeRef}
+                  size="icon-xs"
+                  type="button"
+                  variant="ghost"
+                  {...attributes}
+                  {...listeners}
+                >
+                  <GripVertical />
+                </Button>
+                <Button
+                  aria-label={`Edit ${card.title}`}
+                  data-testid={`magic-board-edit-${card.id}`}
+                  disabled={isSaving}
+                  onClick={onEdit}
+                  size="icon-xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  <Pencil />
+                </Button>
+              </div>
+            ) : null}
+          </div>
+          <CardTitle className="text-lg leading-6">{card.title}</CardTitle>
+        </CardHeader>
+        {card.body ? (
+          <CardContent className="p-5 pt-0 text-sm">
+            <Markdown channelNames={channelNames} content={card.body} />
+          </CardContent>
+        ) : null}
+      </Card>
+    </div>
+  );
+}
+
+function BoardCardDragOverlay({ card }: { card: CanvasBoardCard }) {
   const Icon = CARD_ICONS[card.kind];
 
   return (
     <Card
       className={cn(
-        "mb-4 break-inside-avoid overflow-hidden shadow-sm transition-shadow duration-200 hover:shadow-md",
+        "w-72 overflow-hidden shadow-xl ring-1 ring-primary/30",
         CARD_STYLES[card.kind],
       )}
-      data-board-kind={card.kind}
-      data-testid={`magic-board-card-${card.id}`}
+      data-testid="magic-board-drag-overlay"
     >
-      <CardHeader className="gap-3 p-5 pb-3">
+      <CardHeader className="gap-2 p-4">
         <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
           <Icon className="h-3.5 w-3.5" />
           {CARD_LABELS[card.kind]}
         </div>
-        <CardTitle className="text-lg leading-6">{card.title}</CardTitle>
+        <CardTitle className="text-base leading-5">{card.title}</CardTitle>
       </CardHeader>
-      {card.body ? (
-        <CardContent className="p-5 pt-0 text-sm">
-          <Markdown channelNames={channelNames} content={card.body} />
-        </CardContent>
-      ) : null}
     </Card>
   );
 }
@@ -171,14 +276,20 @@ function LiveBoardCards({
 }
 
 export function ChannelBoard({
+  actionErrorMessage,
   agentCount,
   author,
+  canEdit,
   channelName,
   content,
   errorMessage,
   isLoading,
+  isSaving,
   memberCount,
+  onCreateCard,
+  onEditCard,
   onManageBoard,
+  onMoveCard,
   onOpenMembers,
   onOpenStream,
   updatedAt,
@@ -193,6 +304,28 @@ export function ChannelBoard({
   );
   const board = React.useMemo(() => parseCanvasBoard(content ?? ""), [content]);
   const updatedLabel = formatCanvasUpdatedAt(updatedAt);
+  const [activeCardId, setActiveCardId] = React.useState<string | null>(null);
+  const activeCard = activeCardId
+    ? (board.cards.find((card) => card.id === activeCardId) ?? null)
+    : null;
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
+  function handleDragStart(event: DragStartEvent) {
+    setActiveCardId(String(event.active.id));
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    setActiveCardId(null);
+    if (!event.over || event.active.id === event.over.id) {
+      return;
+    }
+    onMoveCard(String(event.active.id), String(event.over.id));
+  }
 
   return (
     <div
@@ -245,6 +378,18 @@ export function ChannelBoard({
               </div>
             </div>
             <div className="flex shrink-0 flex-wrap gap-2">
+              {canEdit ? (
+                <Button
+                  data-testid="magic-board-create-card"
+                  disabled={isSaving}
+                  onClick={onCreateCard}
+                  size="sm"
+                  type="button"
+                >
+                  <Plus className="h-4 w-4" />
+                  New card
+                </Button>
+              ) : null}
               <Button onClick={onOpenStream} size="sm" type="button">
                 <MessageSquareText className="h-4 w-4" />
                 Open stream
@@ -261,6 +406,15 @@ export function ChannelBoard({
             </div>
           </div>
         </section>
+
+        {actionErrorMessage ? (
+          <p
+            className="mb-4 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+            data-testid="magic-board-action-error"
+          >
+            {actionErrorMessage}
+          </p>
+        ) : null}
 
         {isLoading ? (
           <div className="rounded-xl border border-border/60 bg-background/60 px-5 py-8 text-sm text-muted-foreground">
@@ -292,24 +446,43 @@ export function ChannelBoard({
             </Button>
           </div>
         ) : (
-          <div
-            className="columns-1 gap-4 md:columns-2 xl:columns-3"
-            data-testid="magic-board-grid"
+          <DndContext
+            collisionDetection={closestCenter}
+            onDragCancel={() => setActiveCardId(null)}
+            onDragEnd={handleDragEnd}
+            onDragStart={handleDragStart}
+            sensors={sensors}
           >
-            {board.cards.map((card) => (
-              <BoardCard
-                card={card}
-                channelNames={channelNames}
-                key={card.id}
-              />
-            ))}
-            <LiveBoardCards
-              agentCount={agentCount}
-              memberCount={memberCount}
-              onOpenMembers={onOpenMembers}
-              onOpenStream={onOpenStream}
-            />
-          </div>
+            <SortableContext
+              items={board.cards.map((card) => card.id)}
+              strategy={rectSortingStrategy}
+            >
+              <div
+                className="columns-1 gap-4 md:columns-2 xl:columns-3"
+                data-testid="magic-board-grid"
+              >
+                {board.cards.map((card) => (
+                  <BoardCard
+                    canEdit={canEdit}
+                    card={card}
+                    channelNames={channelNames}
+                    isSaving={isSaving}
+                    key={card.id}
+                    onEdit={() => onEditCard(card)}
+                  />
+                ))}
+                <LiveBoardCards
+                  agentCount={agentCount}
+                  memberCount={memberCount}
+                  onOpenMembers={onOpenMembers}
+                  onOpenStream={onOpenStream}
+                />
+              </div>
+            </SortableContext>
+            <DragOverlay dropAnimation={null}>
+              {activeCard ? <BoardCardDragOverlay card={activeCard} /> : null}
+            </DragOverlay>
+          </DndContext>
         )}
       </div>
     </div>
