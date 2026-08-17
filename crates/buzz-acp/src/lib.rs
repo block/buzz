@@ -4,6 +4,9 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod heartbeat_capability;
+mod heartbeat_capability_constants;
+mod heartbeat_preflight;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -66,6 +69,40 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+fn enforce_helper_required_agent_owner() -> Result<()> {
+    let required_owner = std::env::var("BUZZ_ACP_REQUIRED_AGENT_OWNER").ok();
+    let configured_owner = std::env::var("BUZZ_ACP_AGENT_OWNER").ok();
+    let auth_tag = std::env::var("BUZZ_AUTH_TAG").ok();
+    let private_key = std::env::var("BUZZ_PRIVATE_KEY").ok();
+    enforce_helper_required_agent_owner_from_sources(
+        required_owner.as_deref(),
+        configured_owner.as_deref(),
+        auth_tag.as_deref(),
+        private_key.as_deref(),
+    )
+}
+
+fn enforce_helper_required_agent_owner_from_sources(
+    required_owner: Option<&str>,
+    configured_owner: Option<&str>,
+    auth_tag: Option<&str>,
+    private_key: Option<&str>,
+) -> Result<()> {
+    let required_owner = config::validate_required_agent_owner(required_owner)
+        .map_err(|error| anyhow::anyhow!("configuration error: {error}"))?;
+    if required_owner.is_none() {
+        return Ok(());
+    }
+    let agent_public_key = private_key
+        .filter(|value| !value.is_empty())
+        .and_then(|value| nostr::Keys::parse(value).ok())
+        .map(|keys| keys.public_key());
+    let resolved_owner = agent_public_key.as_ref().and_then(|agent_pubkey| {
+        resolve_agent_owner_from_sources(agent_pubkey, configured_owner, auth_tag)
+    });
+    enforce_required_agent_owner(required_owner.as_deref(), resolved_owner.as_deref())
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -121,25 +158,130 @@ fn emit_runtime_lifecycle(
 ///    Verified against the agent's own pubkey to extract the owner pubkey.
 /// 2. `--agent-owner` CLI flag / `BUZZ_ACP_AGENT_OWNER` env var.
 fn resolve_agent_owner(config: &Config) -> Option<String> {
-    // Try BUZZ_AUTH_TAG first (NIP-OA attestation).
-    if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-        if !auth_tag.is_empty() {
-            let agent_pk = config.keys.public_key();
-            match buzz_sdk::nip_oa::verify_auth_tag(&auth_tag, &agent_pk) {
-                Ok(owner_pk) => {
-                    let owner_hex = owner_pk.to_hex().to_ascii_lowercase();
-                    tracing::info!("owner resolved from BUZZ_AUTH_TAG: {owner_hex}");
-                    return Some(owner_hex);
-                }
-                Err(e) => {
-                    tracing::warn!("BUZZ_AUTH_TAG verification failed: {e} — falling back");
-                }
+    let auth_tag = std::env::var("BUZZ_AUTH_TAG").ok();
+    resolve_agent_owner_from_sources(
+        &config.keys.public_key(),
+        config.agent_owner.as_deref(),
+        auth_tag.as_deref(),
+    )
+}
+
+fn resolve_agent_owner_from_sources(
+    agent_pubkey: &PublicKey,
+    configured_owner: Option<&str>,
+    auth_tag: Option<&str>,
+) -> Option<String> {
+    if let Some(auth_tag) = auth_tag.filter(|value| !value.is_empty()) {
+        match buzz_sdk::nip_oa::verify_auth_tag(auth_tag, agent_pubkey) {
+            Ok(owner_pk) => {
+                let owner_hex = owner_pk.to_hex().to_ascii_lowercase();
+                tracing::info!("owner resolved from BUZZ_AUTH_TAG: {owner_hex}");
+                return Some(owner_hex);
+            }
+            Err(error) => {
+                tracing::warn!("BUZZ_AUTH_TAG verification failed: {error} — falling back");
             }
         }
     }
 
-    // Fall back to --agent-owner config.
-    config.agent_owner.clone()
+    configured_owner.map(str::to_string)
+}
+
+fn enforce_required_agent_owner(
+    required_owner: Option<&str>,
+    resolved_owner: Option<&str>,
+) -> Result<()> {
+    let Some(required_owner) = required_owner else {
+        return Ok(());
+    };
+    let Some(resolved_owner) = resolved_owner else {
+        anyhow::bail!(
+            "required agent owner latch failed: no owner resolved; expected {required_owner}"
+        );
+    };
+    if resolved_owner != required_owner {
+        anyhow::bail!(
+            "required agent owner latch failed: resolved {resolved_owner}, expected {required_owner}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod required_agent_owner_tests {
+    use super::*;
+    use nostr::Keys;
+
+    #[test]
+    fn verified_auth_tag_takes_precedence_over_configured_fallback() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let configured_fallback = "ab".repeat(32);
+        let auth_tag =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "kind=9")
+                .expect("test auth tag must be created");
+
+        let resolved = resolve_agent_owner_from_sources(
+            &agent_keys.public_key(),
+            Some(&configured_fallback),
+            Some(&auth_tag),
+        );
+        let verified_owner = owner_keys.public_key().to_hex().to_ascii_lowercase();
+        assert_eq!(resolved.as_deref(), Some(verified_owner.as_str()));
+        enforce_required_agent_owner(Some(&verified_owner), resolved.as_deref())
+            .expect("verified owner should satisfy its latch");
+        assert!(
+            enforce_required_agent_owner(Some(&configured_fallback), resolved.as_deref()).is_err(),
+            "a fallback value must not override a verified auth tag"
+        );
+    }
+
+    #[test]
+    fn invalid_auth_tag_uses_configured_fallback() {
+        let agent_keys = Keys::generate();
+        let configured_fallback = "cd".repeat(32);
+        let resolved = resolve_agent_owner_from_sources(
+            &agent_keys.public_key(),
+            Some(&configured_fallback),
+            Some("not-an-auth-tag"),
+        );
+
+        assert_eq!(resolved.as_deref(), Some(configured_fallback.as_str()));
+        enforce_required_agent_owner(Some(&configured_fallback), resolved.as_deref())
+            .expect("the configured owner should satisfy the latch after verification fails");
+    }
+
+    #[test]
+    fn required_owner_latch_fails_closed_on_missing_or_mismatched_owner() {
+        let required_owner = "ef".repeat(32);
+        let other_owner = "01".repeat(32);
+
+        enforce_required_agent_owner(None, None).expect("an unset latch preserves legacy startup");
+        assert!(enforce_required_agent_owner(Some(&required_owner), None).is_err());
+        assert!(enforce_required_agent_owner(Some(&required_owner), Some(&other_owner)).is_err());
+        enforce_required_agent_owner(Some(&required_owner), Some(&required_owner))
+            .expect("an exact owner match should pass");
+    }
+
+    #[test]
+    fn helper_latch_fails_before_model_activity_without_resolved_owner() {
+        let required_owner = "ab".repeat(32);
+        assert!(enforce_helper_required_agent_owner_from_sources(
+            Some(&required_owner),
+            None,
+            None,
+            None,
+        )
+        .is_err());
+        assert!(enforce_helper_required_agent_owner_from_sources(None, None, None, None,).is_ok());
+        assert!(enforce_helper_required_agent_owner_from_sources(
+            Some("not-a-pubkey"),
+            Some("not-a-pubkey"),
+            None,
+            Some(&"01".repeat(32)),
+        )
+        .is_err());
+    }
 }
 
 /// Cache for the agent's owner pubkey.
@@ -1864,6 +2006,9 @@ mod idle_pool_sleep_tests {
 }
 
 pub fn run() -> Result<()> {
+    if heartbeat_capability::emit_if_requested()? {
+        return Ok(());
+    }
     config::propagate_legacy_env_vars();
     tokio_main()
 }
@@ -1875,6 +2020,7 @@ async fn tokio_main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
     if is_subcommand("models") {
+        enforce_helper_required_agent_owner()?;
         // Strip the subcommand token so clap doesn't reject it as a positional.
         // Keeps argv[0] (binary name) and passes everything after the subcommand.
         let filtered: Vec<String> = std::env::args()
@@ -1887,6 +2033,7 @@ async fn tokio_main() -> Result<()> {
     }
 
     if is_subcommand("auth-methods") {
+        enforce_helper_required_agent_owner()?;
         let filtered: Vec<String> = std::env::args()
             .enumerate()
             .filter(|(i, _)| *i != 1)
@@ -1897,6 +2044,7 @@ async fn tokio_main() -> Result<()> {
     }
 
     if is_subcommand("authenticate") {
+        enforce_helper_required_agent_owner()?;
         let filtered: Vec<String> = std::env::args()
             .enumerate()
             .filter(|(i, _)| *i != 1)
@@ -1914,6 +2062,14 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    // Resolve and enforce the supervisor-pinned owner before any setup relay,
+    // heartbeat preflight, observer, or ACP/model activity can start. A valid
+    // BUZZ_AUTH_TAG deliberately takes precedence over the configured fallback.
+    let startup_owner = resolve_agent_owner(&config);
+    enforce_required_agent_owner(
+        config.required_agent_owner.as_deref(),
+        startup_owner.as_deref(),
+    )?;
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -1928,6 +2084,31 @@ async fn tokio_main() -> Result<()> {
     }
 
     tracing::info!("buzz-acp starting: {}", config.summary());
+
+    if let Some(ref owner) = startup_owner {
+        tracing::info!("agent owner: {owner}");
+    } else {
+        tracing::info!("no agent owner configured");
+    }
+    // Warn if owner-dependent mode but no owner resolved yet.
+    if startup_owner.is_none() {
+        match &config.respond_to {
+            RespondTo::OwnerOnly => {
+                tracing::warn!(
+                    "respond-to=owner-only but no owner is set — all events will be \
+                     dropped. Set BUZZ_AUTH_TAG or --agent-owner, or use --respond-to=anyone."
+                );
+            }
+            RespondTo::Allowlist => {
+                tracing::warn!(
+                    "respond-to=allowlist but no owner is set — allowlisted pubkeys \
+                     will still be accepted, but owner-based matching is unavailable \
+                     until owner is resolved."
+                );
+            }
+            _ => {} // anyone/nobody don't depend on owner
+        }
+    }
 
     let observer = config
         .relay_observer
@@ -1997,32 +2178,6 @@ async fn tokio_main() -> Result<()> {
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
 
-    // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
-    let startup_owner: Option<String> = resolve_agent_owner(&config);
-    if let Some(ref owner) = startup_owner {
-        tracing::info!("agent owner: {owner}");
-    } else {
-        tracing::info!("no agent owner configured");
-    }
-    // Warn if owner-dependent mode but no owner resolved yet.
-    if startup_owner.is_none() {
-        match &config.respond_to {
-            RespondTo::OwnerOnly => {
-                tracing::warn!(
-                    "respond-to=owner-only but no owner is set — all events will be \
-                     dropped. Set BUZZ_AUTH_TAG or --agent-owner, or use --respond-to=anyone."
-                );
-            }
-            RespondTo::Allowlist => {
-                tracing::warn!(
-                    "respond-to=allowlist but no owner is set — allowlisted pubkeys \
-                     will still be accepted, but owner-based matching is unavailable \
-                     until owner is resolved."
-                );
-            }
-            _ => {} // anyone/nobody don't depend on owner
-        }
-    }
     let owner_cache = OwnerCache::new(startup_owner.clone());
 
     let mut relay_observer_control_rx = None;
@@ -2178,6 +2333,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
+        heartbeat_preflight: config.heartbeat_preflight.clone(),
         cwd: std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("/"))
             .to_string_lossy()
@@ -4151,9 +4307,9 @@ fn handle_prompt_result(
         //    to the agent regardless of whether they occurred during session
         //    creation or an active prompt — respawn unconditionally.
         //
-        // 2. Application-class (IdleTimeout, HardTimeout, Json): the pipe is
-        //    intact but the prompt failed. Return the agent to the pool so it
-        //    can be reused for the next event.
+        // 2. Application-class (IdleTimeout, HardTimeout, Json, heartbeat
+        //    preflight): the pipe is intact or was never touched. Return the
+        //    agent to the pool so it can be reused for the next event.
 
         // Intentional cancel — agent is healthy, return it to the pool.
         // No respawn, no retry penalty. The cancelled batch was already stored
@@ -6734,6 +6890,7 @@ mod build_mcp_servers_tests {
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
+            heartbeat_preflight: None,
             system_prompt: None,
             team_instructions: None,
             initial_message: None,
@@ -6763,6 +6920,7 @@ mod build_mcp_servers_tests {
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
             agent_owner: None,
+            required_agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -6957,6 +7115,7 @@ mod error_outcome_emission_tests {
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
+            heartbeat_preflight: None,
             system_prompt: None,
             team_instructions: None,
             initial_message: None,
@@ -6986,6 +7145,7 @@ mod error_outcome_emission_tests {
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
             agent_owner: None,
+            required_agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -8195,6 +8355,77 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_preflight_failure_returns_healthy_agent_without_respawn() {
+        let mut agent = dummy_agent(0).await;
+        agent.state.heartbeat_session = Some("existing-heartbeat-session".to_string());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "preflight-blocked-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = true;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Heartbeat,
+            turn_id: "preflight-blocked-turn".to_string(),
+            outcome: PromptOutcome::Error(AcpError::HeartbeatPreflight(
+                "gmail:blocked".to_string(),
+            )),
+            batch: None,
+        };
+
+        assert!(matches!(
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            ),
+            LoopAction::Continue
+        ));
+        assert!(!heartbeat_in_flight, "heartbeat latch must be released");
+        assert_eq!(pool.live_count(), 1, "healthy model process must be reused");
+        assert_eq!(respawn_tasks.len(), 0, "preflight block must not respawn");
+        assert!(crash_history[0].crash_times.is_empty());
+        assert!(crash_history[0].open_until.is_none());
+        assert!(!crash_history[0].respawn_in_flight);
+        let mut returned_agent = pool.agents_mut()[0].take().expect("returned agent");
+        assert_eq!(
+            returned_agent.state.heartbeat_session.as_deref(),
+            Some("existing-heartbeat-session"),
+            "preflight failure must preserve the reusable heartbeat session"
+        );
+        returned_agent.acp.shutdown().await;
     }
 
     // ── is_auth_error classification ───────────────────────────────────────

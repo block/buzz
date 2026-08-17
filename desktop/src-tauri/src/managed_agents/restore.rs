@@ -24,7 +24,10 @@ enum SpawnOutcome {
     Skipped,
     Failed(String),
 }
-type AgentSpawnResult = (String, SpawnOutcome);
+/// Pubkey + optimistic record generation + spawn outcome. The generation is
+/// rechecked before registration so a stop, delete, or security-sensitive edit
+/// that lands while restore is resolving cannot be undone by Phase C.
+type AgentSpawnResult = (String, String, SpawnOutcome);
 
 /// Backfill the pinned persona snapshot for pre-existing agents created before
 /// the record became the spawn source of truth. Runs once at launch, before
@@ -288,6 +291,54 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
+    // Phase A deliberately runs before the transition lock because mesh
+    // preflight may await. Re-read every candidate now that lifecycle changes
+    // are serialized: an owner stop/delete/update in that window changes the
+    // record generation and must cancel the stale restore. Re-snapshot the
+    // current persona again as well, so a definition edit in the same window
+    // can never launch the older effective configuration.
+    let agents_to_start = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(app)?;
+        let personas = load_personas(app).unwrap_or_default();
+        let mut refreshed = Vec::new();
+        let mut changed = false;
+
+        for candidate in agents_to_start {
+            let Some(record) = records
+                .iter_mut()
+                .find(|record| record.pubkey == candidate.pubkey)
+            else {
+                continue;
+            };
+            if record.updated_at != candidate.updated_at
+                || !record.start_on_app_launch
+                || record.backend != BackendKind::Local
+            {
+                continue;
+            }
+            if let Some(persona_id) = record.persona_id.clone() {
+                if let Some(persona) = personas.iter().find(|persona| persona.id == persona_id) {
+                    super::persona_events::apply_persona_snapshot(record, persona);
+                    record.updated_at = util::now_iso();
+                    changed = true;
+                }
+            }
+            refreshed.push(record.clone());
+        }
+
+        if changed {
+            save_managed_agents(app, &records)?;
+        }
+        refreshed
+    };
+    if agents_to_start.is_empty() {
+        return Ok(());
+    }
+
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
@@ -310,19 +361,24 @@ pub async fn restore_managed_agents_on_launch(
                                 // tracked a live child for this exact pair during
                                 // the Phase A window, leave it alone. Mirrors the
                                 // live-child guard in `start_pair`.
-                                let already_live = app
+                                let reuse = app
                                     .state::<AppState>()
                                     .managed_agent_processes
                                     .lock()
-                                    .ok()
+                                    .map_err(|error| error.to_string())
                                     .and_then(|mut runtimes| {
-                                        runtimes.get_mut(&key).map(|runtime| {
-                                            runtime.child.try_wait().ok().flatten().is_none()
-                                        })
-                                    })
-                                    .unwrap_or(false);
-                                if already_live {
+                                        let mut record_for_stop = record.clone();
+                                        super::reuse_if_verified(
+                                            app,
+                                            &mut record_for_stop,
+                                            &mut runtimes,
+                                            &key,
+                                        )
+                                    });
+                                if matches!(reuse, Ok(true)) {
                                     SpawnOutcome::Skipped
+                                } else if let Err(error) = reuse {
+                                    SpawnOutcome::Failed(error)
                                 } else {
                                     match super::terminate_untracked_pair_runtime(app, &key)
                                         .and_then(|()| {
@@ -349,7 +405,7 @@ pub async fn restore_managed_agents_on_launch(
                             }
                             Err(error) => SpawnOutcome::Failed(error),
                         };
-                    (record.pubkey.clone(), outcome)
+                    (record.pubkey.clone(), record.updated_at.clone(), outcome)
                 });
                 handle
             })
@@ -375,21 +431,29 @@ pub async fn restore_managed_agents_on_launch(
 
     let mut successfully_spawned: Vec<String> = Vec::new();
 
-    for (pubkey, outcome) in spawn_results {
+    for (pubkey, expected_updated_at, outcome) in spawn_results {
         match outcome {
             // Skipped means a concurrent reconcile already owns a live child for
             // this pair; leave its runtime and record state untouched.
             SpawnOutcome::Skipped => continue,
             SpawnOutcome::Spawned(key, mut process) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
+                    let _ = super::terminate_process(process.child.id());
+                    let _ = process.child.wait();
                     continue;
                 };
+                if record.updated_at != expected_updated_at {
+                    let _ = super::terminate_process(process.child.id());
+                    let _ = process.child.wait();
+                    continue;
+                }
                 let now = util::now_iso();
                 let receipt = super::ManagedAgentRuntimeReceipt {
                     key: key.clone(),
                     pid: process.child.id(),
                     desktop_instance_id: super::current_instance_id(app),
                     started_at: now.clone(),
+                    heartbeat_harness: process.heartbeat_harness.clone(),
                 };
                 if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
                     let _ = super::terminate_process(process.child.id());
@@ -411,6 +475,9 @@ pub async fn restore_managed_agents_on_launch(
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
                     continue;
                 };
+                if record.updated_at != expected_updated_at {
+                    continue;
+                }
                 record.updated_at = util::now_iso();
                 record.last_error = Some(error);
             }

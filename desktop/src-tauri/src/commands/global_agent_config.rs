@@ -262,6 +262,7 @@ async fn restart_local_agent_on_config_change(
         use tauri::Manager;
         let state = app_for_stop.state::<AppState>();
 
+        let _runtime_transition = crate::managed_agents::runtime_transition::lock(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()

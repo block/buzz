@@ -1,5 +1,6 @@
 # Build artifacts
 /target/
+/crates/buzz-acp/target/
 /dist/
 /admin-web/dist/
 

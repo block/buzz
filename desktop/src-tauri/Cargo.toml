@@ -24,14 +24,22 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["system-keyring"]
 mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:mesh-llm-client", "dep:mesh-llm-node", "dep:mesh-llm-system", "dep:mesh-llm-events"]
+harness-verifier = []
 # OS keyring backing for desktop secret storage (nsec private keys). When
 # disabled, secrets fall back to 0o600 files. On by default for real builds.
 system-keyring = ["dep:keyring"]
 
+[[bin]]
+name = "verify-heartbeat-harness-identity"
+path = "src/bin/verify_heartbeat_harness_identity.rs"
+required-features = ["harness-verifier"]
+
 [build-dependencies]
 base64 = "0.22"
+hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 tauri-build = { version = "2", features = [] }
 
 [target.'cfg(unix)'.dependencies]

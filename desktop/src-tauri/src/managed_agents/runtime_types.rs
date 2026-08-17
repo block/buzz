@@ -3,6 +3,19 @@ use sha2::{Digest as _, Sha256};
 
 use super::ManagedAgentProcess;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatHarnessStamp {
+    pub binary_sha256: String,
+    pub protocol_version: u32,
+    pub build_capability: String,
+    /// Digest of the complete owner-authoritative designation used for this
+    /// process. Legacy runtime receipts deserialize with an empty value and
+    /// therefore cannot be reused by a newly designated process.
+    #[serde(default)]
+    pub designation_sha256: String,
+}
+
 /// Canonical identity of one managed-agent harness on one relay.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
@@ -117,4 +130,28 @@ pub struct ManagedAgentRuntimeReceipt {
     pub pid: u32,
     pub desktop_instance_id: String,
     pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_harness: Option<HeartbeatHarnessStamp>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HeartbeatHarnessStamp;
+
+    #[test]
+    fn legacy_harness_stamp_cannot_match_a_designation_bound_stamp() {
+        let legacy: HeartbeatHarnessStamp = serde_json::from_value(serde_json::json!({
+            "binarySha256": "a".repeat(64),
+            "protocolVersion": 1,
+            "buildCapability": "buzz-acp-source-witness-gateway-v1",
+        }))
+        .expect("legacy stamp deserializes");
+        assert!(legacy.designation_sha256.is_empty());
+
+        let current = HeartbeatHarnessStamp {
+            designation_sha256: "b".repeat(64),
+            ..legacy.clone()
+        };
+        assert_ne!(legacy, current);
+    }
 }

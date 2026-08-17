@@ -9,6 +9,7 @@ pub(crate) use agent_env::{
     baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
 };
 mod backend;
+pub(crate) mod binary_identity;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
 mod definition_validation;
@@ -33,6 +34,7 @@ mod restore;
 pub mod retention;
 mod runtime;
 mod runtime_commands;
+pub(crate) mod runtime_transition;
 mod runtime_types;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;

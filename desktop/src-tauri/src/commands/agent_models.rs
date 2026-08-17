@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
-use super::managed_agent_definition::apply_model_provider_prompt_update;
+pub(super) use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
 #[cfg(test)]
@@ -13,6 +13,7 @@ use super::agent_models_env::env_value;
 use super::agent_models_env::{
     effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
+use super::agent_models_heartbeat_update::{lock_update_transition, HeartbeatUpdate};
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
 use crate::{
@@ -699,15 +700,15 @@ use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
 /// Update mutable fields on an existing managed agent record.
 ///
-/// Does NOT auto-restart the agent. Runtime config changes (system prompt,
-/// parallelism, commands, toolsets) take effect on the next agent spawn.
-/// Name changes are synced to the relay immediately via a kind:0 re-publish.
+/// Does not auto-restart: runtime changes apply on next spawn; renames sync immediately.
 #[tauri::command]
 pub async fn update_managed_agent(
     input: UpdateManagedAgentRequest,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
+    let runtime_transition = lock_update_transition(&state)?;
+
     // Phase 1: local save (synchronous, under lock)
     let (summary, sync_params, rollback) = {
         let _store_guard = state
@@ -754,9 +755,8 @@ pub async fn update_managed_agent(
         if let Some(relay_url) = input.relay_url {
             record.relay_url = relay_url.trim().to_string();
         }
-        if let Some(acp_command) = input.acp_command {
-            record.acp_command = acp_command;
-        }
+        let heartbeat_update =
+            HeartbeatUpdate::apply(record, input.acp_command, input.heartbeat_preflight)?;
         // Harness edit: the persona's runtime is authoritative, so an explicit
         // `agent_command_override` is persisted ONLY when the user picks a
         // command that diverges from the persona, and the empty/whitespace
@@ -824,6 +824,8 @@ pub async fn update_managed_agent(
             record.respond_to_allowlist = prospective_allowlist;
         }
 
+        heartbeat_update.stop_obsolete_process(&app, &state, record, &mut runtimes)?;
+
         record.updated_at = now_iso();
 
         save_managed_agents(&app, &records)?;
@@ -875,7 +877,8 @@ pub async fn update_managed_agent(
         };
         let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
         (summary, sync_params, rollback)
-    }; // lock dropped here
+    }; // store/runtime locks dropped here
+    drop(runtime_transition);
 
     try_regenerate_nest(&app);
 

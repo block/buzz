@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    CatalogSource, RelayMeshConfig, RespondTo,
+    CatalogSource, HeartbeatPreflightDesignation, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -188,6 +188,21 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Owner-authoritative, per-agent must-preflight designation.
+    #[serde(default)]
+    pub heartbeat_preflight: Option<HeartbeatPreflightDesignation>,
+}
+
+impl CreateManagedAgentRequest {
+    pub(crate) fn reject_create_heartbeat_preflight(&self) -> Result<(), String> {
+        if self.heartbeat_preflight.is_some() {
+            return Err(
+                "heartbeat preflight must be designated after agent creation using the returned pubkey"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Patch request for updating a managed agent's mutable fields.
@@ -224,6 +239,9 @@ pub struct UpdateManagedAgentRequest {
     pub relay_url: Option<String>,
     #[serde(default)]
     pub acp_command: Option<String>,
+    /// Absent = don't touch; null = remove designation; object = set it.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub heartbeat_preflight: Option<Option<HeartbeatPreflightDesignation>>,
     #[serde(default)]
     pub agent_command: Option<String>,
     /// True when the accompanying `agent_command` is a runtime/Custom command

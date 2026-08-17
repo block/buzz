@@ -137,6 +137,9 @@ jobs:
       - name: Build unsigned Tauri app
         run: cd desktop && pnpm tauri build --verbose --no-sign --features mesh-llm --config src-tauri/tauri.release.conf.json
         env:
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR: "1"
+          BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER: EYF346PHUG
+          BUZZ_BUILD_SOURCE_REVISION: ${{ github.sha }}
           BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.BUZZ_UPDATER_PUBLIC_KEY || secrets.SPROUT_UPDATER_PUBLIC_KEY }}
           BUZZ_UPDATER_ENDPOINT: https://github.com/block/buzz/releases/download/buzz-desktop-latest/latest.json
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -179,11 +182,78 @@ jobs:
           entitlements-plist-path: ${{ runner.temp }}/entitlements.plist
           artifact-name: buzz-${{ github.sha }}-${{ github.run_id }}-arm64
 
+      - name: Verify signed heartbeat harness
+        id: verified_app
+        env:
+          SIGNED_APP_ZIP: ${{ steps.codesign.outputs.signed-artifact-path }}
+          SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
+        run: |
+          set -euo pipefail
+          EXTRACT_DIR="${RUNNER_TEMP}/signed-harness-verification"
+          rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
+          ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
+          SIGNED_HARNESS="$EXTRACT_DIR/Buzz.app/Contents/MacOS/buzz-acp"
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR=1 \
+            BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER=EYF346PHUG \
+            BUZZ_BUILD_SOURCE_REVISION="$GITHUB_SHA" \
+            cargo run --quiet --manifest-path desktop/src-tauri/Cargo.toml \
+              --release --features harness-verifier \
+              --bin verify-heartbeat-harness-identity -- "$SIGNED_HARNESS"
+          HARNESS_REQUIREMENT='identifier "buzz-acp" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "EYF346PHUG"'
+          codesign --verify --strict --verbose=2 -R="$HARNESS_REQUIREMENT" "$SIGNED_HARNESS"
+          codesign -dv --verbose=4 "$SIGNED_HARNESS" 2>&1 | grep -Eq 'flags=0x[[:xdigit:]]+\([^)]*runtime[^)]*\)'
+          test -z "$(codesign -d --entitlements - --xml "$SIGNED_HARNESS" 2>/dev/null)"
+          test "$("$SIGNED_HARNESS" heartbeat-preflight-capability)" = \
+            '{"kind":"buzz_acp_heartbeat_preflight_capability","protocol_version":1,"build_capability":"buzz-acp-source-witness-gateway-v1"}'
+          SIGNED_DMG_SHA256=$(shasum -a 256 "$SIGNED_DMG" | awk '{print $1}')
+          hdiutil verify "$SIGNED_DMG"
+          spctl -a -t open --context context:primary-signature -v "$SIGNED_DMG"
+          xcrun stapler validate "$SIGNED_DMG"
+          MOUNT_POINT=$(mktemp -d "${RUNNER_TEMP}/signed-dmg-mount.XXXXXX")
+          DMG_MOUNTED=0
+          cleanup_dmg() {
+            if [[ "$DMG_MOUNTED" = 1 ]]; then
+              hdiutil detach "$MOUNT_POINT"
+            fi
+            rm -rf "$MOUNT_POINT"
+          }
+          trap cleanup_dmg EXIT HUP INT TERM
+          hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_POINT" "$SIGNED_DMG" >/dev/null
+          DMG_MOUNTED=1
+          DMG_APP="$MOUNT_POINT/Buzz.app"
+          DMG_HARNESS="$DMG_APP/Contents/MacOS/buzz-acp"
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR=1 \
+            BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER=EYF346PHUG \
+            BUZZ_BUILD_SOURCE_REVISION="$GITHUB_SHA" \
+            cargo run --quiet --manifest-path desktop/src-tauri/Cargo.toml \
+              --release --features harness-verifier \
+              --bin verify-heartbeat-harness-identity -- "$DMG_HARNESS"
+          APP_REQUIREMENT='identifier "xyz.block.buzz.app" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "EYF346PHUG"'
+          codesign --verify --deep --strict --verbose=2 -R="$APP_REQUIREMENT" "$DMG_APP"
+          codesign --verify --strict --verbose=2 -R="$HARNESS_REQUIREMENT" "$DMG_HARNESS"
+          codesign -dv --verbose=4 "$DMG_HARNESS" 2>&1 | grep -Eq 'flags=0x[[:xdigit:]]+\([^)]*runtime[^)]*\)'
+          test -z "$(codesign -d --entitlements - --xml "$DMG_HARNESS" 2>/dev/null)"
+          test "$("$DMG_HARNESS" heartbeat-preflight-capability)" = \
+            '{"kind":"buzz_acp_heartbeat_preflight_capability","protocol_version":1,"build_capability":"buzz-acp-source-witness-gateway-v1"}'
+          hdiutil detach "$MOUNT_POINT"
+          DMG_MOUNTED=0
+          rm -rf "$MOUNT_POINT"
+          trap - EXIT HUP INT TERM
+          test "$(shasum -a 256 "$SIGNED_DMG" | awk '{print $1}')" = "$SIGNED_DMG_SHA256"
+          APP_DIR="desktop/src-tauri/target/release/bundle/macos"
+          rm -rf "$APP_DIR/Buzz.app"
+          cp -R "$EXTRACT_DIR/Buzz.app" "$APP_DIR/Buzz.app"
+          rm -f "$APP_DIR/Buzz.app.tar.gz" "$APP_DIR/Buzz.app.tar.gz.sig"
+          (cd "$APP_DIR" && tar -czf Buzz.app.tar.gz Buzz.app)
+          echo "archive_sha256=$(shasum -a 256 "$APP_DIR/Buzz.app.tar.gz" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=$SIGNED_DMG_SHA256" >> "$GITHUB_OUTPUT"
+
       - name: Replace DMG and rebuild updater archive
         env:
           SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
-          SIGNED_APP_ZIP: ${{ steps.codesign.outputs.signed-artifact-path }}
           UNSIGNED_DMG: ${{ steps.unsigned.outputs.dmg }}
+          EXPECTED_ARCHIVE_SHA256: ${{ steps.verified_app.outputs.archive_sha256 }}
+          EXPECTED_DMG_SHA256: ${{ steps.verified_app.outputs.dmg_sha256 }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -193,18 +263,13 @@ jobs:
 
           # Replace unsigned DMG with the signed/notarized one.
           cp "$SIGNED_DMG" "$UNSIGNED_DMG"
+          test "$(shasum -a 256 "$UNSIGNED_DMG" | awk '{print $1}')" = \
+            "$EXPECTED_DMG_SHA256"
 
-          # Swap the unsigned .app for the signed .app extracted from the action's zip.
-          EXTRACT_DIR="${RUNNER_TEMP}/signed-app-extract"
-          rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
-          ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
-          rm -rf "${APP_DIR}/Buzz.app"
-          cp -R "${EXTRACT_DIR}/Buzz.app" "${APP_DIR}/Buzz.app"
-
-          # Rebuild the updater archive from the signed .app and re-sign it with the Tauri updater key.
-          rm -f "${APP_DIR}/Buzz.app.tar.gz" "${APP_DIR}/Buzz.app.tar.gz.sig"
-          (cd "$APP_DIR" && tar -czf Buzz.app.tar.gz Buzz.app)
+          # Sign only the archive built from the already validated extraction.
           TARBALL_ABS="$(pwd)/${APP_DIR}/Buzz.app.tar.gz"
+          test "$(shasum -a 256 "$TARBALL_ABS" | awk '{print $1}')" = \
+            "$EXPECTED_ARCHIVE_SHA256"
           (cd desktop && pnpm tauri signer sign "$TARBALL_ABS")
 
       - name: Verify code signature
@@ -314,6 +379,9 @@ jobs:
       - name: Build unsigned Tauri app
         run: cd desktop && pnpm tauri build --verbose --no-sign --target "$TARGET" --config src-tauri/tauri.release.conf.json
         env:
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR: "1"
+          BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER: EYF346PHUG
+          BUZZ_BUILD_SOURCE_REVISION: ${{ github.sha }}
           BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.BUZZ_UPDATER_PUBLIC_KEY || secrets.SPROUT_UPDATER_PUBLIC_KEY }}
           BUZZ_UPDATER_ENDPOINT: https://github.com/block/buzz/releases/download/buzz-desktop-latest/latest.json
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -353,11 +421,78 @@ jobs:
           entitlements-plist-path: ${{ runner.temp }}/entitlements.plist
           artifact-name: buzz-${{ github.sha }}-${{ github.run_id }}-x64
 
+      - name: Verify signed heartbeat harness
+        id: verified_app
+        env:
+          SIGNED_APP_ZIP: ${{ steps.codesign.outputs.signed-artifact-path }}
+          SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
+        run: |
+          set -euo pipefail
+          EXTRACT_DIR="${RUNNER_TEMP}/signed-harness-verification-x64"
+          rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
+          ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
+          SIGNED_HARNESS="$EXTRACT_DIR/Buzz.app/Contents/MacOS/buzz-acp"
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR=1 \
+            BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER=EYF346PHUG \
+            BUZZ_BUILD_SOURCE_REVISION="$GITHUB_SHA" \
+            cargo run --quiet --manifest-path desktop/src-tauri/Cargo.toml \
+              --release --target "$TARGET" --features harness-verifier \
+              --bin verify-heartbeat-harness-identity -- "$SIGNED_HARNESS"
+          HARNESS_REQUIREMENT='identifier "buzz-acp" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "EYF346PHUG"'
+          codesign --verify --strict --verbose=2 -R="$HARNESS_REQUIREMENT" "$SIGNED_HARNESS"
+          codesign -dv --verbose=4 "$SIGNED_HARNESS" 2>&1 | grep -Eq 'flags=0x[[:xdigit:]]+\([^)]*runtime[^)]*\)'
+          test -z "$(codesign -d --entitlements - --xml "$SIGNED_HARNESS" 2>/dev/null)"
+          test "$("$SIGNED_HARNESS" heartbeat-preflight-capability)" = \
+            '{"kind":"buzz_acp_heartbeat_preflight_capability","protocol_version":1,"build_capability":"buzz-acp-source-witness-gateway-v1"}'
+          SIGNED_DMG_SHA256=$(shasum -a 256 "$SIGNED_DMG" | awk '{print $1}')
+          hdiutil verify "$SIGNED_DMG"
+          spctl -a -t open --context context:primary-signature -v "$SIGNED_DMG"
+          xcrun stapler validate "$SIGNED_DMG"
+          MOUNT_POINT=$(mktemp -d "${RUNNER_TEMP}/signed-dmg-mount-x64.XXXXXX")
+          DMG_MOUNTED=0
+          cleanup_dmg() {
+            if [[ "$DMG_MOUNTED" = 1 ]]; then
+              hdiutil detach "$MOUNT_POINT"
+            fi
+            rm -rf "$MOUNT_POINT"
+          }
+          trap cleanup_dmg EXIT HUP INT TERM
+          hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_POINT" "$SIGNED_DMG" >/dev/null
+          DMG_MOUNTED=1
+          DMG_APP="$MOUNT_POINT/Buzz.app"
+          DMG_HARNESS="$DMG_APP/Contents/MacOS/buzz-acp"
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR=1 \
+            BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER=EYF346PHUG \
+            BUZZ_BUILD_SOURCE_REVISION="$GITHUB_SHA" \
+            cargo run --quiet --manifest-path desktop/src-tauri/Cargo.toml \
+              --release --target "$TARGET" --features harness-verifier \
+              --bin verify-heartbeat-harness-identity -- "$DMG_HARNESS"
+          APP_REQUIREMENT='identifier "xyz.block.buzz.app" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "EYF346PHUG"'
+          codesign --verify --deep --strict --verbose=2 -R="$APP_REQUIREMENT" "$DMG_APP"
+          codesign --verify --strict --verbose=2 -R="$HARNESS_REQUIREMENT" "$DMG_HARNESS"
+          codesign -dv --verbose=4 "$DMG_HARNESS" 2>&1 | grep -Eq 'flags=0x[[:xdigit:]]+\([^)]*runtime[^)]*\)'
+          test -z "$(codesign -d --entitlements - --xml "$DMG_HARNESS" 2>/dev/null)"
+          test "$("$DMG_HARNESS" heartbeat-preflight-capability)" = \
+            '{"kind":"buzz_acp_heartbeat_preflight_capability","protocol_version":1,"build_capability":"buzz-acp-source-witness-gateway-v1"}'
+          hdiutil detach "$MOUNT_POINT"
+          DMG_MOUNTED=0
+          rm -rf "$MOUNT_POINT"
+          trap - EXIT HUP INT TERM
+          test "$(shasum -a 256 "$SIGNED_DMG" | awk '{print $1}')" = "$SIGNED_DMG_SHA256"
+          APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos"
+          rm -rf "$APP_DIR/Buzz.app"
+          cp -R "$EXTRACT_DIR/Buzz.app" "$APP_DIR/Buzz.app"
+          rm -f "$APP_DIR/Buzz.app.tar.gz" "$APP_DIR/Buzz.app.tar.gz.sig"
+          (cd "$APP_DIR" && tar -czf Buzz.app.tar.gz Buzz.app)
+          echo "archive_sha256=$(shasum -a 256 "$APP_DIR/Buzz.app.tar.gz" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=$SIGNED_DMG_SHA256" >> "$GITHUB_OUTPUT"
+
       - name: Replace DMG and rebuild updater archive
         env:
           SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
-          SIGNED_APP_ZIP: ${{ steps.codesign.outputs.signed-artifact-path }}
           UNSIGNED_DMG: ${{ steps.unsigned.outputs.dmg }}
+          EXPECTED_ARCHIVE_SHA256: ${{ steps.verified_app.outputs.archive_sha256 }}
+          EXPECTED_DMG_SHA256: ${{ steps.verified_app.outputs.dmg_sha256 }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -366,18 +501,13 @@ jobs:
 
           # Replace the unsigned DMG with the signed/notarized one.
           cp "$SIGNED_DMG" "$UNSIGNED_DMG"
+          test "$(shasum -a 256 "$UNSIGNED_DMG" | awk '{print $1}')" = \
+            "$EXPECTED_DMG_SHA256"
 
-          # Swap the unsigned .app for the signed .app from the action's zip.
-          EXTRACT_DIR="${RUNNER_TEMP}/signed-app-extract-x64"
-          rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
-          ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
-          rm -rf "${APP_DIR}/Buzz.app"
-          cp -R "${EXTRACT_DIR}/Buzz.app" "${APP_DIR}/Buzz.app"
-
-          # Rebuild the updater archive from the signed .app and re-sign with the Tauri updater key.
-          rm -f "${APP_DIR}/Buzz.app.tar.gz" "${APP_DIR}/Buzz.app.tar.gz.sig"
-          (cd "$APP_DIR" && tar -czf Buzz.app.tar.gz Buzz.app)
+          # Sign only the archive built from the already validated extraction.
           TARBALL_ABS="$(pwd)/${APP_DIR}/Buzz.app.tar.gz"
+          test "$(shasum -a 256 "$TARBALL_ABS" | awk '{print $1}')" = \
+            "$EXPECTED_ARCHIVE_SHA256"
           (cd desktop && pnpm tauri signer sign "$TARBALL_ABS")
 
       - name: Verify code signature

@@ -531,7 +531,7 @@ async fn restart_single_agent_after_install(
 
     let stop_result = tokio::task::spawn_blocking(move || {
         let state = app_for_stop.state::<AppState>();
-
+        let _runtime_transition = crate::managed_agents::runtime_transition::lock(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()

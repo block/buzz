@@ -222,6 +222,7 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            heartbeat_preflight: None,
         }
     }
 

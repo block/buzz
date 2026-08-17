@@ -249,7 +249,7 @@ fn update_request_provider_tristate_value_means_set() {
     );
 }
 
-use super::{CreateManagedAgentRequest, RelayMeshConfig};
+use super::{CreateManagedAgentRequest, HeartbeatPreflightDesignation, RelayMeshConfig};
 
 /// Wire-shape test: the create request arrives from TS as camelCase
 /// (`relayMesh: { modelRef }`). `rename_all = "camelCase"` on
@@ -285,6 +285,63 @@ fn relay_mesh_config_round_trips_snake_case() {
     assert_eq!(json, r#"{"model_ref":"Qwen3"}"#);
     let back: RelayMeshConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(back, config);
+}
+
+#[test]
+fn create_request_rejects_heartbeat_designation_until_pubkey_exists() {
+    let request: CreateManagedAgentRequest = serde_json::from_value(serde_json::json!({
+        "name": "kj",
+        "heartbeatPreflight": {
+            "policyFile": "/owner/policy.json",
+            "policySha256": "a".repeat(64),
+            "heartbeatIntervalSeconds": 3600,
+        }
+    }))
+    .expect("camelCase heartbeat designation should deserialize");
+    assert_eq!(
+        request.heartbeat_preflight,
+        Some(HeartbeatPreflightDesignation {
+            policy_file: "/owner/policy.json".into(),
+            policy_sha256: "a".repeat(64),
+            heartbeat_interval_seconds: 3_600,
+        })
+    );
+    assert_eq!(
+        request
+            .reject_create_heartbeat_preflight()
+            .expect_err("create-time designation cannot bind an unknown pubkey"),
+        "heartbeat preflight must be designated after agent creation using the returned pubkey"
+    );
+}
+
+#[test]
+fn update_request_preserves_heartbeat_designation_tristate() {
+    let absent: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"agent"}"#).expect("absent update");
+    assert!(absent.heartbeat_preflight.is_none());
+
+    let removed: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"agent","heartbeatPreflight":null}"#)
+            .expect("removal update");
+    assert_eq!(removed.heartbeat_preflight, Some(None));
+
+    let designated: super::UpdateManagedAgentRequest = serde_json::from_value(serde_json::json!({
+        "pubkey": "agent",
+        "heartbeatPreflight": {
+            "policyFile": "/owner/policy.json",
+            "policySha256": "b".repeat(64),
+            "heartbeatIntervalSeconds": 7200,
+        }
+    }))
+    .expect("designation update");
+    assert_eq!(
+        designated.heartbeat_preflight,
+        Some(Some(HeartbeatPreflightDesignation {
+            policy_file: "/owner/policy.json".into(),
+            policy_sha256: "b".repeat(64),
+            heartbeat_interval_seconds: 7_200,
+        }))
+    );
 }
 
 // ── Packs → Teams serde alias backward compatibility ────────────────
@@ -744,6 +801,7 @@ fn summary_fixture(
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),
+        heartbeat_preflight: None,
     }
 }
 
@@ -783,4 +841,29 @@ fn summary_with_drift_serializes_restart_diff_entries() {
             "change": { "kind": "value", "before": "gpt-5", "after": "claude-4" },
         }]))
     );
+}
+
+#[test]
+fn persisted_heartbeat_designation_survives_restart_round_trip() {
+    let mut record = sample_agent_record();
+    record.heartbeat_preflight = Some(HeartbeatPreflightDesignation {
+        policy_file: "/owner/policy.json".into(),
+        policy_sha256: "c".repeat(64),
+        heartbeat_interval_seconds: 3_600,
+    });
+    let bytes = serde_json::to_vec(&record).expect("record serializes");
+    let restored: super::ManagedAgentRecord =
+        serde_json::from_slice(&bytes).expect("record restores after restart");
+    assert_eq!(restored.heartbeat_preflight, record.heartbeat_preflight);
+}
+
+#[test]
+fn legacy_agent_record_without_preflight_designation_stays_unprotected() {
+    let mut wire = serde_json::to_value(sample_agent_record()).expect("record serializes");
+    wire.as_object_mut()
+        .expect("record is an object")
+        .remove("heartbeat_preflight");
+    let restored: super::ManagedAgentRecord =
+        serde_json::from_value(wire).expect("legacy record deserializes");
+    assert!(restored.heartbeat_preflight.is_none());
 }

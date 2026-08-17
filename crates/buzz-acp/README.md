@@ -125,9 +125,130 @@ All configuration is via environment variables (or CLI flags — every env var h
 |------|---------|---------|-------------|
 | `--agents` | `BUZZ_ACP_AGENTS` | `1` | Number of agent subprocesses (1–32). |
 | `--lazy-pool` | `BUZZ_ACP_LAZY_POOL` | `false` | Connect, subscribe, and queue accepted work before starting ACP/LLM subprocesses. The first accepted event wakes one pool initialization task; failures retry with bounded exponential backoff while work remains. |
-| `--heartbeat-interval` | `BUZZ_ACP_HEARTBEAT_INTERVAL` | `0` | Seconds between heartbeat prompts. `0` = disabled. Must be `0` or ≥10 when enabled. |
+| `--heartbeat-interval` | `BUZZ_ACP_HEARTBEAT_INTERVAL` | `0` | Seconds between heartbeat prompts. `0` = disabled. Must be `0` or 10–86400 when enabled; a durably designated agent requires the exact positive cadence pinned in both its Desktop designation and policy. |
 | `--heartbeat-prompt` | `BUZZ_ACP_HEARTBEAT_PROMPT` | (built-in) | Custom heartbeat prompt text. Conflicts with `--heartbeat-prompt-file`. |
 | `--heartbeat-prompt-file` | `BUZZ_ACP_HEARTBEAT_PROMPT_FILE` | — | Read heartbeat prompt from a file. Conflicts with `--heartbeat-prompt`. |
+| `--heartbeat-preflight-config` | `BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG` | — | Legacy inline owner config for unprotected agents. Managed must-check agents use the durable policy-file settings below. |
+| `--heartbeat-preflight-required` | `BUZZ_ACP_HEARTBEAT_PREFLIGHT_REQUIRED` | `false` | Durable managed-agent latch. When true, missing or invalid policy-file settings fail startup instead of falling back to an ordinary heartbeat. |
+| `--heartbeat-preflight-policy-file` | `BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_FILE` | — | Absolute owner-policy file re-opened before every heartbeat. Required with the latch. |
+| `--heartbeat-preflight-policy-sha256` | `BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_SHA256` | — | Exact lowercase SHA-256 pin for the durable policy file. Required with the latch. |
+| `--required-agent-owner` | `BUZZ_ACP_REQUIRED_AGENT_OWNER` | — | Exact lowercase 64-hex owner pin. When set, startup fails before relay, preflight, or model activity unless the owner resolved from a verified `BUZZ_AUTH_TAG` (preferred) or `BUZZ_ACP_AGENT_OWNER` matches exactly. |
+
+Heartbeat preflight currently requires Unix process-group containment. Builds
+on other operating systems reject the configuration rather than risk leaving a
+gateway descendant alive with forwarded IPC credentials.
+
+The harness mints each heartbeat's turn UUID together with one immutable
+request timestamp and uses the UUID as the preflight invocation and
+receipt-acceptance context. An idempotent retry of that same turn reuses both
+values, so the gateway may return the byte-identical durable terminal receipt;
+a different turn cannot consume it. Every checked source must match the
+owner-pinned `{source, account, scope, policy_id}` tuple and return a
+`witness_run_id`, `receipt_digest`, and `acceptance_context` equal to that exact
+invocation. The request and result also bind the exact target channel and a
+64-hex digest of the owner declaration that commits the actor, channel,
+sources, and exactly-one-zone assignments. Checked timestamps older than the
+turn's immutable request boundary are rejected.
+The required policy's `heartbeat_interval_seconds` must exactly match the
+Desktop-owned designation; missing, zero, out-of-range, or mismatched cadence
+fails before an ACP/model process can be used.
+
+A successful result must also include `committed_material`, even when it is an
+empty array. Each model-visible item names an owner-pinned source and distinct
+entry ID, carries a content digest, is bound to the exact authority commit that
+was read back remotely, and contains exactly one bounded sanitized payload or
+immutable ledger pointer. Sanitized payloads are re-hashed by the harness and
+each checked source's `item_count` must exactly equal its committed-material
+entry count; blocked sources must carry none. The entire material section is
+capped at 128 items and 64 KiB. A larger sanitized batch must be represented by
+one bounded immutable aggregate ledger pointer or fail closed—silent truncation
+is invalid. Only this typed, validated section reaches the prompt; raw gateway
+stdout/stderr and connector transcripts never do.
+
+Desktop also binds a designated agent to the bundled harness itself. The build
+embeds a stable executable-code digest (excluding only the replaceable platform
+signature payload and its signer-owned Mach-O load-command size fields), and
+every spawn or reuse rechecks a non-symlink path, that digest, and the exact
+versioned `heartbeat-preflight-capability` response. The
+verified digest/protocol is stamped into the in-memory process and durable
+runtime receipt. An old, substituted, or previously unstamped harness is not
+reused.
+
+On macOS, `buzz-acp` also embeds the same capability tuple as the exact
+`BuzzHeartbeatPreflightCapability` scalar in Mach-O `__TEXT,__info_plist`.
+Because the section is present before code signing, a verifier can authenticate
+the capability as signed executable content without launching the candidate.
+
+The executable boundary is intentionally narrow: Buzz verifies the pinned
+executable, policy, result shape, scope, freshness, and invocation binding, but
+does not treat those JSON fields as a signature. The pinned gateway must call
+the accountability-ledger source witness and durably claim the signed receipt
+in its atomic `AcceptanceStore` under the supplied invocation ID before it
+emits a checked result. Missing, blocked, stale, replayed, or unaccepted proof
+must exit nonzero or return a blocked outcome. A helper that merely echoes the
+request does not satisfy this contract.
+
+#### Gateway executable wire contract
+
+The policy's absolute program is executed directly with the policy's literal
+args (no shell). Its environment is empty except for explicitly allowlisted
+gateway IPC metadata. Buzz writes exactly one compact JSON request plus a
+newline to stdin, then closes stdin:
+
+~~~json
+{
+  "version": 1,
+  "kind": "buzz_heartbeat_preflight",
+  "turn_id": "<harness UUID>",
+  "invocation_id": "<same harness UUID>",
+  "target_agent_pubkey": "<64 lowercase hex>",
+  "target_channel": "<owner-pinned Buzz channel token>",
+  "declaration_manifest_digest": "<64 lowercase hex>",
+  "requested_at": "<stable RFC3339 turn start>",
+  "required_sources": [
+    {
+      "source": "gmail",
+      "account": "owner@example.com",
+      "scope": "inbox",
+      "policy_id": "gmail.required"
+    }
+  ],
+  "ledger_instance_id": "<owner-pinned token>"
+}
+~~~
+
+The executable must return one strict JSON object on stdout. It echoes the
+request identity, target agent, target channel, declaration-manifest digest,
+ordered four-field source manifest, and ledger instance; supplies equal valid
+authority_commit and remote_readback_commit; supplies exactly one ordered
+outcome per required source; and always supplies committed_material. A
+checked outcome requires a distinct bounded witness_run_id, distinct 64-hex
+receipt_digest, exact invocation acceptance_context, and an item_count equal to
+that source's material-entry count. A blocked outcome instead requires a
+bounded reason_code and carries no witness fields, item count, or committed
+material.
+
+The gateway is killed on timeout; nonzero exit, extra/unknown JSON fields,
+malformed or oversized output, and any identity, freshness, scope, count,
+digest, commit, or material mismatch fail the heartbeat before the ACP/model
+prompt. Stderr is bounded for process safety but is never forwarded to the
+model.
+
+The policy path and forwarded gateway IPC capability must live outside the
+agent's writable sandbox. File-mode and digest checks reject ordinary
+replacement, but same-user filesystem access is not a credential boundary;
+deployment is responsible for preventing the model/tool process from writing
+the policy or reaching gateway signing/acceptance storage directly. Direct
+execution does not itself authenticate the parent process; a same-user macOS
+deployment therefore needs an OS-enforced service boundary (for example, peer
+audit-token/code-requirement validation) so only the signed harness can invoke
+the privileged connector surface.
+
+This gate covers native scheduled heartbeat prompts only. Ordinary channel
+mentions/messages follow the normal inbound-author and ACP paths and must not
+be described as source-preflight-gated. The source-witness `AcceptanceStore`
+remains an external trusted component: Buzz requires its scope-bound attested
+output but does not replace it with a locally self-asserted acceptance record.
 
 ### Inbound Author Gate
 

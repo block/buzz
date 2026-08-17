@@ -67,6 +67,20 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // ambient env var must not be able to forge setup mode (NotReady) on a
     // Ready agent or suppress it (empty/stale payload) on a NotReady one.
     "BUZZ_ACP_SETUP_PAYLOAD",
+    // Trusted heartbeat preflight is supervisor policy. Letting persona/agent
+    // env replace it would allow the model-controlled record to disable the
+    // source gate or point it at a forged executable.
+    "BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG",
+    "BUZZ_ACP_HEARTBEAT_PREFLIGHT_REQUIRED",
+    "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_FILE",
+    "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_SHA256",
+    "BUZZ_ACP_HEARTBEAT_INTERVAL",
+    // Gateway IPC capabilities may be inherited only by the trusted
+    // preflight child. Saved persona/agent env must never supply them.
+    "BUZZ_HEARTBEAT_GATEWAY_SOCKET",
+    "BUZZ_HEARTBEAT_GATEWAY_PIPE",
+    "BUZZ_HEARTBEAT_GATEWAY_ENDPOINT",
+    "BUZZ_HEARTBEAT_GATEWAY_CLIENT_ID",
     // Desktop ownership markers: these brand every spawned harness with the
     // launching Desktop instance. A user-supplied override would let a
     // definition masquerade as a different instance or fake the nonce used

@@ -14,6 +14,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
+use crate::heartbeat_preflight::{HeartbeatPreflightAuthority, HeartbeatPreflightConfig};
 
 /// Default idle timeout (seconds) when neither `--idle-timeout` nor the
 /// deprecated `--turn-timeout` is set.
@@ -247,6 +248,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
     pub agent_owner: Option<String>,
 
+    /// Fail-closed startup latch for a supervisor-pinned owner pubkey.
+    /// The resolved owner (verified BUZZ_AUTH_TAG first, then agent_owner)
+    /// must exactly match this lowercase 64-char hex value.
+    #[arg(long, env = "BUZZ_ACP_REQUIRED_AGENT_OWNER")]
+    pub required_agent_owner: Option<String>,
+
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
@@ -317,6 +324,36 @@ pub struct CliArgs {
         conflicts_with = "heartbeat_prompt"
     )]
     pub heartbeat_prompt_file: Option<PathBuf>,
+
+    /// Versioned JSON configuration for a trusted executable invoked before
+    /// every heartbeat model prompt. The value is owner/supervisor policy and
+    /// is scrubbed from the agent subprocess environment.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG",
+        hide_env_values = true
+    )]
+    pub heartbeat_preflight_config: Option<String>,
+
+    /// Durable managed-agent latch. When true, startup and every heartbeat
+    /// require the exact hash-pinned policy file below; inline/absent policy is
+    /// never accepted as a fallback.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_REQUIRED",
+        default_value_t = false
+    )]
+    pub heartbeat_preflight_required: bool,
+
+    #[arg(long, env = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_FILE")]
+    pub heartbeat_preflight_policy_file: Option<PathBuf>,
+
+    #[arg(
+        long,
+        env = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_SHA256",
+        hide_env_values = true
+    )]
+    pub heartbeat_preflight_policy_sha256: Option<String>,
 
     #[arg(long, env = "BUZZ_ACP_INITIAL_MESSAGE")]
     pub initial_message: Option<String>,
@@ -516,6 +553,9 @@ pub struct Config {
     /// crash-backstop signal.
     pub turn_liveness_secs: u64,
     pub heartbeat_prompt: Option<String>,
+    /// Owner/supervisor-controlled trusted heartbeat preflight. `None` keeps
+    /// legacy heartbeat behavior byte-for-byte compatible.
+    pub heartbeat_preflight: Option<HeartbeatPreflightAuthority>,
     pub system_prompt: Option<String>,
     /// Team-owned instructions layered separately from the agent system prompt.
     pub team_instructions: Option<String>,
@@ -573,6 +613,9 @@ pub struct Config {
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
+    /// Supervisor-pinned owner identity that must match the resolved owner
+    /// before any relay, heartbeat preflight, or model activity starts.
+    pub required_agent_owner: Option<String>,
     /// Disable the [Base] platform-context section prepended to every prompt.
     pub no_base_prompt: bool,
     /// Resolved content from `--base-prompt-file`, read and validated in
@@ -657,6 +700,25 @@ fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError
         validated.insert(trimmed);
     }
     Ok(validated)
+}
+
+pub(crate) fn validate_required_agent_owner(
+    value: Option<&str>,
+) -> Result<Option<String>, ConfigError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ConfigError::ConfigFile(
+            "BUZZ_ACP_REQUIRED_AGENT_OWNER must be exactly 64 lowercase hexadecimal characters"
+                .into(),
+        ));
+    }
+    Ok(Some(value.to_string()))
 }
 
 /// Validate the `--multiple-event-handling` / `--dedup` combination.
@@ -858,6 +920,8 @@ impl Config {
         args.private_key
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
+        let required_agent_owner =
+            validate_required_agent_owner(args.required_agent_owner.as_deref())?;
 
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
@@ -885,6 +949,51 @@ impl Config {
             Some(std::fs::read_to_string(path)?)
         } else {
             None
+        };
+
+        let heartbeat_preflight = if args.heartbeat_preflight_required {
+            if args.heartbeat_preflight_config.is_some() {
+                return Err(ConfigError::ConfigFile(
+                    "a required heartbeat preflight cannot use legacy inline configuration".into(),
+                ));
+            }
+            let path = args.heartbeat_preflight_policy_file.ok_or_else(|| {
+                ConfigError::ConfigFile(
+                    "required heartbeat preflight is missing its durable policy file".into(),
+                )
+            })?;
+            let sha256 = args.heartbeat_preflight_policy_sha256.ok_or_else(|| {
+                ConfigError::ConfigFile(
+                    "required heartbeat preflight is missing its policy digest".into(),
+                )
+            })?;
+            Some(
+                HeartbeatPreflightAuthority::required_file(
+                    path,
+                    sha256,
+                    &keys.public_key().to_hex(),
+                    args.heartbeat_interval,
+                )
+                .map_err(|error| ConfigError::ConfigFile(error.to_string()))?,
+            )
+        } else {
+            if args.heartbeat_preflight_policy_file.is_some()
+                || args.heartbeat_preflight_policy_sha256.is_some()
+            {
+                return Err(ConfigError::ConfigFile(
+                    "heartbeat preflight policy file/digest requires the durable required latch"
+                        .into(),
+                ));
+            }
+            args.heartbeat_preflight_config
+                .as_deref()
+                .map(|raw| {
+                    HeartbeatPreflightConfig::parse_for_agent(raw, &keys.public_key().to_hex())
+                })
+                .transpose()
+                .map_err(|error| ConfigError::ConfigFile(error.to_string()))?
+                .flatten()
+                .map(HeartbeatPreflightAuthority::legacy_inline)
         };
 
         let base_prompt_content = if args.no_base_prompt {
@@ -1083,6 +1192,7 @@ impl Config {
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
             heartbeat_prompt,
+            heartbeat_preflight,
             system_prompt,
             team_instructions: args
                 .team_instructions
@@ -1120,6 +1230,7 @@ impl Config {
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
+            required_agent_owner,
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
         };
@@ -1463,6 +1574,7 @@ mod tests {
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
+            heartbeat_preflight: None,
             system_prompt: None,
             team_instructions: None,
             initial_message: None,
@@ -1492,6 +1604,7 @@ mod tests {
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
             agent_owner: None,
+            required_agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
         }
@@ -2839,6 +2952,53 @@ channels = "ALL"
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
         );
+    }
+
+    #[test]
+    fn required_agent_owner_full_path_accepts_exact_lowercase_pubkey() {
+        let required_owner = "ab".repeat(32);
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--required-agent-owner",
+            required_owner.as_str(),
+        ])
+        .expect("clap should parse args");
+
+        let config = Config::from_args(args).expect("exact lowercase owner must be accepted");
+        assert_eq!(
+            config.required_agent_owner.as_deref(),
+            Some(required_owner.as_str())
+        );
+    }
+
+    #[test]
+    fn required_agent_owner_full_path_rejects_noncanonical_values() {
+        for invalid in [
+            String::new(),
+            "AB".repeat(32),
+            format!("{} ", "ab".repeat(32)),
+            "a".repeat(63),
+            format!("{}g", "a".repeat(63)),
+        ] {
+            let args = CliArgs::try_parse_from([
+                "buzz-acp",
+                "--private-key",
+                TEST_PRIVATE_KEY,
+                "--required-agent-owner",
+                invalid.as_str(),
+            ])
+            .expect("clap should preserve the value for Config validation");
+
+            let error = Config::from_args(args)
+                .expect_err("noncanonical required owner must fail configuration")
+                .to_string();
+            assert!(
+                error.contains("BUZZ_ACP_REQUIRED_AGENT_OWNER must be exactly 64 lowercase"),
+                "unexpected error for {invalid:?}: {error}"
+            );
+        }
     }
 
     // --- max_turn_duration ceiling gate ---

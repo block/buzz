@@ -116,8 +116,9 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
         let state = app.state::<AppState>();
 
         {
+            let _runtime_transition = crate::managed_agents::runtime_transition::lock(&state)?;
             // Store lock held across all three phases.
-            // Lock ordering: store lock (acquired here) → process lock (per-agent in Phase 2).
+            // Lock ordering: transition -> store -> process (per-agent in Phase 2).
             let _store_guard = state
                 .managed_agents_store_lock
                 .lock()
