@@ -291,6 +291,26 @@ export function isEditAgentProviderSaveValid({
   );
 }
 
+/**
+ * Whether the linked definition — not this instance — owns model, LLM
+ * provider, and system prompt.
+ *
+ * `resolve_effective_config` reads those three from the definition for a
+ * linked instance and never consults the record's own bytes (#1968), so the
+ * instance submit path omits them and `update_managed_agent` drops them again
+ * server-side. An editable control for them on the instance form is therefore
+ * a control that reports a successful save and changes nothing.
+ *
+ * Presentation and omission must derive from THIS predicate, not from two
+ * independent `linkedPersona != null` checks — the dead-control bug it fixes
+ * was exactly the write path moving while the control stayed live.
+ */
+export function definitionOwnsAiConfig(
+  linkedPersona: unknown | null | undefined,
+): boolean {
+  return linkedPersona != null;
+}
+
 export function envVarsEqual(
   a: Record<string, string>,
   b: Record<string, string>,
