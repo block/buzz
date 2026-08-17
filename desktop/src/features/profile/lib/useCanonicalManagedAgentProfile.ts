@@ -1,6 +1,9 @@
 import * as React from "react";
 
-import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
+import {
+  pickDirectProfileAgent,
+  pickProfileAgent,
+} from "@/features/agents/lib/pickProfileAgent";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import { useOwnedManagedAgentPersonaId } from "@/features/profile/lib/useOwnedManagedAgentPersonaId";
@@ -50,19 +53,20 @@ export function useCanonicalManagedAgentProfile(input: {
       (agent) => agent.personaId === linkedPersonaId,
     );
   }, [directManagedAgent, linkedPersonaId, managedAgents]);
-  const managedAgent = React.useMemo(
-    () =>
-      (preserveRequestedInstance || preferDirectManagedAgent) &&
-      directManagedAgent
-        ? directManagedAgent
-        : (pickProfileAgent(personaInstances) ?? directManagedAgent),
-    [
-      directManagedAgent,
-      personaInstances,
-      preferDirectManagedAgent,
-      preserveRequestedInstance,
-    ],
-  );
+  const managedAgent = React.useMemo(() => {
+    if (directManagedAgent) {
+      if (preserveRequestedInstance) return directManagedAgent;
+      if (preferDirectManagedAgent) {
+        return pickDirectProfileAgent(directManagedAgent, personaInstances);
+      }
+    }
+    return pickProfileAgent(personaInstances) ?? directManagedAgent;
+  }, [
+    directManagedAgent,
+    personaInstances,
+    preferDirectManagedAgent,
+    preserveRequestedInstance,
+  ]);
 
   return { linkedPersonaId, managedAgent, personaInstances };
 }
