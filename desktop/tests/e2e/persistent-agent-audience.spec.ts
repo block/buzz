@@ -193,6 +193,17 @@ test("locked agents remain in the tray while Enter-send resolves", async ({
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "hello"))
     .toContain(AGENT_A);
+
+  const sentRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "hello" })
+    .last();
+  const addressPrefix = sentRow.locator(
+    "[data-mention].agent-mention-highlight",
+    { hasText: "Morgarita" },
+  );
+  await expect(addressPrefix).toBeVisible();
+  await expect(addressPrefix).toHaveText("Morgarita");
 });
 
 test("ordinary agent mentions remain one-shot and return to the placeholder", async ({
