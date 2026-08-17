@@ -75,8 +75,7 @@ class _BufferedEvent {
   _BufferedEvent(this.subId, this.event);
 }
 
-/// Manages websocket subscriptions, event batching, reconnection with replay,
-/// and pending event tracking. Equivalent to the desktop's RelayClientSession.
+/// Manages websocket subscriptions, batching, reconnection, and pending events.
 typedef RelaySocketFactory =
     RelaySocket Function({
       required String wsUrl,

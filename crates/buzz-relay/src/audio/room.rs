@@ -78,6 +78,16 @@ pub struct RosterDelta {
     pub left: Option<RosterPeer>,
 }
 
+/// Successful local admission: peer ID, routing index, audio/control receivers,
+/// and the authoritative roster revision assigned to the join.
+pub type PeerAdmission = (
+    Uuid,
+    u8,
+    mpsc::Receiver<Bytes>,
+    mpsc::Receiver<PeerCtrl>,
+    u64,
+);
+
 /// Reason a peer was refused entry to a room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionError {
@@ -229,16 +239,7 @@ impl Room {
         &self,
         pubkey: String,
         requested_version: u8,
-    ) -> Result<
-        (
-            Uuid,
-            u8,
-            mpsc::Receiver<Bytes>,
-            mpsc::Receiver<PeerCtrl>,
-            u64,
-        ),
-        AdmissionError,
-    > {
+    ) -> Result<PeerAdmission, AdmissionError> {
         let mut g = self.guard.lock().map_err(
             |_| AdmissionError::Ended, /* poisoned ≈ shutting down */
         )?;
