@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/identity_archive/archived_identities_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../profile/profile_provider.dart';
@@ -339,13 +340,24 @@ final relayDirectoryUsersProvider =
       ref.watch(relayConfigProvider);
       final session = ref.watch(relaySessionProvider.notifier);
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
+      final archivedPubkeys = await ref.watch(
+        archivedIdentitiesProvider.future,
+      );
       final directoryEvents = await session.queryRelay([
         const NostrFilter(kinds: [0], limit: 50, extensions: {'page': 1}),
       ]);
       var users = directoryUsersFromProfileEvents(directoryEvents);
       if (users.isNotEmpty) {
         return users
-            .where((user) => user.pubkey.toLowerCase() != currentPubkey)
+            .where(
+              (user) =>
+                  user.pubkey.toLowerCase() != currentPubkey &&
+                  !isArchivedForDiscovery(
+                    pubkey: user.pubkey,
+                    archivedPubkeys: archivedPubkeys,
+                    currentPubkey: currentPubkey,
+                  ),
+            )
             .toList();
       }
 
@@ -386,7 +398,15 @@ final relayDirectoryUsersProvider =
                 ? labelComparison
                 : a.pubkey.compareTo(b.pubkey);
           });
-      return users;
+      return users
+          .where(
+            (user) => !isArchivedForDiscovery(
+              pubkey: user.pubkey,
+              archivedPubkeys: archivedPubkeys,
+              currentPubkey: currentPubkey,
+            ),
+          )
+          .toList();
     });
 
 /// Prefix-searches the active relay's kind:0 people directory.
@@ -416,12 +436,23 @@ final relayDirectorySearchProvider = FutureProvider.autoDispose
       ref.watch(relayConfigProvider);
       final session = ref.watch(relaySessionProvider.notifier);
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
+      final archivedPubkeys = await ref.watch(
+        archivedIdentitiesProvider.future,
+      );
       final events = await session.queryRelay([
         NostrFilters.searchUsers(trimmed, limit: 50),
       ]);
-      return directoryUsersFromProfileEvents(
-        events,
-      ).where((user) => user.pubkey.toLowerCase() != currentPubkey).toList();
+      return directoryUsersFromProfileEvents(events)
+          .where(
+            (user) =>
+                user.pubkey.toLowerCase() != currentPubkey &&
+                !isArchivedForDiscovery(
+                  pubkey: user.pubkey,
+                  archivedPubkeys: archivedPubkeys,
+                  currentPubkey: currentPubkey,
+                ),
+          )
+          .toList();
     });
 
 /// Build [ChannelDetails] from a kind:39000 metadata event.
