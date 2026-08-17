@@ -32,6 +32,14 @@ pub struct AgentCommandWrapper {
 }
 
 impl AgentCommandWrapper {
+    /// Whether this wrapper is bound to the managed Nxtlinq Gateway.
+    pub(crate) fn uses_nxtlinq_gateway(&self) -> bool {
+        matches!(
+            self.authorization.as_ref(),
+            Some(AgentCommandWrapperAuthorization::NxtlinqGateway { .. })
+        )
+    }
+
     /// Validate and normalize an operator-supplied wrapper.
     pub fn normalized(mut self) -> Result<Self, String> {
         self.command = self.command.trim().to_string();
@@ -338,6 +346,7 @@ mod tests {
                 sha256: verified.executable_sha256.clone(),
             }),
         };
+        assert!(wrapper.uses_nxtlinq_gateway());
         assert!(wrapper.matches_verified_nxtlinq_gateway(&verified));
 
         let substituted = AgentCommandWrapper {
@@ -350,6 +359,7 @@ mod tests {
             authorization: None,
             ..wrapper.clone()
         };
+        assert!(!unverified.uses_nxtlinq_gateway());
         assert!(!unverified.matches_verified_nxtlinq_gateway(&verified));
 
         let changed_bytes = AgentCommandWrapper {

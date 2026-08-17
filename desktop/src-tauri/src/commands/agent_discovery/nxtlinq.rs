@@ -1,8 +1,12 @@
 use serde::Serialize;
+use tauri::Manager;
 
 use super::*;
 
-const NXTLINQ_GATEWAY_INSTALL_COMMAND: &str = "npm install -g @nxtlinq/authorization-gateway@0.3.0";
+const NXTLINQ_GATEWAY_INSTALL_COMMAND: &str =
+    "npm install -g @nxtlinq/authorization-gateway@0.3.0 @nxtlinq/attest@3.0.0";
+const NXTLINQ_GATEWAY_UNINSTALL_COMMAND: &str =
+    "npm uninstall -g @nxtlinq/authorization-gateway @nxtlinq/attest";
 
 /// Discover the optional Nxtlinq authorization wrapper without treating it as
 /// an ACP runtime. Wrapper identity must stay separate from the downstream
@@ -43,6 +47,107 @@ pub async fn install_nxtlinq_authorization_gateway(
     })
     .await
     .map_err(|e| format!("install task panicked: {e}"))?
+}
+
+/// Remove the reviewed Gateway from Buzz's private npm prefix. Stored operator
+/// configuration and project files are intentionally preserved.
+#[tauri::command]
+pub async fn uninstall_nxtlinq_authorization_gateway(
+    app: tauri::AppHandle,
+) -> Result<InstallRuntimeResult, String> {
+    tokio::task::spawn_blocking(move || uninstall_nxtlinq_gateway_blocking(&app))
+        .await
+        .map_err(|error| format!("uninstall task panicked: {error}"))?
+}
+
+fn uninstall_nxtlinq_gateway_blocking(
+    app: &tauri::AppHandle,
+) -> Result<InstallRuntimeResult, String> {
+    {
+        let mut set = active_installs()
+            .lock()
+            .map_err(|_| "install lock poisoned".to_string())?;
+        if !set.insert(crate::managed_agents::NXTLINQ_GATEWAY_COMMAND.to_string()) {
+            return Err(
+                "a Nxtlinq Gateway install or uninstall is already in progress".to_string(),
+            );
+        }
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Ok(mut set) = active_installs().lock() {
+                set.remove(crate::managed_agents::NXTLINQ_GATEWAY_COMMAND);
+            }
+        }
+    }
+    let _guard = Guard;
+    let state = app.state::<crate::app_state::AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let users: Vec<String> = crate::managed_agents::load_managed_agents(app)?
+        .into_iter()
+        .filter(|agent| {
+            agent
+                .command_wrapper
+                .as_ref()
+                .is_some_and(|wrapper| wrapper.uses_nxtlinq_gateway())
+        })
+        .map(|agent| agent.name)
+        .collect();
+    if !users.is_empty() {
+        return Err(format!(
+            "Nxtlinq Gateway is still used by {} Agent(s): {}. Disable Nxtlinq authorization for them before uninstalling.",
+            users.len(),
+            users.join(", ")
+        ));
+    }
+
+    let reporter = InstallReporter::for_run(app, crate::managed_agents::NXTLINQ_GATEWAY_COMMAND);
+    let mut steps = Vec::new();
+    let planned = match managed_npm_command(NXTLINQ_GATEWAY_UNINSTALL_COMMAND) {
+        Ok(Some(command)) => command,
+        Ok(None) => NXTLINQ_GATEWAY_UNINSTALL_COMMAND.to_string(),
+        Err(step) => {
+            reporter.record_step(&mut steps, *step);
+            return Ok(reporter.failed(steps));
+        }
+    };
+    let result =
+        run_install_command_with_retry("authorization-wrapper-uninstall", &planned, &reporter);
+    let success = result.success;
+    steps.push(result);
+    if !success {
+        return Ok(reporter.failed(steps));
+    }
+
+    crate::managed_agents::refresh_login_shell_path();
+    crate::managed_agents::clear_resolve_cache();
+    if crate::managed_agents::verify_managed_nxtlinq_gateway().is_ok() {
+        reporter.record_step(
+            &mut steps,
+            crate::managed_agents::InstallStepResult {
+                step: "verification".to_string(),
+                command: crate::managed_agents::NXTLINQ_GATEWAY_COMMAND.to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: "Gateway executable is still available after uninstall".to_string(),
+                exit_code: None,
+                hint: Some("Restart Buzz and try uninstalling again.".to_string()),
+            },
+        );
+        return Ok(reporter.failed(steps));
+    }
+
+    Ok(InstallRuntimeResult {
+        success: true,
+        steps,
+        restarted_count: 0,
+        failed_restart_count: 0,
+        log_path: reporter.log_path(),
+    })
 }
 
 fn install_nxtlinq_gateway_blocking(
