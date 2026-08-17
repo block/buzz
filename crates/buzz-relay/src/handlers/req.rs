@@ -1122,17 +1122,12 @@ pub(crate) fn extract_channel_ids_from_filters(filters: &[Filter]) -> Option<Vec
     let mut channel_ids = Vec::new();
     for filter in filters {
         let values = filter.generic_tags.get(&h_tag)?;
-        let mut filter_has_valid_channel = false;
         for value in values {
             if let Ok(channel_id) = value.parse::<uuid::Uuid>() {
-                filter_has_valid_channel = true;
                 if !channel_ids.contains(&channel_id) {
                     channel_ids.push(channel_id);
                 }
             }
-        }
-        if !filter_has_valid_channel {
-            return Some(Vec::new());
         }
     }
     Some(channel_ids)
@@ -1692,6 +1687,33 @@ mod tests {
             .channel_id,
             None,
             "multi-channel OR filters must not be narrowed to their first channel",
+        );
+    }
+
+    #[test]
+    fn valid_channel_union_survives_malformed_or_empty_explicit_siblings() {
+        let valid = uuid::Uuid::new_v4();
+        for sibling in [
+            serde_json::json!({"#h": ["not-a-uuid"]}),
+            serde_json::json!({"#h": []}),
+        ] {
+            let filters = [
+                filter_with_channel(valid),
+                serde_json::from_value(sibling).expect("parse sibling filter"),
+            ];
+            assert_eq!(
+                extract_channel_ids_from_filters(&filters),
+                Some(vec![valid]),
+            );
+        }
+
+        let malformed_only: Filter =
+            serde_json::from_value(serde_json::json!({"#h": ["not-a-uuid"]}))
+                .expect("parse malformed filter");
+        assert_eq!(
+            extract_channel_ids_from_filters(&[malformed_only]),
+            Some(Vec::new()),
+            "malformed-only explicit scope must remain match-nothing, never global",
         );
     }
 

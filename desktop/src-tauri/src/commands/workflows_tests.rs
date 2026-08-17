@@ -216,6 +216,41 @@ fn multi_channel_workflow_query_uses_one_filter_per_channel() {
 }
 
 #[test]
+fn workflow_queries_batch_above_relay_explicit_channel_limit() {
+    let channel_ids = (0..WORKFLOW_QUERY_CHANNEL_BATCH_SIZE + 1)
+        .map(|index| uuid::Uuid::from_u128(index as u128 + 1).to_string())
+        .collect();
+    let batches = channel_workflow_filter_batches(channel_ids).expect("valid channels");
+
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0].len(), WORKFLOW_QUERY_CHANNEL_BATCH_SIZE);
+    assert_eq!(batches[1].len(), 1);
+    assert!(batches.iter().flatten().all(|filter| filter["#h"]
+        .as_array()
+        .is_some_and(|values| values.len() == 1)));
+}
+
+#[test]
+fn workflow_query_results_are_deduplicated_by_event_id() {
+    let first = wf_event(WF, CHAN, YAML);
+    let second_workflow = "33333333-3333-3333-3333-333333333333";
+    let second = wf_event(second_workflow, CHAN, YAML);
+    let mut workflows = Vec::new();
+    let mut seen_event_ids = HashSet::new();
+
+    append_unique_workflows(
+        &mut workflows,
+        &mut seen_event_ids,
+        &[first.clone(), second.clone()],
+    );
+    append_unique_workflows(&mut workflows, &mut seen_event_ids, &[first, second]);
+
+    assert_eq!(workflows.len(), 2);
+    assert_eq!(workflows[0].id, WF);
+    assert_eq!(workflows[1].id, second_workflow);
+}
+
+#[test]
 fn channel_workflow_filters_reject_malformed_or_blank_channel_ids() {
     for channel_id in ["not-a-uuid", "", "   "] {
         let error = channel_workflow_filters(vec![channel_id.to_string()])
