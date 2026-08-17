@@ -323,6 +323,15 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # Same reason as the block above: workspace membership buys clippy and
+        # check, not an executed test. buzz-workflow (schema, executor) and
+        # buzz-acp (queue, pool, subscriptions) were referenced by no cargo test
+        # or nextest invocation anywhere, so their lib tests compiled and never
+        # ran. Both are infra-free — the Postgres-backed cases are #[ignore]d,
+        # which nextest skips by default. buzz-relay is not added here: it needs
+        # Postgres and carries four non-#[ignore]d infra-dependent tests. See #3461.
+        cargo nextest run -p buzz-workflow --lib
+        cargo nextest run -p buzz-acp --lib
     else
         ./scripts/run-tests.sh unit
     fi
