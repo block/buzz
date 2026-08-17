@@ -95,6 +95,14 @@ cat >"${mock_route}" <<'SH'
 if [[ "${MOCK_ROUTE:-online}" == offline ]]; then
   exit 1
 fi
+if [[ "${MOCK_ROUTE:-online}" == offline-sparse ]]; then
+  printf '%s\n' 'route to: default' 'interface: en0'
+  exit 0
+fi
+if [[ "${MOCK_ROUTE:-online}" == offline-bsd ]]; then
+  printf '%s\n' 'route: writing to routing socket: not in table' >&2
+  exit 77
+fi
 if [[ "${MOCK_ROUTE:-online}" == error ]]; then
   exit 2
 fi
@@ -132,6 +140,16 @@ jq -e '
   .components.model.instance_id == "gemma4-26b-official" and
   .components.rag.point_id == "point-1"
 ' "${temporary}/report.json" >/dev/null || fail "pass report is incomplete"
+
+run_checker MOCK_ROUTE=offline-sparse >/dev/null ||
+  fail "successful macOS route probe without an external gateway did not pass"
+jq -e '.ready == true and .network.summary == "no_external_gateway"' \
+  "${temporary}/report.json" >/dev/null || fail "missing external gateway was not explicit"
+
+run_checker MOCK_ROUTE=offline-bsd >/dev/null ||
+  fail "macOS BSD no-route response did not pass"
+jq -e '.ready == true and .network.summary == "no_default_route"' \
+  "${temporary}/report.json" >/dev/null || fail "BSD no-route response was not recognized"
 
 if run_checker MOCK_CODESIGN_FAIL=1 >/dev/null 2>&1; then
   fail "bad app signature passed"

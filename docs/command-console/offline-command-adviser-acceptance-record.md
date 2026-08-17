@@ -16,6 +16,7 @@
 | New worktree baseline | Pass | `just test-unit`, 17 August 2026 |
 | Sea-going manifest fixtures | Pass | 10 tests: deterministic content identity, protected config, materialisation capacity |
 | Readiness fixtures | Pass | app/model/relay/RAG/Memory/skills/disk/network failure matrix |
+| macOS offline route regression | Pass | accepts both a successful route probe without an external gateway and BSD `not in table`; unrelated probe failures remain blocking |
 | Soak fixtures | Pass | 6 tests: resume, cloud attempt, stuck run, duplicate publication, service loss, disk growth |
 | Live LM Studio catalogue regression | Pass | 3 tests permit the accepted embedding instance while requiring one loaded LLM |
 | Existing recovery and scheduler tests | Pass | 7 scheduler and 9 audit/recovery tests; adaptive-memory and autonomous-skill gates passed |
@@ -32,7 +33,7 @@
 | Mac-local RAG | Pass for online preflight | snapshot identity and ADF Doctrine semantic result include document, location, and `point_id`; physical offline repeat remains required |
 | Mac-local Memory | Pass | LaunchAgent on port 18006; MCP server `memory` v3.4.7 |
 | Active skills | Pass | one verified learned projection exists |
-| Bundle manifest | Pass | `8601516e60155bf3818f702436e4c9f4a2fe7b233118e9a1994376d5057a8048`; metadata-only inventory, no duplicate model payload |
+| Bundle manifest | Pass | `939be32425f7b92adf75f0ceb0b6bcab75953c1f161d28c07239ac0aa94eeb6b`; metadata-only inventory, no duplicate model payload |
 | Online readiness | Pass as designed | every component passed; `ready:false` only because the external default route was correctly observed |
 
 Phase 5 changes only acceptance tooling and documentation, not application runtime code. The already installed PR #26 application is therefore the Phase 5 candidate; rebuilding and reinstalling identical runtime code would add Keychain and rollback risk without changing the product under test.
@@ -42,6 +43,11 @@ Encrypted backups and recovery material are at `/Users/matthewwarren/Command Adv
 ## Physical acceptance
 
 These gates are deliberately open. They cannot be closed by repository tests.
+
+The first owner-controlled isolation on 17 August 2026 proved every local
+component ready, but exposed a false-negative macOS route classification
+(`route_probe_failed`). The regression is fixed and the physical gate must be
+repeated with the refreshed recovery pack.
 
 - [ ] external default route absent while loopback services remain available;
 - [ ] one-, two-, and three-adviser installed-app journeys complete through capacity one;

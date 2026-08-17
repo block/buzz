@@ -183,21 +183,32 @@ fi
 
 external_default_route=false
 route_summary="route_probe_failed"
-route_output="$(${route_bin} -n get default 2>/dev/null)"
+route_error_file="${temporary}/route.stderr"
+route_output="$(${route_bin} -n get default 2>"${route_error_file}")"
 route_status=$?
-if ((route_status == 1)); then
+route_error="$(<"${route_error_file}")"
+if ((route_status == 1)) ||
+   { ((route_status != 0)) && grep -Eqi \
+       'writing to routing socket: not in table|route has not been found|no such process' \
+       <<<"${route_error}"; }; then
   route_summary="no_default_route"
-elif ((route_status == 0)) && grep -Eq 'gateway:[[:space:]]*([^[:space:]]+)' <<<"${route_output}"; then
-  gateway="$(sed -n 's/^[[:space:]]*gateway:[[:space:]]*//p' <<<"${route_output}" | head -n 1)"
-  if [[ -n "${gateway}" && "${gateway}" != 127.* && "${gateway}" != "::1" ]]; then
-    external_default_route=true
-    route_summary="external_default_route_present"
+elif ((route_status == 0)); then
+  if grep -Eq 'gateway:[[:space:]]*([^[:space:]]+)' <<<"${route_output}"; then
+    gateway="$(sed -n 's/^[[:space:]]*gateway:[[:space:]]*//p' <<<"${route_output}" | head -n 1)"
+    if [[ -n "${gateway}" && "${gateway}" != 127.* && "${gateway}" != "::1" ]]; then
+      external_default_route=true
+      route_summary="external_default_route_present"
+    else
+      route_summary="loopback_default_route_only"
+    fi
   else
-    route_summary="loopback_default_route_only"
+    route_summary="no_external_gateway"
   fi
 fi
 disconnected_observed=false
-if [[ "${route_summary}" == "no_default_route" || "${route_summary}" == "loopback_default_route_only" ]]; then
+if [[ "${route_summary}" == "no_default_route" ||
+      "${route_summary}" == "no_external_gateway" ||
+      "${route_summary}" == "loopback_default_route_only" ]]; then
   disconnected_observed=true
 fi
 

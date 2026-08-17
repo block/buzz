@@ -39,7 +39,7 @@ each capability.
 | Offline Phase 2 — Mac-local RAG | Complete and merged | [PR #24](https://github.com/NavigatorRAN/buzz/pull/24), merged as `35dabbe89` | Preserve snapshot identity and semantic canary |
 | Offline Phase 3 — adaptive memory | Complete and merged | [PR #25](https://github.com/NavigatorRAN/buzz/pull/25), merged as `4e804b51a` | Preserve append-only history and local active recall |
 | Offline Phase 4 — autonomous skills | Complete and merged | [PR #26](https://github.com/NavigatorRAN/buzz/pull/26), merged as `87fe1a26c` | Preserve immutable skills, verified projection, and rollback |
-| Offline Phase 5 — disconnected acceptance | Automated and online preflight passed; physical gate pending | Draft [PR #27](https://github.com/NavigatorRAN/buzz/pull/27); manifest `8601516e60155bf3818f702436e4c9f4a2fe7b233118e9a1994376d5057a8048` | Run owner-controlled isolation, installed-app journeys, restart matrix, and eight-hour soak |
+| Offline Phase 5 — disconnected acceptance | Automated and online preflight passed; first physical attempt found and fixed a macOS route false negative | Draft [PR #27](https://github.com/NavigatorRAN/buzz/pull/27); refreshed manifest `939be32425f7b92adf75f0ceb0b6bcab75953c1f161d28c07239ac0aa94eeb6b` | Repeat owner-controlled isolation, then run installed-app journeys, restart matrix, and eight-hour soak |
 
 Living Ship, the v0.5.2 integration line, the controlled sync to pinned upstream
 tag `desktop-v0.5.8`, and repository baseline promotion are complete. PR #17
