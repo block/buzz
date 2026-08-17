@@ -93,6 +93,64 @@ test("personaManagedAgentUpdate syncs edited persona identity to linked agent", 
   });
 });
 
+test("personaManagedAgentUpdate syncs respondTo gate to linked agent", () => {
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent(),
+      persona({ respondTo: "anyone", respondToAllowlist: [] }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+      respondTo: "anyone",
+    },
+  );
+});
+
+test("personaManagedAgentUpdate prompt-only save leaves unset respondTo alone", () => {
+  // Instance already anyone; persona gate unset. A prompt tweak must not
+  // coerce undefined → owner-only onto the instance the harness reads.
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({
+        name: "Fizz Prime",
+        model: "new-model",
+        envVars: { NEW_KEY: "2" },
+        respondTo: "anyone",
+      }),
+      persona({ respondTo: null, respondToAllowlist: [] }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      systemPrompt: "New prompt",
+    },
+  );
+});
+
+test("personaManagedAgentUpdate syncs allowlist when mode is allowlist", () => {
+  const allow = "a".repeat(64);
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({ respondTo: "allowlist", respondToAllowlist: [] }),
+      persona({
+        displayName: "Fizz",
+        systemPrompt: "Old prompt",
+        model: "old-model",
+        envVars: { OLD_KEY: "1" },
+        respondTo: "allowlist",
+        respondToAllowlist: [allow],
+      }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      respondToAllowlist: [allow],
+    },
+  );
+});
+
 test("personaManagedAgentUpdate skips unrelated or unchanged agents", () => {
   assert.equal(
     personaManagedAgentUpdate(agent({ personaId: "persona-2" }), persona()),

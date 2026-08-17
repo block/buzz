@@ -14,7 +14,9 @@ use crate::{
     util::now_iso,
 };
 
-use super::{pending, retain_persona_pending, trim_optional, trim_required};
+use super::{pending, propagate, retain_persona_pending, trim_optional, trim_required};
+
+use propagate::{propagate_persona_name_rename, propagate_persona_respond_to};
 
 #[cfg(test)]
 mod name_propagation_tests;
@@ -26,32 +28,6 @@ mod name_propagation_tests;
 pub struct UpdatePersonaResult {
     #[serde(flatten)]
     persona: AgentDefinition,
-}
-
-/// Propagate a persona definition's display_name rename to linked agent instances.
-/// Only instances whose current `name` equals `old_display_name` are updated;
-/// pool-named instances (e.g. "Birch", "Compass") keep their individualised name.
-/// Updates both `record.name` (relay display name) and `record.display_name`.
-/// Returns the pubkeys of the records that were renamed.
-fn propagate_persona_name_rename(
-    records: &mut [ManagedAgentRecord],
-    persona_id: &str,
-    old_display_name: &str,
-    new_display_name: &str,
-) -> Vec<String> {
-    let mut renamed = Vec::new();
-    for record in records.iter_mut() {
-        if record.persona_id.as_deref() != Some(persona_id) {
-            continue;
-        }
-        if record.name != old_display_name {
-            continue; // pool-named instance — keep its individualised name
-        }
-        record.name = new_display_name.to_string();
-        record.display_name = Some(new_display_name.to_string());
-        renamed.push(record.pubkey.clone());
-    }
-    renamed
 }
 
 /// Profile sync params collected under the store lock for async relay publish.
@@ -129,6 +105,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 crate::managed_agents::validate_user_env_keys(&env_vars)?;
                 persona.env_vars = env_vars;
             }
+            let behavior_present = input.behavior.is_some();
             apply_persona_behavior(persona, input.behavior)?;
             persona.updated_at = now_iso();
 
@@ -138,9 +115,19 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let retained = retain(&app, &state, &result)?;
             try_regenerate_nest(&app);
 
-            // If the avatar or display_name changed, propagate to linked agent
-            // records and collect relay profile sync params for the async phase.
-            let sync_params: ProfileSyncParams = if avatar_changed || name_changed {
+            // Propagate definition edits that instances must mirror (avatar,
+            // display name, respond-to gate) and collect relay profile sync
+            // params for the async phase.
+            //
+            // Also enter when the definition already carries an explicit gate:
+            // unrelated edits (prompt, model, …) must still reconcile that gate
+            // onto instances so a prior broken owner-only instance can heal
+            // without toggling the behavior control.
+            let sync_params: ProfileSyncParams = if avatar_changed
+                || name_changed
+                || behavior_present
+                || result.respond_to.is_some()
+            {
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
@@ -160,6 +147,13 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 } else {
                     Vec::new()
                 };
+
+                // Explicit definition gate only — unset leaves instances alone.
+                if result.respond_to.is_some()
+                    && propagate_persona_respond_to(&mut records, &result.id, &result)? > 0
+                {
+                    agents_modified = true;
+                }
 
                 for record in records.iter_mut() {
                     if record.persona_id.as_deref() != Some(&result.id) {
