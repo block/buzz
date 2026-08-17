@@ -514,8 +514,9 @@ impl TurnProvenance {
         let triggering_event_ids = batch
             .map(|batch| {
                 batch
-                    .events
+                    .cancelled_events
                     .iter()
+                    .chain(batch.events.iter())
                     .map(|event| event.event.id.to_hex())
                     .collect()
             })
@@ -7321,6 +7322,29 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             .iter()
             .map(|event| event.event.id.to_hex())
             .collect();
+        assert_eq!(captured.triggering_event_ids, expected);
+    }
+
+    #[test]
+    fn turn_provenance_preserves_merged_prompt_render_order() {
+        let channel_id = Uuid::new_v4();
+        let mut merged = provenance_batch(channel_id, vec![], 2);
+        let cancelled = provenance_batch(channel_id, vec![], 2);
+        merged.cancelled_events = cancelled.events;
+        merged.cancel_reason = Some(crate::queue::CancelReason::Steer);
+
+        let captured = TurnProvenance::capture(
+            Some(&merged),
+            "turn-merged".to_string(),
+            "2026-08-17T00:00:00Z".to_string(),
+        );
+        let expected: Vec<String> = merged
+            .cancelled_events
+            .iter()
+            .chain(merged.events.iter())
+            .map(|event| event.event.id.to_hex())
+            .collect();
+
         assert_eq!(captured.triggering_event_ids, expected);
     }
 
