@@ -1918,12 +1918,17 @@ async fn prompt_to_completion(h: &mut Harness, sid: &str) -> Value {
     }
 }
 
-/// Default off: a silent turn ends on the first end_turn with no extra round.
-/// This is the invariant that keeps the feature free for everyone who hasn't
-/// opted in.
+/// Default ON: a turn that ends without publishing is reminded once before it
+/// is allowed to end. This is the inverse of the invariant this test asserted
+/// while the guard was opt-in, and it is the contract that makes the guard
+/// reach runs Desktop's mesh launcher never touches — manual runs, dev runs,
+/// and non-Desktop harnesses.
+///
+/// The reminder is bounded (`MAX_REPLY_NAGS`) and explicitly licenses silence,
+/// so this costs a silent turn one extra round, not a forced reply.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reply_guard_off_by_default() {
-    let llm = spawn_capturing_llm(vec![openai_text("done"), openai_text("unexpected")]).await;
+async fn reply_guard_on_by_default() {
+    let llm = spawn_capturing_llm(vec![openai_text("done"), openai_text("still done")]).await;
     let mut h = Harness::spawn(&llm.url).await;
     let sid = init_session(&mut h, json!([])).await;
 
@@ -1931,10 +1936,9 @@ async fn reply_guard_off_by_default() {
     assert_eq!(r["result"]["stopReason"], "end_turn");
 
     let captured = llm.captured.lock().await;
-    assert_eq!(
-        captured.len(),
-        1,
-        "guard must be inert when unset, got {} LLM calls",
+    assert!(
+        captured.len() > 1,
+        "guard must nag an unpublished turn when unset, got {} LLM call(s)",
         captured.len()
     );
     h.shutdown().await;
