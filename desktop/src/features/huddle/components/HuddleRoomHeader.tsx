@@ -41,7 +41,7 @@ export function HuddleRoomHeader() {
     parentChannelId: state?.parent_channel_id ?? null,
     ephemeralChannelId: state?.ephemeral_channel_id ?? null,
     fallbackParticipants: state?.participants ?? [],
-    preservedParticipants: [currentPubkey, ...(state?.agent_pubkeys ?? [])],
+    preservedParticipants: state?.agent_pubkeys ?? [],
   });
   const participantSpeakerLevels = React.useMemo(() => {
     const levels = { ...speakerLevels };

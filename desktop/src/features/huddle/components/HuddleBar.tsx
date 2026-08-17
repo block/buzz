@@ -381,7 +381,7 @@ export function HuddleBar({
     parentChannelId: barState?.parent_channel_id ?? null,
     ephemeralChannelId: barState?.ephemeral_channel_id ?? null,
     fallbackParticipants: barState?.participants ?? [],
-    preservedParticipants: [currentPubkey, ...(barState?.agent_pubkeys ?? [])],
+    preservedParticipants: barState?.agent_pubkeys ?? [],
   });
   const participantSpeakerLevels = React.useMemo(() => {
     const levels = { ...speakerLevels };
