@@ -606,6 +606,11 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Whether the harness auto-publishes the agent's streamed assistant text
+    /// as a channel reply when a turn ends (`EndTurn`) without the agent
+    /// itself having published. Heartbeats are exempt. See
+    /// `Config::auto_publish_reply`.
+    pub auto_publish_reply: bool,
 }
 
 impl AgentPool {
@@ -2417,6 +2422,54 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            // Auto-publish-reply fallback: if the agent ended its turn without
+            // itself calling `buzz messages send` (or reacting) but did stream
+            // assistant text, post that text as a channel reply. Catches the
+            // common failure mode where a model reliably answers but never
+            // invokes a publish tool — without this the answer is silently
+            // discarded, since assistant text is never shown to channel
+            // members. Heartbeats are exempt (no triggering thread to reply
+            // to, and heartbeat output is internal). MaxTokens is also exempt:
+            // a truncated stream is not a complete answer, and re-prompting
+            // (or rotation, above) is the right response. Only `EndTurn`
+            // indicates the agent considered its answer finished.
+            if ctx.auto_publish_reply
+                && matches!(stop_reason, StopReason::EndTurn)
+                && matches!(source, PromptSource::Channel(_))
+            {
+                if let Some(text) = agent.acp.take_turn_text() {
+                    let rest = ctx.rest_client.clone();
+                    let channel_id = match &source {
+                        PromptSource::Channel(cid) => *cid,
+                        PromptSource::Heartbeat => unreachable!("guarded above"),
+                    };
+                    // Reply in the thread of the last triggering event — the
+                    // same root/parent the agent would have targeted with
+                    // `buzz messages send --reply-to`.
+                    let thread_tags = batch
+                        .as_ref()
+                        .and_then(|b| b.events.last())
+                        .map(|be| crate::queue::parse_thread_tags(&be.event))
+                        .unwrap_or_default();
+                    let turn_id_for_log = turn_id.clone();
+                    tokio::spawn(async move {
+                        post_channel_reply(&rest, channel_id, &thread_tags, &text).await;
+                        tracing::info!(
+                            target: "pool::autoreply",
+                            channel = %channel_id,
+                            turn = %turn_id_for_log,
+                            chars = text.len(),
+                            "auto-published agent reply (agent did not call buzz messages send)"
+                        );
+                    });
+                } else {
+                    // No streamed text AND no publish: the agent chose silence
+                    // (or only emitted tool calls / thoughts). That is a
+                    // legitimate outcome — the base prompt explicitly licenses
+                    // silence — so do nothing.
+                }
+            }
 
             send_prompt_result(
                 &result_tx,
@@ -4237,11 +4290,16 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
-/// Best-effort: post a visible failure notice (kind:9) to a channel after a
-/// batch is dead-lettered. Replies into the thread of `thread_tags` when the
-/// triggering event was threaded. Errors are logged and swallowed — the
-/// notice must never take down the main loop.
-pub(crate) async fn post_failure_notice(
+/// Best-effort post a signed channel reply (kind:45001) to the relay via
+/// `POST /events`.
+///
+/// Generalizes the original failure-notice path: the same build → sign → submit
+/// pipeline serves both error notices and the auto-publish-reply fallback for
+/// agents that stream an answer without calling `buzz messages send`. Content
+/// is posted as a threaded reply when `thread_tags` carries a root event id,
+/// otherwise as a top-level message. All failures are logged and swallowed —
+/// the caller (often a fire-and-forget spawned task) cannot act on them.
+pub(crate) async fn post_channel_reply(
     rest: &crate::relay::RestClient,
     channel_id: Uuid,
     thread_tags: &ThreadTags,
@@ -4263,21 +4321,21 @@ pub(crate) async fn post_failure_notice(
         match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+                tracing::warn!(channel = %channel_id, "channel reply: build failed: {e}");
                 return;
             }
         };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            tracing::warn!(channel = %channel_id, "channel reply: sign failed: {e}");
             return;
         }
     };
     match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "channel reply: submit failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "channel reply: submit timed out"),
     }
 }
 
@@ -7600,6 +7658,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            auto_publish_reply: false,
         }
     }
 

@@ -328,11 +328,16 @@ fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
 /// | gpt-5.4     | `none, low, medium, high, xhigh`          |
 /// | gpt-5.1     | `none, low, medium, high`                 |
 /// | gpt-5 (base)| `minimal, low, medium, high`              |
+/// | glm-5.3     | `low, high, max` (z.ai blog, Aug 2026)    |
 /// | unknown     | not doc-verified — `max` clamps to `xhigh` |
 ///
 /// Note the `none` vs `minimal` split: `gpt-5` (base) supports `minimal` but not `none`;
 /// `gpt-5.1`/`gpt-5.4`/`gpt-5.5`/`gpt-5.6` support `none` but not `minimal`. These are matched via
 /// nearest-supported fallback in `normalize_effort_for_openai_route`.
+///
+/// `glm-5.3` (z.ai, doc-verified against https://z.ai/blog/glm-5.3 and live API probes,
+/// Aug 2026) supports only `low|high|max`; thinking cannot be disabled, so `none`/`minimal`
+/// fall back to `low` and `medium`/`xhigh` to the nearest supported level.
 ///
 /// Match order: `-pro` variant checked before versioned strings to prevent `gpt-5-pro` from
 /// falling into the `gpt-5` base bucket (substring "gpt-5" is shared).
@@ -373,6 +378,13 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
         ThinkingEffort::Medium,
         ThinkingEffort::High,
     ];
+    // z.ai GLM-5.3: only low|high|max (thinking cannot be disabled).
+    // Doc-verified against https://z.ai/blog/glm-5.3 and live api.z.ai probes (Aug 2026).
+    const GLM_5_3: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::High,
+        ThinkingEffort::Max,
+    ];
 
     let lower = model.to_ascii_lowercase();
     // Check gpt-5-pro before gpt-5.5 / gpt-5.4 etc. to avoid the `-pro` name
@@ -405,6 +417,12 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     } else if gpt5_base_matches(&lower, "gpt-5") || gpt5_base_matches(&lower, "gpt5") {
         // Base gpt-5 (no version suffix matching any of the above).
         Some(GPT5_BASE)
+    } else if gpt5_token_matches(&lower, "glm-5.3")
+        || gpt5_token_matches(&lower, "glm5.3")
+        || gpt5_token_matches(&lower, "glm-5-3")
+        || gpt5_token_matches(&lower, "glm5-3")
+    {
+        Some(GLM_5_3)
     } else {
         // Unknown model — not doc-verified; server validates.
         None
@@ -2599,6 +2617,68 @@ mod tests {
         assert!(openai_efforts_for_model("llama-4").is_none());
         assert!(openai_efforts_for_model("claude-opus-4-8").is_none());
         assert!(openai_efforts_for_model("gpt-4o").is_none());
+    }
+
+    // ---- GLM-5.3 (z.ai): low|high|max only, thinking cannot be disabled ----
+
+    #[test]
+    fn openai_efforts_for_model_glm_5_3_is_low_high_max() {
+        let expected: &[ThinkingEffort] = &[
+            ThinkingEffort::Low,
+            ThinkingEffort::High,
+            ThinkingEffort::Max,
+        ];
+
+        for model in [
+            "glm-5.3",
+            "glm-5-3",
+            "glm5.3",
+            "zai-glm-5.3",
+            "glm-5.3-2026-08-14",
+        ] {
+            assert_eq!(
+                openai_efforts_for_model(model),
+                Some(expected),
+                "{model} must match the glm-5.3 effort table"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_efforts_for_model_glm_5_3_rejects_neighbour_versions() {
+        // glm-5.2 and below are not doc-verified — must stay unknown (max clamps to xhigh).
+        assert!(openai_efforts_for_model("glm-5.2").is_none());
+        assert!(openai_efforts_for_model("glm-5.1").is_none());
+        // glm-5.30 must not false-match glm-5.3 (digit continuation is blocked).
+        assert!(openai_efforts_for_model("glm-5.30").is_none());
+    }
+
+    #[test]
+    fn normalize_effort_max_passes_through_for_glm_5_3() {
+        // The whole point of the table entry: max must NOT clamp to xhigh for glm-5.3.
+        assert_eq!(
+            normalize_effort_for_openai_route(ThinkingEffort::Max, "glm-5.3"),
+            ThinkingEffort::Max
+        );
+    }
+
+    #[test]
+    fn normalize_effort_unsupported_levels_fall_back_for_glm_5_3() {
+        // medium → high (nearest supported, upward preference)
+        assert_eq!(
+            normalize_effort_for_openai_route(ThinkingEffort::Medium, "glm-5.3"),
+            ThinkingEffort::High
+        );
+        // xhigh → max (nearest supported)
+        assert_eq!(
+            normalize_effort_for_openai_route(ThinkingEffort::XHigh, "glm-5.3"),
+            ThinkingEffort::Max
+        );
+        // none → low (thinking cannot be disabled; peer minimal is unsupported)
+        assert_eq!(
+            normalize_effort_for_openai_route(ThinkingEffort::None, "glm-5.3"),
+            ThinkingEffort::Low
+        );
     }
 
     // ---- Boundary-safe matching: version digits must not false-match longer versions ----
