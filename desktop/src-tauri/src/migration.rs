@@ -1375,6 +1375,9 @@ pub use backfill::backfill_standalone_agents;
 mod detach;
 pub use detach::detach_directory_backed_teams;
 mod pollen;
+pub(crate) use pollen::{
+    profile_reconcile_queue_path, read_profile_reconcile_queue, write_profile_reconcile_queue,
+};
 mod team_suffix;
 pub use team_suffix::strip_baked_team_instructions;
 

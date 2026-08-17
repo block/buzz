@@ -472,6 +472,54 @@ pub async fn restore_managed_agents_on_launch(
     Ok(())
 }
 
+pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if !state
+        .managed_agent_profile_reconcile_enabled
+        .load(Ordering::Acquire)
+    {
+        return;
+    }
+    let items = match crate::commands::load_pending_profile_reconciliations(app) {
+        Ok(items) => items,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to load pending profile reconciliations: {error}");
+            return;
+        }
+    };
+
+    for (pubkey, data) in items {
+        let reconcile_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = reconcile_app.state::<AppState>();
+            match crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
+                .await
+            {
+                Ok(())
+                    if state
+                        .managed_agent_profile_reconcile_enabled
+                        .load(Ordering::Acquire) =>
+                {
+                    if let Err(error) =
+                        crate::commands::mark_profile_reconciled(&reconcile_app, &pubkey)
+                    {
+                        eprintln!(
+                            "buzz-desktop: failed to clear profile reconciliation for agent {pubkey}: {error}"
+                        );
+                    }
+                }
+                // Reconciliation can return Ok after the experiment is enabled
+                // mid-flight; retain the queue item rather than treating that
+                // intentional no-op as a successful relay write.
+                Ok(()) => {}
+                Err(error) => eprintln!(
+                    "buzz-desktop: profile reconciliation failed for agent {pubkey}: {error}"
+                ),
+            }
+        });
+    }
+}
+
 #[cfg(feature = "mesh-llm")]
 fn persist_restore_error(
     app: &tauri::AppHandle,

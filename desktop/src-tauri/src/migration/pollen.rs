@@ -30,7 +30,8 @@ fn migrate_pollen_agent_name_in_file(path: &Path, now: &str) {
         return;
     };
 
-    let mut version_updates = std::collections::HashMap::new();
+    let mut version_updates = stock_version_updates(now);
+    let mut profile_reconcile_pubkeys = Vec::new();
     let mut changed = false;
 
     // Migrate the definition first so an in-sync linked instance can advance
@@ -91,6 +92,9 @@ fn migrate_pollen_agent_name_in_file(path: &Path, now: &str) {
             continue;
         };
         let is_pollen_instance = persona_id == crate::managed_agents::POLLEN_PERSONA_ID;
+        // Definition rows are absent on direct upgrades from the pre-unified
+        // persona store. The stock hashes still let pristine linked instances
+        // advance instead of appearing falsely out of date after seeding.
         let version_update = version_updates.get(&persona_id);
         if !is_instance || (!is_pollen_instance && version_update.is_none()) {
             continue;
@@ -105,7 +109,19 @@ fn migrate_pollen_agent_name_in_file(path: &Path, now: &str) {
         let Some(object) = record.as_object_mut() else {
             continue;
         };
+        let name_was_migrated = is_pollen_instance
+            && object.get("name").and_then(serde_json::Value::as_str)
+                == Some(crate::managed_agents::POLLEN_LEGACY_DISPLAY_NAME);
         let mut record_changed = is_pollen_instance && migrate_pollen_fields(object, false);
+        if name_was_migrated {
+            if let Some(pubkey) = object
+                .get("pubkey")
+                .and_then(serde_json::Value::as_str)
+                .filter(|pubkey| !pubkey.is_empty())
+            {
+                profile_reconcile_pubkeys.push(pubkey.to_string());
+            }
+        }
         if source_was_current {
             if let Some((_, new_version)) = version_update {
                 object.insert(
@@ -124,13 +140,121 @@ fn migrate_pollen_agent_name_in_file(path: &Path, now: &str) {
         }
     }
 
-    if changed {
+    if !profile_reconcile_pubkeys.is_empty() {
+        // Queue first: a crash after this write but before the agent-store write
+        // leaves a harmless stale item. The loader verifies the local name is
+        // already Pollen before publishing, so the next boot can finish safely.
+        if let Err(error) = persist_profile_reconcile_queue(path, &profile_reconcile_pubkeys) {
+            eprintln!("buzz-desktop: migrate-pollen-agent-name: {error}");
+            return;
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
+            if let Err(error) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
+                eprintln!("buzz-desktop: migrate-pollen-agent-name: {error}");
+            }
+        }
+    } else if changed {
         if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
             if let Err(error) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
                 eprintln!("buzz-desktop: migrate-pollen-agent-name: {error}");
             }
         }
     }
+}
+
+fn stock_version_updates(now: &str) -> std::collections::HashMap<String, (String, String)> {
+    let mut updates = std::collections::HashMap::new();
+
+    if let Some(mut legacy_pollen) = crate::managed_agents::built_in_persona_definition(
+        crate::managed_agents::POLLEN_PERSONA_ID,
+        now,
+    ) {
+        let current_pollen = persona_version(&legacy_pollen);
+        legacy_pollen.display_name = crate::managed_agents::POLLEN_LEGACY_DISPLAY_NAME.to_string();
+        legacy_pollen.system_prompt =
+            crate::managed_agents::POLLEN_LEGACY_SYSTEM_PROMPT.to_string();
+        legacy_pollen.name_pool =
+            vec![crate::managed_agents::POLLEN_LEGACY_DISPLAY_NAME.to_string()];
+        updates.insert(
+            crate::managed_agents::POLLEN_PERSONA_ID.to_string(),
+            (persona_version(&legacy_pollen), current_pollen),
+        );
+    }
+
+    if let Some(mut legacy_fizz) =
+        crate::managed_agents::built_in_persona_definition("builtin:fizz", now)
+    {
+        let current_fizz = persona_version(&legacy_fizz);
+        legacy_fizz
+            .name_pool
+            .insert(4, crate::managed_agents::POLLEN_DISPLAY_NAME.to_string());
+        updates.insert(
+            "builtin:fizz".to_string(),
+            (persona_version(&legacy_fizz), current_fizz),
+        );
+    }
+
+    updates
+}
+
+fn persona_version(definition: &crate::managed_agents::AgentDefinition) -> String {
+    crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(definition),
+    )
+}
+
+pub(crate) fn profile_reconcile_queue_path(agent_store_path: &Path) -> std::path::PathBuf {
+    agent_store_path.with_file_name("profile-reconcile-pending.json")
+}
+
+fn persist_profile_reconcile_queue(path: &Path, pubkeys: &[String]) -> Result<(), String> {
+    let queue_path = profile_reconcile_queue_path(path);
+    let mut pending = std::fs::read_to_string(&queue_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Vec<String>>(&contents).ok())
+        .unwrap_or_default();
+    pending.extend(pubkeys.iter().cloned());
+    pending.sort();
+    pending.dedup();
+    let bytes = serde_json::to_vec_pretty(&pending)
+        .map_err(|error| format!("failed to serialize profile reconcile queue: {error}"))?;
+    if bytes.len() > PROFILE_RECONCILE_QUEUE_MAX_BYTES {
+        return Err("profile reconcile queue exceeds its size limit".to_string());
+    }
+    crate::managed_agents::atomic_write_json_restricted(&queue_path, &bytes)
+}
+
+pub(crate) const PROFILE_RECONCILE_QUEUE_MAX_BYTES: usize = 1024 * 1024;
+
+pub(crate) fn read_profile_reconcile_queue(path: &Path) -> Result<Vec<String>, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("failed to inspect profile reconcile queue: {error}"))?;
+    if metadata.len() > PROFILE_RECONCILE_QUEUE_MAX_BYTES as u64 {
+        return Err("profile reconcile queue exceeds its size limit".to_string());
+    }
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read profile reconcile queue: {error}"))?;
+    serde_json::from_str(&contents)
+        .map_err(|error| format!("failed to parse profile reconcile queue: {error}"))
+}
+
+pub(crate) fn write_profile_reconcile_queue(path: &Path, pubkeys: &[String]) -> Result<(), String> {
+    if pubkeys.is_empty() {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "failed to remove empty profile reconcile queue {}: {error}",
+                path.display()
+            )),
+        };
+    }
+    let bytes = serde_json::to_vec_pretty(pubkeys)
+        .map_err(|error| format!("failed to serialize profile reconcile queue: {error}"))?;
+    if bytes.len() > PROFILE_RECONCILE_QUEUE_MAX_BYTES {
+        return Err("profile reconcile queue exceeds its size limit".to_string());
+    }
+    crate::managed_agents::atomic_write_json_restricted(path, &bytes)
 }
 
 fn migrate_pollen_fields(
@@ -251,6 +375,7 @@ mod tests {
             "persona_id": crate::managed_agents::POLLEN_PERSONA_ID,
             "system_prompt": crate::managed_agents::POLLEN_LEGACY_SYSTEM_PROMPT,
             "persona_source_version": old_version,
+            "start_on_app_launch": false,
             "updated_at": "before",
             "future_instance_field": "preserved"
         });
@@ -323,6 +448,11 @@ mod tests {
         assert_eq!(records[2]["persona_source_version"], "custom-version");
         assert_eq!(records[2]["updated_at"], "before");
         assert_eq!(records[3], unrelated);
+        assert_eq!(
+            read_profile_reconcile_queue(&profile_reconcile_queue_path(&path)).unwrap(),
+            vec!["pristine-pubkey".to_string()],
+            "a stopped stock instance must retry its relay profile independently of startup"
+        );
 
         let once = std::fs::read(&path).unwrap();
         migrate_pollen_agent_name_in_file(&path, "later");
@@ -331,6 +461,60 @@ mod tests {
             once,
             "migration is idempotent"
         );
+    }
+
+    #[test]
+    fn pollen_name_migration_advances_stock_versions_without_definition_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents/managed-agents.json");
+        let updates = stock_version_updates("before");
+        let (old_pollen, new_pollen) = updates
+            .get(crate::managed_agents::POLLEN_PERSONA_ID)
+            .unwrap();
+        let (old_fizz, new_fizz) = updates.get("builtin:fizz").unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([
+                {
+                    "pubkey": "pollen-pubkey",
+                    "name": crate::managed_agents::POLLEN_LEGACY_DISPLAY_NAME,
+                    "persona_id": crate::managed_agents::POLLEN_PERSONA_ID,
+                    "system_prompt": crate::managed_agents::POLLEN_LEGACY_SYSTEM_PROMPT,
+                    "persona_source_version": old_pollen,
+                    "start_on_app_launch": false,
+                    "updated_at": "before"
+                },
+                {
+                    "pubkey": "fizz-pubkey",
+                    "name": "Fizz",
+                    "persona_id": "builtin:fizz",
+                    "persona_source_version": old_fizz,
+                    "updated_at": "before"
+                }
+            ]),
+        );
+
+        migrate_pollen_agent_name_in_file(&path, "after");
+
+        let records = read_agents_json(dir.path());
+        assert_eq!(records[0]["persona_source_version"], *new_pollen);
+        assert_eq!(records[1]["persona_source_version"], *new_fizz);
+        assert_eq!(
+            read_profile_reconcile_queue(&profile_reconcile_queue_path(&path)).unwrap(),
+            vec!["pollen-pubkey".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_profile_reconcile_queue_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile-reconcile-pending.json");
+        write_profile_reconcile_queue(&path, &["pollen-pubkey".to_string()]).unwrap();
+        assert!(path.exists());
+
+        write_profile_reconcile_queue(&path, &[]).unwrap();
+
+        assert!(!path.exists());
     }
 
     #[test]

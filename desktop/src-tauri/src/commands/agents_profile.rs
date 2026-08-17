@@ -2,7 +2,8 @@
 //! guard). Owns the reconcile data carrier, the legacy-avatar backfill, and
 //! the needs-sync predicate.
 
-use tauri::AppHandle;
+use std::collections::HashSet;
+use tauri::{AppHandle, Manager};
 
 use crate::app_state::AppState;
 use crate::managed_agents::managed_agent_avatar_url;
@@ -47,6 +48,78 @@ pub(super) fn resolve_legacy_avatar(
         .or(relay_picture)
         .or_else(|| managed_agent_avatar_url(agent_command))
         .unwrap_or_default()
+}
+
+pub(crate) fn profile_reconcile_data(
+    record: &crate::managed_agents::ManagedAgentRecord,
+    personas: &[crate::managed_agents::AgentDefinition],
+) -> ProfileReconcileData {
+    ProfileReconcileData {
+        private_key_nsec: record.private_key_nsec.clone(),
+        name: record.name.clone(),
+        relay_url: record.relay_url.clone(),
+        avatar_url: record.avatar_url.clone(),
+        auth_tag: record.auth_tag.clone(),
+        pubkey: record.pubkey.clone(),
+        agent_command: crate::managed_agents::record_agent_command(record, personas),
+        persona_id: record.persona_id.clone(),
+    }
+}
+
+pub(crate) fn load_pending_profile_reconciliations(
+    app: &AppHandle,
+) -> Result<Vec<(String, ProfileReconcileData)>, String> {
+    let state = app.state::<AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let store_path = crate::managed_agents::managed_agents_store_path(app)?;
+    let queue_path = crate::migration::profile_reconcile_queue_path(&store_path);
+    if !queue_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let pending: HashSet<String> = crate::migration::read_profile_reconcile_queue(&queue_path)?
+        .into_iter()
+        .collect();
+    let records = crate::managed_agents::load_managed_agents(app)?;
+    let personas = crate::managed_agents::load_personas(app).unwrap_or_default();
+    let workspace_relay = relay_ws_url_with_override(&state);
+    Ok(records
+        .iter()
+        // A queue write deliberately precedes the migrated agent-store write.
+        // If the process dies between them, retain (but do not execute) the
+        // stale item until the next boot finishes renaming the record.
+        .filter(|record| {
+            pending.contains(&record.pubkey)
+                && record.name == crate::managed_agents::POLLEN_DISPLAY_NAME
+        })
+        .map(|record| {
+            let mut data = profile_reconcile_data(record, &personas);
+            // Pin the effective relay while this workspace is active. Otherwise
+            // a fast community switch could make a queued task for A run on B.
+            data.relay_url =
+                crate::relay::effective_agent_relay_url(&data.relay_url, &workspace_relay);
+            (record.pubkey.clone(), data)
+        })
+        .collect())
+}
+
+pub(crate) fn mark_profile_reconciled(app: &AppHandle, pubkey: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let store_path = crate::managed_agents::managed_agents_store_path(app)?;
+    let queue_path = crate::migration::profile_reconcile_queue_path(&store_path);
+    if !queue_path.exists() {
+        return Ok(());
+    }
+    let mut pending = crate::migration::read_profile_reconcile_queue(&queue_path)?;
+    pending.retain(|queued| queued != pubkey);
+    crate::migration::write_profile_reconcile_queue(&queue_path, &pending)
 }
 
 /// Reconcile an agent's kind:0 profile on the relay.
