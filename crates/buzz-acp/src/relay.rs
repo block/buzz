@@ -261,6 +261,49 @@ fn is_retriable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
+/// What an `OK` frame means for the event still sitting in our in-flight queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OkDisposition {
+    /// The relay has the event. Retire it.
+    Stored,
+    /// The relay refused it for a reason that may not hold next time. Keep it
+    /// queued so the next requeue resends it.
+    Retriable,
+    /// The relay refused it for a reason a resend cannot change. Retire it, but
+    /// loudly — the event is being dropped.
+    Permanent,
+}
+
+/// Classify a NIP-01 `OK` frame by its machine-readable message prefix.
+///
+/// NIP-01 requires the message on a rejection to begin with one of a fixed set
+/// of prefixes, which is what makes this decidable rather than guesswork. Only
+/// `rate-limited:` and `error:` describe conditions that can clear on their
+/// own; `invalid:`, `blocked:`, `restricted:` and `pow:` are properties of the
+/// event or of our standing with the relay, so resending byte-identical bytes
+/// gets a byte-identical refusal.
+///
+/// `duplicate:` is a rejection that means the publish already succeeded, so it
+/// is `Stored`. Treating it as a failure would be a false alarm on exactly the
+/// path — resend after reconnect — that produces duplicates in the first place.
+///
+/// An unrecognized message is treated as `Retriable`: keeping an event queued
+/// costs a bounded slot, whereas dropping one loses it for good, and unknown
+/// prefixes come from relays we do not control.
+pub(crate) fn classify_ok(accepted: bool, message: &str) -> OkDisposition {
+    if accepted {
+        return OkDisposition::Stored;
+    }
+    if message.starts_with("duplicate:") {
+        return OkDisposition::Stored;
+    }
+    const PERMANENT: [&str; 4] = ["invalid:", "blocked:", "restricted:", "pow:"];
+    if PERMANENT.iter().any(|p| message.starts_with(p)) {
+        return OkDisposition::Permanent;
+    }
+    OkDisposition::Retriable
+}
+
 /// Base retry delays for transient HTTP failures: 500ms, 1s, 2s.
 /// Jitter (±20%) is applied at call time via `jittered_duration`, so the first
 /// sleep lands in `[400ms, 600ms)`.
@@ -2480,8 +2523,33 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
-                    state.acknowledge_observer_frame(&event_id);
-                    debug!("OK for event {event_id}: accepted={accepted} message={message}");
+                    // Retiring an in-flight frame means "the relay has this
+                    // event now". Only an acceptance establishes that, so a
+                    // rejection must not be retired as though it published.
+                    match classify_ok(accepted, &message) {
+                        OkDisposition::Stored => {
+                            state.acknowledge_observer_frame(&event_id);
+                            debug!(
+                                "OK for event {event_id}: accepted={accepted} message={message}"
+                            );
+                        }
+                        OkDisposition::Retriable => {
+                            // Leave it in flight: the next requeue resends it.
+                            warn!(
+                                "relay refused event {event_id} transiently: {message} — \
+                                 keeping it queued for resend"
+                            );
+                        }
+                        OkDisposition::Permanent => {
+                            // Retire it — resending cannot change this answer —
+                            // but say so, because the event is now lost.
+                            state.acknowledge_observer_frame(&event_id);
+                            warn!(
+                                "relay rejected event {event_id}: {message} — \
+                                 dropping it, a resend would be refused identically"
+                            );
+                        }
+                    }
                 }
             }
             true
@@ -6113,6 +6181,83 @@ mod tests {
             .collect();
         assert_eq!(ids, [rejected.id, later.id]);
         assert!(state.observer_in_flight.is_empty());
+    }
+
+    /// An acceptance, and only an acceptance, means the relay has the event.
+    #[test]
+    fn classify_ok_treats_acceptance_and_duplicate_as_stored() {
+        assert_eq!(classify_ok(true, ""), OkDisposition::Stored);
+        assert_eq!(classify_ok(true, "anything at all"), OkDisposition::Stored);
+        // `duplicate:` is a rejection that means the publish already landed —
+        // the normal outcome of a resend after reconnect, not a failure.
+        assert_eq!(
+            classify_ok(false, "duplicate: already have this event"),
+            OkDisposition::Stored
+        );
+    }
+
+    /// Prefixes describing the event itself cannot be fixed by resending it.
+    #[test]
+    fn classify_ok_treats_event_level_refusals_as_permanent() {
+        for message in [
+            "invalid: bad signature",
+            "blocked: pubkey is banned",
+            "restricted: not a member of this group",
+            "pow: difficulty 28 required",
+        ] {
+            assert_eq!(
+                classify_ok(false, message),
+                OkDisposition::Permanent,
+                "{message} must not be retried — a resend gets the same answer"
+            );
+        }
+    }
+
+    /// Transient refusals, and anything we do not recognize, stay queued.
+    /// Holding an event costs a bounded slot; dropping one loses it for good.
+    #[test]
+    fn classify_ok_keeps_transient_and_unknown_refusals_queued() {
+        for message in [
+            "rate-limited: slow down",
+            "error: could not connect to the database",
+            "sorry, no",
+            "",
+        ] {
+            assert_eq!(
+                classify_ok(false, message),
+                OkDisposition::Retriable,
+                "{message:?} must stay queued rather than be silently dropped"
+            );
+        }
+    }
+
+    /// The bug this replaced: every `OK` retired its in-flight frame, so a
+    /// rejected event was dropped from the resend queue exactly as though it
+    /// had been stored, and the rejection was only visible at `debug!`.
+    #[test]
+    fn transient_rejection_keeps_the_frame_queued_for_resend() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let refused = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(refused.clone()));
+
+        // What the OK handler does for a Retriable disposition: nothing.
+        assert_eq!(
+            classify_ok(false, "rate-limited: slow down"),
+            OkDisposition::Retriable
+        );
+
+        state.requeue_observer_in_flight();
+        let ids: Vec<_> = state
+            .gated_observer_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [refused.id],
+            "a transiently refused event must survive to be resent"
+        );
     }
 
     /// The parked-frame queue is bounded: overflow evicts the oldest frame and
