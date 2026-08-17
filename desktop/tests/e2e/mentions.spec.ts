@@ -371,7 +371,7 @@ test("thread autocomplete keeps multiple long names readable in a narrow panel",
   });
   await page.setViewportSize({ width: 900, height: 640 });
   await page.addInitScript(() => {
-    window.sessionStorage.setItem("buzz.desktop.thread-panel-width", "300");
+    window.localStorage.setItem("buzz.desktop.thread-panel-width", "300");
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();

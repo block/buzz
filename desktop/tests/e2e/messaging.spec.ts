@@ -2619,18 +2619,19 @@ test("opens a single-level thread panel with inline expansion", async ({
   ).toHaveCount(0);
 });
 
-test("thread panel width uses session storage and reset handle", async ({
+test("thread panel width uses local storage, survives reload, and reset handle", async ({
   page,
 }) => {
   const customWidthPx = 520;
   const defaultWidthPx = 380;
+  const storageKey = "buzz.desktop.thread-panel-width";
 
-  await page.addInitScript((width) => {
-    window.sessionStorage.setItem(
-      "buzz.desktop.thread-panel-width",
-      String(width),
-    );
-  }, customWidthPx);
+  await page.addInitScript(
+    ({ key, width }) => {
+      window.localStorage.setItem(key, String(width));
+    },
+    { key: storageKey, width: customWidthPx },
+  );
 
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -2656,27 +2657,60 @@ test("thread panel width uses session storage and reset handle", async ({
     })
     .toBe(customWidthPx);
 
-  await resizeHandle.dblclick();
+  await expect
+    .poll(() => page.evaluate((key) => window.localStorage.getItem(key), storageKey))
+    .toBe(String(customWidthPx));
+
+  // Reload should restore the same width from localStorage (not sessionStorage).
+  await page.reload();
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timelineAfterReload = page.getByTestId("message-timeline");
+  const rootAfterReload = timelineAfterReload.getByTestId("message-row").first();
+  const threadPanelAfterReload = page.getByTestId("message-thread-panel");
+
+  await rootAfterReload.hover();
+  await rootAfterReload.getByRole("button", { name: "Reply" }).click();
+  await expect(threadPanelAfterReload).toBeVisible();
 
   await expect
     .poll(async () => {
-      return threadPanel.evaluate((panel) => {
+      return threadPanelAfterReload.evaluate((panel) => {
+        const element = panel as HTMLElement;
+        return Math.round(element.getBoundingClientRect().width);
+      });
+    })
+    .toBe(customWidthPx);
+
+  const resizeHandleAfterReload = threadPanelAfterReload.getByTestId(
+    "right-auxiliary-pane-resize-handle",
+  );
+  await resizeHandleAfterReload.dblclick();
+
+  await expect
+    .poll(async () => {
+      return threadPanelAfterReload.evaluate((panel) => {
         const element = panel as HTMLElement;
         return Math.round(element.getBoundingClientRect().width);
       });
     })
     .toBe(defaultWidthPx);
 
-  await threadPanel.getByTestId("auxiliary-panel-close").click();
-  await expect(threadPanel).toBeHidden();
+  await expect
+    .poll(() => page.evaluate((key) => window.localStorage.getItem(key), storageKey))
+    .toBe(String(defaultWidthPx));
 
-  await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
-  await expect(threadPanel).toBeVisible();
+  await threadPanelAfterReload.getByTestId("auxiliary-panel-close").click();
+  await expect(threadPanelAfterReload).toBeHidden();
+
+  await rootAfterReload.hover();
+  await rootAfterReload.getByRole("button", { name: "Reply" }).click();
+  await expect(threadPanelAfterReload).toBeVisible();
 
   await expect
     .poll(async () => {
-      return threadPanel.evaluate((panel) => {
+      return threadPanelAfterReload.evaluate((panel) => {
         const element = panel as HTMLElement;
         return Math.round(element.getBoundingClientRect().width);
       });
