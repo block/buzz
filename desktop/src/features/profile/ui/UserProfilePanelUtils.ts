@@ -298,19 +298,28 @@ export function personaManagedAgentUpdate(
     hasChanges = true;
   }
 
-  // Definition edits expose the access policy in the same dialog as identity
-  // and runtime settings. Keep the exact linked instance in sync when the
-  // definition carries an explicit policy; otherwise the dialog reopens with
-  // the new value while the running agent and sidebar retain the old one.
-  if (persona.respondTo != null && persona.respondTo !== agent.respondTo) {
-    input.respondTo = persona.respondTo;
+  // Sync the inbound author gate (respond_to) from the persona to the linked
+  // instance. The persona stores the wire-shape mode + allowlist; the instance
+  // stores the typed enum + allowlist that build_respond_to_env reads at spawn.
+  // Without this, a respond_to-only edit saves to the definition but the
+  // instance keeps booting with the stale gate (#6026).
+  //
+  // This intentionally overwrites the instance's respond_to with the persona's
+  // value — the persona edit is the owner's explicit intent for this linked
+  // agent. Instance-level overrides are preserved by apply_persona_snapshot
+  // during re-snapshot at start/restore, not during persona edit.
+  const personaMode = persona.respondTo ?? "owner-only";
+  if (personaMode !== agent.respondTo) {
+    input.respondTo = personaMode;
     hasChanges = true;
   }
-  if (
-    persona.respondTo === "allowlist" &&
-    !stringArrayEqual(persona.respondToAllowlist, agent.respondToAllowlist)
-  ) {
-    input.respondToAllowlist = [...persona.respondToAllowlist];
+
+  // Sync the allowlist only when the mode is "allowlist". For other modes,
+  // clear the instance's allowlist so stale entries do not survive a mode
+  // switch back to "allowlist" later.
+  const personaAllowlist = personaMode === "allowlist" ? persona.respondToAllowlist : [];
+  if (!stringArrayEqual(personaAllowlist, agent.respondToAllowlist)) {
+    input.respondToAllowlist = personaAllowlist;
     hasChanges = true;
   }
 
