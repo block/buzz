@@ -510,8 +510,38 @@ pub async fn reconcile_managed_agent_runtimes(
                         app.clone(),
                     ) {
                         Ok(mut status) => {
-                            status.requested_relay_url = Some(requested);
+                            status.requested_relay_url = Some(requested.clone());
                             rows.push(status);
+
+                            // Profile reconciliation is detached from runtime
+                            // startup: a slow or failed relay request must never
+                            // delay this pair or the rest of the batch.
+                            let reconcile_app = app.clone();
+                            let reconcile_pubkey = record.pubkey.clone();
+                            let reconcile_relay = requested.clone();
+                            let reconcile_data =
+                                crate::commands::ProfileReconcileData::from_record(
+                                    &record,
+                                    &personas,
+                                );
+                            tauri::async_runtime::spawn(async move {
+                                let state = reconcile_app.state::<AppState>();
+                                if let Err(error) =
+                                    crate::commands::reconcile_agent_profile_at_relay(
+                                        &state,
+                                        &reconcile_app,
+                                        &reconcile_pubkey,
+                                        &reconcile_relay,
+                                        &reconcile_data,
+                                        false,
+                                    )
+                                    .await
+                                {
+                                    eprintln!(
+                                        "buzz-desktop: profile reconciliation failed for agent {reconcile_pubkey} on {reconcile_relay}: {error}"
+                                    );
+                                }
+                            });
                         }
                         Err(error) => {
                             let mut status = status_for_with(

@@ -1363,8 +1363,10 @@ use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
 #[path = "agents_profile.rs"]
 mod profile;
 #[cfg(test)]
-use profile::{profile_needs_sync, resolve_legacy_avatar};
-pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
+use profile::{profile_needs_sync, resolve_legacy_avatar, validate_profile_relay};
+pub(crate) use profile::{
+    reconcile_agent_profile, reconcile_agent_profile_at_relay, ProfileReconcileData,
+};
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]
