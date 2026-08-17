@@ -167,6 +167,15 @@ export function ModelPicker({
           );
           return;
         }
+        if (outcome === "not_delivered") {
+          // The switch never reached a session: the turn was already ending, or
+          // no active turn remained by the time the harness received it. Nothing
+          // was applied and nothing rides a later session — tell the truth.
+          toast.error(
+            "Couldn't switch models — the agent wasn't running a turn to switch.",
+          );
+          return;
+        }
         if (outcome === "pending") {
           // The switch was accepted but its apply is deferred to the next
           // session (the agent is mid-turn) and didn't confirm before the

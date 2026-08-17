@@ -96,7 +96,53 @@ test("awaitLiveSwitchOutcome resolves ok only after every distinct channel acks"
   await drainMicrotasks();
   assert.equal(settled, false, "must not resolve before every channel acks");
 
-  h.push(frame("turn_ending", { channelId: CH_B }));
+  h.push(frame("switched", { channelId: CH_B }));
+  assert.equal(await h.outcome, "ok");
+});
+
+test("awaitLiveSwitchOutcome settles not_delivered immediately on a turn_ending frame without waiting for other channels or the timeout", async () => {
+  // `turn_ending` means the control oneshot was already consumed (a prior
+  // cancel is ending the turn) — the switch can't land and nothing applies
+  // later. It must fail-fast to "not_delivered", NOT count as a positive
+  // terminal. Three channels prove it never traverses the success-count path.
+  const h = harness([CH_A, CH_B, "channel-c"]);
+  h.push(frame("turn_ending"));
+  assert.equal(await h.outcome, "not_delivered");
+  assert.equal(h.cancelTimeoutCalls, 1, "timeout cancelled, not awaited");
+  assert.equal(h.unsubscribeCalls, 1);
+
+  // A later positive frame must not re-resolve or re-unsubscribe.
+  h.push(frame("switched"));
+  assert.equal(h.unsubscribeCalls, 1, "no double-unsubscribe on a late frame");
+});
+
+test("awaitLiveSwitchOutcome settles not_delivered immediately on a no_active_turn frame", async () => {
+  // `no_active_turn` means neither an in-flight task nor an idle session-owning
+  // agent existed by the time the harness received the switch (a stale
+  // `activeTurns` snapshot). Nothing was applied and nothing rides a later
+  // session — fail-fast to "not_delivered", never a false "ok".
+  const h = harness([CH_A, CH_B]);
+  h.push(frame("no_active_turn"));
+  assert.equal(await h.outcome, "not_delivered");
+  assert.equal(h.cancelTimeoutCalls, 1, "timeout cancelled, not awaited");
+  assert.equal(h.unsubscribeCalls, 1);
+});
+
+test("awaitLiveSwitchOutcome ignores an unknown future status and settles via a real switched terminal", async () => {
+  // A status the picker doesn't know (a newer harness) must be inert — never
+  // default-counted as success. The pick stays open until a real `switched`
+  // terminal (or the timeout) settles it.
+  const h = harness([CH_A]);
+  let settled = false;
+  void h.outcome.then(() => {
+    settled = true;
+  });
+
+  h.push(frame("some_future_status"));
+  await drainMicrotasks();
+  assert.equal(settled, false, "an unknown status must not settle the pick");
+
+  h.push(frame("switched"));
   assert.equal(await h.outcome, "ok");
 });
 
