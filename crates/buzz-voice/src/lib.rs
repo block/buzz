@@ -1,7 +1,11 @@
 //! Reusable local voice primitives for Buzz.
 
+pub mod german_normalize;
 pub mod imported;
+pub mod kokoro;
 pub mod pocket;
+
+pub use german_normalize::normalize_german_text;
 
 pub use pocket::{
     april_model_info, load_text_to_speech, load_voice_style, PocketModelInfo, PocketTts,
