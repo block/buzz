@@ -581,6 +581,68 @@ fn commit_boot_fallback_relay_cannot_bury_apply_workspace_relay() {
 }
 
 #[test]
+fn commit_failed_newer_request_still_supersedes_older_snapshot() {
+    // Carl 4954831197, case 1: a newer request that never writes must still
+    // permanently supersede an older snapshot. gen1 (pre-edit) is claimed and
+    // its relay work is slow; an edit claims gen2 (post-edit); gen2 then FAILS
+    // during its relay work, so it never commits. When gen1 finally finishes,
+    // it must NOT publish its obsolete roster — gating on highest-*requested*
+    // (advanced by gen2's claim) drops it, whereas gating on highest-*written*
+    // (0, since gen2 never wrote) would wrongly let gen1 publish.
+    let gate = NestRegenGate::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = agents_md_with_markers(tmp.path());
+
+    let gen1 = gate.claim(); // pre-edit request
+    let gen2 = gate.claim(); // post-edit request
+    assert!(gen1 < gen2);
+
+    // gen2 fails during relay work and never reaches commit — nothing written.
+
+    // gen1 finishes last; its stale render must be dropped.
+    assert!(
+        !gate.commit(&file, "pre-edit roster", gen1).unwrap(),
+        "an older snapshot must not publish once a newer generation was requested, \
+         even if that newer generation failed before writing"
+    );
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(
+        !content.contains("pre-edit roster"),
+        "the obsolete pre-edit roster must never become authoritative"
+    );
+}
+
+#[test]
+fn commit_claim_at_the_older_tasks_cutover_supersedes_it() {
+    // Carl 4954831197, case 2: a claim arriving at the older task's commit
+    // cutover must supersede it. Model the exact interleaving the shared lock
+    // must forbid: gen1 becomes eligible (it is the highest request), then gen2
+    // is claimed *before* gen1 actually writes. Because claim advances the same
+    // watermark commit reads under one lock, gen1's write is rejected — a bare
+    // atomic checked separately from the write would have let gen1 slip through.
+    let gate = NestRegenGate::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = agents_md_with_markers(tmp.path());
+
+    let gen1 = gate.claim();
+    // A new request lands at the cutover, before gen1's commit runs.
+    let gen2 = gate.claim();
+    assert!(gen1 < gen2);
+
+    assert!(
+        !gate.commit(&file, "gen1 roster", gen1).unwrap(),
+        "a claim arriving before the older task's write must supersede it"
+    );
+    // gen2 is the surviving request and may publish.
+    assert!(gate.commit(&file, "gen2 roster", gen2).unwrap());
+
+    let content = fs::read_to_string(&file).unwrap();
+    assert!(content.contains("gen2 roster"));
+    assert!(!content.contains("gen1 roster"));
+}
+
+#[test]
 fn commit_equal_generation_is_allowed() {
     // The gate rejects only strictly-lower generations. Re-committing the same
     // generation (e.g. a retried request) is permitted and refreshes the file.
@@ -613,7 +675,7 @@ fn commit_poisoned_lock_returns_error_instead_of_panicking() {
 
     let poisoner = gate.clone();
     let _ = std::thread::spawn(move || {
-        let _guard = poisoner.last_written.lock().unwrap();
+        let _guard = poisoner.highest_requested.lock().unwrap();
         panic!("poison the gate lock");
     })
     .join();

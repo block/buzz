@@ -16,7 +16,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
@@ -665,58 +664,71 @@ pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io
 }
 
 /// Serializes nest-context writes so a slow, stale regeneration cannot roll the
-/// file back over a newer one. This is an ordered, latest-write-wins gate — not
-/// a work coalescer: every superseded generation still performs its relay reads,
-/// then drops its result at commit time. Adding a true dirty-loop owner would be
-/// a larger change and is unwarranted at this user-driven trigger rate.
+/// file back over a newer one. This is an ordered, latest-request-wins gate —
+/// not a work coalescer: every superseded generation still performs its relay
+/// reads, then drops its result at commit time. Adding a true dirty-loop owner
+/// would be a larger change and is unwarranted at this user-driven trigger rate.
 ///
 /// Each regeneration request claims a monotonic generation *synchronously* at
 /// request time (see [`NestRegenGate::claim`]), so the generation encodes
 /// program order: boot's regen is claimed before `apply_workspace`'s, an edit's
 /// regen before the next edit's. The claimed generation travels with the
-/// spawned task and gates its write in [`NestRegenGate::commit`]: a task
-/// whose generation is below the high-water mark drops its result instead of
-/// overwriting the newer file. The commit lock is held across the compare and
-/// the synchronous file write, so two tasks cannot both read a stale mark and
-/// both write — a bare mutex acquired around only the write would still permit
-/// that stale-last rollback.
+/// spawned task and gates its write in [`NestRegenGate::commit`]: a task drops
+/// its result once a *newer generation has been requested*, even if that newer
+/// generation later fails before it writes. Gating on the highest *requested*
+/// generation — not the highest *written* one — is what stops a slow, stale
+/// pre-edit render from publishing after a newer post-edit render was claimed
+/// and then failed during its relay work (which would otherwise leave the
+/// obsolete roster authoritative until the next unrelated trigger). Declared
+/// semantic: once a newer regeneration is requested, no older one publishes;
+/// if that newer one fails, the file simply waits for the next trigger.
+///
+/// `claim` and `commit` share one lock, so the "is this still the newest
+/// request?" compare is atomic with the synchronous file write. A bare atomic
+/// watermark checked separately from the write would let a new claim slip
+/// between an older task's eligibility check and its write; holding the lock
+/// across both closes that window (no `await` occurs while it is held).
 struct NestRegenGate {
-    /// Next generation to hand out. `fetch_add` under a single atomic preserves
-    /// the program order of `claim` calls regardless of memory ordering.
-    next_gen: AtomicU64,
-    /// Highest generation already written. `0` means nothing written yet.
-    last_written: Mutex<u64>,
+    /// Highest generation *requested* so far (`0` = none yet). Advanced by
+    /// [`claim`] and read by [`commit`]; guarding both under this single lock
+    /// keeps the eligibility compare atomic with the file write.
+    highest_requested: Mutex<u64>,
 }
 
 impl NestRegenGate {
     const fn new() -> Self {
         Self {
-            next_gen: AtomicU64::new(1),
-            last_written: Mutex::new(0),
+            highest_requested: Mutex::new(0),
         }
     }
 
     /// Claim the next generation. Call synchronously at request time so the
     /// value reflects when the regeneration was requested, not when its task
-    /// happens to run.
+    /// happens to run. Advancing the shared watermark here is what lets a later
+    /// [`commit`] recognize — and drop — any older generation's stale render.
     fn claim(&self) -> u64 {
-        self.next_gen.fetch_add(1, Ordering::SeqCst)
+        let mut requested = self
+            .highest_requested
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *requested += 1;
+        *requested
     }
 
-    /// Commit `content` for `generation`, dropping the write when a newer
-    /// generation has already committed. Returns whether the file was written.
-    /// The lock spans the compare and the write so the check-and-write is
-    /// atomic and no await occurs while it is held.
+    /// Commit `content` for `generation`, dropping the write once a newer
+    /// generation has been *requested* (regardless of whether that newer
+    /// generation has written or ever will). Returns whether the file was
+    /// written. The lock spans the compare and the write so the check-and-write
+    /// is atomic and no await occurs while it is held.
     fn commit(&self, agents_md: &Path, content: &str, generation: u64) -> io::Result<bool> {
-        let mut last = self
-            .last_written
+        let requested = self
+            .highest_requested
             .lock()
             .map_err(|_| io::Error::other("nest regen gate lock poisoned"))?;
-        if generation < *last {
+        if generation < *requested {
             return Ok(false);
         }
         upsert_managed_section(agents_md, content)?;
-        *last = generation;
         Ok(true)
     }
 }

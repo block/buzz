@@ -172,6 +172,22 @@ pub struct UnarchiveRequest {
     pub reason: Option<String>,
 }
 
+/// Roster refresh a successful archive/unarchive triggers. Binding the action
+/// to a *type* rather than a closure selected at each call site is what closes
+/// the regression Thufir found: the command wrapper passes a value (`&app`)
+/// with no callback to construct, so the "regenerate on success" selection
+/// lives entirely inside the cores below — where the tests traverse it. The
+/// production binding is the single, irreducible `AppHandle` adapter.
+pub(crate) trait NestRegenTrigger {
+    fn trigger(&self);
+}
+
+impl NestRegenTrigger for AppHandle {
+    fn trigger(&self) {
+        try_regenerate_nest(self);
+    }
+}
+
 /// Submit `builder` to the active workspace relay, then trigger `on_success`
 /// exactly once iff the relay accepted the event.
 ///
@@ -190,19 +206,21 @@ async fn submit_then_regenerate(
 }
 
 /// `AppHandle`-free core of [`archive_identity`]: resolve the owner-of-agent
-/// `auth` tag, build the real `kind:9035` request, submit it, and forward
-/// `on_success` so a successful archive refreshes the roster.
+/// `auth` tag, build the real `kind:9035` request, submit it, and trigger
+/// `regen` so a successful archive refreshes the roster.
 ///
 /// The command wrapper is untestable (it needs a live Tauri runtime for its
-/// `AppHandle`), so extracting this core is what lets a test drive the exact
-/// archive wiring — including the forwarded regeneration callback — through a
-/// loopback relay. RED-on-revert: pass `|| {}` here instead of `on_success` and
+/// `AppHandle`), so this core owns the whole orchestration — including *binding*
+/// the regeneration trigger onto the successful-submit path. The wrapper only
+/// hands it the `AppHandle` as the trigger; a test drives the exact archive
+/// wiring with a counting trigger over a loopback relay. RED-on-revert: change
+/// `|| regen.trigger()` to `|| {}` here and
 /// `archive_core_fires_regen_only_on_accepted_submit` fails while the unarchive
 /// core test stays green.
 async fn archive_identity_core(
     req: &ArchiveRequest,
     state: &AppState,
-    on_success: impl FnOnce(),
+    regen: &impl NestRegenTrigger,
 ) -> Result<SubmitEventResponse, String> {
     let auth_tag = maybe_owner_auth_tag(state, &req.target_pubkey).await?;
     let builder = events::build_archive_identity_request(
@@ -212,18 +230,18 @@ async fn archive_identity_core(
         req.replaced_by.as_deref(),
         auth_tag.as_ref(),
     )?;
-    submit_then_regenerate(builder, state, on_success).await
+    submit_then_regenerate(builder, state, || regen.trigger()).await
 }
 
 /// `AppHandle`-free core of [`unarchive_identity`]: builds the real `kind:9036`
-/// request and forwards `on_success` on acceptance. See [`archive_identity_core`]
-/// for why this seam is extracted. RED-on-revert: pass `|| {}` here and
-/// `unarchive_core_fires_regen_only_on_accepted_submit` fails while the archive
-/// core test stays green.
+/// request and triggers `regen` on acceptance. See [`archive_identity_core`]
+/// for why this seam is extracted. RED-on-revert: change `|| regen.trigger()`
+/// to `|| {}` here and `unarchive_core_fires_regen_only_on_accepted_submit`
+/// fails while the archive core test stays green.
 async fn unarchive_identity_core(
     req: &UnarchiveRequest,
     state: &AppState,
-    on_success: impl FnOnce(),
+    regen: &impl NestRegenTrigger,
 ) -> Result<SubmitEventResponse, String> {
     let auth_tag = maybe_owner_auth_tag(state, &req.target_pubkey).await?;
     let builder = events::build_unarchive_identity_request(
@@ -232,7 +250,7 @@ async fn unarchive_identity_core(
         req.reason.as_deref(),
         auth_tag.as_ref(),
     )?;
-    submit_then_regenerate(builder, state, on_success).await
+    submit_then_regenerate(builder, state, || regen.trigger()).await
 }
 
 /// Submit a `kind:9035` archive request to the relay. Consent path is selected
@@ -251,7 +269,7 @@ pub async fn archive_identity(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubmitEventResponse, String> {
-    archive_identity_core(&req, &state, || try_regenerate_nest(&app)).await
+    archive_identity_core(&req, &state, &app).await
 }
 
 /// Submit a `kind:9036` unarchive request to the relay. See
@@ -263,7 +281,7 @@ pub async fn unarchive_identity(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubmitEventResponse, String> {
-    unarchive_identity_core(&req, &state, || try_regenerate_nest(&app)).await
+    unarchive_identity_core(&req, &state, &app).await
 }
 
 /// If the current user is the verified NIP-OA owner of `target`, return the
@@ -458,6 +476,29 @@ pub async fn get_relay_self(state: State<'_, AppState>) -> Result<Option<String>
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+    #[cfg(not(target_os = "windows"))]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counting [`NestRegenTrigger`] double: records how many times the core
+    /// fires regeneration on the successful-submit path, standing in for the
+    /// production `AppHandle` binding without a live Tauri runtime.
+    #[cfg(not(target_os = "windows"))]
+    #[derive(Default)]
+    struct CountingRegen(AtomicUsize);
+
+    #[cfg(not(target_os = "windows"))]
+    impl CountingRegen {
+        fn count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    impl NestRegenTrigger for CountingRegen {
+        fn trigger(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     /// Build a fake `kind:0` with a valid NIP-OA auth tag for a fresh owner.
     fn kind0_with_auth(agent: &Keys, owner: &Keys) -> nostr::Event {
@@ -732,7 +773,6 @@ mod tests {
     async fn archive_core_fires_regen_only_on_accepted_submit() {
         use crate::app_state::build_app_state;
         use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
-        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
@@ -747,29 +787,24 @@ mod tests {
 
         // Accepted archive → hook fires exactly once.
         *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(true).await);
-        let fired = AtomicUsize::new(0);
-        let response = archive_identity_core(&req, &state, || {
-            fired.fetch_add(1, Ordering::SeqCst);
-        })
-        .await
-        .expect("accepted archive returns Ok");
+        let regen = CountingRegen::default();
+        let response = archive_identity_core(&req, &state, &regen)
+            .await
+            .expect("accepted archive returns Ok");
         assert!(response.accepted);
         assert_eq!(
-            fired.load(Ordering::SeqCst),
+            regen.count(),
             1,
             "an accepted archive must trigger regeneration exactly once"
         );
 
         // Rejected submit → error propagates, hook never fires.
         *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(false).await);
-        let fired = AtomicUsize::new(0);
-        let result = archive_identity_core(&req, &state, || {
-            fired.fetch_add(1, Ordering::SeqCst);
-        })
-        .await;
+        let regen = CountingRegen::default();
+        let result = archive_identity_core(&req, &state, &regen).await;
         assert!(result.is_err(), "a rejected archive must return an error");
         assert_eq!(
-            fired.load(Ordering::SeqCst),
+            regen.count(),
             0,
             "a rejected archive changed nothing, so regeneration must not fire"
         );
@@ -788,7 +823,6 @@ mod tests {
     async fn unarchive_core_fires_regen_only_on_accepted_submit() {
         use crate::app_state::build_app_state;
         use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
-        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
@@ -802,29 +836,24 @@ mod tests {
 
         // Accepted unarchive → hook fires exactly once.
         *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(true).await);
-        let fired = AtomicUsize::new(0);
-        let response = unarchive_identity_core(&req, &state, || {
-            fired.fetch_add(1, Ordering::SeqCst);
-        })
-        .await
-        .expect("accepted unarchive returns Ok");
+        let regen = CountingRegen::default();
+        let response = unarchive_identity_core(&req, &state, &regen)
+            .await
+            .expect("accepted unarchive returns Ok");
         assert!(response.accepted);
         assert_eq!(
-            fired.load(Ordering::SeqCst),
+            regen.count(),
             1,
             "an accepted unarchive must trigger regeneration exactly once"
         );
 
         // Rejected submit → error propagates, hook never fires.
         *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(false).await);
-        let fired = AtomicUsize::new(0);
-        let result = unarchive_identity_core(&req, &state, || {
-            fired.fetch_add(1, Ordering::SeqCst);
-        })
-        .await;
+        let regen = CountingRegen::default();
+        let result = unarchive_identity_core(&req, &state, &regen).await;
         assert!(result.is_err(), "a rejected unarchive must return an error");
         assert_eq!(
-            fired.load(Ordering::SeqCst),
+            regen.count(),
             0,
             "a rejected unarchive changed nothing, so regeneration must not fire"
         );
