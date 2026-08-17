@@ -73,6 +73,9 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
+import { registerPendingMention } from "@/features/agents/pendingMentionAckStore";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type MessageQueryContext = {
   optimisticId: string;
@@ -309,6 +312,10 @@ export function useChannelSubscription(channel: Channel | null) {
       if (next !== current) queryClient.setQueryData(windowKey, next);
       return;
     }
+    // NIP-MR acks and mention resolution are handled in useLiveChannelUpdates,
+    // which subscribes across every joined channel. This subscription covers
+    // only the channel currently open and is torn down on switch, so consuming
+    // acks here would lose any that arrive after the user navigates away.
     const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);
     const threadReference = isTimelineRow
       ? getThreadReference(event.tags)
@@ -439,6 +446,9 @@ export function useSendMessageMutation(
   identity: Identity | undefined,
 ) {
   const queryClient = useQueryClient();
+  // NIP-MR: needed to tell an agent mention (which should be acknowledged)
+  // from a mention of a colleague (which should not).
+  const knownAgentPubkeys = useKnownAgentPubkeys();
 
   return useMutation<
     RelayEvent,
@@ -686,6 +696,29 @@ export function useSendMessageMutation(
       if (!context) {
         return;
       }
+
+      // NIP-MR: start waiting for receipts. Registered here rather than in
+      // onMutate because the optimistic id is local — an ack references the
+      // real event id the agent saw.
+      //
+      // Read from the sent event's own `p` tags rather than the composer's
+      // explicit mentions: those are the tags an agent actually matches on, and
+      // in a DM they include every participant even when the text contains no
+      // `@`. Registering from explicit mentions alone would leave DM prompts
+      // untracked — exactly the case with the strictest gate, where a dropped
+      // prompt is most likely.
+      //
+      // Only agent pubkeys are kept: nobody expects a colleague to acknowledge
+      // within 30 seconds.
+      const mentionedAgents = message.tags
+        .filter((tag) => tag[0] === "p" && tag[1])
+        .map((tag) => normalizePubkey(tag[1]))
+        .filter(
+          (pubkey) =>
+            pubkey !== normalizePubkey(message.pubkey) &&
+            knownAgentPubkeys.has(pubkey),
+        );
+      registerPendingMention(message.id, context.channelId, mentionedAgents);
 
       const windowKey = channelWindowKey(context.channelId);
       const current =
