@@ -82,7 +82,7 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 | Flutter | 3.41+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
 | Docker | 24+ | For Postgres, Redis, MinIO |
 | `just` | latest | Task runner — `cargo install just` |
-| `lefthook` | 2.1.3 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
+| `lefthook` | 2.1.10 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
 | `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |
 
 This repo uses [Hermit](https://cashapp.github.io/hermit/) for toolchain
