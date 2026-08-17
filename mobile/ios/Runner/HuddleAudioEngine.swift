@@ -337,17 +337,22 @@ struct HuddleActiveTalkerSelector {
       )
       return nil
     }
-    let evicted = active.count >= capacity
+    let weakest = active.count >= capacity
       ? active.values.min { left, right in
-        if left.lastPacketOrdinal != right.lastPacketOrdinal {
-          return left.lastPacketOrdinal < right.lastPacketOrdinal
-        }
         if left.levelDbov != right.levelDbov {
           return left.levelDbov < right.levelDbov
         }
+        if left.lastPacketOrdinal != right.lastPacketOrdinal {
+          return left.lastPacketOrdinal < right.lastPacketOrdinal
+        }
         return left.peerIndex < right.peerIndex
-      }?.peerIndex
+      }
       : nil
+    // Equal-level packets (especially continuous -127 dBov silence) must not
+    // churn decoder/jitter state. Admit a new peer only when it is louder than
+    // the quietest selected peer.
+    if let weakest, levelDbov <= weakest.levelDbov { return nil }
+    let evicted = weakest?.peerIndex
     if let evicted { active.removeValue(forKey: evicted) }
     active[peerIndex] = Activity(
       peerIndex: peerIndex,
@@ -524,6 +529,7 @@ final class HuddleAudioEngine {
         {
           evicted.release(from: audioEngine)
         }
+        if activeTalkers.active[packet.peerIndex] == nil { return }
         let playback: HuddlePeerPlayback
         if let existing = peerPlaybacks[packet.peerIndex] {
           playback = existing

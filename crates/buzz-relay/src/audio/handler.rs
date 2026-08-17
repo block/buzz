@@ -662,6 +662,11 @@ async fn handle_active_audio_connection(
     }
 
     // ── Step 6: emit kind:48101 (PARTICIPANT_JOINED) ──────────────────────────
+    let lifecycle_revision = if remote_session.is_some() {
+        roster_revision
+    } else {
+        admission_revision
+    };
     emit_participant_event(
         &state,
         &tenant,
@@ -669,6 +674,7 @@ async fn handle_active_audio_connection(
         channel_id,
         parent_id_for_event,
         &pubkey_hex,
+        Some(lifecycle_revision),
     )
     .await;
 
@@ -832,21 +838,33 @@ async fn handle_active_audio_connection(
     } else {
         room.remove_peer_and_check_ended(peer_id)
     };
+    let removal_revision = if remote_session.is_none() {
+        removal.as_ref().map(|(delta, _)| delta.revision)
+    } else {
+        // The ingress mirror's local revision is not the owner's authoritative
+        // ordering. Omit it rather than publishing a plausible-but-wrong value.
+        None
+    };
     let should_auto_end = removal.as_ref().map(|(_, ended)| *ended).unwrap_or(false);
 
     if remote_session.is_none() {
         if let Some((delta, _)) = removal {
-            let left = delta
-                .left
-                .expect("peer removal deltas always carry the removed peer");
-            let left_msg = serde_json::json!({
-                "type": "left",
-                "revision": delta.revision,
-                "pubkey": left.pubkey,
-                "peer_index": left.peer_index,
-            })
-            .to_string();
-            room.broadcast_control(left_msg);
+            if let Some(left) = delta.left {
+                let left_msg = serde_json::json!({
+                    "type": "left",
+                    "revision": delta.revision,
+                    "pubkey": left.pubkey,
+                    "peer_index": left.peer_index,
+                })
+                .to_string();
+                room.broadcast_control(left_msg);
+            } else {
+                warn!(
+                    channel_id = %channel_id,
+                    revision = delta.revision,
+                    "audio peer removal delta did not include the removed peer"
+                );
+            }
         }
     }
 
@@ -857,6 +875,7 @@ async fn handle_active_audio_connection(
         channel_id,
         parent_id_for_event,
         &pubkey_hex,
+        removal_revision,
     )
     .await;
 
@@ -886,6 +905,7 @@ async fn handle_active_audio_connection(
                     channel_id,
                     parent_id_for_event,
                     &pubkey_hex,
+                    None,
                 )
                 .await;
             }
@@ -1288,8 +1308,16 @@ async fn emit_participant_event(
     channel_id: Uuid,
     parent_channel_id: Uuid,
     participant_pubkey: &str,
+    roster_revision: Option<u64>,
 ) {
-    let content = serde_json::json!({"ephemeral_channel_id": channel_id.to_string()}).to_string();
+    let content = match roster_revision {
+        Some(revision) => serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+            "roster_revision": revision,
+        }),
+        None => serde_json::json!({"ephemeral_channel_id": channel_id.to_string()}),
+    }
+    .to_string();
 
     let h_tag = match Tag::parse(["h", &parent_channel_id.to_string()]) {
         Ok(t) => t,

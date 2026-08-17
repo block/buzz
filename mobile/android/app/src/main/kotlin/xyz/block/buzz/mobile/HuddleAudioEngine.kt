@@ -62,15 +62,21 @@ internal class HuddleActiveTalkerSelector(
             active[peerIndex] = Activity(peerIndex, ordinal, levelDbov)
             return null
         }
-        val evicted = if (active.size >= capacity) {
+        val weakest = if (active.size >= capacity) {
             active.values.minWithOrNull(
-                compareBy<Activity> { it.lastPacketOrdinal }
-                    .thenBy { it.levelDbov }
+                compareBy<Activity> { it.levelDbov }
+                    .thenBy { it.lastPacketOrdinal }
                     .thenBy { it.peerIndex },
-            )?.peerIndex.also { index -> index?.let(active::remove) }
+            )
         } else {
             null
         }
+        // Equal-level packets (especially continuous -127 dBov silence) must
+        // not churn decoder/jitter state. A new peer earns a slot only when it
+        // is actually louder than the quietest selected peer.
+        if (weakest != null && levelDbov <= weakest.levelDbov) return null
+        val evicted = weakest?.peerIndex
+        evicted?.let(active::remove)
         active[peerIndex] = Activity(peerIndex, ordinal, levelDbov)
         return evicted
     }
@@ -78,6 +84,8 @@ internal class HuddleActiveTalkerSelector(
     fun remove(peerIndex: Int) {
         active.remove(peerIndex)
     }
+
+    fun contains(peerIndex: Int): Boolean = active.containsKey(peerIndex)
 
     fun indices(): Set<Int> = active.keys.toSet()
 }
@@ -493,6 +501,7 @@ internal class HuddleAudioEngine(
                             packet.levelDbov,
                         )
                         evicted?.let { playbacks.remove(it)?.release() }
+                        if (!activeTalkers.contains(packet.peerIndex)) continue
                         val playback = playbacks[packet.peerIndex] ?: PeerPlayback(
                             packet.peerIndex,
                         ).also {

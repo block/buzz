@@ -1,6 +1,7 @@
 package xyz.block.buzz.mobile
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -10,8 +11,8 @@ class HuddleActiveTalkerSelectorTest {
         val selector = HuddleActiveTalkerSelector(capacity = 15)
 
         repeat(15) { peer -> assertNull(selector.activate(peer, -20)) }
-        assertEquals(0, selector.activate(15, -20))
-        assertEquals((1..15).toSet(), selector.indices())
+        assertNull(selector.activate(15, -20))
+        assertEquals((0..14).toSet(), selector.indices())
     }
 
     @Test
@@ -21,20 +22,41 @@ class HuddleActiveTalkerSelectorTest {
         selector.activate(4, -40)
         selector.activate(2, -20)
         selector.activate(4, -10)
-        assertEquals(2, selector.activate(9, -30))
+        assertEquals(2, selector.activate(9, -5))
         assertEquals(setOf(4, 9), selector.indices())
 
-        assertEquals(4, selector.activate(2, -15))
+        assertEquals(4, selector.activate(2, -1))
         assertEquals(setOf(2, 9), selector.indices())
     }
 
     @Test
-    fun `stable peer index breaks equal activity ties`() {
+    fun `equal level does not replace selected peer`() {
         val selector = HuddleActiveTalkerSelector(capacity = 1)
 
         selector.activate(7, -30)
-        assertEquals(7, selector.activate(3, -30))
-        assertEquals(setOf(3), selector.indices())
+        assertNull(selector.activate(3, -30))
+        assertEquals(setOf(7), selector.indices())
+    }
+
+    @Test
+    fun `equal level packets do not churn selected peers`() {
+        val selector = HuddleActiveTalkerSelector(capacity = 2)
+
+        selector.activate(4, -127)
+        selector.activate(2, -127)
+        assertNull(selector.activate(9, -127))
+        assertFalse(selector.contains(9))
+        assertEquals(setOf(2, 4), selector.indices())
+    }
+
+    @Test
+    fun `louder peer replaces the quietest selected peer`() {
+        val selector = HuddleActiveTalkerSelector(capacity = 2)
+
+        selector.activate(4, -40)
+        selector.activate(2, -20)
+        assertEquals(4, selector.activate(9, -30))
+        assertEquals(setOf(2, 9), selector.indices())
     }
 
     @Test

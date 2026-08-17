@@ -13,8 +13,8 @@ class RunnerTests: XCTestCase {
     for peer in 0..<15 {
       XCTAssertNil(selector.activate(peerIndex: peer, levelDbov: -20))
     }
-    XCTAssertEqual(selector.activate(peerIndex: 15, levelDbov: -20), 0)
-    XCTAssertEqual(Set(selector.active.keys), Set(1...15))
+    XCTAssertNil(selector.activate(peerIndex: 15, levelDbov: -20))
+    XCTAssertEqual(Set(selector.active.keys), Set(0..<15))
 
     selector.remove(7)
     XCTAssertFalse(selector.active.keys.contains(7))
@@ -25,11 +25,21 @@ class RunnerTests: XCTestCase {
   func testHuddleActiveTalkerSelectorUsesRecentActivity() {
     var selector = HuddleActiveTalkerSelector(capacity: 2)
 
-    XCTAssertNil(selector.activate(peerIndex: 4, levelDbov: -40))
+    XCTAssertNil(selector.activate(peerIndex: 4, levelDbov: -10))
     XCTAssertNil(selector.activate(peerIndex: 2, levelDbov: -20))
     XCTAssertNil(selector.activate(peerIndex: 4, levelDbov: -10))
-    XCTAssertEqual(selector.activate(peerIndex: 9, levelDbov: -30), 2)
+    XCTAssertEqual(selector.activate(peerIndex: 9, levelDbov: -5), 2)
     XCTAssertEqual(Set(selector.active.keys), Set([4, 9]))
+  }
+
+  func testHuddleActiveTalkerSelectorDoesNotChurnAtEqualLevels() {
+    var selector = HuddleActiveTalkerSelector(capacity: 2)
+
+    XCTAssertNil(selector.activate(peerIndex: 4, levelDbov: -127))
+    XCTAssertNil(selector.activate(peerIndex: 2, levelDbov: -127))
+    XCTAssertNil(selector.activate(peerIndex: 9, levelDbov: -127))
+    XCTAssertNil(selector.active[9])
+    XCTAssertEqual(Set(selector.active.keys), Set([2, 4]))
   }
 
   func testHuddlePacketJitterQueueReordersAndRejectsStaleDuplicates() {

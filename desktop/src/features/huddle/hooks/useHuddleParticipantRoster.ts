@@ -21,17 +21,60 @@ function normalizedPubkey(value: string | null | undefined): string | null {
   return normalized ? normalized : null;
 }
 
-function lifecycleChannelId(event: RelayEvent): string | null {
+function lifecycleContent(event: RelayEvent): {
+  ephemeralChannelId: string | null;
+  rosterRevision: number | null;
+} {
   try {
     const content = JSON.parse(event.content) as {
       ephemeral_channel_id?: unknown;
+      roster_revision?: unknown;
     };
-    return typeof content.ephemeral_channel_id === "string"
-      ? content.ephemeral_channel_id
-      : null;
+    return {
+      ephemeralChannelId:
+        typeof content.ephemeral_channel_id === "string"
+          ? content.ephemeral_channel_id
+          : null,
+      rosterRevision:
+        typeof content.roster_revision === "number" &&
+        Number.isSafeInteger(content.roster_revision) &&
+        content.roster_revision >= 0
+          ? content.roster_revision
+          : null,
+    };
   } catch {
-    return null;
+    return { ephemeralChannelId: null, rosterRevision: null };
   }
+}
+
+function lifecycleChannelId(event: RelayEvent): string | null {
+  return lifecycleContent(event).ephemeralChannelId;
+}
+
+function lifecyclePhase(kind: number): number {
+  if (kind === KIND_HUDDLE_STARTED) return 0;
+  if (kind === KIND_HUDDLE_ENDED) return 2;
+  return 1;
+}
+
+function compareLifecycleEvents(left: RelayEvent, right: RelayEvent): number {
+  const timestampOrder = left.created_at - right.created_at;
+  if (timestampOrder !== 0) return timestampOrder;
+
+  const phaseOrder = lifecyclePhase(left.kind) - lifecyclePhase(right.kind);
+  if (phaseOrder !== 0) return phaseOrder;
+
+  const leftRevision = lifecycleContent(left).rosterRevision;
+  const rightRevision = lifecycleContent(right).rosterRevision;
+  if (
+    leftRevision !== null &&
+    rightRevision !== null &&
+    leftRevision !== rightRevision
+  ) {
+    return leftRevision - rightRevision;
+  }
+
+  return left.kind - right.kind || left.id.localeCompare(right.id);
 }
 
 function lifecycleParticipant(event: RelayEvent): string | null {
@@ -60,9 +103,10 @@ export function reconstructHuddleParticipantRoster({
   );
   const sorted = [...events]
     .filter((event) => lifecycleChannelId(event) === ephemeralChannelId)
-    // Equal-second lifecycle events must retain relay delivery order: kind/id
-    // are not causal and can invert a leave followed by an immediate rejoin.
-    .sort((left, right) => left.created_at - right.created_at);
+    // Nostr timestamps have second precision and relay history arrives newest
+    // first. Session phases break start/end ties; owner roster revisions order
+    // same-second join/leave mutations without relying on delivery order.
+    .sort(compareLifecycleEvents);
   let ended = false;
 
   for (const event of sorted) {
