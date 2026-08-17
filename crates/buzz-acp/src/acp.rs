@@ -4109,7 +4109,15 @@ mod tests {
                 .expect("steer_tx send should succeed");
         });
 
-        let idle = std::time::Duration::from_millis(800);
+        // The idle timeout is only how this loop *exits* once the fixture has
+        // answered — no assertion depends on its value, and the ack and the
+        // captured bytes are checked afterwards either way. At 800ms it was
+        // also, accidentally, a deadline the fixture had to beat: an MSYS
+        // `read` plus a file write can exceed it on a loaded host, and then
+        // the loop gave up before the response arrived. Three seconds is far
+        // outside that range while still bounding a fixture that never
+        // answers, which the 10s cap catches regardless.
+        let idle = std::time::Duration::from_secs(3);
         let max_dur = std::time::Duration::from_secs(10);
         let hard_deadline = tokio::time::Instant::now() + max_dur;
         let _ = client
