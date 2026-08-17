@@ -25,7 +25,6 @@ export type MessageComposerEditTarget = {
 export type MessageComposerProps = {
   audienceContext?: {
     type: "channel" | "thread";
-    threadRootId?: string;
   } | null;
   channelId?: string | null;
   channelName: string;

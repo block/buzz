@@ -126,16 +126,11 @@ function MessageComposerImpl({
   const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
-  const audienceThreadRootId =
-    audienceContext?.type === "thread"
-      ? (audienceContext.threadRootId ?? null)
-      : null;
   const audienceScope =
     audienceContext && channelId && ownerPubkey
       ? getPersistentAgentAudienceScope({
           ownerPubkey,
           channelId,
-          threadRootId: audienceThreadRootId,
         })
       : null;
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);

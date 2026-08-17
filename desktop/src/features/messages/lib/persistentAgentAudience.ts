@@ -78,13 +78,11 @@ function persistAudiences(): void {
 export function getPersistentAgentAudienceScope({
   ownerPubkey,
   channelId,
-  threadRootId = null,
 }: PersistentAgentAudienceScopeInput): string | null {
   const owner = ownerPubkey.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(owner) || !channelId) return null;
-  return threadRootId
-    ? `${owner}:${channelId}:thread:${threadRootId}`
-    : `${owner}:${channelId}:channel`;
+  // Thread composers intentionally share their parent channel's audience.
+  return `${owner}:${channelId}:channel`;
 }
 
 export function setPersistentAgentAudience(

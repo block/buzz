@@ -9,7 +9,6 @@ const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
-const SCOPE = `${OWNER}:${CHANNEL_ID}:thread:${THREAD_ROOT_ID}`;
 const CHANNEL_SCOPE = `${OWNER}:${CHANNEL_ID}:channel`;
 
 async function seedAudience(page: Page, pubkeys: string[], theme = "buzz") {
@@ -21,7 +20,7 @@ async function seedAudience(page: Page, pubkeys: string[], theme = "buzz") {
       );
       window.localStorage.setItem("buzz-theme", selectedTheme);
     },
-    { audience: pubkeys, scope: SCOPE, selectedTheme: theme },
+    { audience: pubkeys, scope: CHANNEL_SCOPE, selectedTheme: theme },
   );
 }
 
@@ -263,7 +262,7 @@ test("locked agents restore in the tray and can be removed independently", async
           );
           return stored[scope] ?? [];
         },
-        { scope: SCOPE },
+        { scope: CHANNEL_SCOPE },
       ),
     )
     .toEqual([AGENT_A]);
@@ -280,6 +279,47 @@ test("locked agents restore in the tray and can be removed independently", async
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "hello"))
     .not.toContain(AGENT_B);
+});
+
+test("channel locks carry into threads and stay synchronized", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A]);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  await expect(
+    channelComposer(page).getByRole("button", {
+      name: "Always mention Morgarita",
+    }),
+  ).toBeVisible();
+
+  await openThread(page);
+  const channelLock = channelComposer(page).getByRole("button", {
+    name: "Always mention Morgarita",
+  });
+  const threadLock = threadComposer(page).getByRole("button", {
+    name: "Always mention Morgarita",
+  });
+  await expect(channelLock).toBeVisible();
+  await expect(threadLock).toBeVisible();
+
+  await threadLock.click();
+  await expect(threadLock).toHaveCount(0);
+  await expect(channelLock).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ scope }) => {
+          const stored = JSON.parse(
+            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+          );
+          return stored[scope] ?? null;
+        },
+        { scope: CHANNEL_SCOPE },
+      ),
+    )
+    .toEqual([]);
 });
 
 for (const theme of ["buzz", "buzz-dark"]) {

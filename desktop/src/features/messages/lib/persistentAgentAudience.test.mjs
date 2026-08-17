@@ -33,28 +33,20 @@ function savedAudiences() {
   return JSON.parse(window.localStorage.getItem(storageKey));
 }
 
-test("conversation scopes isolate identities, channels, and threads", async () => {
+test("audience scopes isolate identities and channels", async () => {
   const store = await loadStore();
   const scopes = [
     store.getPersistentAgentAudienceScope({
       ownerPubkey: ownerA,
       channelId: "channel-a",
-      threadRootId: "root-1",
-    }),
-    store.getPersistentAgentAudienceScope({
-      ownerPubkey: ownerA,
-      channelId: "channel-a",
-      threadRootId: "root-2",
     }),
     store.getPersistentAgentAudienceScope({
       ownerPubkey: ownerA,
       channelId: "channel-b",
-      threadRootId: "root-1",
     }),
     store.getPersistentAgentAudienceScope({
       ownerPubkey: ownerB,
       channelId: "channel-a",
-      threadRootId: "root-1",
     }),
   ];
 
@@ -63,7 +55,7 @@ test("conversation scopes isolate identities, channels, and threads", async () =
     store.setPersistentAgentAudience(scope, [agentA]);
   }
 
-  assert.equal(new Set(Object.keys(savedAudiences())).size, 4);
+  assert.equal(new Set(Object.keys(savedAudiences())).size, 3);
 });
 
 test("address locks can be added independently", async () => {
@@ -71,7 +63,6 @@ test("address locks can be added independently", async () => {
   const scope = store.getPersistentAgentAudienceScope({
     ownerPubkey: ownerA,
     channelId: "channel-a",
-    threadRootId: "root",
   });
   store.addPersistentAgentAudienceMember(scope, agentA);
   store.addPersistentAgentAudienceMember(scope, agentB);
@@ -100,7 +91,7 @@ test("address locks can be removed independently", async () => {
 
 test("removing final chip preserves an explicit empty scope", async () => {
   const store = await loadStore(4);
-  const scope = `${ownerA}:channel-a:thread:root`;
+  const scope = `${ownerA}:channel-a:channel`;
   store.setPersistentAgentAudience(scope, [agentA]);
   store.removePersistentAgentAudienceMember(scope, agentA);
 
@@ -213,7 +204,7 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
   dom.window.close();
 });
 
-test("channel and thread scopes are distinct", async () => {
+test("channel and thread composers share the channel audience scope", async () => {
   const store = await loadStore(7);
   const channelScope = store.getPersistentAgentAudienceScope({
     ownerPubkey: ownerA,
@@ -226,5 +217,5 @@ test("channel and thread scopes are distinct", async () => {
   });
 
   assert.equal(channelScope, `${ownerA}:channel-a:channel`);
-  assert.equal(threadScope, `${ownerA}:channel-a:thread:root`);
+  assert.equal(threadScope, channelScope);
 });

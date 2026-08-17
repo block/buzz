@@ -756,14 +756,7 @@ function InboxMessageDetailPane({
           />
           <div className="pointer-events-auto">
             <MessageComposer
-              audienceContext={
-                isDirectMessage
-                  ? null
-                  : {
-                      type: "thread",
-                      threadRootId: item.conversationId,
-                    }
-              }
+              audienceContext={isDirectMessage ? null : { type: "thread" }}
               channelId={item.item.channelId}
               channelName={item.channelLabel ?? "channel"}
               channelType={composerChannelType}
