@@ -17,6 +17,8 @@ members = [
     "crates/buzz-admin",
     "crates/buzz-deletion",
     "crates/buzz-workflow",
+    "crates/buzz-flow",
+    "crates/buzz-agent-studio",
     "crates/buzz-media",
     "crates/buzz-cli",
     "crates/buzz-pairing-cli",
@@ -142,6 +144,8 @@ buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-search = { path = "crates/buzz-search" }
 buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }
+buzz-flow = { path = "crates/buzz-flow" }
+buzz-agent-studio = { path = "crates/buzz-agent-studio" }
 buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }

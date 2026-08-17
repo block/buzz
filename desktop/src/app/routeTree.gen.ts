@@ -10,7 +10,9 @@ import { Route as settingsRouteImport } from "./routes/settings";
 import { Route as remindersRouteImport } from "./routes/reminders";
 import { Route as pulseRouteImport } from "./routes/pulse";
 import { Route as projectsRouteImport } from "./routes/projects";
+import { Route as flowStudioRouteImport } from "./routes/flow-studio";
 import { Route as agentsRouteImport } from "./routes/agents";
+import { Route as agentStudioRouteImport } from "./routes/agent-studio";
 import { Route as indexRouteImport } from "./routes/index";
 import { Route as workflowsDotworkflowIdRouteImport } from "./routes/workflows.$workflowId";
 import { Route as projectsDotprojectIdRouteImport } from "./routes/projects.$projectId";
@@ -43,9 +45,19 @@ const projectsRoute = projectsRouteImport.update({
   path: "/projects",
   getParentRoute: () => rootRouteImport,
 } as any);
+const flowStudioRoute = flowStudioRouteImport.update({
+  id: "/flow-studio",
+  path: "/flow-studio",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const agentsRoute = agentsRouteImport.update({
   id: "/agents",
   path: "/agents",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const agentStudioRoute = agentStudioRouteImport.update({
+  id: "/agent-studio",
+  path: "/agent-studio",
   getParentRoute: () => rootRouteImport,
 } as any);
 const indexRoute = indexRouteImport.update({
@@ -82,7 +94,9 @@ const channelsDotchannelIdDotpostsDotpostIdRoute =
 
 export interface FileRoutesByFullPath {
   "/": typeof indexRoute;
+  "/agent-studio": typeof agentStudioRoute;
   "/agents": typeof agentsRoute;
+  "/flow-studio": typeof flowStudioRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -96,7 +110,9 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   "/": typeof indexRoute;
+  "/agent-studio": typeof agentStudioRoute;
   "/agents": typeof agentsRoute;
+  "/flow-studio": typeof flowStudioRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -111,7 +127,9 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof indexRoute;
+  "/agent-studio": typeof agentStudioRoute;
   "/agents": typeof agentsRoute;
+  "/flow-studio": typeof flowStudioRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -127,7 +145,9 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
   fullPaths:
     | "/"
+    | "/agent-studio"
     | "/agents"
+    | "/flow-studio"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -141,7 +161,9 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo;
   to:
     | "/"
+    | "/agent-studio"
     | "/agents"
+    | "/flow-studio"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -155,7 +177,9 @@ export interface FileRouteTypes {
   id:
     | "__root__"
     | "/"
+    | "/agent-studio"
     | "/agents"
+    | "/flow-studio"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -170,7 +194,9 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   indexRoute: typeof indexRoute;
+  agentStudioRoute: typeof agentStudioRoute;
   agentsRoute: typeof agentsRoute;
+  flowStudioRoute: typeof flowStudioRoute;
   projectsRoute: typeof projectsRoute;
   pulseRoute: typeof pulseRoute;
   remindersRoute: typeof remindersRoute;
@@ -220,11 +246,25 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof projectsRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/flow-studio": {
+      id: "/flow-studio";
+      path: "/flow-studio";
+      fullPath: "/flow-studio";
+      preLoaderRoute: typeof flowStudioRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/agents": {
       id: "/agents";
       path: "/agents";
       fullPath: "/agents";
       preLoaderRoute: typeof agentsRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/agent-studio": {
+      id: "/agent-studio";
+      path: "/agent-studio";
+      fullPath: "/agent-studio";
+      preLoaderRoute: typeof agentStudioRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/": {
@@ -274,7 +314,9 @@ declare module "@tanstack/react-router" {
 
 const rootRouteChildren: RootRouteChildren = {
   indexRoute: indexRoute,
+  agentStudioRoute: agentStudioRoute,
   agentsRoute: agentsRoute,
+  flowStudioRoute: flowStudioRoute,
   projectsRoute: projectsRoute,
   pulseRoute: pulseRoute,
   remindersRoute: remindersRoute,

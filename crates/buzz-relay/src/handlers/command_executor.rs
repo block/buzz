@@ -950,6 +950,7 @@ async fn handle_workflow_trigger(
     // 5. Spawn workflow execution
     let engine = Arc::clone(&state.workflow_engine);
     let db = state.db.clone();
+    let state = Arc::clone(state);
     let def_value = workflow.definition.clone();
     let trigger_ctx_clone = trigger_ctx.clone();
     tokio::spawn(async move {
@@ -987,8 +988,11 @@ async fn handle_workflow_trigger(
             None,
         )
         .await;
+        let trace = crate::flow_telemetry::trace_from_execution(&result, None);
         engine
             .finalize_run(community_id, run_id, result, None)
+            .await;
+        crate::flow_telemetry::publish_flow_block_telemetry(&state, community_id, &def, &trace)
             .await;
     });
 
@@ -1128,11 +1132,18 @@ async fn handle_approval_grant(
     let workflow_id = approval.workflow_id;
     let resume_index = approval.step_index as usize + 1;
     let engine = Arc::clone(&state.workflow_engine);
-    let db = state.db.clone();
+    let state = Arc::clone(state);
 
     tokio::spawn(async move {
-        resume_workflow_after_approval(engine, db, community_id, run_id, workflow_id, resume_index)
-            .await;
+        resume_workflow_after_approval(
+            engine,
+            state,
+            community_id,
+            run_id,
+            workflow_id,
+            resume_index,
+        )
+        .await;
     });
 
     // 7. Return response
@@ -1292,12 +1303,13 @@ async fn handle_approval_deny(
 /// Resume a suspended workflow run after an approval gate has been granted.
 async fn resume_workflow_after_approval(
     engine: Arc<buzz_workflow::WorkflowEngine>,
-    db: buzz_db::Db,
+    state: Arc<AppState>,
     community_id: CommunityId,
     run_id: Uuid,
     workflow_id: Uuid,
     resume_index: usize,
 ) {
+    let db = state.db.clone();
     let run = match db.get_workflow_run(community_id, run_id).await {
         Ok(r) => r,
         Err(e) => {
@@ -1381,7 +1393,9 @@ async fn resume_workflow_after_approval(
         Some(initial_outputs),
     )
     .await;
+    let trace = crate::flow_telemetry::trace_from_execution(&result, existing_trace.clone());
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+    crate::flow_telemetry::publish_flow_block_telemetry(&state, community_id, &def, &trace).await;
 }

@@ -58,6 +58,16 @@ export const KIND_MANAGED_AGENT = 30177;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_AGENT_TURN_METRIC = 44200;
+// Buzz Hive — Flow Studio (46200–46399) and Agent Studio (47200–47399).
+// Mirror of buzz-core/src/kind.rs.
+export const KIND_FLOW_GRAPH_SAVED = 46200;
+export const KIND_FLOW_BLOCK_EXECUTED = 46201;
+export const KIND_FLOW_BLOCK_FAILED = 46202;
+export const KIND_AGENT_CONFIG_CREATED = 47200;
+export const KIND_AGENT_CONFIG_UPDATED = 47201;
+export const KIND_AGENT_SKILL_IMPORTED = 47250;
+export const KIND_AGENT_SESSION_TELEMETRY = 47300;
+export const KIND_AGENT_GRAPH_EDGE = 47350;
 export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
 export const KIND_REPO_STATE = 30618;

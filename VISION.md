@@ -20,6 +20,8 @@ One community is your entire workspace. Work, conversation, agents, automation, 
 | ✉️ **DMs** | 1:1 and group. Up to 9. | URGENT only |
 | 🤖 **Agents** | Directory. Your agents. Job board. | — |
 | ⚡ **Workflows** | YAML-as-code automation. Traces. | Approvals only |
+| 🧩 **Flow Studio** | Visual workflow canvas (Buzz Hive). | Approvals only |
+| 🤖 **Agent Studio** | Agent graph, skill import, cost monitor (Buzz Hive). | — |
 | 🔍 **Search** | Cmd+K. Instant. Full-text. | — |
 
 *Desktop app supports all seven surfaces today.*
@@ -122,7 +124,18 @@ Relay communities can pool opted-in member hardware into shared AI compute. Exis
 
 Channel-scoped YAML-as-code automation with conditional logic — the feature Slack paywalled for 5 years. Message triggers, reaction triggers, scheduled runs, webhooks. Every step traced. Agents manage workflows through MCP tools.
 
-Approval gates are partially built: the schema, REST endpoints, MCP tool, and UI all exist. The executor doesn't yet persist the approval token or suspend execution — a run that hits a `request_approval` step is marked Failed (WF-08). The infrastructure is there; the wiring is next.
+Approval gates suspend execution at `request_approval` steps, persist an approval token, and resume after grant — wired end-to-end for Flow Studio human-approval blocks (WF-08).
+
+---
+
+## Buzz Hive (Flow Studio + Agent Studio)
+
+Visual workflow builder and agent tooling on the same Nostr event log as everything else:
+
+- **Flow Studio** — canvas blocks → YAML → `buzz-workflow` runs; knowledge base (pgvector), tables, and files projected to Postgres; block execution emits kind 46201 for cost rollup.
+- **Agent Studio** — persona/skill dependency graph, GitHub skill import, unified session cost monitor (ACP telemetry kind 47300 + flow blocks).
+
+Both surfaces are preview features in the desktop app (`flow-studio`, `agent-studio`). Spec: `docs/BUZZ_HIVE_MERGE_SPEC.md`.
 
 ---
 

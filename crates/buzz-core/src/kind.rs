@@ -581,7 +581,47 @@ pub const KIND_WORKFLOW_APPROVAL_GRANTED: u32 = 46011;
 /// A pending workflow approval was denied.
 pub const KIND_WORKFLOW_APPROVAL_DENIED: u32 = 46012;
 
-// User groups (47000–47999)
+// Flow Studio (46200–46399) — Buzz Hive / Sim visual workflow merge.
+/// Flow graph saved to the event log.
+pub const KIND_FLOW_GRAPH_SAVED: u32 = 46200;
+/// A Flow Studio block started execution.
+pub const KIND_FLOW_BLOCK_EXECUTED: u32 = 46201;
+/// A Flow Studio block failed.
+pub const KIND_FLOW_BLOCK_FAILED: u32 = 46202;
+/// Knowledge base document ingested.
+pub const KIND_FLOW_KB_DOCUMENT_INGESTED: u32 = 46250;
+/// Embedding indexed for semantic search.
+pub const KIND_FLOW_KB_EMBEDDING_INDEXED: u32 = 46251;
+/// Semantic query recorded.
+pub const KIND_FLOW_KB_SEMANTIC_QUERY: u32 = 46252;
+/// Tables row created.
+pub const KIND_FLOW_TABLE_ROW_CREATED: u32 = 46300;
+/// Tables row updated.
+pub const KIND_FLOW_TABLE_ROW_UPDATED: u32 = 46301;
+/// Tables row deleted.
+pub const KIND_FLOW_TABLE_ROW_DELETED: u32 = 46302;
+/// File uploaded via Flow Studio.
+pub const KIND_FLOW_FILE_UPLOADED: u32 = 46350;
+/// File version recorded.
+pub const KIND_FLOW_FILE_VERSIONED: u32 = 46351;
+/// File deleted.
+pub const KIND_FLOW_FILE_DELETED: u32 = 46352;
+
+// Agent Studio (47200–47399) — Buzz Hive / claude-code-cli-ui merge.
+// Occupies the reserved user-groups band (47000–47999); does not overlap
+// audit (48001) or huddle (48100+) kinds.
+/// Agent config created (persona binding).
+pub const KIND_AGENT_CONFIG_CREATED: u32 = 47200;
+/// Agent config updated.
+pub const KIND_AGENT_CONFIG_UPDATED: u32 = 47201;
+/// Skill or command imported (e.g. from GitHub).
+pub const KIND_AGENT_SKILL_IMPORTED: u32 = 47250;
+/// Session telemetry: token usage, cost, tool-call per turn.
+pub const KIND_AGENT_SESSION_TELEMETRY: u32 = 47300;
+/// Dependency graph edge (agent→command, command→skill).
+pub const KIND_AGENT_GRAPH_EDGE: u32 = 47350;
+
+// User groups (47000–47999) — Agent Studio kinds above use 47200–47399.
 
 // System / admin custom range (48000–48999)
 /// An audit log entry was recorded.
@@ -745,6 +785,23 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_WORKFLOW_APPROVAL_REQUESTED,
     KIND_WORKFLOW_APPROVAL_GRANTED,
     KIND_WORKFLOW_APPROVAL_DENIED,
+    KIND_FLOW_GRAPH_SAVED,
+    KIND_FLOW_BLOCK_EXECUTED,
+    KIND_FLOW_BLOCK_FAILED,
+    KIND_FLOW_KB_DOCUMENT_INGESTED,
+    KIND_FLOW_KB_EMBEDDING_INDEXED,
+    KIND_FLOW_KB_SEMANTIC_QUERY,
+    KIND_FLOW_TABLE_ROW_CREATED,
+    KIND_FLOW_TABLE_ROW_UPDATED,
+    KIND_FLOW_TABLE_ROW_DELETED,
+    KIND_FLOW_FILE_UPLOADED,
+    KIND_FLOW_FILE_VERSIONED,
+    KIND_FLOW_FILE_DELETED,
+    KIND_AGENT_CONFIG_CREATED,
+    KIND_AGENT_CONFIG_UPDATED,
+    KIND_AGENT_SKILL_IMPORTED,
+    KIND_AGENT_SESSION_TELEMETRY,
+    KIND_AGENT_GRAPH_EDGE,
     KIND_AUDIT_ENTRY,
     KIND_HUDDLE_STARTED,
     KIND_HUDDLE_PARTICIPANT_JOINED,
@@ -788,6 +845,16 @@ pub const fn is_parameterized_replaceable(kind: u32) -> bool {
 /// These must not trigger workflows (prevents infinite loops).
 pub const fn is_workflow_execution_kind(kind: u32) -> bool {
     kind >= KIND_WORKFLOW_TRIGGERED && kind <= KIND_WORKFLOW_APPROVAL_DENIED
+}
+
+/// Returns `true` if `kind` is a Flow Studio event (46200–46399).
+pub const fn is_flow_studio_kind(kind: u32) -> bool {
+    kind >= KIND_FLOW_GRAPH_SAVED && kind <= 46399
+}
+
+/// Returns `true` if `kind` is an Agent Studio event (47200–47399).
+pub const fn is_agent_studio_kind(kind: u32) -> bool {
+    kind >= KIND_AGENT_CONFIG_CREATED && kind <= 47399
 }
 
 /// Returns `true` if `kind` is a NIP-43 relay membership admin command (9030–9032)
@@ -864,6 +931,13 @@ const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 3062
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
+const _: () = assert!(is_flow_studio_kind(KIND_FLOW_GRAPH_SAVED));
+const _: () = assert!(is_flow_studio_kind(46399));
+const _: () = assert!(!is_flow_studio_kind(KIND_WORKFLOW_APPROVAL_DENIED));
+const _: () = assert!(is_agent_studio_kind(KIND_AGENT_CONFIG_CREATED));
+const _: () = assert!(is_agent_studio_kind(47399));
+const _: () = assert!(!is_agent_studio_kind(KIND_AUDIT_ENTRY));
+const _: () = assert!(!is_agent_studio_kind(KIND_HUDDLE_STARTED));
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(

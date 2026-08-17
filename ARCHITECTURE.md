@@ -82,7 +82,9 @@ buzz-core    (zero I/O — types, verification, filter matching, kind registry)
     ├── buzz-pubsub      (Redis pub/sub, presence, typing indicators)
     ├── buzz-search      (Postgres FTS: query, delete)
     ├── buzz-audit       (hash-chain tamper-evident log)
-    └── buzz-workflow    (YAML-as-code automation engine)
+    ├── buzz-workflow    (YAML-as-code automation engine)
+    ├── buzz-flow        (Flow Studio — canvas blocks, KB, tables, files; kinds 46200–46399)
+    └── buzz-agent-studio (Agent Studio — graph, skills, telemetry; kinds 47200–47399)
          │
          └── buzz-relay       (ties everything together — the server)
 
@@ -503,6 +505,24 @@ Tamper-evident append-only log with SHA-256 hash chaining.
 **10 audit actions:** `EventCreated`, `EventDeleted`, `ChannelCreated`, `ChannelUpdated`, `ChannelDeleted`, `MemberAdded`, `MemberRemoved`, `AuthSuccess`, `AuthFailure`, `RateLimitExceeded`.
 
 **Does NOT:** log `KIND_AUTH` (22242) events — returns `AuditError::AuthEventForbidden` immediately. Does NOT log ephemeral events (they never reach the audit pipeline).
+
+---
+
+### buzz-flow — Flow Studio (Buzz Hive)
+
+Visual workflow canvas, block/tool registry, knowledge base, tables, and file metadata. All writes are Nostr events (kinds 46200–46399); Postgres tables in migration `0032` are a read-model projector target.
+
+**HTTP surface (relay):** `/flow-studio/blocks`, `/flow-studio/graph`, `/flow-studio/knowledge/search`, `/flow-studio/tables/{id}/rows`, `/flow-studio/files`, YAML export from canvas.
+
+**Projector:** `buzz-flow/src/projector.rs` — ingest hook in `buzz-relay` applies KB docs, table rows, and file metadata to Postgres.
+
+---
+
+### buzz-agent-studio — Agent Studio (Buzz Hive)
+
+Agent/skill dependency graph, GitHub skill import planning, and ACP session telemetry (kind 47300). Persona publishes also emit kind 47200/47201.
+
+**HTTP surface:** `/agent-studio/graph`, `/agent-studio/sessions`, `/agent-studio/costs`, `/agent-studio/skills/import`.
 
 ---
 

@@ -30,6 +30,18 @@
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": ["desktop"]
+    },
+    {
+      "id": "flow-studio",
+      "name": "Flow Studio",
+      "description": "Visual workflow builder (Buzz Hive / Sim merge)",
+      "platforms": ["desktop"]
+    },
+    {
+      "id": "agent-studio",
+      "name": "Agent Studio",
+      "description": "Agent/skill dependency graph and GitHub import (Buzz Hive)",
+      "platforms": ["desktop"]
     }
   ]
 }

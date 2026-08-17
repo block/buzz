@@ -9,7 +9,9 @@ export type AppView =
   | "agents"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "projects"
+  | "flow-studio"
+  | "agent-studio";
 
 const WINDOW_DRAG_HANDLE_HEIGHT = 44;
 const TAURI_DRAG_REGION_ATTR = "data-tauri-drag-region";
@@ -185,6 +187,20 @@ export function deriveShellRoute(pathname: string): {
     return {
       selectedChannelId: null,
       selectedView: "pulse",
+    };
+  }
+
+  if (pathname === "/flow-studio" || pathname.startsWith("/flow-studio/")) {
+    return {
+      selectedChannelId: null,
+      selectedView: "flow-studio",
+    };
+  }
+
+  if (pathname === "/agent-studio" || pathname.startsWith("/agent-studio/")) {
+    return {
+      selectedChannelId: null,
+      selectedView: "agent-studio",
     };
   }
 

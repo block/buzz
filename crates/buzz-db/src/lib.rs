@@ -27,6 +27,8 @@ pub mod error;
 pub mod event;
 /// Home feed queries.
 pub mod feed;
+/// Flow Studio read-model persistence (Buzz Hive).
+pub mod flow_studio;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
 /// Embedded database migrations.
@@ -4194,6 +4196,160 @@ impl Db {
             note,
         )
         .await
+    }
+
+    /// Upsert a Flow Studio knowledge document read-model row.
+    #[datastore_span(name = "upsert_flow_knowledge_document", system = "postgresql")]
+    pub async fn upsert_flow_knowledge_document(
+        &self,
+        community_id: CommunityId,
+        knowledge_base_id: &str,
+        document_id: &str,
+        filename: &str,
+        mime_type: &str,
+    ) -> Result<()> {
+        flow_studio::upsert_knowledge_document(
+            &self.pool,
+            community_id,
+            knowledge_base_id,
+            document_id,
+            filename,
+            mime_type,
+        )
+        .await
+    }
+
+    /// Upsert a Flow Studio table row read-model row.
+    #[datastore_span(name = "upsert_flow_table_row", system = "postgresql")]
+    pub async fn upsert_flow_table_row(
+        &self,
+        community_id: CommunityId,
+        table_id: &str,
+        row_id: &str,
+        row_json: &str,
+    ) -> Result<()> {
+        flow_studio::upsert_table_row(&self.pool, community_id, table_id, row_id, row_json).await
+    }
+
+    /// Soft-delete a Flow Studio table row read-model row.
+    #[datastore_span(name = "delete_flow_table_row", system = "postgresql")]
+    pub async fn delete_flow_table_row(
+        &self,
+        community_id: CommunityId,
+        table_id: &str,
+        row_id: &str,
+    ) -> Result<()> {
+        flow_studio::delete_table_row(&self.pool, community_id, table_id, row_id).await
+    }
+
+    /// Index a knowledge-base text chunk with an embedding vector.
+    #[datastore_span(name = "upsert_flow_knowledge_embedding", system = "postgresql")]
+    pub async fn upsert_flow_knowledge_embedding(
+        &self,
+        community_id: CommunityId,
+        document_id: &str,
+        embedding_id: &str,
+        chunk_index: i32,
+        content: &str,
+        embedding: &[f32],
+    ) -> Result<()> {
+        flow_studio::upsert_knowledge_embedding(
+            &self.pool,
+            community_id,
+            document_id,
+            embedding_id,
+            chunk_index,
+            content,
+            embedding,
+        )
+        .await
+    }
+
+    /// Semantic (cosine) search over Flow Studio knowledge chunks.
+    #[datastore_span(name = "search_flow_knowledge_semantic", system = "postgresql")]
+    pub async fn search_flow_knowledge_semantic(
+        &self,
+        community_id: CommunityId,
+        knowledge_base_id: &str,
+        query_embedding: &[f32],
+        limit: i64,
+    ) -> Result<Vec<flow_studio::FlowKnowledgeSearchHit>> {
+        flow_studio::search_knowledge_semantic(
+            &self.pool,
+            community_id,
+            knowledge_base_id,
+            query_embedding,
+            limit,
+        )
+        .await
+    }
+
+    /// List active table rows for a Flow Studio table.
+    #[datastore_span(name = "list_flow_table_rows", system = "postgresql")]
+    pub async fn list_flow_table_rows(
+        &self,
+        community_id: CommunityId,
+        table_id: &str,
+        limit: i64,
+    ) -> Result<Vec<flow_studio::FlowTableRowRecord>> {
+        flow_studio::list_table_rows(&self.pool, community_id, table_id, limit).await
+    }
+
+    /// Upsert Flow Studio file metadata.
+    #[datastore_span(name = "upsert_flow_file", system = "postgresql")]
+    pub async fn upsert_flow_file(
+        &self,
+        community_id: CommunityId,
+        file_id: &str,
+        filename: &str,
+        media_url: Option<&str>,
+    ) -> Result<()> {
+        flow_studio::upsert_flow_file(&self.pool, community_id, file_id, filename, media_url).await
+    }
+
+    /// Soft-delete Flow Studio file metadata.
+    #[datastore_span(name = "delete_flow_file", system = "postgresql")]
+    pub async fn delete_flow_file(&self, community_id: CommunityId, file_id: &str) -> Result<()> {
+        flow_studio::delete_flow_file(&self.pool, community_id, file_id).await
+    }
+
+    /// List active Flow Studio files.
+    #[datastore_span(name = "list_flow_files", system = "postgresql")]
+    pub async fn list_flow_files(
+        &self,
+        community_id: CommunityId,
+        limit: i64,
+    ) -> Result<Vec<flow_studio::FlowFileRecord>> {
+        flow_studio::list_flow_files(&self.pool, community_id, limit).await
+    }
+
+    /// Keyword search over Flow Studio knowledge chunks.
+    #[datastore_span(name = "search_flow_knowledge", system = "postgresql")]
+    pub async fn search_flow_knowledge(
+        &self,
+        community_id: CommunityId,
+        knowledge_base_id: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<flow_studio::FlowKnowledgeSearchHit>> {
+        flow_studio::search_knowledge_content(
+            &self.pool,
+            community_id,
+            knowledge_base_id,
+            query,
+            limit,
+        )
+        .await
+    }
+
+    /// Load the latest saved Flow Studio canvas graph content for a flow id.
+    #[datastore_span(name = "get_latest_flow_graph", system = "postgresql")]
+    pub async fn get_latest_flow_graph(
+        &self,
+        community_id: CommunityId,
+        flow_id: &str,
+    ) -> Result<Option<String>> {
+        flow_studio::get_latest_flow_graph(&self.pool, community_id, flow_id).await
     }
 
     /// Ensures monthly partitions exist for the next N months.

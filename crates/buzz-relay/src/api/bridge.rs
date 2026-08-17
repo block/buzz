@@ -1924,6 +1924,7 @@ pub async fn workflow_webhook(
     // Spawn workflow execution asynchronously.
     let engine = Arc::clone(&state.workflow_engine);
     let db = state.db.clone();
+    let state = Arc::clone(&state);
     let def_value = workflow.definition.clone();
     let trigger_ctx_clone = trigger_ctx.clone();
     tokio::spawn(async move {
@@ -1961,8 +1962,11 @@ pub async fn workflow_webhook(
             None,
         )
         .await;
+        let trace = crate::flow_telemetry::trace_from_execution(&result, None);
         engine
             .finalize_run(community_id, run_id, result, None)
+            .await;
+        crate::flow_telemetry::publish_flow_block_telemetry(&state, community_id, &def, &trace)
             .await;
     });
 

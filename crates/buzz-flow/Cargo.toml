@@ -1,0 +1,18 @@
+[package]
+name = "buzz-flow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Buzz Flow Studio — visual workflow blocks ported from Sim (Buzz Hive P0 skeleton)"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-workflow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

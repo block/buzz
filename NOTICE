@@ -1,0 +1,22 @@
+Buzz
+Copyright contributors to the Buzz project.
+
+Licensed under the Apache License, Version 2.0.
+
+---
+
+## Third-party components (Buzz Hive ports)
+
+### claude-code-cli-ui (Agent Studio)
+
+- Upstream: https://github.com/Ngxba/claude-code-cli-ui
+- License: MIT
+- Ported to: `crates/buzz-agent-studio`, `desktop/src/features/agent-studio`
+- Copyright remains with original authors; see upstream LICENSE.
+
+### Sim (Flow Studio)
+
+- Upstream: https://github.com/simstudioai/sim
+- License: Apache-2.0 (verify upstream LICENSE before release)
+- Ported to: `crates/buzz-flow`, `desktop/src/features/flow-studio`
+- Reference only — not shipped as Next.js runtime.

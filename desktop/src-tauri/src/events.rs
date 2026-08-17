@@ -12,7 +12,12 @@ use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
+mod canvas;
+mod hive_studio;
 mod message_tags;
+
+pub use canvas::*;
+pub use hive_studio::*;
 
 use message_tags::{
     append_client_tags, append_sent_from_thread_tag, emoji_tags, imeta_tags, mention_reference_tags,
@@ -413,15 +418,6 @@ pub fn build_remove_reaction(reaction_event_id: EventId) -> Result<EventBuilder,
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
-// ── Canvas ───────────────────────────────────────────────────────────────────
-
-/// Kind 40100 — set canvas.
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, String> {
-    check_content(content)?;
-    let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
-    Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
-}
-
 // ── Profile ──────────────────────────────────────────────────────────────────
 
 /// Kind 0 — NIP-01 profile metadata (full snapshot).
@@ -787,14 +783,15 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
 }
 
 /// Kind 46030 — grant an approval token (with optional note).
-pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+/// Kind 46030 — grant an approval (pass `approval_ref` = hex SHA-256 of token).
+pub fn build_approval_grant(token_hash: &str, note: Option<&str>) -> Result<EventBuilder, String> {
+    let tags = vec![tag(vec!["d", token_hash])?];
     Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
 }
 
-/// Kind 46031 — deny an approval token (with optional note).
-pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+/// Kind 46031 — deny an approval (pass `approval_ref` = hex SHA-256 of token).
+pub fn build_approval_deny(token_hash: &str, note: Option<&str>) -> Result<EventBuilder, String> {
+    let tags = vec![tag(vec!["d", token_hash])?];
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
 }
 

@@ -4177,6 +4177,78 @@ async fn publish_agent_turn_metric(
             "NIP-AM: publish timed out"
         ),
     }
+    publish_agent_session_telemetry(ctx, &usage, session_id).await;
+}
+
+/// Best-effort: publish kind 47300 session telemetry for Agent Studio monitor.
+async fn publish_agent_session_telemetry(
+    ctx: &PromptContext,
+    usage: &crate::usage::TurnUsage,
+    session_id: &str,
+) {
+    use buzz_agent_studio::events::AgentSessionTelemetry;
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let Some(owner_pk) = ctx.agent_owner_pubkey.as_ref() else {
+        return;
+    };
+
+    let payload = AgentSessionTelemetry {
+        session_id: session_id.to_string(),
+        agent_id: Some(ctx.harness_name.clone()),
+        input_tokens: usage.cumulative_input_tokens.unwrap_or(0),
+        output_tokens: usage.cumulative_output_tokens.unwrap_or(0),
+        cost_usd: usage.cumulative_cost_usd.unwrap_or(0.0),
+        tool_calls: 0,
+    };
+    let content = match serde_json::to_string(&payload) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::metrics",
+                session_id,
+                "Agent Studio telemetry serialize failed: {error}"
+            );
+            return;
+        }
+    };
+    let owner_hex = owner_pk.to_hex();
+    let agent_hex = ctx.agent_keys.public_key().to_hex();
+    let event = match EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_AGENT_SESSION_TELEMETRY as u16),
+        content,
+    )
+    .tags([
+        Tag::parse(["d", session_id]).expect("d tag"),
+        Tag::parse(["p", &owner_hex]).expect("p tag"),
+        Tag::parse(["agent", &agent_hex]).expect("agent tag"),
+    ])
+    .sign_with_keys(&ctx.agent_keys)
+    {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::metrics",
+                session_id,
+                "Agent Studio telemetry sign failed: {error}"
+            );
+            return;
+        }
+    };
+    const TELEMETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    match tokio::time::timeout(TELEMETRY_TIMEOUT, ctx.rest_client.submit_event(&event)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::warn!(
+            target: "pool::metrics",
+            session_id,
+            "Agent Studio telemetry publish failed: {error}"
+        ),
+        Err(_) => tracing::warn!(
+            target: "pool::metrics",
+            session_id,
+            "Agent Studio telemetry publish timed out"
+        ),
+    }
 }
 
 const REACTION_SEEN: &str = "👀";
