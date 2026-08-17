@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -175,7 +176,11 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
   var _generation = 0;
   var _receivedFrames = 0;
   var _sentFrames = 0;
-  Future<void> _playbackTail = Future<void>.value();
+  static const _playbackQueueCapacityPerPeer = 10;
+
+  final Map<int, Queue<HuddleRemoteAudioFrame>> _playbackQueues = {};
+  Future<void>? _playbackDrain;
+  int? _lastPlaybackPeerIndex;
   final Map<String, Timer> _speakerTimers = {};
   final Map<String, double> _pendingSpeakerLevels = {};
   Timer? _speakerLevelFlushTimer;
@@ -344,12 +349,12 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
         state.phase == HuddleSessionPhase.leaving) {
       return;
     }
-    _generation += 1;
+    final generation = ++_generation;
     state = state.copyWith(phase: HuddleSessionPhase.leaving, error: null);
     try {
       await _disposeResources();
     } finally {
-      state = HuddleSessionState.idle;
+      if (_isCurrent(generation)) state = HuddleSessionState.idle;
     }
   }
 
@@ -394,14 +399,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
       _recordSpeaker(frame, transport, generation);
       _receivedFrames += 1;
       _emitStatsIfNeeded(sent: false);
-      _playbackTail = _playbackTail.then((_) => media.playRemoteFrame(frame));
-      unawaited(
-        _playbackTail.catchError((Object error) async {
-          if (_isCurrent(generation)) {
-            await _fail(_messageFor(error), generation);
-          }
-        }),
-      );
+      _enqueuePlayback(media, frame, generation);
     });
     _transportStateSubscription = transport.states.listen((transportState) {
       if (!_isCurrent(generation)) return;
@@ -434,13 +432,78 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
     });
     _peerEventSubscription = transport.peerEvents.listen((event) {
       if (!_isCurrent(generation)) return;
-      if (event.type == HuddlePeerEventType.left) {
+      if (event.type == HuddlePeerEventType.left ||
+          event.type == HuddlePeerEventType.replaced) {
         _clearSpeaker(event.peer.pubkey);
+        _clearPlaybackPeer(event.peer.peerIndex);
+        unawaited(
+          media.removeRemotePeer(event.peer.peerIndex).catchError((
+            Object error,
+          ) async {
+            if (_isCurrent(generation)) {
+              await _fail(_messageFor(error), generation);
+            }
+          }),
+        );
       }
     });
     _transportIssueSubscription = transport.issues.listen((issue) {
       if (_isCurrent(generation)) state = state.copyWith(issue: issue.message);
     });
+  }
+
+  void _enqueuePlayback(
+    HuddleMedia media,
+    HuddleRemoteAudioFrame frame,
+    int generation,
+  ) {
+    final queue = _playbackQueues.putIfAbsent(frame.peerIndex, Queue.new);
+    if (queue.length == _playbackQueueCapacityPerPeer) {
+      queue.removeFirst();
+    }
+    queue.addLast(frame);
+    if (_playbackDrain != null) return;
+
+    final drain = _drainPlayback(media, generation);
+    _playbackDrain = drain;
+    unawaited(
+      drain.whenComplete(() {
+        if (identical(_playbackDrain, drain)) _playbackDrain = null;
+      }),
+    );
+  }
+
+  Future<void> _drainPlayback(HuddleMedia media, int generation) async {
+    try {
+      while (_isCurrent(generation)) {
+        final peerIndexes = _playbackQueues.keys.toList()..sort();
+        if (peerIndexes.isEmpty) return;
+        final next = _lastPlaybackPeerIndex == null
+            ? 0
+            : peerIndexes.indexWhere(
+                (index) => index > _lastPlaybackPeerIndex!,
+              );
+        final start = next < 0 ? 0 : next;
+        HuddleRemoteAudioFrame? frame;
+        for (var offset = 0; offset < peerIndexes.length; offset++) {
+          final index = peerIndexes[(start + offset) % peerIndexes.length];
+          final queue = _playbackQueues[index];
+          if (queue != null && queue.isNotEmpty) {
+            frame = queue.removeFirst();
+            _lastPlaybackPeerIndex = index;
+            break;
+          }
+        }
+        if (frame == null) return;
+        await media.playRemoteFrame(frame);
+      }
+    } catch (error) {
+      if (_isCurrent(generation)) await _fail(_messageFor(error), generation);
+    }
+  }
+
+  void _clearPlaybackPeer(int peerIndex) {
+    _playbackQueues.remove(peerIndex)?.clear();
   }
 
   List<String> _participantPubkeys(HuddleTransportState transportState) {
@@ -562,13 +625,22 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
 
   Future<void> _fail(String message, int generation) async {
     if (!_isCurrent(generation)) return;
-    _generation += 1;
-    state = state.copyWith(
+    final failureGeneration = ++_generation;
+    final failedState = state.copyWith(
       phase: HuddleSessionPhase.failed,
       isMuted: true,
       error: message,
     );
-    await _disposeResources();
+    // Failure teardown follows the same local-first contract as an explicit
+    // hangup. Publish the failed state only after capture and transport are
+    // closed, so lifecycle observers cannot begin relay work while native
+    // audio is still active.
+    try {
+      await _disposeResources();
+    } catch (error) {
+      debugPrint('Unable to fully release failed Huddle resources: $error');
+    }
+    if (_isCurrent(failureGeneration)) state = failedState;
   }
 
   Future<void> _disposeResources() async {
@@ -627,7 +699,9 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
         }),
       );
     }
-    _playbackTail = Future<void>.value();
+    _playbackQueues.clear();
+    _playbackDrain = null;
+    _lastPlaybackPeerIndex = null;
     if (failure != null) {
       Error.throwWithStackTrace(failure, failureStackTrace!);
     }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:typed_data';
 
 import 'package:buzz/shared/huddle/huddle.dart';
@@ -106,6 +107,59 @@ void main() {
     await controller.leave();
   });
 
+  test('bounds playback per peer, drops oldest, and drains fairly', () async {
+    final media = _FakeMedia(blockPlayback: true);
+    final transport = _FakeTransport();
+    final container = ProviderContainer(
+      overrides: [
+        huddleMediaFactoryProvider.overrideWithValue(() => media),
+        huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(huddleSessionProvider.notifier).join(_parameters());
+
+    for (var sequence = 0; sequence < 20; sequence++) {
+      transport.emitRemote(_remoteFrame(peerIndex: 1, sequence: sequence));
+    }
+    transport.emitRemote(_remoteFrame(peerIndex: 2, sequence: 100));
+    await Future<void>.delayed(Duration.zero);
+    expect(media.playedFrames.single.header.sequence, 0);
+
+    media.releaseNextPlayback();
+    await _waitUntil(() => media.playedFrames.length == 2);
+    expect(media.playedFrames[1].peerIndex, 2);
+    media.releaseNextPlayback();
+    await _waitUntil(() => media.playedFrames.length == 3);
+    expect(media.playedFrames[2].header.sequence, 10);
+  });
+
+  test('peer replacement clears queued and native playback first', () async {
+    final media = _FakeMedia(blockPlayback: true);
+    final transport = _FakeTransport();
+    final container = ProviderContainer(
+      overrides: [
+        huddleMediaFactoryProvider.overrideWithValue(() => media),
+        huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(huddleSessionProvider.notifier).join(_parameters());
+
+    transport.emitRemote(_remoteFrame(peerIndex: 1, sequence: 1));
+    transport.emitRemote(_remoteFrame(peerIndex: 1, sequence: 2));
+    transport.emitReplacement(
+      const HuddlePeer(pubkey: 'desktop', peerIndex: 1),
+      const HuddlePeer(pubkey: 'new', peerIndex: 1),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(media.removedPeers, [1]);
+
+    media.releaseNextPlayback();
+    await Future<void>.delayed(Duration.zero);
+    expect(media.playedFrames.map((frame) => frame.header.sequence), [1]);
+  });
+
   test('keeps media alive through a bounded transport reconnect', () async {
     final media = _FakeMedia();
     final transport = _FakeTransport();
@@ -174,6 +228,41 @@ void main() {
   });
 
   test(
+    'native failure releases media and transport before publishing failure',
+    () async {
+      final release = Completer<void>();
+      final media = _FakeMedia(disposeGate: release.future);
+      final transport = _FakeTransport();
+      final container = ProviderContainer(
+        overrides: [
+          huddleMediaFactoryProvider.overrideWithValue(() => media),
+          huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(huddleSessionProvider.notifier).join(_parameters());
+      media.emitFailure();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(media.disposeCalls, 1);
+      expect(transport.disposeCalls, 0);
+      expect(
+        container.read(huddleSessionProvider).phase,
+        HuddleSessionPhase.connected,
+      );
+
+      release.complete();
+      await _waitUntil(
+        () =>
+            container.read(huddleSessionProvider).phase ==
+            HuddleSessionPhase.failed,
+      );
+      expect(transport.disposeCalls, 1);
+    },
+  );
+
+  test(
     'retains admission evidence after an established transport fails',
     () async {
       final media = _FakeMedia();
@@ -204,6 +293,20 @@ void main() {
   );
 }
 
+HuddleRemoteAudioFrame _remoteFrame({
+  required int peerIndex,
+  required int sequence,
+}) => HuddleRemoteAudioFrame(
+  peerIndex: peerIndex,
+  header: HuddleAudioHeader(
+    sequence: sequence,
+    timestamp48k: sequence * 960,
+    levelDbov: -20,
+    flags: 0,
+  ),
+  opusPayload: Uint8List.fromList([sequence & 0xff]),
+);
+
 HuddleConnectionParameters _parameters() => HuddleConnectionParameters(
   relayWebSocketUrl: 'wss://buzz.example',
   nsec: _privateKey,
@@ -212,18 +315,27 @@ HuddleConnectionParameters _parameters() => HuddleConnectionParameters(
 );
 
 final class _FakeMedia implements HuddleMedia {
-  _FakeMedia({this.permission = HuddleMicrophonePermission.granted});
+  _FakeMedia({
+    this.permission = HuddleMicrophonePermission.granted,
+    this.blockPlayback = false,
+    this.disposeGate,
+  });
 
   final HuddleMicrophonePermission permission;
+  final bool blockPlayback;
+  final Future<void>? disposeGate;
   final _states = StreamController<HuddleMediaState>.broadcast(sync: true);
   final _localFrames = StreamController<HuddleLocalAudioFrame>.broadcast(
     sync: true,
   );
   final List<HuddleRemoteAudioFrame> playedFrames = [];
+  final List<int> removedPeers = [];
+  final Queue<Completer<void>> _playbackCompleters = Queue();
   HuddleMediaState _state = const HuddleMediaState(
     phase: HuddleMediaPhase.idle,
   );
   var startCalls = 0;
+  var disposeCalls = 0;
 
   void emitLocal(HuddleLocalAudioFrame frame) => _localFrames.add(frame);
 
@@ -234,6 +346,18 @@ final class _FakeMedia implements HuddleMedia {
       isMuted: _state.isMuted,
       isSpeakerEnabled: _state.isSpeakerEnabled,
       isInterrupted: interrupted,
+    );
+    _states.add(_state);
+  }
+
+  void emitFailure() {
+    _state = HuddleMediaState(
+      phase: HuddleMediaPhase.failed,
+      capabilities: _state.capabilities,
+      error: const HuddleMediaError(
+        code: HuddleMediaErrorCode.platformFailure,
+        message: 'native playback failed',
+      ),
     );
     _states.add(_state);
   }
@@ -312,6 +436,18 @@ final class _FakeMedia implements HuddleMedia {
   @override
   Future<void> playRemoteFrame(HuddleRemoteAudioFrame frame) async {
     playedFrames.add(frame);
+    if (blockPlayback) {
+      final completer = Completer<void>();
+      _playbackCompleters.addLast(completer);
+      await completer.future;
+    }
+  }
+
+  void releaseNextPlayback() => _playbackCompleters.removeFirst().complete();
+
+  @override
+  Future<void> removeRemotePeer(int peerIndex) async {
+    removedPeers.add(peerIndex);
   }
 
   @override
@@ -324,7 +460,11 @@ final class _FakeMedia implements HuddleMedia {
   }
 
   @override
-  Future<void> dispose() => stop();
+  Future<void> dispose() async {
+    disposeCalls += 1;
+    if (disposeGate case final gate?) await gate;
+    await stop();
+  }
 }
 
 final class _FakeTransport implements HuddleTransportClient {
@@ -336,9 +476,20 @@ final class _FakeTransport implements HuddleTransportClient {
   final _issues = StreamController<HuddleTransportError>.broadcast(sync: true);
   final List<HuddleLocalAudioFrame> sentFrames = [];
   var connectCalls = 0;
+  var disposeCalls = 0;
   HuddleTransportState _state = HuddleTransportState.idle();
 
   void emitRemote(HuddleRemoteAudioFrame frame) => _remoteFrames.add(frame);
+
+  void emitReplacement(HuddlePeer peer, HuddlePeer replacement) {
+    _peerEvents.add(
+      HuddlePeerEvent(
+        type: HuddlePeerEventType.replaced,
+        peer: peer,
+        replacement: replacement,
+      ),
+    );
+  }
 
   void emitUnexpectedFailure() {
     _state = HuddleTransportState(
@@ -398,7 +549,10 @@ final class _FakeTransport implements HuddleTransportClient {
   }
 
   @override
-  Future<void> dispose() => disconnect();
+  Future<void> dispose() async {
+    disposeCalls += 1;
+    await disconnect();
+  }
 }
 
 Future<void> _waitUntil(bool Function() predicate) async {

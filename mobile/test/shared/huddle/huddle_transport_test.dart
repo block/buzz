@@ -53,7 +53,13 @@ void main() {
       final channel = _ControlledWebSocketChannel();
       final transport = _transport(channel);
       addTearDown(transport.dispose);
-      await _connect(channel, transport);
+      await _connect(
+        channel,
+        transport,
+        peers: const [
+          {'pubkey': 'remote', 'peer_index': 4},
+        ],
+      );
 
       final inbound = expectLater(
         transport.remoteAudioFrames,
@@ -107,6 +113,211 @@ void main() {
     expect(transport.state.phase, HuddleTransportPhase.connected);
   });
 
+  test(
+    'revisioned roster is authoritative and deltas are sequential',
+    () async {
+      final channel = _ControlledWebSocketChannel();
+      final transport = _transport(channel);
+      addTearDown(transport.dispose);
+      await _connect(
+        channel,
+        transport,
+        revision: 4,
+        peers: const [
+          {'pubkey': 'desktop', 'peer_index': 1},
+        ],
+      );
+      expect(transport.state.peers.keys, [1]);
+      expect(transport.state.rosterRevision, 4);
+
+      channel.emitText(
+        jsonEncode({
+          'type': 'joined',
+          'revision': 5,
+          'pubkey': 'agent',
+          'peer_index': 2,
+          'peers': [
+            {'pubkey': 'agent', 'peer_index': 2},
+          ],
+        }),
+      );
+      await _waitForRevision(transport, 5);
+      expect(transport.state.peers.keys, containsAll([1, 2]));
+
+      channel.emitText(
+        jsonEncode({
+          'type': 'roster',
+          'revision': 6,
+          'peers': [
+            {'pubkey': 'replacement', 'peer_index': 2},
+          ],
+        }),
+      );
+      await _waitForRevision(transport, 6);
+      expect(transport.state.peers.keys, [2]);
+      expect(transport.state.peers[2]?.pubkey, 'replacement');
+
+      channel.emitText(
+        jsonEncode({'type': 'roster', 'revision': 5, 'peers': const []}),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(transport.state.rosterRevision, 6);
+      expect(transport.state.peers[2]?.pubkey, 'replacement');
+    },
+  );
+
+  test(
+    'newer roster arriving before admission remains authoritative',
+    () async {
+      final channel = _ControlledWebSocketChannel();
+      final transport = _transport(channel);
+      addTearDown(transport.dispose);
+
+      final connect = transport.connect();
+      await _waitForPhase(transport, HuddleTransportPhase.awaitingChallenge);
+      channel.emitText(jsonEncode({'type': 'challenge', 'challenge': 'abc'}));
+      await _waitForPhase(transport, HuddleTransportPhase.authenticating);
+      channel.emitText(
+        jsonEncode({
+          'type': 'roster',
+          'revision': 6,
+          'peers': [
+            {'pubkey': 'new', 'peer_index': 4},
+          ],
+        }),
+      );
+      channel.emitText(
+        jsonEncode({
+          'type': 'joined',
+          'revision': 5,
+          'pubkey': 'self',
+          'peer_index': 3,
+          'peers': [
+            {'pubkey': 'old', 'peer_index': 1},
+          ],
+        }),
+      );
+      await connect;
+
+      expect(transport.state.localPeerIndex, 3);
+      expect(transport.state.rosterRevision, 6);
+      expect(transport.state.peers.keys, [4]);
+      expect(transport.state.peers[4]?.pubkey, 'new');
+    },
+  );
+
+  test('revision gap reconnects without applying the gap', () async {
+    final channel = _ControlledWebSocketChannel();
+    final transport = _transport(channel);
+    addTearDown(transport.dispose);
+    await _connect(
+      channel,
+      transport,
+      revision: 2,
+      peers: const [
+        {'pubkey': 'desktop', 'peer_index': 1},
+      ],
+    );
+
+    channel.emitText(
+      jsonEncode({
+        'type': 'left',
+        'revision': 4,
+        'pubkey': 'desktop',
+        'peer_index': 1,
+      }),
+    );
+    await _waitForPhase(transport, HuddleTransportPhase.failed);
+
+    expect(transport.state.rosterRevision, 2);
+    expect(transport.state.peers[1]?.pubkey, 'desktop');
+    expect(transport.state.error?.message, contains('revision gap'));
+  });
+
+  test('revisioned admission does not inject an absent local user', () async {
+    final channel = _ControlledWebSocketChannel();
+    final transport = _transport(channel);
+    addTearDown(transport.dispose);
+    await _connect(
+      channel,
+      transport,
+      revision: 8,
+      peers: const [
+        {'pubkey': 'desktop', 'peer_index': 1},
+      ],
+    );
+
+    expect(transport.state.localPeerIndex, 3);
+    expect(transport.state.peers.keys, [1]);
+  });
+
+  test('revisioned joined delta reports index reuse', () async {
+    final channel = _ControlledWebSocketChannel();
+    final transport = _transport(channel);
+    addTearDown(transport.dispose);
+    await _connect(
+      channel,
+      transport,
+      revision: 1,
+      peers: const [
+        {'pubkey': 'old', 'peer_index': 4},
+      ],
+    );
+    final events = <HuddlePeerEvent>[];
+    final subscription = transport.peerEvents.listen(events.add);
+    addTearDown(subscription.cancel);
+
+    channel.emitText(
+      jsonEncode({
+        'type': 'joined',
+        'revision': 2,
+        'pubkey': 'new',
+        'peer_index': 4,
+        'peers': [
+          {'pubkey': 'new', 'peer_index': 4},
+        ],
+      }),
+    );
+    await _waitForRevision(transport, 2);
+
+    expect(events.single.type, HuddlePeerEventType.replaced);
+    expect(events.single.peer.pubkey, 'old');
+    expect(events.single.replacement?.pubkey, 'new');
+    expect(transport.state.peers[4]?.pubkey, 'new');
+  });
+
+  test('index replacement is emitted before new media is admitted', () async {
+    final channel = _ControlledWebSocketChannel();
+    final transport = _transport(channel);
+    addTearDown(transport.dispose);
+    await _connect(
+      channel,
+      transport,
+      revision: 1,
+      peers: const [
+        {'pubkey': 'old', 'peer_index': 4},
+      ],
+    );
+    final events = <HuddlePeerEvent>[];
+    final subscription = transport.peerEvents.listen(events.add);
+    addTearDown(subscription.cancel);
+
+    channel.emitText(
+      jsonEncode({
+        'type': 'roster',
+        'revision': 2,
+        'peers': [
+          {'pubkey': 'new', 'peer_index': 4},
+        ],
+      }),
+    );
+    await _waitForRevision(transport, 2);
+
+    expect(events.single.type, HuddlePeerEventType.replaced);
+    expect(events.single.peer.pubkey, 'old');
+    expect(events.single.replacement?.pubkey, 'new');
+  });
+
   test('exposes relay rejection code and failed lifecycle state', () async {
     final channel = _ControlledWebSocketChannel();
     final transport = _transport(channel);
@@ -143,6 +354,82 @@ void main() {
     expect(transport.state.phase, HuddleTransportPhase.failed);
   });
 
+  test('bounds transport audio ingress', () async {
+    final channel = _ControlledWebSocketChannel();
+    final transport = _transport(channel);
+    addTearDown(transport.dispose);
+    await _connect(
+      channel,
+      transport,
+      revision: 1,
+      peers: const [
+        {'pubkey': 'remote', 'peer_index': 4},
+      ],
+    );
+    final received = <int>[];
+    final subscription = transport.remoteAudioFrames.listen(
+      (frame) => received.add(frame.header.sequence),
+    );
+    addTearDown(subscription.cancel);
+
+    for (var sequence = 0; sequence < 100; sequence++) {
+      channel.emitBinary(_relayFrame(peerIndex: 4, sequence: sequence));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(received, hasLength(50));
+    expect(received.first, 50);
+    expect(received.last, 99);
+  });
+
+  test(
+    'authoritative left purges queued media before same-index rejoin',
+    () async {
+      final channel = _ControlledWebSocketChannel();
+      final transport = _transport(channel);
+      addTearDown(transport.dispose);
+      await _connect(
+        channel,
+        transport,
+        revision: 1,
+        peers: const [
+          {'pubkey': 'old', 'peer_index': 4},
+        ],
+      );
+      final received = <int>[];
+      final subscription = transport.remoteAudioFrames.listen(
+        (frame) => received.add(frame.header.sequence),
+      );
+      addTearDown(subscription.cancel);
+
+      for (var sequence = 0; sequence < 50; sequence++) {
+        channel.emitBinary(_relayFrame(peerIndex: 4, sequence: sequence));
+      }
+      channel.emitText(
+        jsonEncode({
+          'type': 'left',
+          'revision': 2,
+          'pubkey': 'old',
+          'peer_index': 4,
+        }),
+      );
+      channel.emitText(
+        jsonEncode({
+          'type': 'joined',
+          'revision': 3,
+          'pubkey': 'new',
+          'peer_index': 4,
+        }),
+      );
+      channel.emitBinary(_relayFrame(peerIndex: 4, sequence: 50));
+      await _waitForRevision(transport, 3);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(transport.state.peers[4]?.pubkey, 'new');
+      expect(received, [50]);
+    },
+  );
+
   test(
     'intentional disconnect reaches disconnected without an error',
     () async {
@@ -174,21 +461,37 @@ HuddleTransport _transport(_ControlledWebSocketChannel channel) =>
 
 Future<void> _connect(
   _ControlledWebSocketChannel channel,
-  HuddleTransport transport,
-) async {
+  HuddleTransport transport, {
+  int? revision,
+  List<Map<String, Object>> peers = const [],
+}) async {
   final connect = transport.connect();
   await _waitForPhase(transport, HuddleTransportPhase.awaitingChallenge);
   channel.emitText(jsonEncode({'type': 'challenge', 'challenge': 'abc'}));
   await _waitForPhase(transport, HuddleTransportPhase.authenticating);
-  channel.emitText(
-    jsonEncode({
-      'type': 'joined',
-      'pubkey': 'self',
-      'peer_index': 3,
-      'peers': const [],
-    }),
-  );
+  final admission = <String, Object>{
+    'type': 'joined',
+    'pubkey': 'self',
+    'peer_index': 3,
+    'peers': peers,
+  };
+  if (revision != null) admission['revision'] = revision;
+  channel.emitText(jsonEncode(admission));
   await connect;
+}
+
+Uint8List _relayFrame({required int peerIndex, required int sequence}) {
+  final header = HuddleAudioHeader(
+    sequence: sequence,
+    timestamp48k: sequence * 960,
+    levelDbov: -30,
+    flags: 0,
+  );
+  final clientFrame = HuddleWireV2.encodeClientFrame(
+    header,
+    Uint8List.fromList([sequence & 0xff]),
+  );
+  return Uint8List.fromList([peerIndex, ...clientFrame]);
 }
 
 Future<void> _waitForPhase(
@@ -200,6 +503,17 @@ Future<void> _waitForPhase(
     await Future<void>.delayed(const Duration(milliseconds: 1));
   }
   fail('Transport never reached ${phase.name}; was ${transport.state.phase}.');
+}
+
+Future<void> _waitForRevision(HuddleTransport transport, int revision) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    if (transport.state.rosterRevision == revision) return;
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+  }
+  fail(
+    'Transport never reached roster revision $revision; '
+    'was ${transport.state.rosterRevision}.',
+  );
 }
 
 final class _ControlledWebSocketChannel implements WebSocketChannel {

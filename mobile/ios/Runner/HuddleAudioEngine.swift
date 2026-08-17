@@ -13,6 +13,7 @@ struct HuddleRemoteOpusPacket {
   let peerIndex: Int
   let sequence: Int
   let timestamp48k: Int64
+  let levelDbov: Int
   let opus: Data
 }
 
@@ -265,6 +266,63 @@ enum HuddleAudioLevels {
   }
 }
 
+/// Fixed-capacity active-talker selector. The UI roster is independent; native
+/// decoder/player resources exist only for peers that actually send packets.
+struct HuddleActiveTalkerSelector {
+  struct Activity {
+    let peerIndex: Int
+    let lastPacketOrdinal: UInt64
+    let levelDbov: Int
+  }
+
+  let capacity: Int
+  private(set) var active: [Int: Activity] = [:]
+  private var ordinal: UInt64 = 0
+
+  init(capacity: Int) {
+    self.capacity = capacity
+  }
+
+  mutating func activate(peerIndex: Int, levelDbov: Int) -> Int? {
+    ordinal &+= 1
+    if active[peerIndex] != nil {
+      active[peerIndex] = Activity(
+        peerIndex: peerIndex,
+        lastPacketOrdinal: ordinal,
+        levelDbov: levelDbov
+      )
+      return nil
+    }
+    let evicted = active.count >= capacity
+      ? active.values.min { left, right in
+        if left.lastPacketOrdinal != right.lastPacketOrdinal {
+          return left.lastPacketOrdinal < right.lastPacketOrdinal
+        }
+        if left.levelDbov != right.levelDbov {
+          return left.levelDbov < right.levelDbov
+        }
+        return left.peerIndex < right.peerIndex
+      }?.peerIndex
+      : nil
+    if let evicted { active.removeValue(forKey: evicted) }
+    active[peerIndex] = Activity(
+      peerIndex: peerIndex,
+      lastPacketOrdinal: ordinal,
+      levelDbov: levelDbov
+    )
+    return evicted
+  }
+
+  mutating func remove(_ peerIndex: Int) {
+    active.removeValue(forKey: peerIndex)
+  }
+
+  mutating func removeAll() {
+    active.removeAll()
+    ordinal = 0
+  }
+}
+
 /// Foreground-only iOS realtime media engine for the fixed Huddle Opus v2 path.
 ///
 /// AVAudioEngine owns voice-processed capture and per-peer mixed playout.
@@ -288,6 +346,7 @@ final class HuddleAudioEngine {
   private var interrupted = false
   private var failureReported = false
   private var pendingCaptureBuffers = 0
+  private var pendingRemotePackets = 0
   private var captureConverter: AVAudioConverter?
   private var captureSourceFormat: AVAudioFormat?
   private var captureTapInstalled = false
@@ -300,6 +359,7 @@ final class HuddleAudioEngine {
   private var rmsDbovHistogram: [Int: Int64] = [:]
   private var peakDbovHistogram: [Int: Int64] = [:]
   private var peerPlaybacks: [Int: HuddlePeerPlayback] = [:]
+  private var activeTalkers = HuddleActiveTalkerSelector(capacity: 15)
   private var playbackTimer: DispatchSourceTimer?
   private var configurationObserver: NSObjectProtocol?
 
@@ -395,25 +455,35 @@ final class HuddleAudioEngine {
 
   func enqueueRemote(_ packet: HuddleRemoteOpusPacket) throws {
     stateLock.lock()
-    let isRunning = running
-    stateLock.unlock()
-    guard isRunning else {
+    guard running else {
+      stateLock.unlock()
       throw HuddleNativeMediaError.invalidState(
         "Huddle audio is not running."
       )
     }
+    guard pendingRemotePackets < 50 else {
+      stateLock.unlock()
+      return
+    }
+    pendingRemotePackets += 1
+    stateLock.unlock()
     processingQueue.async { [weak self] in
       guard let self else { return }
+      defer { completeRemotePacket() }
       do {
+        let evictedIndex = activeTalkers.activate(
+          peerIndex: packet.peerIndex,
+          levelDbov: packet.levelDbov
+        )
+        if let evictedIndex,
+          let evicted = peerPlaybacks.removeValue(forKey: evictedIndex)
+        {
+          evicted.release(from: audioEngine)
+        }
         let playback: HuddlePeerPlayback
         if let existing = peerPlaybacks[packet.peerIndex] {
           playback = existing
         } else {
-          guard peerPlaybacks.count < 15 else {
-            throw HuddleNativeMediaError.invalidState(
-              "This device reached the mobile Huddle participant limit."
-            )
-          }
           playback = try HuddlePeerPlayback(
             engine: audioEngine,
             pcmFormat: pcmFormat
@@ -424,6 +494,22 @@ final class HuddleAudioEngine {
       } catch {
         reportFailure(code: "playback_failed", error: error)
       }
+    }
+  }
+
+  private func completeRemotePacket() {
+    stateLock.lock()
+    pendingRemotePackets = max(0, pendingRemotePackets - 1)
+    stateLock.unlock()
+  }
+
+  func removeRemotePeer(_ peerIndex: Int) {
+    processingQueue.async { [weak self] in
+      guard let self else { return }
+      activeTalkers.remove(peerIndex)
+      guard let playback = peerPlaybacks.removeValue(forKey: peerIndex)
+      else { return }
+      playback.release(from: audioEngine)
     }
   }
 
@@ -484,6 +570,7 @@ final class HuddleAudioEngine {
     muted = false
     interrupted = false
     pendingCaptureBuffers = 0
+    pendingRemotePackets = 0
     stateLock.unlock()
 
     playbackTimer?.cancel()
@@ -496,6 +583,7 @@ final class HuddleAudioEngine {
       playback.release(from: audioEngine)
     }
     peerPlaybacks.removeAll()
+    activeTalkers.removeAll()
     audioEngine.stop()
     audioEngine.reset()
     try? audioEngine.inputNode.setVoiceProcessingEnabled(false)

@@ -64,6 +64,7 @@ internal class HuddleMediaPlugin(
             "setMuted" -> setMuted(call.arguments, result)
             "setSpeakerEnabled" -> setSpeakerEnabled(call.arguments, result)
             "playRemoteOpusFrame" -> playRemoteOpusFrame(call.arguments, result)
+            "removeRemotePeer" -> removeRemotePeer(call.arguments, result)
             "stop" -> stop(result)
             else -> result.notImplemented()
         }
@@ -253,10 +254,12 @@ internal class HuddleMediaPlugin(
         val peerIndex = (values?.get("peerIndex") as? Number)?.toInt()
         val sequence = (values?.get("sequence") as? Number)?.toInt()
         val timestamp48k = (values?.get("timestamp48k") as? Number)?.toLong()
+        val levelDbov = (values?.get("levelDbov") as? Number)?.toInt()
         val opus = values?.get("opus") as? ByteArray
         if (peerIndex == null || peerIndex !in 0..255 ||
             sequence == null || sequence !in 0..0xffff ||
             timestamp48k == null || timestamp48k !in 0..0xffff_ffffL ||
+            levelDbov == null || levelDbov !in -127..0 ||
             opus == null || opus.isEmpty() || opus.size > MAX_OPUS_PACKET_BYTES
         ) {
             result.error("invalid_arguments", "Malformed remote Huddle Opus packet.", null)
@@ -270,9 +273,25 @@ internal class HuddleMediaPlugin(
                     peerIndex = peerIndex,
                     sequence = sequence,
                     timestamp48k = timestamp48k,
+                    levelDbov = levelDbov,
                     opus = opus.copyOf(),
                 ),
             )
+            result.success(null)
+        } catch (error: Throwable) {
+            result.error("playback_failed", error.message, null)
+        }
+    }
+
+    private fun removeRemotePeer(arguments: Any?, result: MethodChannel.Result) {
+        val peerIndex = ((arguments as? Map<*, *>)?.get("peerIndex") as? Number)?.toInt()
+        if (peerIndex == null || peerIndex !in 0..255) {
+            result.error("invalid_arguments", "Missing Huddle peer index.", null)
+            return
+        }
+        try {
+            val engine = audioEngine ?: error("Huddle audio is not running.")
+            engine.removeRemotePeer(peerIndex)
             result.success(null)
         } catch (error: Throwable) {
             result.error("playback_failed", error.message, null)

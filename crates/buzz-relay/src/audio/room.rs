@@ -229,7 +229,16 @@ impl Room {
         &self,
         pubkey: String,
         requested_version: u8,
-    ) -> Result<(Uuid, u8, mpsc::Receiver<Bytes>, mpsc::Receiver<PeerCtrl>), AdmissionError> {
+    ) -> Result<
+        (
+            Uuid,
+            u8,
+            mpsc::Receiver<Bytes>,
+            mpsc::Receiver<PeerCtrl>,
+            u64,
+        ),
+        AdmissionError,
+    > {
         let mut g = self.guard.lock().map_err(
             |_| AdmissionError::Ended, /* poisoned ≈ shutting down */
         )?;
@@ -265,14 +274,15 @@ impl Room {
             },
         );
         g.roster_revision = g.roster_revision.wrapping_add(1);
+        let revision = g.roster_revision;
         let delta = RosterDelta {
-            revision: g.roster_revision,
+            revision,
             joined: Some(RosterPeer { pubkey, peer_index }),
             left: None,
         };
         let _ = self.roster_tx.send(delta);
         drop(g); // Release lock after ordered roster publication.
-        Ok((peer_id, peer_index, audio_rx, ctrl_rx))
+        Ok((peer_id, peer_index, audio_rx, ctrl_rx, revision))
     }
 
     /// Add a non-owner ingress peer at the index already allocated by the
@@ -283,7 +293,7 @@ impl Room {
         pubkey: String,
         requested_version: u8,
         peer_index: u8,
-    ) -> Result<(Uuid, mpsc::Receiver<Bytes>, mpsc::Receiver<PeerCtrl>), AdmissionError> {
+    ) -> Result<(Uuid, mpsc::Receiver<Bytes>, mpsc::Receiver<PeerCtrl>, u64), AdmissionError> {
         let mut g = self.guard.lock().map_err(|_| AdmissionError::Ended)?;
         if g.ended {
             return Err(AdmissionError::Ended);
@@ -323,43 +333,45 @@ impl Room {
             },
         );
         g.roster_revision = g.roster_revision.wrapping_add(1);
+        let revision = g.roster_revision;
         let delta = RosterDelta {
-            revision: g.roster_revision,
+            revision,
             joined: Some(RosterPeer { pubkey, peer_index }),
             left: None,
         };
         let _ = self.roster_tx.send(delta);
         drop(g);
-        Ok((peer_id, audio_rx, ctrl_rx))
+        Ok((peer_id, audio_rx, ctrl_rx, revision))
     }
 
-    /// Remove a peer and recycle its index.
-    pub fn remove_peer(&self, peer_id: Uuid) {
+    /// Remove a peer and recycle its index. Returns the ordered roster delta
+    /// when the peer existed.
+    pub fn remove_peer(&self, peer_id: Uuid) -> Option<RosterDelta> {
         let Ok(mut g) = self.guard.lock() else {
-            return;
+            return None;
         };
-        if let Some((_, peer)) = self.peers.remove(&peer_id) {
-            g.release(peer.peer_index);
-            g.roster_revision = g.roster_revision.wrapping_add(1);
-            let delta = RosterDelta {
-                revision: g.roster_revision,
-                joined: None,
-                left: Some(RosterPeer {
-                    pubkey: peer.pubkey,
-                    peer_index: peer.peer_index,
-                }),
-            };
-            let _ = self.roster_tx.send(delta);
-            drop(g);
-        }
+        let (_, peer) = self.peers.remove(&peer_id)?;
+        g.release(peer.peer_index);
+        g.roster_revision = g.roster_revision.wrapping_add(1);
+        let delta = RosterDelta {
+            revision: g.roster_revision,
+            joined: None,
+            left: Some(RosterPeer {
+                pubkey: peer.pubkey,
+                peer_index: peer.peer_index,
+            }),
+        };
+        let _ = self.roster_tx.send(delta.clone());
+        drop(g);
+        Some(delta)
     }
 
     /// Remove a peer AND atomically check if the room should end.
     /// If the room is now empty, sets `ended = true` under the same lock
     /// acquisition that recycles the index — no window for a concurrent
     /// `add_peer` to sneak in between removal and the ended flag.
-    /// Returns `(peer_index, should_auto_end)`.
-    pub fn remove_peer_and_check_ended(&self, peer_id: Uuid) -> Option<(u8, bool)> {
+    /// Returns `(roster_delta, should_auto_end)`.
+    pub fn remove_peer_and_check_ended(&self, peer_id: Uuid) -> Option<(RosterDelta, bool)> {
         let mut g = self.guard.lock().ok()?;
         let (_, peer) = self.peers.remove(&peer_id)?;
         let peer_index = peer.peer_index;
@@ -382,9 +394,9 @@ impl Room {
         } else {
             false
         };
-        let _ = self.roster_tx.send(delta);
+        let _ = self.roster_tx.send(delta.clone());
         drop(g);
-        Some((peer_index, should_end))
+        Some((delta, should_end))
     }
 
     /// Fan-out a binary frame to all peers except the sender.
@@ -431,19 +443,23 @@ impl Room {
     /// Send a JSON control message to all peers via the control channel.
     /// Separate from audio so control is never starved by audio backpressure.
     /// Control messages (joined/left) are state-bearing — the client's
-    /// peer_index→pubkey map depends on receiving every one. The channel is
-    /// sized generously (32 slots) so drops should never happen in practice;
-    /// if they do, we log a warning so the issue is visible.
+    /// peer_index→pubkey map depends on receiving every one. Saturation is
+    /// therefore terminal for that receiver: dropping its sender closes the
+    /// queue, forcing a reconnect with a fresh authoritative admission snapshot.
     pub fn broadcast_control(&self, json: String) {
-        for entry in self.peers.iter() {
+        for mut entry in self.peers.iter_mut() {
             if entry
                 .ctrl_tx
                 .try_send(PeerCtrl::Json(json.clone()))
                 .is_err()
             {
+                let (replacement_tx, replacement_rx) = mpsc::channel(1);
+                drop(replacement_rx);
+                let old_tx = std::mem::replace(&mut entry.ctrl_tx, replacement_tx);
+                drop(old_tx);
                 tracing::warn!(
                     peer_id = %entry.key(),
-                    "control channel full — dropped state-bearing message (peer map may desync)"
+                    "control channel full — closing receiver for authoritative roster resync"
                 );
             }
         }
@@ -568,7 +584,7 @@ mod tests {
         let (_local_id, local_index, ..) = room.add_peer("owner-local".into(), 2).unwrap();
         assert_eq!(local_index, 0);
 
-        let (remote_id, _audio, _ctrl) = room
+        let (remote_id, _audio, _ctrl, _revision) = room
             .add_peer_at_index("remote".into(), 2, 7)
             .expect("owner-assigned index admits");
         assert_eq!(room.peers.get(&remote_id).unwrap().peer_index, 7);
@@ -674,7 +690,7 @@ mod tests {
         let channel_id = Uuid::new_v4();
 
         let room1 = manager.get_or_create(community_id, channel_id);
-        let (peer_id, _, _, _) = room1
+        let (peer_id, _, _, _, _) = room1
             .add_peer("alice".to_string(), 2)
             .expect("first peer admits");
         // Last peer leaves and ends the room atomically.
@@ -736,14 +752,14 @@ mod tests {
     #[test]
     fn version_pin_persists_across_peer_churn() {
         let room = fresh_room();
-        let (alice_id, alice_idx, _, _) =
+        let (alice_id, alice_idx, _, _, _) =
             room.add_peer("alice".to_string(), 2).expect("alice admits");
         room.remove_peer(alice_id);
         // Room is non-empty thanks to nothing yet — wait, alice left and
         // nobody else is here. Add bob with the same version: should work.
         // Then add carol with a different version: should fail with the
         // *original* pin, even though alice already left.
-        let (_, bob_idx, _, _) = room
+        let (_, bob_idx, _, _, _) = room
             .add_peer("bob".to_string(), 2)
             .expect("bob admits at v=2");
         assert_eq!(

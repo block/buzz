@@ -237,6 +237,7 @@ abstract interface class HuddleMedia {
   Future<void> setMuted(bool muted);
   Future<void> setSpeakerEnabled(bool enabled);
   Future<void> playRemoteFrame(HuddleRemoteAudioFrame frame);
+  Future<void> removeRemotePeer(int peerIndex);
   Future<void> stop();
   Future<void> dispose();
 }
@@ -526,6 +527,21 @@ final class MethodChannelHuddleMedia implements HuddleMedia {
         'levelDbov': frame.header.levelDbov,
         'flags': frame.header.flags,
         'opus': frame.opusPayload,
+      });
+    } on PlatformException catch (error) {
+      final failure = _platformFailure(error);
+      _fail(failure);
+      throw failure;
+    }
+  }
+
+  @override
+  Future<void> removeRemotePeer(int peerIndex) async {
+    _ensureNotDisposed();
+    if (_state.phase != HuddleMediaPhase.active) return;
+    try {
+      await _channel.invokeMethod<void>('removeRemotePeer', {
+        'peerIndex': peerIndex,
       });
     } on PlatformException catch (error) {
       final failure = _platformFailure(error);

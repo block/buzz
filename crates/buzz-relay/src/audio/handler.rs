@@ -511,11 +511,11 @@ async fn handle_active_audio_connection(
 
     let admission = if let Some(session) = remote_session.as_ref() {
         room.add_peer_at_index(pubkey_hex.clone(), requested_version, session.peer_index())
-            .map(|(id, audio, ctrl)| (id, session.peer_index(), audio, ctrl))
+            .map(|(id, audio, ctrl, revision)| (id, session.peer_index(), audio, ctrl, revision))
     } else {
         room.add_peer(pubkey_hex.clone(), requested_version)
     };
-    let (peer_id, peer_index, audio_rx, peer_ctrl_rx) = match admission {
+    let (peer_id, peer_index, audio_rx, peer_ctrl_rx, admission_revision) = match admission {
         Ok(v) => v,
         Err(crate::audio::room::AdmissionError::Full) => {
             warn!(channel_id = %channel_id, "audio room full (255 peers exhausted)");
@@ -608,22 +608,37 @@ async fn handle_active_audio_connection(
 
     // Remote registration and owner-assigned ingress admission completed above.
 
-    let peers_snapshot: Vec<serde_json::Value> = if let Some(session) = remote_session.as_ref() {
-        session
-            .roster()
-            .peers
-            .iter()
-            .map(|peer| serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index}))
-            .collect()
-    } else {
-        room.peer_pubkeys()
-            .into_iter()
-            .map(|(pk, idx)| serde_json::json!({"pubkey": pk, "peer_index": idx}))
-            .collect()
-    };
+    let (peers_snapshot, roster_revision): (Vec<serde_json::Value>, u64) =
+        if let Some(session) = remote_session.as_ref() {
+            (
+                session
+                    .roster()
+                    .peers
+                    .iter()
+                    .map(|peer| {
+                        serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index})
+                    })
+                    .collect(),
+                session.roster().revision,
+            )
+        } else {
+            let snapshot = room.roster_snapshot();
+            (
+                snapshot
+                    .peers
+                    .into_iter()
+                    .map(|peer| {
+                        serde_json::json!({"pubkey": peer.pubkey, "peer_index": peer.peer_index})
+                    })
+                    .collect(),
+                snapshot.revision,
+            )
+        };
+    debug_assert!(roster_revision >= admission_revision);
 
     let joined_msg = serde_json::json!({
         "type": "joined",
+        "revision": roster_revision,
         "pubkey": pubkey_hex,
         "peer_index": peer_index,
         "peers": peers_snapshot,
@@ -684,6 +699,7 @@ async fn handle_active_audio_connection(
         data_tx,
         ctrl_tx.clone(),
         fwd_cancel,
+        cancel.clone(),
     ));
 
     // Non-owner path: own the owner's `HuddleControl` stream in a reader task.
@@ -811,23 +827,27 @@ async fn handle_active_audio_connection(
     // AdmissionGuard lock across index recycling AND the is_empty + ended=true
     // check. Ingress mirrors never archive authoritative huddle state; they
     // remove locally and let the owner decide room lifetime.
-    let should_auto_end = if remote_session.is_some() {
-        room.remove_peer(peer_id);
-        false
+    let removal = if remote_session.is_some() {
+        room.remove_peer(peer_id).map(|delta| (delta, false))
     } else {
         room.remove_peer_and_check_ended(peer_id)
-            .map(|(_, ended)| ended)
-            .unwrap_or(false)
     };
+    let should_auto_end = removal.as_ref().map(|(_, ended)| *ended).unwrap_or(false);
 
-    let left_msg = serde_json::json!({
-        "type": "left",
-        "pubkey": pubkey_hex,
-        "peer_index": peer_index,
-    })
-    .to_string();
     if remote_session.is_none() {
-        room.broadcast_control(left_msg);
+        if let Some((delta, _)) = removal {
+            let left = delta
+                .left
+                .expect("peer removal deltas always carry the removed peer");
+            let left_msg = serde_json::json!({
+                "type": "left",
+                "revision": delta.revision,
+                "pubkey": left.pubkey,
+                "peer_index": left.peer_index,
+            })
+            .to_string();
+            room.broadcast_control(left_msg);
+        }
     }
 
     emit_participant_event(
@@ -1115,6 +1135,7 @@ async fn audio_forward_loop(
     data_tx: mpsc::Sender<WsMessage>,
     ctrl_tx: mpsc::Sender<WsMessage>,
     cancel: CancellationToken,
+    connection_cancel: CancellationToken,
 ) {
     loop {
         tokio::select! {
@@ -1124,9 +1145,18 @@ async fn audio_forward_loop(
             msg = peer_ctrl_rx.recv() => {
                 match msg {
                     Some(PeerCtrl::Json(json)) => {
-                        let _ = ctrl_tx.try_send(WsMessage::Text(json.into()));
+                        if ctrl_tx.try_send(WsMessage::Text(json.into())).is_err() {
+                            // State-bearing roster control may not be dropped.
+                            // Closing the connection forces admission to replay
+                            // a fresh authoritative snapshot.
+                            connection_cancel.cancel();
+                            break;
+                        }
                     }
-                    Some(PeerCtrl::Close) | None => break,
+                    Some(PeerCtrl::Close) | None => {
+                        connection_cancel.cancel();
+                        break;
+                    }
                 }
             }
             frame = audio_rx.recv() => {
@@ -1431,6 +1461,66 @@ mod tests {
         let _ = server.await;
 
         received
+    }
+
+    #[tokio::test]
+    async fn saturated_websocket_control_queue_cancels_the_audio_connection() {
+        let (_audio_tx, audio_rx) = mpsc::channel(1);
+        let (peer_ctrl_tx, peer_ctrl_rx) = mpsc::channel(2);
+        let (data_tx, _data_rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        ctrl_tx
+            .try_send(WsMessage::Ping(Bytes::new()))
+            .expect("fill websocket control queue");
+        peer_ctrl_tx
+            .try_send(PeerCtrl::Json("{}".into()))
+            .expect("queue state-bearing control");
+        let task_cancel = CancellationToken::new();
+        let connection_cancel = CancellationToken::new();
+
+        audio_forward_loop(
+            audio_rx,
+            peer_ctrl_rx,
+            data_tx,
+            ctrl_tx,
+            task_cancel,
+            connection_cancel.clone(),
+        )
+        .await;
+
+        assert!(
+            connection_cancel.is_cancelled(),
+            "saturated websocket control must force a fresh roster admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_peer_control_queue_cancels_the_audio_connection() {
+        let (_audio_tx, audio_rx) = mpsc::channel(1);
+        let (peer_ctrl_tx, peer_ctrl_rx) = mpsc::channel(1);
+        let (data_tx, _data_rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        let task_cancel = CancellationToken::new();
+        let connection_cancel = CancellationToken::new();
+
+        let forward = tokio::spawn(audio_forward_loop(
+            audio_rx,
+            peer_ctrl_rx,
+            data_tx,
+            ctrl_tx,
+            task_cancel,
+            connection_cancel.clone(),
+        ));
+        drop(peer_ctrl_tx);
+
+        tokio::time::timeout(Duration::from_secs(1), forward)
+            .await
+            .expect("forwarder exits when its state-bearing queue closes")
+            .expect("forwarder task completes cleanly");
+        assert!(
+            connection_cancel.is_cancelled(),
+            "lost control state must tear down the WebSocket for a fresh roster"
+        );
     }
 
     #[tokio::test]

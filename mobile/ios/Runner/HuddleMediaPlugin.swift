@@ -76,6 +76,8 @@ final class HuddleMediaPlugin {
       setSpeakerEnabled(arguments: call.arguments, result: result)
     case "playRemoteOpusFrame":
       playRemoteOpusFrame(arguments: call.arguments, result: result)
+    case "removeRemotePeer":
+      removeRemotePeer(arguments: call.arguments, result: result)
     case "stop":
       stop(result: result)
     default:
@@ -314,6 +316,8 @@ final class HuddleMediaPlugin {
       (0...0xffff).contains(sequence),
       let timestamp = (values["timestamp48k"] as? NSNumber)?.int64Value,
       (0...Int64(UInt32.max)).contains(timestamp),
+      let levelDbov = (values["levelDbov"] as? NSNumber)?.intValue,
+      (-127...0).contains(levelDbov),
       let typedData = values["opus"] as? FlutterStandardTypedData,
       !typedData.data.isEmpty,
       typedData.data.count <= HuddleAudioFormats.maximumOpusPacketBytes
@@ -339,6 +343,7 @@ final class HuddleMediaPlugin {
           peerIndex: peerIndex,
           sequence: sequence,
           timestamp48k: timestamp,
+          levelDbov: levelDbov,
           opus: typedData.data
         )
       )
@@ -352,6 +357,37 @@ final class HuddleMediaPlugin {
         )
       )
     }
+  }
+
+  private func removeRemotePeer(
+    arguments: Any?,
+    result: @escaping FlutterResult
+  ) {
+    guard let values = arguments as? [String: Any],
+      let peerIndex = (values["peerIndex"] as? NSNumber)?.intValue,
+      (0...255).contains(peerIndex)
+    else {
+      result(
+        FlutterError(
+          code: "invalid_arguments",
+          message: "Missing Huddle peer index.",
+          details: nil
+        )
+      )
+      return
+    }
+    guard let audioEngine else {
+      result(
+        FlutterError(
+          code: "invalid_state",
+          message: "Huddle audio is not running.",
+          details: nil
+        )
+      )
+      return
+    }
+    audioEngine.removeRemotePeer(peerIndex)
+    result(nil)
   }
 
   private func handleInterruption(_ notification: Notification) {

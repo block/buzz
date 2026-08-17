@@ -67,26 +67,33 @@ final class HuddlePeer {
   const HuddlePeer({required this.pubkey, required this.peerIndex});
 }
 
-enum HuddlePeerEventType { joined, left }
+enum HuddlePeerEventType { joined, left, replaced }
 
 @immutable
 final class HuddlePeerEvent {
   final HuddlePeerEventType type;
   final HuddlePeer peer;
+  final HuddlePeer? replacement;
 
-  const HuddlePeerEvent({required this.type, required this.peer});
+  const HuddlePeerEvent({
+    required this.type,
+    required this.peer,
+    this.replacement,
+  });
 }
 
 @immutable
 final class HuddleTransportState {
   final HuddleTransportPhase phase;
   final int? localPeerIndex;
+  final int? rosterRevision;
   final UnmodifiableMapView<int, HuddlePeer> peers;
   final HuddleTransportError? error;
 
   HuddleTransportState({
     required this.phase,
     this.localPeerIndex,
+    this.rosterRevision,
     Map<int, HuddlePeer> peers = const {},
     this.error,
   }) : peers = UnmodifiableMapView(Map<int, HuddlePeer>.from(peers));
@@ -128,6 +135,9 @@ final class HuddleTransport implements HuddleTransportClient {
       StreamController.broadcast(sync: true);
   final StreamController<HuddleRemoteAudioFrame> _audioController =
       StreamController.broadcast(sync: true);
+  static const _audioIngressCapacity = 50;
+  final Queue<HuddleRemoteAudioFrame> _audioIngress = Queue();
+  Timer? _audioIngressTimer;
   final StreamController<HuddlePeerEvent> _peerController =
       StreamController.broadcast(sync: true);
   final StreamController<HuddleTransportError> _issueController =
@@ -306,6 +316,9 @@ final class HuddleTransport implements HuddleTransportClient {
     if (_disposed) return;
     await disconnect();
     _disposed = true;
+    _audioIngressTimer?.cancel();
+    _audioIngressTimer = null;
+    _audioIngress.clear();
     await _stateController.close();
     await _audioController.close();
     await _peerController.close();
@@ -343,6 +356,8 @@ final class HuddleTransport implements HuddleTransportClient {
         _handleJoined(message, generation);
       case 'left':
         _handleLeft(message, generation);
+      case 'roster':
+        _handleRoster(message, generation);
       case 'error':
         _handleRelayError(message, generation);
       default:
@@ -406,42 +421,85 @@ final class HuddleTransport implements HuddleTransportClient {
       return;
     }
 
+    final initialAdmission =
+        _state.phase == HuddleTransportPhase.authenticating;
+    final revision = message['revision'];
+    if (revision != null && (revision is! int || revision < 0)) {
+      _handleProtocolProblem('Malformed Huddle joined revision.', generation);
+      return;
+    }
+    final currentRevision = _state.rosterRevision;
+    final staleAdmission =
+        initialAdmission &&
+        currentRevision != null &&
+        revision is int &&
+        revision < currentRevision;
     final peers = Map<int, HuddlePeer>.from(_state.peers);
+    final replaced = peers[peerIndex];
     final snapshot = message['peers'];
     if (snapshot is List) {
-      peers.clear();
-      for (final candidate in snapshot) {
-        if (candidate is! Map) continue;
-        final candidatePubkey = candidate['pubkey'];
-        final candidateIndex = candidate['peer_index'];
-        if (candidatePubkey is String &&
-            candidatePubkey.isNotEmpty &&
-            candidateIndex is int &&
-            candidateIndex >= 0 &&
-            candidateIndex <= 255) {
-          peers[candidateIndex] = HuddlePeer(
-            pubkey: candidatePubkey,
-            peerIndex: candidateIndex,
-          );
-        }
+      final parsed = _parsePeerSnapshot(snapshot);
+      if (parsed == null) {
+        _handleProtocolProblem('Malformed Huddle joined roster.', generation);
+        return;
+      }
+      if (initialAdmission && !staleAdmission) {
+        peers
+          ..clear()
+          ..addAll(parsed);
+      } else if (!initialAdmission && revision == null) {
+        // Legacy, unrevisioned relays used this field as a best-effort roster
+        // snapshot. Revisioned joined controls are deltas; merging their
+        // payload before inspecting the occupied slot would hide index reuse.
+        peers.addAll(parsed);
+      }
+    }
+    if (!initialAdmission &&
+        !_acceptDeltaRevision(revision as int?, generation)) {
+      return;
+    }
+    if (initialAdmission && revision == null) {
+      final selfPresent = peers.values.any(
+        (candidate) => candidate.pubkey.toLowerCase() == pubkey.toLowerCase(),
+      );
+      if (!selfPresent) {
+        peers[peerIndex] = HuddlePeer(pubkey: pubkey, peerIndex: peerIndex);
       }
     }
     final peer = HuddlePeer(pubkey: pubkey, peerIndex: peerIndex);
-    peers[peerIndex] = peer;
+    if (!initialAdmission || revision == null) {
+      peers[peerIndex] = peer;
+    }
+    if (!initialAdmission &&
+        replaced != null &&
+        replaced.pubkey != peer.pubkey) {
+      _purgeAudioIngress({peerIndex});
+    }
 
-    final initialAdmission =
-        _state.phase == HuddleTransportPhase.authenticating;
     _emitState(
       HuddleTransportState(
         phase: HuddleTransportPhase.connected,
         localPeerIndex: initialAdmission ? peerIndex : _state.localPeerIndex,
+        rosterRevision: initialAdmission
+            ? (staleAdmission ? currentRevision : revision as int?)
+            : (revision as int? ?? _state.rosterRevision),
         peers: peers,
       ),
     );
     if (!initialAdmission) {
-      _peerController.add(
-        HuddlePeerEvent(type: HuddlePeerEventType.joined, peer: peer),
-      );
+      if (replaced != null && replaced.pubkey != peer.pubkey) {
+        _peerController.add(
+          HuddlePeerEvent(
+            type: HuddlePeerEventType.replaced,
+            peer: replaced,
+            replacement: peer,
+          ),
+        );
+      } else {
+        _peerController.add(
+          HuddlePeerEvent(type: HuddlePeerEventType.joined, peer: peer),
+        );
+      }
     }
     _handshakeTimer?.cancel();
     _handshakeTimer = null;
@@ -457,28 +515,172 @@ final class HuddleTransport implements HuddleTransportClient {
     }
     final pubkey = message['pubkey'];
     final peerIndex = message['peer_index'];
+    final revision = message['revision'];
     if (pubkey is! String ||
         peerIndex is! int ||
         peerIndex < 0 ||
-        peerIndex > 255) {
+        peerIndex > 255 ||
+        (revision != null && (revision is! int || revision < 0))) {
       _handleProtocolProblem('Malformed Huddle left message.', generation);
       return;
     }
+    if (!_acceptDeltaRevision(revision as int?, generation)) return;
 
+    final existing = _state.peers[peerIndex];
+    if (existing != null && existing.pubkey != pubkey) {
+      _requestRosterResync(generation);
+      return;
+    }
     final peers = Map<int, HuddlePeer>.from(_state.peers);
-    final removed =
-        peers.remove(peerIndex) ??
-        HuddlePeer(pubkey: pubkey, peerIndex: peerIndex);
+    final removed = peers.remove(peerIndex);
+    if (removed == null) return;
+    _purgeAudioIngress({peerIndex});
     _emitState(
       HuddleTransportState(
         phase: HuddleTransportPhase.connected,
         localPeerIndex: _state.localPeerIndex,
+        rosterRevision: revision ?? _state.rosterRevision,
         peers: peers,
       ),
     );
     _peerController.add(
       HuddlePeerEvent(type: HuddlePeerEventType.left, peer: removed),
     );
+  }
+
+  void _handleRoster(Map<String, dynamic> message, int generation) {
+    if (_state.phase == HuddleTransportPhase.authenticating) {
+      _handleInitialRoster(message, generation);
+      return;
+    }
+    if (_state.phase != HuddleTransportPhase.connected) {
+      _handleProtocolProblem('Unexpected Huddle roster message.', generation);
+      return;
+    }
+    final revision = message['revision'];
+    final snapshot = message['peers'];
+    if (revision is! int || revision < 0 || snapshot is! List) {
+      _handleProtocolProblem('Malformed Huddle roster message.', generation);
+      return;
+    }
+    final previousRevision = _state.rosterRevision;
+    if (previousRevision != null && revision <= previousRevision) return;
+    final peers = _parsePeerSnapshot(snapshot);
+    if (peers == null) {
+      _handleProtocolProblem('Malformed Huddle roster message.', generation);
+      return;
+    }
+
+    final previous = _state.peers;
+    final removedOrReplacedIndices = <int>{};
+    for (final entry in previous.entries) {
+      final replacement = peers[entry.key];
+      if (replacement == null || replacement.pubkey != entry.value.pubkey) {
+        removedOrReplacedIndices.add(entry.key);
+      }
+    }
+    _purgeAudioIngress(removedOrReplacedIndices);
+    for (final entry in previous.entries) {
+      final replacement = peers[entry.key];
+      if (replacement == null) {
+        _peerController.add(
+          HuddlePeerEvent(type: HuddlePeerEventType.left, peer: entry.value),
+        );
+      } else if (replacement.pubkey != entry.value.pubkey) {
+        _peerController.add(
+          HuddlePeerEvent(
+            type: HuddlePeerEventType.replaced,
+            peer: entry.value,
+            replacement: replacement,
+          ),
+        );
+      }
+    }
+    for (final entry in peers.entries) {
+      if (!previous.containsKey(entry.key)) {
+        _peerController.add(
+          HuddlePeerEvent(type: HuddlePeerEventType.joined, peer: entry.value),
+        );
+      }
+    }
+    _emitState(
+      HuddleTransportState(
+        phase: HuddleTransportPhase.connected,
+        localPeerIndex: _state.localPeerIndex,
+        rosterRevision: revision,
+        peers: peers,
+      ),
+    );
+  }
+
+  void _handleInitialRoster(Map<String, dynamic> message, int generation) {
+    final revision = message['revision'];
+    final snapshot = message['peers'];
+    if (revision is! int || revision < 0 || snapshot is! List) {
+      _handleProtocolProblem('Malformed Huddle roster message.', generation);
+      return;
+    }
+    final peers = _parsePeerSnapshot(snapshot);
+    if (peers == null) {
+      _handleProtocolProblem('Malformed Huddle roster message.', generation);
+      return;
+    }
+    // Mesh owners may repair a snapshot-to-delta race before the admission
+    // message reaches this client. Retain that newer authoritative snapshot;
+    // the following joined admission is allowed to establish localPeerIndex
+    // without replacing it with older state.
+    _emitState(
+      HuddleTransportState(
+        phase: HuddleTransportPhase.authenticating,
+        rosterRevision: revision,
+        peers: peers,
+      ),
+    );
+  }
+
+  bool _acceptDeltaRevision(int? revision, int generation) {
+    final current = _state.rosterRevision;
+    // Single-node relays do not revision their legacy joined/left controls.
+    // Once a revisioned snapshot/delta is observed, every later delta must be
+    // exactly sequential; gaps are repaired by an authoritative snapshot.
+    if (revision == null) return current == null;
+    if (current == null || revision == current + 1) return true;
+    if (revision <= current) return false;
+    _requestRosterResync(generation);
+    return false;
+  }
+
+  void _requestRosterResync(int generation) {
+    if (!_isCurrent(generation) ||
+        _state.phase != HuddleTransportPhase.connected) {
+      return;
+    }
+    _fail(
+      const HuddleTransportError(
+        code: HuddleTransportErrorCode.protocolViolation,
+        message: 'Huddle roster revision gap; reconnecting for a fresh roster.',
+      ),
+      generation,
+    );
+  }
+
+  Map<int, HuddlePeer>? _parsePeerSnapshot(List<dynamic> snapshot) {
+    final peers = <int, HuddlePeer>{};
+    for (final candidate in snapshot) {
+      if (candidate is! Map) return null;
+      final pubkey = candidate['pubkey'];
+      final peerIndex = candidate['peer_index'];
+      if (pubkey is! String ||
+          pubkey.isEmpty ||
+          peerIndex is! int ||
+          peerIndex < 0 ||
+          peerIndex > 255 ||
+          peers.containsKey(peerIndex)) {
+        return null;
+      }
+      peers[peerIndex] = HuddlePeer(pubkey: pubkey, peerIndex: peerIndex);
+    }
+    return peers;
   }
 
   void _handleRelayError(Map<String, dynamic> message, int generation) {
@@ -507,7 +709,15 @@ final class HuddleTransport implements HuddleTransportClient {
       return;
     }
     try {
-      _audioController.add(HuddleWireV2.decodeRelayFrame(bytes));
+      final frame = HuddleWireV2.decodeRelayFrame(bytes);
+      // The authoritative control roster owns the routing table. Packets from
+      // absent/recycled slots are stale and must never allocate playback state.
+      if (!_state.peers.containsKey(frame.peerIndex)) return;
+      if (_audioIngress.length == _audioIngressCapacity) {
+        _audioIngress.removeFirst();
+      }
+      _audioIngress.addLast(frame);
+      _audioIngressTimer ??= Timer(Duration.zero, _drainAudioIngress);
     } on HuddleWireException catch (error) {
       _issueController.add(
         HuddleTransportError(
@@ -516,6 +726,32 @@ final class HuddleTransport implements HuddleTransportClient {
           cause: error,
         ),
       );
+    }
+  }
+
+  void _purgeAudioIngress(Set<int> peerIndices) {
+    if (peerIndices.isEmpty || _audioIngress.isEmpty) return;
+    _audioIngress.removeWhere((frame) => peerIndices.contains(frame.peerIndex));
+  }
+
+  void _drainAudioIngress() {
+    _audioIngressTimer = null;
+    if (_disposed) {
+      _audioIngress.clear();
+      return;
+    }
+    while (_audioIngress.isNotEmpty) {
+      final frame = _audioIngress.removeFirst();
+      // Control and media are handled by the same socket callback, but queued
+      // media drains on later event-loop turns. Revalidate here so a removal
+      // or index replacement wins over every frame queued before that control.
+      if (_state.peers.containsKey(frame.peerIndex)) {
+        _audioController.add(frame);
+        break;
+      }
+    }
+    if (_audioIngress.isNotEmpty) {
+      _audioIngressTimer = Timer(Duration.zero, _drainAudioIngress);
     }
   }
 
@@ -565,6 +801,7 @@ final class HuddleTransport implements HuddleTransportClient {
       HuddleTransportState(
         phase: HuddleTransportPhase.failed,
         localPeerIndex: _state.localPeerIndex,
+        rosterRevision: _state.rosterRevision,
         peers: _state.peers,
         error: error,
       ),

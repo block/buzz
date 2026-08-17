@@ -38,8 +38,54 @@ internal data class HuddleRemoteOpusPacket(
     val peerIndex: Int,
     val sequence: Int,
     val timestamp48k: Long,
+    val levelDbov: Int,
     val opus: ByteArray,
 )
+
+/// Fixed-capacity active-talker selector. Roster membership stays in Dart;
+/// native decoder/track resources exist only for peers that actually send.
+internal class HuddleActiveTalkerSelector(
+    private val capacity: Int,
+) {
+    internal data class Activity(
+        val peerIndex: Int,
+        val lastPacketOrdinal: Long,
+        val levelDbov: Int,
+    )
+
+    private val active = mutableMapOf<Int, Activity>()
+    private var ordinal = 0L
+
+    fun activate(peerIndex: Int, levelDbov: Int): Int? {
+        ordinal += 1
+        if (active.containsKey(peerIndex)) {
+            active[peerIndex] = Activity(peerIndex, ordinal, levelDbov)
+            return null
+        }
+        val evicted = if (active.size >= capacity) {
+            active.values.minWithOrNull(
+                compareBy<Activity> { it.lastPacketOrdinal }
+                    .thenBy { it.levelDbov }
+                    .thenBy { it.peerIndex },
+            )?.peerIndex.also { index -> index?.let(active::remove) }
+        } else {
+            null
+        }
+        active[peerIndex] = Activity(peerIndex, ordinal, levelDbov)
+        return evicted
+    }
+
+    fun remove(peerIndex: Int) {
+        active.remove(peerIndex)
+    }
+
+    fun indices(): Set<Int> = active.keys.toSet()
+}
+
+internal sealed interface HuddlePlaybackCommand {
+    data class Packet(val packet: HuddleRemoteOpusPacket) : HuddlePlaybackCommand
+    data class RemovePeer(val peerIndex: Int) : HuddlePlaybackCommand
+}
 
 /** Aggregate, debug-only microphone telemetry. No PCM or encoded audio is retained. */
 internal data class HuddleCaptureDiagnostics(
@@ -76,7 +122,7 @@ internal class HuddleAudioEngine(
 ) {
     private val running = AtomicBoolean(false)
     private val failureReported = AtomicBoolean(false)
-    private val playbackQueue = ArrayBlockingQueue<HuddleRemoteOpusPacket>(PLAYBACK_QUEUE_CAPACITY)
+    private val playbackQueue = ArrayBlockingQueue<HuddlePlaybackCommand>(PLAYBACK_QUEUE_CAPACITY)
     private val interrupted = AtomicBoolean(false)
 
     @Volatile
@@ -132,10 +178,28 @@ internal class HuddleAudioEngine(
 
     fun enqueueRemote(packet: HuddleRemoteOpusPacket) {
         check(running.get()) { "Huddle audio is not running." }
-        if (!playbackQueue.offer(packet)) {
-            playbackQueue.poll()
-            playbackQueue.offer(packet)
+        offerPlayback(HuddlePlaybackCommand.Packet(packet))
+    }
+
+    fun removeRemotePeer(peerIndex: Int) {
+        check(running.get()) { "Huddle audio is not running." }
+        playbackQueue.removeIf { command ->
+            command is HuddlePlaybackCommand.Packet && command.packet.peerIndex == peerIndex
         }
+        offerPlayback(HuddlePlaybackCommand.RemovePeer(peerIndex))
+    }
+
+    private fun offerPlayback(command: HuddlePlaybackCommand) {
+        if (playbackQueue.offer(command)) return
+
+        // Packets are expendable realtime data; peer-removal commands are not.
+        // Make room by evicting the oldest packet only, so an audio flood can
+        // never resurrect stale decoder/track state after index reuse.
+        val oldestPacket = playbackQueue.firstOrNull {
+            it is HuddlePlaybackCommand.Packet
+        }
+        if (oldestPacket != null) playbackQueue.remove(oldestPacket)
+        playbackQueue.offer(command)
     }
 
     fun stop() {
@@ -355,23 +419,34 @@ internal class HuddleAudioEngine(
     private fun runPlayback() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
         val playbacks = mutableMapOf<Int, PeerPlayback>()
+        val activeTalkers = HuddleActiveTalkerSelector(MAX_REMOTE_PEERS)
         try {
             while (running.get()) {
-                val packet = try {
+                val command = try {
                     playbackQueue.poll(FRAME_DURATION_US, TimeUnit.MICROSECONDS)
                 } catch (_: InterruptedException) {
                     break
                 }
-                if (packet != null) {
-                    val playback = playbacks[packet.peerIndex] ?: run {
-                        check(playbacks.size < MAX_REMOTE_PEERS) {
-                            "This device reached the mobile Huddle participant limit."
-                        }
-                        PeerPlayback(packet.peerIndex).also {
+                when (command) {
+                    is HuddlePlaybackCommand.Packet -> {
+                        val packet = command.packet
+                        val evicted = activeTalkers.activate(
+                            packet.peerIndex,
+                            packet.levelDbov,
+                        )
+                        evicted?.let { playbacks.remove(it)?.release() }
+                        val playback = playbacks[packet.peerIndex] ?: PeerPlayback(
+                            packet.peerIndex,
+                        ).also {
                             playbacks[packet.peerIndex] = it
                         }
+                        playback.enqueue(packet)
                     }
-                    playback.enqueue(packet)
+                    is HuddlePlaybackCommand.RemovePeer -> {
+                        activeTalkers.remove(command.peerIndex)
+                        playbacks.remove(command.peerIndex)?.release()
+                    }
+                    null -> Unit
                 }
                 if (!interrupted.get()) {
                     for (playback in playbacks.values) playback.drainOne()

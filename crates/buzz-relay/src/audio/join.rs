@@ -1292,14 +1292,16 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                             self.rooms
                                 .get(CommunityId::from_uuid(community_id), session_id)
                         }) {
-                            let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
-                            room.remove_peer(peer_id);
-                            if let Some(peer_index) = peer_index {
+                            if let Some(delta) = room.remove_peer(peer_id) {
+                                let left = delta
+                                    .left
+                                    .expect("peer removal deltas always carry the removed peer");
                                 room.broadcast_control(
                                     serde_json::json!({
                                         "type": "left",
-                                        "pubkey": pubkey,
-                                        "peer_index": peer_index,
+                                        "revision": delta.revision,
+                                        "pubkey": left.pubkey,
+                                        "peer_index": left.peer_index,
                                     })
                                     .to_string(),
                                 );
@@ -1351,15 +1353,17 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             self.rooms
                 .get(CommunityId::from_uuid(community_id), session_id)
         }) {
-            for (pubkey, peer_id) in registered {
-                let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
-                room.remove_peer(peer_id);
-                if let Some(peer_index) = peer_index {
+            for (_pubkey, peer_id) in registered {
+                if let Some(delta) = room.remove_peer(peer_id) {
+                    let left = delta
+                        .left
+                        .expect("peer removal deltas always carry the removed peer");
                     room.broadcast_control(
                         serde_json::json!({
                             "type": "left",
-                            "pubkey": pubkey,
-                            "peer_index": peer_index,
+                            "revision": delta.revision,
+                            "pubkey": left.pubkey,
+                            "peer_index": left.peer_index,
                         })
                         .to_string(),
                     );
@@ -1381,7 +1385,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         registered: &mut std::collections::HashMap<String, Uuid>,
     ) -> HuddleControlMsg {
         match room.add_peer(pubkey.to_string(), protocol_version) {
-            Ok((peer_id, peer_index, audio_rx, _peer_ctrl_rx)) => {
+            Ok((peer_id, peer_index, audio_rx, _peer_ctrl_rx, roster_revision)) => {
                 registered.insert(pubkey.to_string(), peer_id);
                 // The owner's Room fans out to this remote peer's `audio_tx`;
                 // the sink drains `audio_rx` and ships each frame as a datagram
@@ -1389,6 +1393,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 spawn_remote_peer_sink(Arc::clone(&self.transport), from, fenced, audio_rx);
                 let joined = serde_json::json!({
                     "type": "joined",
+                    "revision": roster_revision,
                     "pubkey": pubkey,
                     "peer_index": peer_index,
                     "peers": [{"pubkey": pubkey, "peer_index": peer_index}],
@@ -2277,7 +2282,7 @@ mod tests {
         let fenced = fenced_owned_by(owner_rt, session_id);
         let rooms = Arc::new(AudioRoomManager::new());
         let room = rooms.get_or_create(community(), session_id);
-        let (_local_id, _local_index, _audio_rx, mut local_ctrl_rx) =
+        let (_local_id, _local_index, _audio_rx, mut local_ctrl_rx, _revision) =
             room.add_peer("owner-local".into(), 2).unwrap();
         // Discard the local peer's own roster delta; this assertion targets the
         // websocket-compatible control fanout below.

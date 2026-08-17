@@ -19,6 +19,7 @@ class MobileHuddleShell extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.read(mobileHuddleControllerProvider.notifier);
     final presentation = ref.watch(mobileHuddlePresentationProvider);
     final session = ref.watch(huddleSessionProvider);
     final relayStatus = ref.watch(relaySessionProvider).status;

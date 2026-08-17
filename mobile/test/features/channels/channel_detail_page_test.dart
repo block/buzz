@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -295,6 +296,7 @@ Widget _buildTestable({
         huddleHumanCountProvider.overrideWithValue(huddleHumanCountLoader),
       if (huddleCurrentPubkey != null)
         currentPubkeyProvider.overrideWith((ref) => huddleCurrentPubkey),
+      appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
@@ -4459,7 +4461,7 @@ void main() {
     });
 
     testWidgets(
-      'top-right call end closes and releases media before member lookup',
+      'duplicate hangup still completes the admitted lifecycle after local teardown',
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         final media = _HuddleTestMedia();
@@ -4497,6 +4499,12 @@ void main() {
         await tester.tap(find.widgetWithText(FilledButton, 'Join'));
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const ValueKey('huddle-leave')));
+        final huddleContainer = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        unawaited(
+          huddleContainer.read(mobileHuddleControllerProvider.notifier).leave(),
+        );
         for (var attempt = 0; attempt < 20; attempt++) {
           await tester.pump();
         }
@@ -4517,6 +4525,77 @@ void main() {
 
         expect(archivedChannelId, _huddleChannelId);
         expect(relaySession.publishedKinds, contains(EventKind.huddleEnded));
+      },
+    );
+
+    testWidgets(
+      'creator end publish superseded by rejoin cannot archive new admission',
+      (tester) async {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final endPublishGate = Completer<void>();
+        final media = Queue<_HuddleTestMedia>.of([
+          _HuddleTestMedia(),
+          _HuddleTestMedia(),
+        ]);
+        final transports = Queue<_HuddleTestTransport>.of([
+          _HuddleTestTransport(),
+          _HuddleTestTransport(),
+        ]);
+        final relaySession = _ReconnectingRelaySession(
+          huddleEndPublishGate: endPublishGate.future,
+        );
+        String? archivedChannelId;
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'stale-creator-end',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {'self': UserProfile(pubkey: 'self')},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relaySession,
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: media.removeFirst,
+            huddleTransportFactory: (_) => transports.removeFirst(),
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onArchiveChannel: (channelId) async =>
+                  archivedChannelId = channelId,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final controller = container.read(
+          mobileHuddleControllerProvider.notifier,
+        );
+        final staleEnd = controller.end();
+        await relaySession.huddleEndPublishStarted.future;
+        final rejoin = controller.join(
+          parentChannelId: _channelId,
+          ephemeralChannelId: _huddleChannelId,
+          startedBy: 'self',
+          startedEventId: 'stale-creator-end',
+        );
+        endPublishGate.complete();
+        await staleEnd;
+        await rejoin;
+        await tester.pump();
+
+        expect(relaySession.publishedKinds, contains(EventKind.huddleEnded));
+        expect(archivedChannelId, isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
       },
     );
 
@@ -8572,7 +8651,16 @@ class _ErrorMessagesNotifier extends ChannelMessagesNotifier {
       AsyncError('Connection failed', StackTrace.current);
 }
 
+class _TestAppLifecycleNotifier extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
+}
+
 class _ReconnectingRelaySession extends RelaySessionNotifier {
+  _ReconnectingRelaySession({this.huddleEndPublishGate});
+
+  final Future<void>? huddleEndPublishGate;
+  final huddleEndPublishStarted = Completer<void>();
   final List<int> publishedKinds = [];
 
   @override
@@ -8591,6 +8679,14 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     publishedKinds.add(event.kind);
+    if (event.kind == EventKind.huddleEnded) {
+      if (huddleEndPublishGate case final gate?) {
+        if (!huddleEndPublishStarted.isCompleted) {
+          huddleEndPublishStarted.complete();
+        }
+        await gate;
+      }
+    }
     return event;
   }
 
@@ -8799,6 +8895,10 @@ class _HuddleRelayConfigNotifier extends RelayConfigNotifier {
 }
 
 final class _HuddleTestMedia implements HuddleMedia {
+  _HuddleTestMedia({this.stopGate});
+
+  final Future<void>? stopGate;
+  final stopStarted = Completer<void>();
   final _states = StreamController<HuddleMediaState>.broadcast(sync: true);
   final _localFrames = StreamController<HuddleLocalAudioFrame>.broadcast(
     sync: true,
@@ -8886,7 +8986,12 @@ final class _HuddleTestMedia implements HuddleMedia {
   Future<void> playRemoteFrame(HuddleRemoteAudioFrame frame) async {}
 
   @override
+  Future<void> removeRemotePeer(int peerIndex) async {}
+
+  @override
   Future<void> stop() async {
+    if (!stopStarted.isCompleted) stopStarted.complete();
+    if (stopGate case final gate?) await gate;
     _emit(
       HuddleMediaState(
         phase: HuddleMediaPhase.stopped,
