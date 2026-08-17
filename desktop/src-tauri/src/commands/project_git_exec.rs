@@ -146,11 +146,27 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
     // disables the global config file on every platform.
     command.env("GIT_CONFIG_GLOBAL", "/dev/null");
 
+    let entries = git_auth_config_entries(auth, needs_credentials, cfg!(windows));
+    if needs_credentials && auth.credential_helper.is_some() {
+        command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
+    }
+    apply_git_config(command, &entries);
+}
+
+/// Ephemeral `GIT_CONFIG_*` entries for a project git subprocess.
+///
+/// `is_windows` is passed as data so tests can cover Git-for-Windows behavior
+/// without patching `cfg!(windows)`.
+fn git_auth_config_entries(
+    auth: &GitAuthConfig,
+    needs_credentials: bool,
+    is_windows: bool,
+) -> Vec<(&'static str, String)> {
     // Base entries: disable any inherited credential helper, and neutralize
     // repo-local hooks — every process git spawns inherits our environment
     // (including NOSTR_PRIVATE_KEY below), and a cloned repository's hooks
     // must never run with the identity key in reach.
-    let mut entries: Vec<(&str, String)> = vec![
+    let mut entries: Vec<(&'static str, String)> = vec![
         ("credential.helper", String::new()),
         ("core.hooksPath", "/dev/null".to_string()),
         ("core.fsmonitor", "false".to_string()),
@@ -168,18 +184,23 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
             .to_string(),
         ),
     ];
+    // `GIT_CONFIG_NOSYSTEM` + `GIT_CONFIG_GLOBAL=/dev/null` hide the user's
+    // `core.longpaths=true`. Without this injected replacement, Git for
+    // Windows rejects any path over MAX_PATH (260) during snapshot clone.
+    if is_windows {
+        entries.push(("core.longpaths", "true".to_string()));
+    }
     if needs_credentials {
         let Some(cred_helper) = &auth.credential_helper else {
-            return apply_git_config(command, &entries);
+            return entries;
         };
-        command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
         entries.push((
             "credential.helper",
             credential_helper_config_value(cred_helper),
         ));
         entries.push(("credential.useHttpPath", "true".to_string()));
     }
-    apply_git_config(command, &entries);
+    entries
 }
 
 /// Format a path for git `credential.helper`.
@@ -393,10 +414,42 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
-        validate_local_clone_url,
+        clean_branch, clean_target_ref, credential_helper_config_value, git_auth_config_entries,
+        git_needs_credentials, git_subcommand, validate_clone_url,
+        validate_clone_url_against_relay, validate_local_clone_url, GitAuthConfig,
     };
+
+    fn test_auth(allow_file_transport: bool) -> GitAuthConfig {
+        GitAuthConfig {
+            git_path: std::path::PathBuf::from("git"),
+            credential_helper: None,
+            nsec: String::new(),
+            allow_file_transport,
+        }
+    }
+
+    fn has_entry(entries: &[(&str, String)], key: &str, value: &str) -> bool {
+        entries.iter().any(|(k, v)| *k == key && v == value)
+    }
+
+    #[test]
+    fn windows_git_auth_injects_core_longpaths() {
+        let entries = git_auth_config_entries(&test_auth(false), false, true);
+        assert!(
+            has_entry(&entries, "core.longpaths", "true"),
+            "isolated Windows git config must restore core.longpaths after hiding global gitconfig"
+        );
+        assert!(has_entry(&entries, "core.hooksPath", "/dev/null"));
+    }
+
+    #[test]
+    fn non_windows_git_auth_omits_core_longpaths() {
+        let entries = git_auth_config_entries(&test_auth(false), false, false);
+        assert!(
+            !entries.iter().any(|(k, _)| *k == "core.longpaths"),
+            "Unix git has no core.longpaths setting; do not inject a Windows-only key"
+        );
+    }
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {
