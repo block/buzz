@@ -1003,12 +1003,14 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
 }
 
 /// True when an event is a threaded reply — it carries a NIP-10 `e` tag marked
-/// `reply` or `root`. A top-level message has neither, so a `message_posted`
-/// filter of `trigger_is_reply == false` fires only on new top-level messages.
+/// `reply`. A `root` marker alone is not enough: the ingest resolver treats
+/// `(root=Some, reply=None)` as top-level (see `resolve_nip10_thread_meta`), so
+/// a `message_posted` filter of `trigger_is_reply == false` fires on those and
+/// on messages with no NIP-10 markers at all.
 fn event_is_reply(event: &nostr::Event) -> bool {
     event.tags.iter().any(|tag| {
         let parts = tag.as_slice();
-        parts.len() >= 4 && parts[0] == "e" && (parts[3] == "reply" || parts[3] == "root")
+        parts.len() >= 4 && parts[0] == "e" && parts[3] == "reply"
     })
 }
 
@@ -1625,6 +1627,50 @@ steps:
         let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
         let ctx = build_trigger_context(&stored);
         assert!(ctx.is_reply, "message with reply/root e-tags is a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_true_for_reply_only_marker() {
+        // A NIP-10 `reply` marker without a `root` marker (the fallback ingest
+        // treats as `root == reply`) is still a threaded reply.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let parent = Keys::generate();
+        let parent_event = EventBuilder::new(Kind::Custom(9), "parent")
+            .sign_with_keys(&parent)
+            .expect("sign parent");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "reply only")
+            .tags([Tag::parse(["e", &parent_event.id.to_hex(), "", "reply"]).expect("reply tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(ctx.is_reply, "a lone `reply` marker is a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_root_only_marker() {
+        // Ingest treats `(root=Some, reply=None)` as top-level, so
+        // `event_is_reply` must too — otherwise `trigger_is_reply == false`
+        // would skip a message the relay stored as a new top-level post.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "root marker only")
+            .tags([Tag::parse(["e", &root_event.id.to_hex(), "", "root"]).expect("root tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a lone `root` marker is top-level to ingest, not a reply"
+        );
     }
 
     #[test]

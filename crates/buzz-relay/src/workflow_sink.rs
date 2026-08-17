@@ -399,6 +399,20 @@ impl ActionSink for RelayActionSink {
                     None,
                 )
                 .await;
+
+                // A threaded reply changed its thread's counters — push a fresh
+                // relay-signed kind:39005 so subscribed clients update badge
+                // counts without refetching the head window, exactly as the
+                // ingest path does after a reply insert. Fan-out-only and
+                // best-effort; skipped for top-level (non-reply) messages.
+                if let Some(owned) = &thread_meta_owned {
+                    crate::handlers::side_effects::emit_live_thread_summary(
+                        &tenant,
+                        &state,
+                        channel_uuid,
+                        owned.root_event_id.clone(),
+                    );
+                }
             }
 
             Ok(event_id_hex)
@@ -852,6 +866,148 @@ mod integration_tests {
             .to_vec();
         assert_eq!(meta.parent_event_id.as_deref(), Some(root_bytes.as_slice()));
         assert_eq!(meta.root_event_id.as_deref(), Some(root_bytes.as_slice()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_reply_to_metadata_less_nested_parent_recovers_depth_2() {
+        // A parent that carries NIP-10 root/reply markers but has NO
+        // thread_metadata row (legacy or not-yet-indexed) must be recognized as
+        // nested: the workflow reply threads at depth 2 onto the parent's own
+        // root, not a false top-level depth 1.
+        let state = test_state().await;
+
+        let author = nostr::Keys::generate();
+        let author_hex = author.public_key().to_hex();
+
+        let host = format!("wf-legacy-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &author_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-legacy",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &author.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+
+        let channel_hex = channel.id.to_string();
+
+        // A top-level root message, inserted WITHOUT any thread metadata row.
+        let root_event = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "root")
+            .tags([Tag::parse(["h", &channel_hex]).expect("h tag")])
+            .sign_with_keys(&author)
+            .expect("sign root");
+        let root_hex = root_event.id.to_hex();
+        state
+            .db
+            .insert_event(community, &root_event, Some(channel.id))
+            .await
+            .expect("insert root");
+
+        // A nested parent that marks its root/reply — but, crucially, is stored
+        // with NO thread_metadata row (the legacy/unindexed case F1 addresses).
+        let parent_event =
+            EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "nested parent")
+                .tags([
+                    Tag::parse(["h", &channel_hex]).expect("h tag"),
+                    Tag::parse(["e", &root_hex, "", "root"]).expect("root tag"),
+                    Tag::parse(["e", &root_hex, "", "reply"]).expect("reply tag"),
+                ])
+                .sign_with_keys(&author)
+                .expect("sign parent");
+        let parent_hex = parent_event.id.to_hex();
+        state
+            .db
+            .insert_event(community, &parent_event, Some(channel.id))
+            .await
+            .expect("insert parent");
+        assert!(
+            state
+                .db
+                .get_thread_metadata_by_event(community, parent_event.id.as_bytes())
+                .await
+                .expect("query parent meta")
+                .is_none(),
+            "test premise: the nested parent must have no thread_metadata row"
+        );
+
+        // A workflow reply onto the metadata-less nested parent.
+        let reply_hex = RelayActionSink::new(&state)
+            .send_message(
+                community,
+                &channel_hex,
+                "workflow reply",
+                &author_hex,
+                Some(&parent_hex),
+            )
+            .await
+            .expect("send reply");
+
+        let reply_id_bytes = nostr::EventId::from_hex(&reply_hex)
+            .expect("reply id")
+            .as_bytes()
+            .to_vec();
+        let meta = state
+            .db
+            .get_thread_metadata_by_event(community, &reply_id_bytes)
+            .await
+            .expect("query meta")
+            .expect("reply has thread metadata");
+
+        assert_eq!(
+            meta.depth, 2,
+            "reply to a marked-but-unindexed nested parent is depth 2, not top-level"
+        );
+        let root_bytes = nostr::EventId::from_hex(&root_hex)
+            .expect("root id")
+            .as_bytes()
+            .to_vec();
+        let parent_bytes = parent_event.id.as_bytes().to_vec();
+        assert_eq!(
+            meta.root_event_id.as_deref(),
+            Some(root_bytes.as_slice()),
+            "root recovered from the parent's own NIP-10 markers"
+        );
+        assert_eq!(
+            meta.parent_event_id.as_deref(),
+            Some(parent_bytes.as_slice())
+        );
+
+        // The reply's own NIP-10 e-tags point root→the recovered root,
+        // reply→the immediate parent (matching the ingest resolver).
+        let stored = state
+            .db
+            .get_event_by_id(community, &reply_id_bytes)
+            .await
+            .expect("query reply")
+            .expect("reply persisted");
+        let marker = |m: &str| -> Option<String> {
+            stored.event.tags.iter().find_map(|t| {
+                let p = t.as_slice();
+                if p.len() >= 4 && p[0] == "e" && p[3] == m {
+                    Some(p[1].clone())
+                } else {
+                    None
+                }
+            })
+        };
+        assert_eq!(marker("root").as_deref(), Some(root_hex.as_str()));
+        assert_eq!(marker("reply").as_deref(), Some(parent_hex.as_str()));
     }
 
     #[tokio::test]

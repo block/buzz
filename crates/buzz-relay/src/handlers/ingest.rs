@@ -807,46 +807,18 @@ pub(crate) async fn resolve_nip10_thread_meta(
             (effective_root, root_ts, depth)
         }
         None => {
-            let parent_root = parent_event
-                .event
-                .tags
-                .iter()
-                .find_map(|t| {
-                    let parts = t.as_slice();
-                    if parts.len() >= 4 && parts[0] == "e" && parts[3] == "root" {
-                        hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    parent_event.event.tags.iter().find_map(|t| {
-                        let parts = t.as_slice();
-                        if parts.len() >= 4 && parts[0] == "e" && parts[3] == "reply" {
-                            hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .unwrap_or_else(|| parent_bytes.clone());
+            let (parent_root, root_created, depth) = derive_ancestry_from_parent_tags(
+                community_id,
+                &parent_event.event,
+                &parent_bytes,
+                parent_created,
+                state,
+            )
+            .await;
 
             if client_root_bytes != parent_root {
                 return Err("root tag does not match thread ancestry".to_string());
             }
-            let depth = if parent_root == parent_bytes { 1 } else { 2 };
-            let root_created = if parent_root != parent_bytes {
-                if let Ok(Some(root_ev)) =
-                    state.db.get_event_by_id(community_id, &parent_root).await
-                {
-                    chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
-                        .unwrap_or(parent_created)
-                } else {
-                    parent_created
-                }
-            } else {
-                parent_created
-            };
             (parent_root, root_created, depth)
         }
     };
@@ -870,6 +842,52 @@ pub(crate) async fn resolve_nip10_thread_meta(
         depth,
         broadcast,
     }))
+}
+
+/// Recover a reply's thread ancestry from its *parent's* NIP-10 tags when the
+/// parent has **no** `thread_metadata` row (legacy or not-yet-indexed events).
+///
+/// The parent's own marked `root` (else `reply`) `e` tag names the thread root;
+/// absent both, the parent is itself top-level and is its own root. Depth is 1
+/// when the parent is the root and 2 otherwise — a reply to a nested-but-
+/// unindexed parent must not be mistaken for a top-level reply.
+///
+/// Shared by [`resolve_nip10_thread_meta`] (client path) and
+/// [`resolve_relay_reply_thread_meta`] (workflow path) so the two cannot
+/// diverge. Returns `(root_event_id, root_event_created_at, depth)`.
+async fn derive_ancestry_from_parent_tags(
+    community_id: CommunityId,
+    parent_event: &Event,
+    parent_bytes: &[u8],
+    parent_created: chrono::DateTime<Utc>,
+    state: &AppState,
+) -> (Vec<u8>, chrono::DateTime<Utc>, i32) {
+    let marked_ancestor = |marker: &str| {
+        parent_event.tags.iter().find_map(|t| {
+            let parts = t.as_slice();
+            if parts.len() >= 4 && parts[0] == "e" && parts[3] == marker {
+                hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
+            } else {
+                None
+            }
+        })
+    };
+    let parent_root = marked_ancestor("root")
+        .or_else(|| marked_ancestor("reply"))
+        .unwrap_or_else(|| parent_bytes.to_vec());
+
+    if parent_root.as_slice() == parent_bytes {
+        (parent_root, parent_created, 1)
+    } else {
+        let root_created =
+            if let Ok(Some(root_ev)) = state.db.get_event_by_id(community_id, &parent_root).await {
+                chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
+                    .unwrap_or(parent_created)
+            } else {
+                parent_created
+            };
+        (parent_root, root_created, 2)
+    }
 }
 
 /// Resolved thread ancestry for a relay-built reply (workflow path).
@@ -977,8 +995,19 @@ pub(crate) async fn resolve_relay_reply_thread_meta(
             };
             (effective_root, root_ts, meta.depth + 1)
         }
-        // No metadata row ⇒ parent is a top-level message; it is its own root.
-        None => (parent_bytes.clone(), parent_created, 1),
+        // No metadata row ⇒ recover the parent's ancestry from its own NIP-10
+        // tags. A marked (but not-yet-indexed) nested parent yields depth 2, not
+        // a false top-level depth 1.
+        None => {
+            derive_ancestry_from_parent_tags(
+                community_id,
+                &parent_event.event,
+                &parent_bytes,
+                parent_created,
+                state,
+            )
+            .await
+        }
     };
 
     if depth > 100 {
