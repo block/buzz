@@ -373,3 +373,63 @@ test("rewriteRelayUrl: still passes external Blossom URLs through unchanged", as
     globalThis.window = previousWindow;
   }
 });
+
+test("rewriteRelayUrl: proxies an exact registered community host alias only", async () => {
+  const previousWindow = globalThis.window;
+
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_http_url") {
+          return Promise.resolve("https://current.example");
+        }
+        if (command === "get_relay_community_hosts") {
+          return Promise.resolve(["current.example", "OLD.EXAMPLE:3000"]);
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?aliases=${Date.now()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const aliasUrl = `http://old.example:3000/media/${HASH}.png`;
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(aliasUrl),
+      `http://127.0.0.1:54321/media/${HASH}.png`,
+    );
+
+    const suffixSpoof = `http://old.example:3000.evil.test/media/${HASH}.png`;
+    assert.equal(mediaUrl.rewriteRelayUrl(suffixSpoof), suffixSpoof);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("rewriteRelayUrl: fails closed until relay identity is resolved", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_http_url") return new Promise(() => {});
+        if (command === "get_relay_community_hosts") {
+          return Promise.reject(new Error("not ready"));
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?unresolved=${Date.now()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const untrusted = `https://evil.test/media/${HASH}.png`;
+    assert.equal(mediaUrl.rewriteRelayUrl(untrusted), untrusted);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});

@@ -1265,12 +1265,17 @@ impl Db {
     ) -> Result<Option<CommunityRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
-              AND deleted_at IS NULL
-              AND deletion_state = 'active'
+            SELECT c.id, matched.host
+            FROM (
+                SELECT id AS community_id, host FROM communities
+                UNION ALL
+                SELECT community_id, host FROM community_hosts
+            ) matched
+            JOIN communities c ON c.id = matched.community_id
+            WHERE lower(matched.host) = lower($1)
+              AND c.archived_at IS NULL
+              AND c.deleted_at IS NULL
+              AND c.deletion_state = 'active'
             "#,
         )
         .bind(normalized_host)
@@ -1287,6 +1292,88 @@ impl Db {
             })
         })
         .transpose()
+    }
+
+    /// Returns the canonical host and every registered alias for a community.
+    pub async fn community_hosts(&self, community_id: CommunityId) -> Result<Vec<String>> {
+        sqlx::query_scalar(
+            r#"
+            SELECT host FROM communities WHERE id = $1 AND archived_at IS NULL
+            UNION ALL
+            SELECT host FROM community_hosts WHERE community_id = $1
+            ORDER BY host
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Adds an alternate normalized host for an existing community.
+    /// Returns false when the exact mapping already exists.
+    pub async fn add_community_host(
+        &self,
+        community_id: CommunityId,
+        normalized_host: &str,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(lower($1), 0))")
+            .bind(normalized_host)
+            .execute(&mut *tx)
+            .await?;
+
+        let existing_owner: Option<Uuid> = sqlx::query_scalar(
+            "SELECT community_id FROM community_hosts WHERE lower(host) = lower($1)",
+        )
+        .bind(normalized_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing_owner) = existing_owner {
+            if existing_owner == *community_id.as_uuid() {
+                tx.commit().await?;
+                return Ok(false);
+            }
+            return Err(DbError::InvalidData(
+                "host is already an alias for another community".into(),
+            ));
+        }
+
+        let canonical_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM communities WHERE lower(host) = lower($1))",
+        )
+        .bind(normalized_host)
+        .fetch_one(&mut *tx)
+        .await?;
+        if canonical_exists {
+            return Err(DbError::InvalidData(
+                "host is already a canonical community host".into(),
+            ));
+        }
+
+        sqlx::query("INSERT INTO community_hosts (community_id, host) VALUES ($1, $2)")
+            .bind(community_id.as_uuid())
+            .bind(normalized_host)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Removes an alternate host. Canonical community hosts are never removed.
+    pub async fn remove_community_host(
+        &self,
+        community_id: CommunityId,
+        normalized_host: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM community_hosts WHERE community_id = $1 AND lower(host) = lower($2)",
+        )
+        .bind(community_id.as_uuid())
+        .bind(normalized_host)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Returns whether a community id still exists in the active lifecycle state.
@@ -6406,6 +6493,56 @@ mod tests {
             .expect("lookup stored-case host")
             .expect("community found by stored-case host");
         assert_eq!(found.id, CommunityId::from_uuid(id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_host_aliases_are_case_insensitive_idempotent_and_removable() {
+        let db = setup_db().await;
+        let id = Uuid::new_v4();
+        let canonical = format!("canonical-{}.example", id.simple());
+        let alias = format!("alias-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&canonical)
+            .execute(&db.pool)
+            .await
+            .expect("insert community");
+        let community_id = CommunityId::from_uuid(id);
+
+        assert!(db
+            .add_community_host(community_id, &alias.to_ascii_uppercase())
+            .await
+            .expect("add alias"));
+        assert!(!db
+            .add_community_host(community_id, &alias)
+            .await
+            .expect("idempotent alias add"));
+        let found = db
+            .lookup_community_by_host(&alias)
+            .await
+            .expect("lookup alias")
+            .expect("alias resolves");
+        assert_eq!(found.id, community_id);
+        assert_eq!(found.host, alias.to_ascii_uppercase());
+
+        assert!(db
+            .add_community_host(community_id, &canonical)
+            .await
+            .is_err());
+        assert!(db
+            .remove_community_host(community_id, &alias)
+            .await
+            .expect("remove alias"));
+        assert!(db
+            .lookup_community_by_host(&alias)
+            .await
+            .expect("lookup removed alias")
+            .is_none());
+        assert!(!db
+            .remove_community_host(community_id, &canonical)
+            .await
+            .expect("canonical host cannot be removed as alias"));
     }
 
     #[tokio::test]

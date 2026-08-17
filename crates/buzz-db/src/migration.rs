@@ -412,6 +412,7 @@ mod tests {
             "storage_taxonomy_sweeps",
             "community_serving_write_leases",
             "community_deletion_executor_heartbeats",
+            "community_hosts",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -625,7 +626,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 31);
+        assert_eq!(migrations.len(), 32);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -969,7 +970,6 @@ mod tests {
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
         );
-
         // Replica heartbeat (this branch, renumbered to 0026 after
         // 0025_relay_invites landed on main): the fence's portable read-side
         // observation. A single CHECK'd row makes the token update the
@@ -1057,6 +1057,28 @@ mod tests {
             .as_str()
             .contains("error_code"));
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
+    }
+
+    #[test]
+    fn community_hosts_lets_a_community_resolve_under_more_than_one_authority() {
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
+
+        assert_eq!(migrations[31].version, 32);
+        let community_hosts = migrations[31].sql.as_str();
+        assert!(community_hosts.contains("CREATE TABLE community_hosts"));
+        assert!(community_hosts.contains("REFERENCES communities(id) ON DELETE CASCADE"));
+        assert!(community_hosts.contains("CREATE UNIQUE INDEX idx_community_hosts_lower_host"));
+        assert!(community_hosts.contains("CHECK (btrim(host) <> '')"));
+        assert!(community_hosts.contains("pg_advisory_xact_lock"));
+        assert!(community_hosts.contains("_operator_global_tables"));
+
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(desired_schema.contains("CREATE TABLE community_hosts"));
+        assert!(desired_schema.contains("idx_community_hosts_lower_host"));
+        assert!(desired_schema.contains("CHECK (btrim(host) <> '')"));
+        assert!(desired_schema.contains("CREATE TRIGGER guard_communities_host_collision"));
+        assert!(desired_schema.contains("CREATE TRIGGER guard_community_hosts_collision"));
     }
 
     #[test]
