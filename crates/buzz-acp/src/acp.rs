@@ -3180,7 +3180,13 @@ mod tests {
     /// healthy implementation clears the floor within a couple of tries.
     /// Measured before this helper existed: 4 of 9 full-suite runs failed here.
     async fn assert_activity_resets_idle(script: &str, what: &str) {
-        const ATTEMPTS: usize = 4;
+        // Sized against how loaded the suite actually is, not by feel. Four was
+        // enough at 797 tests; at 811 — the count once the agent-lifecycle
+        // branch's process fixtures are also present — one run in three still
+        // exhausted it. Each extra attempt costs a fixture spawn only on a host
+        // that is already stalling, and never on a genuine regression: that
+        // fails on the first attempt, deterministically.
+        const ATTEMPTS: usize = 8;
         let mut inconclusive = Vec::new();
 
         for _ in 0..ATTEMPTS {
