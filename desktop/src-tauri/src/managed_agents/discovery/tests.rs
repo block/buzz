@@ -317,8 +317,6 @@ fn record_agent_command_bare_record_defaults() {
     assert_eq!(record_agent_command(&record, &[]), default_agent_command());
 }
 
-// ── try_record_agent_command ─────────────────────────────────────────────────
-
 /// When the record carries a dangling (unknown) runtime id, `try_record_agent_command`
 /// must return `Err` containing "DANGLING_HARNESS_ID" — NEVER the buzz-agent default.
 /// This test would fail if the function silently fell back to `default_agent_command()`.
