@@ -138,7 +138,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 A resume that cannot happen never costs the turn: if the file is missing, the entry is stale, the agent does not advertise `loadSession`, or the agent rejects `session/load`, the harness forgets the mapping and falls back to `session/new` for that channel.
 
-> **Operators running in containers:** the default state directory lives under the working directory, which is ephemeral in most container and pod filesystems — it silently vanishes on every deploy, so every restart starts every channel from scratch. Set `BUZZ_ACP_STATE_DIR` to a path on mounted persistent storage (a volume, PVC, or bind mount, e.g. `/var/lib/buzz-acp`) when the harness does not live on a laptop. Gateways that supervise hosted harnesses can additionally key sessions by `(agent pubkey, channelId)` in their own store — the harness sends the channel on `session/new` as `_meta.channelId` — to resume across a node move even when the file did not survive.
+> **Operators running in containers:** the default state directory lives under the working directory, which is ephemeral in most container and pod filesystems — it silently vanishes on every deploy, so every restart starts every channel from scratch. Set `BUZZ_ACP_STATE_DIR` to a path on mounted persistent storage (a volume, PVC, or bind mount, e.g. `/var/lib/buzz-acp`) when the harness does not live on a laptop. Gateways that supervise hosted harnesses can additionally key sessions by `(agent pubkey, channelId)` in their own store — the harness sends the channel on `session/new` as `_meta.channelId` — to resume across a node move even when the file did not survive. Such a gateway must honour `_meta.freshSession: true` (sent on the first `session/new` after an owner `!rotate`) by opening a new conversation instead of resuming, otherwise `!rotate` becomes a no-op behind it.
 
 ### Inbound Author Gate
 
@@ -164,7 +164,7 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 |---------|--------|
 | `!shutdown` | Gracefully exits the harness. |
 | `!cancel` | Cancels the current in-flight turn for that channel, if any. |
-| `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session. |
+| `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session, and that `session/new` carries `_meta.freshSession: true` so an agent (or gateway) that keys its own state by `_meta.channelId` knows to start over rather than resume. |
 
 Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
 

@@ -14,7 +14,7 @@
 //! swallowed — the store is an optimisation on top of the in-memory map, never
 //! a reason to refuse a turn.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -25,6 +25,11 @@ pub struct SessionStore {
     /// `None` disables persistence: `get` is always empty, `put`/`remove` no-op.
     path: Option<PathBuf>,
     map: Mutex<HashMap<Uuid, String>>,
+    /// Channels whose owner asked (`!rotate`) that the *next* session start
+    /// from nothing — see [`request_fresh`](Self::request_fresh). In-memory
+    /// only and independent of `path`: it is a signal about the next
+    /// `session/new`, not a memory of a past one.
+    fresh: Mutex<HashSet<Uuid>>,
 }
 
 impl SessionStore {
@@ -33,6 +38,7 @@ impl SessionStore {
         Self {
             path: None,
             map: Mutex::new(HashMap::new()),
+            fresh: Mutex::new(HashSet::new()),
         }
     }
 
@@ -71,6 +77,7 @@ impl SessionStore {
         Self {
             path: Some(path),
             map: Mutex::new(map),
+            fresh: Mutex::new(HashSet::new()),
         }
     }
 
@@ -107,6 +114,30 @@ impl SessionStore {
         }
     }
 
+    /// Record that the owner rotated `channel_id`: the next `session/new` for
+    /// it must tell the agent to start fresh (`_meta.freshSession`), even if
+    /// the agent keys its own state by channel and would otherwise resume.
+    ///
+    /// Dropping the harness's ACP session is not enough on its own. An agent
+    /// that resumes by `_meta.channelId` (`fountain acp` and its channel-bound
+    /// conversations) hands the same conversation back on the very next
+    /// `session/new`, which turns `!rotate` into a no-op. This flag is how the
+    /// harness relays the owner's intent through.
+    pub fn request_fresh(&self, channel_id: Uuid) {
+        if let Ok(mut fresh) = self.fresh.lock() {
+            fresh.insert(channel_id);
+        }
+    }
+
+    /// Consume a pending fresh-session request for `channel_id`. Returns
+    /// `true` at most once per [`request_fresh`](Self::request_fresh).
+    pub fn take_fresh(&self, channel_id: Uuid) -> bool {
+        self.fresh
+            .lock()
+            .map(|mut fresh| fresh.remove(&channel_id))
+            .unwrap_or(false)
+    }
+
     fn flush(&self, map: &HashMap<Uuid, String>) {
         let Some(path) = &self.path else { return };
         let write = || -> std::io::Result<()> {
@@ -137,6 +168,18 @@ mod tests {
             "buzz-acp-session-store-{}-{name}.json",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn fresh_request_is_consumed_once_and_works_when_disabled() {
+        let store = SessionStore::disabled();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        assert!(!store.take_fresh(a));
+        store.request_fresh(a);
+        assert!(!store.take_fresh(b), "other channels are unaffected");
+        assert!(store.take_fresh(a));
+        assert!(!store.take_fresh(a), "consumed by the first take");
     }
 
     #[test]

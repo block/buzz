@@ -145,6 +145,10 @@ pub struct SessionOrigin<'a> {
     pub channel_id: uuid::Uuid,
     /// `"dm"`, `"stream"`, … as the relay reports it; `None` when unresolved.
     pub channel_type: Option<&'a str>,
+    /// The owner rotated this channel (`!rotate`): the agent must start this
+    /// session from nothing rather than resume whatever it keeps for
+    /// `channel_id`. Sent as `_meta.freshSession: true`; omitted when false.
+    pub fresh: bool,
 }
 
 pub struct AcpClient {
@@ -712,7 +716,9 @@ impl AcpClient {
     }
 
     /// [`session_new_full`](Self::session_new_full) plus the channel the session
-    /// is for, sent out of band as `_meta.channelId` / `_meta.channelType`.
+    /// is for, sent out of band as `_meta.channelId` / `_meta.channelType`, and
+    /// `_meta.freshSession: true` when the owner rotated the channel and the
+    /// agent must not resume its own channel-keyed state.
     ///
     /// The prompt already names the channel in its `[Context]` block, but that
     /// is text for the model. An agent — or a gateway in front of many agents,
@@ -751,6 +757,9 @@ impl AcpClient {
             params["_meta"]["channelId"] = serde_json::Value::String(origin.channel_id.to_string());
             if let Some(channel_type) = origin.channel_type {
                 params["_meta"]["channelType"] = serde_json::Value::String(channel_type.to_owned());
+            }
+            if origin.fresh {
+                params["_meta"]["freshSession"] = serde_json::Value::Bool(true);
             }
         }
         let result = self.send_request("session/new", params).await?;
@@ -3637,6 +3646,7 @@ mod tests {
                 Some(SessionOrigin {
                     channel_id,
                     channel_type: Some("dm"),
+                    fresh: false,
                 }),
             )
             .await
@@ -3648,8 +3658,49 @@ mod tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(meta["channelType"].as_str(), Some("dm"));
+        // Not rotated: the member is absent, not `false`.
+        assert!(meta.get("freshSession").is_none());
         // The existing member is untouched: the origin merges into _meta.
         assert_eq!(meta["sessionTitle"].as_str(), Some("Fizz · #buzz-dev"));
+    }
+
+    #[tokio::test]
+    async fn session_new_with_origin_sends_fresh_session_after_rotate() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let channel_id = uuid::Uuid::new_v4();
+        let resp = client
+            .session_new_with_origin(
+                "/tmp",
+                vec![],
+                None,
+                None,
+                Some(SessionOrigin {
+                    channel_id,
+                    channel_type: None,
+                    fresh: true,
+                }),
+            )
+            .await
+            .expect("session_new_with_origin should succeed");
+
+        let meta = &resp.raw["_receivedRequest"]["params"]["_meta"];
+        assert_eq!(
+            meta["channelId"].as_str(),
+            Some(channel_id.to_string().as_str())
+        );
+        assert_eq!(meta["freshSession"].as_bool(), Some(true));
     }
 
     #[tokio::test]

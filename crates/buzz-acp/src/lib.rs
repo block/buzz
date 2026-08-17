@@ -2829,6 +2829,13 @@ async fn tokio_main() -> Result<()> {
                             if is_rotate {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
+                                        // The owner asked for a fresh session. Whether the
+                                        // channel is idle or mid-turn: do not bring the old
+                                        // session back after a restart, and tell the agent
+                                        // on the next session/new not to resume its own
+                                        // channel-keyed state either (`_meta.freshSession`).
+                                        ctx.session_store.remove(buzz_event.channel_id);
+                                        ctx.session_store.request_fresh(buzz_event.channel_id);
                                         let fired = signal_in_flight_task(
                                             &mut pool,
                                             buzz_event.channel_id,
@@ -2841,8 +2848,6 @@ async fn tokio_main() -> Result<()> {
                                             );
                                         } else {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
-                                            // The owner asked for a fresh session; do not bring the old one back.
-                                            ctx.session_store.remove(buzz_event.channel_id);
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,

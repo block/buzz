@@ -1079,6 +1079,8 @@ async fn create_session_and_apply_model(
             channel.id.map(|channel_id| SessionOrigin {
                 channel_id,
                 channel_type: channel.channel_type,
+                // Consumed here, on the one session/new that follows a !rotate.
+                fresh: ctx.session_store.take_fresh(channel_id),
             }),
         )
         .await?;
