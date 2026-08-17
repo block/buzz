@@ -7,6 +7,7 @@ import {
   CLI_ACP_INTERNAL_ERROR_COPY,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
+  USAGE_CREDITS_COPY,
 } from "./friendlyAgentLastError.ts";
 
 test("null lastError → null", () => {
@@ -124,6 +125,17 @@ test("unknown code falls through to generic", () => {
   assert.deepEqual(result, {
     severity: "generic",
     copy: "some error",
+  });
+});
+
+test("usage-credits internal error → denied credits copy", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32603): Internal error: Fable 5 requires usage credits. Run /usage-credits to continue.",
+    -32603,
+  );
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: USAGE_CREDITS_COPY,
   });
 });
 
