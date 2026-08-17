@@ -12,19 +12,23 @@
 //!    persona it names whenever that persona is unambiguous, and — unlike the
 //!    save path — never drops one it cannot resolve.
 //!
-//! 2. **Orphaned instance `team_id`.** Adding a standalone persona to an
-//!    existing team records the persona on the team but does not backfill
-//!    `team_id` on that persona's already-running instances. Team instructions
-//!    are injected at spawn by matching `record.team_id`
-//!    (`spawn_snapshot::effective_team_instructions`), so such an instance runs
-//!    without them — a member in the roster but not in behavior. This backfills
-//!    `team_id` on any instance whose persona is in a team but whose own
-//!    `team_id` is unset.
+//! 2. **Orphaned or stale instance `team_id`.** Team instructions are injected
+//!    at spawn by matching `record.team_id`
+//!    (`spawn_snapshot::effective_team_instructions`), so an instance's binding
+//!    must track its persona's membership. Two ways it drifts: adding a persona
+//!    to a team does not backfill `team_id` on that persona's already-running
+//!    instances (a member in the roster but not in behavior), and removing a
+//!    persona while keeping its agents leaves the binding pointing at a team
+//!    that no longer lists it (still drawing that team's instructions). This
+//!    backfills an unset binding and heals a stale one — always on the same
+//!    single-team evidence rule, never guessing across teams.
 //!
-//! Both fixes are strictly additive (rewrite-or-leave, set-if-unset), so a
-//! second boot is a clean no-op. Runs BEFORE `detach_directory_backed_teams`
-//! so a not-yet-detached directory-backed team can still be scoped by its
-//! `source_dir`, and before any UI save can drop an unresolvable id.
+//! The stale-id rewrite is strictly additive (rewrite-or-leave); the binding
+//! repair converges to a fixed point (bound-to-a-listing-team or unbound), so a
+//! second boot is a clean no-op either way. Runs BEFORE
+//! `detach_directory_backed_teams` so a not-yet-detached directory-backed team
+//! can still be scoped by its `source_dir`, and before any UI save can drop an
+//! unresolvable id.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -201,27 +205,47 @@ fn team_source_scope(team: &TeamRecord, definitions: &[&ManagedAgentRecord]) -> 
     }
 }
 
-/// Backfill `team_id` on instances whose persona is a team member but whose own
-/// `team_id` is unset. Returns the number of instances updated.
+/// Repair instance `team_id` against the current rosters. Returns the number of
+/// instances changed.
 ///
-/// Conservative on two axes: it only sets an unset field (an instance already
-/// bound to a team is never re-pointed, so a persona shared across teams keeps
-/// its binding), and it only backfills when the persona belongs to *exactly
-/// one* team. The product permits one persona under multiple teams with
-/// distinct instructions, so a legacy unbound instance whose persona spans two
-/// teams has no evidence selecting either — JSON team order is not ownership.
-/// Such a persona is left unbound and logged; the command-time backfill on an
-/// explicit add supplies the intended team going forward.
+/// Two directions, both conservative and evidence-gated:
+///
+/// - **Unbound → bound (backfill).** An instance whose persona is a team member
+///   but whose own `team_id` is unset is bound to that team, so it spawns with
+///   the team's instructions. Only when the persona belongs to *exactly one*
+///   team — a persona spanning several teams has no evidence selecting one
+///   (JSON team order is not ownership), so it is left unbound and logged.
+/// - **Stale binding → cleared or re-pointed.** An instance bound to a team
+///   whose roster no longer lists its persona (a "keep agents" removal left the
+///   binding behind, so the kept instance keeps drawing that team's
+///   instructions at spawn) is healed: re-pointed when the persona now belongs
+///   to exactly one *other* team (same single-evidence rule), otherwise unbound
+///   and logged. A binding whose team still lists the persona is authoritative
+///   and never touched.
+///
+/// Idempotent: after a repair every instance is either bound to a team that
+/// lists it or unbound with no single-team evidence, so a second pass is a
+/// no-op.
 fn backfill_instance_team_ids(teams: &[TeamRecord], agents: &mut [ManagedAgentRecord]) -> usize {
     // persona_id → the sole team referencing it, or None once a *distinct*
-    // second team is seen (ambiguous → never backfilled). A persona listed
-    // twice within one team is not ambiguity — duplicates are not prohibited at
-    // the storage boundary (`ensure_persona_ids_are_active` checks existence
-    // only; create/update/inbound persist the vector unchanged), so poisoning
-    // on a same-team repeat would strand a legitimately single-team instance.
+    // second team is seen (ambiguous → never used as binding evidence). A
+    // persona listed twice within one team is not ambiguity — duplicates are
+    // not prohibited at the storage boundary (`ensure_persona_ids_are_active`
+    // checks existence only; create/update/inbound persist the vector
+    // unchanged), so poisoning on a same-team repeat would strand a
+    // legitimately single-team instance.
     let mut persona_to_team: HashMap<&str, Option<&str>> = HashMap::new();
+    // Team ids that exist in the store, and the (team_id, persona_id) pairs they
+    // list. A binding is *stale* only when its team still exists but no longer
+    // lists the persona — a binding to an absent team is left alone (it already
+    // degrades to no instructions via `effective_team_instructions`, and a
+    // deleted team is not this repair's concern).
+    let mut team_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut membership: std::collections::HashSet<(&str, &str)> = std::collections::HashSet::new();
     for team in teams {
+        team_ids.insert(team.id.as_str());
         for persona_id in &team.persona_ids {
+            membership.insert((team.id.as_str(), persona_id.as_str()));
             persona_to_team
                 .entry(persona_id.as_str())
                 .and_modify(|slot| {
@@ -233,28 +257,52 @@ fn backfill_instance_team_ids(teams: &[TeamRecord], agents: &mut [ManagedAgentRe
         }
     }
 
-    let mut backfilled = 0usize;
+    let mut repaired = 0usize;
     for agent in agents.iter_mut() {
-        if agent.pubkey.is_empty() || agent.team_id.is_some() {
+        if agent.pubkey.is_empty() {
             continue;
         }
         let Some(persona_id) = agent.persona_id.as_deref() else {
             continue;
         };
-        match persona_to_team.get(persona_id) {
-            Some(Some(team_id)) => {
-                agent.team_id = Some((*team_id).to_string());
-                backfilled += 1;
-            }
-            Some(None) => eprintln!(
-                "buzz-desktop: team-membership-repair: leaving instance {:?} unbound — persona \
-                 {persona_id:?} spans multiple teams",
-                agent.pubkey
-            ),
-            None => {}
+        match agent.team_id.as_deref() {
+            // Live binding, or a binding to an absent team: leave it. A binding
+            // is only stale when its team exists and dropped the persona.
+            Some(bound)
+                if !team_ids.contains(bound) || membership.contains(&(bound, persona_id)) => {}
+            // Stale binding: the still-present bound team dropped this persona.
+            // Re-point on single-team evidence, else unbind — never guess.
+            Some(_) => match persona_to_team.get(persona_id) {
+                Some(Some(team_id)) => {
+                    agent.team_id = Some((*team_id).to_string());
+                    repaired += 1;
+                }
+                _ => {
+                    eprintln!(
+                        "buzz-desktop: team-membership-repair: unbinding instance {:?} — persona \
+                         {persona_id:?} left its team's roster with no single-team successor",
+                        agent.pubkey
+                    );
+                    agent.team_id = None;
+                    repaired += 1;
+                }
+            },
+            // Unbound: backfill on single-team evidence.
+            None => match persona_to_team.get(persona_id) {
+                Some(Some(team_id)) => {
+                    agent.team_id = Some((*team_id).to_string());
+                    repaired += 1;
+                }
+                Some(None) => eprintln!(
+                    "buzz-desktop: team-membership-repair: leaving instance {:?} unbound — persona \
+                     {persona_id:?} spans multiple teams",
+                    agent.pubkey
+                ),
+                None => {}
+            },
         }
     }
-    backfilled
+    repaired
 }
 
 #[cfg(test)]

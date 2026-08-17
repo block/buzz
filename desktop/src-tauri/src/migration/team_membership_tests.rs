@@ -325,6 +325,85 @@ fn same_team_duplicate_persona_id_still_backfills() {
     assert_eq!(instance_team_id(dir.path(), 'd').as_deref(), Some(TEAM_ID));
 }
 
+/// A stale binding — the bound team no longer lists the instance's persona (a
+/// "keep agents" removal left it behind) — is cleared when no other single team
+/// claims the persona, so the kept instance stops drawing that team's
+/// instructions at spawn.
+#[test]
+fn clears_stale_binding_when_persona_left_its_team() {
+    let dir = tempfile::tempdir().unwrap();
+    // The team no longer lists gurney; the instance is still bound to it.
+    write_teams_json(
+        dir.path(),
+        &serde_json::json!([team(TEAM_ID, &["sietch-tabr:paul"])]),
+    );
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([
+            definition("sietch-tabr:gurney", ST, "gurney"),
+            definition("sietch-tabr:paul", ST, "paul"),
+            instance('g', "sietch-tabr:gurney", Some(TEAM_ID)),
+        ]),
+    );
+
+    assert_eq!(repair_team_membership_in_dir(&base(dir.path())).unwrap(), 1);
+    assert_eq!(instance_team_id(dir.path(), 'g'), None);
+}
+
+/// A stale binding is *re-pointed* — not merely cleared — when the persona now
+/// belongs to exactly one other team, matching the single-evidence backfill
+/// rule.
+#[test]
+fn repoints_stale_binding_to_the_sole_successor_team() {
+    let dir = tempfile::tempdir().unwrap();
+    // gurney left TEAM_ID but is the sole member of other-team.
+    write_teams_json(
+        dir.path(),
+        &serde_json::json!([
+            team(TEAM_ID, &["sietch-tabr:paul"]),
+            team("other-team", &["sietch-tabr:gurney"]),
+        ]),
+    );
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([
+            definition("sietch-tabr:gurney", ST, "gurney"),
+            definition("sietch-tabr:paul", ST, "paul"),
+            instance('g', "sietch-tabr:gurney", Some(TEAM_ID)),
+        ]),
+    );
+
+    assert_eq!(repair_team_membership_in_dir(&base(dir.path())).unwrap(), 1);
+    assert_eq!(
+        instance_team_id(dir.path(), 'g').as_deref(),
+        Some("other-team")
+    );
+}
+
+/// A binding whose team still lists the persona is authoritative — a repair pass
+/// leaves it untouched even when that persona also belongs to another team.
+#[test]
+fn leaves_live_binding_untouched_for_multi_team_persona() {
+    let dir = tempfile::tempdir().unwrap();
+    write_teams_json(
+        dir.path(),
+        &serde_json::json!([
+            team(TEAM_ID, &["sietch-tabr:duncan"]),
+            team("other-team", &["sietch-tabr:duncan"]),
+        ]),
+    );
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([
+            definition("sietch-tabr:duncan", ST, "duncan"),
+            instance('d', "sietch-tabr:duncan", Some(TEAM_ID)),
+        ]),
+    );
+
+    assert_eq!(repair_team_membership_in_dir(&base(dir.path())).unwrap(), 0);
+    assert_eq!(instance_team_id(dir.path(), 'd').as_deref(), Some(TEAM_ID));
+}
+
 /// A store that needs no repair is a clean no-op: `Ok(0)`, no write, no backup.
 #[test]
 fn clean_store_is_a_no_op() {
