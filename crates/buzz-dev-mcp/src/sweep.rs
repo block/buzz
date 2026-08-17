@@ -122,12 +122,34 @@ fn pid_liveness(pid: u32) -> Liveness {
     }
 }
 
+/// Classify an `OpenProcess` failure into [`Liveness`].
+///
+/// Only `ERROR_INVALID_PARAMETER` — what Windows returns for a pid no
+/// process object exists for — establishes that the owner is gone.
+/// `ERROR_ACCESS_DENIED` means the process is there but not queryable (a
+/// protected process, or one owned by another user). Everything else
+/// (resource exhaustion, transient kernel failures) says nothing either way
+/// about whether the pid exists, and under this module's fail-safe contract
+/// "says nothing" must never authorize a delete, so every code but the one
+/// that positively proves absence maps to `Unknown`.
+///
+/// Split out of `pid_liveness` so the classification is unit-testable
+/// directly, without having to provoke real system errors.
+#[cfg(windows)]
+fn classify_open_process_error(err: u32) -> Liveness {
+    use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+
+    if err == ERROR_INVALID_PARAMETER {
+        Liveness::Dead
+    } else {
+        Liveness::Unknown
+    }
+}
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn pid_liveness(pid: u32) -> Liveness {
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
-    };
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -142,15 +164,7 @@ fn pid_liveness(pid: u32) -> Liveness {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            return if GetLastError() == ERROR_ACCESS_DENIED {
-                // The process exists but this query is denied (e.g. a
-                // protected process) — the safe direction is to assume it's
-                // alive rather than guess it's gone.
-                Liveness::Unknown
-            } else {
-                // Typically ERROR_INVALID_PARAMETER: no such pid.
-                Liveness::Dead
-            };
+            return classify_open_process_error(GetLastError());
         }
         let mut exit_code: u32 = 0;
         let ok = GetExitCodeProcess(handle, &mut exit_code);
@@ -197,6 +211,16 @@ pub(crate) struct SweepStats {
 /// stuck or misconfigured temp directory must never prevent the MCP server
 /// from starting.
 pub(crate) fn sweep_stale_dirs(temp_root: &Path) -> SweepStats {
+    sweep_stale_dirs_with(temp_root, &|dir| std::fs::remove_dir_all(dir))
+}
+
+/// [`sweep_stale_dirs`] with the removal step injected, so tests can drive
+/// the removal-failure branch deterministically on every platform instead of
+/// trying to provoke a real filesystem error.
+fn sweep_stale_dirs_with(
+    temp_root: &Path,
+    remove: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> SweepStats {
     let mut stats = SweepStats::default();
 
     let entries = match std::fs::read_dir(temp_root) {
@@ -247,13 +271,13 @@ pub(crate) fn sweep_stale_dirs(temp_root: &Path) -> SweepStats {
             }
         }
 
-        sweep_one(&entry.path(), &mut stats);
+        sweep_one(&entry.path(), &mut stats, remove);
     }
 
     stats
 }
 
-fn sweep_one(dir: &Path, stats: &mut SweepStats) {
+fn sweep_one(dir: &Path, stats: &mut SweepStats, remove: &dyn Fn(&Path) -> std::io::Result<()>) {
     let Some(marker) = read_owner_marker(dir) else {
         // Legacy rule: a directory with no confirmable owner — either it
         // predates this change, or its marker is corrupt/half-written — is
@@ -273,7 +297,7 @@ fn sweep_one(dir: &Path, stats: &mut SweepStats) {
         return;
     }
 
-    match std::fs::remove_dir_all(dir) {
+    match remove(dir) {
         Ok(()) => {
             stats.removed += 1;
             tracing::info!(
@@ -425,36 +449,77 @@ mod tests {
         assert_eq!(stats.removed, 0, "{stats:?}");
     }
 
-    #[cfg(unix)]
+    /// A directory whose removal fails must be counted as an error and left
+    /// in place, and one failure must not abandon the rest of the sweep.
+    ///
+    /// The remover is injected rather than provoked with real filesystem
+    /// permissions. Stripping permissions from the directory makes its
+    /// *marker* unreadable first, so the sweep skips it as unowned and never
+    /// reaches removal at all; on top of that, chmod has no Windows analogue
+    /// and root bypasses it entirely, so a permission-based version of this
+    /// test would silently cover nothing on three different setups.
     #[test]
-    fn sweep_tolerates_a_permission_denied_entry() {
-        use std::os::unix::fs::PermissionsExt;
-
-        // root bypasses permission checks entirely, so chmod 000 would not
-        // reproduce a permission error under root (e.g. some CI containers)
-        // — skip rather than assert something that can't happen there.
-        if nix::unistd::Uid::effective().is_root() {
-            eprintln!("skipping: running as root, permission checks are bypassed");
-            return;
+    fn removal_failures_are_counted_and_do_not_abort_the_sweep() {
+        let root = tempdir().expect("tempdir");
+        let first = root
+            .path()
+            .join(format!("{OWNER_PREFIX}test-remove-fails-a"));
+        let second = root
+            .path()
+            .join(format!("{OWNER_PREFIX}test-remove-fails-b"));
+        for dir in [&first, &second] {
+            std::fs::create_dir(dir).expect("mkdir");
+            write_marker(dir, dead_pid());
         }
 
-        let root = tempdir().expect("tempdir");
-        let target = root.path().join(format!("{OWNER_PREFIX}test-noperm"));
-        std::fs::create_dir(&target).expect("mkdir");
-        write_marker(&target, dead_pid());
-        // Strip all permissions from the child dir so remove_dir_all on it
-        // fails with a permission error instead of succeeding — the sweep
-        // must record the error and move on rather than propagating it.
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000))
-            .expect("chmod 000");
+        let stats = sweep_stale_dirs_with(root.path(), &|_dir| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected removal failure",
+            ))
+        });
 
-        let stats = sweep_stale_dirs(root.path());
-
-        // Restore permissions so the tempdir guard can clean up afterwards.
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700))
-            .expect("restore perms for cleanup");
-
+        // Two errors, not one: whatever order read_dir hands the entries
+        // back in, the sweep kept going after the first failure.
+        assert_eq!(stats.errors, 2, "{stats:?}");
         assert_eq!(stats.removed, 0, "{stats:?}");
-        assert_eq!(stats.errors, 1, "{stats:?}");
+        assert!(
+            first.exists() && second.exists(),
+            "a dir whose removal failed must be left in place"
+        );
+    }
+
+    /// Only the error code that positively proves a pid has no process
+    /// object may authorize a delete. Anything else is a probe that failed,
+    /// which is not evidence the owner is gone.
+    #[cfg(windows)]
+    #[test]
+    fn only_an_invalid_pid_error_proves_the_owner_is_gone() {
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY,
+            ERROR_NO_SYSTEM_RESOURCES,
+        };
+
+        assert_eq!(
+            classify_open_process_error(ERROR_INVALID_PARAMETER),
+            Liveness::Dead
+        );
+        // Exists, just not queryable by us.
+        assert_eq!(
+            classify_open_process_error(ERROR_ACCESS_DENIED),
+            Liveness::Unknown
+        );
+        // Resource pressure and transient kernel failures say nothing about
+        // whether the pid exists — deleting on these would take out a live
+        // session's binaries.
+        assert_eq!(
+            classify_open_process_error(ERROR_NOT_ENOUGH_MEMORY),
+            Liveness::Unknown
+        );
+        assert_eq!(
+            classify_open_process_error(ERROR_NO_SYSTEM_RESOURCES),
+            Liveness::Unknown
+        );
+        assert_eq!(classify_open_process_error(0), Liveness::Unknown);
     }
 }
