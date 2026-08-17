@@ -68,6 +68,16 @@ function MessageLinkMetadataTooltip({
   footer: string;
   metadata: ReturnType<typeof useMessageLinkMetadata>;
 }) {
+  if (metadata.state.kind === "deleted") {
+    return (
+      <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+        <Tooltip>
+          <TooltipTrigger asChild>{children}</TooltipTrigger>
+          <TooltipContent side="top">Message deleted</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
   if (metadata.state.kind !== "ready" || !metadata.state.snippet.trim()) {
     return children;
   }
@@ -105,6 +115,7 @@ export function MessageLinkPill({
   href,
   interactive,
   link,
+  onOpenChannel,
   onOpenMessageLink,
   threadExcerpt,
   variant = "default",
@@ -118,6 +129,7 @@ export function MessageLinkPill({
   const shouldLoadMetadata =
     channelReadable && interactive && variant === "default";
   const metadata = useMessageLinkMetadata(link, shouldLoadMetadata);
+  const isDeleted = metadata.state.kind === "deleted";
   const metadataPending =
     shouldLoadMetadata &&
     (metadata.state.kind === "idle" || metadata.state.kind === "loading");
@@ -150,10 +162,18 @@ export function MessageLinkPill({
         data-message-link=""
         href={permalink}
         icon="message"
-        aria-label={`Open message in channel ${channelLabel}`}
-        className="max-w-64"
+        aria-label={
+          isDeleted
+            ? `Deleted message in channel ${channelLabel}`
+            : `Open message in channel ${channelLabel}`
+        }
+        className={cn("max-w-64", isDeleted && "buzz-link-deleted")}
         interactive={interactive}
         onOpenLink={() => {
+          if (isDeleted) {
+            onOpenChannel(link.channelId);
+            return;
+          }
           onOpenMessageLink(link);
         }}
       >

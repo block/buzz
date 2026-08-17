@@ -7,7 +7,17 @@ import { getUserProfile } from "@/shared/api/tauriProfiles";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const MESSAGE_METADATA_RETRY_DELAY_MS = 750;
+const EVENT_NOT_FOUND_MESSAGE = "event not found";
 const PREVIEWABLE_MESSAGE_KINDS = new Set([9, 40002, 45001, 45003]);
+
+function isEventNotFoundError(error: unknown): boolean {
+  if (typeof error === "string") {
+    return error.includes(EVENT_NOT_FOUND_MESSAGE);
+  }
+  return (
+    error instanceof Error && error.message.includes(EVENT_NOT_FOUND_MESSAGE)
+  );
+}
 
 function waitForMessageMetadataRetry(): Promise<void> {
   return new Promise((resolve) => {
@@ -18,7 +28,8 @@ function waitForMessageMetadataRetry(): Promise<void> {
 async function getMessageLinkEvent(messageId: string) {
   try {
     return await getEventById(messageId);
-  } catch {
+  } catch (error) {
+    if (isEventNotFoundError(error)) throw error;
     await waitForMessageMetadataRetry();
     return getEventById(messageId);
   }
@@ -33,10 +44,12 @@ type MessageLinkMetadataState =
   | { kind: "idle" }
   | { kind: "loading" }
   | ({ kind: "ready" } & MessageLinkMetadata)
+  | { kind: "deleted" }
   | { kind: "unavailable" };
 
 type CachedMessageLinkMetadata =
   | ({ kind: "ready" } & MessageLinkMetadata)
+  | { kind: "deleted" }
   | { kind: "unavailable" };
 
 const metadataCache = new Map<string, Promise<CachedMessageLinkMetadata>>();
@@ -71,7 +84,11 @@ function fetchMetadata(
           snippet: summarizeMessageLinkContent(event.content),
         };
       })
-      .catch(() => ({ kind: "unavailable" }) as const);
+      .catch((error) =>
+        isEventNotFoundError(error)
+          ? ({ kind: "deleted" } as const)
+          : ({ kind: "unavailable" } as const),
+      );
     metadataCache.set(key, request);
     void request.then((result) => {
       if (result.kind === "unavailable" && metadataCache.get(key) === request) {

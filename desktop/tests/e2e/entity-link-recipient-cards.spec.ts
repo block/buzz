@@ -379,6 +379,92 @@ test("reopening the same entity link reapplies its workspace state", async ({
   await expect(issueHeading).toBeVisible();
 });
 
+test("definitively deleted message links open their channel and remain copyable", async ({
+  page,
+}) => {
+  const deletedMessageId = "d".repeat(64);
+  const channelId = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
+  const link = `buzz://message?channel=${channelId}&id=${deletedMessageId}`;
+  await installMockBridge(page, { deletedEventIds: [deletedMessageId] });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-general").click();
+  await page
+    .getByTestId("message-input")
+    .fill(`Deleted link \`reference\` ${link}`);
+  await page.getByTestId("send-message").click();
+
+  const linkMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Deleted link" })
+    .last();
+  const deletedLink = linkMessage.getByLabel(
+    "Deleted message in channel random",
+  );
+  await expect(deletedLink).toHaveText("random");
+  await expect(deletedLink).toHaveClass(/buzz-link-deleted/);
+  const inlineCode = linkMessage
+    .locator("code")
+    .filter({ hasText: "reference" });
+  await expect(inlineCode).toBeVisible();
+  await expect
+    .poll(async () => {
+      const [deletedStyles, codeStyles] = await Promise.all([
+        deletedLink.evaluate((element) => {
+          const styles = getComputedStyle(element);
+          return [styles.backgroundColor, styles.color];
+        }),
+        inlineCode.evaluate((element) => {
+          const styles = getComputedStyle(element);
+          return [styles.backgroundColor, styles.color];
+        }),
+      ]);
+      return JSON.stringify(deletedStyles) === JSON.stringify(codeStyles);
+    })
+    .toBe(true);
+  await expect(deletedLink).toHaveJSProperty("tagName", "BUTTON");
+  const deletedColors = await deletedLink.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return [styles.backgroundColor, styles.color];
+  });
+  await deletedLink.hover();
+  await expect
+    .poll(() =>
+      deletedLink.evaluate((element) => {
+        const styles = getComputedStyle(element);
+        return [styles.backgroundColor, styles.color];
+      }),
+    )
+    .toEqual(deletedColors);
+
+  await expect(page.getByRole("tooltip")).toHaveText("Message deleted");
+  await deletedLink.click({ button: "right" });
+  const linkMenu = page.locator("[data-buzz-link-context-menu]");
+  await expect(
+    linkMenu.getByRole("button", { name: "Open link" }),
+  ).toBeVisible();
+  await linkMenu.getByRole("button", { name: "Copy link" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        return (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{
+              command: string;
+              payload: { text?: string };
+            }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__?.findLast(
+          ({ command }) => command === "copy_text_to_clipboard",
+        )?.payload.text;
+      }),
+    )
+    .toBe(link);
+
+  await deletedLink.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await expect(page).toHaveURL(new RegExp(`#/channels/${channelId}$`));
+});
+
 test("cold-start entity links drain after the React listener mounts", async ({
   page,
 }) => {

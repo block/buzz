@@ -35,10 +35,11 @@ function formatChannelActivity(timestamp: string): string | null {
   return `Active ${Math.floor(elapsedDays / 7)}w ago`;
 }
 
-function channelTooltipFooter(channel: Channel) {
+export function channelTooltipFooter(channel: Channel) {
   const details = [
     channel.visibility === "private" ? "Private channel" : "Public channel",
     channel.channelType === "forum" ? "Forum" : null,
+    channel.archivedAt ? "Archived" : null,
     channel.lastMessageAt ? formatChannelActivity(channel.lastMessageAt) : null,
   ];
   return details.filter(Boolean).join(" · ");
@@ -136,6 +137,7 @@ export function ChannelDeepLinkAnchor({
         href={href}
         interactive={interactive}
         link={messageLink}
+        onOpenChannel={onOpenChannel}
         onOpenMessageLink={onOpenMessageLink}
       />
     );
@@ -184,6 +186,7 @@ export function MarkdownChannelDeepLink({
         href={href}
         interactive={interactive}
         link={messageLink}
+        onOpenChannel={onOpenChannel}
         onOpenMessageLink={onOpenMessageLink}
       />
     );

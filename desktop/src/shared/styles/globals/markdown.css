@@ -87,6 +87,12 @@
   color: hsl(var(--primary));
 }
 
+.message-markdown .mention-chip.buzz-link-deleted,
+.message-markdown .mention-chip.buzz-link-deleted:hover {
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+}
+
 .message-markdown .mention-chip.inbox-channel-chip {
   background: hsl(var(--muted));
   color: hsl(var(--muted-foreground) / 0.82);
