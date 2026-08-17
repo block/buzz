@@ -1,4 +1,5 @@
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { isRelayDownloadable } from "./markdown/mediaEntry";
 
 /** Minimal shape of an imeta entry as consumed by the markdown renderer. */
 export type FileCardImetaEntry = {
@@ -131,16 +132,31 @@ export function resolveFileCard(
   entry: FileCardImetaEntry | undefined,
   href: string | undefined,
   childText: string,
+  relayOrigin?: string,
 ): ResolvedFileCard | null {
-  if (
-    !href ||
-    !entry?.m ||
-    entry.m.startsWith("image/") ||
-    entry.m.startsWith("video/")
-  ) {
+  if (!href) {
     return null;
   }
+
+  if (entry?.m) {
+    if (entry.m.startsWith("image/") || entry.m.startsWith("video/")) {
+      return null;
+    }
+  } else {
+    if (!isRelayDownloadable(href, relayOrigin)) return null;
+
+    let pathname: string;
+    try {
+      pathname = new URL(href).pathname;
+    } catch {
+      return null;
+    }
+    if (!/^\/media\/[a-f\d]{64}\.[a-z\d][a-z\d_-]{0,15}$/i.test(pathname)) {
+      return null;
+    }
+  }
+
   const filename =
-    entry.filename || childText.trim() || href.split("/").pop() || "file";
-  return { href: rewriteRelayUrl(href), filename, size: entry.size };
+    entry?.filename || childText.trim() || href.split("/").pop() || "file";
+  return { href: rewriteRelayUrl(href), filename, size: entry?.size };
 }

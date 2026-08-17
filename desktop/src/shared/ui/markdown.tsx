@@ -1335,13 +1335,13 @@ function createMarkdownComponents(
       );
     }
 
-    // Generic file attachment: a `[filename](url)` link whose href matches an
-    // imeta entry with a non-image, non-video MIME. Render a download card
-    // instead of a plain link. (Media uses the `img` renderer, not this path.)
+    // Generic file attachment: use imeta when available, while also accepting
+    // canonical same-relay media links posted by agents that cannot add imeta.
     const card = resolveFileCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
       label,
+      relayOrigin ?? undefined,
     );
     if (card) {
       return (

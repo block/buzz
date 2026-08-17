@@ -7,9 +7,46 @@ import { resolveFileCard, resolveSnapshotCard } from "./markdownFileCard.ts";
 // proxy regex, so `rewriteRelayUrl` passes it through unchanged — assertions
 // can compare hrefs directly.
 const PDF_URL = `https://relay.example/media/${"a".repeat(64)}.pdf`;
+const RELAY_ORIGIN = "https://relay.example";
 
 test("resolveFileCard: returns null when there is no imeta entry", () => {
   assert.equal(resolveFileCard(undefined, PDF_URL, ""), null);
+});
+
+test("resolveFileCard: same-relay media link needs no imeta entry", () => {
+  assert.deepEqual(
+    resolveFileCard(undefined, PDF_URL, "Markdown revision", RELAY_ORIGIN),
+    {
+      href: PDF_URL,
+      filename: "Markdown revision",
+      size: undefined,
+    },
+  );
+});
+
+test("resolveFileCard: relay-link filename falls back to the URL tail", () => {
+  const card = resolveFileCard(undefined, PDF_URL, "", RELAY_ORIGIN);
+  assert.equal(card?.filename, `${"a".repeat(64)}.pdf`);
+});
+
+test("resolveFileCard: external media lookalike remains a normal link", () => {
+  const externalUrl = `https://files.example/media/${"a".repeat(64)}.pdf`;
+  assert.equal(
+    resolveFileCard(undefined, externalUrl, "report.pdf", RELAY_ORIGIN),
+    null,
+  );
+});
+
+test("resolveFileCard: malformed relay media path remains a normal link", () => {
+  assert.equal(
+    resolveFileCard(
+      undefined,
+      `${RELAY_ORIGIN}/media/not-a-hash.pdf`,
+      "report.pdf",
+      RELAY_ORIGIN,
+    ),
+    null,
+  );
 });
 
 test("resolveFileCard: returns null without an href", () => {

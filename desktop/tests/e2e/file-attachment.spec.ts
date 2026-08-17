@@ -88,6 +88,34 @@ async function uploadCommandCount(page: Page) {
   );
 }
 
+test("downloads an agent-posted relay file link inside Buzz", async ({
+  page,
+}) => {
+  const mediaUrl = `http://localhost:3000/media/${"c".repeat(64)}.pdf`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page
+    .getByTestId("message-input")
+    .fill(`[Markdown revision](${mediaUrl})`);
+  await page.getByTestId("send-message").click();
+
+  const card = page.getByTestId("file-card").last();
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Markdown revision");
+  await card.click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("download_file");
+});
+
 test("picker survives cancel, same-file retry, and multiple selection", async ({
   page,
 }) => {
