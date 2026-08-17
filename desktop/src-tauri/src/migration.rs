@@ -185,8 +185,10 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // pre-existing definition slugs exist for collision checks) and before event
     // sync republishes — the backfilled link flips the 30177 projection.
     backfill_standalone_agents(app);
-    team_membership::repair_team_membership(app);
-    detach_directory_backed_teams(app);
+    // Repair dropped team↔member links, then detach directory-backed teams —
+    // but gate detach on a clean repair so a failed repair preserves
+    // `source_dir` (the disambiguating evidence a retry needs) for the next boot.
+    team_membership::repair_then_detach_teams(app);
     reconcile_provider_mcp_commands(app);
     reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
@@ -1374,7 +1376,6 @@ use fold::load_persona_runtimes;
 mod backfill;
 pub use backfill::backfill_standalone_agents;
 mod detach;
-pub use detach::detach_directory_backed_teams;
 mod team_membership;
 mod team_suffix;
 pub use team_suffix::strip_baked_team_instructions;

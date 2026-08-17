@@ -38,7 +38,11 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 /// `load_agents`/`save_agents` are injected so the command wiring (prior-roster
 /// capture, delta direction, and this best-effort policy) is unit-testable
 /// without an `AppHandle`; the commands pass the real store IO.
-fn propagate_membership_best_effort(
+///
+/// Shared with the inbound reconcile path (`commands::personas::inbound`): a
+/// 30176 team edit arriving from another device must bind/detach instances the
+/// same way a local edit does, so both call this one wrapper.
+pub(in crate::commands) fn propagate_membership_best_effort(
     team_id: &str,
     previous_persona_ids: &[String],
     current_persona_ids: &[String],

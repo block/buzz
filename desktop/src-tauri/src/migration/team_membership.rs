@@ -35,17 +35,52 @@ use std::path::Path;
 
 use crate::managed_agents::{team_persona_key, ManagedAgentRecord, TeamRecord};
 
-/// Repair stale team `persona_ids` and backfill orphaned instance `team_id`.
-pub(super) fn repair_team_membership(app: &tauri::AppHandle) {
+/// Repair stale team `persona_ids`/instance `team_id`, then detach
+/// directory-backed teams — but only when the repair succeeded.
+///
+/// `repair` clears no `source_dir`; the downstream detach does. A stale bare
+/// slug shared across source teams is disambiguated by `source_dir`, so if
+/// repair fails (its backup or write errored) and detach still ran, the next
+/// boot would see only ambiguous candidates and the original membership-loss
+/// path recurs. Gating detach on a clean repair preserves `source_dir` as retry
+/// evidence for that boot; the next boot retries repair and, once clean,
+/// detaches.
+pub(super) fn repair_then_detach_teams(app: &tauri::AppHandle) {
     let Ok(base_dir) = crate::managed_agents::managed_agents_base_dir(app) else {
         return;
     };
-    match repair_team_membership_in_dir(&base_dir) {
-        Ok(0) => {}
-        Ok(n) => {
-            eprintln!("buzz-desktop: team-membership-repair: repaired {n} record(s)")
+    orchestrate_repair_then_detach(
+        || repair_team_membership_in_dir(&base_dir),
+        || super::detach::detach_directory_backed_teams_in_dir(&base_dir),
+    );
+}
+
+/// Gate `detach` on a successful `repair`: run detach only when repair returned
+/// `Ok`. Injected ops keep the gate `AppHandle`-free so a failing repair's
+/// skip-detach behavior is unit-testable without a filesystem fault.
+fn orchestrate_repair_then_detach(
+    repair: impl FnOnce() -> Result<usize, String>,
+    detach: impl FnOnce() -> Result<usize, String>,
+) {
+    match repair() {
+        Ok(repaired) => {
+            if repaired > 0 {
+                eprintln!("buzz-desktop: team-membership-repair: repaired {repaired} record(s)");
+            }
+            match detach() {
+                Ok(0) => {}
+                Ok(n) => {
+                    eprintln!(
+                        "buzz-desktop: detach-dir-teams: detached {n} directory-backed team(s)"
+                    )
+                }
+                Err(e) => eprintln!("buzz-desktop: detach-dir-teams: {e}"),
+            }
         }
-        Err(e) => eprintln!("buzz-desktop: team-membership-repair: {e}"),
+        Err(e) => eprintln!(
+            "buzz-desktop: team-membership-repair: {e} — skipping directory-backed detach this \
+             boot to preserve source_dir for a clean-repair retry"
+        ),
     }
 }
 
@@ -81,11 +116,14 @@ pub(super) fn repair_team_membership_in_dir(base_dir: &Path) -> Result<usize, St
         return Ok(0);
     }
 
-    // Pre-migration backups, taken ONCE per store (same contract as
-    // `strip_baked_team_instructions`): a re-run after a partial failure must
-    // not overwrite the pristine backup with a half-migrated snapshot. Both
-    // captured before either write so a crash between the two writes still
-    // leaves a full recovery pair.
+    // Pre-migration backups, both taken BEFORE either live store write: the
+    // stated contract is a full recovery pair even if a crash lands between the
+    // two writes, so neither store may be rewritten until both pristine backups
+    // exist. A stale bare slug shared across source teams is disambiguated by
+    // `source_dir`, which the downstream detach clears — so the pristine
+    // pre-repair `teams.json` is the evidence a retry needs. Each backup is
+    // created once (create-new), so a re-run after a partial failure never
+    // overwrites the pristine copy with a half-migrated snapshot.
     if rewrites > 0 {
         let bak = crate::util::resolved_backup_path(
             &teams_path,
@@ -93,11 +131,7 @@ pub(super) fn repair_team_membership_in_dir(base_dir: &Path) -> Result<usize, St
         );
         crate::util::create_restricted_backup_once(&bak, teams_content.as_bytes())
             .map_err(|e| format!("failed to write teams.json backup: {e}"))?;
-        let payload = serde_json::to_vec_pretty(&teams)
-            .map_err(|e| format!("failed to serialize teams.json: {e}"))?;
-        crate::managed_agents::atomic_write_json(&teams_path, &payload)?;
     }
-
     if backfills > 0 {
         let bak = crate::util::resolved_backup_path(
             &agents_path,
@@ -105,6 +139,15 @@ pub(super) fn repair_team_membership_in_dir(base_dir: &Path) -> Result<usize, St
         );
         crate::util::create_restricted_backup_once(&bak, agents_content.as_bytes())
             .map_err(|e| format!("failed to write managed-agents.json backup: {e}"))?;
+    }
+
+    if rewrites > 0 {
+        let payload = serde_json::to_vec_pretty(&teams)
+            .map_err(|e| format!("failed to serialize teams.json: {e}"))?;
+        crate::managed_agents::atomic_write_json(&teams_path, &payload)?;
+    }
+
+    if backfills > 0 {
         // Restricted: this store can carry plaintext agent nsecs on a
         // keyringless host (SECURITY.md:90).
         let payload = serde_json::to_vec_pretty(&agents)

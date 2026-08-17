@@ -510,3 +510,116 @@ fn writes_teams_backup_once() {
         "backup holds the pre-migration stale id"
     );
 }
+
+/// Both pristine backups are created BEFORE either live store is rewritten, so
+/// a crash between the two writes still leaves a full recovery pair (Carl's
+/// backup-contract finding). A stale bare slug on the team (drives the teams
+/// rewrite) plus an unbound instance (drives the agents backfill) exercises
+/// both stores; each backup must hold the pre-migration bytes.
+#[test]
+fn both_backups_precede_either_live_write() {
+    let dir = tempfile::tempdir().unwrap();
+    write_teams_json(dir.path(), &serde_json::json!([team(TEAM_ID, &["thufir"])]));
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([
+            definition("sietch-tabr:thufir", ST, "thufir"),
+            instance('t', "sietch-tabr:thufir", None),
+        ]),
+    );
+    let teams_bak = base(dir.path()).join("teams.json.pre-team-membership-repair.bak");
+    let agents_bak = base(dir.path()).join("managed-agents.json.pre-team-membership-repair.bak");
+
+    assert_eq!(repair_team_membership_in_dir(&base(dir.path())).unwrap(), 2);
+
+    // teams.json backup holds the stale bare slug (pre-rewrite bytes).
+    let teams_bak_content = std::fs::read_to_string(&teams_bak).unwrap();
+    assert!(
+        teams_bak_content.contains("\"thufir\"")
+            && !teams_bak_content.contains("sietch-tabr:thufir"),
+        "teams backup captures pre-rewrite bytes"
+    );
+    // managed-agents.json backup holds the null binding (pre-backfill bytes).
+    let agents_bak_content = std::fs::read_to_string(&agents_bak).unwrap();
+    assert!(
+        agents_bak_content.contains("\"team_id\": null"),
+        "agents backup captures pre-backfill bytes"
+    );
+}
+
+// ── repair→detach orchestration gate (Carl's finding #2) ──────────────────
+
+use super::orchestrate_repair_then_detach;
+use std::cell::Cell;
+
+/// A failed repair must SKIP the directory-backed detach: detach clears
+/// `source_dir`, the disambiguating evidence a clean-repair retry needs, so
+/// running it after a repair error would let the original membership-loss path
+/// recur on the next boot.
+#[test]
+fn failed_repair_skips_detach() {
+    let detach_ran = Cell::new(false);
+    orchestrate_repair_then_detach(
+        || Err("repair write failed".to_string()),
+        || {
+            detach_ran.set(true);
+            Ok(0)
+        },
+    );
+    assert!(
+        !detach_ran.get(),
+        "detach must not run when repair failed — source_dir is preserved for retry"
+    );
+}
+
+/// A successful repair runs detach, whether or not the repair changed anything
+/// (a clean-store boot with directory-backed teams still needs detaching).
+#[test]
+fn successful_repair_runs_detach() {
+    let detach_ran = Cell::new(false);
+    orchestrate_repair_then_detach(
+        || Ok(0),
+        || {
+            detach_ran.set(true);
+            Ok(1)
+        },
+    );
+    assert!(
+        detach_ran.get(),
+        "detach runs after a clean repair even when repair changed nothing"
+    );
+}
+
+/// End-to-end discriminating proof: a failed repair must leave a
+/// directory-backed team's `source_dir` intact, because the gate skips the real
+/// detach op that would otherwise clear it. The store here is fully valid — so
+/// detach WOULD succeed and strip `source_dir` if the gate let it run — which
+/// is what makes this catch a gate that runs detach unconditionally.
+#[test]
+fn failed_repair_preserves_source_dir_against_real_detach() {
+    let dir = tempfile::tempdir().unwrap();
+    let base_dir = base(dir.path());
+    let mut t = team(TEAM_ID, &["sietch-tabr:thufir"]);
+    t["source_dir"] = serde_json::json!(format!("/packs/{ST}"));
+    write_teams_json(dir.path(), &serde_json::json!([t]));
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([definition("sietch-tabr:thufir", ST, "thufir")]),
+    );
+
+    orchestrate_repair_then_detach(
+        || Err("repair backup write failed".to_string()),
+        || super::super::detach::detach_directory_backed_teams_in_dir(&base_dir),
+    );
+
+    let source_dir = read_teams_json(dir.path())
+        .into_iter()
+        .find(|t| t["id"] == TEAM_ID)
+        .unwrap()["source_dir"]
+        .clone();
+    assert_eq!(
+        source_dir,
+        serde_json::json!(format!("/packs/{ST}")),
+        "a failed repair must preserve source_dir — detach never ran to clear it"
+    );
+}
