@@ -976,6 +976,20 @@ async fn query_events_authed(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    // Enforce the same NIP-11 `max_filters` cap the WebSocket REQ door does
+    // (protocol.rs). Each filter becomes an independent DB query, so an
+    // unbounded list turns one 1 MB request into hundreds of thousands of
+    // queries against the shared pool.
+    if raw_filters.len() > crate::protocol::MAX_FILTERS_PER_REQ {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "too many filters: {} (max {})",
+                raw_filters.len(),
+                crate::protocol::MAX_FILTERS_PER_REQ
+            ),
+        ));
+    }
     let filters: Vec<nostr::Filter> = raw_filters
         .iter()
         .map(|v| serde_json::from_value(v.clone()))
@@ -1415,6 +1429,19 @@ async fn count_events_authed(
 
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    // Same NIP-11 `max_filters` cap as the WS COUNT door and `/query` — a
+    // non-pushable COUNT filter runs an unbounded aggregate scan, so an
+    // uncapped list is an even cheaper amplification than `/query`.
+    if filters.len() > crate::protocol::MAX_FILTERS_PER_REQ {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "too many filters: {} (max {})",
+                filters.len(),
+                crate::protocol::MAX_FILTERS_PER_REQ
+            ),
+        ));
+    }
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();
