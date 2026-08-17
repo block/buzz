@@ -301,6 +301,11 @@ fn reconcile_inbound_persona_event_blocking(
                     crate::managed_agents::BackendKind::Provider { id, config }
                         if record.backend_agent_id.is_some() =>
                     {
+                        // Persist the unacknowledged policy transition in the
+                        // same write as the narrowed policy. If the process
+                        // exits before or during deployment, workspace apply
+                        // can still recover it in every build.
+                        record.provider_policy_pending = true;
                         runtime_refresh = Some(InboundRuntimeRefresh::Provider {
                             pubkey: d_tag.clone(),
                             provider_id: id.clone(),

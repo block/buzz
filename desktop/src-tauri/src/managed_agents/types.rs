@@ -125,6 +125,7 @@ impl AgentDefinition {
             runtime_pid: None,
             backend: BackendKind::default(),
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -322,6 +323,11 @@ pub struct ManagedAgentRecord {
     pub backend: BackendKind,
     #[serde(default)]
     pub backend_agent_id: Option<String>,
+    /// A saved provider access-policy change that has not yet been acknowledged
+    /// by a successful deployment. Persisted before deployment so crashes and
+    /// provider failures remain retryable on the next workspace apply.
+    #[serde(default)]
+    pub provider_policy_pending: bool,
     #[serde(default)]
     pub provider_binary_path: Option<String>,
     /// Installed team directory path (absolute). Set when agent was created from a team persona.

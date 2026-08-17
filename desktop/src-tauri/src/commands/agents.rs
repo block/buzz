@@ -804,6 +804,7 @@ pub async fn create_managed_agent(
             runtime_pid: None,
             backend: input.backend.clone(),
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path,
             persona_team_dir: None,
             persona_name_in_team: None,
