@@ -3975,19 +3975,24 @@ mod tests {
     /// Timeline (t=0 is *after* the fixture reports READY, so shell startup is
     /// outside the measured window — see [`spawn_script_ready`]):
     ///   t≈0:  read loop starts, `hard_deadline = now + 2s`
-    ///   t≈1s: script emits steer response (id=0) → Success renewal moves
+    ///   t≈0:  `read` unblocks the moment the read loop writes the steer
+    ///         request, and the script answers (id=0) → Success renewal moves
     ///         `hard_deadline` to `now + 10s`
-    ///   t≈4s: script emits prompt response (id=999) → `Ok`
+    ///   t≈3s: script emits prompt response (id=999) → `Ok`
     ///
     /// Old code: `HardTimeout` at t≈2s (before the prompt response).
-    /// New code: deadline renewed at t≈1s → prompt response at t≈4s → `Ok`.
+    /// New code: deadline renewed at t≈0 → prompt response at t≈3s → `Ok`.
     ///
-    /// The ~1s gaps on either side of the deadline are deliberate slack: on
-    /// Windows `sleep` is an external binary, so each step carries a process
-    /// spawn the fixture cannot control.
+    /// The leading `read` is a *causal* barrier, not a timed one, and that is
+    /// load-bearing: the steer response must arrive before the deadline, and a
+    /// `sleep` cannot guarantee that when `sleep` is an external binary whose
+    /// spawn a loaded host can delay past the deadline itself. Blocking on the
+    /// request makes the ordering independent of wall-clock entirely. The
+    /// trailing `sleep 3` needs no such treatment: it only has to land *after*
+    /// the original deadline, and a stall pushes it further in that direction.
     #[tokio::test]
     async fn steer_success_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 1; \
+        let script = "read -r _; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
                       sleep 3; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
@@ -4322,12 +4327,15 @@ mod tests {
     /// `steer_success_renews_hard_deadline_and_survives_past_original` for
     /// the `_session/steering` transport.
     ///
-    /// Timeline (t=0 is after READY): original hard deadline at t≈2s; steer
-    /// response at t≈1s renews it to t≈11s; prompt response at t≈4s lands
-    /// inside it.
+    /// Timeline (t=0 is after READY): original hard deadline at t≈2s; the
+    /// leading `read` unblocks when the read loop writes the steer request, so
+    /// the steer response lands at t≈0 and renews the deadline to t≈10s;
+    /// prompt response at t≈3s lands inside it. See
+    /// `steer_success_renews_hard_deadline_and_survives_past_original` for why
+    /// the barrier is a `read` and not a `sleep`.
     #[tokio::test]
     async fn acp_steer_injected_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 1; \
+        let script = "read -r _; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"injected\"}}'; \
                       sleep 3; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
@@ -4374,15 +4382,17 @@ mod tests {
     /// deadline — that clock belongs to a turn which is already settled.
     ///
     /// Same timeline as the `injected` test, so the only difference is the
-    /// outcome string: original hard deadline at t≈2s, steer response at
-    /// t≈1s, prompt response at t≈4s. With renewal the prompt response would
-    /// land and this returns `Ok`; without renewal the original deadline fires
-    /// first and we get `HardTimeout`. The steer response must arrive *before*
-    /// the deadline (so the ack is still produced) and the prompt response
-    /// *after* it — which is what the ~1s gaps on either side protect.
+    /// outcome string: original hard deadline at t≈2s, steer response at t≈0
+    /// (the leading `read` unblocks on the steer request), prompt response at
+    /// t≈3s. With renewal the prompt response would land and this returns
+    /// `Ok`; without renewal the original deadline fires first and we get
+    /// `HardTimeout`. The steer response must arrive *before* the deadline (so
+    /// the ack is still produced) and the prompt response *after* it — the
+    /// `read` barrier guarantees the first ordering causally rather than
+    /// betting on a `sleep`, and the trailing `sleep 3` only has to be late.
     #[tokio::test]
     async fn acp_steer_started_new_turn_acks_success_without_renewing_hard_deadline() {
-        let script = "sleep 1; \
+        let script = "read -r _; \
              echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"startedNewTurn\"}}'; \
              sleep 3; \
              echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
