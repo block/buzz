@@ -2,14 +2,48 @@ part of '../emoji_picker.dart';
 
 const _nativeEmojiPickerChannel = MethodChannel('buzz/native_emoji_picker');
 
+/// Guards the process-global native method-call handler: one native sheet may
+/// own it at a time. A reentrant open would replace the handler and hijack the
+/// live sheet's select/dismiss callbacks, so [_presentIosEmojiPicker] coalesces
+/// reentry while a presentation is in flight.
+bool _iosEmojiPickerPresenting = false;
+
+@visibleForTesting
+void resetIosEmojiPickerPresentationForTest() {
+  _iosEmojiPickerPresenting = false;
+}
+
 Future<void> _presentIosEmojiPicker({
   required BuildContext context,
   required void Function(String emoji) onSelect,
   VoidCallback? onDismiss,
 }) async {
+  // Only one native sheet owns the handler at a time; coalesce a reentrant open
+  // so it cannot steal the live sheet's callbacks from its original owner.
+  if (_iosEmojiPickerPresenting) return;
+  _iosEmojiPickerPresenting = true;
+
   final container = ProviderScope.containerOf(context, listen: false);
-  final customEmoji = await container.read(customEmojiPaletteProvider.future);
-  if (!context.mounted) return;
+  final List<CustomEmoji> customEmoji;
+  try {
+    customEmoji = await container.read(customEmojiPaletteProvider.future);
+  } catch (_) {
+    // A palette fetch failure must not strand the composer's open state: fall
+    // back to the Flutter picker, which watches the palette itself.
+    _iosEmojiPickerPresenting = false;
+    if (context.mounted) {
+      _showFlutterEmojiPicker(
+        context: context,
+        onSelect: onSelect,
+        onDismiss: onDismiss,
+      );
+    }
+    return;
+  }
+  if (!context.mounted) {
+    _iosEmojiPickerPresenting = false;
+    return;
+  }
   final recent = container.read(recentEmojiProvider);
   final mediaAuth = container.read(mediaGetAuthServiceProvider);
   final prefs = container.read(savedPrefsProvider);
@@ -19,6 +53,7 @@ Future<void> _presentIosEmojiPicker({
   void finish() {
     if (dismissed) return;
     dismissed = true;
+    _iosEmojiPickerPresenting = false;
     _nativeEmojiPickerChannel.setMethodCallHandler(null);
     onDismiss?.call();
   }
@@ -72,8 +107,14 @@ Future<void> _presentIosEmojiPicker({
     // A native presentation failure should not remove the emoji affordance.
   }
 
-  if (dismissed || !context.mounted) return;
+  if (dismissed || !context.mounted) {
+    // `dismissed` means finish() already released the guard; the unmounted
+    // path releases it here so a future open is not blocked.
+    _iosEmojiPickerPresenting = false;
+    return;
+  }
   dismissed = true;
+  _iosEmojiPickerPresenting = false;
   _nativeEmojiPickerChannel.setMethodCallHandler(null);
   _showFlutterEmojiPicker(
     context: context,

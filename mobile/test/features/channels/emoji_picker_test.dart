@@ -621,6 +621,8 @@ void main() {
   });
 
   group('iOS native emoji picker', () {
+    setUp(resetIosEmojiPickerPresentationForTest);
+
     testWidgets('passes shared theme and custom emoji into the native sheet', (
       tester,
     ) async {
@@ -807,6 +809,152 @@ void main() {
         expect(find.byType(EmojiPickerSheet), findsOneWidget);
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeEmojiPickerHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets(
+      'a palette load failure falls back to the Flutter picker exactly once',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final prefs = await _prefs();
+        var presents = 0;
+        _setMockNativeEmojiPickerHandler((_) async {
+          presents += 1;
+          return true;
+        });
+        var dismissals = 0;
+
+        try {
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                savedPrefsProvider.overrideWithValue(prefs),
+                myPubkeyProvider.overrideWithValue('self'),
+                emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+                customEmojiPaletteProvider.overrideWith(
+                  () => _FakeCustomEmojiPaletteNotifier(
+                    Future.error(StateError('palette unavailable')),
+                  ),
+                ),
+              ],
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: Scaffold(
+                  body: Builder(
+                    builder: (context) => FilledButton(
+                      onPressed: () => showEmojiPicker(
+                        context: context,
+                        onSelect: (_) {},
+                        onDismiss: () => dismissals += 1,
+                      ),
+                      child: const Text('Open picker'),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          await tester.tap(find.text('Open picker'));
+          await tester.pumpAndSettle();
+
+          // The native sheet is never presented on a palette error; the
+          // Flutter picker takes over so the composer's open state is not
+          // stranded.
+          expect(presents, 0);
+          expect(find.byType(EmojiPickerSheet), findsOneWidget);
+
+          // Dismissing the fallback runs onDismiss exactly once.
+          await tester.tapAt(const Offset(20, 20));
+          await tester.pumpAndSettle();
+          expect(dismissals, 1);
+        } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+          _setMockNativeEmojiPickerHandler(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets('a reentrant open cannot steal the live sheet callbacks', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await _prefs();
+      var presents = 0;
+      _setMockNativeEmojiPickerHandler((call) async {
+        if (call.method == 'present') presents += 1;
+        return true;
+      });
+
+      final firstSelected = <String>[];
+      final secondSelected = <String>[];
+      var firstDismissals = 0;
+      var secondDismissals = 0;
+
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              myPubkeyProvider.overrideWithValue('self'),
+              customEmojiPaletteProvider.overrideWith(
+                () =>
+                    _FakeCustomEmojiPaletteNotifier(Future.value(_customEmoji)),
+              ),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Scaffold(
+                body: Builder(
+                  builder: (context) => Column(
+                    children: [
+                      FilledButton(
+                        onPressed: () => showEmojiPicker(
+                          context: context,
+                          onSelect: firstSelected.add,
+                          onDismiss: () => firstDismissals += 1,
+                        ),
+                        child: const Text('Open first'),
+                      ),
+                      FilledButton(
+                        onPressed: () => showEmojiPicker(
+                          context: context,
+                          onSelect: secondSelected.add,
+                          onDismiss: () => secondDismissals += 1,
+                        ),
+                        child: const Text('Open second'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('Open first'));
+        await tester.pumpAndSettle();
+        expect(presents, 1);
+
+        // A second open while the first sheet is live is coalesced: it neither
+        // presents again nor replaces the live sheet's method-call handler.
+        await tester.tap(find.text('Open second'));
+        await tester.pumpAndSettle();
+        expect(presents, 1);
+
+        // Native events still reach the original owner, and only it.
+        await _sendNativeEmojiPickerCall(tester, 'selected', '\u{1F525}');
+        await _sendNativeEmojiPickerCall(tester, 'dismissed');
+        expect(firstSelected, ['\u{1F525}']);
+        expect(secondSelected, isEmpty);
+        expect(firstDismissals, 1);
+        expect(secondDismissals, 0);
+      } finally {
         _setMockNativeEmojiPickerHandler(null);
         debugDefaultTargetPlatformOverride = previousPlatform;
       }

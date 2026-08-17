@@ -372,6 +372,43 @@ private enum NativeEmojiSearch {
   }
 }
 
+/// The top offset of each pinned section header, keyed by section id, reported
+/// up from the scrolling grid so the rail can follow manual scrolling.
+private struct NativeEmojiSectionOffsetsKey: PreferenceKey {
+  static let defaultValue: [String: CGFloat] = [:]
+
+  static func reduce(
+    value: inout [String: CGFloat],
+    nextValue: () -> [String: CGFloat]
+  ) {
+    value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+  }
+}
+
+/// Pure selection logic: the highlighted section is the last one whose header
+/// has scrolled to or above the top of the viewport. Extracted so the
+/// scroll-tracking behaviour can be unit-tested without a live scroll view.
+enum NativeEmojiCategoryTracker {
+  static func selectedSectionID(
+    order: [String],
+    offsets: [String: CGFloat],
+    viewportTop: CGFloat
+  ) -> String? {
+    var selected: String?
+    for id in order {
+      guard let top = offsets[id] else { continue }
+      // A small tolerance keeps the header that is flush with the top pinned as
+      // selected rather than flickering to the next section.
+      if top <= viewportTop + 1 {
+        selected = id
+      } else {
+        break
+      }
+    }
+    return selected ?? order.first
+  }
+}
+
 private struct NativeEmojiPickerView: View {
   let data: NativeEmojiPickerData
   let appearance: NativeEmojiPickerAppearance
@@ -387,6 +424,8 @@ private struct NativeEmojiPickerView: View {
     repeating: GridItem(.flexible(minimum: 36), spacing: 0),
     count: 8
   )
+
+  private let sectionListSpace = "buzz.emoji.sectionList"
 
   init(
     data: NativeEmojiPickerData,
@@ -496,6 +535,9 @@ private struct NativeEmojiPickerView: View {
         .frame(maxWidth: .infinity)
         .buttonStyle(.plain)
         .accessibilityLabel(section.title)
+        .accessibilityAddTraits(
+          selectedSectionID == section.id ? .isSelected : []
+        )
       }
       Divider()
         .frame(height: 24)
@@ -591,7 +633,7 @@ private struct NativeEmojiPickerView: View {
   private var pickerContent: some View {
     let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmedQuery.isEmpty {
-      sectionList(data.sections)
+      sectionList(data.sections, tracksSelection: true)
     } else {
       let custom = NativeEmojiSearch.results(
         query: trimmedQuery,
@@ -625,12 +667,15 @@ private struct NativeEmojiPickerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .foregroundStyle(Color(uiColor: appearance.secondaryText))
       } else {
-        sectionList(sections)
+        sectionList(sections, tracksSelection: false)
       }
     }
   }
 
-  private func sectionList(_ sections: [NativeEmojiSection]) -> some View {
+  private func sectionList(
+    _ sections: [NativeEmojiSection],
+    tracksSelection: Bool
+  ) -> some View {
     ScrollView {
       LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
         ForEach(sections) { section in
@@ -651,13 +696,32 @@ private struct NativeEmojiPickerView: View {
             .padding(.horizontal, 16)
             .frame(height: 30)
             .background(Color(uiColor: appearance.surface))
+            .background(sectionOffsetReporter(id: section.id))
             .id("section-\(section.id)")
           }
         }
       }
       .padding(.bottom, 8)
     }
+    .coordinateSpace(name: sectionListSpace)
     .scrollDismissesKeyboard(.interactively)
+    .onPreferenceChange(NativeEmojiSectionOffsetsKey.self) { offsets in
+      guard tracksSelection else { return }
+      selectedSectionID = NativeEmojiCategoryTracker.selectedSectionID(
+        order: data.sections.map(\.id),
+        offsets: offsets,
+        viewportTop: 0
+      )
+    }
+  }
+
+  private func sectionOffsetReporter(id: String) -> some View {
+    GeometryReader { geometry in
+      Color.clear.preference(
+        key: NativeEmojiSectionOffsetsKey.self,
+        value: [id: geometry.frame(in: .named(sectionListSpace)).minY]
+      )
+    }
   }
 
   private func emojiButton(_ item: NativeEmojiItem) -> some View {
@@ -861,7 +925,9 @@ final class NativeEmojiPickerCoordinator: NSObject,
 
   @MainActor
   private func present(arguments: [String: Any]) -> Bool {
-    guard presentedController == nil else { return true }
+    // A sheet is already owned by an earlier caller; report busy rather than a
+    // successful presentation so the caller does not treat this as its own.
+    guard presentedController == nil else { return false }
     guard
       let data = NativeEmojiPickerDataLoader.load(arguments: arguments),
       let presenter = topViewController(

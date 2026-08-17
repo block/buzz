@@ -403,6 +403,59 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  func testCategoryTrackerHighlightsLastHeaderAtOrAboveTop() {
+    let order = ["people", "nature", "flags"]
+    let offsets: [String: CGFloat] = [
+      "people": -320,
+      "nature": -12,
+      "flags": 200,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerFollowsScrollPastEachHeader() {
+    let order = ["people", "nature", "flags"]
+
+    // Scrolled to the very top: the first section is highlighted.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 400, "flags": 800],
+        viewportTop: 0
+      ),
+      "people"
+    )
+
+    // Scrolled far enough that Flags has reached the top.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": -800, "nature": -400, "flags": 0],
+        viewportTop: 0
+      ),
+      "flags"
+    )
+  }
+
+  func testCategoryTrackerFallsBackToFirstSectionBeforeAnyHeaderReachesTop() {
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: ["people", "nature"],
+        offsets: ["people": 40, "nature": 400],
+        viewportTop: 0
+      ),
+      "people"
+    )
+  }
+
   private func displayP3Image(red: CGFloat, green: CGFloat, blue: CGFloat) throws -> UIImage {
     let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
     let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
