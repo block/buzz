@@ -31,9 +31,14 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       if (disposed) return const [];
 
       final session = ref.read(relaySessionProvider.notifier);
+      final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
+      final archivedPubkeysFuture = ref.watch(
+        relayArchivedIdentityPubkeysProvider.future,
+      );
       final events = await session.queryRelay([
         NostrFilters.searchUsers(trimmed),
       ]);
+      final archivedPubkeys = await archivedPubkeysFuture;
 
       // Keep only the latest kind:0 event per pubkey (the bridge does not
       // honor the `kinds` filter under search, and may return several
@@ -49,7 +54,10 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       }
 
       return [
-        for (final event in latestByPubkey.values) _profileFromEvent(event),
+        for (final event in latestByPubkey.values)
+          if (event.pubkey.toLowerCase() == currentPubkey ||
+              !archivedPubkeys.contains(event.pubkey.toLowerCase()))
+            _profileFromEvent(event),
       ];
     });
 
@@ -93,6 +101,9 @@ final mentionCandidatesProvider = Provider.family
       final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
+      final archivedPubkeys =
+          ref.watch(relayArchivedIdentityPubkeysProvider).asData?.value ??
+          const <String>{};
       final searchResults =
           ref.watch(mentionUserSearchProvider(args.query)).asData?.value ??
           const <UserProfile>[];
@@ -109,6 +120,7 @@ final mentionCandidatesProvider = Provider.family
         userCache: userCache,
         ownerByAgentPubkey: owners,
         searchResults: searchResults,
+        archivedPubkeys: archivedPubkeys,
         currentPubkey: currentPubkey,
       );
 

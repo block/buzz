@@ -318,6 +318,41 @@ List<DirectoryUser> directoryUsersFromProfileEvents(List<NostrEvent> events) {
   });
 }
 
+/// Excludes relay-archived identities from forward-looking discovery.
+///
+/// The current identity remains visible by construction, matching NIP-IA's
+/// anti-shadowban self-exemption even if a caller has not removed it yet.
+bool isIdentityVisibleForDiscovery(
+  String pubkey, {
+  required Set<String> archivedPubkeys,
+  String? currentPubkey,
+}) {
+  final normalized = pubkey.toLowerCase();
+  return normalized == currentPubkey?.toLowerCase() ||
+      !archivedPubkeys.contains(normalized);
+}
+
+@visibleForTesting
+List<DirectoryUser> filterArchivedDirectoryUsers(
+  Iterable<DirectoryUser> users, {
+  required Set<String> archivedPubkeys,
+  String? currentPubkey,
+}) {
+  final archived = archivedPubkeys
+      .map((pubkey) => pubkey.toLowerCase())
+      .toSet();
+  final self = currentPubkey?.toLowerCase();
+  return [
+    for (final user in users)
+      if (isIdentityVisibleForDiscovery(
+        user.pubkey,
+        archivedPubkeys: archived,
+        currentPubkey: self,
+      ))
+        user,
+  ];
+}
+
 /// People and agents discoverable on the active relay.
 ///
 /// This mirrors desktop's empty-query people directory by listing kind:0
@@ -339,14 +374,19 @@ final relayDirectoryUsersProvider =
       ref.watch(relayConfigProvider);
       final session = ref.watch(relaySessionProvider.notifier);
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
+      final archivedPubkeys = await ref.watch(
+        relayArchivedIdentityPubkeysProvider.future,
+      );
       final directoryEvents = await session.queryRelay([
         const NostrFilter(kinds: [0], limit: 50, extensions: {'page': 1}),
       ]);
       var users = directoryUsersFromProfileEvents(directoryEvents);
       if (users.isNotEmpty) {
-        return users
-            .where((user) => user.pubkey.toLowerCase() != currentPubkey)
-            .toList();
+        return filterArchivedDirectoryUsers(
+          users.where((user) => user.pubkey.toLowerCase() != currentPubkey),
+          archivedPubkeys: archivedPubkeys,
+          currentPubkey: currentPubkey,
+        );
       }
 
       final membershipEvents = await session.fetchHistory(
@@ -386,7 +426,11 @@ final relayDirectoryUsersProvider =
                 ? labelComparison
                 : a.pubkey.compareTo(b.pubkey);
           });
-      return users;
+      return filterArchivedDirectoryUsers(
+        users,
+        archivedPubkeys: archivedPubkeys,
+        currentPubkey: currentPubkey,
+      );
     });
 
 /// Prefix-searches the active relay's kind:0 people directory.
@@ -416,12 +460,19 @@ final relayDirectorySearchProvider = FutureProvider.autoDispose
       ref.watch(relayConfigProvider);
       final session = ref.watch(relaySessionProvider.notifier);
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
+      final archivedPubkeys = await ref.watch(
+        relayArchivedIdentityPubkeysProvider.future,
+      );
       final events = await session.queryRelay([
         NostrFilters.searchUsers(trimmed, limit: 50),
       ]);
-      return directoryUsersFromProfileEvents(
-        events,
-      ).where((user) => user.pubkey.toLowerCase() != currentPubkey).toList();
+      return filterArchivedDirectoryUsers(
+        directoryUsersFromProfileEvents(
+          events,
+        ).where((user) => user.pubkey.toLowerCase() != currentPubkey),
+        archivedPubkeys: archivedPubkeys,
+        currentPubkey: currentPubkey,
+      );
     });
 
 /// Build [ChannelDetails] from a kind:39000 metadata event.
@@ -810,16 +861,21 @@ class ChannelActions {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return const [];
 
+    final archivedPubkeys = await _ref.read(
+      relayArchivedIdentityPubkeysProvider.future,
+    );
     final events = await _session.queryRelay([
       NostrFilters.searchUsers(trimmed, limit: limit),
     ]);
-    return directoryUsersFromProfileEvents(events)
-        .where(
-          (user) =>
-              _currentPubkey == null ||
-              user.pubkey.toLowerCase() != _currentPubkey,
-        )
-        .toList();
+    return filterArchivedDirectoryUsers(
+      directoryUsersFromProfileEvents(events).where(
+        (user) =>
+            _currentPubkey == null ||
+            user.pubkey.toLowerCase() != _currentPubkey,
+      ),
+      archivedPubkeys: archivedPubkeys,
+      currentPubkey: _currentPubkey,
+    );
   }
 
   Future<Channel> _refreshChannelsAndRead(String channelId) async {

@@ -280,5 +280,36 @@ void main() {
       expect(candidates, hasLength(1));
       expect(candidates.single.isMember, isTrue);
     });
+
+    test('archive filtering covers every source and keeps self visible', () {
+      final archivedMember = '4' * 64;
+      final archivedAgent = '5' * 64;
+      final archivedSearchResult = '6' * 64;
+      final candidates = buildMentionCandidates(
+        members: [member(archivedMember), member(userPubkey)],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: archivedAgent,
+            respondTo: 'anyone',
+            channelIds: const ['chan-1'],
+          ),
+        ],
+        sharedChannelIds: const {'chan-1'},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        searchResults: [
+          UserProfile(pubkey: archivedSearchResult, displayName: 'Archived'),
+        ],
+        archivedPubkeys: {
+          archivedMember,
+          archivedAgent,
+          archivedSearchResult,
+          userPubkey,
+        },
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates.map((candidate) => candidate.pubkey), [userPubkey]);
+    });
   });
 }

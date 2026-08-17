@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/relay/relay.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -30,8 +31,20 @@ class MembersSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final membersAsync = ref.watch(channelMembersProvider(channel.id));
     final allMembers = membersAsync.asData?.value ?? const <ChannelMember>[];
-    final people = allMembers.where((member) => !member.isBot).toList();
-    final bots = allMembers.where((member) => member.isBot).toList();
+    final archivedPubkeys =
+        ref.watch(relayArchivedIdentityPubkeysProvider).asData?.value ??
+        const <String>{};
+    final visibleMembers = allMembers
+        .where(
+          (member) => isIdentityVisibleForDiscovery(
+            member.pubkey,
+            archivedPubkeys: archivedPubkeys,
+            currentPubkey: currentPubkey,
+          ),
+        )
+        .toList();
+    final people = visibleMembers.where((member) => !member.isBot).toList();
+    final bots = visibleMembers.where((member) => member.isBot).toList();
     final userCache = ref.watch(userCacheProvider);
     final typingBotPubkeys = ref.watch(workingBotPubkeysProvider(channel.id));
     final statusCache = ref.watch(userStatusCacheProvider);
@@ -66,12 +79,12 @@ class MembersSheet extends HookConsumerWidget {
 
     // Preload profiles for all members so avatars appear.
     useEffect(() {
-      if (allMembers.isNotEmpty) {
+      if (visibleMembers.isNotEmpty) {
         ref
             .read(userCacheProvider.notifier)
-            .preload(allMembers.map((m) => m.pubkey).toList());
+            .preload(visibleMembers.map((m) => m.pubkey).toList());
         // Track user statuses for people (not bots).
-        final peoplePubkeys = allMembers
+        final peoplePubkeys = visibleMembers
             .where((m) => !m.isBot)
             .map((m) => m.pubkey)
             .toList();
@@ -80,7 +93,7 @@ class MembersSheet extends HookConsumerWidget {
         }
       }
       return null;
-    }, [allMembers.length]);
+    }, [visibleMembers.length]);
 
     return Padding(
       key: const ValueKey('members-sheet-content-padding'),

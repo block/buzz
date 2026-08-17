@@ -11,6 +11,41 @@ import 'package:buzz/shared/relay/relay.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
+  test(
+    'archived directory filter keeps only canonical and self identities',
+    () {
+      const archived = DirectoryUser(
+        pubkey:
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        displayName: 'OPUS',
+      );
+      const canonical = DirectoryUser(
+        pubkey:
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        displayName: 'OPUS',
+      );
+      const self = DirectoryUser(
+        pubkey:
+            'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        displayName: 'Mr. Wayne',
+      );
+
+      final filtered = filterArchivedDirectoryUsers(
+        const [archived, canonical, self],
+        archivedPubkeys: const {
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        },
+        currentPubkey: self.pubkey,
+      );
+
+      expect(filtered.map((user) => user.pubkey), [
+        canonical.pubkey,
+        self.pubkey,
+      ]);
+    },
+  );
+
   test('extracts unique relay members from current and legacy tags', () {
     final pubkeys = relayMemberPubkeysFromEvents([
       NostrEvent(
@@ -341,15 +376,73 @@ void main() {
       sig: 'sig',
     );
 
-    ProviderContainer buildContainer(_DirectoryFakeRelaySession session) {
+    ProviderContainer buildContainer(
+      _DirectoryFakeRelaySession session, {
+      Set<String> archivedPubkeys = const {},
+    }) {
       return ProviderContainer(
         retry: (_, _) => null,
         overrides: [
           relaySessionProvider.overrideWith(() => session),
           myPubkeyProvider.overrideWithValue('me'),
+          relayArchivedIdentityPubkeysProvider.overrideWith(
+            (ref) async => archivedPubkeys,
+          ),
         ],
       );
     }
+
+    test('browse and search omit archived duplicate profiles', () async {
+      const archivedKey =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const canonicalKey =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      final session = _DirectoryFakeRelaySession(
+        profileEvents: [
+          profile(archivedKey, 'OPUS'),
+          profile(canonicalKey, 'OPUS'),
+        ],
+      );
+      final container = buildContainer(
+        session,
+        archivedPubkeys: const {archivedKey},
+      );
+      addTearDown(container.dispose);
+
+      final browseResults = await container.read(
+        relayDirectoryUsersProvider.future,
+      );
+      final searchResults = await container.read(
+        relayDirectorySearchProvider('opus').future,
+      );
+
+      expect(browseResults.map((user) => user.pubkey), [canonicalKey]);
+      expect(searchResults.map((user) => user.pubkey), [canonicalKey]);
+    });
+
+    test('global people search omits archived duplicate profiles', () async {
+      const archivedKey =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const canonicalKey =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      final session = _DirectoryFakeRelaySession(
+        profileEvents: [
+          profile(archivedKey, 'OPUS'),
+          profile(canonicalKey, 'OPUS'),
+        ],
+      );
+      final container = buildContainer(
+        session,
+        archivedPubkeys: const {archivedKey},
+      );
+      addTearDown(container.dispose);
+
+      final results = await container
+          .read(channelActionsProvider)
+          .searchUsers('opus');
+
+      expect(results.map((user) => user.pubkey), [canonicalKey]);
+    });
 
     test('browse directory refetches when the relay config changes', () async {
       final session = _DirectoryFakeRelaySession(
