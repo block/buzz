@@ -77,6 +77,10 @@ function manifest(overrides = {}) {
       effective: "perToolAutoDecision",
       source: "buzzHarness",
     },
+    sessionEvidence: {
+      sessionId: "sess-abcd1234",
+      channelId: "chan-efgh5678",
+    },
     limitations: ["Runtime audio output is unreported."],
     ...overrides,
   };
@@ -90,7 +94,7 @@ test("renders readiness, evidence semantics, permission divergence, and tool ris
   );
 
   assert.match(html, /data-testid="agent-capability-manifest"/);
-  assert.match(html, />Ready locally</);
+  assert.match(html, />Runtime ready</);
   assert.match(html, /Codex ACP 1\.2\.3/);
   assert.match(html, /data-state="reported"/);
   assert.match(html, /data-state="unavailable"/);
@@ -115,7 +119,7 @@ test("renders stopped and stale state without a ready claim", () => {
 
   assert.match(html, />Stopped</);
   assert.match(html, /Live evidence is stale/);
-  assert.doesNotMatch(html, />Ready locally</);
+  assert.doesNotMatch(html, />Runtime ready</);
 });
 
 test("labels readiness as local evidence rather than a portable trust claim", () => {

@@ -257,7 +257,18 @@ with a TypeScript lookup table or an id comparison in a component.
     `unavailable`, and only a supplied fact is `reported`. Manifest projection
     is allowlist-only: do not surface raw config, executable commands,
     arguments, environment variables, prompts, paths, credentials, tool inputs,
-    or tool results.
+    or tool results. Reduce initialize, session-config, and command evidence
+    into the observer store independently of the capped raw transcript so a
+    long turn cannot erase the manifest. A newer initialize invalidates older
+    session and command evidence; a newer session config invalidates commands
+    until that session reports its own command update. Readiness labels are
+    local observations for the current owner, machine, process, and community;
+    they are never portable safety, reputation, or third-party delegation
+    claims. A shareable claim requires a separate authenticated event contract,
+    scoped receipts, and expiry semantics. Runtime catalog and lifecycle
+    queries must settle before the manifest renders readiness. Label the
+    positive aggregate state as "Runtime ready" and show the permission evidence
+    source so owners can distinguish runtime behavior from Buzz harness policy.
 
 ## The tests that enforce this
 

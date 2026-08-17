@@ -39,7 +39,7 @@ const overallStatusPresentation: Record<
   }
 > = {
   ready: {
-    label: "Ready locally",
+    label: "Runtime ready",
     variant: "outline",
     className:
       "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
@@ -233,7 +233,7 @@ function ManifestHeader({ manifest }: { manifest: AgentCapabilityManifest }) {
   const status = overallStatusPresentation[manifest.overallStatus];
   const lastVerifiedLabel = manifest.lastVerifiedAt
     ? formatVerifiedTime(manifest.lastVerifiedAt)
-    : "Never verified";
+    : "Not yet observed";
 
   return (
     <div className="flex items-start justify-between gap-3 border-b border-border/60 bg-muted/15 px-4 py-3.5">
@@ -267,6 +267,17 @@ function ManifestHeader({ manifest }: { manifest: AgentCapabilityManifest }) {
         {manifest.freshness === "stale" ? (
           <span className="text-2xs font-medium text-amber-600 dark:text-amber-400">
             Live evidence is stale
+          </span>
+        ) : null}
+        {manifest.sessionEvidence.sessionId ? (
+          <span
+            className="text-2xs text-muted-foreground"
+            data-testid="agent-capability-session-evidence"
+          >
+            Session {manifest.sessionEvidence.sessionId.slice(0, 8)}
+            {manifest.sessionEvidence.channelId
+              ? ` · channel ${manifest.sessionEvidence.channelId.slice(0, 8)}`
+              : ""}
           </span>
         ) : null}
       </div>
@@ -457,10 +468,10 @@ function ToolsSection({ manifest }: { manifest: AgentCapabilityManifest }) {
         <TokenRow
           emptyLabel={
             manifest.toolSourcesState === "unavailable"
-              ? "No MCP tool sources reported"
-              : "Tool sources unknown"
+              ? "No MCP tool sources included in session launch"
+              : "Tool sources not yet observed"
           }
-          label="Sources"
+          label="Included in session launch"
           tokens={manifest.toolSources}
         />
         <TokenRow
