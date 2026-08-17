@@ -467,9 +467,10 @@ mod tests {
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
             "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
+            "  - id: assign\n    action: assign_agent\n    agent_pubkey: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    text: Please take this\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
-        assert_eq!(def.steps.len(), 7);
+        assert_eq!(def.steps.len(), 8);
 
         assert!(matches!(
             &def.steps[0].action,
@@ -493,6 +494,10 @@ mod tests {
             ActionDef::RequestApproval { .. }
         ));
         assert!(matches!(&def.steps[6].action, ActionDef::Delay { .. }));
+        assert!(matches!(
+            &def.steps[7].action,
+            ActionDef::AssignAgent { .. }
+        ));
     }
 
     #[test]
