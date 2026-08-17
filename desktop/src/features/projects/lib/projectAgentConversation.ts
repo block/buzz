@@ -54,3 +54,18 @@ export function visibleConversationMessages<
     )
     .sort((left, right) => left.created_at - right.created_at);
 }
+
+/**
+ * Combines the backing DM's root events with separately queried thread
+ * replies. Keep this chronological: appending the reply query after the root
+ * query would otherwise render every question before every agent answer.
+ */
+export function mergeProjectAgentConversationEvents<
+  Event extends { id: string; created_at: number },
+>(rootEvents: readonly Event[], replyEvents: readonly Event[]): Event[] {
+  return [
+    ...new Map(
+      [...rootEvents, ...replyEvents].map((event) => [event.id, event]),
+    ).values(),
+  ].sort((left, right) => left.created_at - right.created_at);
+}

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 
 import {
+  mergeProjectAgentConversationEvents,
   restoreProjectsAgentConversation,
   visibleConversationMessages,
 } from "./projectAgentConversation.ts";
@@ -119,6 +120,25 @@ test("messages the DM held before the first Projects prompt never appear", () =>
     PROMPT_AT,
   );
   assert.deepEqual(visible, [opener, reply]);
+});
+
+test("root questions and separately queried replies stay in conversation order", () => {
+  const firstQuestion = message(PROMPT_AT);
+  const firstAnswer = message(PROMPT_AT + 2, KIND_STREAM_MESSAGE_V2);
+  const secondQuestion = message(PROMPT_AT + 4);
+  const secondAnswer = message(PROMPT_AT + 6, KIND_STREAM_MESSAGE_V2);
+
+  const merged = mergeProjectAgentConversationEvents(
+    [firstQuestion, secondQuestion],
+    [firstAnswer, secondAnswer, firstAnswer],
+  );
+
+  assert.deepEqual(merged, [
+    firstQuestion,
+    firstAnswer,
+    secondQuestion,
+    secondAnswer,
+  ]);
 });
 
 test("storage read rejects legacy pointers with a zero cutoff", () => {

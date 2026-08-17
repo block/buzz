@@ -7,6 +7,9 @@ import {
   entityDiscussionQuery,
   formatNameList,
   groupDiscussionChannels,
+  mergeOriginDiscussionChannel,
+  pickOriginConversationEvent,
+  relayEventToSearchHit,
   repositoryDiscussionQuery,
 } from "./discussionChannels.ts";
 
@@ -21,6 +24,82 @@ test("query builders emit the tokens FTS needs, nothing else", () => {
     repositoryDiscussionQuery({ owner: OWNER, dtag: "buzz-world" }),
     `${OWNER} buzz-world`,
   );
+});
+
+test("mergeOriginDiscussionChannel prepends the origin when search missed it", () => {
+  const discussed = groupDiscussionChannels([
+    { channelId: "c1", channelName: "general", createdAt: 100, pubkey: ALICE },
+  ]);
+  assert.deepEqual(
+    mergeOriginDiscussionChannel(discussed, {
+      channelId: "origin",
+      createdAt: 50,
+      pubkey: BOB,
+    }),
+    [
+      {
+        id: "origin",
+        name: null,
+        messageCount: 1,
+        lastActivityAt: 50,
+        participants: [BOB],
+      },
+      discussed[0],
+    ],
+  );
+  assert.equal(
+    mergeOriginDiscussionChannel(discussed, {
+      channelId: "c1",
+      createdAt: 1,
+      pubkey: BOB,
+    }),
+    discussed,
+  );
+  assert.equal(mergeOriginDiscussionChannel(discussed, null), discussed);
+});
+
+test("relayEventToSearchHit uses the thread root when present", () => {
+  const hit = relayEventToSearchHit(
+    {
+      id: EVENT_ID,
+      content: "filed it",
+      kind: 9,
+      pubkey: ALICE,
+      created_at: 50,
+      tags: [
+        ["h", "origin"],
+        ["e", "root-id", "", "root"],
+        ["e", "parent-id", "", "reply"],
+      ],
+    },
+    "origin",
+    "agents",
+  );
+  assert.equal(hit.eventId, EVENT_ID);
+  assert.equal(hit.channelId, "origin");
+  assert.equal(hit.channelName, "agents");
+  assert.equal(hit.threadRootId, "root-id");
+});
+
+test("pickOriginConversationEvent prefers the author's newest message", () => {
+  const origin = { channelId: "c1", createdAt: 100, pubkey: ALICE };
+  const picked = pickOriginConversationEvent(
+    [
+      { pubkey: BOB, created_at: 90, id: "bob" },
+      { pubkey: ALICE, created_at: 40, id: "old" },
+      { pubkey: ALICE, created_at: 80, id: "alice" },
+    ],
+    origin,
+  );
+  assert.equal(picked?.id, "alice");
+  assert.equal(
+    pickOriginConversationEvent(
+      [{ pubkey: BOB, created_at: 90, id: "bob" }],
+      origin,
+    )?.id,
+    "bob",
+  );
+  assert.equal(pickOriginConversationEvent([], origin), null);
 });
 
 test("commit queries match full or short hash citations", () => {
@@ -119,6 +198,13 @@ test("discussionSnippet strips entity links and coordinates", () => {
   assert.equal(
     discussionSnippet(`buzz://repo?owner=${OWNER}&d=buzz`),
     "Shared a link to this.",
+  );
+});
+
+test("discussionSnippet keeps markdown markers for the preview renderer", () => {
+  assert.equal(
+    discussionSnippet("**blessed** — @Tyler + [PR #5825](https://example.com)"),
+    "**blessed** — @Tyler + [PR #5825](https://example.com)",
   );
 });
 

@@ -46,8 +46,7 @@ import {
   classifyChildren,
   hasBlockMedia,
   isImageOnlyParagraph,
-  shallowArrayEqual,
-  shallowRecordEqual,
+  markdownPropsAreEqual,
 } from "./markdownUtils";
 import {
   CODE_BLOCK_CLASS,
@@ -1741,6 +1740,7 @@ function MarkdownInner({
   configNudgeAuthorPubkey,
   content,
   customEmoji,
+  hardLineBreaks = true,
   imetaByUrl,
   interactive = true,
   agentMentionPubkeysByName,
@@ -1865,6 +1865,7 @@ function MarkdownInner({
           components: componentSet.components,
           content: processedContent,
           customEmoji,
+          hardLineBreaks,
           leadingInlineContent: hasLeadingInlineContent,
           mentionNames,
           searchQuery,
@@ -1921,24 +1922,8 @@ function MarkdownInner({
 export const Markdown = React.memo(
   MarkdownInner,
   (prev, next) =>
-    prev.content === next.content &&
-    prev.className === next.className &&
-    prev.customEmoji === next.customEmoji &&
-    prev.interactive === next.interactive &&
-    prev.mediaInset === next.mediaInset &&
-    shallowRecordEqual(
-      prev.agentMentionPubkeysByName,
-      next.agentMentionPubkeysByName,
-    ) &&
-    shallowRecordEqual(prev.mentionPubkeysByName, next.mentionPubkeysByName) &&
-    shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
-    shallowArrayEqual(prev.channelNames, next.channelNames) &&
-    prev.imetaByUrl === next.imetaByUrl &&
-    prev.leadingInlineContent === next.leadingInlineContent &&
-    prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
-    prev.searchQuery === next.searchQuery &&
-    prev.snapshotSharedBy === next.snapshotSharedBy &&
-    prev.videoReviewContext === next.videoReviewContext,
+    markdownPropsAreEqual(prev, next) &&
+    prev.leadingInlineContent === next.leadingInlineContent,
 );
 Markdown.displayName = "Markdown";
 export { SyntaxHighlightedCode } from "./markdown/CodeBlock";

@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   isProjectAccessibleToViewer,
+  isProjectMine,
   isRepositoryAccessibleToViewer,
   relativeTime,
 } from "./projectsViewHelpers.ts";
@@ -43,6 +44,50 @@ function makeAccessInput(overrides = {}) {
     ...overrides,
   };
 }
+
+function makeProject(overrides = {}) {
+  return {
+    createdAt: 0,
+    description: "",
+    dtag: "sprout",
+    id: "30621:owner:sprout",
+    name: "sprout",
+    owner: REPO_OWNER,
+    primaryRepositoryAddress: null,
+    projectAddress: "30621:owner:sprout",
+    projectChannelId: null,
+    repositories: [],
+    repositoryAddresses: [],
+    status: "open",
+    ...overrides,
+  };
+}
+
+test("isProjectMine is true for projects the viewer owns or contributes to", () => {
+  assert.equal(isProjectMine(makeProject(), undefined), false);
+  assert.equal(isProjectMine(makeProject(), VIEWER), false);
+  assert.equal(isProjectMine(makeProject(), REPO_OWNER), true);
+  assert.equal(
+    isProjectMine(
+      makeProject({
+        owner: "c".repeat(64),
+        repositories: [makeRepository({ owner: VIEWER })],
+      }),
+      VIEWER,
+    ),
+    true,
+  );
+  assert.equal(
+    isProjectMine(
+      makeProject({
+        owner: "c".repeat(64),
+        repositories: [makeRepository({ contributors: [VIEWER] })],
+      }),
+      VIEWER,
+    ),
+    true,
+  );
+});
 
 test("a channel-bound repository is accessible only to channel members", () => {
   const repository = makeRepository();

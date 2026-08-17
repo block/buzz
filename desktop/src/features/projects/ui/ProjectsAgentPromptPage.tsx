@@ -24,18 +24,24 @@ import { useChannelsQuery, useOpenDmMutation } from "@/features/channels/hooks";
 import {
   useChannelMessagesQuery,
   useChannelSubscription,
+  useToggleReactionMutation,
 } from "@/features/messages/hooks";
+import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import {
   type LinkSelectionInfo,
   useRichTextEditor,
 } from "@/features/messages/lib/useRichTextEditor";
 import { FormattingToolbar } from "@/features/messages/ui/FormattingToolbar";
+import { TimelineMessageList } from "@/features/messages/ui/TimelineMessageList";
+import type { TimelineMessage } from "@/features/messages/types";
+import { useThreadRepliesForRoots } from "@/features/messages/useThreadReplies";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Project } from "@/features/projects/hooks";
 import {
+  mergeProjectAgentConversationEvents,
   restoreProjectsAgentConversation,
-  visibleConversationMessages,
 } from "@/features/projects/lib/projectAgentConversation";
 import {
   clearStoredProjectsAgentConversation,
@@ -46,6 +52,10 @@ import {
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel } from "@/shared/api/types";
+import {
+  KIND_STREAM_MESSAGE,
+  KIND_STREAM_MESSAGE_V2,
+} from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -56,10 +66,9 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-type AgentCandidate = {
+export type AgentCandidate = {
   pubkey: string;
   name: string;
   /** Managed agents can be auto-started before the prompt is sent. */
@@ -101,7 +110,7 @@ function repoContextBlock(projects: readonly Project[]) {
 
 /** Hides the machine-readable repo footer when rendering the user's own
  * prompt back in the inline conversation. */
-function stripRepoContext(content: string) {
+export function stripRepoContext(content: string) {
   const markerIndex = content.indexOf(`---\n${REPO_CONTEXT_MARKER}`);
   if (markerIndex === -1) return content;
   return content.slice(0, markerIndex).replace(/\n+$/, "");
@@ -111,8 +120,8 @@ function buildSuggestions(projects: readonly Project[]) {
   const firstRepo = projects[0]?.name;
   return [
     {
-      label: "PR review",
-      prompt: "Which pull requests need attention today?",
+      label: "Reviews",
+      prompt: "Which reviews need attention today?",
     },
     {
       label: "Release check",
@@ -121,8 +130,8 @@ function buildSuggestions(projects: readonly Project[]) {
         : "Are we safe to cut a release this week?",
     },
     {
-      label: "Issues",
-      prompt: "Summarize the open issues and flag anything urgent.",
+      label: "Tasks",
+      prompt: "Summarize the open tasks and flag anything urgent.",
     },
     {
       label: "Activity",
@@ -134,7 +143,7 @@ function buildSuggestions(projects: readonly Project[]) {
 }
 
 /** Sorts runnable agents first so the default pick can answer immediately. */
-function useAgentCandidates() {
+export function useAgentCandidates() {
   const identityQuery = useIdentityQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -186,12 +195,13 @@ function useAgentCandidates() {
 
 /** Live message feed for the conversation's backing DM channel, reduced to
  * plain chat rows (kind 9 / 40002 only). */
-function ConversationThread({
+export function ConversationThread({
   channel,
   agent,
   agentAvatarUrl,
   currentPubkey,
   selfAvatarUrl,
+  stripSelfContent = stripRepoContext,
   visibleAfter,
 }: {
   channel: Channel;
@@ -199,55 +209,132 @@ function ConversationThread({
   agentAvatarUrl: string | null;
   currentPubkey: string | null;
   selfAvatarUrl: string | null;
+  stripSelfContent?: (content: string) => string;
   visibleAfter: number;
 }) {
   useChannelSubscription(channel);
   const messagesQuery = useChannelMessagesQuery(channel);
-  const agentWorking = useAgentWorking(agent.pubkey, channel.id);
-  const bottomRef = React.useRef<HTMLDivElement>(null);
-
-  const messages = React.useMemo(
-    () => visibleConversationMessages(messagesQuery.data ?? [], visibleAfter),
+  const threadRootIds = React.useMemo(
+    () =>
+      (messagesQuery.data ?? [])
+        .filter(
+          (event) =>
+            (event.kind === KIND_STREAM_MESSAGE ||
+              event.kind === KIND_STREAM_MESSAGE_V2) &&
+            event.created_at >= visibleAfter &&
+            getThreadReference(event.tags).parentId === null,
+        )
+        .map((event) => event.id),
     [messagesQuery.data, visibleAfter],
   );
-
+  const threadReplies = useThreadRepliesForRoots(channel, threadRootIds);
+  const toggleReactionMutation = useToggleReactionMutation();
+  const agentWorking = useAgentWorking(agent.pubkey, channel.id);
+  const bottomRef = React.useRef<HTMLDivElement>(null);
+  const normalizedCurrent = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
+  const profiles = React.useMemo(
+    () => ({
+      [normalizePubkey(agent.pubkey)]: {
+        avatarUrl: agentAvatarUrl,
+        displayName: agent.name,
+        isAgent: true,
+        name: agent.name,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+      ...(normalizedCurrent
+        ? {
+            [normalizedCurrent]: {
+              avatarUrl: selfAvatarUrl,
+              displayName: "You",
+              isAgent: false,
+              name: null,
+              nip05Handle: null,
+              ownerPubkey: null,
+            },
+          }
+        : {}),
+    }),
+    [
+      agent.name,
+      agent.pubkey,
+      agentAvatarUrl,
+      normalizedCurrent,
+      selfAvatarUrl,
+    ],
+  );
+  const messages = React.useMemo(() => {
+    const events = mergeProjectAgentConversationEvents(
+      messagesQuery.data ?? [],
+      threadReplies.events,
+    );
+    return formatTimelineMessages(
+      events,
+      channel,
+      currentPubkey ?? undefined,
+      selfAvatarUrl,
+      profiles,
+    )
+      .filter(
+        (message) =>
+          (message.kind === KIND_STREAM_MESSAGE ||
+            message.kind === KIND_STREAM_MESSAGE_V2) &&
+          message.createdAt >= visibleAfter,
+      )
+      .map((message) =>
+        normalizedCurrent &&
+        message.pubkey &&
+        normalizePubkey(message.pubkey) === normalizedCurrent
+          ? { ...message, body: stripSelfContent(message.body) }
+          : message,
+      );
+  }, [
+    channel,
+    currentPubkey,
+    messagesQuery.data,
+    normalizedCurrent,
+    profiles,
+    selfAvatarUrl,
+    stripSelfContent,
+    threadReplies.events,
+    visibleAfter,
+  ]);
+  const conversationEntries = React.useMemo(
+    () => messages.map((message) => ({ message, summary: null })),
+    [messages],
+  );
   const lastMessageId = messages[messages.length - 1]?.id ?? null;
+  const handleToggleReaction = React.useCallback(
+    async (message: TimelineMessage, emoji: string, remove: boolean) => {
+      await toggleReactionMutation.mutateAsync({
+        emoji,
+        eventId: message.id,
+        remove,
+      });
+    },
+    [toggleReactionMutation.mutateAsync],
+  );
   React.useEffect(() => {
     if (!lastMessageId && !agentWorking.working) return;
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [lastMessageId, agentWorking.working]);
 
-  const normalizedCurrent = currentPubkey
-    ? normalizePubkey(currentPubkey)
-    : null;
-
   return (
-    <div className="space-y-5">
-      {messages.map((event) => {
-        const isSelf = normalizePubkey(event.pubkey) === normalizedCurrent;
-        return (
-          <div className="flex gap-3" key={event.localKey ?? event.id}>
-            <UserAvatar
-              accent={!isSelf}
-              avatarUrl={isSelf ? selfAvatarUrl : agentAvatarUrl}
-              className="mt-0.5 shrink-0"
-              displayName={isSelf ? "You" : agent.name}
-              size="sm"
-            />
-            <div className="min-w-0 flex-1 space-y-0.5">
-              <span className="text-xs font-semibold text-muted-foreground">
-                {isSelf ? "You" : agent.name}
-              </span>
-              <Markdown
-                className="text-base text-foreground"
-                content={
-                  isSelf ? stripRepoContext(event.content) : event.content
-                }
-              />
-            </div>
-          </div>
-        );
-      })}
+    <div data-project-agent-channel-id={channel.id}>
+      <TimelineMessageList
+        channelId={channel.id}
+        channelName={agent.name}
+        channelType="dm"
+        currentPubkey={currentPubkey ?? undefined}
+        hideDayDividers
+        mainEntries={conversationEntries}
+        messages={messages}
+        onToggleReaction={handleToggleReaction}
+        profiles={profiles}
+        useVirtualizer={false}
+      />
       {agentWorking.working ? (
         <div className="flex items-center gap-2 pl-11 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />

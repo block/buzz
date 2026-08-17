@@ -333,8 +333,8 @@ export function getActivityLabel(summary: ProjectActivitySummary | undefined) {
 
   return [
     pluralize(summary.commitCount, "commit"),
-    pluralize(summary.prCount, "PR"),
-    pluralize(summary.issueCount, "issue"),
+    pluralize(summary.prCount, "review"),
+    pluralize(summary.issueCount, "task"),
   ].join(" · ");
 }
 

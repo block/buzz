@@ -16,6 +16,11 @@
  */
 
 import type { SearchHit } from "@/shared/api/searchTypes";
+import type { RelayEvent } from "@/shared/api/types";
+import {
+  getChannelIdFromTags,
+  getThreadReference,
+} from "@/features/messages/lib/threading";
 
 export type DiscussionChannel = {
   id: string;
@@ -35,6 +40,72 @@ export type DiscussionChannel = {
  */
 export function entityDiscussionQuery(eventId: string): string {
   return eventId;
+}
+
+/** Channel the entity was created from (`h` tag). Search will not find that
+ * thread: those messages predate the share link. */
+export type DiscussionOrigin = {
+  channelId: string;
+  createdAt: number;
+  pubkey: string;
+};
+
+/** Prepend the origin channel when search did not already return it. */
+export function mergeOriginDiscussionChannel(
+  channels: DiscussionChannel[],
+  origin: DiscussionOrigin | null | undefined,
+): DiscussionChannel[] {
+  const channelId = origin?.channelId?.trim();
+  if (!channelId || !origin) return channels;
+  if (channels.some((channel) => channel.id === channelId)) {
+    return channels;
+  }
+  return [
+    {
+      id: channelId,
+      name: null,
+      messageCount: 1,
+      lastActivityAt: origin.createdAt,
+      participants: [origin.pubkey.toLowerCase()],
+    },
+    ...channels,
+  ];
+}
+
+/** Newest origin-author message, else the newest message in the channel. */
+export function pickOriginConversationEvent<
+  T extends { pubkey: string; created_at: number },
+>(events: readonly T[], origin: DiscussionOrigin): T | null {
+  if (events.length === 0) return null;
+  const author = origin.pubkey.toLowerCase();
+  const byAuthor = events.filter(
+    (event) => event.pubkey.toLowerCase() === author,
+  );
+  const pool = byAuthor.length > 0 ? byAuthor : events;
+  return [...pool].sort((left, right) => right.created_at - left.created_at)[0];
+}
+
+/** Shape the origin channel event into the hit the conversation panel expects. */
+export function relayEventToSearchHit(
+  event: Pick<
+    RelayEvent,
+    "id" | "content" | "kind" | "pubkey" | "created_at" | "tags"
+  >,
+  channelId: string,
+  channelName?: string | null,
+): SearchHit {
+  const thread = getThreadReference(event.tags);
+  return {
+    eventId: event.id,
+    content: event.content,
+    kind: event.kind,
+    pubkey: event.pubkey,
+    channelId: getChannelIdFromTags(event.tags) ?? channelId,
+    channelName: channelName ?? null,
+    createdAt: event.created_at,
+    score: 0,
+    threadRootId: thread.rootId ?? thread.parentId ?? event.id,
+  };
 }
 
 /**

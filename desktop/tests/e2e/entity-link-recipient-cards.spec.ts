@@ -234,7 +234,7 @@ test("reopening the same entity link reapplies its workspace state", async ({
 
   await emitEntityLink(repoLink);
   const pullRequestsTab = page.getByRole("tab", {
-    name: "Pull Request",
+    name: "Review",
     exact: true,
   });
   await expect(pullRequestsTab).toHaveAttribute("aria-selected", "true");
@@ -261,9 +261,7 @@ test("reopening the same entity link reapplies its workspace state", async ({
   await emitEntityLink(prLink);
   const prHeading = page.getByRole("heading", { name: PR_SUBJECT });
   await expect(prHeading).toBeVisible();
-  await breadcrumb
-    .getByRole("button", { name: "Pull Request", exact: true })
-    .click();
+  await breadcrumb.getByRole("button", { name: "Review", exact: true }).click();
   await expect(prHeading).toHaveCount(0);
   await emitEntityLink(prLink);
   await expect(prHeading).toBeVisible();
@@ -271,7 +269,7 @@ test("reopening the same entity link reapplies its workspace state", async ({
   await emitEntityLink(issueLink);
   const issueHeading = page.getByRole("heading", { name: ISSUE_SUBJECT });
   await expect(issueHeading).toBeVisible();
-  await breadcrumb.getByRole("button", { name: "Issues", exact: true }).click();
+  await breadcrumb.getByRole("button", { name: "Tasks", exact: true }).click();
   await expect(issueHeading).toHaveCount(0);
   await emitEntityLink(issueLink);
   await expect(issueHeading).toBeVisible();
@@ -288,7 +286,7 @@ test("cold-start entity links drain after the React listener mounts", async ({
   await page.goto("/", { waitUntil: "domcontentloaded" });
 
   await expect(
-    page.getByRole("tab", { name: "Pull Request", exact: true }),
+    page.getByRole("tab", { name: "Review", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
   await expect
     .poll(() =>
