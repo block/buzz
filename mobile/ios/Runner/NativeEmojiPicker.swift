@@ -12,6 +12,7 @@ final class NativeEmojiPickerCoordinator: NSObject,
   private weak var parentViewController: UIViewController?
   private weak var presentedController: UIViewController?
   private var didNotifyDismissal = false
+  private var isDismissing = false
 
   init(
     messenger: FlutterBinaryMessenger,
@@ -81,6 +82,7 @@ final class NativeEmojiPickerCoordinator: NSObject,
     }
 
     didNotifyDismissal = false
+    isDismissing = false
     let appearance = NativeEmojiPickerAppearance(arguments: arguments)
     let content = NativeEmojiPickerView(
       data: data,
@@ -129,12 +131,17 @@ final class NativeEmojiPickerCoordinator: NSObject,
 
   @MainActor
   private func select(_ emoji: String) {
+    // A single presentation returns at most one selection. The sheet stays
+    // live through its dismissal animation, so ignore extra taps that arrive
+    // before dismissal completes to avoid emitting duplicate selections.
+    guard !isDismissing else { return }
     channel.invokeMethod("selected", arguments: emoji)
     dismiss()
   }
 
   @MainActor
   private func dismiss() {
+    isDismissing = true
     guard let controller = presentedController else {
       notifyDismissalIfNeeded()
       return
