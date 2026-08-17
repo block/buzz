@@ -262,7 +262,7 @@ unlabeled total.
   turns that end in cancellation or error and turns for which no usage was
   observed. Turn existence and usage measurement are separate facts.
 - When usage is unavailable, publish `turn: null`, `cumulative: null`,
-  `turnSeq: null`, `deltaReliable: false`, and omit unknown model, pricing,
+  `turnSeq: null`, `deltaReliable: false`, an absent or null unknown model, and omit pricing,
   cache, token, and cost values. Unavailable values MUST NOT become zero.
 - `created_at` SHOULD equal the payload `timestamp` truncated to seconds.
 
