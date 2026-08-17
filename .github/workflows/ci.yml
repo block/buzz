@@ -43,24 +43,43 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - '.cargo/config.toml'
               - 'deny.toml'
               - '.github/workflows/ci.yml'
+              - 'bin/**'
+              - 'Justfile'
               - 'scripts/run-tests.sh'
-              - 'justfile'
             desktop:
+              - '.github/workflows/ci.yml'
+              - 'bin/**'
+              - 'biome.json'
+              - 'Justfile'
+              - 'package.json'
+              - 'pnpm-workspace.yaml'
               - 'scripts/check-file-sizes-core.mjs'
               - 'scripts/check-file-sizes-core.test.mjs'
+              - 'scripts/check-pubkey-truncation-core.mjs'
+              - 'scripts/check-px-text-core.mjs'
               - 'desktop/**'
               - '!desktop/src-tauri/**'
               - 'pnpm-lock.yaml'
             desktop-rust:
               - 'desktop/src-tauri/**'
             web:
+              - '.github/workflows/ci.yml'
+              - 'bin/**'
+              - 'biome.json'
+              - 'Justfile'
+              - 'package.json'
+              - 'pnpm-workspace.yaml'
               - 'scripts/check-file-sizes-core.mjs'
               - 'scripts/check-file-sizes-core.test.mjs'
+              - 'scripts/check-pubkey-truncation-core.mjs'
               - 'web/**'
               - 'pnpm-lock.yaml'
             mobile:
+              - 'bin/**'
+              - 'Justfile'
               - 'scripts/check-file-sizes-core.mjs'
               - 'scripts/check-file-sizes-core.test.mjs'
               - 'mobile/**'
@@ -90,6 +109,8 @@ jobs:
         run: scripts/test-mobile-worktree-overrides.sh
       - name: File size ratchet unit tests
         run: node --test scripts/check-file-sizes-core.test.mjs
+      - name: CI path filter contract
+        run: node --test scripts/check-ci-path-filters.test.mjs
 
   rust-lint:
     name: Rust Lint
