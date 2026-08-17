@@ -5,6 +5,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'features/activity/activity_provider.dart';
+import 'features/activity/inbox_notification_listener.dart';
 import 'features/activity/inbox_local_state_provider.dart';
 import 'features/activity/inbox_read_state.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
@@ -87,6 +88,7 @@ class App extends HookConsumerWidget {
       ref.watch(observerRelayProvider);
       ref.watch(appLifecycleProvider);
       ref.watch(userStatusCacheProvider);
+      ref.watch(inboxNotificationListenerProvider);
       hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
     }
 

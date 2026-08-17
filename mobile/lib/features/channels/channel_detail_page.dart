@@ -50,6 +50,7 @@ import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
+import '../../shared/notifications/visible_conversation.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
@@ -255,6 +256,18 @@ class ChannelDetailPage extends HookConsumerWidget {
       final session = ref.read(relaySessionProvider.notifier);
       return session.registerVisibleChannel(channel.id);
     }, [channel.id]);
+
+    useEffect(() {
+      final owner = Object();
+      return registerVisibleConversation(
+        owner,
+        VisibleConversation(
+          channelId: channel.id,
+          messageId: initialMessageId,
+          threadRootId: initialThreadRootId,
+        ),
+      );
+    }, [channel.id, initialMessageId, initialThreadRootId]);
 
     // Preload channel member profiles so @mentions resolve correctly.
     useEffect(() {

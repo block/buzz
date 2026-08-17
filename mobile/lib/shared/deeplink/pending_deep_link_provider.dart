@@ -42,6 +42,11 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
       debugPrint('deep-link: ignoring unsupported link: $uri');
       return;
     }
+    parkLink(link);
+  }
+
+  /// Park a parsed deep link for later dispatch (e.g. notification taps).
+  void parkLink(BuzzDeepLink link) {
     if (state == null) {
       state = link;
     } else {
