@@ -114,6 +114,21 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Collapsed sidebar sections now show what is waiting inside them: a count when someone has mentioned you or sent a DM, a dot for ordinary activity, and nothing when the section is quiet",
     ],
   },
+  // Repeats 0.5.14-4's bullets on purpose. The splash shows only the running
+  // version's entry, so anyone updating 0.5.14-3 → 0.5.14-5 would otherwise
+  // never see them — and -4 shipped hours before this, against a six-hourly
+  // update check, so most people never ran it.
+  {
+    version: "0.5.14-5",
+    date: "2026-08-17",
+    bullets: [
+      "Type @channel to notify everyone in a channel, or @here to notify only the people currently online",
+      "@channel reaches people even in a channel they have muted; @here never does",
+      "The Inbox now shows only unread items by default; switch off 'Show unread only' to see everything again",
+      "The conversation you have open stays in the list while you read it, now marked 'Viewing' so it is clear why it is still there",
+      "Collapsed sidebar sections now show what is waiting inside them: a count when someone has mentioned you or sent a DM, a dot for ordinary activity, and nothing when the section is quiet",
+    ],
+  },
 ];
 
 /**

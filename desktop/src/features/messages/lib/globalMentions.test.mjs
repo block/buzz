@@ -7,11 +7,56 @@ import {
   MENTION_SCOPE_HERE,
   MENTION_SCOPE_TAG,
   canUseMentionScope,
+  detectMentionScope,
   mentionScopeOf,
   mentionScopeTag,
   resolveMentionAudience,
   shouldNotifyForMentionScope,
 } from "./globalMentions.mjs";
+
+// --- detecting a scope written in the message text ---
+
+test("@channel and @here are detected in the composed text", () => {
+  assert.equal(detectMentionScope("@channel standup moved"), "channel");
+  assert.equal(detectMentionScope("heads up @here"), "here");
+  assert.equal(detectMentionScope("mid @here sentence works"), "here");
+});
+
+test("detection is case-insensitive", () => {
+  assert.equal(detectMentionScope("@Channel please read"), "channel");
+  assert.equal(detectMentionScope("@HERE"), "here");
+});
+
+test("@channel wins when both appear", () => {
+  // The wider audience wins: resolving this the other way would silently drop
+  // people the author plainly meant to reach.
+  assert.equal(detectMentionScope("@here and @channel"), "channel");
+});
+
+test("ordinary text is not a broadcast", () => {
+  assert.equal(detectMentionScope("nothing to see"), null);
+  assert.equal(detectMentionScope(""), null);
+  assert.equal(detectMentionScope(undefined), null);
+});
+
+test("lookalikes do not broadcast to the whole channel", () => {
+  // The expensive false positive: an address or path silently paging everyone.
+  assert.equal(detectMentionScope("mail support@channel-ops.example"), null);
+  assert.equal(detectMentionScope("see docs/@here-ish"), null);
+  assert.equal(detectMentionScope("@channels"), null);
+  assert.equal(detectMentionScope("@herewith"), null);
+  assert.equal(detectMentionScope("email me@here.com"), null);
+});
+
+test("a username mention is not a broadcast", () => {
+  assert.equal(detectMentionScope("@priya can you look"), null);
+});
+
+test("trailing punctuation still counts as the end of the word", () => {
+  assert.equal(detectMentionScope("please read this @here."), "here");
+  assert.equal(detectMentionScope("@channel, standup moved"), "channel");
+  assert.equal(detectMentionScope("(@here)"), "here");
+});
 
 // --- reading and writing the marker ---
 

@@ -46,6 +46,34 @@ export const CHANNEL_MENTION_ADMIN_THRESHOLD = 32;
 /** Roles permitted to use a gated scope. */
 const PRIVILEGED_ROLES = new Set(["owner", "admin"]);
 
+/**
+ * Find a global mention written in the message text.
+ *
+ * Deliberately literal: `@channel` and `@here` are matched in the composed
+ * content rather than inserted through the mention autocomplete. That hook
+ * carries debouncing, personas and teams, and threading two synthetic entries
+ * through it is a much larger change than this feature needs to start working.
+ * The cost is discoverability — nothing offers the words to you — so the
+ * autocomplete entries remain worth adding later.
+ *
+ * `@channel` wins when both appear: it is the strictly wider audience, so
+ * resolving the ambiguity the other way could silently drop people the author
+ * plainly meant to reach.
+ *
+ * Both edges are guarded so an address or a path does not page everyone by
+ * accident — the expensive false positive here is silently notifying forty
+ * people. The trailing guard is `(?![\w-])` rather than `\b`, because `\b`
+ * treats a hyphen as a boundary and would have matched `@here-ish` and
+ * `@channel-ops`. A trailing `.` or `,` still counts as the end of the word,
+ * so "read this @here." works.
+ */
+export function detectMentionScope(content) {
+  const text = String(content ?? "");
+  if (/(^|[^\w@])@channel(?![\w-])/i.test(text)) return MENTION_SCOPE_CHANNEL;
+  if (/(^|[^\w@])@here(?![\w-])/i.test(text)) return MENTION_SCOPE_HERE;
+  return null;
+}
+
 /** Read the scope marker off an event's tags, or null if there is none. */
 export function mentionScopeOf(tags) {
   for (const tag of tags ?? []) {

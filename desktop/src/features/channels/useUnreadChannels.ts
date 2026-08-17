@@ -679,10 +679,17 @@ export function useUnreadChannels(
             if (event.created_at > maxExternal) {
               maxExternal = event.created_at;
             }
+            // Catch-up: these events arrived while this client was not
+            // running, so by definition the user was not "here". An `@here`
+            // they missed must not accumulate as urgent — that is the whole
+            // distinction from `@channel`, which does persist for people who
+            // were away.
             const isHighPriority =
               chType === "dm" ||
               (normalizedPubkey !== null &&
-                isHighPriorityEventForUser(event, normalizedPubkey));
+                isHighPriorityEventForUser(event, normalizedPubkey, {
+                  presence: "offline",
+                }));
             unreadEvents.push(
               makeObservedUnreadEvent({
                 id: event.id,

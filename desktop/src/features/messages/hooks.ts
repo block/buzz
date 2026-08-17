@@ -31,6 +31,7 @@ import {
 
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { detectMentionScope } from "@/features/messages/lib/globalMentions.mjs";
 import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
 import { buildSentFromThreadTag } from "@/features/messages/lib/sentFromThread";
 import {
@@ -553,6 +554,11 @@ export function useSendMessageMutation(
           linkPreviewTags,
           sentFromThreadTag,
           supersedesTags,
+          // `@channel` / `@here` written in the message text. Read from the
+          // content rather than tracked as composer state so a draft restored
+          // from storage, or an edit made just before sending, still carries
+          // the scope the author can actually see in the box.
+          detectMentionScope(content),
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.

@@ -10,6 +10,10 @@ export const MENTION_SCOPE_CHANNEL: "channel";
 export const MENTION_SCOPE_HERE: "here";
 export const CHANNEL_MENTION_ADMIN_THRESHOLD: number;
 
+export function detectMentionScope(
+  content: string | null | undefined,
+): MentionScope | null;
+
 export function mentionScopeOf(
   tags: readonly (readonly string[])[] | null | undefined,
 ): MentionScope | null;
