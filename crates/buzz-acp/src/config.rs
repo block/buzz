@@ -26,6 +26,38 @@ use crate::filter::SubscriptionRule;
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 
+/// Resolve the effective idle timeout from the explicit and deprecated flags.
+///
+/// Precedence: `--idle-timeout` > `--turn-timeout` (deprecated) >
+/// `DEFAULT_IDLE_TIMEOUT_SECS`. A resolved value of 0 is clamped to a 1s
+/// minimum, since a 0s deadline would fire before the agent can respond.
+fn resolve_idle_timeout_secs(idle: Option<u64>, turn: Option<u64>) -> u64 {
+    let raw = match (idle, turn) {
+        (Some(idle), Some(_turn)) => {
+            tracing::warn!(
+                "--turn-timeout / BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored \
+                 when --idle-timeout / BUZZ_ACP_IDLE_TIMEOUT is also set"
+            );
+            idle
+        }
+        (Some(idle), None) => idle,
+        (None, Some(turn)) => {
+            tracing::warn!(
+                "--turn-timeout / BUZZ_ACP_TURN_TIMEOUT is deprecated; \
+                 use --idle-timeout / BUZZ_ACP_IDLE_TIMEOUT instead"
+            );
+            turn
+        }
+        (None, None) => DEFAULT_IDLE_TIMEOUT_SECS,
+    };
+    if raw == 0 {
+        tracing::warn!("idle timeout of 0 is invalid — using 1s minimum");
+        1
+    } else {
+        raw
+    }
+}
+
 /// Default absolute wall-clock cap per agent turn (2 hours).
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
@@ -996,34 +1028,7 @@ impl Config {
             args.turn_liveness_secs
         };
 
-        // Resolve idle_timeout_secs with deprecation handling.
-        // Precedence: explicit --idle-timeout > --turn-timeout (deprecated) > `DEFAULT_IDLE_TIMEOUT_SECS`.
-        let idle_timeout_secs = {
-            let raw = match (args.idle_timeout, args.turn_timeout) {
-                (Some(idle), Some(_turn)) => {
-                    tracing::warn!(
-                        "--turn-timeout / BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored \
-                         when --idle-timeout / BUZZ_ACP_IDLE_TIMEOUT is also set"
-                    );
-                    idle
-                }
-                (Some(idle), None) => idle,
-                (None, Some(turn)) => {
-                    tracing::warn!(
-                        "--turn-timeout / BUZZ_ACP_TURN_TIMEOUT is deprecated; \
-                         use --idle-timeout / BUZZ_ACP_IDLE_TIMEOUT instead"
-                    );
-                    turn
-                }
-                (None, None) => DEFAULT_IDLE_TIMEOUT_SECS,
-            };
-            if raw == 0 {
-                tracing::warn!("idle timeout of 0 is invalid — using 1s minimum");
-                1
-            } else {
-                raw
-            }
-        };
+        let idle_timeout_secs = resolve_idle_timeout_secs(args.idle_timeout, args.turn_timeout);
 
         let max_turn_duration_secs = {
             let raw = args.max_turn_duration;
@@ -1096,17 +1101,23 @@ impl Config {
 
         // Validate respond_to against the allowed set.
         let allowed_respond_to = if let Some(raw) = args.allowed_respond_to {
-            // Validate each entry is a known RespondTo mode.
+            // Validate each entry is a known RespondTo mode. Parsing is
+            // case-insensitive, so the gate below must compare parsed enum
+            // values — comparing the raw strings would reject a validated
+            // entry such as "Owner-Only" that renders canonically as
+            // "owner-only".
+            let mut parsed_modes = HashSet::new();
             for s in &raw {
-                RespondTo::from_str(s.trim(), true).map_err(|_| {
+                let mode = RespondTo::from_str(s.trim(), true).map_err(|_| {
                     ConfigError::ConfigFile(format!(
                         "invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO: '{s}' \
                          (valid values: owner-only, allowlist, anyone, nobody)"
                     ))
                 })?;
+                parsed_modes.insert(mode);
             }
-            let allowed_modes: Vec<String> = raw.iter().map(|s| s.trim().to_string()).collect();
-            if !allowed_modes.is_empty() && !allowed_modes.contains(&args.respond_to.to_string()) {
+            let allowed_modes: Vec<String> = parsed_modes.iter().map(|m| m.to_string()).collect();
+            if !parsed_modes.is_empty() && !parsed_modes.contains(&args.respond_to) {
                 return Err(ConfigError::ConfigFile(format!(
                     "respond_to '{}' is not permitted on this deployment \
                      (BUZZ_ACP_ALLOWED_RESPOND_TO={})",
@@ -1211,7 +1222,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s turn_output_timeout={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s turn_output_timeout={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} lazy_pool={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1231,6 +1242,7 @@ impl Config {
             self.presence_enabled,
             self.typing_enabled,
             self.memory_enabled,
+            self.lazy_pool,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
             respond_to_detail,
@@ -2457,6 +2469,24 @@ channels = "ALL"
     }
 
     #[test]
+    fn test_summary_reflects_lazy_pool() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.lazy_pool = false;
+        assert!(
+            config.summary().contains("lazy_pool=false"),
+            "summary should report eager startup, got: {}",
+            config.summary()
+        );
+
+        config.lazy_pool = true;
+        assert!(
+            config.summary().contains("lazy_pool=true"),
+            "summary should report deferred startup, got: {}",
+            config.summary()
+        );
+    }
+
+    #[test]
     fn test_permission_mode_wire_strings() {
         assert_eq!(PermissionMode::Default.as_wire_str(), "default");
         assert_eq!(PermissionMode::Auto.as_wire_str(), "auto");
@@ -2573,45 +2603,32 @@ channels = "ALL"
         }
     }
 
-    /// Helper: resolve idle_timeout_secs using the same precedence logic as Config::from_args.
-    /// Precedence: explicit --idle-timeout > --turn-timeout (deprecated) > `DEFAULT_IDLE_TIMEOUT_SECS`.
-    fn resolve_idle_timeout(idle: Option<u64>, turn: Option<u64>) -> u64 {
-        let raw = match (idle, turn) {
-            (Some(idle), Some(_)) => idle,
-            (Some(idle), None) => idle,
-            (None, Some(turn)) => turn,
-            (None, None) => DEFAULT_IDLE_TIMEOUT_SECS,
-        };
-        if raw == 0 {
-            1
-        } else {
-            raw
-        }
-    }
-
     #[test]
     fn idle_timeout_explicit_wins_over_deprecated() {
-        assert_eq!(resolve_idle_timeout(Some(120), Some(600)), 120);
+        assert_eq!(resolve_idle_timeout_secs(Some(120), Some(600)), 120);
     }
 
     #[test]
     fn idle_timeout_falls_back_to_deprecated_turn_timeout() {
-        assert_eq!(resolve_idle_timeout(None, Some(600)), 600);
+        assert_eq!(resolve_idle_timeout_secs(None, Some(600)), 600);
     }
 
     #[test]
     fn idle_timeout_defaults_to_constant_when_neither_set() {
-        assert_eq!(resolve_idle_timeout(None, None), DEFAULT_IDLE_TIMEOUT_SECS);
+        assert_eq!(
+            resolve_idle_timeout_secs(None, None),
+            DEFAULT_IDLE_TIMEOUT_SECS
+        );
     }
 
     #[test]
     fn idle_timeout_zero_clamped_to_one() {
-        assert_eq!(resolve_idle_timeout(Some(0), None), 1);
+        assert_eq!(resolve_idle_timeout_secs(Some(0), None), 1);
     }
 
     #[test]
     fn idle_timeout_zero_from_deprecated_clamped_to_one() {
-        assert_eq!(resolve_idle_timeout(None, Some(0)), 1);
+        assert_eq!(resolve_idle_timeout_secs(None, Some(0)), 1);
     }
 
     #[test]
@@ -2820,13 +2837,42 @@ channels = "ALL"
 
     #[test]
     fn idle_timeout_must_be_less_than_max_turn_duration() {
-        // The guard in Config::from_args rejects idle >= max_turn.
-        // Exercise the same logic: if idle >= max_turn, it's invalid.
-        let idle = 3600u64;
-        let max_turn = 3600u64;
+        // Equal values must be rejected by the real from_args guard.
+        let equal = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--idle-timeout",
+            "3600",
+            "--max-turn-duration",
+            "3600",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(equal);
         assert!(
-            idle >= max_turn,
-            "test precondition: idle must be >= max_turn to trigger guard"
+            result.is_err(),
+            "from_args should reject idle_timeout equal to max_turn_duration"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("must be less than max_turn_duration"),
+            "error should mention 'must be less than max_turn_duration': {msg}"
+        );
+
+        // One second under the cap must be accepted.
+        let under = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--idle-timeout",
+            "3599",
+            "--max-turn-duration",
+            "3600",
+        ])
+        .expect("clap should parse args");
+        assert!(
+            Config::from_args(under).is_ok(),
+            "from_args should accept idle_timeout strictly below max_turn_duration"
         );
 
         // And the valid case (const assertion so clippy doesn't flag it):
@@ -2996,6 +3042,34 @@ channels = "ALL"
         assert!(
             result.is_ok(),
             "from_args should accept respond_to=owner-only when in allowed set: {result:?}"
+        );
+    }
+
+    #[test]
+    fn allowed_respond_to_accepts_mixed_case_modes() {
+        // Validation parses case-insensitively, so the gate must too:
+        // "Owner-Only" is a valid entry and must not be rejected just because
+        // RespondTo renders canonically as "owner-only".
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--respond-to",
+            "owner-only",
+            "--allowed-respond-to",
+            "Owner-Only,ALLOWLIST",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        assert!(
+            result.is_ok(),
+            "mixed-case allowed entries must not be rejected: {result:?}"
+        );
+        let summary = result.expect("config should build").summary();
+        assert!(
+            summary.contains("allowed_respond_to=[allowlist,owner-only]"),
+            "stored modes should be canonicalized, got: {summary}"
         );
     }
 

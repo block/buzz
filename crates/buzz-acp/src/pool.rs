@@ -552,6 +552,10 @@ pub enum PromptOutcome {
 #[derive(Debug, Clone)]
 pub struct ChannelInfoResolver {
     cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, PromptChannelInfo>>>,
+    /// Channels with a background resolve already in flight. Guards
+    /// [`Self::spawn_resolve`] so a burst of events for one unknown channel
+    /// fires a single fetch instead of one per event.
+    in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
     rest_client: RestClient,
 }
 
@@ -575,8 +579,57 @@ impl ChannelInfoResolver {
             .collect();
         Self {
             cache: std::sync::Arc::new(std::sync::RwLock::new(cache)),
+            in_flight: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             rest_client,
         }
+    }
+
+    /// Read the resolution cache without touching the network.
+    ///
+    /// For callers on a latency-critical path (the author gate runs per
+    /// inbound event) where awaiting a retrying REST fetch would stall the
+    /// whole event loop. A miss means "not known yet", not "not a DM".
+    pub fn cached(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+        self.cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned())
+    }
+
+    /// Resolve `channel_id` in the background so later events hit the cache.
+    ///
+    /// At most one fetch per channel is in flight at a time; concurrent calls
+    /// for the same channel are dropped rather than queued. A failed fetch
+    /// clears the guard, so the next event retries.
+    pub fn spawn_resolve(&self, channel_id: Uuid) {
+        match self.in_flight.lock() {
+            Ok(mut in_flight) => {
+                if !in_flight.insert(channel_id) {
+                    return;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    "channel resolver in-flight guard poisoned: {error}"
+                );
+                return;
+            }
+        }
+
+        let resolver = self.clone();
+        tokio::spawn(async move {
+            let resolved = resolver.resolve(channel_id).await;
+            if let Ok(mut in_flight) = resolver.in_flight.lock() {
+                in_flight.remove(&channel_id);
+            }
+            if resolved.is_none() {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    "background channel-metadata resolution failed — will retry on next event"
+                );
+            }
+        });
     }
 
     pub async fn resolve(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {

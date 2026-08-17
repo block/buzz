@@ -36,7 +36,9 @@ fn event_channel_capacity() -> usize {
     std::env::var("BUZZ_ACP_EVENT_BUFFER")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .map(|v| v.max(1)) // mpsc::channel panics on capacity 0
+        // 0 would panic mpsc::channel; treat it as unset rather than clamp to
+        // 1, which would backpressure every single event.
+        .filter(|v| *v > 0)
         .unwrap_or(EVENT_CHANNEL_CAPACITY_DEFAULT)
 }
 /// Maximum number of seen event IDs before the dedup set is rotated.
@@ -6192,43 +6194,39 @@ mod tests {
 
     // ── Drain state transitions ───────────────────────────────────────────────
 
-    /// drain_rate_limited_pending: a channel re-queued with +5s penalty on send
-    /// failure stays in pending and is not immediately retried.
+    /// drain_rate_limited_pending: a channel whose REQ send fails (dead socket)
+    /// is re-queued by the drain itself with a +5s penalty deadline.
     #[tokio::test(start_paused = true)]
     async fn rate_limited_pending_failure_requeues_with_penalty() {
+        let (mut client, server) = test_ws_pair().await;
+        // Close the client sink and drop the peer: the socket is unusable, so
+        // send_subscribe fails rather than buffering into the kernel.
+        client.close(None).await.expect("close test websocket");
+        drop(server);
+
         let mut state = BgState::new();
         let channel_id = Uuid::new_v4();
-
-        // Seed the channel's subscription intent.
-        apply_command_to_state(
-            &mut state,
-            RelayCommand::Subscribe {
-                channel_id,
-                filter: ChannelFilter {
-                    kinds: Some(vec![9]),
-                    require_mention: false,
-                },
-                replay_since: None,
-            },
-        );
+        seed_test_subscription(&mut state, channel_id);
 
         // Park the channel as rate-limited with a deadline in the past.
         let past = tokio::time::Instant::now();
         state.rate_limited_pending.insert(channel_id, past);
 
-        // Simulate a send failure by re-queuing with +5s (what the drain does).
-        let penalty = tokio::time::Instant::now() + Duration::from_secs(5);
-        state.rate_limited_pending.insert(channel_id, penalty);
+        let sent = drain_rate_limited_pending(&mut client, &mut state, "agent-pubkey", 1).await;
 
+        assert_eq!(sent, 0, "dead socket must yield zero successful sends");
         assert!(
             state.rate_limited_pending.contains_key(&channel_id),
             "channel must stay in rate_limited_pending after send failure"
         );
-        // Deadline should be in the future.
         let deadline = state.rate_limited_pending[&channel_id];
         assert!(
             deadline > tokio::time::Instant::now(),
             "penalty deadline must be in the future"
+        );
+        assert!(
+            deadline <= tokio::time::Instant::now() + Duration::from_secs(5),
+            "penalty deadline must be the +5s branch, not an arbitrary far-future value"
         );
     }
 
@@ -6236,27 +6234,31 @@ mod tests {
     /// rate_limited_pending and removes it from resubscribe_retry.
     #[tokio::test(start_paused = true)]
     async fn resubscribe_retry_gate_rearm_moves_to_pending() {
+        let (mut client, mut server) = test_ws_pair().await;
         let mut state = BgState::new();
         let channel_id = Uuid::new_v4();
 
-        apply_command_to_state(
-            &mut state,
-            RelayCommand::Subscribe {
-                channel_id,
-                filter: ChannelFilter {
-                    kinds: Some(vec![9]),
-                    require_mention: false,
-                },
-                replay_since: None,
-            },
-        );
+        seed_test_subscription(&mut state, channel_id);
         state.resubscribe_retry.insert(channel_id);
 
-        // Simulate gate re-arming mid-drain (what the drain does on check_rate_gate hit).
+        // Arm the shared quota gate before the drain runs — the drain's own
+        // check_rate_gate branch must park the channel instead of sending.
         let retry_after = state.set_rate_limit_gate(5);
-        state.rate_limited_pending.insert(channel_id, retry_after);
-        state.resubscribe_retry.remove(&channel_id);
 
+        let sent = drain_resubscribe_retry(&mut client, &mut state, "agent-pubkey", 1).await;
+
+        assert_eq!(sent, 0, "an armed gate must suppress the REQ");
+        assert!(
+            timeout(Duration::from_millis(50), server.next())
+                .await
+                .is_err(),
+            "no REQ frame may reach the wire while the gate is armed"
+        );
+        assert_eq!(
+            state.rate_limited_pending.get(&channel_id),
+            Some(&retry_after),
+            "the parked deadline must be the gate's own retry_after"
+        );
         assert!(
             !state.resubscribe_retry.contains(&channel_id),
             "channel must be removed from resubscribe_retry when gate re-arms"
@@ -6269,29 +6271,21 @@ mod tests {
 
     /// drain_resubscribe_retry: a successful drain removes the channel and
     /// clears channel_dropped_since.
-    #[test]
-    fn resubscribe_retry_success_clears_state() {
+    #[tokio::test]
+    async fn resubscribe_retry_success_clears_state() {
+        let (mut client, mut server) = test_ws_pair().await;
         let mut state = BgState::new();
         let channel_id = Uuid::new_v4();
 
-        apply_command_to_state(
-            &mut state,
-            RelayCommand::Subscribe {
-                channel_id,
-                filter: ChannelFilter {
-                    kinds: Some(vec![9]),
-                    require_mention: false,
-                },
-                replay_since: None,
-            },
-        );
+        seed_test_subscription(&mut state, channel_id);
         state.resubscribe_retry.insert(channel_id);
         state.channel_dropped_since.insert(channel_id, 1_000_000);
 
-        // Simulate successful re-send (what the drain does on success).
-        state.resubscribe_retry.remove(&channel_id);
-        state.channel_dropped_since.remove(&channel_id);
+        let sent = drain_resubscribe_retry(&mut client, &mut state, "agent-pubkey", 1).await;
 
+        assert_eq!(sent, 1, "a live socket must accept the resubscribe REQ");
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[0], "REQ", "the drain must send a REQ frame: {frame}");
         assert!(
             !state.resubscribe_retry.contains(&channel_id),
             "channel must leave resubscribe_retry on successful drain"
@@ -6300,5 +6294,38 @@ mod tests {
             !state.channel_dropped_since.contains_key(&channel_id),
             "channel_dropped_since must be cleared on successful drain"
         );
+    }
+
+    /// BUZZ_ACP_EVENT_BUFFER=0 is not a request for a 1-slot channel: clamping
+    /// it to 1 would backpressure every event. It must fall back to the default.
+    #[test]
+    fn event_channel_capacity_zero_returns_default() {
+        // This test is the only reader or writer of BUZZ_ACP_EVENT_BUFFER in the
+        // test binary, so no cross-test env lock is needed.
+        let previous = std::env::var("BUZZ_ACP_EVENT_BUFFER").ok();
+
+        std::env::set_var("BUZZ_ACP_EVENT_BUFFER", "0");
+        let zero = event_channel_capacity();
+
+        std::env::set_var("BUZZ_ACP_EVENT_BUFFER", "not-a-number");
+        let garbage = event_channel_capacity();
+
+        std::env::set_var("BUZZ_ACP_EVENT_BUFFER", "7");
+        let explicit = event_channel_capacity();
+
+        match previous {
+            Some(value) => std::env::set_var("BUZZ_ACP_EVENT_BUFFER", value),
+            None => std::env::remove_var("BUZZ_ACP_EVENT_BUFFER"),
+        }
+
+        assert_eq!(
+            zero, EVENT_CHANNEL_CAPACITY_DEFAULT,
+            "0 must fall back to the default, not clamp to 1"
+        );
+        assert_eq!(
+            garbage, EVENT_CHANNEL_CAPACITY_DEFAULT,
+            "an unparseable value must fall back to the default"
+        );
+        assert_eq!(explicit, 7, "a valid positive override must be honoured");
     }
 }
