@@ -1005,10 +1005,18 @@ async fn query_events_authed(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let accessible_channels = state
+    let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &pubkey_bytes,
+        &mut accessible_channels,
+    )
+    .await?;
 
     if filters.iter().any(|f| f.search.is_some()) {
         if has_mixed_search_filters(&filters) {
@@ -1234,8 +1242,9 @@ async fn query_events_authed(
             tenant.community(),
         )
         .await;
-        crate::handlers::req::apply_access_scope_to_query(
+        crate::handlers::req::apply_channel_scope_to_query(
             &mut query,
+            filter,
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
@@ -1322,6 +1331,39 @@ async fn query_events_authed(
     }
 
     Ok(Json(Value::Array(events)))
+}
+
+async fn repair_requested_channel_access(
+    state: &AppState,
+    tenant: &TenantContext,
+    filters: &[nostr::Filter],
+    pubkey_bytes: &[u8],
+    accessible_channels: &mut Vec<uuid::Uuid>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    for filter in filters {
+        let Some(requested) =
+            crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+        else {
+            continue;
+        };
+        for channel_id in requested {
+            if accessible_channels.contains(&channel_id) {
+                continue;
+            }
+            let is_member = state
+                .db
+                .is_member(tenant.community(), channel_id, pubkey_bytes)
+                .await
+                .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
+            crate::handlers::req::resolve_request_local_access(
+                accessible_channels,
+                channel_id,
+                true,
+                Some(is_member),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
@@ -1438,10 +1480,18 @@ async fn count_events_authed(
     }
 
     // Get channels this user can access.
-    let accessible_channels = state
+    let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &pubkey_bytes,
+        &mut accessible_channels,
+    )
+    .await?;
 
     let mut total: u64 = 0;
     for filter in &filters {
@@ -1463,9 +1513,19 @@ async fn count_events_authed(
             crate::handlers::req::filter_can_match_shared_gated_kinds(filter);
 
         // If filter targets a specific channel, verify access.
-        if let Some(ch_id) = extract_channel_from_filter(filter) {
-            if !accessible_channels.contains(&ch_id) {
-                continue; // Skip filters targeting inaccessible channels.
+        if crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+            .is_some()
+        {
+            let ch_id = extract_channel_from_filter(filter);
+            let requested = crate::handlers::req::extract_channel_ids_from_filters(
+                std::slice::from_ref(filter),
+            )
+            .unwrap_or_default();
+            if !requested
+                .iter()
+                .any(|channel_id| accessible_channels.contains(channel_id))
+            {
+                continue;
             }
             // Channel is accessible — count with pushability check.
             let mut query = crate::handlers::req::build_event_query_from_filter(
@@ -1475,6 +1535,12 @@ async fn count_events_authed(
                 tenant.community(),
             )
             .await;
+            crate::handlers::req::apply_channel_scope_to_query(
+                &mut query,
+                filter,
+                ch_id,
+                &accessible_channels,
+            );
             // Shared-gated visibility pushdown: same as REQ and /query paths, so
             // the fallback's query_events call doesn't over-fetch private rows.
             if needs_shared_gate_filtering {

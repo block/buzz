@@ -13,7 +13,39 @@ pub type ConnId = Uuid;
 /// Subscription identifier — the client-supplied string from a REQ message.
 pub type SubId = String;
 /// Stored subscription entry: filters paired with server-resolved community and optional channel scope.
-pub type SubEntry = (Vec<Filter>, CommunityId, Option<Uuid>);
+pub type SubEntry = (Vec<Filter>, CommunityId, SubscriptionScope);
+
+/// Server-resolved live-routing scope for a subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionScope {
+    /// Community-global events only.
+    Global,
+    /// Events from any of these authorized channels.
+    Channels(Vec<Uuid>),
+}
+
+impl SubscriptionScope {
+    fn matches_channel(&self, channel_id: Option<Uuid>) -> bool {
+        match (self, channel_id) {
+            (Self::Global, None) => true,
+            (Self::Channels(channels), Some(channel_id)) => channels.contains(&channel_id),
+            _ => false,
+        }
+    }
+
+    /// Return the channels retained by this routing scope.
+    pub fn channel_ids(&self) -> &[Uuid] {
+        match self {
+            Self::Global => &[],
+            Self::Channels(channels) => channels,
+        }
+    }
+
+    /// Whether this routing scope retains the community-global topic.
+    pub fn is_global(&self) -> bool {
+        matches!(self, Self::Global)
+    }
+}
 
 /// Index key combining a channel and event kind for O(1) fan-out lookups.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -32,12 +64,12 @@ struct GlobalPKindIndexKey {
 }
 
 /// A removed subscription's server-resolved routing scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedSubscription {
     /// Server-resolved community this subscription belonged to.
     pub community_id: CommunityId,
-    /// Tenant-local channel scope; `None` means the community-global topic.
-    pub channel_id: Option<Uuid>,
+    /// Server-resolved topics retained by the removed subscription.
+    pub scope: SubscriptionScope,
 }
 
 /// Thread-safe registry of active subscriptions with targeted in-memory fan-out indexes.
@@ -74,40 +106,75 @@ impl SubscriptionRegistry {
         filters: Vec<Filter>,
         channel_id: Option<Uuid>,
     ) -> Option<RemovedSubscription> {
+        let scope = channel_id
+            .map(|channel_id| SubscriptionScope::Channels(vec![channel_id]))
+            .unwrap_or(SubscriptionScope::Global);
+        self.register_with_scope(community_id, conn_id, sub_id, filters, scope)
+    }
+
+    /// Register a subscription under every authorized requested channel.
+    pub fn register_channels_scoped(
+        &self,
+        community_id: CommunityId,
+        conn_id: ConnId,
+        sub_id: SubId,
+        filters: Vec<Filter>,
+        channel_ids: Vec<Uuid>,
+    ) -> Option<RemovedSubscription> {
+        self.register_with_scope(
+            community_id,
+            conn_id,
+            sub_id,
+            filters,
+            SubscriptionScope::Channels(channel_ids),
+        )
+    }
+
+    fn register_with_scope(
+        &self,
+        community_id: CommunityId,
+        conn_id: ConnId,
+        sub_id: SubId,
+        filters: Vec<Filter>,
+        scope: SubscriptionScope,
+    ) -> Option<RemovedSubscription> {
         let removed = self.remove_subscription(conn_id, &sub_id);
 
-        self.subs
-            .entry(conn_id)
-            .or_default()
-            .insert(sub_id.clone(), (filters.clone(), community_id, channel_id));
+        self.subs.entry(conn_id).or_default().insert(
+            sub_id.clone(),
+            (filters.clone(), community_id, scope.clone()),
+        );
         metrics::gauge!("buzz_subscriptions_active").increment(1.0);
 
-        if let Some(ch_id) = channel_id {
-            match extract_kinds_from_filters(&filters) {
-                None => {
-                    // At least one filter has no `kinds` constraint — wildcard,
-                    // this sub wants all kinds in this channel.
-                    self.channel_wildcard_index
-                        .entry((community_id, ch_id))
-                        .or_default()
-                        .push((conn_id, sub_id.clone()));
-                }
-                Some(kinds) if kinds.is_empty() => {
-                    // All filters had explicit empty kinds lists (`kinds: []`).
-                    // Per NIP-01, `kinds: []` means "match no kinds" — this
-                    // subscription will never receive any events. Do not index it
-                    // anywhere; `filters_match` will reject all events at fan-out.
-                }
-                Some(kinds) => {
-                    for kind in kinds {
-                        let key = IndexKey {
-                            channel_id: ch_id,
-                            kind,
-                        };
-                        self.channel_kind_index
-                            .entry((community_id, key))
+        if let SubscriptionScope::Channels(channel_ids) = &scope {
+            for ch_id in channel_ids {
+                let ch_id = *ch_id;
+                match extract_kinds_from_filters(&filters) {
+                    None => {
+                        // At least one filter has no `kinds` constraint — wildcard,
+                        // this sub wants all kinds in this channel.
+                        self.channel_wildcard_index
+                            .entry((community_id, ch_id))
                             .or_default()
                             .push((conn_id, sub_id.clone()));
+                    }
+                    Some(kinds) if kinds.is_empty() => {
+                        // All filters had explicit empty kinds lists (`kinds: []`).
+                        // Per NIP-01, `kinds: []` means "match no kinds" — this
+                        // subscription will never receive any events. Do not index it
+                        // anywhere; `filters_match` will reject all events at fan-out.
+                    }
+                    Some(kinds) => {
+                        for kind in kinds {
+                            let key = IndexKey {
+                                channel_id: ch_id,
+                                kind,
+                            };
+                            self.channel_kind_index
+                                .entry((community_id, key))
+                                .or_default()
+                                .push((conn_id, sub_id.clone()));
+                        }
                     }
                 }
             }
@@ -177,16 +244,16 @@ impl SubscriptionRegistry {
         F: FnOnce(),
     {
         let mut conn_subs = self.subs.get_mut(&conn_id)?;
-        let (filters, community_id, channel_id) = conn_subs.remove(sub_id)?;
+        let (filters, community_id, scope) = conn_subs.remove(sub_id)?;
 
         after_remove();
-        self.remove_from_index(conn_id, sub_id, &filters, community_id, channel_id);
+        self.remove_from_index(conn_id, sub_id, &filters, community_id, &scope);
         drop(conn_subs);
 
         metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
         Some(RemovedSubscription {
             community_id,
-            channel_id,
+            scope,
         })
     }
 
@@ -195,11 +262,11 @@ impl SubscriptionRegistry {
         let mut removed = Vec::new();
         if let Some((_, conn_subs)) = self.subs.remove(&conn_id) {
             let count = conn_subs.len();
-            for (sub_id, (filters, community_id, channel_id)) in &conn_subs {
-                self.remove_from_index(conn_id, sub_id, filters, *community_id, *channel_id);
+            for (sub_id, (filters, community_id, scope)) in &conn_subs {
+                self.remove_from_index(conn_id, sub_id, filters, *community_id, scope);
                 removed.push(RemovedSubscription {
                     community_id: *community_id,
-                    channel_id: *channel_id,
+                    scope: scope.clone(),
                 });
             }
             metrics::gauge!("buzz_subscriptions_active").decrement(count as f64);
@@ -220,9 +287,10 @@ impl SubscriptionRegistry {
             .map(|conn_subs| {
                 conn_subs
                     .iter()
-                    .filter_map(|(sub_id, (_, sub_community_id, sub_channel_id))| {
-                        (*sub_community_id == community_id && *sub_channel_id == Some(channel_id))
-                            .then_some(sub_id.clone())
+                    .filter_map(|(sub_id, (_, sub_community_id, scope))| {
+                        (*sub_community_id == community_id
+                            && scope.channel_ids().contains(&channel_id))
+                        .then_some(sub_id.clone())
                     })
                     .collect()
             })
@@ -441,12 +509,12 @@ impl SubscriptionRegistry {
         seen: &mut HashSet<(ConnId, SubId)>,
     ) {
         if let Some(conn_subs) = self.subs.get(&conn_id) {
-            if let Some((filters, sub_community_id, sub_channel_id)) = conn_subs.get(sub_id) {
+            if let Some((filters, sub_community_id, scope)) = conn_subs.get(sub_id) {
                 // Candidate snapshots can become stale while a same-ID replacement
                 // moves the subscription. Re-check its authoritative scope before
                 // matching so an old index entry cannot deliver across scopes.
                 if *sub_community_id == community_id
-                    && *sub_channel_id == event.channel_id
+                    && scope.matches_channel(event.channel_id)
                     && filters_match(filters, event)
                 {
                     let entry = (conn_id, sub_id.to_string());
@@ -466,42 +534,45 @@ impl SubscriptionRegistry {
         sub_id: &str,
         filters: &[Filter],
         community_id: CommunityId,
-        channel_id: Option<Uuid>,
+        scope: &SubscriptionScope,
     ) {
-        if let Some(ch_id) = channel_id {
-            match extract_kinds_from_filters(filters) {
-                // None = wildcard (at least one filter had no kinds constraint).
-                None => {
-                    // Was in wildcard index.
-                    if let Some(mut entries) =
-                        self.channel_wildcard_index.get_mut(&(community_id, ch_id))
-                    {
-                        entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                        if entries.is_empty() {
-                            drop(entries);
-                            self.channel_wildcard_index.remove(&(community_id, ch_id));
-                        }
-                    }
-                }
-                Some(kinds) if kinds.is_empty() => {
-                    // `kinds: []` subscriptions are never indexed (they match nothing),
-                    // so there is nothing to remove here.
-                }
-                Some(kinds) => {
-                    // Was in kind-specific index.
-                    for kind in kinds {
-                        let key = IndexKey {
-                            channel_id: ch_id,
-                            kind,
-                        };
-                        if let Some(mut entries) = self
-                            .channel_kind_index
-                            .get_mut(&(community_id, key.clone()))
+        if let SubscriptionScope::Channels(channel_ids) = scope {
+            for ch_id in channel_ids {
+                let ch_id = *ch_id;
+                match extract_kinds_from_filters(filters) {
+                    // None = wildcard (at least one filter had no kinds constraint).
+                    None => {
+                        // Was in wildcard index.
+                        if let Some(mut entries) =
+                            self.channel_wildcard_index.get_mut(&(community_id, ch_id))
                         {
                             entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
                             if entries.is_empty() {
                                 drop(entries);
-                                self.channel_kind_index.remove(&(community_id, key));
+                                self.channel_wildcard_index.remove(&(community_id, ch_id));
+                            }
+                        }
+                    }
+                    Some(kinds) if kinds.is_empty() => {
+                        // `kinds: []` subscriptions are never indexed (they match nothing),
+                        // so there is nothing to remove here.
+                    }
+                    Some(kinds) => {
+                        // Was in kind-specific index.
+                        for kind in kinds {
+                            let key = IndexKey {
+                                channel_id: ch_id,
+                                kind,
+                            };
+                            if let Some(mut entries) = self
+                                .channel_kind_index
+                                .get_mut(&(community_id, key.clone()))
+                            {
+                                entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
+                                if entries.is_empty() {
+                                    drop(entries);
+                                    self.channel_kind_index.remove(&(community_id, key));
+                                }
                             }
                         }
                     }
@@ -684,6 +755,49 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0, conn_id);
         assert_eq!(matches[0].1, sub_id);
+    }
+
+    #[test]
+    fn multi_channel_subscription_fans_out_only_requested_channels() {
+        let registry = SubscriptionRegistry::new();
+        let conn_id = Uuid::new_v4();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let unrelated = Uuid::new_v4();
+        let sub_id = "multi-channel".to_string();
+        let filters = vec![Filter::new()
+            .kind(Kind::TextNote)
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::H),
+                channel_a.to_string(),
+            )
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::H),
+                channel_b.to_string(),
+            )];
+
+        registry.register_channels_scoped(
+            test_community(),
+            conn_id,
+            sub_id.clone(),
+            filters,
+            vec![channel_a, channel_b],
+        );
+
+        assert_eq!(
+            registry.fan_out(&make_stored_event(Kind::TextNote, Some(channel_a))),
+            vec![(conn_id, sub_id.clone())]
+        );
+        assert_eq!(
+            registry.fan_out(&make_stored_event(Kind::TextNote, Some(channel_b))),
+            vec![(conn_id, sub_id)]
+        );
+        assert!(registry
+            .fan_out(&make_stored_event(Kind::TextNote, Some(unrelated)))
+            .is_empty());
+        assert!(registry
+            .fan_out(&make_stored_event(Kind::TextNote, None))
+            .is_empty());
     }
 
     #[test]

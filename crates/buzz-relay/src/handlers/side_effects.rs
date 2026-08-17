@@ -122,10 +122,18 @@ async fn evict_conn_channel_subscriptions(
     }
 
     for (sub_id, removed_scope) in removed {
-        state
-            .pubsub
-            .release_topic(tenant, topic_for_subscription(removed_scope.channel_id))
-            .await;
+        if removed_scope.scope.is_global() {
+            state
+                .pubsub
+                .release_topic(tenant, buzz_pubsub::EventTopic::Global)
+                .await;
+        }
+        for &channel_id in removed_scope.scope.channel_ids() {
+            state
+                .pubsub
+                .release_topic(tenant, buzz_pubsub::EventTopic::Channel(channel_id))
+                .await;
+        }
         let _ = state.conn_manager.send_to(
             conn_id,
             RelayMessage::closed(&sub_id, "restricted: channel access revoked"),
@@ -3365,13 +3373,6 @@ pub async fn publish_nipia_unarchived(
         None,
     )
     .await
-}
-
-fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
-    match channel_id {
-        Some(channel_id) => EventTopic::Channel(channel_id),
-        None => EventTopic::Global,
-    }
 }
 
 #[cfg(test)]

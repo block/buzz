@@ -107,8 +107,8 @@ pub async fn get_channel_workflows(
 ///
 /// The Workflows overview screen previously issued one `get_channel_workflows`
 /// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
-/// relay POSTs. This sends N single-channel filters in one query request. Using
-/// one multi-value `#h` filter would be equivalent under NIP-01, but older
+/// relay POSTs. This sends one single-channel filter per channel in a single
+/// query request. Using one multi-value `#h` filter is equivalent under NIP-01, but older
 /// relays incorrectly narrowed that shape to its first channel. Each
 /// `WorkflowWire` carries its own `channel_id` (from the event's `h` tag), so
 /// the frontend can still group results by channel. Neither this nor the

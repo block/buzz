@@ -107,6 +107,7 @@ pub async fn handle_req(
     }
 
     let channel_id = extract_channel_id_from_filters(&filters);
+    let requested_channel_ids = extract_channel_ids_from_filters(&filters);
 
     // Build the conformance `AbstractState` once at request entry. The
     // `Option` only goes `None` on malformed pubkey bytes (already a
@@ -126,47 +127,45 @@ pub async fn handle_req(
     // `resolve_request_local_access`). Running this ahead of the search branch
     // is what fixes the search false-miss: a `#h=<just-added>` search would
     // otherwise be scoped against the stale vector and return empty.
-    if let Some(ch_id) = channel_id {
-        let token_allows = token_channel_ids
-            .as_deref()
-            .is_none_or(|allowed| allowed.contains(&ch_id));
-        let db_is_member = if !token_allows || accessible_channels.contains(&ch_id) {
-            None
-        } else {
-            match state
-                .db
-                .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
-                .await
-            {
-                Ok(member) => {
-                    if let Some(state_snap) = trace_state.as_ref() {
-                        crate::conformance::record_req_authcheck(
-                            &state.tracer,
-                            state_snap,
-                            ch_id,
-                            member,
-                        );
+    if let Some(requested) = requested_channel_ids.as_ref() {
+        for &ch_id in requested {
+            let token_allows = token_channel_ids
+                .as_deref()
+                .is_none_or(|allowed| allowed.contains(&ch_id));
+            let db_is_member = if !token_allows || accessible_channels.contains(&ch_id) {
+                None
+            } else {
+                match state
+                    .db
+                    .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
+                    .await
+                {
+                    Ok(member) => {
+                        if let Some(state_snap) = trace_state.as_ref() {
+                            crate::conformance::record_req_authcheck(
+                                &state.tracer,
+                                state_snap,
+                                ch_id,
+                                member,
+                            );
+                        }
+                        Some(member)
                     }
-                    Some(member)
+                    Err(e) => {
+                        warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
+                        conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                        return;
+                    }
                 }
-                Err(e) => {
-                    warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                    conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-                    return;
-                }
-            }
-        };
-        if !resolve_request_local_access(
-            &mut accessible_channels,
-            ch_id,
-            token_allows,
-            db_is_member,
-        ) {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: not a channel member",
-            ));
-            return;
+            };
+            // An OR filter may include inaccessible channels; retain every
+            // authorized requested channel and silently omit the others.
+            resolve_request_local_access(
+                &mut accessible_channels,
+                ch_id,
+                token_allows,
+                db_is_member,
+            );
         }
     }
 
@@ -236,23 +235,46 @@ pub async fn handle_req(
         subs.insert(sub_id.clone(), filters.clone());
     }
 
-    let replaced = state.sub_registry.register_scoped(
-        conn.tenant.community(),
-        conn_id,
-        sub_id.clone(),
-        filters.clone(),
-        channel_id,
-    );
+    let authorized_requested_channels = requested_channel_ids.as_ref().map(|requested| {
+        requested
+            .iter()
+            .copied()
+            .filter(|channel_id| accessible_channels.contains(channel_id))
+            .collect::<Vec<_>>()
+    });
+    let replaced = if let Some(channel_ids) = authorized_requested_channels.as_ref() {
+        state.sub_registry.register_channels_scoped(
+            conn.tenant.community(),
+            conn_id,
+            sub_id.clone(),
+            filters.clone(),
+            channel_ids.clone(),
+        )
+    } else {
+        state.sub_registry.register_scoped(
+            conn.tenant.community(),
+            conn_id,
+            sub_id.clone(),
+            filters.clone(),
+            None,
+        )
+    };
     if let Some(replaced) = replaced {
+        release_subscription_topics(&state, &conn.tenant, &replaced.scope).await;
+    }
+    if let Some(channel_ids) = authorized_requested_channels.as_ref() {
+        for &channel_id in channel_ids {
+            state
+                .pubsub
+                .retain_topic(&conn.tenant, EventTopic::Channel(channel_id))
+                .await;
+        }
+    } else {
         state
             .pubsub
-            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
+            .retain_topic(&conn.tenant, EventTopic::Global)
             .await;
     }
-    state
-        .pubsub
-        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
-        .await;
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
 
@@ -790,11 +812,11 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
 /// an exact count without post-filtering.
 ///
 /// Pushed constraints: kinds, authors (single or multi), ids, since, until,
-/// channel_id (#h single), #p (single), #d (single, NIP-33-only kinds), #e (any),
-/// channel_ids (injected by caller).
+/// authorized channel scope (#h single or multi, injected by caller), #p (single),
+/// #d (single, NIP-33-only kinds), #e (any).
 ///
-/// Anything else (multi-#p, #t, #a, search, multi-#h, #d on non-NIP-33)
-/// requires post-filtering and cannot use the fast COUNT path.
+/// Anything else (multi-#p, #t, #a, search, #d on non-NIP-33) requires
+/// post-filtering and cannot use the fast COUNT path.
 pub fn filter_fully_pushable(filter: &Filter) -> bool {
     // Check if filter exclusively targets NIP-33 kinds (needed for #d pushability).
     let is_nip33_only = filter.kinds.as_ref().is_some_and(|ks| {
@@ -808,10 +830,8 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
         let key = tag_key.to_string();
         match key.as_str() {
             "h" => {
-                // Single #h is pushed as channel_id; multi-#h is not.
-                if tag_values.len() > 1 {
-                    return false;
-                }
+                // The caller pushes the complete authorized #h set through
+                // EventQuery::channel_id/channel_ids before invoking COUNT.
             }
             "p" => {
                 // Single #p is pushed via event_mentions join; multi is not.
@@ -1014,7 +1034,7 @@ fn filter_to_query_params(
 /// may access. Invalid values are ignored, and an empty authorized result is an
 /// explicit match-nothing scope rather than a global query. Filters without
 /// `#h` retain the full accessible-channel scope plus global events.
-fn apply_channel_scope_to_query(
+pub(crate) fn apply_channel_scope_to_query(
     query: &mut EventQuery,
     filter: &Filter,
     channel_id: Option<uuid::Uuid>,
@@ -1039,30 +1059,46 @@ fn apply_channel_scope_to_query(
     }
 }
 
-/// Push the caller's authorized channel set into logically global historical
-/// queries so SQL `LIMIT` counts visible rows. Channel-less events remain in
-/// scope by `EventQuery::channel_ids` contract; an explicit single-channel
-/// filter keeps its narrower `channel_id` predicate.
-pub(crate) fn apply_access_scope_to_query(
-    query: &mut EventQuery,
-    channel_id: Option<uuid::Uuid>,
-    accessible_channels: &[uuid::Uuid],
+/// Extract the complete channel set when every filter is explicitly #h-scoped.
+/// `None` means at least one filter is community-global.
+pub(crate) fn extract_channel_ids_from_filters(filters: &[Filter]) -> Option<Vec<uuid::Uuid>> {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let mut channel_ids = Vec::new();
+    for filter in filters {
+        let values = filter.generic_tags.get(&h_tag)?;
+        let mut filter_has_valid_channel = false;
+        for value in values {
+            if let Ok(channel_id) = value.parse::<uuid::Uuid>() {
+                filter_has_valid_channel = true;
+                if !channel_ids.contains(&channel_id) {
+                    channel_ids.push(channel_id);
+                }
+            }
+        }
+        if !filter_has_valid_channel {
+            return Some(Vec::new());
+        }
+    }
+    Some(channel_ids)
+}
+
+async fn release_subscription_topics(
+    state: &AppState,
+    tenant: &TenantContext,
+    scope: &crate::subscription::SubscriptionScope,
 ) {
-    if channel_id.is_none() {
-        query.channel_ids = Some(accessible_channels.to_vec());
+    if scope.is_global() {
+        state.pubsub.release_topic(tenant, EventTopic::Global).await;
+    } else {
+        for &channel_id in scope.channel_ids() {
+            state
+                .pubsub
+                .release_topic(tenant, EventTopic::Channel(channel_id))
+                .await;
+        }
     }
 }
 
-/// Extract a single channel UUID from filter generic tags, or `None` if the
-/// subscription is logically global.
-///
-/// Checks the `"h"` tag key — channel-scoped subscriptions use `#h = <uuid>`.
-///
-/// Returns `None` when:
-/// - Any filter has no channel tag (that filter matches all channels → global sub), or
-/// - Multiple distinct channel UUIDs appear across filters (can't index under one channel).
-///
-/// Callers that receive `None` treat the subscription as global (slow-path fan-out).
 fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
     let mut found_id: Option<uuid::Uuid> = None;
     for f in filters {
@@ -1326,13 +1362,6 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
     })
 }
 
-fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
-    match channel_id {
-        Some(channel_id) => EventTopic::Channel(channel_id),
-        None => EventTopic::Global,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1345,7 +1374,7 @@ mod tests {
             uuid::Uuid::new_v4(),
         ));
 
-        apply_access_scope_to_query(&mut query, None, &accessible);
+        apply_channel_scope_to_query(&mut query, &Filter::new(), None, &accessible);
 
         assert_eq!(query.channel_ids.as_deref(), Some(accessible.as_slice()));
     }
@@ -1359,7 +1388,7 @@ mod tests {
         ));
         query.channel_id = Some(channel);
 
-        apply_access_scope_to_query(&mut query, Some(channel), &accessible);
+        apply_channel_scope_to_query(&mut query, &Filter::new(), Some(channel), &accessible);
 
         assert!(query.channel_ids.is_none());
         assert_eq!(query.channel_id, Some(channel));
