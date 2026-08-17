@@ -17,7 +17,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Switch } from "@/shared/ui/switch";
 
 type WorkflowActionsMenuProps = {
   isEnabled: boolean;
@@ -79,12 +78,21 @@ export function WorkflowActionsMenu({
             <PowerOff className="mr-2 h-4 w-4 shrink-0" />
           )}
           <span>Enable</span>
-          <Switch
+          <span
             aria-hidden="true"
-            checked={isEnabled}
-            className="pointer-events-none ml-auto"
-            tabIndex={-1}
-          />
+            className={
+              "ml-auto inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent transition-colors " +
+              (isEnabled ? "bg-primary" : "bg-input")
+            }
+            data-testid="workflow-enabled-switch-visual"
+          >
+            <span
+              className={
+                "block h-4 w-4 rounded-full bg-background transition-transform " +
+                (isEnabled ? "translate-x-4" : "translate-x-0")
+              }
+            />
+          </span>
         </DropdownMenuCheckboxItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem className="text-destructive" onClick={onDelete}>

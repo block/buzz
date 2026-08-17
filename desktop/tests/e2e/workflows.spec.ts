@@ -188,6 +188,11 @@ test("enables and disables a workflow from its card menu", async ({ page }) => {
   await expect(detailPanel.getByText("active", { exact: true })).toBeVisible();
 
   await workflowActions().click();
+  await expect(enableItem).toHaveAttribute("aria-checked", "true");
+  await expect(enableItem.locator("button")).toHaveCount(0);
+  await expect(
+    enableItem.getByTestId("workflow-enabled-switch-visual"),
+  ).toHaveAttribute("aria-hidden", "true");
   await enableItem.click();
   await expect(
     workflowCard().getByText("disabled", { exact: true }),
@@ -201,6 +206,97 @@ test("enables and disables a workflow from its card menu", async ({ page }) => {
     workflowCard().getByText("active", { exact: true }),
   ).toBeVisible();
   await expect(detailPanel.getByText("active", { exact: true })).toBeVisible();
+});
+
+test("rejects a stale card toggle without overwriting a newer edit", async ({
+  page,
+}) => {
+  const workflowName = `stale_toggle_${Date.now()}`;
+
+  await navigateToWorkflows(page);
+  await createWorkflow(page, workflowName);
+  const workflowCard = page
+    .locator('[data-testid^="workflow-card-"]')
+    .filter({ hasText: workflowName })
+    .first();
+
+  await page.evaluate(async (name) => {
+    const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) throw new Error("mock command bridge unavailable");
+    const createCall = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((call) => call.command === "create_workflow");
+    const channelId = (
+      createCall?.payload as { channelId?: string } | undefined
+    )?.channelId;
+    if (!channelId) throw new Error("create workflow channel unavailable");
+    const workflows = (await invoke("get_channels_workflows", {
+      channelIds: [channelId],
+    })) as Array<{
+      id: string;
+      revision: string;
+      definition: Record<string, unknown>;
+    }>;
+    const workflow = workflows.find(
+      (candidate) => candidate.definition.name === name,
+    );
+    if (!workflow) throw new Error("created workflow unavailable");
+    await invoke("update_workflow", {
+      workflowId: workflow.id,
+      expectedRevision: workflow.revision,
+      yamlDefinition: `name: ${name} edited elsewhere\nenabled: true\ntrigger:\n  on: message_posted\nsteps:\n  - id: step_1\n    action: post_message\n`,
+    });
+  }, workflowName);
+
+  await workflowCard.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitemcheckbox", { name: "Enable" }).click();
+
+  await expect(
+    page
+      .locator("[data-sonner-toast][data-removed='false']")
+      .filter({ hasText: "workflow changed since it was loaded" }),
+  ).toBeVisible();
+  const authoritativeName = await page.evaluate(async () => {
+    const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) throw new Error("mock command bridge unavailable");
+    const createCall = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((call) => call.command === "create_workflow");
+    const channelId = (
+      createCall?.payload as { channelId?: string } | undefined
+    )?.channelId;
+    if (!channelId) throw new Error("create workflow channel unavailable");
+    const workflows = (await invoke("get_channels_workflows", {
+      channelIds: [channelId],
+    })) as Array<{ name: string }>;
+    return workflows[0]?.name;
+  });
+  expect(authoritativeName).toBe(`${workflowName} edited elsewhere`);
+});
+
+test("reports a rejected workflow status change", async ({ page }) => {
+  const workflowName = `rejected_toggle_${Date.now()}`;
+
+  await navigateToWorkflows(page);
+  await createWorkflow(page, workflowName);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__ ??= {};
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.workflowUpdateError = "relay refused the update";
+  });
+
+  const workflowCard = page
+    .locator('[data-testid^="workflow-card-"]')
+    .filter({ hasText: workflowName })
+    .first();
+  await workflowCard.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitemcheckbox", { name: "Enable" }).click();
+
+  const errorToast = page
+    .locator("[data-sonner-toast][data-removed='false']")
+    .filter({ hasText: "Couldn’t change workflow status" });
+  await expect(errorToast).toContainText("relay refused the update");
+  await expect(workflowCard.getByText("active", { exact: true })).toBeVisible();
 });
 
 test("shows the webhook secret dialog after saving a webhook workflow", async ({

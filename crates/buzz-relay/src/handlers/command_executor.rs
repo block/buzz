@@ -188,6 +188,11 @@ async fn persist_command_event(
         .map_err(|e| IngestError::Internal(format!("error: query event coordinate: {e}")))?;
 
         let incoming_id = event.id.as_bytes().as_slice();
+        validate_workflow_revision(
+            kind_i32,
+            extract_tag(event, "expected-revision").as_deref(),
+            existing.as_ref().map(|(_, id)| id.as_slice()),
+        )?;
         if let Some((existing_ts, existing_id)) = existing {
             let dominated = created_at < existing_ts
                 || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
@@ -236,6 +241,44 @@ async fn persist_command_event(
         Ok(PersistResult::Duplicate)
     } else {
         Ok(PersistResult::Inserted(tx))
+    }
+}
+
+fn validate_workflow_revision(
+    kind: i32,
+    expected_revision: Option<&str>,
+    existing_id: Option<&[u8]>,
+) -> Result<(), IngestError> {
+    if kind != KIND_WORKFLOW_DEF as i32 {
+        return Ok(());
+    }
+
+    let expected_id = expected_revision
+        .map(|expected| {
+            let id = hex::decode(expected).map_err(|_| {
+                IngestError::Rejected("invalid: bad expected workflow revision".into())
+            })?;
+            if id.len() != 32 {
+                return Err(IngestError::Rejected(
+                    "invalid: bad expected workflow revision".into(),
+                ));
+            }
+            Ok(id)
+        })
+        .transpose()?;
+
+    match (expected_id.as_deref(), existing_id) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(IngestError::Rejected(
+            "conflict: workflow update requires the current revision".into(),
+        )),
+        (Some(_), None) => Err(IngestError::Rejected(
+            "conflict: workflow revision does not exist".into(),
+        )),
+        (Some(expected), Some(existing)) if expected != existing => Err(IngestError::Rejected(
+            "conflict: workflow changed since it was loaded".into(),
+        )),
+        (Some(_), Some(_)) => Ok(()),
     }
 }
 
@@ -1384,4 +1427,87 @@ async fn resume_workflow_after_approval(
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rejection_message(result: Result<(), IngestError>) -> String {
+        match result {
+            Err(IngestError::Rejected(message)) => message,
+            Err(IngestError::AuthFailed(message)) => panic!("unexpected auth failure: {message}"),
+            Err(IngestError::Internal(message)) => panic!("unexpected internal failure: {message}"),
+            Ok(()) => panic!("expected revision validation to fail"),
+        }
+    }
+
+    #[test]
+    fn workflow_revision_accepts_create_and_matching_update() {
+        let existing = [0x42; 32];
+        assert!(validate_workflow_revision(KIND_WORKFLOW_DEF as i32, None, None).is_ok());
+        assert!(validate_workflow_revision(
+            KIND_WORKFLOW_DEF as i32,
+            Some(&hex::encode(existing)),
+            Some(&existing),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn workflow_revision_rejects_stale_missing_and_malformed_updates() {
+        let existing = [0x42; 32];
+        let stale = [0x24; 32];
+        assert_eq!(
+            rejection_message(validate_workflow_revision(
+                KIND_WORKFLOW_DEF as i32,
+                Some(&hex::encode(stale)),
+                Some(&existing),
+            )),
+            "conflict: workflow changed since it was loaded",
+        );
+        assert_eq!(
+            rejection_message(validate_workflow_revision(
+                KIND_WORKFLOW_DEF as i32,
+                None,
+                Some(&existing),
+            )),
+            "conflict: workflow update requires the current revision",
+        );
+        for malformed in ["not-hex", "42"] {
+            assert_eq!(
+                rejection_message(validate_workflow_revision(
+                    KIND_WORKFLOW_DEF as i32,
+                    Some(malformed),
+                    Some(&existing),
+                )),
+                "invalid: bad expected workflow revision",
+            );
+            assert_eq!(
+                rejection_message(validate_workflow_revision(
+                    KIND_WORKFLOW_DEF as i32,
+                    Some(malformed),
+                    None,
+                )),
+                "invalid: bad expected workflow revision",
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_revision_rejects_update_for_missing_coordinate() {
+        assert_eq!(
+            rejection_message(validate_workflow_revision(
+                KIND_WORKFLOW_DEF as i32,
+                Some(&hex::encode([0x42; 32])),
+                None,
+            )),
+            "conflict: workflow revision does not exist",
+        );
+    }
+
+    #[test]
+    fn revision_tag_does_not_change_other_command_kinds() {
+        assert!(validate_workflow_revision(KIND_DM_OPEN as i32, Some("not-hex"), None).is_ok());
+    }
 }

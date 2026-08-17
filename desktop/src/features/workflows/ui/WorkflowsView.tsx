@@ -1,6 +1,7 @@
 import { Plus, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { stringify as yamlStringify } from "yaml";
 
 import {
@@ -156,7 +157,16 @@ export function WorkflowsView({
             !getWorkflowEnabled(workflow.definition),
           ),
         ),
+        workflow.revision,
       ),
+    onError: (error) => {
+      toast.error("Couldn’t change workflow status", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "The workflow was not changed. Try again.",
+      });
+    },
     onSuccess: (_data, workflow) => {
       void queryClient.invalidateQueries({
         queryKey: workflowQueryKey(workflow.id),
