@@ -262,8 +262,13 @@ fn is_retriable_status(status: reqwest::StatusCode) -> bool {
 }
 
 /// Base retry delays for transient HTTP failures: 500ms, 1s, 2s.
-/// Jitter (±20%) is applied at call time via `jittered_duration`.
-const REST_RETRY_BASE_DELAYS: [Duration; 3] = [
+/// Jitter (±20%) is applied at call time via `jittered_duration`, so the first
+/// sleep lands in `[400ms, 600ms)`.
+///
+/// `pub(crate)` so callers can assert their own timeout is actually long
+/// enough to reach attempt two before choosing [`RestClient::submit_event`]
+/// over [`RestClient::submit_event_once`].
+pub(crate) const REST_RETRY_BASE_DELAYS: [Duration; 3] = [
     Duration::from_millis(500),
     Duration::from_millis(1000),
     Duration::from_millis(2000),
@@ -388,10 +393,33 @@ impl RestClient {
         path: &str,
         body_bytes: &[u8],
     ) -> Result<reqwest::Response, RelayError> {
+        self.bridge_post_inner(path, body_bytes, true).await
+    }
+
+    /// POST with NIP-98 auth and **no** retry ladder — a single attempt.
+    ///
+    /// For callers whose own timeout is shorter than the first backoff sleep,
+    /// where retrying is not merely useless but actively misleading: the outer
+    /// timeout fires mid-sleep, so the extra attempts never happen and the
+    /// error the caller reports is `Elapsed` rather than what the relay said.
+    async fn bridge_post_once(
+        &self,
+        path: &str,
+        body_bytes: &[u8],
+    ) -> Result<reqwest::Response, RelayError> {
+        self.bridge_post_inner(path, body_bytes, false).await
+    }
+
+    async fn bridge_post_inner(
+        &self,
+        path: &str,
+        body_bytes: &[u8],
+        retry: bool,
+    ) -> Result<reqwest::Response, RelayError> {
         let url = format!("{}{}", self.base_url, path);
         let body_owned = body_bytes.to_vec();
         let auth_tag_header = self.auth_tag_json.clone();
-        self.request_with_retry("POST", path, || {
+        let build = || {
             // NIP-98 is re-signed each attempt (fresh created_at).
             // sign_nip98 is infallible in practice (key is always valid).
             let auth = self
@@ -406,8 +434,20 @@ impl RestClient {
                 req = req.header("x-auth-tag", tag);
             }
             req.body(body_owned.clone()).send()
-        })
-        .await
+        };
+        if retry {
+            self.request_with_retry("POST", path, build).await
+        } else {
+            match build().await {
+                Ok(resp) if resp.status().is_success() => Ok(resp),
+                Ok(resp) => Err(RelayError::Http(format!(
+                    "POST {} returned HTTP {}",
+                    path,
+                    resp.status()
+                ))),
+                Err(e) => Err(RelayError::Http(e.to_string())),
+            }
+        }
     }
 
     /// Fetch the relay's own signing pubkey from the public NIP-11 `/info`
@@ -474,6 +514,23 @@ impl RestClient {
         let body_bytes = serde_json::to_vec(event)
             .map_err(|e| RelayError::Http(format!("event serialize error: {e}")))?;
         let resp = self.bridge_post("/events", &body_bytes).await?;
+        Self::read_event_response(resp).await
+    }
+
+    /// Submit a signed event with a **single** attempt and no retry ladder.
+    ///
+    /// For cosmetic publishes on a sub-second budget. [`submit_event`] backs
+    /// off 500ms/1s/2s between attempts, so a caller wrapping it in a timeout
+    /// shorter than the first sleep can never reach attempt two — it only
+    /// converts the relay's real answer into an opaque timeout.
+    pub async fn submit_event_once(&self, event: &Event) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(event)
+            .map_err(|e| RelayError::Http(format!("event serialize error: {e}")))?;
+        let resp = self.bridge_post_once("/events", &body_bytes).await?;
+        Self::read_event_response(resp).await
+    }
+
+    async fn read_event_response(resp: reqwest::Response) -> Result<Value, RelayError> {
         let text = resp
             .text()
             .await
