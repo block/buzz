@@ -87,6 +87,14 @@ function buildPersonaCards(
 
   const ownerIndex = pickPersonaActionsIndex(persona, liveGroups);
   return liveGroups.map((group, index) => ({
+    // Plain `::` join rather than the length-prefixed form `agentDisplayGroupKey`
+    // uses, because this key is also the card's `data-testid` and e2e specs read
+    // it. That is safe only because the left segment cannot contain the
+    // separator: a persona id is either a `slugify()` output (every
+    // non-alphanumeric becomes `-`), a v4 UUID, or a `builtin:<name>` literal
+    // with a single colon — never `::`. The right segment is free text, but a
+    // forged separator there cannot shift the boundary when the left one is
+    // constrained. Revisit if persona ids ever become user-supplied.
     key: `${persona.id}::${group.foldedName}`,
     label: group.name || persona.displayName,
     personaLabel: persona.displayName,
