@@ -275,9 +275,52 @@ test.describe("community rail", () => {
     expect(communityBox?.y).toBeLessThan(feedbackBox?.y ?? 0);
     expect(feedbackBox?.y).toBeLessThan(settingsBox?.y ?? 0);
 
-    await page.getByTestId("community-switcher").click();
-
     const menu = page.getByRole("menu", { name: "Community actions" });
+    await communityTrigger.hover();
+    await page.waitForTimeout(40);
+    await expect(menu).toBeHidden();
+    await expect(menu).toBeVisible({ timeout: 160 });
+
+    const openTriggerBox = await communityTrigger.boundingBox();
+    const menuBox = await menu.boundingBox();
+    expect(openTriggerBox).not.toBeNull();
+    expect(menuBox).not.toBeNull();
+    if (!openTriggerBox || !menuBox) {
+      throw new Error("Community actions geometry unavailable");
+    }
+    await communityTrigger.evaluate((trigger) => {
+      trigger.addEventListener("mouseleave", () => {
+        document.body.dataset.communityTriggerLeft = "true";
+      });
+      const observer = new MutationObserver(() => {
+        if (trigger.getAttribute("aria-expanded") === "false") {
+          document.body.dataset.communityMenuClosedDuringBridge = "true";
+        }
+      });
+      observer.observe(trigger, {
+        attributeFilter: ["aria-expanded"],
+        attributes: true,
+      });
+    });
+    await page.mouse.move(
+      openTriggerBox.x + openTriggerBox.width / 2,
+      openTriggerBox.y + openTriggerBox.height + 4,
+    );
+    await page.waitForTimeout(80);
+    await expect
+      .poll(() =>
+        page.locator("body").getAttribute("data-community-trigger-left"),
+      )
+      .toBe("true");
+    await expect(menu).toBeVisible();
+    await expect
+      .poll(() =>
+        page
+          .locator("body")
+          .getAttribute("data-community-menu-closed-during-bridge"),
+      )
+      .toBeNull();
+    await page.mouse.move(menuBox.x + menuBox.width / 2, menuBox.y + 8);
     await expect(menu).toBeVisible();
     await expect(
       menu.getByRole("menuitem", { name: "Copy community URL" }),
