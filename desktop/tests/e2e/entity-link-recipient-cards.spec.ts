@@ -24,20 +24,32 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   page,
 }) => {
   await page.addInitScript(
-    ({ repoAddress, prId, alicePubkey, subject }) => {
+    ({ repoAddress, prId, issueId, alicePubkey, prSubject, issueSubject }) => {
+      const createdAt = Math.floor(Date.now() / 1000) - 60;
       window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__ = [
         {
           id: prId,
           kind: 1618, // KIND_GIT_PULL_REQUEST
           pubkey: alicePubkey,
-          created_at: Math.floor(Date.now() / 1000) - 60,
+          created_at: createdAt,
           content: "PR body",
           tags: [
             ["a", repoAddress],
-            ["subject", subject],
+            ["subject", prSubject],
             ["c", "abc123".padEnd(40, "0")],
             ["branch-name", "fix/entity-cards"],
             ["clone", "https://github.com/block/relay-tools.git"],
+          ],
+        },
+        {
+          id: issueId,
+          kind: 1621, // KIND_GIT_ISSUE
+          pubkey: alicePubkey,
+          created_at: createdAt,
+          content: "Issue body",
+          tags: [
+            ["a", repoAddress],
+            ["subject", issueSubject],
           ],
         },
       ];
@@ -45,8 +57,10 @@ test("agent-style message with bare buzz:// links renders entity cards without s
     {
       repoAddress: REPO_ADDRESS,
       prId: PR_ID,
+      issueId: ISSUE_ID,
       alicePubkey: ALICE_PUBKEY,
-      subject: PR_SUBJECT,
+      prSubject: PR_SUBJECT,
+      issueSubject: ISSUE_SUBJECT,
     },
   );
   await installMockBridge(page);
@@ -60,18 +74,20 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   // Simulate an agent/CLI sender: plain kind-9 message with bare buzz://
   // URLs in the content and NO link-preview snapshot tags.
   await page.evaluate(
-    ({ prId, alicePubkey }) => {
+    ({ prId, issueId, alicePubkey }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         pubkey: alicePubkey,
         content: [
           "PR is up — review when you can:",
           `buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools`,
+          `Issue: buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools`,
           `Repo: buzz://repo?owner=${alicePubkey}&d=relay-tools`,
+          `Missing repo: buzz://repo?owner=${alicePubkey}&d=missing-repo`,
         ].join("\n"),
       });
     },
-    { prId: PR_ID, alicePubkey: ALICE_PUBKEY },
+    { prId: PR_ID, issueId: ISSUE_ID, alicePubkey: ALICE_PUBKEY },
   );
 
   const row = page
@@ -96,10 +112,39 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(
     prCard.locator("[data-link-preview-hostname-favicon]"),
   ).toHaveCount(0);
+  const prChip = row.getByRole("button", {
+    name: /Open pull request .* in repository relay-tools/,
+  });
+  await expect(prChip).not.toHaveAttribute("title");
+  await prChip.hover();
+  const prTooltip = page.getByRole("tooltip");
+  await expect(
+    prTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText(PR_SUBJECT);
+  await expect(
+    prTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
+  ).toHaveText("Pull request · relay-tools");
+  await expect(prChip).toContainText(`relay-tools · ${PR_SUBJECT}`);
+
+  const issueChip = row.getByRole("button", {
+    name: /Open issue .* in repository relay-tools/,
+  });
+  await expect(issueChip).toContainText(`relay-tools · ${ISSUE_SUBJECT}`);
+  await expect(issueChip).toHaveClass(/max-w-64/);
+  await issueChip.hover();
+  const issueTooltip = page.getByRole("tooltip");
+  await expect(
+    issueTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText(ISSUE_SUBJECT);
+  await expect(
+    issueTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
+  ).toHaveText("Issue · relay-tools");
 
   // The repository card uses its signed announcement metadata and remains
   // image-less.
-  const repoCard = row.locator('[data-link-preview="buzz-repository"]');
+  const repoCard = row
+    .locator('[data-link-preview="buzz-repository"]')
+    .filter({ hasText: "relay-tools" });
   await expect(repoCard).toBeVisible();
   await expect(repoCard).toContainText("relay-tools");
   await expect(repoCard).toContainText(
@@ -116,6 +161,30 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(
     repoCard.locator("[data-link-preview-hostname-favicon]"),
   ).toHaveCount(0);
+  const repoChip = row.getByRole("button", {
+    name: "Open repository relay-tools",
+  });
+  await repoChip.hover();
+  const repoTooltip = page.getByRole("tooltip");
+  await expect(
+    repoTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText("Operator tooling and admin CLI for relay deployments.");
+  await expect(
+    repoTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
+  ).toHaveText("Repository");
+  const missingRepoChip = row.getByRole("button", {
+    name: "Open repository missing-repo",
+  });
+  // Failed metadata falls back to the chip's stable identity instead of
+  // removing the tooltip or leaving a type-only footer.
+  await missingRepoChip.hover();
+  const missingRepoTooltip = page.getByRole("tooltip");
+  await expect(
+    missingRepoTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText("missing-repo");
+  await expect(
+    missingRepoTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
+  ).toHaveText("Repository");
   // Default typography is 14px; keep the image-less card compact while
   // allowing fractional line-height rounding across rendering platforms.
   expect(
@@ -127,6 +196,39 @@ test("agent-style message with bare buzz:// links renders entity cards without s
     animations: "disabled",
     path: `${SHOTS}/01-recipient-entity-cards.png`,
   });
+});
+
+test("entity tooltip keeps stable identity while relay metadata is delayed", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(() =>
+    window.__BUZZ_E2E_ACTIVATE_RELAY_RATE_LIMIT__?.(300),
+  );
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.evaluate(
+    ({ issueId, owner }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `Delayed issue: buzz://issue?id=${issueId}&owner=${owner}&d=buzz`,
+      });
+    },
+    { issueId: ISSUE_ID, owner: DEFAULT_MOCK_PUBKEY },
+  );
+
+  const issueChip = page.getByRole("button", {
+    name: /Open issue .* in repository buzz/,
+  });
+  await issueChip.hover();
+  await expect(
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText(`buzz · ${ISSUE_ID.slice(0, 8)}`);
 });
 
 test("desktop composer shows entity card and send is not blocked by missing snapshot", async ({

@@ -12,7 +12,70 @@ import {
   type SupportedLinkPreview,
 } from "@/shared/lib/linkPreview";
 
+import {
+  loadBuzzEntityMetadata,
+  type LinkPreviewMetadata,
+} from "@/shared/lib/useResolvedLinkPreviews";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/shared/ui/tooltip";
+
 import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
+
+function EntityMetadataTooltip({
+  children,
+  fallback,
+  footer,
+  href,
+}: {
+  children: (
+    metadata: LinkPreviewMetadata | null | undefined,
+  ) => React.ReactElement;
+  fallback: string;
+  footer: string;
+  href: string;
+}) {
+  const [metadata, setMetadata] = React.useState<
+    LinkPreviewMetadata | null | undefined
+  >(undefined);
+  React.useEffect(() => {
+    let cancelled = false;
+    void loadBuzzEntityMetadata(href).then((value) => {
+      if (!cancelled) setMetadata(value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [href]);
+  const context = metadata?.title.trim() || fallback;
+  const chip = children(metadata);
+  return (
+    <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+      <Tooltip>
+        <TooltipTrigger asChild>{chip}</TooltipTrigger>
+        <TooltipContent
+          align="start"
+          className="max-w-72 p-2 text-left"
+          side="top"
+        >
+          <span className="line-clamp-2" data-buzz-tooltip-metadata-content="">
+            {context}
+            {metadata?.description ? ` · ${metadata.description}` : null}
+          </span>
+          <span
+            className="mt-1 block text-2xs text-primary-foreground/70"
+            data-buzz-tooltip-metadata-type=""
+          >
+            {footer}
+          </span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
 
 function entityLinkPresentation(link: ParsedEntityLink) {
   switch (link.type) {
@@ -25,24 +88,28 @@ function entityLinkPresentation(link: ParsedEntityLink) {
         label: link.commitHash
           ? `${link.dtag} · ${link.commitHash.slice(0, 8)}`
           : link.dtag,
+        tooltipFooter: "Repository",
       };
     case "pr":
       return {
         ariaLabel: `Open pull request ${link.id.slice(0, 8)} in repository ${link.dtag}`,
         icon: "pr" as const,
         label: `${link.dtag} · ${link.id.slice(0, 8)}`,
+        tooltipFooter: `Pull request · ${link.dtag}`,
       };
     case "issue":
       return {
         ariaLabel: `Open issue ${link.id.slice(0, 8)} in repository ${link.dtag}`,
         icon: "issue" as const,
         label: `${link.dtag} · ${link.id.slice(0, 8)}`,
+        tooltipFooter: `Issue · ${link.dtag}`,
       };
     case "project":
       return {
         ariaLabel: `Open project ${link.dtag}`,
         icon: "project" as const,
         label: link.dtag,
+        tooltipFooter: "Project",
       };
   }
 }
@@ -161,17 +228,36 @@ export function renderEntityLinkAnchor({
     );
   }
 
-  return (
-    <BuzzLinkChip
-      data-buzz-link-kind={parsed.value.type}
-      href={href}
-      icon={presentation.icon}
-      title={href}
-      aria-label={presentation.ariaLabel}
-      interactive={interactive}
-      onOpenLink={() => onOpenEntityLink(parsed.value)}
+  const chip = (metadata?: LinkPreviewMetadata | null) => {
+    const resolvedContext = metadata?.title.trim();
+    const label =
+      resolvedContext &&
+      (parsed.value.type === "issue" || parsed.value.type === "pr")
+        ? `${parsed.value.dtag} · ${resolvedContext}`
+        : presentation.label;
+    return (
+      <BuzzLinkChip
+        data-buzz-link-kind={parsed.value.type}
+        href={href}
+        icon={presentation.icon}
+        aria-label={presentation.ariaLabel}
+        className="max-w-64"
+        interactive={interactive}
+        onOpenLink={() => onOpenEntityLink(parsed.value)}
+      >
+        <span className="truncate">{label}</span>
+      </BuzzLinkChip>
+    );
+  };
+  return interactive ? (
+    <EntityMetadataTooltip
+      fallback={presentation.label}
+      footer={presentation.tooltipFooter}
+      href={canonicalHref}
     >
-      {presentation.label}
-    </BuzzLinkChip>
+      {chip}
+    </EntityMetadataTooltip>
+  ) : (
+    chip()
   );
 }

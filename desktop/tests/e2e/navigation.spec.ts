@@ -401,6 +401,11 @@ test("message links to visible root messages open the thread panel", async ({
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to general",
   );
+  await page.evaluate(() => {
+    (
+      window as Window & { __BUZZ_E2E_DEFER_GET_EVENT__?: string | null }
+    ).__BUZZ_E2E_DEFER_GET_EVENT__ = "mock-general-welcome";
+  });
 
   const link =
     "buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=mock-general-welcome";
@@ -433,14 +438,95 @@ test("message links to visible root messages open the thread panel", async ({
     .last();
   await expect(linkMessage).toBeVisible();
   const rootThreadLink = linkMessage.getByRole("button", {
-    name: "Open message mock-gen in channel general",
+    name: "Open message in channel general",
   });
   await expect(rootThreadLink).toHaveText("general · mock-gen");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number })
+            .__BUZZ_E2E_GET_EVENT_CALL_COUNT__ ?? 0,
+      ),
+    )
+    .toBe(1);
+  await page.evaluate(() => {
+    (
+      window as Window & { __BUZZ_E2E_RELEASE_GET_EVENT__?: () => number }
+    ).__BUZZ_E2E_RELEASE_GET_EVENT__?.();
+  });
+  await expect(rootThreadLink).toHaveText("general · Welcome to general");
   await expect(rootThreadLink).toHaveClass(/mention-chip/);
+  await expect(rootThreadLink).toHaveClass(/max-w-64/);
+  await expect(rootThreadLink).not.toHaveAttribute("title");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__?.filter(
+            ({ command }) => command === "get_event",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
+  await rootThreadLink.hover();
+  const messageTooltip = page.getByRole("tooltip");
+  await expect(
+    messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText("Welcome to general");
+  await expect(
+    messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveClass(/line-clamp-2/);
+  await expect(
+    messageTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
+  ).toHaveText(/#general · .+ · (just now|\d+[mhdw] ago)/);
+  const messageChipBox = await rootThreadLink.boundingBox();
+  const messageTooltipBox = await messageTooltip.boundingBox();
+  if (!messageChipBox || !messageTooltipBox) {
+    throw new Error("Expected visible message chip and tooltip");
+  }
+  expect(Math.abs(messageTooltipBox.x - messageChipBox.x)).toBeLessThanOrEqual(
+    1,
+  );
+  await page.getByTestId("chat-title").hover();
+  await rootThreadLink.hover();
+  await expect(
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText("Welcome to general");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__?.filter(
+            ({ command }) => command === "get_event",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
   const randomChannelLink = linkMessage.getByRole("button", {
     name: "Open channel random",
   });
   await expect(randomChannelLink).toBeVisible();
+  await expect(randomChannelLink).not.toHaveAttribute("title");
+  await randomChannelLink.hover();
+  const channelTooltip = page.getByRole("tooltip");
+  await expect(
+    channelTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText("Off-topic, fun stuff");
+  await expect(
+    channelTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
+  ).toHaveText("Public channel");
+  await rootThreadLink.hover();
   await rootThreadLink.click({ button: "right" });
 
   const linkMenu = page.locator("[data-buzz-link-context-menu]");
@@ -481,6 +567,32 @@ test("message links to visible root messages open the thread panel", async ({
   );
 });
 
+test("message links omit tooltips when preview metadata is unavailable", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const missingMessageId = "f".repeat(64);
+  await page
+    .getByTestId("message-input")
+    .fill(
+      `Missing preview buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=${missingMessageId}`,
+    );
+  await page.getByTestId("send-message").click();
+
+  const linkMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Missing preview" })
+    .last();
+  const missingMessageLink = linkMessage.getByRole("button", {
+    name: "Open message in channel general",
+  });
+  await expect(missingMessageLink).toHaveText("general");
+  await missingMessageLink.hover();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+});
+
 test("message links reopen a closed thread when the same messageId is already in the URL", async ({
   page,
 }) => {
@@ -511,9 +623,9 @@ test("message links reopen a closed thread when the same messageId is already in
     .last();
   await expect(linkMessage).toBeVisible();
   const rootThreadLink = linkMessage.getByRole("button", {
-    name: "Open message mock-gen in channel general",
+    name: "Open message in channel general",
   });
-  await expect(rootThreadLink).toHaveText("general · mock-gen");
+  await expect(rootThreadLink).toHaveText("general · Welcome to general");
   await rootThreadLink.click();
 
   await expect(threadPanel).toBeVisible();

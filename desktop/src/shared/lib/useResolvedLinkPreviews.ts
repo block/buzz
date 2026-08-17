@@ -381,6 +381,13 @@ const entityMetadataLoader = createMetadataLoader({
   fetcher: fetchBuzzEntityMetadata,
 });
 
+/** Share deduplicated relay-native entity metadata across cards and inline tooltips. */
+export async function loadBuzzEntityMetadata(
+  href: string,
+): Promise<LinkPreviewMetadata | null> {
+  return (await entityMetadataLoader.load(href)).metadata;
+}
+
 /** Clear ephemeral metadata when the active relay/community changes. */
 export function resetLinkPreviewMetadataCache(): void {
   metadataLoader.reset();

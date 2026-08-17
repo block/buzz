@@ -1096,7 +1096,7 @@ test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
 
   assert.equal((html.match(/data-buzz-link=""/g) ?? []).length, 6);
   assert.equal((html.match(/inline-chip-icon-message/g) ?? []).length, 2);
-  assert.equal((html.match(/>engineering · c3b589fa</g) ?? []).length, 2);
+  assert.equal((html.match(/>engineering</g) ?? []).length, 3);
   assert.equal((html.match(/data-message-link=""/g) ?? []).length, 2);
   assert.equal((html.match(/data-channel-deep-link=""/g) ?? []).length, 1);
   assert.match(html, /inline-chip-icon-channel/);
@@ -1174,7 +1174,7 @@ test("bare Buzz permalinks shorten unavailable channel identifiers", () => {
     ),
   );
 
-  assert.match(html, />580ca78b · c3b589fa</);
+  assert.match(html, />580ca78b</);
   assert.match(html, />580ca78b</);
   assert.doesNotMatch(html, /#channel/);
 });
