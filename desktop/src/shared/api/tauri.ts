@@ -317,9 +317,7 @@ export function fromRawFeedItem(item: RawFeedItem) {
     createdAt: item.created_at,
     channelId: item.channel_id,
     channelName: item.channel_name,
-    // Canonicalize the wire `null` to undefined so FeedItem's optional
-    // channelType contract holds at runtime (enrichment and the DM
-    // notification filter both key off `=== undefined`).
+    // FeedItem and DM filters require absent channelType to be undefined.
     channelType: item.channel_type ?? undefined,
     tags: item.tags,
     category: item.category,
@@ -407,9 +405,7 @@ export async function getCanvas(channelId: string): Promise<CanvasResponse> {
   });
   return {
     content: response.content,
-    // Normalize absent keys to null: ensureWelcomeCanvas treats null as
-    // "no canvas yet", and `undefined !== null` would make every fresh
-    // channel look already-seeded.
+    // ensureWelcomeCanvas uses null for "no canvas yet".
     updatedAt: response.updated_at ?? null,
     author: response.author ?? null,
   };
@@ -466,8 +462,14 @@ export async function searchMessages(
   };
 }
 
-export async function getEventById(eventId: string): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("get_event", { eventId });
+export async function getEventById(
+  eventId: string,
+  channelId?: string,
+): Promise<RelayEvent> {
+  const eventJson = await invokeTauri<string>("get_event", {
+    eventId,
+    channelId,
+  });
   return JSON.parse(eventJson) as RelayEvent;
 }
 
@@ -779,9 +781,7 @@ export async function getMyRelayMembership(): Promise<RelayMember | null> {
     const raw = await invokeTauri<RawRelayMember>("get_my_relay_membership");
     return fromRawRelayMember(raw);
   } catch (error) {
-    // "relay returned 404 Not Found" = not a relay member — return null so
-    // the UI hides the Members tab. Re-throw real errors (network, auth, 500)
-    // so React Query surfaces them.
+    // Hide Members for 404; surface network, auth, and server failures.
     if (
       error instanceof Error &&
       error.message.startsWith("relay returned 404")
@@ -1134,8 +1134,7 @@ export async function applyCommunity(
   });
 }
 
-// Validate a candidate repos dir without mutating the filesystem. Rejects
-// with a human-readable reason; resolves for a valid or empty path.
+// Validate a repos dir without mutation; reject with a human-readable reason.
 export async function validateReposDir(dir: string): Promise<void> {
   await invokeTauri("validate_repos_dir", { dir });
 }

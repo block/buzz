@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn event_by_id_filter_scopes_group_lookup_when_channel_is_known() {
+    let filter = event_by_id_filter("event-id", Some("channel-id"));
+
+    assert_eq!(filter["ids"], serde_json::json!(["event-id"]));
+    assert_eq!(filter["#h"], serde_json::json!(["channel-id"]));
+    assert_eq!(filter["limit"], 1);
+}
+
+#[test]
+fn event_by_id_filter_keeps_unscoped_lookup_for_channel_less_events() {
+    let filter = event_by_id_filter("event-id", None);
+
+    assert!(filter.get("#h").is_none());
+}
+
+#[test]
 fn search_messages_limit_allows_discussion_discovery_page() {
     assert_eq!(search_messages_limit(None), 20);
     assert_eq!(search_messages_limit(Some(500)), 500);

@@ -411,18 +411,26 @@ pub async fn get_channel_messages_before(
     })
 }
 
-#[tauri::command]
-pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<String, String> {
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "ids": [event_id],
-            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
-            "limit": 1
-        })],
-    )
-    .await?;
+fn event_by_id_filter(event_id: &str, channel_id: Option<&str>) -> serde_json::Value {
+    let mut filter = serde_json::json!({
+        "ids": [event_id],
+        "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
+        "limit": 1
+    });
+    if let Some(channel_id) = channel_id.filter(|id| !id.trim().is_empty()) {
+        filter["#h"] = serde_json::json!([channel_id]);
+    }
+    filter
+}
 
+#[tauri::command]
+pub async fn get_event(
+    event_id: String,
+    channel_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let filter = event_by_id_filter(&event_id, channel_id.as_deref());
+    let events = query_relay(&state, &[filter]).await?;
     let ev = events
         .first()
         .ok_or_else(|| "event not found".to_string())?;

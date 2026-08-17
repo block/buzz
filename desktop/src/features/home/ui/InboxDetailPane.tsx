@@ -698,7 +698,28 @@ function InboxMessageDetailPane({
                 data-testid="home-inbox-context-error"
               >
                 <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>Some message context could not be loaded.</span>
+                <span className="min-w-0 flex-1">
+                  Some message context could not be loaded.
+                </span>
+                {canOpenChannel && contextChannelId ? (
+                  <Button
+                    className="h-7 shrink-0 gap-1 px-2 text-destructive hover:text-destructive"
+                    data-testid="home-inbox-context-error-open"
+                    onClick={() =>
+                      onOpenContext(
+                        contextChannelId,
+                        sourceEventId,
+                        contextThreadRootId,
+                      )
+                    }
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    Open channel
+                  </Button>
+                ) : null}
               </div>
             ) : null}
             {displayMessages.map((message, index) => {
