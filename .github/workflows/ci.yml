@@ -88,6 +88,10 @@ jobs:
           scripts/test-mobile-release-candidate-publisher.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+      - name: Production Compose environment initialization contract
+        run: |
+          shellcheck deploy/compose/run.sh deploy/compose/test-init.sh
+          deploy/compose/test-init.sh
       - name: File size ratchet unit tests
         run: node --test scripts/check-file-sizes-core.test.mjs
 
