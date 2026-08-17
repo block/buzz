@@ -1064,7 +1064,9 @@ pub async fn start_managed_agent(
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
     enum StartTarget {
-        Local,
+        Local {
+            pair_key: Option<crate::managed_agents::ManagedAgentRuntimeKey>,
+        },
         Provider {
             backend: BackendKind,
             cached_binary_path: Option<String>,
@@ -1115,7 +1117,9 @@ pub async fn start_managed_agent(
         };
 
         let target = if record.backend == BackendKind::Local {
-            StartTarget::Local
+            StartTarget::Local {
+                pair_key: crate::managed_agents::workspace_pair_key(&app, record),
+            }
         } else {
             StartTarget::Provider {
                 backend: record.backend.clone(),
@@ -1128,7 +1132,14 @@ pub async fn start_managed_agent(
     };
 
     let result = match target {
-        StartTarget::Local => {
+        StartTarget::Local { pair_key } => {
+            if let Some(pair_key) = pair_key {
+                state
+                    .managed_agent_manual_stops
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .remove(&pair_key);
+            }
             start_local_agent_with_preflight(&app, &state, &pubkey, &owner_hex, false).await
         }
         StartTarget::Provider {
@@ -1242,7 +1253,15 @@ pub async fn stop_managed_agent(
             }
             // Pair-scoped: stops only the active workspace's pair; delete and
             // the config-restart flows still drain every pair.
+            let pair_key = crate::managed_agents::workspace_pair_key(&app, record);
             stop_managed_agent_workspace_pair(&app, record, &mut runtimes)?;
+            if let Some(pair_key) = pair_key {
+                state
+                    .managed_agent_manual_stops
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .insert(pair_key);
+            }
         }
         save_managed_agents(&app, &records)?;
         let record = records
