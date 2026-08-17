@@ -33,6 +33,14 @@ const MAX_SUBSCRIPTIONS: usize = 1024;
 /// `buffer_unordered`), so dedupe/trace/error semantics are unchanged.
 pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
 
+/// Maximum aggregate number of explicit `#h` values accepted in one REQ,
+/// COUNT, HTTP `/query`, or HTTP `/count` request.
+///
+/// Explicit channels may each require an uncached membership lookup and, for a
+/// live WS subscription, a registry entry plus Redis topic retain. Bound the
+/// values before any of that request-amplified work begins.
+pub(crate) const MAX_EXPLICIT_CHANNEL_VALUES: usize = 128;
+
 // Guard: keep the bound a small fraction of any sane Postgres pool size.
 // Raising it past this range requires re-running the relay bench and
 // reconsidering pool contention (see docs above). Compile-time — violating
@@ -85,6 +93,18 @@ pub async fn handle_req(
         }
     };
 
+    let channel_id = extract_channel_id_from_filters(&filters);
+    let requested_channel_ids = match extract_channel_ids_from_filters_limited(&filters) {
+        Ok(ids) => ids,
+        Err(()) => {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: too many explicit channels",
+            ));
+            return;
+        }
+    };
+
     let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
             .increment(1);
@@ -105,9 +125,6 @@ pub async fn handle_req(
     if let Some(allowed) = token_channel_ids.as_deref() {
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
-
-    let channel_id = extract_channel_id_from_filters(&filters);
-    let requested_channel_ids = extract_channel_ids_from_filters(&filters);
 
     // Build the conformance `AbstractState` once at request entry. The
     // `Option` only goes `None` on malformed pubkey bytes (already a
@@ -1061,6 +1078,30 @@ pub(crate) fn apply_channel_scope_to_query(
 
 /// Extract the complete channel set when every filter is explicitly #h-scoped.
 /// `None` means at least one filter is community-global.
+///
+/// The aggregate value count is checked before UUID parsing or membership I/O;
+/// duplicate and malformed values still consume the request budget.
+pub(crate) fn extract_channel_ids_from_filters_limited(
+    filters: &[Filter],
+) -> Result<Option<Vec<uuid::Uuid>>, ()> {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let value_count = filters.iter().try_fold(0usize, |count, filter| {
+        let additional = filter
+            .generic_tags
+            .get(&h_tag)
+            .map_or(0, |values| values.len());
+        count.checked_add(additional).ok_or(())
+    })?;
+    if value_count > MAX_EXPLICIT_CHANNEL_VALUES {
+        return Err(());
+    }
+
+    Ok(extract_channel_ids_from_filters(filters))
+}
+
+/// Extract the complete channel set without applying the aggregate request budget.
+/// Callers that can trigger I/O must validate first with
+/// [`extract_channel_ids_from_filters_limited`].
 pub(crate) fn extract_channel_ids_from_filters(filters: &[Filter]) -> Option<Vec<uuid::Uuid>> {
     let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
     let mut channel_ids = Vec::new();
@@ -1640,6 +1681,46 @@ mod tests {
     }
 
     #[test]
+    fn explicit_channel_limit_is_aggregate_and_counts_every_value() {
+        let channel_values = |count: usize| {
+            (0..count)
+                .map(|_| uuid::Uuid::new_v4().to_string())
+                .collect::<Vec<_>>()
+        };
+        let at_limit: Filter = serde_json::from_value(serde_json::json!({
+            "#h": channel_values(MAX_EXPLICIT_CHANNEL_VALUES),
+        }))
+        .unwrap();
+        assert!(extract_channel_ids_from_filters_limited(&[at_limit]).is_ok());
+
+        let first: Filter = serde_json::from_value(serde_json::json!({
+            "#h": channel_values(MAX_EXPLICIT_CHANNEL_VALUES),
+        }))
+        .unwrap();
+        let duplicate_over_limit: Filter = serde_json::from_value(serde_json::json!({
+            "#h": [uuid::Uuid::nil().to_string()],
+        }))
+        .unwrap();
+        assert_eq!(
+            extract_channel_ids_from_filters_limited(&[first, duplicate_over_limit]),
+            Err(()),
+        );
+
+        let global_then_over_limit = [
+            Filter::new(),
+            serde_json::from_value(serde_json::json!({
+                "#h": channel_values(MAX_EXPLICIT_CHANNEL_VALUES + 1),
+            }))
+            .unwrap(),
+        ];
+        assert_eq!(
+            extract_channel_ids_from_filters_limited(&global_then_over_limit),
+            Err(()),
+            "a global filter must not hide an over-limit explicit filter",
+        );
+    }
+
+    #[test]
     fn multi_value_h_scope_intersects_access_before_limit() {
         let channel_a = uuid::Uuid::new_v4();
         let channel_b = uuid::Uuid::new_v4();
@@ -1674,6 +1755,27 @@ mod tests {
         assert!(scoped_channels.contains(&channel_b));
         assert!(!query.channel_ids_include_global);
         assert_eq!(query.limit, Some(1));
+    }
+
+    #[test]
+    fn multi_value_h_scope_remains_explicit_when_only_one_channel_is_authorized() {
+        let authorized = uuid::Uuid::new_v4();
+        let unauthorized = uuid::Uuid::new_v4();
+        let filter: Filter = serde_json::from_value(serde_json::json!({
+            "#h": [authorized.to_string(), unauthorized.to_string()],
+        }))
+        .unwrap();
+        let mut query = filter_to_query_params(
+            &filter,
+            extract_channel_id_from_filter(&filter),
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        );
+
+        apply_channel_scope_to_query(&mut query, &filter, None, &[authorized]);
+
+        assert_eq!(query.channel_id, None);
+        assert_eq!(query.channel_ids, Some(vec![authorized]));
+        assert!(!query.channel_ids_include_global);
     }
 
     #[test]

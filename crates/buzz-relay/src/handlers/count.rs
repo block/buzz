@@ -63,6 +63,23 @@ pub async fn handle_count(
         return;
     }
 
+    let requested_channel_sets =
+        match super::req::extract_channel_ids_from_filters_limited(&filters) {
+            Ok(_) => filters
+                .iter()
+                .map(|filter| {
+                    super::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+                })
+                .collect::<Vec<_>>(),
+            Err(()) => {
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "restricted: too many explicit channels",
+                ));
+                return;
+            }
+        };
+
     // Get channels this user can access — same enforcement as WS REQ handler.
     let mut accessible_channels = match state
         .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
@@ -86,7 +103,7 @@ pub async fn handle_count(
 
     // For each filter, count matching events with channel access enforcement.
     let mut total: u64 = 0;
-    for filter in &filters {
+    for (filter, requested_channels) in filters.iter().zip(requested_channel_sets) {
         // Determine if this filter can match author-only kinds — if so, the
         // fast-path count_events() cannot be used because it doesn't do
         // per-event author filtering.
@@ -105,9 +122,7 @@ pub async fn handle_count(
         let needs_result_gated_filtering = filter_can_match_result_gated_kinds(filter)
             && !result_gated_count_safe_for_pushdown(filter, &authed_pubkey_hex);
 
-        if let Some(requested_channels) =
-            super::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
-        {
+        if let Some(requested_channels) = requested_channels {
             for &ch_id in &requested_channels {
                 if accessible_channels.contains(&ch_id) {
                     continue;
@@ -146,7 +161,11 @@ pub async fn handle_count(
             if authorized_requested.is_empty() {
                 continue;
             }
-            let ch_id = (authorized_requested.len() == 1).then_some(authorized_requested[0]);
+            // Preserve the original explicit multi-channel shape even when
+            // authorization narrows it to one channel. The helper must write
+            // that intersection into `channel_ids`; synthesizing `Some(A)` here
+            // would leave a query built from multi-#h completely unscoped.
+            let ch_id = (requested_channels.len() == 1).then_some(authorized_requested[0]);
             // Channel is accessible — count with pushability check.
             let mut query = super::req::build_event_query_from_filter(
                 filter,

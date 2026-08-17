@@ -981,6 +981,8 @@ async fn query_events_authed(
         .map(|v| serde_json::from_value(v.clone()))
         .collect::<Result<_, _>>()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
+        .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
@@ -1457,6 +1459,8 @@ async fn count_events_authed(
 
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
+        .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();

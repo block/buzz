@@ -1919,6 +1919,10 @@ mod tests {
         insert_event(&pool, community, &newer_c, Some(unrelated_c))
             .await
             .expect("insert unrelated C candidate");
+        let global = make_event_at(39_000, "global candidate", base + 4);
+        insert_event(&pool, community, &global, None)
+            .await
+            .expect("insert global candidate");
 
         let events = query_events(
             &pool,
@@ -1937,6 +1941,22 @@ mod tests {
         assert_eq!(
             events[0].event.id, requested_b.id,
             "newer unrelated channel C must not consume the requested A/B limit"
+        );
+
+        let partial_authorization_count = count_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_000]),
+                channel_ids: Some(vec![channel_a]),
+                channel_ids_include_global: false,
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("count one authorized channel from a multi-channel request");
+        assert_eq!(
+            partial_authorization_count, 1,
+            "partial authorization must exclude requested B, unrelated C, and global rows"
         );
     }
 
