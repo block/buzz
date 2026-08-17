@@ -621,7 +621,10 @@ fn compute_series_counts_no_usage_turn_without_fabricating_numeric_values() {
     assert_eq!(series.coverage.report_count, 2);
     assert!(series.coverage.has_unknown_usage);
     assert_eq!(series.agents[0].report_count, 2);
-    assert_eq!(series.agents[0].usage.input_tokens.value.as_deref(), Some("100"));
+    assert_eq!(
+        series.agents[0].usage.input_tokens.value.as_deref(),
+        Some("100")
+    );
     assert!(series.agents[0].usage.input_tokens.incomplete);
     assert_eq!(series.agents[0].usage.estimated_cost_usd.value, Some(0.01));
     assert!(series.agents[0].usage.estimated_cost_usd.incomplete);
