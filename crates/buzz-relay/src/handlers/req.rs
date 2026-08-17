@@ -15,10 +15,11 @@ use buzz_db::EventQuery;
 use buzz_pubsub::EventTopic;
 use hex;
 use nostr::Filter;
+use tokio_util::sync::CancellationToken;
 
 use buzz_auth::Scope;
 
-use crate::connection::{AuthState, ConnectionState};
+use crate::connection::{AuthState, ConnectionState, PendingReqs};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
@@ -45,6 +46,9 @@ pub async fn handle_req(
     filters: Vec<Filter>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
+    request_cancel: CancellationToken,
+    pending_reqs: PendingReqs,
+    request_id: uuid::Uuid,
 ) {
     let (conn_id, pubkey_bytes, token_channel_ids) = {
         let auth = conn.auth_state.read().await;
@@ -60,16 +64,6 @@ pub async fn handle_req(
                 }
 
                 let pk_bytes = ctx.pubkey.to_bytes().to_vec();
-
-                let subs = conn.subscriptions.lock().await;
-                if !subs.contains_key(&sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
-                    conn.send(RelayMessage::closed(
-                        &sub_id,
-                        "error: too many subscriptions",
-                    ));
-                    return;
-                }
-
                 (conn.conn_id, pk_bytes, ctx.channel_ids.clone())
             }
             _ => {
@@ -226,35 +220,28 @@ pub async fn handle_req(
             &conn,
             &state,
             trace_state.as_ref(),
+            &request_cancel,
+            &pending_reqs,
+            request_id,
         )
         .await;
         return;
     }
 
-    {
-        let mut subs = conn.subscriptions.lock().await;
-        subs.insert(sub_id.clone(), filters.clone());
-    }
-
-    let replaced = state.sub_registry.register_scoped(
-        conn.tenant.community(),
-        conn_id,
-        sub_id.clone(),
-        filters.clone(),
+    let Some(replaced) = register_subscription_if_active(
+        &sub_id,
+        &filters,
         channel_id,
-    );
-    if let Some(replaced) = replaced {
-        state
-            .pubsub
-            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
-            .await;
-    }
-    state
-        .pubsub
-        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
-        .await;
+        &conn,
+        &state,
+        &request_cancel,
+    )
+    .await
+    else {
+        return;
+    };
 
-    debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
+    debug!(conn_id = %conn_id, sub_id = %sub_id, replaced, "Subscription registered");
 
     // NIP-01 OR semantics: execute one DB query per filter and deduplicate results
     // by event ID. Collapsing all filters into a single query would merge their
@@ -317,7 +304,15 @@ pub async fn handle_req(
     .buffered(FILTER_QUERY_CONCURRENCY);
 
     // Phase 3 — post-processing, strictly in filter order.
-    while let Some((idx, per_filter_channel, filter_events)) = results.next().await {
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = request_cancel.cancelled() => return,
+            next = results.next() => next,
+        };
+        let Some((idx, per_filter_channel, filter_events)) = next else {
+            break;
+        };
         let filter = &filters[idx];
         let events = match filter_events {
             Ok(evs) => evs,
@@ -370,6 +365,9 @@ pub async fn handle_req(
         }
 
         for stored in &events {
+            if request_cancel.is_cancelled() {
+                return;
+            }
             // Per-filter NIP-01 matching — use the current filter only, not the
             // full filter set. OR semantics across filters are handled by the outer
             // loop (each filter gets its own DB query).
@@ -410,6 +408,9 @@ pub async fn handle_req(
         }
     }
 
+    if request_cancel.is_cancelled() {
+        return;
+    }
     conn.send(RelayMessage::eose(&sub_id));
 
     debug!(
@@ -418,6 +419,104 @@ pub async fn handle_req(
         count = total_sent,
         "EOSE sent after historical delivery"
     );
+}
+
+/// Commit one regular subscription unless its REQ generation was cancelled.
+///
+/// The connection subscription lock is the lifecycle barrier shared with
+/// CLOSE and disconnect cleanup. Once the cancellation check passes, local
+/// state, fan-out indexes, and Redis topic refcounts transition together before
+/// cleanup can acquire the lock.
+pub(crate) async fn register_subscription_if_active(
+    sub_id: &str,
+    filters: &[Filter],
+    channel_id: Option<uuid::Uuid>,
+    conn: &ConnectionState,
+    state: &AppState,
+    request_cancel: &CancellationToken,
+) -> Option<bool> {
+    register_subscription_after_check(
+        sub_id,
+        filters,
+        channel_id,
+        conn,
+        state,
+        request_cancel,
+        std::future::ready(()),
+    )
+    .await
+}
+
+async fn register_subscription_after_check<F>(
+    sub_id: &str,
+    filters: &[Filter],
+    channel_id: Option<uuid::Uuid>,
+    conn: &ConnectionState,
+    state: &AppState,
+    request_cancel: &CancellationToken,
+    after_check: F,
+) -> Option<bool>
+where
+    F: std::future::Future<Output = ()>,
+{
+    let mut subs = conn.subscriptions.lock().await;
+    if request_cancel.is_cancelled() {
+        return None;
+    }
+    after_check.await;
+    if !subs.contains_key(sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
+        conn.send(RelayMessage::closed(
+            sub_id,
+            "error: too many subscriptions",
+        ));
+        return None;
+    }
+    subs.insert(sub_id.to_owned(), filters.to_vec());
+    let replaced = state.sub_registry.register_scoped(
+        conn.tenant.community(),
+        conn.conn_id,
+        sub_id.to_owned(),
+        filters.to_vec(),
+        channel_id,
+    );
+    if let Some(replaced) = replaced {
+        state
+            .pubsub
+            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
+            .await;
+    }
+    state
+        .pubsub
+        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
+        .await;
+    Some(replaced.is_some())
+}
+
+/// Test seam that pauses registration after its cancellation check while the
+/// lifecycle mutex remains held.
+#[cfg(test)]
+pub(crate) async fn register_subscription_after_check_for_test<F>(
+    sub_id: &str,
+    filters: &[Filter],
+    channel_id: Option<uuid::Uuid>,
+    conn: &ConnectionState,
+    state: &AppState,
+    request_cancel: &CancellationToken,
+    after_check: F,
+) -> Option<bool>
+where
+    F: std::future::Future<Output = ()>,
+{
+    register_subscription_after_check(
+        sub_id,
+        filters,
+        channel_id,
+        conn,
+        state,
+        request_cancel,
+        after_check,
+    )
+    .await
 }
 
 /// FTS candidate hits fetched per page. Pages are always full regardless of
@@ -519,6 +618,20 @@ pub(crate) fn build_search_channel_scope_filter(
     })
 }
 
+pub(crate) fn send_search_frame_if_active(
+    conn: &ConnectionState,
+    pending_reqs: &PendingReqs,
+    sub_id: &str,
+    request_id: uuid::Uuid,
+    request_cancel: &CancellationToken,
+    frame: String,
+) -> bool {
+    let Some(active) = pending_reqs.get(sub_id) else {
+        return false;
+    };
+    active.0 == request_id && !request_cancel.is_cancelled() && conn.send(frame)
+}
+
 /// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
 /// Search subscriptions are one-shot — no persistent subscription is registered.
 #[allow(clippy::too_many_arguments)]
@@ -532,7 +645,13 @@ async fn handle_search_req(
     conn: &ConnectionState,
     state: &AppState,
     trace_state: Option<&crate::conformance::AbstractState>,
+    request_cancel: &CancellationToken,
+    pending_reqs: &PendingReqs,
+    request_id: uuid::Uuid,
 ) {
+    if request_cancel.is_cancelled() {
+        return;
+    }
     // The community-wide channel scope (no #h tag on the filter). `None` means
     // "no accessible channels and no global access" → EOSE, exactly as the
     // legacy string-filter helper short-circuited.
@@ -540,7 +659,14 @@ async fn handle_search_req(
         match build_search_channel_scope_filter(accessible_channels, include_global) {
             Some(scope) => scope,
             None => {
-                conn.send(RelayMessage::eose(sub_id));
+                send_search_frame_if_active(
+                    conn,
+                    pending_reqs,
+                    sub_id,
+                    request_id,
+                    request_cancel,
+                    RelayMessage::eose(sub_id),
+                );
                 return;
             }
         };
@@ -548,6 +674,9 @@ async fn handle_search_req(
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
 
     for filter in filters {
+        if request_cancel.is_cancelled() {
+            return;
+        }
         let search_text = match &filter.search {
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
@@ -610,6 +739,9 @@ async fn handle_search_req(
         let mut emitted: u32 = 0;
 
         for page in 1..=MAX_SEARCH_PAGES {
+            if request_cancel.is_cancelled() {
+                return;
+            }
             if emitted >= limit {
                 break;
             }
@@ -627,7 +759,11 @@ async fn handle_search_req(
                 mode: buzz_search::SearchMode::FullText,
             };
 
-            let search_result = match state.search.search(&search_query).await {
+            let search_result = match tokio::select! {
+                biased;
+                _ = request_cancel.cancelled() => return,
+                result = state.search.search(&search_query) => result,
+            } {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(sub_id = %sub_id, "NIP-50 search failed: {e}");
@@ -645,11 +781,15 @@ async fn handle_search_req(
 
             if !hit_ids.is_empty() {
                 let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
-                let events = match state
-                    .db
-                    .get_events_by_ids_routed("req_search_hydrate", tenant.community(), &id_refs)
-                    .await
-                {
+                let events = match tokio::select! {
+                    biased;
+                    _ = request_cancel.cancelled() => return,
+                    result = state.db.get_events_by_ids_routed(
+                        "req_search_hydrate",
+                        tenant.community(),
+                        &id_refs,
+                    ) => result,
+                } {
                     Ok(evs) => evs,
                     Err(e) => {
                         warn!(sub_id = %sub_id, "NIP-50 batch fetch failed: {e}");
@@ -677,17 +817,20 @@ async fn handle_search_req(
                         }
                         s.into_iter().collect()
                     };
-                    let channel_communities =
-                        match state.db.communities_of_channels(&distinct).await {
-                            Ok(m) => m,
-                            Err(e) => {
-                                warn!(
-                                    sub_id = %sub_id,
-                                    "conformance row-community lookup failed: {e}"
-                                );
-                                std::collections::HashMap::new()
-                            }
-                        };
+                    let channel_communities = match tokio::select! {
+                        biased;
+                        _ = request_cancel.cancelled() => return,
+                        result = state.db.communities_of_channels(&distinct) => result,
+                    } {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!(
+                                sub_id = %sub_id,
+                                "conformance row-community lookup failed: {e}"
+                            );
+                            std::collections::HashMap::new()
+                        }
+                    };
                     crate::conformance::record_read_by_id_rows(
                         &state.tracer,
                         state_snap,
@@ -704,6 +847,9 @@ async fn handle_search_req(
                         .collect();
 
                 for id_array in &hit_ids {
+                    if request_cancel.is_cancelled() {
+                        return;
+                    }
                     if emitted >= limit {
                         break;
                     }
@@ -730,7 +876,14 @@ async fn handle_search_req(
                     if !seen_ids.insert(stored.event.id) {
                         continue;
                     }
-                    if !conn.send(RelayMessage::event(sub_id, &stored.event)) {
+                    if !send_search_frame_if_active(
+                        conn,
+                        pending_reqs,
+                        sub_id,
+                        request_id,
+                        request_cancel,
+                        RelayMessage::event(sub_id, &stored.event),
+                    ) {
                         return;
                     }
                     emitted += 1;
@@ -743,7 +896,14 @@ async fn handle_search_req(
         }
     }
 
-    conn.send(RelayMessage::eose(sub_id));
+    send_search_frame_if_active(
+        conn,
+        pending_reqs,
+        sub_id,
+        request_id,
+        request_cancel,
+        RelayMessage::eose(sub_id),
+    );
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.

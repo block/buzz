@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
+use dashmap::DashMap;
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -31,6 +32,34 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
+
+/// In-flight REQ handlers keyed by client subscription ID.
+pub(crate) type PendingReqs = Arc<DashMap<String, (Uuid, CancellationToken)>>;
+
+fn start_pending_req(
+    pending_reqs: &PendingReqs,
+    sub_id: &str,
+    connection_cancel: &CancellationToken,
+) -> (Uuid, CancellationToken) {
+    let request_id = Uuid::new_v4();
+    let request_cancel = connection_cancel.child_token();
+    if let Some((_, previous_cancel)) =
+        pending_reqs.insert(sub_id.to_owned(), (request_id, request_cancel.clone()))
+    {
+        previous_cancel.cancel();
+    }
+    (request_id, request_cancel)
+}
+
+fn finish_pending_req(pending_reqs: &PendingReqs, sub_id: &str, request_id: Uuid) {
+    pending_reqs.remove_if(sub_id, |_, (active_id, _)| *active_id == request_id);
+}
+
+fn cancel_pending_req(pending_reqs: &PendingReqs, sub_id: &str) {
+    if let Some((_, (_, request_cancel))) = pending_reqs.remove(sub_id) {
+        request_cancel.cancel();
+    }
+}
 
 /// Request for the writer to flush a restart close and report the result.
 pub(crate) struct RestartClose {
@@ -286,12 +315,7 @@ async fn handle_active_connection(
     let _ = heartbeat_task.await;
     let _ = auth_timeout_task.await;
 
-    for removed in state.sub_registry.remove_connection(conn.conn_id) {
-        state
-            .pubsub
-            .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
-            .await;
-    }
+    cleanup_connection_subscriptions(&conn, &state).await;
     state.conn_manager.deregister(conn.conn_id);
     if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
         let remaining = state.conn_manager.connection_ids_for_pubkey_in_community(
@@ -309,6 +333,26 @@ async fn handle_active_connection(
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
 
     drop(permit);
+}
+
+/// Remove all subscription state owned by one connection.
+///
+/// Taking the connection subscription lock synchronizes teardown with REQ
+/// registration: a handler already in its commit section finishes first and is
+/// removed here; one entering afterward observes cancellation and does not
+/// register.
+async fn cleanup_connection_subscriptions(conn: &ConnectionState, state: &AppState) {
+    let removed_subscriptions = {
+        let mut subscriptions = conn.subscriptions.lock().await;
+        subscriptions.clear();
+        state.sub_registry.remove_connection(conn.conn_id)
+    };
+    for removed in removed_subscriptions {
+        state
+            .pubsub
+            .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
+            .await;
+    }
 }
 
 /// Outbound send loop with control-frame priority.
@@ -463,6 +507,7 @@ async fn recv_loop(
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
 ) {
+    let pending_reqs = Arc::new(DashMap::new());
     loop {
         tokio::select! {
             msg = ws_recv.next() => {
@@ -484,7 +529,12 @@ async fn recv_loop(
                             break;
                         }
                         trace!(len = text.len(), "frame received");
-                        handle_text_message(text.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
+                        handle_text_message(
+                            text.to_string(),
+                            Arc::clone(&conn),
+                            Arc::clone(&state),
+                            Arc::clone(&pending_reqs),
+                        ).await;
                     }
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let max_frame_bytes = state.config.max_frame_bytes;
@@ -506,7 +556,12 @@ async fn recv_loop(
                         // (notably certain Nostr libraries) send text payloads in binary frames.
                         // NIP-01 is text-only, but accepting binary is a common relay extension.
                         if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                            handle_text_message(text, Arc::clone(&conn), Arc::clone(&state)).await;
+                            handle_text_message(
+                                text,
+                                Arc::clone(&conn),
+                                Arc::clone(&state),
+                                Arc::clone(&pending_reqs),
+                            ).await;
                         }
                     }
                     Some(Ok(WsMessage::Pong(_))) => {
@@ -537,7 +592,12 @@ async fn recv_loop(
     }
 }
 
-async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Arc<AppState>) {
+async fn handle_text_message(
+    text: String,
+    conn: Arc<ConnectionState>,
+    state: Arc<AppState>,
+    pending_reqs: PendingReqs,
+) {
     let msg = match ClientMessage::parse(&text) {
         Ok(m) => m,
         Err(e) => {
@@ -599,10 +659,22 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
+            let (request_id, request_cancel) =
+                start_pending_req(&pending_reqs, &sub_id, &conn.cancel);
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
             tokio::spawn(
                 async move {
-                    handlers::req::handle_req(sub_id, filters, conn, state).await;
+                    handlers::req::handle_req(
+                        sub_id.clone(),
+                        filters,
+                        Arc::clone(&conn),
+                        state,
+                        request_cancel,
+                        Arc::clone(&pending_reqs),
+                        request_id,
+                    )
+                    .await;
+                    finish_pending_req(&pending_reqs, &sub_id, request_id);
                     drop(permit);
                 }
                 .instrument(span),
@@ -630,6 +702,7 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             );
         }
         ClientMessage::Close(sub_id) => {
+            cancel_pending_req(&pending_reqs, &sub_id);
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;
         }
     }
@@ -740,6 +813,7 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::{oneshot, Notify};
 
     #[derive(Debug, Default)]
     struct MockSinkState {
@@ -832,6 +906,328 @@ mod tests {
                 other => panic!("unexpected websocket message in test: {other:?}"),
             })
             .collect()
+    }
+
+    async fn subscription_test_state() -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    fn subscription_test_conn_with_receiver() -> (Arc<ConnectionState>, mpsc::Receiver<WsMessage>) {
+        let (send_tx, send_rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let conn = Arc::new(ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+                "relay.example",
+            ),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: RwLock::new(AuthState::Pending {
+                challenge: "test".to_string(),
+            }),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        (conn, send_rx)
+    }
+
+    fn subscription_test_conn() -> Arc<ConnectionState> {
+        subscription_test_conn_with_receiver().0
+    }
+
+    fn spawn_blocked_registration(
+        state: Arc<AppState>,
+        conn: Arc<ConnectionState>,
+        sub_id: &'static str,
+        filters: Vec<Filter>,
+        request_cancel: CancellationToken,
+    ) -> (
+        oneshot::Receiver<()>,
+        Arc<Notify>,
+        tokio::task::JoinHandle<Option<bool>>,
+    ) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let resume = Arc::new(Notify::new());
+        let task_resume = Arc::clone(&resume);
+        let task = tokio::spawn(async move {
+            crate::handlers::req::register_subscription_after_check_for_test(
+                sub_id,
+                &filters,
+                None,
+                &conn,
+                &state,
+                &request_cancel,
+                async move {
+                    let _ = started_tx.send(());
+                    task_resume.notified().await;
+                },
+            )
+            .await
+        });
+        (started_rx, resume, task)
+    }
+
+    async fn assert_subscription_state_empty(state: &AppState, conn: &ConnectionState) {
+        assert!(conn.subscriptions.lock().await.is_empty());
+        assert_eq!(state.sub_registry.total_subscriptions(), 0);
+        assert_eq!(
+            state
+                .pubsub
+                .topic_refcount(&conn.tenant, EventTopic::Global)
+                .await,
+            0
+        );
+    }
+
+    #[test]
+    fn close_cancels_an_in_flight_req() {
+        let pending_reqs = Arc::new(DashMap::new());
+        let connection_cancel = CancellationToken::new();
+        let (_, request_cancel) = start_pending_req(&pending_reqs, "history", &connection_cancel);
+
+        cancel_pending_req(&pending_reqs, "history");
+
+        assert!(request_cancel.is_cancelled());
+        assert!(pending_reqs.is_empty());
+    }
+
+    #[test]
+    fn replacement_req_cancels_only_the_previous_generation() {
+        let pending_reqs = Arc::new(DashMap::new());
+        let connection_cancel = CancellationToken::new();
+        let (old_id, old_cancel) = start_pending_req(&pending_reqs, "live", &connection_cancel);
+        let (new_id, new_cancel) = start_pending_req(&pending_reqs, "live", &connection_cancel);
+
+        assert!(old_cancel.is_cancelled());
+        assert!(!new_cancel.is_cancelled());
+
+        finish_pending_req(&pending_reqs, "live", old_id);
+        assert!(pending_reqs.contains_key("live"));
+
+        finish_pending_req(&pending_reqs, "live", new_id);
+        assert!(pending_reqs.is_empty());
+    }
+
+    #[test]
+    fn connection_close_cancels_an_in_flight_req() {
+        let pending_reqs = Arc::new(DashMap::new());
+        let connection_cancel = CancellationToken::new();
+        let (_, request_cancel) = start_pending_req(&pending_reqs, "history", &connection_cancel);
+
+        connection_cancel.cancel();
+
+        assert!(request_cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn close_prevents_a_blocked_req_from_registering_late() {
+        let state = subscription_test_state().await;
+        let conn = subscription_test_conn();
+        let pending_reqs = Arc::new(DashMap::new());
+        let (_, request_cancel) = start_pending_req(&pending_reqs, "history", &conn.cancel);
+        let filters = vec![Filter::new().kind(nostr::Kind::TextNote)];
+        let (started, resume, task) = spawn_blocked_registration(
+            Arc::clone(&state),
+            Arc::clone(&conn),
+            "history",
+            filters,
+            request_cancel,
+        );
+        started.await.expect("blocked REQ started");
+
+        cancel_pending_req(&pending_reqs, "history");
+        let mut close = Box::pin(crate::handlers::close::handle_close(
+            "history".to_string(),
+            Arc::clone(&conn),
+            Arc::clone(&state),
+        ));
+        assert!(futures_util::poll!(&mut close).is_pending());
+        resume.notify_one();
+
+        assert_eq!(task.await.expect("blocked REQ task"), Some(false));
+        close.await;
+        assert_subscription_state_empty(&state, &conn).await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_prevents_a_blocked_req_from_registering_late() {
+        let state = subscription_test_state().await;
+        let conn = subscription_test_conn();
+        let pending_reqs = Arc::new(DashMap::new());
+        let (_, request_cancel) = start_pending_req(&pending_reqs, "history", &conn.cancel);
+        let filters = vec![Filter::new().kind(nostr::Kind::TextNote)];
+        let (started, resume, task) = spawn_blocked_registration(
+            Arc::clone(&state),
+            Arc::clone(&conn),
+            "history",
+            filters,
+            request_cancel,
+        );
+        started.await.expect("blocked REQ started");
+
+        conn.cancel.cancel();
+        let mut cleanup = Box::pin(cleanup_connection_subscriptions(&conn, &state));
+        assert!(futures_util::poll!(&mut cleanup).is_pending());
+        resume.notify_one();
+
+        assert_eq!(task.await.expect("blocked REQ task"), Some(false));
+        cleanup.await;
+        assert_subscription_state_empty(&state, &conn).await;
+    }
+
+    #[tokio::test]
+    async fn replacement_prevents_an_older_blocked_req_from_overwriting_state() {
+        let state = subscription_test_state().await;
+        let conn = subscription_test_conn();
+        let pending_reqs = Arc::new(DashMap::new());
+        let (_, old_cancel) = start_pending_req(&pending_reqs, "live", &conn.cancel);
+        let old_filters = vec![Filter::new().kind(nostr::Kind::TextNote)];
+        let (started, resume, old_task) = spawn_blocked_registration(
+            Arc::clone(&state),
+            Arc::clone(&conn),
+            "live",
+            old_filters,
+            old_cancel,
+        );
+        started.await.expect("old REQ started");
+
+        let (_, new_cancel) = start_pending_req(&pending_reqs, "live", &conn.cancel);
+        let new_filters = vec![Filter::new().kind(nostr::Kind::Reaction)];
+        let mut replacement = Box::pin(crate::handlers::req::register_subscription_if_active(
+            "live",
+            &new_filters,
+            None,
+            &conn,
+            &state,
+            &new_cancel,
+        ));
+        assert!(futures_util::poll!(&mut replacement).is_pending());
+        resume.notify_one();
+
+        assert_eq!(old_task.await.expect("old REQ task"), Some(false));
+        assert_eq!(replacement.await, Some(true));
+        assert_eq!(
+            conn.subscriptions.lock().await.get("live"),
+            Some(&new_filters)
+        );
+        assert_eq!(
+            state.sub_registry.get_filters(conn.conn_id, "live"),
+            Some(new_filters)
+        );
+        assert_eq!(state.sub_registry.total_subscriptions(), 1);
+        assert_eq!(
+            state
+                .pubsub
+                .topic_refcount(&conn.tenant, EventTopic::Global)
+                .await,
+            1
+        );
+
+        cancel_pending_req(&pending_reqs, "live");
+        crate::handlers::close::handle_close(
+            "live".to_string(),
+            Arc::clone(&conn),
+            Arc::clone(&state),
+        )
+        .await;
+        assert_subscription_state_empty(&state, &conn).await;
+    }
+
+    #[tokio::test]
+    async fn close_and_replacement_suppress_cancelled_search_output() {
+        let state = subscription_test_state().await;
+        let (conn, mut send_rx) = subscription_test_conn_with_receiver();
+        let pending_reqs = Arc::new(DashMap::new());
+        let (close_id, close_cancel) =
+            start_pending_req(&pending_reqs, "search-close", &conn.cancel);
+
+        cancel_pending_req(&pending_reqs, "search-close");
+        crate::handlers::close::handle_close(
+            "search-close".to_string(),
+            Arc::clone(&conn),
+            Arc::clone(&state),
+        )
+        .await;
+        assert!(!crate::handlers::req::send_search_frame_if_active(
+            &conn,
+            &pending_reqs,
+            "search-close",
+            close_id,
+            &close_cancel,
+            "stale EVENT after CLOSE".to_string(),
+        ));
+        assert!(!crate::handlers::req::send_search_frame_if_active(
+            &conn,
+            &pending_reqs,
+            "search-close",
+            close_id,
+            &close_cancel,
+            RelayMessage::eose("search-close"),
+        ));
+
+        let closed = send_rx.try_recv().expect("CLOSED acknowledgement");
+        let WsMessage::Text(closed) = closed else {
+            panic!("expected CLOSED text frame");
+        };
+        assert!(closed.contains(r#"["CLOSED","search-close""#));
+        assert!(send_rx.try_recv().is_err(), "no stale search output");
+
+        let (old_id, old_cancel) = start_pending_req(&pending_reqs, "search-replace", &conn.cancel);
+        let (_, _new_cancel) = start_pending_req(&pending_reqs, "search-replace", &conn.cancel);
+        assert!(!crate::handlers::req::send_search_frame_if_active(
+            &conn,
+            &pending_reqs,
+            "search-replace",
+            old_id,
+            &old_cancel,
+            "stale EVENT after replacement".to_string(),
+        ));
+        assert!(!crate::handlers::req::send_search_frame_if_active(
+            &conn,
+            &pending_reqs,
+            "search-replace",
+            old_id,
+            &old_cancel,
+            RelayMessage::eose("search-replace"),
+        ));
+        assert!(send_rx.try_recv().is_err(), "no replaced-generation output");
     }
 
     #[test]
