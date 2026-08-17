@@ -474,6 +474,26 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Persist a bounded, content-free local audit trail for inbound turns.
+    /// `--turn-audit=false` disables it.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_TURN_AUDIT",
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+    )]
+    pub turn_audit: bool,
+
+    /// Maximum number of inbound event records kept in the local turn audit.
+    #[arg(long, env = "BUZZ_ACP_TURN_AUDIT_RETENTION", default_value_t = 1_000)]
+    pub turn_audit_retention: usize,
+
+    /// Directory for the local turn-audit file. Defaults to `<cwd>/.buzz-acp/`.
+    #[arg(long, env = "BUZZ_ACP_TURN_AUDIT_DIR")]
+    pub turn_audit_dir: Option<PathBuf>,
+
     /// Exit after this many seconds with no dispatched events and no turn in flight.
     /// 0 disables inactivity self-termination.
     #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
@@ -562,6 +582,12 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Whether to persist the content-free local turn audit.
+    pub turn_audit: bool,
+    /// Maximum retained inbound event records in the turn audit.
+    pub turn_audit_retention: usize,
+    /// Audit directory override. `None` uses `<cwd>/.buzz-acp/`.
+    pub turn_audit_dir: Option<PathBuf>,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
@@ -1116,6 +1142,9 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            turn_audit: args.turn_audit,
+            turn_audit_retention: args.turn_audit_retention.clamp(1, 10_000),
+            turn_audit_dir: args.turn_audit_dir,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
@@ -1143,7 +1172,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} turn_audit={} turn_audit_retention={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1164,6 +1193,8 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.turn_audit,
+            self.turn_audit_retention,
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1488,6 +1519,9 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            turn_audit: true,
+            turn_audit_retention: 1_000,
+            turn_audit_dir: None,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
@@ -2203,6 +2237,24 @@ channels = "ALL"
             "120",
         ]);
         assert_eq!(configured.exit_after_inactivity, 120);
+    }
+
+    #[test]
+    fn turn_audit_defaults_on_and_can_be_disabled() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--turn-audit-retention",
+            "250",
+        ]);
+        assert!(default.turn_audit);
+        assert_eq!(default.turn_audit_retention, 250);
+
+        let disabled =
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--turn-audit=false"]);
+        assert!(!disabled.turn_audit);
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
+mod turn_audit;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -112,6 +113,28 @@ fn emit_runtime_lifecycle(
             }),
         );
     }
+}
+
+fn emit_inbound_audit_stage(
+    observer: Option<&observer::ObserverHandle>,
+    kind: &str,
+    channel_id: Uuid,
+    event_id: &str,
+    reason: Option<&str>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    let mut payload = serde_json::json!({"eventId": event_id});
+    if let Some(reason) = reason {
+        payload["reason"] = serde_json::Value::String(reason.to_string());
+    }
+    observer.emit(
+        kind,
+        None,
+        &observer::context_for(Some(channel_id), None, None),
+        payload,
+    );
 }
 
 /// Resolve the agent's owner pubkey at startup.
@@ -1929,9 +1952,34 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
-    let observer = config
-        .relay_observer
-        .then(observer::ObserverHandle::in_process);
+    // The local audit consumes the same in-process observer feed as the
+    // optional encrypted relay observer, but persists only a strict metadata
+    // projection. Keep the bus alive when either consumer is enabled.
+    let observer = if config.relay_observer {
+        Some(observer::ObserverHandle::in_process())
+    } else if config.turn_audit {
+        Some(observer::ObserverHandle::in_process_unbuffered())
+    } else {
+        None
+    };
+    let turn_audit_task = if config.turn_audit {
+        observer.as_ref().map(|observer| {
+            let base_dir = config.turn_audit_dir.clone().unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".buzz-acp")
+            });
+            let path = turn_audit::audit_path(
+                &base_dir,
+                &config.keys.public_key().to_hex(),
+                &config.relay_url,
+            );
+            tracing::info!(target: "turn_audit", path = %path.display(), "local turn audit enabled");
+            turn_audit::spawn(observer, path, config.turn_audit_retention)
+        })
+    } else {
+        None
+    };
     if let Some(handle) = &observer {
         handle.emit(
             "harness_started",
@@ -2716,8 +2764,24 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
+                            let inbound_event_id = buzz_event.event.id.to_hex();
+                            emit_inbound_audit_stage(
+                                observer.as_ref(),
+                                "turn_received",
+                                buzz_event.channel_id,
+                                &inbound_event_id,
+                                None,
+                            );
+
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
+                                emit_inbound_audit_stage(
+                                    observer.as_ref(),
+                                    "turn_rejected",
+                                    buzz_event.channel_id,
+                                    &inbound_event_id,
+                                    Some("self_authored"),
+                                );
                                 continue;
                             }
 
@@ -2738,6 +2802,13 @@ async fn tokio_main() -> Result<()> {
                                             "shutdown command from owner — exiting gracefully"
                                         );
                                         let _ = shutdown_tx.send(());
+                                        emit_inbound_audit_stage(
+                                            observer.as_ref(),
+                                            "turn_rejected",
+                                            buzz_event.channel_id,
+                                            &inbound_event_id,
+                                            Some("owner_shutdown_control"),
+                                        );
                                         continue;
                                     }
                                 }
@@ -2773,6 +2844,13 @@ async fn tokio_main() -> Result<()> {
                                                 "!cancel received but no in-flight task — no-op"
                                             );
                                         }
+                                        emit_inbound_audit_stage(
+                                            observer.as_ref(),
+                                            "turn_rejected",
+                                            buzz_event.channel_id,
+                                            &inbound_event_id,
+                                            Some("owner_cancel_control"),
+                                        );
                                         continue; // consume event — do NOT push to queue
                                     }
                                 }
@@ -2818,6 +2896,13 @@ async fn tokio_main() -> Result<()> {
                                                 "!rotate received — invalidated idle channel session(s)"
                                             );
                                         }
+                                        emit_inbound_audit_stage(
+                                            observer.as_ref(),
+                                            "turn_rejected",
+                                            buzz_event.channel_id,
+                                            &inbound_event_id,
+                                            Some("owner_rotate_control"),
+                                        );
                                         continue; // consume event — do NOT push to queue
                                     }
                                 }
@@ -2859,6 +2944,13 @@ async fn tokio_main() -> Result<()> {
                                         is_dm,
                                         "inbound author gate — dropping event"
                                     );
+                                    emit_inbound_audit_stage(
+                                        observer.as_ref(),
+                                        "turn_rejected",
+                                        buzz_event.channel_id,
+                                        &inbound_event_id,
+                                        Some("author_gate"),
+                                    );
                                     continue;
                                 }
                             }
@@ -2868,6 +2960,24 @@ async fn tokio_main() -> Result<()> {
                                 Some(m) => m.prompt_tag,
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
+                                    let mentioned = buzz_event.event.tags.iter().any(|tag| {
+                                        let values = tag.as_slice();
+                                        values.first().map(|value| value.as_str()) == Some("p")
+                                            && values.get(1).map(|value| value.as_str())
+                                                == Some(pubkey_hex.as_str())
+                                    });
+                                    let reason = if !mentioned && rules.iter().any(|rule| rule.require_mention) {
+                                        "mention_required"
+                                    } else {
+                                        "subscription_rule_no_match"
+                                    };
+                                    emit_inbound_audit_stage(
+                                        observer.as_ref(),
+                                        "turn_rejected",
+                                        buzz_event.channel_id,
+                                        &inbound_event_id,
+                                        Some(reason),
+                                    );
                                     continue;
                                 }
                             };
@@ -2893,6 +3003,13 @@ async fn tokio_main() -> Result<()> {
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
                             });
+                            emit_inbound_audit_stage(
+                                observer.as_ref(),
+                                if accepted { "turn_queued" } else { "turn_rejected" },
+                                buzz_event.channel_id,
+                                &event_id_hex,
+                                (!accepted).then_some("queue_policy_drop"),
+                            );
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
@@ -3494,6 +3611,10 @@ async fn tokio_main() -> Result<()> {
 
     if let Some(handle) = relay_observer_publisher_task.take() {
         handle.abort();
+    }
+    // Persist every frame already queued on the observer bus before shutdown.
+    if let Some(task) = turn_audit_task {
+        task.shutdown().await;
     }
 
     // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s
@@ -6759,6 +6880,9 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            turn_audit: false,
+            turn_audit_retention: 1_000,
+            turn_audit_dir: None,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
@@ -6982,6 +7106,9 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            turn_audit: false,
+            turn_audit_retention: 1_000,
+            turn_audit_dir: None,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,

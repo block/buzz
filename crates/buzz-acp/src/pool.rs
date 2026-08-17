@@ -1453,6 +1453,19 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    let outcome_label = match &outcome {
+        PromptOutcome::Ok(_) => "ok",
+        PromptOutcome::Error(_) => "error",
+        PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
+        PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
+        PromptOutcome::AgentExited => "agent_exited",
+        PromptOutcome::Cancelled => "cancelled",
+        PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
+    };
+    agent.acp.observe(
+        "turn_outcome",
+        serde_json::json!({"outcome": outcome_label}),
+    );
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -2182,6 +2195,10 @@ pub async fn run_prompt_task(
         target: "pool::prompt",
         "turn starting for {}",
         prompt_label(&source)
+    );
+    agent.acp.observe(
+        "acp_submitted",
+        serde_json::json!({"sessionId": session_id}),
     );
 
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
