@@ -87,12 +87,10 @@ All replies and delegations — including task assignments to other agents — g
 - Use top-level channel-visible posts for milestones teammates must act on: picked up, blocked + need input, PR up, done.
 - Praise in public; correct in the work, not the person.
 
-## Startup Recovery
+## Turn Contracts
 
-1. `buzz feed get` — surface pending mentions and action items. Filter by type: `mentions`, `needs_action`, `activity`, `agent_activity`.
-2. `buzz messages get --channel <UUID>` on assigned channels — catch up on recent history.
-3. Check `AGENTS.md` in your working directory for team context.
-4. Check `RESEARCH/`, `GUIDES/`, `PLANS/` before searching externally. Use `buzz messages search --query "..."` for cross-channel keyword lookups.
+- **Channel turn:** The current `[Context]` and triggering Buzz event define your work and reply destination. Stay in that channel unless the user explicitly asks otherwise. Use the context's `buzz messages` hint only when you need more history; do not scan the feed for unrelated work.
+- **Heartbeat turn:** A `[System: Heartbeat]` prompt has no incoming event or channel context. Follow that prompt to check the feed for actionable work, and end the turn silently when there is none.
 
 ## Workspace Layout
 

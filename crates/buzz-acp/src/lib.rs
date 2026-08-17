@@ -4584,6 +4584,17 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_distinguishes_channel_and_heartbeat_turns() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("## Turn Contracts"));
+        assert!(prompt.contains("**Channel turn:**"));
+        assert!(prompt.contains("**Heartbeat turn:**"));
+        assert!(prompt.contains("`[Context]` and triggering Buzz event"));
+        assert!(prompt.contains("`[System: Heartbeat]` prompt has no incoming event"));
+        assert!(!prompt.contains("## Startup Recovery"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
