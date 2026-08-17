@@ -3566,49 +3566,76 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
 /// tag emitted by `workflow_sink.rs`, and it has already verified that owner's
 /// access to the destination channel before emitting the event.
 ///
-/// Recognition requires ALL of:
-/// 1. a known relay `self` pubkey (fetched from NIP-11 at startup) — no
-///    `relay_self`, no exemption (fail closed);
-/// 2. `event.pubkey` == relay `self` — only the relay holds that key, and the
-///    relay verifies signatures on submitted events, so this cannot be forged
-///    by another member;
-/// 3. a `buzz:workflow` tag — the marker the relay puts on workflow-emitted
-///    messages (also used for workflow-loop prevention relay-side);
-/// 4. a `buzz:workflow-owner` tag carrying a valid 64-hex pubkey — the
-///    explicit ownership attribution. Mention `p` tags are never used for
-///    attribution, so who is @mentioned in the message text has no bearing
-///    on whose authority the gate evaluates.
+/// Recognition requires ALL of the following, failing closed otherwise:
+/// 1. kind `9` (stream message) — the only kind the workflow sink emits;
+/// 2. a known, syntactically valid relay `self` pubkey (fetched from NIP-11
+///    at startup) — no `relay_self`, no exemption;
+/// 3. `event.pubkey` == relay `self`, with a **valid event signature**
+///    verified here. The relay verifies signatures on submission, but this
+///    gate re-checks locally so the exemption never rests on an upstream
+///    guarantee it can't see;
+/// 4. **exactly one** tag exactly equal to `["buzz:workflow", "true"]` — no
+///    duplicates, no extra fields, no other value;
+/// 5. **exactly one** tag exactly equal to `["buzz:workflow-owner", <pubkey>]`
+///    where the owner parses as a full pubkey — no duplicates, no extra
+///    fields. Mention `p` tags are never used for attribution, so who is
+///    @mentioned in the message text has no bearing on whose authority the
+///    gate evaluates.
 ///
 /// The returned pubkey is gated exactly like a direct author: owner/sibling
 /// under `owner-only`, plus the explicit list under `allowlist`. A workflow
 /// owned by a random channel member therefore still cannot wake an
 /// owner-only agent.
 fn workflow_attributed_author(event: &nostr::Event, relay_self: Option<&str>) -> Option<String> {
-    let relay_self = relay_self?;
-    if event.pubkey.to_hex() != relay_self {
+    // 1. Kind gate first — cheapest check, and everything below only makes
+    //    sense for the kind:9 messages the workflow sink emits.
+    if event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE {
         return None;
     }
-    let is_workflow = event
+
+    // 2. Relay identity must be known AND syntactically valid.
+    let relay_self = nostr::PublicKey::from_hex(relay_self?).ok()?;
+    if event.pubkey != relay_self {
+        return None;
+    }
+
+    // 4. Exactly one marker tag, exactly ["buzz:workflow", "true"]. Collect
+    //    every tag with the marker key so duplicates or shape/value mismatches
+    //    (extra fields, wrong value) disqualify instead of being skipped over.
+    let markers: Vec<&[String]> = event
         .tags
         .iter()
-        .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("buzz:workflow"));
-    if !is_workflow {
+        .map(|t| t.as_slice())
+        .filter(|s| s.first().map(|k| k.as_str()) == Some("buzz:workflow"))
+        .collect();
+    if markers.len() != 1 || markers[0] != ["buzz:workflow", "true"] {
         return None;
     }
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.first().map(|k| k.as_str()) != Some("buzz:workflow-owner") {
-            return None;
-        }
-        let owner = s.get(1)?;
-        // Defensive shape check: the gate compares pubkey hex strings, so
-        // reject anything that is not a 64-hex pubkey rather than feeding
-        // arbitrary bytes into the owner/sibling/allowlist comparison.
-        if owner.len() != 64 || !owner.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
-        Some(owner.to_ascii_lowercase())
-    })
+
+    // 5. Exactly one owner tag, exactly ["buzz:workflow-owner", <pubkey>].
+    //    The owner must parse as a full pubkey — not merely look hex-ish —
+    //    before it is fed into the owner/sibling/allowlist comparison.
+    let owners: Vec<&[String]> = event
+        .tags
+        .iter()
+        .map(|t| t.as_slice())
+        .filter(|s| s.first().map(|k| k.as_str()) == Some("buzz:workflow-owner"))
+        .collect();
+    let [owner_tag] = owners.as_slice() else {
+        return None;
+    };
+    let [_, owner_value] = owner_tag else {
+        return None;
+    };
+    let owner = nostr::PublicKey::from_hex(owner_value).ok()?;
+
+    // 3. Signature check last — it is the most expensive step, so only pay
+    //    for it once every structural requirement has already passed.
+    if event.verify().is_err() {
+        return None;
+    }
+
+    Some(owner.to_hex())
 }
 
 fn is_owner_control_command(
@@ -5893,6 +5920,144 @@ mod workflow_attributed_author_tests {
             "a workflow message with no buzz:workflow-owner tag has no attributed \
              author and must fall through to the plain (relay-pubkey) author gate"
         );
+    }
+
+    #[test]
+    fn duplicate_marker_tags_disqualify() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = make_event(
+            &relay,
+            vec![
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["buzz:workflow-owner", &owner]).unwrap(),
+            ],
+        );
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            None,
+            "more than one buzz:workflow marker tag must fail closed"
+        );
+    }
+
+    #[test]
+    fn marker_value_mismatch_disqualifies() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        for bad_marker in [
+            Tag::parse(["buzz:workflow", "false"]).unwrap(),
+            Tag::parse(["buzz:workflow"]).unwrap(),
+            Tag::parse(["buzz:workflow", "true", "extra"]).unwrap(),
+        ] {
+            let event = make_event(
+                &relay,
+                vec![
+                    bad_marker.clone(),
+                    Tag::parse(["buzz:workflow-owner", &owner]).unwrap(),
+                ],
+            );
+            assert_eq!(
+                workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+                None,
+                "marker tag {:?} is not exactly [\"buzz:workflow\", \"true\"] and must fail closed",
+                bad_marker.as_slice()
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_owner_tags_disqualify() {
+        // Two owner tags — even with identical values — are ambiguous
+        // provenance and must not attribute to anyone.
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let other = Keys::generate().public_key().to_hex();
+        for second_owner in [&owner, &other] {
+            let event = make_event(
+                &relay,
+                vec![
+                    Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                    Tag::parse(["buzz:workflow-owner", &owner]).unwrap(),
+                    Tag::parse(["buzz:workflow-owner", second_owner]).unwrap(),
+                ],
+            );
+            assert_eq!(
+                workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+                None,
+                "duplicate buzz:workflow-owner tags must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_tag_with_extra_fields_disqualifies() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = make_event(
+            &relay,
+            vec![
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["buzz:workflow-owner", &owner, "extra"]).unwrap(),
+            ],
+        );
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            None,
+            "an owner tag with extra fields is not the exact shape the relay \
+             emits and must fail closed"
+        );
+    }
+
+    #[test]
+    fn wrong_kind_disqualifies() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = EventBuilder::new(Kind::from(1u16), "wake up")
+            .tags(workflow_tags(&owner, &agent))
+            .sign_with_keys(&relay)
+            .expect("sign test event");
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            None,
+            "only kind:9 stream messages may use the workflow exemption"
+        );
+    }
+
+    #[test]
+    fn tampered_event_fails_signature_check() {
+        // Alter the content after signing: pubkey still matches relay_self
+        // and the tags are pristine, but the signature no longer covers the
+        // event — the local verify must reject it.
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = make_event(&relay, workflow_tags(&owner, &agent));
+        let mut json = serde_json::to_value(&event).expect("event to JSON");
+        json["content"] = serde_json::Value::String("tampered".into());
+        let tampered: nostr::Event = serde_json::from_value(json).expect("tampered event parses");
+        assert_eq!(
+            workflow_attributed_author(&tampered, Some(&relay.public_key().to_hex())),
+            None,
+            "a tampered event must fail the local signature check"
+        );
+    }
+
+    #[test]
+    fn syntactically_invalid_relay_self_means_no_exemption() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = make_event(&relay, workflow_tags(&owner, &agent));
+        let long_not_hex = "zz".repeat(32);
+        for bad_self in ["", "not-hex", long_not_hex.as_str()] {
+            assert_eq!(
+                workflow_attributed_author(&event, Some(bad_self)),
+                None,
+                "an invalid NIP-11 self value {bad_self:?} must disable the exemption"
+            );
+        }
     }
 }
 
