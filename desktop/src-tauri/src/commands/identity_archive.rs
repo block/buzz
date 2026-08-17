@@ -12,11 +12,12 @@
 //! see §Owner-of-Agent Requests and §Relay Processing Algorithm.
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
     events,
+    managed_agents::try_regenerate_nest,
     relay::{
         classify_request_error, query_relay, query_relay_at, relay_api_base_url,
         relay_http_base_url, relay_ws_url, relay_ws_url_with_override, submit_event,
@@ -178,6 +179,7 @@ pub struct UnarchiveRequest {
 #[tauri::command]
 pub async fn archive_identity(
     req: ArchiveRequest,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubmitEventResponse, String> {
     let auth_tag = maybe_owner_auth_tag(&state, &req.target_pubkey).await?;
@@ -190,13 +192,20 @@ pub async fn archive_identity(
         req.replaced_by.as_deref(),
         auth_ref,
     )?;
-    submit_event(builder, &state).await
+    let response = submit_event(builder, &state).await?;
+    // Refresh AGENTS.md so a just-archived agent drops from the roster without
+    // waiting for the next unrelated edit or app restart. Fire-and-forget and
+    // fail-open like every other mutation site; it races the relay's kind:13535
+    // snapshot update, so a stale render self-heals on the next regen.
+    try_regenerate_nest(&app);
+    Ok(response)
 }
 
 /// Submit a `kind:9036` unarchive request to the relay.
 #[tauri::command]
 pub async fn unarchive_identity(
     req: UnarchiveRequest,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubmitEventResponse, String> {
     let auth_tag = maybe_owner_auth_tag(&state, &req.target_pubkey).await?;
@@ -208,7 +217,11 @@ pub async fn unarchive_identity(
         req.reason.as_deref(),
         auth_ref,
     )?;
-    submit_event(builder, &state).await
+    let response = submit_event(builder, &state).await?;
+    // See `archive_identity`: refresh the roster so an unarchived agent
+    // reappears promptly, fail-open against the same snapshot race.
+    try_regenerate_nest(&app);
+    Ok(response)
 }
 
 /// If the current user is the verified NIP-OA owner of `target`, return the

@@ -598,3 +598,29 @@ fn commit_equal_generation_is_allowed() {
     let content = fs::read_to_string(&file).unwrap();
     assert!(content.contains("second"));
 }
+
+#[test]
+fn commit_poisoned_lock_returns_error_instead_of_panicking() {
+    // A poisoned gate lock must degrade to an io::Error so the fire-and-forget
+    // caller warns and continues, never panicking the desktop process (root
+    // AGENTS.md: no new expect() in production paths). Poison the lock by
+    // panicking a thread while it holds the guard, then assert commit yields
+    // Err rather than unwinding.
+    let gate = std::sync::Arc::new(NestRegenGate::new());
+    let tmp = tempfile::tempdir().unwrap();
+    let file = agents_md_with_markers(tmp.path());
+    let gen = gate.claim();
+
+    let poisoner = gate.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.last_written.lock().unwrap();
+        panic!("poison the gate lock");
+    })
+    .join();
+
+    let result = gate.commit(&file, "after poison", gen);
+    assert!(
+        result.is_err(),
+        "a poisoned lock must surface as an error, not a panic"
+    );
+}

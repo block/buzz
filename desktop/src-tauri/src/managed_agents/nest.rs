@@ -711,7 +711,7 @@ impl NestRegenGate {
         let mut last = self
             .last_written
             .lock()
-            .expect("nest regen gate lock poisoned");
+            .map_err(|_| io::Error::other("nest regen gate lock poisoned"))?;
         if generation < *last {
             return Ok(false);
         }
@@ -765,9 +765,10 @@ pub async fn regenerate_nest_context(app: &AppHandle, generation: u64) -> Result
 /// a stale AGENTS.md, so we warn and continue rather than propagating the error.
 /// The generation is claimed *here*, synchronously, so it encodes call order;
 /// the spawned task carries it into [`NestRegenGate::commit`], which drops
-/// a stale render rather than letting a slow task overwrite a newer file. A
-/// just-archived agent may linger for one regen cycle until the next regen (any
-/// agent/team edit or the next launch).
+/// a stale render rather than letting a slow task overwrite a newer file.
+/// Archive/unarchive trigger this directly, but the regen races the relay's
+/// `kind:13535` snapshot update, so a just-archived agent may still linger for
+/// one cycle until the next regen (any agent/team edit or the next launch).
 pub fn try_regenerate_nest(app: &AppHandle) {
     let generation = NEST_REGEN.claim();
     let app = app.clone();
