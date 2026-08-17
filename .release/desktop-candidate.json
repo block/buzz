@@ -1,10 +1,10 @@
 {
   "schema": 2,
-  "version": "0.5.14",
-  "base_sha": "1b3dbcaaea882eeea90359c1db02e306d2f4f50a",
-  "previous_tag": "desktop-v0.5.13",
-  "previous_base_sha": "09768100ec3420f0aa7cd278bd00fe0baab5de8d",
-  "previous_merge_sha": "51beba603886d34e751349d12b33c0c5aeb92c28",
-  "tag": "desktop-v0.5.14",
-  "commit_count": 1
+  "version": "0.5.15",
+  "base_sha": "7f61cf431af1d8f0480a0baf525881a12f2be7f2",
+  "previous_tag": "desktop-v0.5.14",
+  "previous_base_sha": "1b3dbcaaea882eeea90359c1db02e306d2f4f50a",
+  "previous_merge_sha": "82f7ed1532f50e0d28afca5580ed522f1c2ef1ca",
+  "tag": "desktop-v0.5.15",
+  "commit_count": 18
 }
