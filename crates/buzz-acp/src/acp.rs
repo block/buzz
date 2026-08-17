@@ -3150,35 +3150,90 @@ mod tests {
         );
     }
 
+    /// Idle budget for the two "activity resets the idle timer" tests, and the
+    /// elapsed floor that proves a reset happened.
+    ///
+    /// INVARIANT: `RESET_FLOOR` must stay strictly greater than `RESET_IDLE` —
+    /// 2x here. A run in which no reset occurred returns elapsed ≈ `RESET_IDLE`,
+    /// so a floor at or below it would be satisfied by the bug these tests
+    /// exist to catch.
+    const RESET_IDLE: std::time::Duration = std::time::Duration::from_millis(600);
+    const RESET_FLOOR: std::time::Duration = std::time::Duration::from_millis(1200);
+
+    /// Drive `script` through the read loop and assert that incoming activity
+    /// kept the turn alive well past a single idle timeout.
+    ///
+    /// Retries an *inconclusive* run, and only that. The fixture's cadence
+    /// comes from a real subprocess — `sleep` is an external binary under MSYS,
+    /// so each tick costs a process spawn and the observed inter-line gap is
+    /// ~98ms (up to ~244ms idle, worse under parallel load) against a nominal
+    /// 50ms. When the host stalls longer than the idle budget, the read loop
+    /// times out *correctly* and the run tells us nothing about the behaviour
+    /// under test. Widening the constants cannot fix this: Linux finishes the
+    /// activity window in ~1s and Windows takes ~2s, so the floor is squeezed
+    /// from both sides.
+    ///
+    /// This does not weaken the assertion, because the two outcomes have
+    /// different shapes. A genuine failure to reset the idle timer is
+    /// deterministic — elapsed ≈ `RESET_IDLE` on every attempt, so every
+    /// attempt fails and so does the test. A host stall is intermittent, so a
+    /// healthy implementation clears the floor within a couple of tries.
+    /// Measured before this helper existed: 4 of 9 full-suite runs failed here.
+    async fn assert_activity_resets_idle(script: &str, what: &str) {
+        const ATTEMPTS: usize = 4;
+        let mut inconclusive = Vec::new();
+
+        for _ in 0..ATTEMPTS {
+            let mut client = spawn_script(script).await;
+            let max_dur = std::time::Duration::from_secs(30);
+            let hard_deadline = tokio::time::Instant::now() + max_dur;
+            let start = std::time::Instant::now();
+            let result = client
+                .read_until_response_with_idle_timeout(
+                    "test",
+                    999,
+                    RESET_IDLE,
+                    hard_deadline,
+                    max_dur,
+                )
+                .await;
+            let elapsed = start.elapsed();
+            client.shutdown().await;
+
+            // Always a true assertion: the turn must end by idling out, never
+            // by hitting the hard deadline or losing the child.
+            assert!(
+                matches!(result, Err(AcpError::IdleTimeout(_))),
+                "{what}: expected IdleTimeout, got {result:?}"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(20),
+                "{what}: read loop ran away; elapsed {elapsed:?}"
+            );
+
+            if elapsed >= RESET_FLOOR {
+                return;
+            }
+            inconclusive.push(elapsed);
+        }
+
+        panic!(
+            "{what}: idle fired before {RESET_FLOOR:?} on all {ATTEMPTS} attempts \
+             (elapsed {inconclusive:?}, idle budget {RESET_IDLE:?}). Activity is \
+             not resetting the idle timer. A merely-slow host would have cleared \
+             the floor on at least one attempt."
+        );
+    }
+
     /// Valid JSON `session/update` notifications reset the idle timer; non-JSON
     /// lines do not.
-    ///
-    /// See [`keepalive_resets_idle_past_deadline`] for why the budget is loose
-    /// and why the elapsed floor must stay at 2x `IDLE`.
     #[tokio::test]
     async fn idle_resets_on_stdout_activity() {
-        const IDLE: std::time::Duration = std::time::Duration::from_millis(600);
-        const FLOOR: std::time::Duration = std::time::Duration::from_millis(1200);
-
-        let mut client = spawn_script(
+        assert_activity_resets_idle(
             r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 30"#,
+            "agent_thought_chunk activity",
         )
         .await;
-        let max_dur = std::time::Duration::from_secs(30);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout("test", 999, IDLE, hard_deadline, max_dur)
-            .await;
-        let elapsed = start.elapsed();
-        // 20 messages of activity, then idle fires one IDLE later. Clearing
-        // FLOOR = 2x IDLE proves the timer was reset at least once.
-        assert!(
-            elapsed >= FLOOR,
-            "stdout activity should reset idle; elapsed only {elapsed:?}"
-        );
-        assert!(elapsed < std::time::Duration::from_secs(20));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
     #[tokio::test]
@@ -3352,45 +3407,17 @@ mod tests {
     }
 
     /// Keepalive `session/update` lines must keep resetting the idle timer, so
-    /// the turn survives far past a single idle deadline.
+    /// the turn survives far past a single idle deadline. This is the
+    /// regression test for the keepalive fix itself.
     ///
-    /// The budget here is deliberately loose. `sleep` is an external binary
-    /// under MSYS, so on Windows each `echo; sleep 0.05` iteration costs a
-    /// process spawn: the real inter-line gap is ~98ms (up to ~244ms under
-    /// load) rather than the nominal 50ms. With the original 100ms idle budget
-    /// the fixture was genuinely silent for longer than its own deadline, so
-    /// the read loop timed out *correctly* and the test failed for a reason
-    /// that had nothing to do with the behaviour under test.
-    ///
-    /// INVARIANT: the elapsed floor must stay strictly greater than
-    /// `idle_timeout` — ideally 2x, as here. If it ever drops to or below it,
-    /// a run in which no reset happened at all would still satisfy the
-    /// assertion, and the test would prove nothing.
+    /// See [`assert_activity_resets_idle`] for the budget and the retry rule.
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        const IDLE: std::time::Duration = std::time::Duration::from_millis(600);
-        const FLOOR: std::time::Duration = std::time::Duration::from_millis(1200);
-
-        let mut client = spawn_script(
+        assert_activity_resets_idle(
             r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 30"#,
+            "keepalive",
         )
         .await;
-        let max_dur = std::time::Duration::from_secs(30);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout("test", 999, IDLE, hard_deadline, max_dur)
-            .await;
-        let elapsed = start.elapsed();
-        // 20 keepalives of activity (~1s on Unix, ~2s on Windows), then idle
-        // fires one IDLE later. Clearing FLOOR = 2x IDLE proves at least one
-        // reset occurred.
-        assert!(
-            elapsed >= FLOOR,
-            "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
-        );
-        assert!(elapsed < std::time::Duration::from_secs(20));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
     #[tokio::test]
