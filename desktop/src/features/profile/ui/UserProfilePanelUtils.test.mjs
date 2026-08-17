@@ -59,6 +59,8 @@ function persona(overrides = {}) {
     isBuiltIn: false,
     isActive: true,
     envVars: { NEW_KEY: "2" },
+    respondTo: "owner-only",
+    respondToAllowlist: [],
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -149,6 +151,67 @@ test("personaManagedAgentUpdate leaves runtime fields alone when runtime is unch
         runtimes: [runtime({ id: "goose", command: "goose" })],
       },
     ),
+    null,
+  );
+});
+
+test("personaManagedAgentUpdate syncs an edited respond-to mode to the linked agent", () => {
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({
+        name: "Fizz Prime",
+        systemPrompt: "New prompt",
+        model: "new-model",
+        envVars: { NEW_KEY: "2" },
+      }),
+      persona({ respondTo: "anyone" }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      respondTo: "anyone",
+      respondToAllowlist: [],
+    },
+  );
+});
+
+test("personaManagedAgentUpdate syncs an edited respond-to allowlist to the linked agent", () => {
+  const allowlist = ["a".repeat(64), "b".repeat(64)];
+
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({
+        name: "Fizz Prime",
+        systemPrompt: "New prompt",
+        model: "new-model",
+        envVars: { NEW_KEY: "2" },
+        respondTo: "allowlist",
+        respondToAllowlist: ["a".repeat(64)],
+      }),
+      persona({ respondTo: "allowlist", respondToAllowlist: allowlist }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      respondTo: "allowlist",
+      respondToAllowlist: allowlist,
+    },
+  );
+});
+
+test("personaManagedAgentUpdate leaves respond-to alone when unchanged or unset", () => {
+  const settled = agent({
+    name: "Fizz Prime",
+    systemPrompt: "New prompt",
+    model: "new-model",
+    envVars: { NEW_KEY: "2" },
+    respondTo: "anyone",
+  });
+
+  assert.equal(
+    personaManagedAgentUpdate(settled, persona({ respondTo: "anyone" })),
+    null,
+  );
+  assert.equal(
+    personaManagedAgentUpdate(settled, persona({ respondTo: null })),
     null,
   );
 });

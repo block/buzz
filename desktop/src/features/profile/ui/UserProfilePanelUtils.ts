@@ -298,6 +298,21 @@ export function personaManagedAgentUpdate(
     hasChanges = true;
   }
 
+  // The persona carries the authored respond-to gate; the harness spawn env is
+  // built from the *instance* record (`build_respond_to_env`). Without this the
+  // card renders the persona's mode while the running agent keeps whatever it
+  // was minted with, and no restart ever reconciles them. Mode and allowlist
+  // travel together — the backend replaces the allowlist only when it is sent.
+  if (
+    persona.respondTo != null &&
+    (persona.respondTo !== agent.respondTo ||
+      !stringArrayEqual(persona.respondToAllowlist, agent.respondToAllowlist))
+  ) {
+    input.respondTo = persona.respondTo;
+    input.respondToAllowlist = [...persona.respondToAllowlist];
+    hasChanges = true;
+  }
+
   const runtimeChanged =
     options.previousPersona !== undefined &&
     options.previousPersona.runtime !== persona.runtime;
