@@ -39,6 +39,7 @@ final class HuddleSessionState {
   final int participantCount;
   final List<String> participantPubkeys;
   final Set<String> activeSpeakerPubkeys;
+  final Map<String, double> speakerLevels;
   final int reconnectAttempt;
   final int receivedFrameCount;
   final int sentFrameCount;
@@ -58,6 +59,7 @@ final class HuddleSessionState {
     this.participantCount = 0,
     this.participantPubkeys = const [],
     this.activeSpeakerPubkeys = const {},
+    this.speakerLevels = const {},
     this.reconnectAttempt = 0,
     this.receivedFrameCount = 0,
     this.sentFrameCount = 0,
@@ -94,6 +96,7 @@ final class HuddleSessionState {
     int? participantCount,
     List<String>? participantPubkeys,
     Set<String>? activeSpeakerPubkeys,
+    Map<String, double>? speakerLevels,
     int? reconnectAttempt,
     int? receivedFrameCount,
     int? sentFrameCount,
@@ -120,6 +123,7 @@ final class HuddleSessionState {
     participantCount: participantCount ?? this.participantCount,
     participantPubkeys: participantPubkeys ?? this.participantPubkeys,
     activeSpeakerPubkeys: activeSpeakerPubkeys ?? this.activeSpeakerPubkeys,
+    speakerLevels: speakerLevels ?? this.speakerLevels,
     reconnectAttempt: reconnectAttempt ?? this.reconnectAttempt,
     receivedFrameCount: receivedFrameCount ?? this.receivedFrameCount,
     sentFrameCount: sentFrameCount ?? this.sentFrameCount,
@@ -173,6 +177,8 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
   var _sentFrames = 0;
   Future<void> _playbackTail = Future<void>.value();
   final Map<String, Timer> _speakerTimers = {};
+  final Map<String, double> _pendingSpeakerLevels = {};
+  Timer? _speakerLevelFlushTimer;
   Timer? _reconnectTimer;
   var _reconnectAttempt = 0;
   var _reconnectInFlight = false;
@@ -366,7 +372,11 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
         if (!frame.header.isDtx && frame.header.levelDbov >= -55) {
           final currentPubkey = state.currentPubkey;
           if (currentPubkey != null) {
-            _recordSpeakerPubkey(currentPubkey, generation);
+            _recordSpeakerPubkey(
+              currentPubkey,
+              frame.header.levelDbov,
+              generation,
+            );
           }
         }
         _sentFrames += 1;
@@ -447,30 +457,62 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
     if (frame.header.isDtx || frame.header.levelDbov < -55) return;
     final pubkey = transport.state.peers[frame.peerIndex]?.pubkey.toLowerCase();
     if (pubkey == null) return;
-    _recordSpeakerPubkey(pubkey, generation);
+    _recordSpeakerPubkey(pubkey, frame.header.levelDbov, generation);
   }
 
-  void _recordSpeakerPubkey(String pubkey, int generation) {
-    final speakers = {...state.activeSpeakerPubkeys, pubkey};
-    if (!state.activeSpeakerPubkeys.contains(pubkey)) {
-      state = state.copyWith(activeSpeakerPubkeys: Set.unmodifiable(speakers));
+  void _recordSpeakerPubkey(String pubkey, int levelDbov, int generation) {
+    final normalized = pubkey.toLowerCase();
+    final wasActive = state.activeSpeakerPubkeys.contains(normalized);
+    final level = _speakerLevelFromDbov(levelDbov);
+    if (!wasActive) {
+      final speakers = {...state.activeSpeakerPubkeys, normalized};
+      final levels = {...state.speakerLevels, normalized: level};
+      state = state.copyWith(
+        activeSpeakerPubkeys: Set.unmodifiable(speakers),
+        speakerLevels: Map.unmodifiable(levels),
+      );
+    } else {
+      _pendingSpeakerLevels[normalized] = level;
+      _scheduleSpeakerLevelFlush(generation);
     }
-    _speakerTimers.remove(pubkey)?.cancel();
-    _speakerTimers[pubkey] = Timer(const Duration(milliseconds: 600), () {
+    _speakerTimers.remove(normalized)?.cancel();
+    _speakerTimers[normalized] = Timer(const Duration(milliseconds: 600), () {
       if (!_isCurrent(generation)) return;
-      _clearSpeaker(pubkey);
+      _clearSpeaker(normalized);
     });
   }
 
   void _clearSpeaker(String pubkey) {
     final normalized = pubkey.toLowerCase();
     _speakerTimers.remove(normalized)?.cancel();
-    if (!state.activeSpeakerPubkeys.contains(normalized)) return;
+    _pendingSpeakerLevels.remove(normalized);
+    if (!state.activeSpeakerPubkeys.contains(normalized) &&
+        !state.speakerLevels.containsKey(normalized)) {
+      return;
+    }
+    final levels = Map<String, double>.from(state.speakerLevels)
+      ..remove(normalized);
     state = state.copyWith(
       activeSpeakerPubkeys: Set.unmodifiable(
         state.activeSpeakerPubkeys.where((value) => value != normalized),
       ),
+      speakerLevels: Map.unmodifiable(levels),
     );
+  }
+
+  void _scheduleSpeakerLevelFlush(int generation) {
+    if (_speakerLevelFlushTimer != null) return;
+    _speakerLevelFlushTimer = Timer(const Duration(milliseconds: 50), () {
+      _speakerLevelFlushTimer = null;
+      if (!_isCurrent(generation)) {
+        _pendingSpeakerLevels.clear();
+        return;
+      }
+      if (_pendingSpeakerLevels.isEmpty) return;
+      final levels = {...state.speakerLevels, ..._pendingSpeakerLevels};
+      _pendingSpeakerLevels.clear();
+      state = state.copyWith(speakerLevels: Map.unmodifiable(levels));
+    });
   }
 
   void _scheduleReconnect(
@@ -551,6 +593,9 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
       timer.cancel();
     }
     _speakerTimers.clear();
+    _speakerLevelFlushTimer?.cancel();
+    _speakerLevelFlushTimer = null;
+    _pendingSpeakerLevels.clear();
     final transport = _transport;
     final media = _media;
     _transport = null;
@@ -605,3 +650,6 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
     _ => 'Unable to join the Huddle.',
   };
 }
+
+double _speakerLevelFromDbov(int levelDbov) =>
+    ((levelDbov + 55) / 55).clamp(0.0, 1.0).toDouble();

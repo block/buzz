@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [channelDetailsFromEvent].
@@ -274,6 +275,90 @@ void main() {
         expect(started.id, start.id);
       },
     );
+
+    test(
+      'publishes ephemeral Huddle reactions on the backing channel',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _RecordingPublishRelaySession();
+        final actionsProvider = Provider<ChannelActions>((ref) {
+          return ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: keys.public,
+          );
+        });
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            myPubkeyProvider.overrideWithValue(keys.public),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(actionsProvider)
+            .sendHuddleReaction(
+              channelId: _channelId,
+              emoji: ' 🎉 ',
+              senderName: 'Self',
+            );
+
+        expect(session.publishedEvents, hasLength(1));
+        final reaction = session.publishedEvents.single;
+        expect(reaction.kind, EventKind.huddleReaction);
+        expect(reaction.content, '🎉');
+        expect(reaction.tags, [
+          ['h', _channelId],
+          ['reaction', '🎉'],
+          ['sender_name', 'Self'],
+        ]);
+      },
+    );
+
+    test('last-human count ignores a stale cached roster', () async {
+      final session = _ConnectionAwareRelaySession();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          channelMembersProvider(_channelId).overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: _memberPubkey,
+                role: 'admin',
+                joinedAt: DateTime(2025),
+              ),
+              ChannelMember(
+                pubkey:
+                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.connect();
+      expect(
+        await container.read(channelMembersProvider(_channelId).future),
+        hasLength(2),
+      );
+
+      final humanCount = await container.read(huddleHumanCountProvider)(
+        _channelId,
+      );
+
+      expect(humanCount, 1);
+      expect(session.historyQueryCount, 1);
+    });
   });
 
   group('channelMembersProvider', () {

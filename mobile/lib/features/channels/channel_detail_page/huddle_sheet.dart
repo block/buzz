@@ -4,6 +4,10 @@ const _huddleLifetime = Duration(hours: 1);
 const _huddleAvatarRadius = 52.0;
 const _huddleAvatarFrameSize = 128.0;
 const _huddleSpeakingRingSize = 112.0;
+const _huddleDenseAvatarFrameSize = 104.0;
+const _huddleMinimumAvatarFrameSize = 48.0;
+const _huddleParticipantLabelSpace = 28.0;
+const _huddleDenseParticipantThreshold = 6;
 
 final _huddleParticipantProfileUpdatesProvider = NotifierProvider.autoDispose
     .family<_HuddleParticipantProfileUpdates, int, String>(
@@ -554,6 +558,10 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     );
     final profiles = ref.watch(userCacheProvider);
     final directoryDisplayNames = ref.watch(agentDirectoryDisplayNamesProvider);
+    final reactionSenderName = _huddleReactionSenderName(
+      localPubkey: localPubkey,
+      profile: localPubkey == null ? null : profiles[localPubkey],
+    );
 
     return PopScope<void>(
       onPopInvokedWithResult: (didPop, _) {
@@ -605,6 +613,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                     remotePubkeys: remotePubkeys,
                     localPubkey: localPubkey,
                     activeSpeakerPubkeys: session.activeSpeakerPubkeys,
+                    speakerLevels: session.speakerLevels,
                     retryTooltip: unavailable
                         ? 'Start a new Huddle'
                         : 'Try again',
@@ -640,6 +649,35 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                         !session.isSpeakerEnabled,
                       ),
                     ),
+                    onReact: () => showEmojiPicker(
+                      context: context,
+                      onSelect: (emoji) {
+                        ref.read(recentEmojiProvider.notifier).record(emoji);
+                        _burstHuddleReaction(
+                          ref: ref,
+                          fallbackContext: context,
+                          emoji: emoji,
+                          senderPubkey: localPubkey,
+                        );
+                        unawaited(
+                          ref
+                              .read(channelActionsProvider)
+                              .sendHuddleReaction(
+                                channelId: invite.ephemeralChannelId,
+                                emoji: emoji,
+                                senderName: reactionSenderName,
+                              )
+                              .catchError((Object error) {
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Reaction failed'),
+                                  ),
+                                );
+                              }),
+                        );
+                      },
+                    ),
                   )
                 else
                   const SizedBox(height: Grid.xxl),
@@ -650,6 +688,18 @@ class _MobileHuddleCallPage extends ConsumerWidget {
       ),
     );
   }
+}
+
+String _huddleReactionSenderName({
+  required String? localPubkey,
+  required UserProfile? profile,
+}) {
+  final displayName = profile?.displayName?.trim();
+  if (displayName?.isNotEmpty == true) return displayName!;
+  if (localPubkey?.isNotEmpty == true) {
+    return 'Participant ${shortPubkey(localPubkey!)}';
+  }
+  return 'Someone';
 }
 
 class _HuddleCallHeader extends StatelessWidget {

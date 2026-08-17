@@ -60,6 +60,10 @@ void main() {
       container.read(huddleSessionProvider).activeSpeakerPubkeys,
       contains('desktop'),
     );
+    expect(
+      container.read(huddleSessionProvider).speakerLevels['desktop'],
+      closeTo(25 / 55, 0.001),
+    );
 
     media.emitLocal(
       HuddleLocalAudioFrame(
@@ -76,6 +80,10 @@ void main() {
     expect(transport.sentFrames.single.opusPayload, [4, 5]);
     expect(container.read(huddleSessionProvider).sentFrameCount, 1);
     expect(container.read(huddleSessionProvider).isMuted, isFalse);
+    expect(
+      container.read(huddleSessionProvider).speakerLevels['mobile'],
+      closeTo(35 / 55, 0.001),
+    );
 
     await controller.setMuted(true);
     media.emitLocal(

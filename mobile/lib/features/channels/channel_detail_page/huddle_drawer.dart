@@ -7,7 +7,7 @@ const _mobileHuddleDrawerCurve = Cubic(0.32, 0.72, 0, 1);
 
 /// Lifts the mobile app above a persistent Huddle control drawer when the
 /// full-screen call has been minimized.
-class MobileHuddleShell extends ConsumerWidget {
+class MobileHuddleShell extends HookConsumerWidget {
   const MobileHuddleShell({
     super.key,
     required this.navigatorKey,
@@ -21,6 +21,15 @@ class MobileHuddleShell extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final presentation = ref.watch(mobileHuddlePresentationProvider);
     final session = ref.watch(huddleSessionProvider);
+    final relayStatus = ref.watch(relaySessionProvider).status;
+    _useIncomingHuddleReactions(
+      context: context,
+      ref: ref,
+      inSession: session.isInSession,
+      channelId: session.ephemeralChannelId,
+      currentPubkey: session.currentPubkey,
+      relayStatus: relayStatus,
+    );
     final drawerOpen =
         presentation == MobileHuddlePresentation.drawer && session.isInSession;
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
@@ -76,6 +85,7 @@ class MobileHuddleShell extends ConsumerWidget {
                       ),
                       enabled: drawerOpen,
                       color: context.colors.surface,
+                      backdropColor: surface,
                       corners: ConcentricSurfaceCorners.bottom,
                       padding: EdgeInsets.zero,
                       providesSheetSurface: false,
@@ -188,76 +198,80 @@ class _MobileHuddleDrawer extends ConsumerWidget {
           child: Center(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-              child: Row(
-                key: const ValueKey('huddle-drawer-controls'),
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Row(
-                    key: const ValueKey('huddle-drawer-primary-controls'),
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _HuddleRoundControl(
-                        key: const ValueKey('huddle-drawer-expand'),
-                        tooltip: 'Open Huddle',
-                        showTooltip: false,
-                        icon: LucideIcons.chevronUp,
-                        foregroundColor: foreground,
-                        backgroundColor: controlSurface,
-                        onPressed: restoreFullScreen,
-                      ),
-                      const SizedBox(width: Grid.twelve),
-                      _HuddleRoundControl(
-                        key: const ValueKey('huddle-drawer-speaker-toggle'),
-                        tooltip: session.isSpeakerEnabled
-                            ? 'Use earpiece'
-                            : 'Use speaker',
-                        showTooltip: false,
-                        icon: LucideIcons.volume2,
-                        foregroundColor: session.isSpeakerEnabled
-                            ? drawerSurface
-                            : foreground,
-                        backgroundColor: session.isSpeakerEnabled
-                            ? foreground
-                            : controlSurface,
-                        toggled: session.isSpeakerEnabled,
-                        onPressed: () => unawaited(
-                          sessionController.setSpeakerEnabled(
-                            !session.isSpeakerEnabled,
+              child: Transform.translate(
+                key: const ValueKey('huddle-drawer-control-offset'),
+                offset: const Offset(0, -8),
+                child: Row(
+                  key: const ValueKey('huddle-drawer-controls'),
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Row(
+                      key: const ValueKey('huddle-drawer-primary-controls'),
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _HuddleRoundControl(
+                          key: const ValueKey('huddle-drawer-expand'),
+                          tooltip: 'Open Huddle',
+                          showTooltip: false,
+                          icon: LucideIcons.chevronUp,
+                          foregroundColor: foreground,
+                          backgroundColor: controlSurface,
+                          onPressed: restoreFullScreen,
+                        ),
+                        const SizedBox(width: Grid.twelve),
+                        _HuddleRoundControl(
+                          key: const ValueKey('huddle-drawer-speaker-toggle'),
+                          tooltip: session.isSpeakerEnabled
+                              ? 'Use earpiece'
+                              : 'Use speaker',
+                          showTooltip: false,
+                          icon: LucideIcons.volume2,
+                          foregroundColor: session.isSpeakerEnabled
+                              ? drawerSurface
+                              : foreground,
+                          backgroundColor: session.isSpeakerEnabled
+                              ? foreground
+                              : controlSurface,
+                          toggled: session.isSpeakerEnabled,
+                          onPressed: () => unawaited(
+                            sessionController.setSpeakerEnabled(
+                              !session.isSpeakerEnabled,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: Grid.twelve),
-                      _HuddleRoundControl(
-                        key: const ValueKey('huddle-drawer-mute-toggle'),
-                        tooltip: session.isMuted ? 'Unmute' : 'Mute',
-                        showTooltip: false,
-                        icon: session.isMuted
-                            ? LucideIcons.micOff
-                            : LucideIcons.mic,
-                        foregroundColor: session.isMuted
-                            ? foreground
-                            : drawerSurface,
-                        backgroundColor: session.isMuted
-                            ? controlSurface
-                            : foreground,
-                        toggled: session.isMuted,
-                        onPressed: () => unawaited(
-                          sessionController.setMuted(!session.isMuted),
+                        const SizedBox(width: Grid.twelve),
+                        _HuddleRoundControl(
+                          key: const ValueKey('huddle-drawer-mute-toggle'),
+                          tooltip: session.isMuted ? 'Unmute' : 'Mute',
+                          showTooltip: false,
+                          icon: session.isMuted
+                              ? LucideIcons.micOff
+                              : LucideIcons.mic,
+                          foregroundColor: session.isMuted
+                              ? foreground
+                              : drawerSurface,
+                          backgroundColor: session.isMuted
+                              ? controlSurface
+                              : foreground,
+                          toggled: session.isMuted,
+                          onPressed: () => unawaited(
+                            sessionController.setMuted(!session.isMuted),
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                  _HuddleRoundControl(
-                    key: const ValueKey('huddle-drawer-leave'),
-                    tooltip: 'Leave Huddle',
-                    showTooltip: false,
-                    icon: LucideIcons.phoneOff,
-                    foregroundColor: context.colors.error,
-                    backgroundColor: controlSurface,
-                    onPressed: leave,
-                  ),
-                ],
+                      ],
+                    ),
+                    _HuddleRoundControl(
+                      key: const ValueKey('huddle-drawer-leave'),
+                      tooltip: 'Leave Huddle',
+                      showTooltip: false,
+                      icon: LucideIcons.phoneOff,
+                      foregroundColor: context.colors.error,
+                      backgroundColor: controlSurface,
+                      onPressed: leave,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

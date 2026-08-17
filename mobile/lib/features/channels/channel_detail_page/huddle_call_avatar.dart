@@ -1,23 +1,61 @@
 part of '../channel_detail_page.dart';
 
-class _HuddleCallAvatar extends HookWidget {
+class _HuddleCallAvatar extends HookConsumerWidget {
   const _HuddleCallAvatar({
     required this.pubkey,
     required this.profile,
     required this.fallbackLabel,
     required this.active,
+    required this.speakerLevel,
     this.isSelf = false,
+    this.frameSize = _huddleAvatarFrameSize,
   });
 
   final String pubkey;
   final UserProfile? profile;
   final String? fallbackLabel;
   final bool active;
+  final double speakerLevel;
   final bool isSelf;
+  final double frameSize;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final scale = frameSize / _huddleAvatarFrameSize;
+    final avatarRadius = _huddleAvatarRadius * scale;
+    final speakingRingSize = _huddleSpeakingRingSize * scale;
+    final fallbackIconSize = 44 * scale;
+    final normalizedSpeakerLevel = speakerLevel.clamp(0.0, 1.0).toDouble();
+    final haloLevel = active ? 0.08 + normalizedSpeakerLevel * 0.92 : 0.0;
+    final haloController = useAnimationController(
+      initialValue: reducedMotion ? haloLevel : 0,
+    );
+    final animatedHaloLevel = useAnimation(haloController);
+    useEffect(() {
+      haloController.stop();
+      if (reducedMotion) {
+        haloController.value = haloLevel;
+        return null;
+      }
+
+      final isRising = haloLevel > haloController.value;
+      haloController.animateTo(
+        haloLevel,
+        duration: Duration(milliseconds: isRising ? 140 : 220),
+        curve: isRising ? Curves.easeOutCubic : Curves.easeInOutCubic,
+      );
+      return null;
+    }, [haloController, haloLevel, reducedMotion]);
+    final originKey = useMemoized(
+      () => GlobalKey(debugLabel: 'huddle-reaction-origin-$pubkey'),
+      [pubkey],
+    );
+    final originRegistry = ref.read(_huddleAvatarOriginRegistryProvider);
+    useEffect(() {
+      originRegistry.register(pubkey, originKey);
+      return () => originRegistry.unregister(pubkey, originKey);
+    }, [originRegistry, pubkey, originKey]);
     final showsLabel = useState(false);
     final profileName = profile?.displayName?.trim();
     final directoryName = fallbackLabel?.trim();
@@ -29,7 +67,7 @@ class _HuddleCallAvatar extends HookWidget {
     void toggleLabel() => showsLabel.value = !showsLabel.value;
 
     return SizedBox(
-      width: _huddleAvatarFrameSize,
+      width: frameSize,
       child: Semantics(
         label: active ? '$label, speaking' : label,
         hint: showsLabel.value
@@ -47,47 +85,54 @@ class _HuddleCallAvatar extends HookWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              TweenAnimationBuilder<double>(
+              SizedBox.square(
                 key: ValueKey('huddle-speaking-ring-$pubkey'),
-                duration: reducedMotion
-                    ? Duration.zero
-                    : const Duration(milliseconds: 160),
-                curve: Curves.easeOutCubic,
-                tween: Tween(end: active ? 1 : 0),
-                builder: (context, value, child) => SizedBox.square(
-                  dimension: _huddleAvatarFrameSize,
+                dimension: frameSize,
+                child: SizedBox.square(
+                  key: originKey,
+                  dimension: frameSize,
                   child: Stack(
                     alignment: Alignment.center,
+                    clipBehavior: Clip.none,
                     children: [
-                      Opacity(
-                        opacity: value,
+                      AnimatedOpacity(
+                        key: ValueKey('huddle-speaking-halo-opacity-$pubkey'),
+                        duration: reducedMotion
+                            ? Duration.zero
+                            : Duration(milliseconds: active ? 140 : 220),
+                        curve: active
+                            ? Curves.easeOutCubic
+                            : Curves.easeInOutCubic,
+                        opacity: active ? 1 : 0,
                         child: Transform.scale(
-                          scale: 1 + value * 0.08,
+                          key: ValueKey('huddle-speaking-halo-scale-$pubkey'),
+                          scale: reducedMotion
+                              ? (active ? 1.15 : 1)
+                              : 1 + animatedHaloLevel * 1.55,
                           child: Container(
-                            width: _huddleSpeakingRingSize,
-                            height: _huddleSpeakingRingSize,
+                            key: ValueKey('huddle-speaking-halo-$pubkey'),
+                            width: speakingRingSize,
+                            height: speakingRingSize,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              border: Border.all(
-                                color: context.colors.primary,
-                                width: 4,
+                              color: context.colors.primary.withValues(
+                                alpha: 0.07,
                               ),
                             ),
                           ),
                         ),
                       ),
-                      child!,
+                      AvatarImage(
+                        imageUrl: profile?.avatarUrl,
+                        radius: avatarRadius,
+                        backgroundColor: context.colors.primaryContainer,
+                        fallback: Icon(
+                          LucideIcons.userRound,
+                          size: fallbackIconSize,
+                          color: context.colors.onPrimaryContainer,
+                        ),
+                      ),
                     ],
-                  ),
-                ),
-                child: AvatarImage(
-                  imageUrl: profile?.avatarUrl,
-                  radius: _huddleAvatarRadius,
-                  backgroundColor: context.colors.primaryContainer,
-                  fallback: Icon(
-                    LucideIcons.userRound,
-                    size: 44,
-                    color: context.colors.onPrimaryContainer,
                   ),
                 ),
               ),
@@ -118,7 +163,7 @@ class _HuddleCallAvatar extends HookWidget {
                         key: ValueKey('huddle-participant-label-$pubkey'),
                         padding: const EdgeInsets.only(top: Grid.half),
                         child: SizedBox(
-                          width: _huddleAvatarFrameSize,
+                          width: frameSize,
                           child: Text(
                             label,
                             maxLines: 1,

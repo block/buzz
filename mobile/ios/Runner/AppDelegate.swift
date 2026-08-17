@@ -70,7 +70,7 @@ import UserNotifications
       forPlugin: "BuzzConcentricSheetSurface"
     ) {
       concentricSheetRegistrar.register(
-        ConcentricSheetSurfaceFactory(),
+        ConcentricSheetSurfaceFactory(messenger: messenger),
         withId: "buzz/concentric_sheet_surface"
       )
       concentricSheetSurfaceChannel = FlutterMethodChannel(

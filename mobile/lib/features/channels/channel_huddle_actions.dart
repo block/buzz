@@ -1,5 +1,13 @@
 part of 'channel_management_provider.dart';
 
+const _huddleReactionNameMax = 48;
+
+String _clampHuddleReactionName(String name) {
+  final trimmed = name.trim();
+  if (trimmed.length <= _huddleReactionNameMax) return trimmed;
+  return '${trimmed.substring(0, _huddleReactionNameMax - 1).trimRight()}…';
+}
+
 /// Canonical Huddle lifecycle operations built on the shared channel actions.
 extension HuddleChannelActions on ChannelActions {
   /// Creates the private, one-hour stream used only by Huddle media.
@@ -51,6 +59,32 @@ extension HuddleChannelActions on ChannelActions {
       content: jsonEncode({'ephemeral_channel_id': ephemeralChannelId}),
       tags: [
         ['h', parentChannelId],
+      ],
+    );
+  }
+
+  /// Sends an ephemeral emoji burst to the active Huddle backing channel.
+  Future<void> sendHuddleReaction({
+    required String channelId,
+    required String emoji,
+    required String senderName,
+  }) async {
+    final normalizedEmoji = emoji.trim();
+    if (normalizedEmoji.isEmpty) return;
+    final shortcode = normalizeShortcode(normalizedEmoji);
+    final emojiUrl = reactionEmojiUrl(
+      normalizedEmoji,
+      _ref.read(customEmojiListProvider),
+    );
+    await _signedEventRelay.submit(
+      kind: EventKind.huddleReaction,
+      content: normalizedEmoji,
+      tags: [
+        ['h', channelId],
+        ['reaction', normalizedEmoji],
+        ['sender_name', _clampHuddleReactionName(senderName)],
+        if (shortcode != null && emojiUrl != null)
+          ['emoji', shortcode, emojiUrl],
       ],
     );
   }

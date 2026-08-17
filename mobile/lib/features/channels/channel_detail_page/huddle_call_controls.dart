@@ -6,16 +6,19 @@ class _HuddleCallControls extends StatelessWidget {
     required this.isSpeakerEnabled,
     required this.onToggleMute,
     required this.onToggleSpeaker,
+    required this.onReact,
   });
 
   final bool isMuted;
   final bool isSpeakerEnabled;
   final VoidCallback onToggleMute;
   final VoidCallback onToggleSpeaker;
+  final VoidCallback onReact;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
+      key: const ValueKey('huddle-call-controls'),
       padding: const EdgeInsets.only(top: Grid.xxs),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -30,7 +33,7 @@ class _HuddleCallControls extends StatelessWidget {
             backgroundColor: isSpeakerEnabled
                 ? context.colors.primary
                 : context.colors.surfaceContainerHighest,
-            dimension: 72,
+            dimension: 80,
             toggled: isSpeakerEnabled,
             onPressed: onToggleSpeaker,
           ),
@@ -45,9 +48,19 @@ class _HuddleCallControls extends StatelessWidget {
             backgroundColor: isMuted
                 ? context.colors.surfaceContainerHighest
                 : context.colors.primary,
-            dimension: 72,
+            dimension: 80,
             toggled: isMuted,
             onPressed: onToggleMute,
+          ),
+          const SizedBox(width: Grid.sm),
+          _HuddleRoundControl(
+            key: const ValueKey('huddle-emoji-reactions'),
+            tooltip: 'Emoji reactions',
+            icon: LucideIcons.smilePlus,
+            foregroundColor: context.colors.onSurface,
+            backgroundColor: context.colors.surfaceContainerHighest,
+            dimension: 80,
+            onPressed: onReact,
           ),
         ],
       ),

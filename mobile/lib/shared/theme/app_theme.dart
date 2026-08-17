@@ -60,7 +60,10 @@ class AppTheme {
       warning: const Color(0xFFEED49F), // Macchiato Yellow
       accent: scheme.tertiary,
       huddleDrawerSurface: scheme.primaryContainer,
-      huddleControlSurface: scheme.secondaryContainer,
+      huddleControlSurface: Color.alphaBlend(
+        scheme.onPrimaryContainer.withValues(alpha: 0.18),
+        scheme.primaryContainer,
+      ),
       onHuddleDrawer: scheme.onPrimaryContainer,
       topSectionGradient: topSectionGradient,
     );

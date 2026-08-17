@@ -9,6 +9,7 @@ class _HuddleCallParticipants extends StatelessWidget {
     required this.remotePubkeys,
     required this.localPubkey,
     required this.activeSpeakerPubkeys,
+    required this.speakerLevels,
     required this.retryTooltip,
     required this.retryIcon,
     required this.onRetry,
@@ -21,6 +22,7 @@ class _HuddleCallParticipants extends StatelessWidget {
   final List<String> remotePubkeys;
   final String? localPubkey;
   final Set<String> activeSpeakerPubkeys;
+  final Map<String, double> speakerLevels;
   final String retryTooltip;
   final IconData retryIcon;
   final VoidCallback onRetry;
@@ -60,8 +62,16 @@ class _HuddleCallParticipants extends StatelessWidget {
       );
     }
 
+    if (!connected) {
+      return const Center(child: _HuddleLoadingBee());
+    }
+
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final hasRemoteParticipants = connected && remotePubkeys.isNotEmpty;
+    final hasRemoteParticipants = remotePubkeys.isNotEmpty;
+    final hasDenseRemoteRoster =
+        remotePubkeys.length > _huddleDenseParticipantThreshold;
+    final remoteHeightFactor = hasDenseRemoteRoster ? 0.58 : 0.5;
+    final localHeightFactor = hasDenseRemoteRoster ? 0.42 : 0.5;
     final movementDuration = reducedMotion
         ? Duration.zero
         : const Duration(milliseconds: 260);
@@ -83,7 +93,7 @@ class _HuddleCallParticipants extends StatelessWidget {
               end: hasRemoteParticipants ? 1 : 0,
             ),
             builder: (context, value, child) => FractionallySizedBox(
-              heightFactor: 0.5,
+              heightFactor: localHeightFactor,
               alignment: Alignment.lerp(
                 Alignment.center,
                 Alignment.bottomCenter,
@@ -106,57 +116,169 @@ class _HuddleCallParticipants extends StatelessWidget {
               active:
                   localPubkey != null &&
                   activeSpeakerPubkeys.contains(localPubkey),
+              speakerLevel: localPubkey == null
+                  ? 0
+                  : speakerLevels[localPubkey] ?? 0,
               isSelf: true,
             ),
           ),
         ),
         Positioned.fill(
           child: FractionallySizedBox(
-            heightFactor: 0.5,
+            key: const ValueKey('huddle-remote-participant-region'),
+            heightFactor: remoteHeightFactor,
             alignment: Alignment.topCenter,
             child: Align(
               key: const ValueKey('huddle-remote-participant-group'),
               alignment: const Alignment(0, 0.35),
-              child: connected
-                  ? SingleChildScrollView(
-                      key: const ValueKey('huddle-remote-participants'),
-                      padding: const EdgeInsets.symmetric(vertical: Grid.xs),
-                      child: Wrap(
-                        alignment: WrapAlignment.center,
-                        spacing: Grid.md,
-                        runSpacing: Grid.xs,
-                        children: [
-                          for (final pubkey in remotePubkeys)
-                            SizedBox(
-                              key: ValueKey('huddle-participant-entry-$pubkey'),
-                              width: _huddleAvatarFrameSize,
-                              child: TweenAnimationBuilder<double>(
-                                duration: entryDuration,
-                                curve: Curves.easeOutCubic,
-                                tween: Tween(begin: 0, end: 1),
-                                builder: (context, value, child) => Opacity(
-                                  opacity: value,
-                                  child: Transform.scale(
-                                    scale: 0.95 + value * 0.05,
-                                    child: child,
-                                  ),
-                                ),
-                                child: _HuddleCallAvatar(
-                                  pubkey: pubkey,
-                                  profile: profiles[pubkey],
-                                  fallbackLabel: fallbackLabels[pubkey],
-                                  active: activeSpeakerPubkeys.contains(pubkey),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final layout = _HuddleParticipantLayout.fit(
+                    availableSize: constraints.biggest,
+                    participantCount: remotePubkeys.length,
+                    dense: hasDenseRemoteRoster,
+                  );
+                  return TweenAnimationBuilder<double>(
+                    key: const ValueKey('huddle-remote-participants'),
+                    duration: movementDuration,
+                    curve: Curves.easeInOutCubic,
+                    tween: Tween(end: layout.frameSize),
+                    builder: (context, frameSize, _) => Wrap(
+                      alignment: WrapAlignment.center,
+                      runAlignment: WrapAlignment.center,
+                      spacing: layout.spacing,
+                      runSpacing: layout.runSpacing,
+                      children: [
+                        for (final pubkey in remotePubkeys)
+                          SizedBox(
+                            key: ValueKey('huddle-participant-entry-$pubkey'),
+                            width: frameSize,
+                            height: frameSize + _huddleParticipantLabelSpace,
+                            child: TweenAnimationBuilder<double>(
+                              duration: entryDuration,
+                              curve: Curves.easeOutCubic,
+                              tween: Tween(begin: 0, end: 1),
+                              builder: (context, value, child) => Opacity(
+                                opacity: value,
+                                child: Transform.scale(
+                                  scale: 0.95 + value * 0.05,
+                                  child: child,
                                 ),
                               ),
+                              child: _HuddleCallAvatar(
+                                pubkey: pubkey,
+                                profile: profiles[pubkey],
+                                fallbackLabel: fallbackLabels[pubkey],
+                                active: activeSpeakerPubkeys.contains(pubkey),
+                                speakerLevel: speakerLevels[pubkey] ?? 0,
+                                frameSize: frameSize,
+                              ),
                             ),
-                        ],
-                      ),
-                    )
-                  : const BuzzLoadingIndicator(size: 40),
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
             ),
           ),
         ),
       ],
+    );
+  }
+}
+
+class _HuddleLoadingBee extends HookWidget {
+  const _HuddleLoadingBee();
+
+  @override
+  Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final flapController = useAnimationController(
+      duration: const Duration(milliseconds: 480),
+    );
+    final flapProgress = useAnimation(flapController);
+    useEffect(() {
+      if (reducedMotion) {
+        flapController
+          ..stop()
+          ..reset();
+      } else {
+        flapController.repeat();
+      }
+      return null;
+    }, [flapController, reducedMotion]);
+    final flapAmount = reducedMotion
+        ? 0.0
+        : 0.5 - (0.5 * cos(flapProgress * 4 * pi));
+
+    return Semantics(
+      label: 'Joining Huddle',
+      liveRegion: true,
+      child: ExcludeSemantics(
+        child: FlappingBee(
+          key: const ValueKey('huddle-loading-bee'),
+          width: 60,
+          color: context.colors.primary,
+          flapAmount: flapAmount,
+        ),
+      ),
+    );
+  }
+}
+
+class _HuddleParticipantLayout {
+  const _HuddleParticipantLayout({
+    required this.frameSize,
+    required this.spacing,
+    required this.runSpacing,
+  });
+
+  final double frameSize;
+  final double spacing;
+  final double runSpacing;
+
+  static _HuddleParticipantLayout fit({
+    required Size availableSize,
+    required int participantCount,
+    required bool dense,
+  }) {
+    const spacing = Grid.xs;
+    const runSpacing = Grid.xxs;
+    final maximumFrameSize = dense
+        ? _huddleDenseAvatarFrameSize
+        : _huddleAvatarFrameSize;
+    if (participantCount <= 0 || availableSize.isEmpty) {
+      return _HuddleParticipantLayout(
+        frameSize: maximumFrameSize,
+        spacing: spacing,
+        runSpacing: runSpacing,
+      );
+    }
+
+    var bestFrameSize = _huddleMinimumAvatarFrameSize;
+    for (var columns = 1; columns <= participantCount; columns++) {
+      final rows = (participantCount + columns - 1) ~/ columns;
+      final widthForAvatars = availableSize.width - spacing * (columns - 1);
+      final heightForAvatars =
+          availableSize.height -
+          runSpacing * (rows - 1) -
+          _huddleParticipantLabelSpace * rows;
+      if (widthForAvatars <= 0 || heightForAvatars <= 0) continue;
+
+      final widthBound = widthForAvatars / columns;
+      final heightBound = heightForAvatars / rows;
+      final candidate = min(maximumFrameSize, min(widthBound, heightBound));
+      if (candidate > bestFrameSize) bestFrameSize = candidate;
+    }
+
+    return _HuddleParticipantLayout(
+      frameSize: bestFrameSize.clamp(
+        _huddleMinimumAvatarFrameSize,
+        maximumFrameSize,
+      ),
+      spacing: spacing,
+      runSpacing: runSpacing,
     );
   }
 }

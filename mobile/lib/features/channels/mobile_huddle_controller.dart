@@ -50,19 +50,23 @@ final mobileHuddlePresentationProvider =
 /// ending the Huddle on transient relay failure.
 final huddleHumanCountProvider = Provider<HuddleHumanCountLoader>((ref) {
   return (channelId) async {
-    final membersProvider = channelMembersProvider(channelId);
-    final cachedMembers = ref.read(membersProvider).value;
-    if (cachedMembers != null) {
-      return cachedMembers.where((member) => !member.isBot).length;
-    }
     if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
       throw StateError('Relay is unavailable for Huddle member lookup.');
     }
-    final members = await ref.read(membersProvider.future);
+    // Desktop always queries the relay's current kind:39002 snapshot here.
+    // The UI-facing provider intentionally preserves cached members through
+    // reconnects, but that cache can lag a leave event and must not decide
+    // whether the room ends for everyone.
+    final events = await ref
+        .read(relaySessionProvider.notifier)
+        .fetchHistory(NostrFilters.channelMembers(channelId));
     if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
       throw StateError('Relay disconnected during Huddle member lookup.');
     }
-    return members.where((member) => !member.isBot).length;
+    if (events.isEmpty) return 0;
+    return membersFromEvent(
+      events.first,
+    ).where((member) => member.role != 'bot').length;
   };
 });
 
