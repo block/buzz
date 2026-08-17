@@ -2855,8 +2855,9 @@ async fn tokio_main() -> Result<()> {
                                 // plain author gate would drop them and the
                                 // scheduled @mention would silently never wake
                                 // the agent. Gate them on their *attributed*
-                                // author (the workflow owner's `p` tag)
-                                // instead. See `workflow_attributed_author`
+                                // author (the `buzz:workflow-owner` tag — the
+                                // pubkey that created the workflow) instead.
+                                // See `workflow_attributed_author`
                                 // for the recognition + trust argument.
                                 let author = match workflow_attributed_author(
                                     &buzz_event.event,
@@ -3560,10 +3561,10 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
 /// (`event.pubkey` = the relay's NIP-11 `self` key), not by the human who owns
 /// the workflow — so the plain author gate would drop them even though they
 /// carry `p` tags meant to wake mentioned agents. The relay attributes the
-/// message to the workflow owner via the **first `p` tag** (see
-/// `workflow_sink.rs`: the owner `p` tag is pushed before any mention `p`
-/// tags), and it has already verified that owner's access to the destination
-/// channel before emitting the event.
+/// message to the **workflow owner** (the pubkey that created the workflow,
+/// `workflow.owner_pubkey` relay-side) via the explicit `buzz:workflow-owner`
+/// tag emitted by `workflow_sink.rs`, and it has already verified that owner's
+/// access to the destination channel before emitting the event.
 ///
 /// Recognition requires ALL of:
 /// 1. a known relay `self` pubkey (fetched from NIP-11 at startup) — no
@@ -3572,7 +3573,11 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
 ///    relay verifies signatures on submitted events, so this cannot be forged
 ///    by another member;
 /// 3. a `buzz:workflow` tag — the marker the relay puts on workflow-emitted
-///    messages (also used for workflow-loop prevention relay-side).
+///    messages (also used for workflow-loop prevention relay-side);
+/// 4. a `buzz:workflow-owner` tag carrying a valid 64-hex pubkey — the
+///    explicit ownership attribution. Mention `p` tags are never used for
+///    attribution, so who is @mentioned in the message text has no bearing
+///    on whose authority the gate evaluates.
 ///
 /// The returned pubkey is gated exactly like a direct author: owner/sibling
 /// under `owner-only`, plus the explicit list under `allowlist`. A workflow
@@ -3592,11 +3597,17 @@ fn workflow_attributed_author(event: &nostr::Event, relay_self: Option<&str>) ->
     }
     event.tags.iter().find_map(|t| {
         let s = t.as_slice();
-        if s.first().map(|k| k.as_str()) == Some("p") {
-            s.get(1).map(|v| v.to_string())
-        } else {
-            None
+        if s.first().map(|k| k.as_str()) != Some("buzz:workflow-owner") {
+            return None;
         }
+        let owner = s.get(1)?;
+        // Defensive shape check: the gate compares pubkey hex strings, so
+        // reject anything that is not a 64-hex pubkey rather than feeding
+        // arbitrary bytes into the owner/sibling/allowlist comparison.
+        if owner.len() != 64 || !owner.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(owner.to_ascii_lowercase())
     })
 }
 
@@ -5774,12 +5785,13 @@ mod workflow_attributed_author_tests {
             Tag::parse(["p", owner_hex]).unwrap(),
             Tag::parse(["h", "3204e3f9-fd09-4e95-b749-76966794c287"]).unwrap(),
             Tag::parse(["buzz:workflow", "true"]).unwrap(),
+            Tag::parse(["buzz:workflow-owner", owner_hex]).unwrap(),
             Tag::parse(["p", mention_hex]).unwrap(),
         ]
     }
 
     #[test]
-    fn relay_signed_workflow_message_attributes_to_first_p_tag_owner() {
+    fn relay_signed_workflow_message_attributes_to_workflow_owner_tag() {
         let relay = Keys::generate();
         let owner = Keys::generate().public_key().to_hex();
         let agent = Keys::generate().public_key().to_hex();
@@ -5787,8 +5799,46 @@ mod workflow_attributed_author_tests {
         assert_eq!(
             workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
             Some(owner),
-            "a relay-signed buzz:workflow event must attribute to the owner \
-             (first p tag), not the mentioned agent"
+            "a relay-signed buzz:workflow event must attribute to the \
+             buzz:workflow-owner tag, not any mentioned agent"
+        );
+    }
+
+    #[test]
+    fn attribution_ignores_p_tags_entirely() {
+        // Only the explicit buzz:workflow-owner tag attributes; p tags
+        // (owner attribution + mentions) must have no effect on the gate.
+        let relay = Keys::generate();
+        let someone = Keys::generate().public_key().to_hex();
+        let event = make_event(
+            &relay,
+            vec![
+                Tag::parse(["p", &someone]).unwrap(),
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+            ],
+        );
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            None,
+            "without a buzz:workflow-owner tag there is no attributed author, \
+             even when p tags are present"
+        );
+    }
+
+    #[test]
+    fn malformed_owner_tag_value_attributes_to_no_one() {
+        let relay = Keys::generate();
+        let event = make_event(
+            &relay,
+            vec![
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["buzz:workflow-owner", "not-a-pubkey"]).unwrap(),
+            ],
+        );
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            None,
+            "a buzz:workflow-owner value that is not 64-hex must be rejected"
         );
     }
 
@@ -5834,14 +5884,14 @@ mod workflow_attributed_author_tests {
     }
 
     #[test]
-    fn workflow_message_without_p_tag_attributes_to_no_one() {
+    fn workflow_message_without_owner_tag_attributes_to_no_one() {
         let relay = Keys::generate();
         let event = make_event(&relay, vec![Tag::parse(["buzz:workflow", "true"]).unwrap()]);
         assert_eq!(
             workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
             None,
-            "a workflow message with no p tags has no attributed author and must \
-             fall through to the plain (relay-pubkey) author gate"
+            "a workflow message with no buzz:workflow-owner tag has no attributed \
+             author and must fall through to the plain (relay-pubkey) author gate"
         );
     }
 }
