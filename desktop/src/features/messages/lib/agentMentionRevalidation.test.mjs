@@ -8,12 +8,16 @@ const AGENT = "b".repeat(64);
 const HUMAN = "c".repeat(64);
 const OTHER_OWNER = "d".repeat(64);
 
-function options(refetchOwnerProfiles) {
+function options(refetchOwnerProfiles, overrides = {}) {
   return {
     pubkeys: [HUMAN, AGENT],
     agentPubkeys: new Set([AGENT]),
     currentPubkey: CURRENT,
-    eligibilityScope: { type: "channel", channelId: "general" },
+    eligibilityScope: {
+      type: "channel",
+      channelId: "general",
+      memberPubkeys: new Set([AGENT]),
+    },
     sharedChannelIds: new Set(["general"]),
     ownerOnly: true,
     ownerPolicyError: null,
@@ -29,7 +33,12 @@ function options(refetchOwnerProfiles) {
       ],
       error: null,
     }),
+    refetchChannelMembers: async () => ({
+      data: [{ pubkey: AGENT }],
+      error: null,
+    }),
     refetchOwnerProfiles,
+    ...overrides,
   };
 }
 
@@ -72,3 +81,89 @@ for (const [name, refetchOwnerProfiles] of [
     );
   });
 }
+
+test("channel revalidation drops an agent removed after selection", async () => {
+  const result = await revalidateAgentMentionPubkeys(
+    options(
+      async () => ({
+        profiles: { [AGENT]: { ownerPubkey: CURRENT } },
+        missing: [],
+      }),
+      { refetchChannelMembers: async () => ({ data: [], error: null }) },
+    ),
+  );
+
+  assert.deepEqual(result, [HUMAN]);
+});
+
+test("channel revalidation fails closed when the fresh roster fails", async () => {
+  const result = await revalidateAgentMentionPubkeys(
+    options(
+      async () => ({
+        profiles: { [AGENT]: { ownerPubkey: CURRENT } },
+        missing: [],
+      }),
+      {
+        refetchChannelMembers: async () => ({
+          data: [{ pubkey: AGENT }],
+          error: new Error("relay unavailable"),
+        }),
+      },
+    ),
+  );
+
+  assert.deepEqual(result, [HUMAN]);
+});
+
+test("invite preflight revalidates policy before requiring membership", async () => {
+  let rosterReads = 0;
+  const result = await revalidateAgentMentionPubkeys(
+    options(
+      async () => ({
+        profiles: { [AGENT]: { ownerPubkey: CURRENT } },
+        missing: [],
+      }),
+      {
+        eligibilityScope: {
+          type: "channel",
+          channelId: "general",
+          memberPubkeys: new Set(),
+        },
+        requireChannelMembership: false,
+        refetchChannelMembers: async () => {
+          rosterReads += 1;
+          return { data: [], error: null };
+        },
+      },
+    ),
+  );
+
+  assert.equal(rosterReads, 0);
+  assert.deepEqual(result, [HUMAN, AGENT]);
+});
+
+test("fresh roster admits an authorized agent with stale directory channels", async () => {
+  const result = await revalidateAgentMentionPubkeys(
+    options(
+      async () => ({
+        profiles: { [AGENT]: { ownerPubkey: CURRENT } },
+        missing: [],
+      }),
+      {
+        refetchRelayAgents: async () => ({
+          data: [
+            {
+              pubkey: AGENT,
+              respondTo: "anyone",
+              respondToAllowlist: [],
+              channelIds: [],
+            },
+          ],
+          error: null,
+        }),
+      },
+    ),
+  );
+
+  assert.deepEqual(result, [HUMAN, AGENT]);
+});

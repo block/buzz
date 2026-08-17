@@ -233,6 +233,14 @@ async function waitForTimelineSettled(page: import("@playwright/test").Page) {
   await expect(page.locator("[data-render-pending]")).toHaveCount(0);
 }
 
+async function typeAfterSelectedMention(
+  input: import("@playwright/test").Locator,
+  text: string,
+) {
+  const current = ((await input.textContent()) ?? "").trimEnd();
+  await input.fill(`${current} ${text}`);
+}
+
 async function expectOwnedAgentProfileActions(
   profilePopover: import("@playwright/test").Locator,
   pubkey: string,
@@ -320,6 +328,95 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   expect(fizzIndex).toBeLessThan(charlieIndex);
 });
 
+test("roster-authorized agents with stale directory channels emit the canonical p tag", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: TEST_IDENTITIES.bob.pubkey,
+        name: "bob",
+        respondTo: "anyone",
+        channelIds: [],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @bob");
+
+  const bobRow = autocomplete(page).locator("button", { hasText: "bob" });
+  await expect(bobRow).toBeVisible();
+  await bobRow.click();
+  await typeAfterSelectedMention(input, "please reply");
+
+  const content = "Ask @bob please reply";
+  await expect(input).toHaveText(content);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toEqual([TEST_IDENTITIES.bob.pubkey]);
+});
+
+test("send-time roster refresh drops an agent removed after selection", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: TEST_IDENTITIES.bob.pubkey,
+        name: "bob",
+        respondTo: "anyone",
+        channelIds: [],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Ask @bob");
+  const bobRow = autocomplete(page).locator("button", { hasText: "bob" });
+  await expect(bobRow).toBeVisible();
+  await bobRow.click();
+  await typeAfterSelectedMention(input, "please reply");
+
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const tauriWindow = window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+        __TAURI_INTERNALS__?: {
+          invoke?: (
+            command: string,
+            payload?: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      };
+      const invoke =
+        tauriWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ ??
+        tauriWindow.__TAURI_INTERNALS__?.invoke;
+      if (!invoke) throw new Error("Mock invoke bridge is unavailable.");
+      await invoke("remove_channel_member", { channelId, pubkey });
+    },
+    { channelId: GENERAL_CHANNEL_ID, pubkey: TEST_IDENTITIES.bob.pubkey },
+  );
+
+  const content = "Ask @bob please reply";
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toEqual([]);
+});
+
 test("relay-only shared agents emit an outbound mention tag when selected", async ({
   page,
 }) => {
@@ -333,7 +430,7 @@ test("relay-only shared agents emit an outbound mention tag when selected", asyn
   const aliceRow = autocomplete(page).locator("button", { hasText: "alice" });
   await expect(aliceRow).toBeVisible();
   await aliceRow.click();
-  await page.keyboard.type("please reply");
+  await typeAfterSelectedMention(input, "please reply");
 
   const content = "Ask @alice please reply";
   await expect(input).toHaveText(content);
@@ -1082,7 +1179,7 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
   await page.getByTestId("mention-autocomplete").getByText("quinn").click();
-  await page.keyboard.type("hello");
+  await typeAfterSelectedMention(input, "hello");
   await page.getByRole("button", { name: "Attach file" }).click();
   const removeAttachment = page.getByRole("button", {
     name: "Remove attachment",
@@ -1204,7 +1301,7 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
   const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
   await expect(quinnRow).toBeVisible();
   await quinnRow.click();
-  await page.keyboard.type("hello");
+  await typeAfterSelectedMention(input, "hello");
   await expect(input).toHaveText("@quinn hello");
   await page.getByTestId("send-message").click();
   await page.getByRole("button", { name: "Invite", exact: true }).click();
@@ -1235,7 +1332,7 @@ test("selected relay agents revoked before send emit no p tag", async ({
   const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
   await expect(quinnRow).toBeVisible();
   await quinnRow.click();
-  await page.keyboard.type("hello");
+  await typeAfterSelectedMention(input, "hello");
 
   await page.evaluate(async () => {
     window.__BUZZ_E2E__.mock ??= {};
@@ -1300,7 +1397,7 @@ test("selected relay agents revoked after the invite prompt cause no side effect
   const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
   await expect(quinnRow).toBeVisible();
   await quinnRow.click();
-  await page.keyboard.type("hello");
+  await typeAfterSelectedMention(input, "hello");
   await page.getByTestId("send-message").click();
   const inviteButton = page.getByRole("button", {
     name: "Invite",
@@ -1357,7 +1454,7 @@ test("selected relay agents revoked during send emit no p tag", async ({
   const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
   await expect(quinnRow).toBeVisible();
   await quinnRow.click();
-  await page.keyboard.type("hello");
+  await typeAfterSelectedMention(input, "hello");
 
   await page.evaluate(() => {
     window.__BUZZ_E2E__.mock ??= {};

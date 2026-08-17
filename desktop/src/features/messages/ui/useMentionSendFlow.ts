@@ -402,7 +402,9 @@ export function useMentionSendFlow({
       let uploadStarted = false;
       try {
         const admittedMentionPubkeys = uniqueNormalizedPubkeys(
-          await mentions.revalidateMentionPubkeys(mentionPubkeys),
+          await mentions.revalidateMentionPubkeys(mentionPubkeys, {
+            requireChannelMembership: false,
+          }),
         );
         if (isSendCancelled()) return;
         if (!isMountedRef.current) return persistPreflightDraft();
@@ -885,13 +887,16 @@ export function useMentionSendFlow({
     }
     setNonMemberPromptError(null);
     void (async () => {
-      const mentionPubkeys = uniqueNormalizedPubkeys(
-        await mentions.revalidateMentionPubkeys([
-          ...pendingNonMemberSend.mentionPubkeys,
-          ...pendingNonMemberSend.nonMemberPubkeys,
-        ]),
+      const preInviteMentionPubkeys = uniqueNormalizedPubkeys(
+        await mentions.revalidateMentionPubkeys(
+          [
+            ...pendingNonMemberSend.mentionPubkeys,
+            ...pendingNonMemberSend.nonMemberPubkeys,
+          ],
+          { requireChannelMembership: false },
+        ),
       );
-      const admittedMentionPubkeys = new Set(mentionPubkeys);
+      const admittedMentionPubkeys = new Set(preInviteMentionPubkeys);
       const originalNonMemberPubkeys = new Set(
         pendingNonMemberSend.nonMemberPubkeys.map(normalizePubkey),
       );
@@ -943,6 +948,9 @@ export function useMentionSendFlow({
         return;
       }
 
+      const mentionPubkeys = uniqueNormalizedPubkeys(
+        await mentions.revalidateMentionPubkeys(preInviteMentionPubkeys),
+      );
       await completeSend(
         {
           ...pendingNonMemberSend,

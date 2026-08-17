@@ -183,12 +183,29 @@ export function useMentions(
   const mentionChannelId = isAgentMentionChannelType(options?.channelType)
     ? channelId
     : null;
+  const channelRosterReady =
+    membersQuery.data !== undefined &&
+    membersQuery.error === null &&
+    !membersQuery.isFetching;
+  const memberPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (channelRosterReady ? (membersQuery.data ?? []) : []).map((member) =>
+          normalizePubkey(member.pubkey),
+        ),
+      ),
+    [channelRosterReady, membersQuery.data],
+  );
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
         currentPubkey,
         eligibilityScope: mentionChannelId
-          ? { type: "channel", channelId: mentionChannelId }
+          ? {
+              type: "channel",
+              channelId: mentionChannelId,
+              memberPubkeys,
+            }
           : { type: "managed-only" },
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
@@ -197,6 +214,7 @@ export function useMentions(
     [
       currentPubkey,
       managedAgentPubkeys,
+      memberPubkeys,
       mentionChannelId,
       relayAgentsQuery.data,
       sharedChannelIds,
@@ -230,11 +248,6 @@ export function useMentions(
   const activePersonaIds = React.useMemo(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
-  );
-  const memberPubkeys = React.useMemo(
-    () =>
-      new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
-    [members],
   );
   const agentIdentityPubkeys = React.useMemo(
     () =>
@@ -821,13 +834,18 @@ export function useMentions(
     getSelectedAgentPubkeys,
     currentPubkey,
     eligibilityScope: mentionChannelId
-      ? { type: "channel", channelId: mentionChannelId }
+      ? {
+          type: "channel",
+          channelId: mentionChannelId,
+          memberPubkeys,
+        }
       : { type: "managed-only" },
     sharedChannelIds,
     ownerOnly: agentAccessOwnerOnlyQuery.data,
     ownerPolicyError: agentAccessOwnerOnlyQuery.error,
     refetchManagedAgents: managedAgentsQuery.refetch,
     refetchRelayAgents: relayAgentsQuery.refetch,
+    refetchChannelMembers: mentionChannelId ? membersQuery.refetch : undefined,
   });
 
   const extractMentionPersonas = React.useCallback(

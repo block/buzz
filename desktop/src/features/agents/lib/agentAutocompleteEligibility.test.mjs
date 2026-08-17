@@ -164,6 +164,42 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
+test("getMentionableAgentPubkeys: admits authorized roster agents despite stale directory channels", () => {
+  const authorizedMember = {
+    pubkey: PUB_B,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: [],
+  };
+  const unauthorizedMember = {
+    pubkey: PUB_C,
+    respondTo: "allowlist",
+    respondToAllowlist: [OTHER_OWNER_PUBKEY],
+    channelIds: [],
+  };
+  const authorizedNonmember = {
+    pubkey: PUB_D,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: [],
+  };
+
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      eligibilityScope: {
+        type: "channel",
+        channelId: "general",
+        memberPubkeys: new Set([PUB_B, PUB_C]),
+      },
+      managedAgentPubkeys: [],
+      currentPubkey: CURRENT_PUBKEY,
+      relayAgents: [authorizedMember, unauthorizedMember, authorizedNonmember],
+      sharedChannelIds: new Set(["general"]),
+    }),
+    new Set([PUB_B]),
+  );
+});
+
 test("getMentionableAgentPubkeys: scopes channel composers and fails closed without context", () => {
   const relayAgents = [
     {
