@@ -5,11 +5,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    persist_record_start_failure, process_is_running, record_agent_command,
+    resolve_effective_agent_env, save_managed_agents, spawn_agent_child, terminate_process,
+    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -283,7 +283,20 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    // The record's own pubkey (not the canonicalized pair key) is the stamp
+    // target — `persist_record_start_failure` matches records by exact pubkey.
+    let record_pubkey = record.pubkey.clone();
+    let mut process = match spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())
+    {
+        Ok(process) => process,
+        Err(error) => {
+            // Spawn refusal escaped this command with nothing persisted —
+            // stamp the durable record (store lock already held above) so the
+            // failure is visible after the fact.
+            persist_record_start_failure(&app, &mut records, &record_pubkey, &error);
+            return Err(error);
+        }
+    };
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -294,6 +307,7 @@ fn start_pair(
     if let Err(error) = write_agent_runtime_receipt(&app, &receipt) {
         let _ = terminate_process(process.child.id());
         let _ = process.child.wait();
+        persist_record_start_failure(&app, &mut records, &record_pubkey, &error);
         return Err(error);
     }
     record.runtime_pid = None;

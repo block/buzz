@@ -13,7 +13,7 @@ use tempfile::NamedTempFile;
 
 use super::{
     agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
-    KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
+    stamp_agent_start_failure, KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
 };
 
 /// In-memory [`KeyStore`] for testing the migrate decision without the OS
@@ -829,4 +829,70 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
             format!("install-{id}.log")
         );
     }
+}
+
+// ── Start-failure stamping ───────────────────────────────────────────────────
+//
+// `stamp_agent_start_failure` is the pure core of the start-path persistence
+// added so a refused start (spawn refusal, orphaned persona, relay-mesh
+// preflight rejection) leaves a durable `last_error` on the record instead of
+// returning an error nothing saved. The lock + load + save wrappers around it
+// (`persist_record_start_failure` / `persist_agent_start_failure`) need a live
+// `AppHandle`, which no test fixture in this crate provides — the stamping
+// contract is pinned here, and the save half is the same `save_managed_agents`
+// every other record-mutating path already exercises.
+
+/// A spawn refusal overwrites any stale error, clears the structured code
+/// (no code exists on the start path), and refreshes `updated_at`.
+#[test]
+fn start_failure_stamp_records_message_and_clears_structured_code() {
+    let mut record = record_with_pubkey_and_key("agent-pubkey", "");
+    record.last_error = Some("stale error".to_string());
+    record.last_error_code = Some(-32001);
+    record.updated_at = "2026-01-01T00:00:00Z".to_string();
+    let mut records = vec![record];
+
+    stamp_agent_start_failure(&mut records, "agent-pubkey", "identity key unavailable")
+        .expect("stamp must find the record");
+
+    let record = &records[0];
+    assert_eq!(
+        record.last_error.as_deref(),
+        Some("identity key unavailable")
+    );
+    assert_eq!(
+        record.last_error_code, None,
+        "start-path failures carry no structured code"
+    );
+    assert_ne!(
+        record.updated_at, "2026-01-01T00:00:00Z",
+        "a refused start must bump updated_at"
+    );
+}
+
+/// Other records in the store are untouched.
+#[test]
+fn start_failure_stamp_leaves_other_records_alone() {
+    let target = record_with_pubkey_and_key("agent-pubkey", "");
+    let bystander = record_with_pubkey_and_key("other-pubkey", "");
+    let mut records = vec![target, bystander];
+
+    stamp_agent_start_failure(&mut records, "agent-pubkey", "orphaned persona")
+        .expect("stamp must find the record");
+
+    assert_eq!(records[1].last_error, None);
+    assert_eq!(records[1].updated_at, "2026-01-01T00:00:00Z");
+}
+
+/// An unknown pubkey errors and mutates nothing — the caller still returns the
+/// original start error (the persistence layer never masks it).
+#[test]
+fn start_failure_stamp_unknown_pubkey_errors_without_touching_records() {
+    let mut records = vec![record_with_pubkey_and_key("agent-pubkey", "")];
+
+    let error = stamp_agent_start_failure(&mut records, "missing-pubkey", "spawn refused")
+        .expect_err("unknown pubkey must error");
+
+    assert!(error.contains("missing-pubkey"), "{error}");
+    assert_eq!(records[0].last_error, None);
 }

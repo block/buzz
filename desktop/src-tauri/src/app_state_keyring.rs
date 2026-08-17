@@ -17,6 +17,13 @@ pub(crate) fn keyring_service() -> &'static str {
     }
 }
 
+/// True for the canonical dev service and every per-instance scoped dev
+/// service (`buzz-desktop-dev.<slug>`) — i.e. every service a dev build may
+/// use. The production service ("buzz-desktop") is never a dev service.
+pub(crate) fn is_dev_keyring_service(service: &str) -> bool {
+    service == "buzz-desktop-dev" || service.starts_with("buzz-desktop-dev.")
+}
+
 pub(super) fn migration_marker_name(service: &str, default_name: &str) -> String {
     if service == "buzz-desktop" || service == "buzz-desktop-dev" {
         default_name.to_string()
@@ -27,7 +34,15 @@ pub(super) fn migration_marker_name(service: &str, default_name: &str) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::{dev_keyring_service, migration_marker_name};
+    use super::{dev_keyring_service, is_dev_keyring_service, migration_marker_name};
+
+    #[test]
+    fn scoped_dev_services_are_dev_services() {
+        assert!(is_dev_keyring_service("buzz-desktop-dev"));
+        assert!(is_dev_keyring_service("buzz-desktop-dev.example"));
+        assert!(!is_dev_keyring_service("buzz-desktop"));
+        assert!(!is_dev_keyring_service("buzz-desktop-developer"));
+    }
 
     #[test]
     fn standalone_scope_must_remain_under_dev_service() {

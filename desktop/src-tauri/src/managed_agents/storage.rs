@@ -7,7 +7,7 @@ use std::{
 
 use tauri::{AppHandle, Manager};
 
-use crate::app_state::keyring_service;
+use crate::app_state::{is_dev_keyring_service, keyring_service};
 use crate::managed_agents::{
     ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
 };
@@ -394,6 +394,64 @@ pub(crate) fn save_agent_definitions(
     write_agent_store(app, definitions, instances)
 }
 
+/// Stamp a start-path failure (spawn refusal, orphaned persona, relay-mesh
+/// preflight rejection) onto the matching record: bump `updated_at`, record
+/// the error message, and clear `last_error_code` — these paths carry no
+/// structured code. Mirrors the `sync_managed_agent_processes` failure
+/// convention in `runtime/lifecycle.rs`, so a refused start leaves a durable
+/// forensic trace instead of returning an error nothing persisted.
+pub(crate) fn stamp_agent_start_failure(
+    records: &mut [ManagedAgentRecord],
+    pubkey: &str,
+    error: &str,
+) -> Result<(), String> {
+    let record = records
+        .iter_mut()
+        .find(|record| record.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    record.updated_at = crate::util::now_iso();
+    record.last_error = Some(error.to_string());
+    record.last_error_code = None;
+    Ok(())
+}
+
+/// Stamp + save a start-path failure. The caller MUST already hold
+/// `managed_agents_store_lock`. Best-effort: a persistence failure is logged
+/// and swallowed so it never masks the original start error.
+pub(crate) fn persist_record_start_failure(
+    app: &AppHandle,
+    records: &mut [ManagedAgentRecord],
+    pubkey: &str,
+    error: &str,
+) {
+    if let Err(e) = stamp_agent_start_failure(records, pubkey, error)
+        .and_then(|()| save_managed_agents(app, records))
+    {
+        eprintln!("buzz-desktop: failed to persist start error for agent {pubkey}: {e}");
+    }
+}
+
+/// Lock + load + stamp + save a start-path failure, for failure points that
+/// escape BEFORE the caller's mutable store load (the async relay-mesh
+/// preflight runs without the store lock held, by design). Never call this
+/// while holding `managed_agents_store_lock` — the mutex is not reentrant;
+/// use [`persist_record_start_failure`] there instead. Best-effort, same
+/// never-mask-the-original-error contract.
+pub fn persist_agent_start_failure(app: &AppHandle, pubkey: &str, error: &str) {
+    let state = app.state::<crate::app_state::AppState>();
+    let result = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())
+        .and_then(|_guard| load_managed_agents(app));
+    match result {
+        Ok(mut records) => persist_record_start_failure(app, &mut records, pubkey, error),
+        Err(e) => {
+            eprintln!("buzz-desktop: failed to persist start error for agent {pubkey}: {e}")
+        }
+    }
+}
+
 /// Serialize definitions + instances into the single unified store file.
 /// Definitions sort first (by slug) for stable diffs; instances keep the
 /// name/pubkey order their save path established.
@@ -444,7 +502,8 @@ fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRec
 }
 
 /// One-time migration of agent keys from the production keyring service
-/// (`"buzz-desktop"`) to the dev service (`"buzz-desktop-dev"`). Only runs
+/// (`"buzz-desktop"`) to the active dev service (`"buzz-desktop-dev"` or a
+/// per-instance `"buzz-desktop-dev.<slug>"`). Only runs
 /// in debug builds — release builds never touch `"buzz-desktop"` from this
 /// path.
 ///
@@ -458,7 +517,11 @@ fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRec
 /// after the service-name change.
 #[cfg(debug_assertions)]
 pub fn migrate_agent_keys_to_dev_service(app: &tauri::AppHandle) {
-    if !cfg!(feature = "system-keyring") || keyring_service() != "buzz-desktop-dev" {
+    // Runs for the canonical dev service and every per-instance scoped dev
+    // service (`buzz-desktop-dev.<slug>`) — a worktree build's agents need the
+    // same prod-keyring migration, otherwise instances synced from the user's
+    // prod install can never start (their keys are local-only by design).
+    if !cfg!(feature = "system-keyring") || !is_dev_keyring_service(keyring_service()) {
         return;
     }
 
