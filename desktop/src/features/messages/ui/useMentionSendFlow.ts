@@ -596,8 +596,11 @@ export function useMentionSendFlow({
             onComplete: async (uploaded, signal) => {
               try {
                 await finishSend(uploaded, signal);
-              } catch {
+              } catch (error) {
                 restoreComposerAfterFailure();
+                toast.error(
+                  `Message failed to send: ${getErrorMessage(error, "Unknown error")}`,
+                );
               }
             },
             onError: (error) => {
@@ -629,8 +632,11 @@ export function useMentionSendFlow({
         if (!preparedUpload) {
           try {
             await finishSend([]);
-          } catch {
+          } catch (error) {
             restoreComposerAfterFailure();
+            toast.error(
+              `Message failed to send: ${getErrorMessage(error, "Unknown error")}`,
+            );
           }
         }
       } finally {

@@ -91,3 +91,21 @@ test("message send trace classifies publish timeouts", async () => {
     restore();
   }
 });
+
+test("message send trace classifies Tauri string connection errors", async () => {
+  const entries = [];
+  const restore = installInvoke(async (_command, args) => {
+    entries.push(args.entry);
+  });
+  try {
+    const trace = createMessageSendTrace({
+      channelId: "15fed9f9-a324-5e47-917c-6f33546539b1",
+      transport: "http",
+    });
+    trace.finishFailure("relay unreachable: could not connect to relay");
+    await flushDiagnosticWrites();
+    assert.equal(entries.at(-1).outcome, "connection_error");
+  } finally {
+    restore();
+  }
+});

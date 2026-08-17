@@ -44,13 +44,22 @@ export type SendTracedStreamMessageOptions = {
 };
 
 function classifySendFailure(error: unknown): string {
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  const message =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : typeof error === "string"
+        ? error.toLowerCase()
+        : "";
   if (message.includes("timed out") || message.includes("timeout")) {
     return "timeout";
   }
   if (message.includes("rate-limit")) return "rate_limited";
   if (message.includes("reject")) return "relay_rejected";
-  if (message.includes("connect") || message.includes("socket")) {
+  if (
+    message.includes("connect") ||
+    message.includes("socket") ||
+    message.includes("relay unreachable")
+  ) {
     return "connection_error";
   }
   return "unknown_error";
