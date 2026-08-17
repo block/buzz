@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod download_attachment;
 mod paths;
 mod read_file;
 mod rg;
@@ -69,6 +70,17 @@ impl DevMcp {
         Parameters(p): Parameters<view_image::ViewImageParams>,
     ) -> Result<CallToolResult, ErrorData> {
         view_image::run(&self.state, p).await
+    }
+
+    #[tool(
+        name = "download_attachment",
+        description = "Download a non-image file attached to a Buzz message into a temporary local file, using the managed agent's Buzz identity for relay media authorization. Pass the /media/ link and, when available, its displayed filename. Returns an absolute path readable by local PDF/document tools. Use this instead of shell/curl for Buzz attachment links. Only the configured Buzz relay is allowed; files are capped at 20 MiB and removed when this MCP session ends."
+    )]
+    async fn download_attachment(
+        &self,
+        Parameters(p): Parameters<download_attachment::DownloadAttachmentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        download_attachment::run(&self.state, p).await
     }
 
     #[tool(

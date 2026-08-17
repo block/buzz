@@ -363,7 +363,7 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
     if let Some(len) = resp.content_length() {
         if len as usize > MAX_SOURCE_BYTES {
             return Err(invalid_params(format!(
-                "remote image too large: Content-Length {} bytes (limit {})",
+                "remote media too large: Content-Length {} bytes (limit {})",
                 len, MAX_SOURCE_BYTES
             )));
         }
@@ -379,7 +379,7 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
             Some(bytes) => {
                 if buf.len() + bytes.len() > MAX_SOURCE_BYTES {
                     return Err(invalid_params(format!(
-                        "remote image exceeded {} byte cap mid-stream",
+                        "remote media exceeded {} byte cap mid-stream",
                         MAX_SOURCE_BYTES
                     )));
                 }
@@ -389,6 +389,28 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
         }
     }
     Ok(buf)
+}
+
+/// Download a Buzz attachment with the same signed media-read flow used by
+/// `view_image`. Unlike `view_image`'s general URL support, this entry point is
+/// deliberately restricted to the configured relay's `/media/` namespace so
+/// callers cannot turn the authenticated helper into an arbitrary downloader.
+pub(crate) async fn fetch_relay_attachment(url: &str) -> Result<Vec<u8>, ErrorData> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| invalid_params(format!("invalid attachment URL: {url} ({e})")))?;
+    let relay_value = std::env::var("BUZZ_RELAY_URL").map_err(|_| {
+        invalid_params(
+            "BUZZ_RELAY_URL is not configured; cannot authenticate Buzz attachment".to_string(),
+        )
+    })?;
+    let relay = reqwest::Url::parse(&relay_value)
+        .map_err(|e| invalid_params(format!("BUZZ_RELAY_URL is invalid: {relay_value} ({e})")))?;
+    if !is_relay_media_url(&parsed, &relay) {
+        return Err(invalid_params(
+            "attachment URL must be under /media/ on the configured Buzz relay".to_string(),
+        ));
+    }
+    fetch_url(url).await
 }
 
 /// Sniff the image format from magic bytes alone (do not trust extensions

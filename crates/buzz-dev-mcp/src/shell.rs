@@ -74,12 +74,14 @@ impl SharedState {
 
 fn build_bootstrap(cwd: &Path, shell_hint: &str) -> String {
     let stack = detect_stack(cwd);
-    let buzz_hint =
-        if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
-            "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
-        } else {
-            ""
-        };
+    let buzz_hint = if std::env::var("BUZZ_RELAY_URL").is_ok()
+        && std::env::var("BUZZ_PRIVATE_KEY").is_ok()
+    {
+        "\nBuzz relay configured. Run `buzz --help` to see available commands. \
+             For Buzz `/media/` attachment links, use the `download_attachment` tool instead of shell/curl.\n"
+    } else {
+        ""
+    };
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
