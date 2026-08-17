@@ -1065,7 +1065,7 @@ mod tests {
     fn setup_edit(target: &str) -> nostr::Event {
         let keys = nostr::Keys::generate();
         nostr::EventBuilder::new(
-            nostr::Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16),
             "edited",
         )
         .tags([nostr::Tag::parse(["e", target]).unwrap()])
