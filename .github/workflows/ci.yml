@@ -1024,6 +1024,13 @@ jobs:
         # Serial: windows_resolver_tests mutate process-global env
         # (BUZZ_SHELL/GIT_BASH/SystemRoot) that SharedState::new reads.
         run: cargo test -p buzz-dev-mcp --target $env:TARGET -- --test-threads=1
+      - name: Test (buzz-agent auth coordinator)
+        # The auth coordinator single-flights on an OS advisory lock, which is
+        # LockFileEx on Windows; this integration suite drives real second
+        # processes on the same lock file, so it only exercises the Windows
+        # lock runtime (contention, crash release, cross-process cache) if it
+        # runs ON Windows. Every other job compiles it but never executes it.
+        run: cargo test -p buzz-agent --target $env:TARGET --test databricks_auth_coordinator
       # Smoke-test the new host-prereq contract: Git for Windows (which provides
       # bash) is available on the runner, a shell command round-trips, and bash
       # does NOT resolve from System32 (so WSL's launcher is never picked up).

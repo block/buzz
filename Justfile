@@ -323,6 +323,13 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # buzz-agent: the OAuth auth coordinator's library concurrency matrix
+        # plus the databricks integration tests (lock single-flight, cooldown,
+        # cross-process crash recovery) are infra-free — a stub OIDC provider
+        # and an injected browser opener, no network or Postgres. Enumerated
+        # here because nothing in CI runs `cargo test --workspace`, so without
+        # this stanza the crate's tests never execute remotely.
+        cargo nextest run -p buzz-agent
     else
         ./scripts/run-tests.sh unit
     fi
