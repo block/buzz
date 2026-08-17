@@ -997,8 +997,19 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         timestamp: event.event.created_at.as_secs().to_string(),
         emoji,
         message_id,
+        is_reply: event_is_reply(&event.event),
         webhook_fields: HashMap::new(),
     }
+}
+
+/// True when an event is a threaded reply — it carries a NIP-10 `e` tag marked
+/// `reply` or `root`. A top-level message has neither, so a `message_posted`
+/// filter of `trigger_is_reply == false` fires only on new top-level messages.
+fn event_is_reply(event: &nostr::Event) -> bool {
+    event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.len() >= 4 && parts[0] == "e" && (parts[3] == "reply" || parts[3] == "root")
+    })
 }
 
 /// Pure authority decision for [`WorkflowEngine::check_owner_authority`].
@@ -1588,6 +1599,53 @@ steps:
         // Non-reaction events have empty emoji.
         assert_eq!(ctx.emoji, "");
         assert!(ctx.webhook_fields.is_empty());
+        // A top-level message (no e-tags) is not a reply.
+        assert!(!ctx.is_reply);
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_true_for_threaded_message() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .tags([])
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let root_hex = root_event.id.to_hex();
+
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "a threaded reply")
+            .tags([
+                Tag::parse(["e", &root_hex, "", "root"]).expect("root tag"),
+                Tag::parse(["e", &root_hex, "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(ctx.is_reply, "message with reply/root e-tags is a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_unmarked_e_tag() {
+        // A bare `e` tag with no NIP-10 marker (e.g. a plain mention/quote) is
+        // not treated as a thread reply — only `reply`/`root` markers count.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let other = Keys::generate();
+        let other_event = EventBuilder::new(Kind::Custom(9), "other")
+            .tags([])
+            .sign_with_keys(&other)
+            .expect("sign");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "quotes another")
+            .tags([Tag::parse(["e", &other_event.id.to_hex()]).expect("bare e tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(!ctx.is_reply, "unmarked e-tag must not count as a reply");
     }
 
     #[test]

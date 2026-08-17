@@ -872,6 +872,128 @@ pub(crate) async fn resolve_nip10_thread_meta(
     }))
 }
 
+/// Resolved thread ancestry for a relay-built reply (workflow path).
+///
+/// Carries the parent and root identifiers plus the reply's depth, so the
+/// caller can both emit matching NIP-10 `root`/`reply` tags and persist thread
+/// metadata for the signed reply event.
+pub(crate) struct ReplyAncestry {
+    pub parent_event_id: Vec<u8>,
+    pub parent_event_created_at: chrono::DateTime<Utc>,
+    pub root_event_id: Vec<u8>,
+    pub root_event_created_at: chrono::DateTime<Utc>,
+    pub depth: i32,
+}
+
+impl ReplyAncestry {
+    /// Root event ID as lowercase hex, for the NIP-10 `root` tag.
+    pub fn root_hex(&self) -> String {
+        hex::encode(&self.root_event_id)
+    }
+
+    /// Parent event ID as lowercase hex, for the NIP-10 `reply` tag.
+    pub fn parent_hex(&self) -> String {
+        hex::encode(&self.parent_event_id)
+    }
+
+    /// Build the DB thread-metadata params for the signed reply event.
+    pub fn into_thread_meta(
+        self,
+        reply_event_id: Vec<u8>,
+        reply_created_at: chrono::DateTime<Utc>,
+        channel_id: Uuid,
+    ) -> ThreadMetadataOwned {
+        ThreadMetadataOwned {
+            event_id: reply_event_id,
+            event_created_at: reply_created_at,
+            channel_id,
+            parent_event_id: self.parent_event_id,
+            parent_event_created_at: self.parent_event_created_at,
+            root_event_id: self.root_event_id,
+            root_event_created_at: self.root_event_created_at,
+            depth: self.depth,
+            broadcast: false,
+        }
+    }
+}
+
+/// Resolve thread ancestry for a reply built by the relay (workflow path).
+///
+/// Unlike [`resolve_nip10_thread_meta`], which validates client-supplied NIP-10
+/// `e` tags, this derives ancestry from a known `parent_hex` (the triggering
+/// event) and *computes* the correct root and depth. Enforces the same-channel
+/// invariant and the depth limit that the ingest path applies.
+pub(crate) async fn resolve_relay_reply_thread_meta(
+    community_id: CommunityId,
+    parent_hex: &str,
+    channel_id: Uuid,
+    state: &AppState,
+) -> Result<ReplyAncestry, String> {
+    let parent_bytes =
+        hex::decode(parent_hex).map_err(|_| "invalid parent event ID hex".to_string())?;
+
+    let (parent_event_result, parent_meta_result) = tokio::join!(
+        state.db.get_event_by_id(community_id, &parent_bytes),
+        state
+            .db
+            .get_thread_metadata_by_event(community_id, &parent_bytes),
+    );
+
+    let parent_event = parent_event_result
+        .map_err(|e| format!("db error looking up parent: {e}"))?
+        .ok_or_else(|| "reply parent not found".to_string())?;
+
+    match parent_event.channel_id {
+        Some(parent_ch) if parent_ch != channel_id => {
+            return Err("parent event belongs to a different channel".to_string());
+        }
+        None => return Err("parent event has no channel association".to_string()),
+        _ => {}
+    }
+
+    let parent_created =
+        chrono::DateTime::from_timestamp(parent_event.event.created_at.as_secs() as i64, 0)
+            .unwrap_or_else(Utc::now);
+
+    let parent_meta =
+        parent_meta_result.map_err(|e| format!("db error looking up thread metadata: {e}"))?;
+
+    // Root = parent's root if the parent is itself a reply, else the parent.
+    // Depth = parent depth + 1 (a direct reply to a top-level message is depth 1).
+    let (root_bytes, root_created, depth) = match parent_meta {
+        Some(meta) => {
+            let effective_root = meta.root_event_id.unwrap_or_else(|| parent_bytes.clone());
+            let root_ts = if effective_root == parent_bytes {
+                parent_created
+            } else if let Ok(Some(root_ev)) = state
+                .db
+                .get_event_by_id(community_id, &effective_root)
+                .await
+            {
+                chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
+                    .unwrap_or(parent_created)
+            } else {
+                parent_created
+            };
+            (effective_root, root_ts, meta.depth + 1)
+        }
+        // No metadata row ⇒ parent is a top-level message; it is its own root.
+        None => (parent_bytes.clone(), parent_created, 1),
+    };
+
+    if depth > 100 {
+        return Err("thread depth limit exceeded".to_string());
+    }
+
+    Ok(ReplyAncestry {
+        parent_event_id: parent_bytes,
+        parent_event_created_at: parent_created,
+        root_event_id: root_bytes,
+        root_event_created_at: root_created,
+        depth,
+    })
+}
+
 /// Count all `e` tags regardless of content validity.
 fn count_e_tags(event: &Event) -> usize {
     event
