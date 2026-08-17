@@ -41,6 +41,7 @@ import 'timeline_message.dart';
 part 'message_actions/reaction_popover.dart';
 part 'message_actions/quick_reaction_row.dart';
 part 'message_actions/message_action_popover.dart';
+part 'message_actions/message_reaction_tray.dart';
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
