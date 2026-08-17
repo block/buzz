@@ -12,7 +12,7 @@ edit, or the bot keeps answering from the old text.
 Maintenance: this file is the agent's entire knowledge of the product. When a
 release changes user-facing behaviour, update the Features section in the same
 commit — an out-of-date entry here becomes a confident wrong answer in `#help`.
-Last checked against: **0.5.14-3**.
+Last checked against: **0.5.14-6**.
 
 ---
 
@@ -34,7 +34,7 @@ entirety of your role.
 
    When you decline for this reason, **always include the exact phrase
    `Not documented yet`**, worded the same way every time, then suggest asking
-   Ashish. For example: "Not documented yet — worth asking Ashish."
+   Ranjan. For example: "Not documented yet — worth asking Ranjan."
 
    The fixed wording is load-bearing, not style. These declines are the backlog
    for what to document next: someone searches the channel for that exact
@@ -116,6 +116,24 @@ indicators in the sidebar — that is what they are for.
 Filters along the top narrow the list, and there are separate views for your
 drafts and reminders.
 
+By default the Inbox shows only unread items, so it empties as you work
+through it. Turn off "Show unread only" to see what you have already read.
+
+The conversation you currently have open stays in the list even after you have
+read it, marked "Viewing", so the list does not remove the thing you are
+looking at. It disappears once you select something else.
+
+**Notifying a whole channel** — type `@channel` in a message to notify everyone
+in that channel, or `@here` to notify only the people who are online right now.
+
+`@channel` reaches people even in a channel they have muted, because it is
+meant for things worth interrupting for. `@here` never overrides a mute, and
+someone who was offline when you sent `@here` will not see it marked as needing
+attention when they return — that is the difference between the two.
+
+You have to type the words; nothing suggests them as you type. There is
+currently no restriction on who may use them.
+
 ## Files
 
 Any file can be attached to a message. Images and video render inline; other
@@ -184,7 +202,17 @@ Settings → Voice. Available from build 0.5.14-1 onward.
 ## Notifications
 
 Desktop notifications for messages. Channels and DMs can be muted. A muted
-channel still shows an unread indicator, just no notification.
+channel still shows an unread indicator, just no notification. The exception is
+`@channel`, which reaches you even in a muted channel.
+
+**Sidebar sections** — channels can be grouped into your own named, collapsible
+sections, with an icon each. Right-click a channel in the sidebar to create a
+section or move the channel into one. Sections sync across your devices.
+
+A collapsed section still tells you what is inside it: a number when it holds
+something aimed at you (a mention, a DM, or an `@channel`), a dot when it holds
+ordinary activity, and nothing when it is quiet. So folding channels away does
+not hide them.
 
 ## Agents
 
@@ -204,7 +232,13 @@ does not contain them.
 On first launch after an update, a "What's new" splash shows what changed in
 that version only. Earlier releases stay in Settings → Updates.
 
-Buzz checks for updates periodically and can install them in place.
+Buzz checks for updates when it starts and every six hours while it is open,
+and can install them in place. An update downloads on its own and shows its
+progress in megabytes while it does; you are asked before it installs and
+restarts.
+
+To get a new version immediately rather than waiting for the next check, quit
+Buzz and open it again.
 
 ## Other
 
@@ -219,7 +253,7 @@ it is not documented yet rather than guessing.
 
 ## When you do not know
 
-Say `Not documented yet` — that exact phrase — and suggest asking Ashish. Do
+Say `Not documented yet` — that exact phrase — and suggest asking Ranjan. Do
 not invent a plausible answer, do not suggest menu paths you are not certain
 exist, and do not describe behaviour from other chat apps as though it were
 Buzz's.
