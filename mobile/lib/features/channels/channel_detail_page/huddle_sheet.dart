@@ -29,12 +29,14 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
           ephemeralChannelId: state.ephemeralChannelId,
           currentPubkey: state.currentPubkey,
           participantPubkeys: state.participantPubkeys,
+          wasAdmitted: state.wasAdmitted,
         ),
       ),
     );
-    final members =
-        ref.watch(channelMembersProvider(channelId)).value ??
-        const <ChannelMember>[];
+    final members = session.wasAdmitted
+        ? const <ChannelMember>[]
+        : ref.watch(channelMembersProvider(channelId)).value ??
+              const <ChannelMember>[];
     final relayState = ref.watch(relaySessionProvider);
     final participantPubkeys = _huddleParticipantPubkeys(
       sessionParticipantPubkeys: session.ephemeralChannelId == channelId
@@ -266,7 +268,9 @@ class _HuddleJoinSurface extends ConsumerWidget {
           DateTime.fromMillisecondsSinceEpoch(message.createdAt * 1000),
         ) >
         _huddleLifetime;
-    final canJoin = isMember && !isArchived && !ended && !stale;
+    final blockedByOtherHuddle = session.isInSession && !isThisSession;
+    final canJoin =
+        isMember && !isArchived && !ended && !stale && !blockedByOtherHuddle;
 
     final label = unavailable
         ? 'Start new'
@@ -547,7 +551,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final participantPubkeys = _huddleParticipantPubkeys(
       sessionParticipantPubkeys: session.participantPubkeys,
       currentPubkey: localPubkey,
-      members: backingMembers,
+      members: session.wasAdmitted ? const [] : backingMembers,
     );
     final remotePubkeys = participantPubkeys
         .where((pubkey) => pubkey != localPubkey)

@@ -431,6 +431,69 @@ void main() {
   );
 
   test(
+    're-admission reports departed and reused peer indexes before new media',
+    () async {
+      final firstChannel = _ControlledWebSocketChannel();
+      final secondChannel = _ControlledWebSocketChannel();
+      var connection = 0;
+      final transport = HuddleTransport(
+        parameters: HuddleConnectionParameters(
+          relayWebSocketUrl: 'wss://buzz.example',
+          nsec: _privateKey,
+          parentChannelId: _parentChannelId,
+          ephemeralChannelId: _ephemeralChannelId,
+        ),
+        channelFactory: (_) => connection++ == 0 ? firstChannel : secondChannel,
+        connectTimeout: const Duration(seconds: 1),
+        handshakeTimeout: const Duration(seconds: 1),
+      );
+      addTearDown(transport.dispose);
+      await _connect(
+        firstChannel,
+        transport,
+        revision: 1,
+        peers: const [
+          {'pubkey': 'old', 'peer_index': 4},
+          {'pubkey': 'departed', 'peer_index': 5},
+        ],
+      );
+      final events = <HuddlePeerEvent>[];
+      final subscription = transport.peerEvents.listen(events.add);
+      addTearDown(subscription.cancel);
+
+      firstChannel.emitError(StateError('socket lost'));
+      await _waitForPhase(transport, HuddleTransportPhase.failed);
+      final reconnect = transport.connect();
+      await _waitForPhase(transport, HuddleTransportPhase.awaitingChallenge);
+      secondChannel.emitText(
+        jsonEncode({'type': 'challenge', 'challenge': 'reconnect'}),
+      );
+      await _waitForPhase(transport, HuddleTransportPhase.authenticating);
+      secondChannel.emitText(
+        jsonEncode({
+          'type': 'joined',
+          'revision': 4,
+          'pubkey': 'self',
+          'peer_index': 3,
+          'peers': [
+            {'pubkey': 'new', 'peer_index': 4},
+            {'pubkey': 'self', 'peer_index': 3},
+          ],
+        }),
+      );
+      await reconnect;
+
+      expect(transport.state.peers[4]?.pubkey, 'new');
+      expect(events, hasLength(2));
+      expect(events[0].type, HuddlePeerEventType.replaced);
+      expect(events[0].peer.pubkey, 'old');
+      expect(events[0].replacement?.pubkey, 'new');
+      expect(events[1].type, HuddlePeerEventType.left);
+      expect(events[1].peer.pubkey, 'departed');
+    },
+  );
+
+  test(
     'intentional disconnect reaches disconnected without an error',
     () async {
       final channel = _ControlledWebSocketChannel();
@@ -522,6 +585,7 @@ final class _ControlledWebSocketChannel implements WebSocketChannel {
 
   void emitText(String value) => _streamController.add(value);
   void emitBinary(Uint8List value) => _streamController.add(value);
+  void emitError(Object error) => _streamController.addError(error);
 
   @override
   Future<void> get ready => Future.value();

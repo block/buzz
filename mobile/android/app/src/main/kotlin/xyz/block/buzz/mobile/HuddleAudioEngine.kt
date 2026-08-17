@@ -175,7 +175,12 @@ internal class HuddleAudioEngine(
         check(isSupported()) { "This device does not expose Android Opus encode/decode codecs." }
 
         val record = createAudioRecord()
-        val encoder = createEncoder()
+        val encoder = try {
+            createEncoder()
+        } catch (error: Throwable) {
+            runCatching { record.release() }
+            throw error
+        }
         try {
             encoder.start()
             record.startRecording()
@@ -206,7 +211,27 @@ internal class HuddleAudioEngine(
     }
 
     fun setInterrupted(value: Boolean) {
-        interrupted.set(value)
+        val record = audioRecord
+        if (value) {
+            interrupted.set(true)
+            // A focus loss must stop native capture, not merely discard frames
+            // after AudioRecord has already read them from the microphone.
+            if (record != null) runCatching { record.stop() }
+            return
+        }
+        if (!running.get() || record == null) {
+            interrupted.set(false)
+            return
+        }
+        try {
+            record.startRecording()
+            check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                "Microphone recording did not resume."
+            }
+            interrupted.set(false)
+        } catch (error: Throwable) {
+            reportFailure("audio_resume_failed", error)
+        }
     }
 
     fun enqueueRemote(packet: HuddleRemoteOpusPacket) {
@@ -498,17 +523,39 @@ internal class HuddleAudioEngine(
         onFailure(code, error.message ?: "Native Huddle audio failed.")
     }
 
-    private class PeerPlayback(val peerIndex: Int) {
-        private val decoder = createDecoder()
-        private val track = createAudioTrack()
+    private class PeerPlayback private constructor(
+        val peerIndex: Int,
+        private val decoder: MediaCodec,
+        private val track: AudioTrack,
+    ) {
         private val jitterQueue = HuddlePacketJitterQueue(
             capacity = PER_PEER_JITTER_CAPACITY,
             startPackets = JITTER_START_PACKETS,
         )
 
+        companion object {
+            operator fun invoke(peerIndex: Int): PeerPlayback {
+                val decoder = createDecoder()
+                val track = try {
+                    createAudioTrack()
+                } catch (error: Throwable) {
+                    runCatching { decoder.release() }
+                    throw error
+                }
+                return PeerPlayback(peerIndex, decoder, track)
+            }
+        }
+
         init {
-            decoder.start()
-            track.play()
+            try {
+                decoder.start()
+                track.play()
+            } catch (error: Throwable) {
+                runCatching { track.release() }
+                runCatching { decoder.stop() }
+                runCatching { decoder.release() }
+                throw error
+            }
         }
 
         fun enqueue(packet: HuddleRemoteOpusPacket) {
@@ -629,8 +676,9 @@ internal class HuddleAudioEngine(
                 )
                 .setBufferSizeInBytes(max(minimum, FRAME_BYTES * 8))
                 .build()
-            check(record.state == AudioRecord.STATE_INITIALIZED) {
-                "Android microphone capture could not be initialized."
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                record.release()
+                error("Android microphone capture could not be initialized.")
             }
             return record
         }
@@ -645,8 +693,13 @@ internal class HuddleAudioEngine(
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, FRAME_BYTES)
                 setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
             }
-            return MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).apply {
-                configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
+            try {
+                encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                return encoder
+            } catch (error: Throwable) {
+                runCatching { encoder.release() }
+                throw error
             }
         }
 
@@ -662,8 +715,13 @@ internal class HuddleAudioEngine(
                 setByteBuffer("csd-1", nativeLongBuffer(0))
                 setByteBuffer("csd-2", nativeLongBuffer(OPUS_SEEK_PREROLL_NS))
             }
-            return MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).apply {
-                configure(format, null, null, 0)
+            val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
+            try {
+                decoder.configure(format, null, null, 0)
+                return decoder
+            } catch (error: Throwable) {
+                runCatching { decoder.release() }
+                throw error
             }
         }
 
@@ -691,8 +749,9 @@ internal class HuddleAudioEngine(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .setBufferSizeInBytes(max(minimum, FRAME_BYTES * 8))
                 .build()
-            check(track.state == AudioTrack.STATE_INITIALIZED) {
-                "Android Huddle audio output could not be initialized."
+            if (track.state != AudioTrack.STATE_INITIALIZED) {
+                track.release()
+                error("Android Huddle audio output could not be initialized.")
             }
             return track
         }

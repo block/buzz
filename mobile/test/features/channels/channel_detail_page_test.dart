@@ -46,7 +46,6 @@ import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/flapping_bee.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
-import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -114,6 +113,7 @@ NostrEvent _huddleMsg({
   required int kind,
   String pubkey = 'alice',
   int createdAt = 1000,
+  String ephemeralChannelId = _huddleChannelId,
 }) => NostrEvent(
   id: id,
   pubkey: pubkey,
@@ -122,7 +122,7 @@ NostrEvent _huddleMsg({
   tags: [
     ['h', _channelId],
   ],
-  content: jsonEncode({'ephemeral_channel_id': _huddleChannelId}),
+  content: jsonEncode({'ephemeral_channel_id': ephemeralChannelId}),
   sig: '',
 );
 
@@ -3258,6 +3258,53 @@ void main() {
       expect(join.onPressed, isNotNull);
     });
 
+    testWidgets('disables a different Huddle card during an active call', (
+      tester,
+    ) async {
+      const otherHuddleChannelId = 'other-huddle-channel';
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'current-huddle',
+              kind: EventKind.huddleStarted,
+              pubkey: 'self',
+              createdAt: now,
+            ),
+            _huddleMsg(
+              id: 'other-huddle',
+              kind: EventKind.huddleStarted,
+              pubkey: 'alice',
+              createdAt: now,
+              ephemeralChannelId: otherHuddleChannelId,
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+          },
+          relayConfigNotifier: _HuddleRelayConfigNotifier(),
+          huddleCurrentPubkey: 'self',
+          huddleMediaFactory: _HuddleTestMedia.new,
+          huddleTransportFactory: (_) => _HuddleTestTransport(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('huddle-Join-$_huddleChannelId')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
+      await tester.pumpAndSettle();
+
+      final otherJoin = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('huddle-Join-$otherHuddleChannelId')),
+      );
+      expect(otherJoin.onPressed, isNull);
+    });
+
     testWidgets('marks an expired Huddle card as ended', (tester) async {
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       await tester.pumpWidget(
@@ -3510,7 +3557,13 @@ void main() {
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         final media = _HuddleTestMedia();
-        final transport = _HuddleTestTransport();
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'desktop', peerIndex: 1),
+            2: HuddlePeer(pubkey: 'self', peerIndex: 2),
+            3: HuddlePeer(pubkey: 'agent', peerIndex: 3),
+          },
+        );
         final navigator = _RecordingNavigatorObserver();
         String? leftChannelId;
 
@@ -4051,7 +4104,14 @@ void main() {
         // participant exercises the densest supported call.
         final remotePubkeys = List.generate(24, (index) => 'guest-$index');
         final transport = _HuddleTestTransport(
-          peers: const {2: HuddlePeer(pubkey: 'self', peerIndex: 2)},
+          peers: {
+            0: const HuddlePeer(pubkey: 'self', peerIndex: 0),
+            for (var index = 0; index < remotePubkeys.length; index++)
+              index + 1: HuddlePeer(
+                pubkey: remotePubkeys[index],
+                peerIndex: index + 1,
+              ),
+          },
         );
 
         await tester.pumpWidget(
@@ -4194,7 +4254,9 @@ void main() {
       (tester) async {
         const guestPubkey = 'guest';
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        final membersNotifier = _MutableHuddleMembersNotifier(const []);
+        final transport = _HuddleTestTransport(
+          peers: const {2: HuddlePeer(pubkey: 'self', peerIndex: 2)},
+        );
 
         await tester.pumpWidget(
           _buildTestable(
@@ -4213,14 +4275,11 @@ void main() {
                 displayName: 'Guest',
               ),
             },
-            huddleMembersNotifier: membersNotifier,
             relayConfigNotifier: _HuddleRelayConfigNotifier(),
             relaySessionNotifier: _ReconnectingRelaySession(),
             huddleCurrentPubkey: 'self',
             huddleMediaFactory: _HuddleTestMedia.new,
-            huddleTransportFactory: (_) => _HuddleTestTransport(
-              peers: const {2: HuddlePeer(pubkey: 'self', peerIndex: 2)},
-            ),
+            huddleTransportFactory: (_) => transport,
           ),
         );
         await tester.pumpAndSettle();
@@ -4234,14 +4293,9 @@ void main() {
         final soloCenter = tester.getCenter(localAvatar).dy;
         expect(soloCenter, closeTo(tester.getCenter(stage).dy, 1));
 
-        membersNotifier.replace([
-          ChannelMember(
-            pubkey: guestPubkey,
-            role: 'member',
-            joinedAt: DateTime(2025),
-          ),
-        ]);
-        await tester.pump();
+        transport.emitPeerJoin(
+          const HuddlePeer(pubkey: guestPubkey, peerIndex: 1),
+        );
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 130));
         final movingCenter = tester.getCenter(localAvatar).dy;
@@ -4261,92 +4315,65 @@ void main() {
       },
     );
 
-    testWidgets(
-      'adds backing-channel members and applies profile updates without reopening',
-      (tester) async {
-        const latePubkey =
-            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-        const avatarUrl =
-            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        final membersNotifier = _MutableHuddleMembersNotifier(const []);
-        final users = _FakeUserCacheNotifier(const {
-          'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
-          'self': UserProfile(pubkey: 'self', displayName: 'Self'),
-        });
+    testWidgets('does not add backing-channel members after relay admission', (
+      tester,
+    ) async {
+      const staleMemberPubkey =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final membersNotifier = _MutableHuddleMembersNotifier(const []);
 
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: [
-              _huddleMsg(
-                id: 'live-roster-call',
-                kind: EventKind.huddleStarted,
-                pubkey: 'self',
-                createdAt: now,
-              ),
-            ],
-            userCacheNotifier: users,
-            huddleMembersNotifier: membersNotifier,
-            relayConfigNotifier: _HuddleRelayConfigNotifier(),
-            relaySessionNotifier: _ReconnectingRelaySession(),
-            huddleCurrentPubkey: 'self',
-            huddleMediaFactory: _HuddleTestMedia.new,
-            huddleTransportFactory: (_) => _HuddleTestTransport(),
-          ),
-        );
-        await tester.pumpAndSettle();
-        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
-        await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'authoritative-live-roster',
+              kind: EventKind.huddleStarted,
+              pubkey: 'self',
+              createdAt: now,
+            ),
+          ],
+          users: const {
+            'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
+            'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            staleMemberPubkey: UserProfile(
+              pubkey: staleMemberPubkey,
+              displayName: 'Stale member',
+            ),
+          },
+          huddleMembersNotifier: membersNotifier,
+          relayConfigNotifier: _HuddleRelayConfigNotifier(),
+          relaySessionNotifier: _ReconnectingRelaySession(),
+          huddleCurrentPubkey: 'self',
+          huddleMediaFactory: _HuddleTestMedia.new,
+          huddleTransportFactory: (_) => _HuddleTestTransport(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+      await tester.pumpAndSettle();
 
-        final lateAvatar = find.byKey(
-          const ValueKey('huddle-participant-avatar-$latePubkey'),
-        );
-        expect(lateAvatar, findsNothing);
+      membersNotifier.replace([
+        ChannelMember(
+          pubkey: staleMemberPubkey,
+          role: 'member',
+          joinedAt: DateTime(2025),
+        ),
+      ]);
+      await tester.pump();
+      await tester.pump();
 
-        membersNotifier.replace([
-          ChannelMember(
-            pubkey: latePubkey,
-            role: 'bot',
-            joinedAt: DateTime(2025),
-          ),
-        ]);
-        await tester.pump();
-        await tester.pump();
-
-        expect(lateAvatar, findsOneWidget);
-        expect(
-          find.descendant(of: lateAvatar, matching: find.text('N')),
-          findsNothing,
-        );
-        expect(
-          find.descendant(
-            of: lateAvatar,
-            matching: find.byIcon(LucideIcons.userRound),
-          ),
-          findsOneWidget,
-        );
-
-        users.replace(
-          const UserProfile(
-            pubkey: latePubkey,
-            displayName: 'Ada',
-            avatarUrl: avatarUrl,
-          ),
-        );
-        await tester.pump(const Duration(milliseconds: 60));
-
-        final avatar = tester.widget<AvatarImage>(
-          find.descendant(of: lateAvatar, matching: find.byType(AvatarImage)),
-        );
-        expect(avatar.imageUrl, avatarUrl);
-        expect(find.text('Ada'), findsNothing);
-
-        await tester.tap(lateAvatar);
-        await tester.pump();
-        expect(find.text('Ada'), findsOneWidget);
-        expect(find.byKey(const ValueKey('huddle-leave')), findsOneWidget);
-      },
-    );
+      expect(
+        find.byKey(
+          const ValueKey('huddle-participant-avatar-$staleMemberPubkey'),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-participant-avatar-desktop')),
+        findsOneWidget,
+      );
+    });
 
     testWidgets('top-right call end leaves audio and the backing channel', (
       tester,
@@ -9039,15 +9066,15 @@ final class _HuddleTestTransport implements HuddleTransportClient {
   _HuddleTestTransport({
     this.connectError,
     this.connectGate,
-    this.peers = const {
+    Map<int, HuddlePeer> peers = const {
       1: HuddlePeer(pubkey: 'desktop', peerIndex: 1),
       2: HuddlePeer(pubkey: 'self', peerIndex: 2),
     },
-  });
+  }) : _peers = Map<int, HuddlePeer>.from(peers);
 
   final HuddleTransportError? connectError;
   final Future<void>? connectGate;
-  final Map<int, HuddlePeer> peers;
+  final Map<int, HuddlePeer> _peers;
   final _states = StreamController<HuddleTransportState>.broadcast(sync: true);
   final _remoteFrames = StreamController<HuddleRemoteAudioFrame>.broadcast(
     sync: true,
@@ -9055,6 +9082,19 @@ final class _HuddleTestTransport implements HuddleTransportClient {
   final _peerEvents = StreamController<HuddlePeerEvent>.broadcast(sync: true);
   final _issues = StreamController<HuddleTransportError>.broadcast(sync: true);
   HuddleTransportState _state = HuddleTransportState.idle();
+
+  void emitPeerJoin(HuddlePeer peer) {
+    _peers[peer.peerIndex] = peer;
+    _state = HuddleTransportState(
+      phase: HuddleTransportPhase.connected,
+      localPeerIndex: _state.localPeerIndex,
+      peers: _peers,
+    );
+    _states.add(_state);
+    _peerEvents.add(
+      HuddlePeerEvent(type: HuddlePeerEventType.joined, peer: peer),
+    );
+  }
 
   void emitRemoteAudio({int levelDbov = -30, int sequence = 1}) {
     _remoteFrames.add(
@@ -9093,7 +9133,7 @@ final class _HuddleTestTransport implements HuddleTransportClient {
     _state = HuddleTransportState(
       phase: HuddleTransportPhase.connected,
       localPeerIndex: 2,
-      peers: peers,
+      peers: _peers,
     );
     _states.add(_state);
   }

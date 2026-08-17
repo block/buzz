@@ -151,6 +151,8 @@ final class HuddleTransport implements HuddleTransportClient {
   int _generation = 0;
   bool _disposed = false;
   bool _intentionalClose = false;
+  bool _hasAdmitted = false;
+  Map<int, HuddlePeer>? _admissionPreviousPeers;
 
   HuddleTransport({
     required this.parameters,
@@ -205,7 +207,15 @@ final class HuddleTransport implements HuddleTransportClient {
 
     final generation = ++_generation;
     _intentionalClose = false;
-    _emitState(HuddleTransportState(phase: HuddleTransportPhase.connecting));
+    _admissionPreviousPeers = Map<int, HuddlePeer>.from(_state.peers);
+    _emitState(
+      HuddleTransportState(
+        phase: HuddleTransportPhase.connecting,
+        localPeerIndex: _state.localPeerIndex,
+        rosterRevision: _state.rosterRevision,
+        peers: _state.peers,
+      ),
+    );
 
     try {
       final channel = _channelFactory(parameters.audioWebSocketUri);
@@ -227,7 +237,12 @@ final class HuddleTransport implements HuddleTransportClient {
         cancelOnError: false,
       );
       _emitState(
-        HuddleTransportState(phase: HuddleTransportPhase.awaitingChallenge),
+        HuddleTransportState(
+          phase: HuddleTransportPhase.awaitingChallenge,
+          localPeerIndex: _state.localPeerIndex,
+          rosterRevision: _state.rosterRevision,
+          peers: _state.peers,
+        ),
       );
       _handshakeTimer = Timer(handshakeTimeout, () {
         _fail(
@@ -389,7 +404,12 @@ final class HuddleTransport implements HuddleTransportClient {
       );
       _channel?.sink.add(jsonEncode(auth));
       _emitState(
-        HuddleTransportState(phase: HuddleTransportPhase.authenticating),
+        HuddleTransportState(
+          phase: HuddleTransportPhase.authenticating,
+          localPeerIndex: _state.localPeerIndex,
+          rosterRevision: _state.rosterRevision,
+          peers: _state.peers,
+        ),
       );
     } catch (error) {
       _fail(
@@ -423,6 +443,9 @@ final class HuddleTransport implements HuddleTransportClient {
 
     final initialAdmission =
         _state.phase == HuddleTransportPhase.authenticating;
+    final previousAdmissionPeers = initialAdmission
+        ? (_admissionPreviousPeers ?? _state.peers)
+        : _state.peers;
     final revision = message['revision'];
     if (revision != null && (revision is! int || revision < 0)) {
       _handleProtocolProblem('Malformed Huddle joined revision.', generation);
@@ -470,6 +493,9 @@ final class HuddleTransport implements HuddleTransportClient {
     if (!initialAdmission || revision == null) {
       peers[peerIndex] = peer;
     }
+    if (initialAdmission && _hasAdmitted) {
+      _emitAdmissionRosterChanges(previousAdmissionPeers, peers);
+    }
     if (!initialAdmission &&
         replaced != null &&
         replaced.pubkey != peer.pubkey) {
@@ -503,9 +529,36 @@ final class HuddleTransport implements HuddleTransportClient {
     }
     _handshakeTimer?.cancel();
     _handshakeTimer = null;
+    if (initialAdmission) {
+      _hasAdmitted = true;
+      _admissionPreviousPeers = null;
+    }
     if (_handshakeCompleter case final completer? when !completer.isCompleted) {
       completer.complete();
     }
+  }
+
+  void _emitAdmissionRosterChanges(
+    Map<int, HuddlePeer> previous,
+    Map<int, HuddlePeer> current,
+  ) {
+    final removedOrReplacedIndices = <int>{};
+    for (final entry in previous.entries) {
+      final replacement = current[entry.key];
+      if (replacement == null || replacement.pubkey != entry.value.pubkey) {
+        removedOrReplacedIndices.add(entry.key);
+        _peerController.add(
+          HuddlePeerEvent(
+            type: replacement == null
+                ? HuddlePeerEventType.left
+                : HuddlePeerEventType.replaced,
+            peer: entry.value,
+            replacement: replacement,
+          ),
+        );
+      }
+    }
+    _purgeAudioIngress(removedOrReplacedIndices);
   }
 
   void _handleLeft(Map<String, dynamic> message, int generation) {

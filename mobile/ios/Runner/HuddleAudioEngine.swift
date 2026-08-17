@@ -859,13 +859,16 @@ final class HuddleAudioEngine {
       stateLock.unlock()
       return
     }
+    let message =
+      (error as? LocalizedError)?.errorDescription
+      ?? error.localizedDescription
     failureReported = true
     stateLock.unlock()
-    onFailure(
-      code,
-      (error as? LocalizedError)?.errorDescription
-        ?? error.localizedDescription
-    )
+    // Fail closed on the native queue. Flutter will perform the durable session
+    // teardown too, but microphone and playout lifetime must not depend on a
+    // platform-channel callback making a successful round trip.
+    stopOnQueue()
+    onFailure(code, message)
   }
 
   private func matchesTargetPCM(_ format: AVAudioFormat) -> Bool {
@@ -909,7 +912,7 @@ final class HuddleAudioEngine {
 }
 
 private final class HuddlePeerPlayback {
-  private let player = AVAudioPlayerNode()
+  private let player: AVAudioPlayerNode
   private let decoder: HuddleOpusDecoder
   private var jitterQueue = HuddlePacketJitterQueue(
     capacity: 10,
@@ -921,9 +924,18 @@ private final class HuddlePeerPlayback {
     pcmFormat: AVAudioFormat
   ) throws {
     decoder = try HuddleOpusDecoder()
+    let player = AVAudioPlayerNode()
+    self.player = player
     engine.attach(player)
-    engine.connect(player, to: engine.mainMixerNode, format: pcmFormat)
-    player.play()
+    do {
+      engine.connect(player, to: engine.mainMixerNode, format: pcmFormat)
+      player.play()
+    } catch {
+      player.stop()
+      engine.disconnectNodeOutput(player)
+      engine.detach(player)
+      throw error
+    }
   }
 
   func enqueue(_ packet: HuddleRemoteOpusPacket) {

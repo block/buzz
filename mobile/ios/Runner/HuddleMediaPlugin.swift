@@ -172,6 +172,11 @@ final class HuddleMediaPlugin {
       ])
     } catch {
       audioSessionPrepared = false
+      try? audioSession.overrideOutputAudioPort(.none)
+      try? audioSession.setActive(
+        false,
+        options: [.notifyOthersOnDeactivation]
+      )
       result(
         FlutterError(
           code: "audio_session_failed",
