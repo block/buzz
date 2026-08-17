@@ -185,12 +185,12 @@ test("native mode is NOT entered when the bridge fails, and the hook says so", a
   }
 });
 
-test("native ingest rejection heals the chain, re-syncs projection, and preserves the next mutation", async () => {
+test("native ingest rejection retries the originally rejected marker", async () => {
   installFreshStorage();
   let harness;
-  const failCommands = new Set();
-  const rig = installNativeRig({ failCommands });
-  const scope = { pubkey: "pk-ingest-recovery", relayUrl: RELAY };
+  const failOnceCommands = new Set(["observed_unread_ingest"]);
+  const rig = installNativeRig({ failOnceCommands });
+  const scope = { pubkey: "pk-ingest-marker-retry", relayUrl: RELAY };
   try {
     harness = await mountHook(
       {
@@ -202,41 +202,24 @@ test("native ingest rejection heals the chain, re-syncs projection, and preserve
     );
     await settle();
 
-    const store = rig.scope(scope);
-    store.events.set("evt-recovery", {
-      id: "evt-recovery",
-      channelId: "channel-recovery",
-      createdAt: NOW_S + 1,
-      rootId: null,
-      highPriority: false,
-      countsTowardBadge: true,
-      countsTowardAppBadge: true,
-    });
-    failCommands.add("observed_unread_ingest");
-
     harness.api.syncMarkers(["channel-failed"]);
     await settle();
     await settle();
-    failCommands.delete("observed_unread_ingest");
 
     assert.equal(
-      harness.api.projectionsRef.current.get("channel-recovery")?.count,
-      1,
-      "reopening after the rejected transaction must replace the optimistic projection with the authoritative snapshot",
+      rig.scope(scope).markers.get("channel-failed"),
+      NOW_S,
+      "the marker rejected on its first attempt must survive the reopen and retry",
+    );
+    assert.equal(
+      rig.requests("observed_unread_open_scope").length,
+      2,
+      "recovery must refresh the native sequence and revision before retrying",
     );
     assert.equal(
       harness.api.isNative(),
       true,
-      "a successful reopen must keep native persistence healthy",
-    );
-
-    harness.api.syncMarkers(["channel-next"]);
-    await settle();
-
-    assert.equal(
-      store.markers.get("channel-next"),
-      NOW_S,
-      "the mutation after a rejected ingest must still reach the native store",
+      "a successful retry must keep native persistence healthy",
     );
   } finally {
     await harness?.unmount();
@@ -244,11 +227,95 @@ test("native ingest rejection heals the chain, re-syncs projection, and preserve
   }
 });
 
-test("native ingest and reopen rejection declares native persistence unhealthy", async () => {
+test("native ingest rejection retries the originally rejected destructive clear", async () => {
+  installFreshStorage();
+  let harness;
+  const failOnceCommands = new Set();
+  const rig = installNativeRig({ failOnceCommands });
+  const scope = { pubkey: "pk-ingest-clear-retry", relayUrl: RELAY };
+  try {
+    harness = await mountHook(
+      { ...DEFAULT_PROPS, pubkey: scope.pubkey },
+      makeRefs(),
+    );
+    await settle();
+
+    const store = rig.scope(scope);
+    store.events.set("evt-clear-retry", {
+      channelId: "channel-clear-retry",
+      id: "evt-clear-retry",
+      createdAt: NOW_S,
+      rootId: null,
+      highPriority: false,
+      countsTowardBadge: true,
+      countsTowardAppBadge: true,
+    });
+    store.channelLatest.set("channel-clear-retry", NOW_S);
+    failOnceCommands.add("observed_unread_ingest");
+
+    harness.api.removeChannel("channel-clear-retry");
+    await settle();
+    await settle();
+
+    assert.equal(
+      store.events.has("evt-clear-retry"),
+      false,
+      "the removeChannel rejected on its first attempt must still delete events",
+    );
+    assert.equal(
+      store.channelLatest.has("channel-clear-retry"),
+      false,
+      "the retried clear must also remove the channel latest anchor",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
+test("native ingest rejection retries the originally rejected membership delta", async () => {
+  installFreshStorage();
+  let harness;
+  const failOnceCommands = new Set(["observed_unread_ingest"]);
+  const rig = installNativeRig({ failOnceCommands });
+  const scope = { pubkey: "pk-ingest-membership-retry", relayUrl: RELAY };
+  try {
+    harness = await mountHook(
+      { ...DEFAULT_PROPS, pubkey: scope.pubkey },
+      makeRefs(),
+    );
+    await settle();
+
+    harness.api.updateMembership("followed", "root-retry", true);
+    await settle();
+    await settle();
+
+    assert.ok(
+      rig.scope(scope).membership.has("followed\u0000root-retry"),
+      "the membership delta rejected on its first attempt must survive the retry",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
+test("native retry and reopen rejection applies the mutation to fallback state", async () => {
   installFreshStorage();
   let harness;
   const failCommands = new Set();
   const rig = installNativeRig({ failCommands });
+  const refs = makeRefs();
+  refs.eventsRef.current.set(
+    "channel-failed",
+    new Map([
+      [
+        "evt-fallback",
+        makeObservedEvent({ id: "evt-fallback", createdAt: NOW_S }),
+      ],
+    ]),
+  );
+  refs.latestRef.current.set("channel-failed", NOW_S);
   try {
     harness = await mountHook(
       {
@@ -256,7 +323,7 @@ test("native ingest and reopen rejection declares native persistence unhealthy",
         pubkey: "pk-ingest-reopen-failure",
         getTs: () => NOW_S,
       },
-      makeRefs(),
+      refs,
     );
     await settle();
     failCommands.add("observed_unread_ingest");
@@ -269,7 +336,17 @@ test("native ingest and reopen rejection declares native persistence unhealthy",
     assert.equal(
       harness.api.isNative(),
       false,
-      "if the authoritative snapshot cannot be reopened, isNative must stop reporting the failed path as healthy",
+      "if neither retry nor authoritative reopen succeeds, isNative must declare the path unhealthy",
+    );
+    assert.equal(
+      refs.eventsRef.current.has("channel-failed"),
+      false,
+      "the rejected marker must still prune equivalent JS fallback state",
+    );
+    assert.equal(
+      refs.latestRef.current.has("channel-failed"),
+      false,
+      "fallback latest state must stay consistent with the applied marker",
     );
   } finally {
     await harness?.unmount();

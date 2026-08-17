@@ -355,6 +355,58 @@ struct RunningSync {
     reload: Arc<Notify>,
 }
 
+/// Proof that the holder is the current archive-sync owner, and the lock that
+/// makes it true. Minted only by [`ArchiveSyncState::begin`], and required by
+/// [`NativeRelayClient::archive_session`].
+///
+/// Acquiring the shared relay session has to happen *inside* the ownership
+/// critical section, not after it. `NativeRelayClient::ensure_session` shuts
+/// down the previous scope's socket and installs its own within its own lock,
+/// and `attach_archive` replaces the session's archive event sender outright.
+/// Both are destructive on entry, so a superseded start that merely
+/// re-validated its mark *after* acquiring would already have torn down the
+/// newer owner's session — with nothing to restore it from, since a session is
+/// spawned rather than handed back. The damage is done by the call, so the
+/// fence has to be around the call.
+///
+/// Holding both guards across that acquisition is sound because it performs no
+/// I/O: `ensure_session` and `attach_archive` await only mutex acquisitions,
+/// `shutdown` is a synchronous cancel, and the socket connects on the task
+/// `start_managed` spawns. If either half ever grows an awaited network
+/// round-trip, this design must be revisited rather than quietly extended.
+///
+/// The lock order through the whole unit is `latest` -> `running` -> `current`
+/// -> `archive_events`, and nothing acquires in the reverse direction:
+/// [`ArchiveSyncState::end`] and
+/// [`ArchiveSyncState::notify_subscriptions_changed`] take the archive locks in
+/// the same order and never reach into the session, and the session's own paths
+/// (`session`, `fetch_events`, `run_session`) never reach back into archive
+/// state. So there is no cycle to deadlock on.
+///
+/// **What this token does not cover.** It serializes archive lifecycle against
+/// archive lifecycle. It does not serialize against
+/// [`NativeRelayClient::session`], which the persona catalog and unread
+/// catch-up call without one: a scope-changing `session` landing between
+/// `ensure_session` and `attach_archive` would shut the returned session down,
+/// and attaching to an already-cancelled session is silent — the sender is
+/// installed but its socket loop has already exited, so archive sync would sit
+/// dead until the next lifecycle edge. That window predates this change and the
+/// renderer gates those features to the same scope, so it is theoretical today;
+/// it is recorded here so this token is not read as a guarantee it does not
+/// make.
+///
+/// The fields are private and the type is un-constructible outside this module,
+/// so the stale-start path is a compile error rather than a race to remember.
+/// Dropping the token releases ownership, which is why the command holds it
+/// until the sync task is spawned.
+pub(crate) struct ArchiveOwnership<'a> {
+    /// Field order is the lock order `begin` and `end` both take: `latest`,
+    /// then `running`. Rust drops fields in declaration order, so releasing
+    /// mirrors acquiring and the two halves can never interleave.
+    _latest: tokio::sync::MutexGuard<'a, (u64, u64)>,
+    _running: tokio::sync::MutexGuard<'a, Option<RunningSync>>,
+}
+
 impl ArchiveSyncState {
     /// Wakes the sync task so it reloads saved subscriptions.
     ///
@@ -398,7 +450,7 @@ impl ArchiveSyncState {
     }
 
     /// Takes ownership for a start under `(epoch, lease)`, installing the task
-    /// when it wins. Returns false when the caller must not proceed — either
+    /// when it wins. Returns `None` when the caller must not proceed — either
     /// the mark is stale or an equivalent task is already running.
     ///
     /// The whole ownership policy lives here rather than in the command so the
@@ -410,16 +462,22 @@ impl ArchiveSyncState {
     /// start a newer start already superseded, and one delayed past its own
     /// stop. Comparison is lexicographic on `(epoch, lease)`, so any call from
     /// a superseded realm loses regardless of how far its lease counter ran.
+    ///
+    /// The winner receives an [`ArchiveOwnership`] that keeps both guards held,
+    /// and [`NativeRelayClient::archive_session`] cannot be called without one.
+    /// Acquiring the shared session is therefore inside this critical section
+    /// rather than after it — see [`ArchiveOwnership`] for why "revalidate the
+    /// mark afterwards" cannot work here.
     async fn begin(
         &self,
         mark: (u64, u64),
         scope: (String, String),
         cancel: CancellationToken,
         reload: Arc<Notify>,
-    ) -> bool {
+    ) -> Option<ArchiveOwnership<'_>> {
         let mut latest = self.latest.lock().await;
         if mark <= *latest {
-            return false;
+            return None;
         }
         *latest = mark;
 
@@ -430,7 +488,7 @@ impl ArchiveSyncState {
             .as_ref()
             .is_some_and(|current| current.scope == scope)
         {
-            return false;
+            return None;
         }
         if let Some(previous) = running.take() {
             previous.cancel.cancel();
@@ -440,7 +498,10 @@ impl ArchiveSyncState {
             cancel,
             reload,
         });
-        true
+        Some(ArchiveOwnership {
+            _latest: latest,
+            _running: running,
+        })
     }
 
     /// Releases ownership for a stop under `(epoch, lease)`, cancelling the
@@ -508,16 +569,22 @@ pub async fn start_archive_sync(
     // same-scope remount, must not open a relay socket just to drop it again.
     let cancel = CancellationToken::new();
     let reload = Arc::new(Notify::new());
-    if !sync_state
+    let Some(ownership) = sync_state
         .begin((epoch, lease), scope, cancel.clone(), Arc::clone(&reload))
         .await
-    {
+    else {
         return Ok(());
-    }
+    };
 
     // No NIP-OA auth tag: this is the owner's own session, authenticated as
     // the identity itself, exactly like the renderer's relay client.
-    let (session, events) = relay_client.archive_session(relay_url, keys).await;
+    //
+    // Inside the ownership critical section, holding `ownership`: acquiring the
+    // shared session is destructive to whatever scope holds it, so a superseded
+    // start must not be able to reach this line at all. See [`ArchiveOwnership`].
+    let (session, events) = relay_client
+        .archive_session(relay_url, keys, &ownership)
+        .await;
 
     let io = AppIo {
         app: app.clone(),

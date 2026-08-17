@@ -112,10 +112,21 @@ impl NativeRelayClient {
         self.ensure_session(relay_url, keys).await
     }
 
+    /// Returns the shared session for `(relay_url, keys)` plus the archive
+    /// event stream, replacing any session for a different scope.
+    ///
+    /// Requires proof of archive-sync ownership because both halves are
+    /// destructive on entry: `ensure_session` shuts down a different scope's
+    /// socket, and `attach_archive` replaces the session's archive sender, so a
+    /// superseded caller would steal the live stream from the current owner.
+    /// The token is un-constructible outside `archive::sync` and holds the
+    /// ownership locks for its lifetime, so a stale start cannot reach this
+    /// call. See [`crate::archive::sync::ArchiveOwnership`].
     pub(crate) async fn archive_session(
         &self,
         relay_url: String,
         keys: Keys,
+        _ownership: &crate::archive::sync::ArchiveOwnership<'_>,
     ) -> (Arc<RelaySession>, mpsc::Receiver<MatchedEvent>) {
         let session = self.ensure_session(relay_url, keys).await;
         let event_rx = session.attach_archive().await;

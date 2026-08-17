@@ -534,6 +534,10 @@ async fn a_failed_listing_leaves_the_previous_subscriptions_live() {
 /// ownership. Mirrors the command minus the relay session and spawned loop,
 /// which the ordering invariant does not involve.
 ///
+/// The ownership token is dropped before returning, so these tests apply the
+/// halves sequentially as before. The test that needs it held across an
+/// acquisition calls [`ArchiveSyncState::begin`] directly.
+///
 /// The token is the task's identity: two starts produce distinct tokens, so a
 /// test can name WHICH task survived an interleaving rather than only that one
 /// did. "Something is running" is satisfiable by the stale start's task.
@@ -551,6 +555,7 @@ async fn start_half(
             Arc::new(Notify::new()),
         )
         .await
+        .is_some()
         .then_some(cancel)
 }
 
@@ -877,4 +882,102 @@ async fn announced_epochs_strictly_increase() {
         );
         previous = epoch;
     }
+}
+
+// ── Session acquisition ──────────────────────────────────────────────────────
+//
+// Ordering alone is not enough once a start has to acquire the shared relay
+// session: `ensure_session` shuts down a different scope's socket and
+// `attach_archive` replaces the archive sender, both destructively on entry.
+// A start that checked its mark, yielded, and acquired afterwards would already
+// have torn down the newer owner's session by the time it discovered it lost.
+//
+// Two things close that, and only one of them is testable here. That a
+// superseded start cannot call `archive_session` at all is the token's job and
+// is enforced by the compiler, not by a test — `ArchiveOwnership` is
+// un-constructible outside this module, so the bypass does not compile. What
+// this test pins is the property the token's usefulness rests on: while a
+// winner holds it, no other start can claim.
+
+/// While a start holds its ownership token, a newer start cannot claim — so the
+/// window in which the shared session is acquired is exclusive.
+///
+/// This is the mutant that motivated the design and the one a test has to
+/// catch: keeping the token but releasing the guards inside `begin`. That
+/// compiles, keeps every other lifecycle test green, and restores exactly the
+/// race — B claims, yields into `archive_session`, C claims and installs its
+/// own session, then B's acquisition shuts C's socket down and attaches the
+/// archive stream to a task whose token is already cancelled.
+///
+/// The competing start uses a DIFFERENT scope on purpose: under `SCOPE` it
+/// would take the same-scope remount no-op and report `None` whatever the locks
+/// did, so the assertion would hold for a benign reason.
+#[tokio::test]
+async fn a_newer_start_cannot_claim_while_the_owner_holds_its_token() {
+    let state = Arc::new(ArchiveSyncState::default());
+
+    let first = CancellationToken::new();
+    let ownership = state
+        .begin(
+            (1, 1),
+            (SCOPE.0.to_string(), SCOPE.1.to_string()),
+            first.clone(),
+            Arc::new(Notify::new()),
+        )
+        .await
+        .expect("the first start claims ownership");
+
+    let second = CancellationToken::new();
+    let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let contender = tokio::spawn({
+        let state = Arc::clone(&state);
+        let claimed = Arc::clone(&claimed);
+        let second = second.clone();
+        async move {
+            let won = state
+                .begin(
+                    (1, 2),
+                    ("other-pubkey".to_string(), SCOPE.1.to_string()),
+                    second,
+                    Arc::new(Notify::new()),
+                )
+                .await
+                .is_some();
+            claimed.store(won, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+
+    // Give the contender every chance to claim while the owner still holds the
+    // token. Yield first so it is polled at all, then a real sleep so a slow
+    // scheduler cannot make this pass by never running it.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        !claimed.load(std::sync::atomic::Ordering::SeqCst),
+        "a newer start claimed while the owner still held its token: the owner's \
+         session acquisition is no longer exclusive, so a superseded start can \
+         shut down the newer scope's socket"
+    );
+    assert!(
+        !first.is_cancelled(),
+        "the owner's task was cancelled while it still held ownership"
+    );
+
+    // Releasing the token is what lets the newer start through — and it must
+    // then win, or this test would also pass against a `begin` that deadlocked.
+    drop(ownership);
+    contender.await.expect("contender task");
+    assert!(
+        claimed.load(std::sync::atomic::Ordering::SeqCst),
+        "the newer start never claimed after the owner released its token"
+    );
+    assert!(
+        first.is_cancelled(),
+        "the superseded task must be cancelled once the newer start installs"
+    );
+    assert!(
+        running_is(&state, &second).await,
+        "the newer start's task must be the installed one"
+    );
 }

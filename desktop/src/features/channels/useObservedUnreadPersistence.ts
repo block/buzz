@@ -253,42 +253,94 @@ export function useObservedUnreadPersistence(
       });
   }, [apply]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mutable storage refs are stable containers
+  const seedFallback = React.useCallback((mutation: NativeMutation) => {
+    if (mutation.clearAll) {
+      observedUnreadEventsByChannelRef.current = new Map();
+      latestByChannelRef.current = new Map();
+    }
+    for (const channelId of mutation.clearChannels) {
+      observedUnreadEventsByChannelRef.current.delete(channelId);
+      latestByChannelRef.current.delete(channelId);
+    }
+    for (const event of mutation.events) {
+      const { channelId, ...observed } = event;
+      recordObservedUnreadEvent(
+        observedUnreadEventsByChannelRef.current,
+        channelId,
+        observed,
+        1_000,
+      );
+    }
+    const markers = new Map(
+      mutation.markers.map(({ contextId, readAt }) => [contextId, readAt]),
+    );
+    pruneObservedUnreadByMarkers(
+      observedUnreadEventsByChannelRef.current,
+      latestByChannelRef.current,
+      (channelId) =>
+        markers.has(channelId)
+          ? (markers.get(channelId) ?? null)
+          : getEffectiveTimestamp(channelId),
+      (contextId) =>
+        markers.has(contextId)
+          ? (markers.get(contextId) ?? null)
+          : getOwnTimestamp(contextId),
+    );
+    for (const latest of mutation.channelLatest) {
+      const current = latestByChannelRef.current.get(latest.channelId) ?? 0;
+      if (latest.createdAt > current)
+        latestByChannelRef.current.set(latest.channelId, latest.createdAt);
+    }
+    // Membership deltas mirror renderer-owned sets, which remain authoritative
+    // after native persistence degrades and therefore need no fallback copy.
+    nativeFailedRef.current = true;
+    nativeRef.current = null;
+    scheduleObservedUnreadWrite(scopeLoadedRef.current, persistRefs.current);
+    optionsRef.current.onPruned?.();
+  }, []);
+
   const enqueueNative = React.useCallback(
     (state: NativeState, mutation: NativeMutation) => {
       flushNative();
-      chainRef.current = chainRef.current
-        .then(async () => {
+      chainRef.current = chainRef.current.then(async () => {
+        const ingest = async () => {
           const current = nativeRef.current;
           if (
             !current ||
             current.scope.pubkey !== state.scope.pubkey ||
             current.scope.relayUrl !== state.scope.relayUrl
           )
-            return;
-          apply(
-            await ingestObservedUnread({
-              scope: current.scope,
-              sequence: current.sequence + 1,
-              baseRevision: current.revision,
-              ...mutation,
-            }),
-          );
-        })
-        .catch(async () => {
-          try {
-            await reopen(state.scope);
-          } catch {
-            if (
-              activityScopeKey(state.scope.pubkey, state.scope.relayUrl) ===
-              scopeLoadedRef.current
-            ) {
-              nativeFailedRef.current = true;
-              nativeRef.current = null;
-            }
-          }
-        });
+            return true;
+          const response = await ingestObservedUnread({
+            scope: current.scope,
+            sequence: current.sequence + 1,
+            baseRevision: current.revision,
+            ...mutation,
+          });
+          if (response.kind === "snapshotRequired") return false;
+          apply(response);
+          return true;
+        };
+
+        try {
+          if (await ingest()) return;
+        } catch {}
+
+        try {
+          await reopen(state.scope);
+          if (await ingest()) return;
+        } catch {}
+
+        if (
+          activityScopeKey(state.scope.pubkey, state.scope.relayUrl) ===
+          scopeLoadedRef.current
+        ) {
+          seedFallback(mutation);
+        }
+      });
     },
-    [apply, flushNative, reopen],
+    [apply, flushNative, reopen, seedFallback],
   );
 
   React.useEffect(() => {
