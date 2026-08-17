@@ -1199,6 +1199,19 @@ pub enum ReposCmd {
         #[arg(long)]
         channel: String,
     },
+    /// Delete one of your repository announcements (NIP-09 kind:5).
+    ///
+    /// Retracts the kind:30617 announcement at `30617:<you>:<id>` so it stops
+    /// appearing in repository and project listings. Scoped to the caller's own
+    /// pubkey — another author's announcement at the same id is never touched.
+    ///
+    /// This removes the announcement only. Any relay-hosted bare repository
+    /// storage behind it is an operator concern and is not reclaimed here.
+    Delete {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+    },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
@@ -2292,7 +2305,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "get", "list", "protect"]
+            vec!["bind", "create", "delete", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -2368,7 +2381,7 @@ mod tests {
             ("pr", 5),
             ("projects", 7),
             ("reactions", 3),
-            ("repos", 5),
+            ("repos", 6),
             ("social", 7),
             ("upload", 1),
             ("users", 5),

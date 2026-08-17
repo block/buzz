@@ -4,8 +4,9 @@
 //!   1. Fetch the caller's own live head via `kinds:[30621] + authors:[self] + #d:[slug]`.
 //!   2. Mutate the tag set (strip `auth`, apply change).
 //!   3. Re-validate the full envelope through Layer A before submitting.
-//!   4. Set `created_at = head.created_at + 1` (never wall-clock) to avoid
-//!      overwriting a concurrently advancing head.
+//!   4. Set `created_at = max(now, head.created_at + 1)` to avoid overwriting
+//!      a concurrently advancing head without stranding the write outside the
+//!      relay's accepted timestamp window (see `next_timestamp`).
 //!
 //! Limitations recorded in this phase:
 //!   - Relay hints are read-preserved but not authored (`--repo` carries
@@ -137,12 +138,40 @@ async fn submit_project(
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
 /// Advance the `created_at` counter off an observed head.
+///
+/// Returns `max(now, head.created_at + 1)`.
+///
+/// `head + 1` on its own preserves monotonicity — the write always lands
+/// strictly above the head it read, so it cannot silently erase a
+/// concurrently advancing writer. But it never tracks wall clock, so on a
+/// head older than the relay's accepted timestamp window it signs a stale
+/// `created_at` and the relay rejects the write with "event timestamp too far
+/// from server time". That failure is permanent rather than transient: the
+/// stored head only ages further, so every subsequent mutation — `update`,
+/// `add-repo`, `remove-repo` and `delete` alike — is rejected too, leaving the
+/// project impossible to modify or remove.
+///
+/// Taking the max keeps the monotonicity guarantee (the result is always
+/// greater than the head, including when the head sits in the future) while
+/// following wall clock in the ordinary case where wall clock is ahead.
+///
+/// Trade-off, deliberately accepted: `head + 1` also gave free lost-update
+/// detection. A writer working from a stale read would land at or below an
+/// intervening writer's timestamp and be refused as dominated. Tracking wall
+/// clock removes that backstop — a delayed writer now lands above the
+/// intervening write and silently replaces it. Closing that hole properly
+/// needs a compare-and-swap on the observed head, not a timestamp rule. Until
+/// then this is the better failure mode: the old behaviour made aged projects
+/// permanently unmodifiable and undeletable, which is a certainty, against a
+/// narrow concurrent-writer race, which is not.
 fn next_timestamp(head: &Event) -> Result<Timestamp, CliError> {
-    head.created_at
+    let after_head = head
+        .created_at
         .as_secs()
         .checked_add(1)
-        .map(Timestamp::from)
-        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))
+        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))?;
+
+    Ok(Timestamp::from(after_head.max(Timestamp::now().as_secs())))
 }
 
 /// Strip `auth` from a tag list and pass the resulting envelope through
@@ -515,7 +544,7 @@ pub async fn cmd_update(
 ///
 /// Head-based and verified:
 ///   1. Fetch own live head — `NotFound` if absent.
-///   2. Build tombstone at `head.created_at + 1`.
+///   2. Build tombstone at `max(now, head.created_at + 1)`.
 ///   3. Submit.
 ///   4. Re-query the coordinate; if a newer head survived → `Conflict`.
 pub async fn cmd_delete(client: &BuzzClient, slug: &str) -> Result<(), CliError> {
@@ -532,6 +561,9 @@ pub async fn cmd_delete(client: &BuzzClient, slug: &str) -> Result<(), CliError>
         .custom_created_at(next_ts);
 
     let event = client.sign_event(tombstone)?;
+    // Captured before submit: `submit_event` consumes the event, and the
+    // tombstone id is what an operator needs to audit the retraction.
+    let tombstone_id = event.id.to_hex();
     let raw = client.submit_event(event).await?;
     parse_write_response(&raw, "delete event was dominated; a newer head exists")?;
 
@@ -544,7 +576,14 @@ pub async fn cmd_delete(client: &BuzzClient, slug: &str) -> Result<(), CliError>
         )));
     }
 
-    println!("{}", serde_json::json!({ "deleted": slug, "status": "ok" }));
+    println!(
+        "{}",
+        serde_json::json!({
+            "deleted": slug,
+            "event_id": tombstone_id,
+            "status": "ok",
+        })
+    );
     Ok(())
 }
 
@@ -1003,22 +1042,27 @@ mod tests {
 
     // ── next_timestamp ordering ───────────────────────────────────────────────
 
-    /// `next_timestamp` must return `head.created_at + 1` regardless of the wall
-    /// clock.  NIP-MP Deletion rule: a tombstone older than the live head does
-    /// NOT remove it, so we must advance strictly off the observed head — never
-    /// use wall-clock time, which could be behind a head that was bumped
-    /// multiple times in the same second.
-    #[test]
-    fn next_timestamp_returns_head_plus_one_when_head_is_ahead_of_wall_clock() {
-        // Build a minimal signed event with a created_at far in the future.
+    /// Build a signed kind:30621 head carrying an exact `created_at`.
+    fn signed_head_at(created_at: Timestamp) -> Event {
         let keys = nostr::Keys::generate();
-        let far_future_ts = Timestamp::from(9_999_999_999u64); // year 2286
         let tags = vec![
             make_test_tag(&["d", "platform"]),
             make_test_tag(&["a", &format!("30617:{OWNER_HEX}:buzz")]),
         ];
-        let builder = rebuild_project("", tags, far_future_ts).expect("valid head envelope");
-        let head = builder.sign_with_keys(&keys).expect("sign");
+        let builder = rebuild_project("", tags, created_at).expect("valid head envelope");
+        builder.sign_with_keys(&keys).expect("sign")
+    }
+
+    /// When the head is ahead of the wall clock, `next_timestamp` must return
+    /// `head.created_at + 1`.  NIP-MP Deletion rule: a tombstone older than the
+    /// live head does NOT remove it, so the result must advance strictly off the
+    /// observed head — wall-clock time alone could land behind a head that was
+    /// bumped multiple times in the same second.
+    #[test]
+    fn next_timestamp_returns_head_plus_one_when_head_is_ahead_of_wall_clock() {
+        // Build a minimal signed event with a created_at far in the future.
+        let far_future_ts = Timestamp::from(9_999_999_999u64); // year 2286
+        let head = signed_head_at(far_future_ts);
         // Verify the event actually has our future timestamp.
         assert_eq!(head.created_at, far_future_ts);
 
@@ -1028,6 +1072,58 @@ mod tests {
             next.as_secs(),
             far_future_ts.as_secs() + 1,
             "tombstone must be strictly after head, even when head is far in the future"
+        );
+    }
+
+    /// An aged head must NOT produce an aged timestamp.  `head + 1` alone would
+    /// sign a `created_at` an hour in the past here, which the relay rejects as
+    /// "event timestamp too far from server time" — permanently, because the
+    /// stored head only ages further.  The result must track the wall clock.
+    #[test]
+    fn next_timestamp_uses_wall_clock_when_head_is_aged() {
+        let now = Timestamp::now().as_secs();
+        let hour_ago = Timestamp::from(now - 3_600);
+        let head = signed_head_at(hour_ago);
+
+        let next = next_timestamp(&head).expect("no overflow").as_secs();
+
+        assert!(
+            next >= now,
+            "aged head must advance to wall clock, got {next} against now {now}"
+        );
+        assert!(
+            next > hour_ago.as_secs(),
+            "result must still be strictly after the observed head"
+        );
+    }
+
+    /// A head written moments ago is already inside the relay's window, so the
+    /// result must stay at wall clock rather than jumping ahead of it.
+    #[test]
+    fn next_timestamp_stays_at_wall_clock_for_a_current_head() {
+        let now = Timestamp::now().as_secs();
+        let head = signed_head_at(Timestamp::from(now - 1));
+
+        let next = next_timestamp(&head).expect("no overflow").as_secs();
+
+        assert!(
+            next >= now && next <= now + 1,
+            "current head must land at wall clock, got {next} against now {now}"
+        );
+    }
+
+    /// `u64::MAX` cannot be advanced — the checked add must surface an error
+    /// rather than wrapping to zero and signing a 1970 timestamp.
+    #[test]
+    fn next_timestamp_rejects_overflow_at_u64_max() {
+        let head = signed_head_at(Timestamp::from(u64::MAX));
+
+        let error = next_timestamp(&head).expect_err("u64::MAX must not advance");
+
+        assert!(
+            matches!(error, CliError::Other(ref message)
+                if message.contains("timestamp cannot be advanced")),
+            "expected a timestamp-advance error, got {error:?}"
         );
     }
 
