@@ -29,6 +29,7 @@ export type ReadinessStatus = "ready" | "attention" | "pending" | "unknown";
 export type ReadinessCheckId =
   | "installation"
   | "authentication"
+  | "credential_persistence"
   | "process"
   | "community"
   | "presence"
@@ -72,6 +73,14 @@ export type ManifestPermissionMode = {
   source: "runtime" | "buzzHarness" | "unknown";
 };
 
+/** Session identity for the evidence shown in the manifest. */
+export type ManifestSessionIdentity = {
+  /** ACP session ID, or null when no session has been observed. */
+  sessionId: string | null;
+  /** Channel UUID the session evidence came from, or null. */
+  channelId: string | null;
+};
+
 /** Owner-local capability and readiness projection for a managed agent. */
 export type AgentCapabilityManifest = {
   overallStatus: ManifestOverallStatus;
@@ -102,6 +111,8 @@ export type AgentCapabilityManifest = {
   tools: ManifestTool[];
   toolsState: CapabilityEvidenceState;
   permissionMode: ManifestPermissionMode;
+  /** Session and channel the evidence was drawn from. */
+  sessionEvidence: ManifestSessionIdentity;
   limitations: string[];
 };
 
@@ -638,6 +649,34 @@ function readinessChecks(
             status: "unknown",
             detail: "Not verified",
           };
+  const credentialPersistence: ReadinessCheck =
+    agent.credentialPersistence === "keyring_verified"
+      ? {
+          id: "credential_persistence",
+          label: "Credential persistence",
+          status: "ready",
+          detail: "Keyring entry verified",
+        }
+      : agent.credentialPersistence === "inline_fallback"
+        ? {
+            id: "credential_persistence",
+            label: "Credential persistence",
+            status: "ready",
+            detail: "Key stored inline (keyring unreachable at last save)",
+          }
+        : agent.credentialPersistence === "missing"
+          ? {
+              id: "credential_persistence",
+              label: "Credential persistence",
+              status: "attention",
+              detail: "No key found in keyring or inline storage",
+            }
+          : {
+              id: "credential_persistence",
+              label: "Credential persistence",
+              status: "unknown",
+              detail: "Keyring unavailable — cannot determine persistence",
+            };
   const active = isActiveManagedAgent(agent);
   const process: ReadinessCheck = {
     id: "process",
@@ -723,7 +762,15 @@ function readinessChecks(
             detail:
               observerState === "connecting" ? "Connecting" : "Not connected",
           };
-  return [installation, authentication, process, community, presence, observer];
+  return [
+    installation,
+    authentication,
+    credentialPersistence,
+    process,
+    community,
+    presence,
+    observer,
+  ];
 }
 
 function toIsoTimestamp(value: string | null | undefined): string | null {
@@ -917,6 +964,10 @@ export function buildAgentCapabilityManifest({
     tools: tools.tools,
     toolsState: tools.state,
     permissionMode,
+    sessionEvidence: {
+      sessionId: session?.event.sessionId ?? null,
+      channelId: session?.event.channelId ?? null,
+    },
     limitations,
   };
 }

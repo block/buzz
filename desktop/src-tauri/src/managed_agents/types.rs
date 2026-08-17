@@ -554,6 +554,10 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    /// Owner-local credential storage evidence. Derived from a read-only
+    /// keyring probe at summary build time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_persistence: Option<CredentialPersistence>,
 }
 
 #[derive(Debug, Serialize)]
@@ -600,6 +604,30 @@ pub enum AuthStatus {
     NotApplicable,
     /// Probe was not attempted (runtime unavailable or probe timed out).
     Unknown,
+}
+
+/// Credential storage status for a managed agent, derived from a read-only
+/// keyring probe and the record's inline key state. This is owner-local
+/// evidence — it does not prove the keyring entry's value derives the agent's
+/// pubkey (that would require loading the secret). See wolfyy970's feedback on
+/// #5311 and #2957.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPersistence {
+    /// Key is stored in the OS keyring and was verified present via a
+    /// read-only probe.
+    KeyringVerified,
+    /// Key is stored inline in the `0o600` JSON fallback because the keyring
+    /// was unreachable at the last save. The keyring may or may not be
+    /// reachable this boot.
+    InlineFallback,
+    /// No key found in either the keyring or the JSON file. The agent cannot
+    /// be spawned.
+    Missing,
+    /// Keyring backend is unavailable this boot — cannot determine whether
+    /// the key is in the keyring. If the key is inline, it is still usable
+    /// for spawning but the persistence state is unknown.
+    Unavailable,
 }
 
 /// Origin of an ACP runtime catalog entry. Serializes as a lowercase string so the TypeScript consumer can switch on it without numeric comparisons.

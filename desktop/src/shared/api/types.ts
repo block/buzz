@@ -373,7 +373,20 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
+  /**
+   * Owner-local credential storage evidence. `null` when the backend does not
+   * report it (older builds). Does not prove the keyring entry's value derives
+   * the agent's pubkey.
+   */
+  credentialPersistence: CredentialPersistence | null;
 };
+
+/** Credential storage status for a managed agent. */
+export type CredentialPersistence =
+  | "keyring_verified"
+  | "inline_fallback"
+  | "missing"
+  | "unavailable";
 
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
