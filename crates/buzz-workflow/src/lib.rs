@@ -394,9 +394,16 @@ impl WorkflowEngine {
                 .check_owner_authority(community_id, channel_id, &workflow.owner_pubkey, &def)
                 .await
             {
+                // SEC-006 (exfiltration-capable definitions like call_webhook)
+                // denies runs without creating a run row or emitting an event —
+                // the only trace is this log. Include enough fields to diagnose
+                // "workflow appears to succeed, no run record" reports (issue
+                // #5122) from relay logs alone.
                 tracing::warn!(
                     workflow_id = %workflow.id,
-                    "Skipping workflow — owner authority check failed: {e}"
+                    owner_pubkey = %hex::encode(&workflow.owner_pubkey),
+                    requires_elevated_authority = def.requires_elevated_authority(),
+                    "Skipping workflow — SEC-006 owner authority check failed: {e}"
                 );
                 continue;
             }
