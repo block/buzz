@@ -1034,19 +1034,7 @@ pub async fn start_managed_agent(
         // profile reconcile (the create-time snapshot may be empty or stale for
         // a persona-inherited harness).
         let reconcile_personas = load_personas(&app).unwrap_or_default();
-        let reconcile_effective_command =
-            crate::managed_agents::record_agent_command(record, &reconcile_personas);
-
-        let reconcile = ProfileReconcileData {
-            private_key_nsec: record.private_key_nsec.clone(),
-            name: record.name.clone(),
-            relay_url: record.relay_url.clone(),
-            avatar_url: record.avatar_url.clone(),
-            auth_tag: record.auth_tag.clone(),
-            pubkey: record.pubkey.clone(),
-            agent_command: reconcile_effective_command,
-            persona_id: record.persona_id.clone(),
-        };
+        let reconcile = profile_reconcile_data(record, &reconcile_personas);
 
         let target = if record.backend == BackendKind::Local {
             StartTarget::Local
@@ -1297,9 +1285,9 @@ use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
 
 #[path = "agents_profile.rs"]
 mod profile;
+pub(crate) use profile::*;
 #[cfg(test)]
 use profile::{profile_needs_sync, resolve_legacy_avatar};
-pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]

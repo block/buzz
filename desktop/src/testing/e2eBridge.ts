@@ -2408,9 +2408,9 @@ function resetMockPersonas(config?: E2eConfig) {
     },
     {
       id: "builtin:bumble",
-      display_name: "Bumble",
+      display_name: "Pollen",
       avatar_url: null,
-      system_prompt: "You are Bumble.",
+      system_prompt: "You are Pollen.",
     },
   ];
   mockPersonas = builtInPersonas.map((persona) => ({

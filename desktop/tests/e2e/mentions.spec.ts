@@ -2429,7 +2429,7 @@ test("agent profile popover shows its owner", async ({ page }) => {
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: TEST_IDENTITIES.bob.pubkey,
         isAgent: true,
       },
@@ -2440,16 +2440,16 @@ test("agent profile popover shows its owner", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',
@@ -2469,7 +2469,7 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: MOCK_VIEWER_PUBKEY,
         isAgent: true,
       },
@@ -2480,16 +2480,16 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',
@@ -2509,7 +2509,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: CASEY_PROFILE_PUBKEY,
         isAgent: true,
       },
@@ -2520,16 +2520,16 @@ test("agent profile popover falls back to the owner's pubkey", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',
