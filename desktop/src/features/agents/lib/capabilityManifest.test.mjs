@@ -668,7 +668,9 @@ test("observer reduction retains capability evidence after raw events are trimme
   );
 
   const snapshot = getAgentObserverSnapshot(AGENT_PUBKEY, true);
-  assert.equal(snapshot.events.length, 3_000);
+  // When events exceed MAX_OBSERVER_EVENTS (3000), the store trims to
+  // OBSERVER_EVENTS_LOW_WATER (2700) to amortize eviction across refills.
+  assert.equal(snapshot.events.length, 2_700);
   assert.equal(
     snapshot.events.some((event) => event.kind === "agent_initialized"),
     false,
