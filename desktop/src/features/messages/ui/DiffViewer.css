@@ -82,6 +82,35 @@
   border-radius: 0.2rem;
 }
 
+/*
+ * In a side-by-side review, paired delete/insert rows represent one edited
+ * line. Keep their unchanged text neutral and highlight only the fragments
+ * produced by markEdits(). A wholly added or removed line has no inline edit
+ * token, so it intentionally retains the normal full-line diff colour.
+ */
+.buzz-diff-theme .buzz-diff-fragment-highlights
+  tr:has(.diff-code-edit)
+  .diff-code-insert,
+.buzz-diff-theme
+  .buzz-diff-fragment-highlights
+  tr:has(.diff-code-edit)
+  .diff-code-delete {
+  background-color: transparent;
+  color: hsl(var(--foreground));
+}
+
+.buzz-diff-theme
+  .buzz-diff-fragment-highlights
+  tr:has(.diff-code-edit)
+  .diff-gutter-insert,
+.buzz-diff-theme
+  .buzz-diff-fragment-highlights
+  tr:has(.diff-code-edit)
+  .diff-gutter-delete {
+  background-color: transparent;
+  color: hsl(var(--muted-foreground));
+}
+
 .buzz-diff-theme .diff-decoration-content {
   padding: 0.2rem 0.75rem;
   background: hsl(var(--muted) / 0.35);

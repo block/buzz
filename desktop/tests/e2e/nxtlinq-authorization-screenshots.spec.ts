@@ -47,6 +47,55 @@ test.describe("Nxtlinq authorization screenshots", () => {
     await card.screenshot({ path: `${SHOTS}/01-operator-settings.png` });
   });
 
+  test("uninstalls and reinstalls the managed Gateway", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+    await openSettings(page, "agents");
+
+    const card = page.getByTestId("settings-nxtlinq-authorization");
+    page.once("dialog", (dialog) => void dialog.accept());
+    await card.getByRole("button", { name: "Uninstall Gateway" }).click();
+    await expect(card).toContainText("Not installed");
+    await expect(
+      card.getByRole("button", { name: "Install Gateway" }),
+    ).toBeVisible();
+
+    await card.getByRole("button", { name: "Install Gateway" }).click();
+    await expect(card).toContainText("Installed at");
+    await expect(
+      card.getByRole("button", { name: "Uninstall Gateway" }),
+    ).toBeVisible();
+  });
+
+  test("blocks uninstall while an Agent uses the Gateway", async ({ page }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: "Protected Agent",
+          status: "stopped",
+          commandWrapper: {
+            command: "/tmp/buzz/bin/nxtlinq-authorization-gateway",
+            args: ["--adapter", "acp", "--"],
+            authorization: {
+              kind: "nxtlinq_gateway",
+              executable: "/tmp/buzz/bin/nxtlinq-authorization-gateway",
+              sha256: "a".repeat(64),
+            },
+          },
+        },
+      ],
+    });
+    await page.goto("/");
+    await openSettings(page, "agents");
+
+    const card = page.getByTestId("settings-nxtlinq-authorization");
+    await expect(card).toContainText("Used by 1 Agent");
+    await expect(
+      card.getByRole("button", { name: "Uninstall Gateway" }),
+    ).toBeDisabled();
+  });
+
   test("captures a verified Agent launch preset", async ({ page }) => {
     await installMockBridge(page, {
       nxtlinqAuthorizationConfig: {
@@ -97,7 +146,44 @@ test.describe("Nxtlinq authorization screenshots", () => {
     await expect(
       preset.getByText("Paths changed", { exact: false }),
     ).toHaveCount(0);
+    await expect(page.locator("#edit-agent-working-directory")).toHaveCount(0);
     await waitForAnimations(page);
     await preset.screenshot({ path: `${SHOTS}/02-agent-preset.png` });
+  });
+
+  test("opens the complete Nxtlinq setup directly from Agent edit", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      nxtlinqAuthorizationConfig: {
+        trustStore: TRUST_STORE,
+        receiptRoot: RECEIPT_ROOT,
+      },
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: "Nxtlinq Demo",
+          runtime: "buzz-agent",
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+    await expect(page.locator("#edit-agent-working-directory")).toHaveCount(0);
+    await page
+      .getByTestId("nxtlinq-authorization-preset")
+      .getByRole("button", { name: "Set up Nxtlinq" })
+      .click();
+
+    const review = page.getByTestId("nxtlinq-setup-review-dialog");
+    await expect(review).toBeVisible();
+    await expect(review).toContainText(
+      "Choose the project this Agent should use",
+    );
+    await expect(review.getByRole("button", { name: "Browse" })).toBeVisible();
+    await expect(review).toContainText("Choose a project to continue");
+    await expect(page.getByTestId("edit-agent-dialog")).toHaveCount(0);
   });
 });

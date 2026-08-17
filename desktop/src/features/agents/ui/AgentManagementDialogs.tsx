@@ -1,6 +1,7 @@
 import { useAgentManagement } from "@/features/agents/useAgentManagement";
 import { AgentCardDialogs } from "./AgentCardViewerDialog";
 import { AgentDialog } from "./AgentDialog";
+import { NxtlinqSetupReviewDialog } from "./NxtlinqSetupReviewDialog";
 
 /** Global review surfaces opened by owned agents through the Buzz harness. */
 export function AgentManagementDialogs() {
@@ -40,6 +41,15 @@ export function AgentManagementDialogs() {
           runtimeCatalogStatus={management.runtimeCatalogStatus}
           submitLabel="Save changes"
           title="Edit agent"
+        />
+      ) : null}
+      {management.request?.action === "nxtlinq_setup" ? (
+        <NxtlinqSetupReviewDialog
+          agent={management.sourceAgent}
+          onOpenChange={(open) => {
+            if (!open) management.dismiss();
+          }}
+          request={management.request}
         />
       ) : null}
       <AgentCardDialogs />

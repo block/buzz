@@ -1,4 +1,10 @@
-import { Diff, Hunk, type ViewType } from "react-diff-view";
+import {
+  Diff,
+  Hunk,
+  markEdits,
+  tokenize,
+  type ViewType,
+} from "react-diff-view";
 import "react-diff-view/style/index.css";
 import { useMemo } from "react";
 
@@ -17,6 +23,7 @@ type DiffViewerProps = {
   content: string;
   fallbackFilePath?: string;
   viewType?: ViewType;
+  highlightChangedFragments?: boolean;
   className?: string;
 };
 
@@ -45,11 +52,23 @@ export function DiffViewer({
   content,
   fallbackFilePath,
   viewType = "unified",
+  highlightChangedFragments = false,
   className,
 }: DiffViewerProps) {
   const { files, parseError } = useMemo(
     () => parseUnifiedDiff(content),
     [content],
+  );
+  const inlineEditTokens = useMemo(
+    () =>
+      highlightChangedFragments
+        ? files.map((file) =>
+            tokenize(file.hunks, {
+              enhancers: [markEdits(file.hunks)],
+            }),
+          )
+        : [],
+    [files, highlightChangedFragments],
   );
 
   if (parseError) {
@@ -71,7 +90,7 @@ export function DiffViewer({
   return (
     <div className={cn("buzz-diff-theme", className)}>
       <div className="space-y-3">
-        {files.map((file) => {
+        {files.map((file, fileIndex) => {
           const label = getDiffFileLabel(file, fallbackFilePath);
           const { additions, deletions } = countDiffFileChanges(file);
           const diffType = normalizeDiffType(file.type);
@@ -121,6 +140,8 @@ export function DiffViewer({
                 <Diff
                   className={cn(
                     "buzz-diff-table",
+                    highlightChangedFragments &&
+                      "buzz-diff-fragment-highlights",
                     viewType === "split" ? "min-w-[780px]" : "w-full",
                   )}
                   codeClassName="buzz-diff-code"
@@ -128,6 +149,7 @@ export function DiffViewer({
                   gutterClassName="buzz-diff-gutter"
                   hunks={file.hunks}
                   lineClassName="buzz-diff-line"
+                  tokens={inlineEditTokens[fileIndex]}
                   viewType={viewType}
                 >
                   {(hunks) =>

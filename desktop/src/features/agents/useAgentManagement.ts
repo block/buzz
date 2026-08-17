@@ -73,7 +73,11 @@ export function useAgentManagement() {
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
+  const pendingRequestAction = React.useRef<
+    AgentManagementRequest["action"] | null
+  >(null);
   const sourceAgentPubkey = React.useRef<string | null>(null);
+  const refreshingRequestIds = React.useRef(new Set<string>());
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
   const bufferedRequestsRef = React.useRef<
@@ -95,11 +99,68 @@ export function useAgentManagement() {
       }
       seenRequestIds.current.add(next.requestId);
       setError(null);
-      if (pendingRequestId.current === null) {
+      const replacesNxtlinqRegeneration =
+        pendingRequestAction.current === "nxtlinq_setup" &&
+        next.action === "nxtlinq_setup" &&
+        sourceAgentPubkey.current?.toLowerCase() === agentPubkey.toLowerCase();
+      if (pendingRequestId.current === null || replacesNxtlinqRegeneration) {
         pendingRequestId.current = next.requestId;
+        pendingRequestAction.current = next.action;
         sourceAgentPubkey.current = agentPubkey;
         setRequest(next);
       }
+    },
+  );
+
+  const reviewCandidate = React.useEffectEvent(
+    (agentPubkey: string, next: AgentManagementRequest) => {
+      const classification = classifyAgentManagementOrigin(
+        managedAgentsRef.current,
+        channelsRef.current,
+        agentPubkey,
+        next.request.channelId,
+      );
+      if (classification === "accept") {
+        acceptOwnedRequest(agentPubkey, next);
+        return;
+      }
+      if (classification === "buffer") {
+        if (
+          !bufferedRequestsRef.current.some(
+            (candidate) => candidate.request.requestId === next.requestId,
+          )
+        ) {
+          bufferedRequestsRef.current.push({ agentPubkey, request: next });
+          if (bufferedRequestsRef.current.length > 100) {
+            bufferedRequestsRef.current.shift();
+          }
+        }
+        return;
+      }
+
+      // Membership and managed-Agent queries can be stale immediately after an
+      // Agent is attached to a channel. Revalidate once against the relay/local
+      // store before failing closed; never accept from stale cached data alone.
+      if (refreshingRequestIds.current.has(next.requestId)) return;
+      refreshingRequestIds.current.add(next.requestId);
+      void Promise.all([managedAgentsQuery.refetch(), channelsQuery.refetch()])
+        .then(([agentsResult, channelsResult]) => {
+          if (
+            classifyAgentManagementOrigin(
+              agentsResult.data,
+              channelsResult.data,
+              agentPubkey,
+              next.request.channelId,
+            ) === "accept"
+          ) {
+            managedAgentsRef.current = agentsResult.data;
+            channelsRef.current = channelsResult.data;
+            acceptOwnedRequest(agentPubkey, next);
+          }
+        })
+        .finally(() => {
+          refreshingRequestIds.current.delete(next.requestId);
+        });
     },
   );
 
@@ -109,7 +170,7 @@ export function useAgentManagement() {
     if (managedAgentsQuery.data && channelsQuery.data) {
       const buffered = bufferedRequestsRef.current.splice(0);
       for (const candidate of buffered) {
-        acceptOwnedRequest(candidate.agentPubkey, candidate.request);
+        reviewCandidate(candidate.agentPubkey, candidate.request);
       }
     }
   }, [channelsQuery.data, managedAgentsQuery.data]);
@@ -121,21 +182,7 @@ export function useAgentManagement() {
         // this Desktop owns may draft a change; defer the ownership decision
         // until the managed-agent query has initialized so ephemeral requests
         // cannot disappear during startup.
-        if (
-          classifyAgentManagementOrigin(
-            managedAgentsRef.current,
-            channelsRef.current,
-            agentPubkey,
-            next.request.channelId,
-          ) === "buffer"
-        ) {
-          bufferedRequestsRef.current.push({ agentPubkey, request: next });
-          if (bufferedRequestsRef.current.length > 100) {
-            bufferedRequestsRef.current.shift();
-          }
-          return;
-        }
-        acceptOwnedRequest(agentPubkey, next);
+        reviewCandidate(agentPubkey, next);
       }),
     [],
   );
@@ -151,6 +198,10 @@ export function useAgentManagement() {
   }, [personasQuery.data, request]);
   const currentPersona =
     matchingPersonas.length === 1 ? matchingPersonas[0] : undefined;
+  const sourceAgent = (managedAgentsQuery.data ?? []).find(
+    (agent) =>
+      agent.pubkey.toLowerCase() === sourceAgentPubkey.current?.toLowerCase(),
+  );
 
   const isPending =
     createPersonaMutation.isPending ||
@@ -261,6 +312,7 @@ export function useAgentManagement() {
 
   function dismiss() {
     pendingRequestId.current = null;
+    pendingRequestAction.current = null;
     sourceAgentPubkey.current = null;
     setRequest(null);
   }
@@ -294,6 +346,7 @@ export function useAgentManagement() {
 
   return {
     request,
+    sourceAgent,
     createInitialValues,
     editInitialValues,
     editError,

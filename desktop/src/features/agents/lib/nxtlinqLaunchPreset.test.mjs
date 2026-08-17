@@ -60,7 +60,11 @@ test("builds deterministic shell-free wrapper argv and preserves env names", () 
     1,
   );
   assert.ok(args.includes("OPENAI_COMPAT_API_KEY"));
+  assert.ok(args.includes("ANTHROPIC_API_KEY"));
+  assert.ok(args.includes("OPENROUTER_API_KEY"));
+  assert.ok(args.includes("DATABRICKS_HOST"));
   assert.ok(args.includes("BUZZ_AGENT_NXTLINQ_PERMISSION_BRIDGE"));
+  assert.ok(args.includes("--forward-agent-stderr"));
   assert.equal(args.includes("BUZZ_ACP_TRUST_NXTLINQ_GATEWAY"), false);
 });
 

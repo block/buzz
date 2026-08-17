@@ -28,6 +28,7 @@ import {
 
 const MAX_OBSERVER_EVENTS = 3000;
 const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
+const MAX_RECENT_AGENT_MANAGEMENT_REQUESTS = 100;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
@@ -104,6 +105,10 @@ const controlResultListeners = new Map<
 const agentManagementListeners = new Set<
   (agentPubkey: string, request: AgentManagementRequest) => void
 >();
+const recentAgentManagementRequests: Array<{
+  agentPubkey: string;
+  request: AgentManagementRequest;
+}> = [];
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
 // "agent" tag matches an entry here will be decrypted (defense-in-depth).
@@ -385,6 +390,25 @@ function processLiveObserverEvent(agentPubkey: string, parsed: ObserverEvent) {
   appendAgentEvent(agentPubkey, parsed);
   const managementRequest = parseAgentManagementRequest(parsed.payload);
   if (managementRequest) {
+    const alreadyRecorded = recentAgentManagementRequests.some(
+      (candidate) =>
+        normalizePubkey(candidate.agentPubkey) ===
+          normalizePubkey(agentPubkey) &&
+        candidate.request.requestId === managementRequest.requestId,
+    );
+    if (alreadyRecorded) {
+      return;
+    }
+    recentAgentManagementRequests.push({
+      agentPubkey,
+      request: managementRequest,
+    });
+    if (
+      recentAgentManagementRequests.length >
+      MAX_RECENT_AGENT_MANAGEMENT_REQUESTS
+    ) {
+      recentAgentManagementRequests.shift();
+    }
     for (const listener of agentManagementListeners) {
       listener(agentPubkey, managementRequest);
     }
@@ -547,6 +571,9 @@ export function subscribeAgentManagementRequests(
   listener: (agentPubkey: string, request: AgentManagementRequest) => void,
 ) {
   agentManagementListeners.add(listener);
+  for (const candidate of recentAgentManagementRequests) {
+    listener(candidate.agentPubkey, candidate.request);
+  }
   return () => {
     agentManagementListeners.delete(listener);
   };
@@ -754,6 +781,17 @@ export function injectObserverEventsForE2E(
   notifyListeners();
 }
 
+/** E2E-only ingress that also exercises owner-reviewed management dispatch. */
+export function injectLiveObserverEventsForE2E(
+  agentPubkey: string,
+  events: ObserverEvent[],
+) {
+  for (const event of events) {
+    processLiveObserverEvent(agentPubkey, event);
+  }
+  notifyListeners();
+}
+
 /**
  * Synchronize the observer store with a sorted buffer of events for one agent.
  * Used by test harnesses and replay bridges that already hold decoded frames.
@@ -782,6 +820,7 @@ export function resetAgentObserverStore() {
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
+  recentAgentManagementRequests.length = 0;
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

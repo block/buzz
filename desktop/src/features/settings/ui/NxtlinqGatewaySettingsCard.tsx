@@ -6,7 +6,9 @@ import {
   useNxtlinqAuthorizationConfigQuery,
   useNxtlinqAuthorizationGatewayQuery,
   useSaveNxtlinqAuthorizationConfigMutation,
+  useUninstallNxtlinqAuthorizationGatewayMutation,
 } from "@/features/agents/nxtlinqHooks";
+import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import {
   pickNxtlinqDirectory,
   pickNxtlinqTrustStore,
@@ -20,6 +22,8 @@ export function NxtlinqGatewaySettingsCard() {
   const gatewayQuery = useNxtlinqAuthorizationGatewayQuery();
   const configQuery = useNxtlinqAuthorizationConfigQuery();
   const installMutation = useInstallNxtlinqAuthorizationGatewayMutation();
+  const uninstallMutation = useUninstallNxtlinqAuthorizationGatewayMutation();
+  const managedAgentsQuery = useManagedAgentsQuery();
   const saveMutation = useSaveNxtlinqAuthorizationConfigMutation();
   const [trustStore, setTrustStore] = React.useState("");
   const [receiptRoot, setReceiptRoot] = React.useState("");
@@ -32,6 +36,15 @@ export function NxtlinqGatewaySettingsCard() {
 
   async function installGateway(force = false) {
     const result = await installMutation.mutateAsync(force);
+    if (result.success) await gatewayQuery.refetch();
+  }
+
+  async function uninstallGateway() {
+    const confirmed = window.confirm(
+      "Uninstall the Nxtlinq Gateway from Buzz? Operator settings, receipts, and project files will be kept.",
+    );
+    if (!confirmed) return;
+    const result = await uninstallMutation.mutateAsync();
     if (result.success) await gatewayQuery.refetch();
   }
 
@@ -60,11 +73,26 @@ export function NxtlinqGatewaySettingsCard() {
       : installMutation.error instanceof Error
         ? installMutation.error.message
         : null;
+  const uninstallFailure =
+    uninstallMutation.data?.success === false
+      ? uninstallMutation.data.steps.at(-1)?.hint ||
+        uninstallMutation.data.steps.at(-1)?.stderr ||
+        "Gateway uninstall failed."
+      : uninstallMutation.error instanceof Error
+        ? uninstallMutation.error.message
+        : null;
+  const gatewayUsers =
+    managedAgentsQuery.data?.filter(
+      (agent) =>
+        agent.commandWrapper?.authorization?.kind === "nxtlinq_gateway",
+    ) ?? [];
+  const packageMutationPending =
+    installMutation.isPending || uninstallMutation.isPending;
 
   return (
     <section className="min-w-0" data-testid="settings-nxtlinq-authorization">
       <SettingsSectionHeader
-        description="Install the authorization Gateway once and configure operator-owned trust for all local Agents."
+        description="Manage the local Gateway and advanced trust storage used by local Agents."
         title="Nxtlinq authorization"
       />
       <SettingsOptionGroup>
@@ -91,15 +119,39 @@ export function NxtlinqGatewaySettingsCard() {
               Install Gateway
             </Button>
           ) : (
-            <Button
-              disabled={installMutation.isPending}
-              onClick={() => void installGateway(true)}
-              variant="outline"
-            >
-              {installMutation.isPending
-                ? "Reinstalling…"
-                : "Reinstall Gateway"}
-            </Button>
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex gap-2">
+                <Button
+                  disabled={packageMutationPending}
+                  onClick={() => void installGateway(true)}
+                  variant="outline"
+                >
+                  {installMutation.isPending
+                    ? "Reinstalling…"
+                    : "Reinstall Gateway"}
+                </Button>
+                <Button
+                  disabled={
+                    packageMutationPending ||
+                    managedAgentsQuery.isLoading ||
+                    gatewayUsers.length > 0
+                  }
+                  onClick={() => void uninstallGateway()}
+                  variant="destructive"
+                >
+                  {uninstallMutation.isPending
+                    ? "Uninstalling…"
+                    : "Uninstall Gateway"}
+                </Button>
+              </div>
+              {gatewayUsers.length > 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  Used by {gatewayUsers.length} Agent
+                  {gatewayUsers.length === 1 ? "" : "s"}. Disable their Nxtlinq
+                  authorization before uninstalling.
+                </p>
+              ) : null}
+            </div>
           )}
         </SettingsOptionRow>
 
@@ -124,9 +176,8 @@ export function NxtlinqGatewaySettingsCard() {
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              Signer public keys enrolled by this Buzz deployment's operator
-              after verifying the project owner's key. Buzz never stores a
-              signing private key.
+              Buzz can create this local trust store during setup. Private keys
+              stay in secure owner storage and are never exposed to Agents.
             </p>
           </div>
         </SettingsOptionRow>
@@ -189,6 +240,11 @@ export function NxtlinqGatewaySettingsCard() {
       {installFailure ? (
         <p className="mt-3 text-sm text-destructive" role="alert">
           {installFailure}
+        </p>
+      ) : null}
+      {uninstallFailure ? (
+        <p className="mt-3 text-sm text-destructive" role="alert">
+          {uninstallFailure}
         </p>
       ) : null}
     </section>

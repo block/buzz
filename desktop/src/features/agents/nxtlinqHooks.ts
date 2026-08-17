@@ -5,6 +5,7 @@ import {
   discoverNxtlinqAuthorizationGateway,
   getNxtlinqAuthorizationConfig,
   installNxtlinqAuthorizationGateway,
+  uninstallNxtlinqAuthorizationGateway,
   setNxtlinqAuthorizationConfig,
 } from "@/shared/api/tauriNxtlinq";
 
@@ -49,6 +50,18 @@ export function useInstallNxtlinqAuthorizationGatewayMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (force: boolean) => installNxtlinqAuthorizationGateway(force),
+    onSettled: () => {
+      void queryClient.invalidateQueries({
+        queryKey: nxtlinqAuthorizationGatewayQueryKey,
+      });
+    },
+  });
+}
+
+export function useUninstallNxtlinqAuthorizationGatewayMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: uninstallNxtlinqAuthorizationGateway,
     onSettled: () => {
       void queryClient.invalidateQueries({
         queryKey: nxtlinqAuthorizationGatewayQueryKey,

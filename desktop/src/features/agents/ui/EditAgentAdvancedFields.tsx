@@ -1,8 +1,5 @@
 import * as React from "react";
-import { FolderOpen } from "lucide-react";
-import { pickNxtlinqDirectory } from "@/shared/api/tauriNxtlinq";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
@@ -33,7 +30,6 @@ import {
 } from "../lib/agentConfigCore";
 import type { AgentLaunchFields } from "./useAgentLaunchFields";
 import { NxtlinqAuthorizationPreset } from "./NxtlinqAuthorizationPreset";
-import { isNxtlinqGatewayCommand } from "../lib/nxtlinqLaunchPreset";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -62,6 +58,7 @@ export function EditAgentAdvancedFields({
   onEnvVarsChange,
   onInheritHarnessChange,
   onNxtlinqSaveBlockedChange,
+  onOpenNxtlinqSetup,
   onParallelismChange,
   onAutoRestartChange,
   onSystemPromptChange,
@@ -116,6 +113,7 @@ export function EditAgentAdvancedFields({
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
   onNxtlinqSaveBlockedChange: (blocked: boolean) => void;
+  onOpenNxtlinqSetup: () => void;
   onParallelismChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
@@ -158,15 +156,6 @@ export function EditAgentAdvancedFields({
       requested,
     );
   }, [selectedRuntime, parallelism]);
-
-  const nxtlinqAuthorizationEnabled = isNxtlinqGatewayCommand(
-    launchFields.commandWrapperCommand,
-  );
-
-  async function chooseWorkspace() {
-    const path = await pickNxtlinqDirectory();
-    if (path) launchFields.setWorkingDirectory(path);
-  }
 
   return (
     <div className="space-y-5 pt-2">
@@ -246,53 +235,6 @@ export function EditAgentAdvancedFields({
         </div>
       </div>
 
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-working-directory"
-        >
-          Agent workspace
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-        </label>
-        <div
-          className={cn(
-            "flex min-h-11 items-center px-3",
-            PERSONA_FIELD_SHELL_CLASS,
-          )}
-        >
-          <Input
-            autoCorrect="off"
-            className={cn(
-              "h-8 px-0 py-0 leading-6",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
-            disabled={disabled}
-            id="edit-agent-working-directory"
-            onChange={(event) =>
-              launchFields.setWorkingDirectory(event.target.value)
-            }
-            placeholder="/absolute/path/to/attested/project"
-            value={launchFields.workingDirectory}
-          />
-          <Button
-            className="ml-2 shrink-0"
-            disabled={disabled}
-            onClick={() => void chooseWorkspace()}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            <FolderOpen className="mr-1.5 size-4" />
-            Browse
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          {nxtlinqAuthorizationEnabled
-            ? "Changing the workspace requires a successful Nxtlinq Recheck before this Agent can be saved."
-            : "Absolute directory sent as ACP session cwd. Nxtlinq must receive the same project path used by its signed manifest."}
-        </p>
-      </div>
-
       <NxtlinqAuthorizationPreset
         agentPubkey={agentPubkey}
         disabled={disabled}
@@ -300,6 +242,7 @@ export function EditAgentAdvancedFields({
         inheritedEnvVars={inheritedEnvVars}
         launchFields={launchFields}
         onEnvVarsChange={onEnvVarsChange}
+        onOpenSetup={onOpenNxtlinqSetup}
         onSaveBlockedChange={onNxtlinqSaveBlockedChange}
         requiredEnvKeys={requiredEnvKeys}
       />

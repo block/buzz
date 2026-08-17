@@ -96,6 +96,7 @@ import {
   usePendingHarnessSelection,
 } from "./addCustomHarness";
 import { useAgentLaunchFields } from "./useAgentLaunchFields";
+import { useNxtlinqDirectSetup } from "./NxtlinqDirectSetupDialog";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -146,6 +147,11 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  const nxtlinqSetup = useNxtlinqDirectSetup(
+    agent,
+    launchFields.workingDirectory,
+    () => onOpenChange(false),
+  );
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -264,10 +270,7 @@ export function AgentInstanceEditDialog({
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
   }, [runtimes, originalAgentCommand]);
 
-  // The runtime id active after submit. Inheriting resolves from the LINKED PERSONA's runtime
-  // (that is what runs once the override is cleared, not the current override).
-  // Falls back to dual-match (command path, then id) when no persona or its runtime is unset.
-  // This single prospective id feeds BOTH the block-save gate and submit so they always agree.
+  // Resolve the post-submit runtime once for both save gating and submission.
   const prospectiveRuntimeId = React.useMemo(() => {
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
@@ -394,12 +397,7 @@ export function AgentInstanceEditDialog({
     enabled: open,
   });
 
-  // Merge global env as the base layer so credential keys satisfied via global
-  // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
-  // `inheritedSubmission.envVars` (the same snapshot the credential gate
-  // validates) rather than raw `envVars`, so an inherit-transition that layers
-  // in persona env vars is reflected in discovery. Agent-local env takes
-  // precedence, matching the agent → global → file spawn-path precedence.
+  // Match spawn precedence while including inherited credentials in discovery.
   const envVarsForDiscovery = React.useMemo(
     () => ({ ...globalConfig.env_vars, ...inheritedSubmission.envVars }),
     [globalConfig.env_vars, inheritedSubmission.envVars],
@@ -844,9 +842,8 @@ export function AgentInstanceEditDialog({
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
-
   return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
+    <Dialog onOpenChange={handleOpenChange} open={open && !nxtlinqSetup.isOpen}>
       <ChooserDialogContent
         className="max-w-3xl border-0"
         contentClassName="pt-3"
@@ -1206,6 +1203,7 @@ export function AgentInstanceEditDialog({
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onNxtlinqSaveBlockedChange={launchFields.setSaveBlocked}
+                      onOpenNxtlinqSetup={nxtlinqSetup.open}
                       onParallelismChange={setParallelism}
                       onSystemPromptChange={setSystemPrompt}
                     />
@@ -1222,6 +1220,7 @@ export function AgentInstanceEditDialog({
           </div>
         </div>
       </ChooserDialogContent>
+      {nxtlinqSetup.dialog}
     </Dialog>
   );
 }

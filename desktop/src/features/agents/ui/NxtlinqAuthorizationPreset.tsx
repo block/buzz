@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 
 import {
-  useInstallNxtlinqAuthorizationGatewayMutation,
   useNxtlinqAuthorizationConfigQuery,
   useNxtlinqAuthorizationGatewayQuery,
   useNxtlinqAuthorizationSetupQuery,
@@ -33,6 +32,7 @@ export function NxtlinqAuthorizationPreset({
   inheritedEnvVars,
   launchFields,
   onEnvVarsChange,
+  onOpenSetup,
   onSaveBlockedChange,
   requiredEnvKeys,
 }: {
@@ -42,12 +42,12 @@ export function NxtlinqAuthorizationPreset({
   inheritedEnvVars: Record<string, string>;
   launchFields: AgentLaunchFields;
   onEnvVarsChange: (value: EnvVarsValue) => void;
+  onOpenSetup: () => void;
   onSaveBlockedChange: (blocked: boolean) => void;
   requiredEnvKeys: readonly string[];
 }) {
   const gatewayQuery = useNxtlinqAuthorizationGatewayQuery();
   const configQuery = useNxtlinqAuthorizationConfigQuery();
-  const installMutation = useInstallNxtlinqAuthorizationGatewayMutation();
   const enabled = isNxtlinqGatewayCommand(launchFields.commandWrapperCommand);
   const workspace = launchFields.workingDirectory.trim();
   const trustStore = configQuery.data?.trustStore?.trim() ?? "";
@@ -181,33 +181,6 @@ export function NxtlinqAuthorizationPreset({
     onEnvVarsChange(next);
   }
 
-  async function installAndEnable() {
-    try {
-      const result = await installMutation.mutateAsync(false);
-      if (!result.success) return;
-      const discovery = await gatewayQuery.refetch();
-      const setup = await recheckSetup(discovery.data?.available === true);
-      if (
-        setup?.ready &&
-        setup.gatewayExecutable &&
-        setup.gatewayExecutableSha256
-      ) {
-        applyPreset(setup.gatewayExecutable, setup.gatewayExecutableSha256);
-      }
-    } catch {
-      // The mutation/query state renders the actionable failure below.
-    }
-  }
-
-  const failure =
-    installMutation.data?.success === false
-      ? installMutation.data.steps.at(-1)?.hint ||
-        installMutation.data.steps.at(-1)?.stderr ||
-        "Nxtlinq Gateway installation failed."
-      : installMutation.error instanceof Error
-        ? installMutation.error.message
-        : null;
-
   return (
     <div
       className="space-y-4 rounded-xl border border-border/80 bg-muted/20 p-4"
@@ -224,51 +197,30 @@ export function NxtlinqAuthorizationPreset({
             wrapper arguments.
           </p>
         </div>
-        {enabled ? (
+        <div className="flex shrink-0 items-center gap-2">
           <Button
             disabled={disabled}
-            onClick={disablePreset}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            Disable
-          </Button>
-        ) : gatewayQuery.data?.available ? (
-          <Button
-            disabled={disabled || !canEnable}
-            onClick={() => {
-              if (
-                currentSetup?.gatewayExecutable &&
-                currentSetup.gatewayExecutableSha256
-              ) {
-                applyPreset(
-                  currentSetup.gatewayExecutable,
-                  currentSetup.gatewayExecutableSha256,
-                );
-              }
-            }}
+            onClick={onOpenSetup}
             size="sm"
             type="button"
           >
-            Enable
+            {enabled ? "Review policy" : "Set up Nxtlinq"}
           </Button>
-        ) : (
-          <Button
-            disabled={disabled || !pathsComplete || installMutation.isPending}
-            onClick={() => void installAndEnable()}
-            size="sm"
-            type="button"
-          >
-            {installMutation.isPending ? (
-              <LoaderCircle className="mr-2 size-4 animate-spin" />
-            ) : null}
-            Install & enable
-          </Button>
-        )}
+          {enabled ? (
+            <Button
+              disabled={disabled}
+              onClick={disablePreset}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              Disable
+            </Button>
+          ) : null}
+        </div>
       </div>
 
-      {gatewayQuery.data?.available ? (
+      {enabled && gatewayQuery.data?.available ? (
         <div className="space-y-2 rounded-lg border border-border/60 bg-background/60 p-3">
           <div className="flex items-center justify-between gap-3">
             <span className="text-xs font-semibold text-foreground">
@@ -359,29 +311,29 @@ export function NxtlinqAuthorizationPreset({
       ) : null}
 
       {!workspace ? (
-        <p className="text-xs text-amber-600 dark:text-amber-400">
-          Choose an Agent workspace before enabling Nxtlinq.
+        <p className="text-xs text-muted-foreground">
+          You can choose and confirm the Agent workspace during setup.
         </p>
       ) : null}
-      {!configQuery.isLoading && (!trustStore || !receiptDirectory) ? (
+      {enabled &&
+      !configQuery.isLoading &&
+      (!trustStore || !receiptDirectory) ? (
         <p className="text-xs text-amber-600 dark:text-amber-400">
-          Configure the shared trust store in Settings → Agents → Nxtlinq
-          authorization.
+          Open Review policy to repair local trust and receipt storage.
         </p>
       ) : null}
       <p className="text-xs text-muted-foreground">
-        This Agent inherits the shared trusted signers and receives its own
-        receipt directory. Buzz never creates or stores the policy signing key.
+        Buzz protects the owner key in secure local storage and never exposes it
+        to the Agent.
       </p>
-      {gatewayQuery.data?.available && currentSetup?.ready === false ? (
+      {enabled &&
+      gatewayQuery.data?.available &&
+      currentSetup?.ready === false ? (
         <p className="text-xs text-amber-600 dark:text-amber-400">
-          Enable is locked until the project owner signs the manifest and the
-          deployment operator provisions the external trust store. For this
-          repository's demo, run `npm run demo:buzz-project:setup` from the
-          Gateway package.
+          This setup is not ready. Open Review policy to repair, sign, and
+          activate it.
         </p>
       ) : null}
-      {failure ? <p className="text-xs text-destructive">{failure}</p> : null}
       {saveBlocked ? (
         <p className="text-xs text-amber-600 dark:text-amber-400">
           Recheck the changed Nxtlinq setup before saving this Agent.

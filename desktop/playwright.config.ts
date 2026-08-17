@@ -121,6 +121,7 @@ export default defineConfig({
         "**/invite-link-copy.spec.ts",
         "**/global-agent-config-screenshots.spec.ts",
         "**/nxtlinq-authorization-screenshots.spec.ts",
+        "**/nxtlinq-conversational-setup.spec.ts",
         "**/doctor-states.spec.ts",
         "**/onboarding-avatar-skip.spec.ts",
         "**/onboarding-backup.spec.ts",

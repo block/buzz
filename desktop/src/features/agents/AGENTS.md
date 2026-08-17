@@ -183,8 +183,10 @@ with a TypeScript lookup table or an id comparison in a component.
    Nxtlinq discovery and installation remain separate from the ACP runtime
    catalog, because the Gateway wraps a harness rather than becoming one. The
    preset may derive wrapper argv and pass through the Agent's configured env
-   names, but it must not generate policy private keys, enroll trusted signers,
-   or place operator trust/receipt state inside the Agent-writable workspace.
+   names, but it must not silently generate policy private keys, enroll trusted
+   signers, or place private keys or operator trust/receipt state inside the
+   Agent-writable workspace. The explicit native initialization ceremony in
+   rule 14 is the only key-generation exception.
    Raw wrapper fields are internal launch state and are not exposed to end
    users; the preset owns their deterministic construction. Before enabling a
    preset, the Host may check file presence and operator-path
@@ -198,6 +200,70 @@ with a TypeScript lookup table or an id comparison in a component.
    PATH lookup, or unverified wrapper record is never sufficient. Managed
    installation pins the reviewed Gateway package version, and both readiness
    and process spawn fail closed if that version or executable identity drifts.
+14. **Conversational authorization setup is an owner-reviewed draft, never an
+   Agent-side installer.** An owned Agent may propose the Nxtlinq project root,
+   policy-only manifest fields, and a plain-language access explanation through
+   the authenticated observer draft channel. Desktop revalidates that the Agent
+   and owner share the claimed source channel. Missing Attest initialization is
+   not a draft-submission blocker; Desktop presents it as a separate owner step.
+   For an initialized project, Desktop reads the current manifest itself and
+   shows an exact diff. An absolute project path explicitly
+   supplied by the owner must be preserved; it must never be replaced by the
+   Agent, shell, MCP working directory, or configured workspace. The Agent asks
+   the owner for an exact absolute path whenever the current request omits one,
+   instead of submitting a draft against an inferred default.
+   Desktop lets the owner browse or change the proposed path and requires an
+   explicit action to adopt that project as the local Agent `working_directory`
+   before signing or enablement. The request contract rejects
+   signing/integrity fields, private keys, arbitrary capability constraints, and
+   direct trust-store selection. Applying is digest-bound to the reviewed file
+   revision. Gateway installation, manifest write, signed readiness, and
+   wrapper enablement remain explicit owner actions in Desktop. In the local
+   deployment MVP, the explicit initialization action may copy the freshly
+   generated and verified public key into a Buzz-owned app-data trust store and
+   select it automatically; it must never reference the Agent-writable project
+   key. A changed manifest requires an explicit owner signing action;
+   The review UI is a progressive five-step ceremony—Project, Attest, Local
+   trust, Policy, Activate. Only the active step's fields and action may render;
+   later paths, policy details, and signing controls stay hidden until their
+   prerequisites exist. Back may revisit completed steps without undoing their
+   already-approved native effects.
+   Desktop retrieves the matching Buzz-managed key from the OS secure store,
+   then stops the local Agent and holds its lifecycle lock through signing and
+   verification. Key bytes and any transient path must never enter the WebView,
+   observer draft, Agent, MCP server, stored settings, logs, or error text.
+   Desktop invokes the reviewed Attest CLI with a digest-bound manifest,
+   verifies the resulting signature against operator trust, and returns only
+   non-secret signer metadata. The Agent must never choose, request, read, or
+   use the signing key. When the reviewed project is uninitialized, Desktop may
+   offer a separate, explicit owner action. While holding the local Agent
+   lifecycle lock, Desktop runs the reviewed Attest CLI's standard init in a
+   protected mode-0700 staging directory on the project filesystem. Attest—not
+   Buzz—generates the Ed25519 identity and initial manifest. Desktop validates
+   the generated pair, stores the private key under a deterministic
+   fingerprint-derived name in the OS secure store, removes the staged private
+   key, then atomically installs only the public project state. If the OS secure
+   store is unavailable, Desktop may use an
+   owner-only mode-0600 file below Buzz app data, outside the Agent workspace,
+   and must report that fallback to the owner. Signing may materialize the key
+   only in an owner-only temporary directory for the reviewed CLI invocation
+   and must remove it immediately afterward. The private-key path and bytes
+   must never cross IPC or enter the WebView, Agent, MCP, logs, settings, or
+   project. IPC may return only the storage class, public fingerprint, and the
+   non-secret Buzz-owned trust-store path.
+   Desktop must never run default key-generating init inside the workspace or
+   treat a repository-supplied key as trusted. Automatic enrollment is allowed
+   only for the key pair generated and verified inside that same explicit,
+   Agent-stopped Desktop initialization ceremony. Later private-key signing
+   remains a separate owner decision.
+15. **Gateway environment filtering must preserve the downstream runtime's
+   effective configuration.** Nxtlinq starts the ACP runtime with a clean
+   environment, so the deterministic wrapper allowlist must include every
+   provider credential, endpoint/model override, and Buzz Agent tuning variable
+   that Desktop may inject from global, persona, build, or Agent configuration;
+   using only `record.env_vars` drops inherited credentials after readiness has
+   already passed. Forward downstream stderr through the Gateway so runtime
+   configuration failures remain diagnosable without weakening authorization.
 
 ## The tests that enforce this
 

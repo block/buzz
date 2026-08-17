@@ -5,6 +5,7 @@ import {
 } from "./installTypes";
 import { invokeTauri } from "./tauri";
 import type { CommandAvailability } from "./types";
+import type { NxtlinqPolicyDraft } from "@/features/agents/agentManagement";
 
 type RawCommandAvailability = {
   command: string;
@@ -42,6 +43,41 @@ export type NxtlinqAuthorizationConfig = {
   receiptRoot: string;
 };
 
+export type NxtlinqManifestPreview = {
+  manifestPath: string;
+  currentManifest: string;
+  proposedManifest: string;
+  unifiedDiff: string;
+  currentSha256: string;
+  changed: boolean;
+  requiresSignature: boolean;
+};
+
+export type NxtlinqManifestSignResult = {
+  cancelled: boolean;
+  signerKeyId: string | null;
+  manifestSha256: string | null;
+};
+
+export type NxtlinqAttestInitializationState =
+  | "missing"
+  | "initialized"
+  | "workspacePrivateKey"
+  | "invalid";
+
+export type NxtlinqAttestInitializationStatus = {
+  status: NxtlinqAttestInitializationState;
+  detail: string | null;
+};
+
+export type NxtlinqAttestInitializationResult = {
+  cancelled: boolean;
+  signerKeyId: string | null;
+  publicKeyFingerprint: string | null;
+  privateKeyStorage: string | null;
+  trustStorePath: string | null;
+};
+
 export async function discoverNxtlinqAuthorizationGateway(): Promise<CommandAvailability> {
   const raw = await invokeTauri<RawCommandAvailability>(
     "discover_nxtlinq_authorization_gateway",
@@ -59,6 +95,13 @@ export async function installNxtlinqAuthorizationGateway(
   const raw = await invokeTauri<RawInstallRuntimeResult>(
     "install_nxtlinq_authorization_gateway",
     { force },
+  );
+  return fromRawInstallRuntimeResult(raw);
+}
+
+export async function uninstallNxtlinqAuthorizationGateway(): Promise<InstallRuntimeResult> {
+  const raw = await invokeTauri<RawInstallRuntimeResult>(
+    "uninstall_nxtlinq_authorization_gateway",
   );
   return fromRawInstallRuntimeResult(raw);
 }
@@ -86,6 +129,26 @@ export async function pickNxtlinqDirectory(): Promise<string | null> {
   return invokeTauri<string | null>("pick_nxtlinq_directory");
 }
 
+export async function inspectNxtlinqAttestInitialization(input: {
+  projectRoot: string;
+}): Promise<NxtlinqAttestInitializationStatus> {
+  return invokeTauri<NxtlinqAttestInitializationStatus>(
+    "inspect_nxtlinq_attest_initialization",
+    input,
+  );
+}
+
+export async function initializeNxtlinqAttest(input: {
+  agentPubkey: string;
+  projectRoot: string;
+  keyId: string;
+}): Promise<NxtlinqAttestInitializationResult> {
+  return invokeTauri<NxtlinqAttestInitializationResult>(
+    "initialize_nxtlinq_attest",
+    input,
+  );
+}
+
 export async function checkNxtlinqAuthorizationSetup(input: {
   projectRoot: string;
   trustStore: string;
@@ -99,4 +162,35 @@ export async function checkNxtlinqAuthorizationSetup(input: {
       receiptDirectory: input.receiptDirectory,
     },
   );
+}
+
+export async function previewNxtlinqManifestPolicy(input: {
+  projectRoot: string;
+  policy: NxtlinqPolicyDraft;
+}): Promise<NxtlinqManifestPreview> {
+  return invokeTauri<NxtlinqManifestPreview>(
+    "preview_nxtlinq_manifest_policy",
+    input,
+  );
+}
+
+export async function applyNxtlinqManifestPolicy(input: {
+  projectRoot: string;
+  policy: NxtlinqPolicyDraft;
+  expectedSha256: string;
+}): Promise<NxtlinqManifestPreview> {
+  return invokeTauri<NxtlinqManifestPreview>(
+    "apply_nxtlinq_manifest_policy",
+    input,
+  );
+}
+
+export async function signNxtlinqManifest(input: {
+  agentPubkey: string;
+  projectRoot: string;
+  policy: NxtlinqPolicyDraft;
+  expectedSha256: string;
+  trustStore: string;
+}): Promise<NxtlinqManifestSignResult> {
+  return invokeTauri<NxtlinqManifestSignResult>("sign_nxtlinq_manifest", input);
 }

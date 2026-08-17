@@ -20,6 +20,7 @@ import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStor
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
 import {
   injectObserverEventsForE2E,
+  injectLiveObserverEventsForE2E,
   syncAgentObserverEvents,
 } from "@/features/agents/observerRelayStore";
 import {
@@ -489,6 +490,11 @@ type E2eConfig = {
     nxtlinqAuthorizationConfig?: {
       trustStore: string | null;
       receiptRoot: string;
+    };
+    /** Native Attest project status; initialization transitions it to initialized. */
+    nxtlinqAttestInitialization?: {
+      status: "missing" | "initialized" | "workspacePrivateKey" | "invalid";
+      detail?: string | null;
     };
     /** Explicit owner-only agent-access capability; independent of baked defaults. */
     ownerOnlyAccessBuild?: boolean;
@@ -1310,6 +1316,19 @@ declare global {
       kind?: "turn_started" | "turn_completed";
     }) => void;
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
+      agentPubkey: string;
+      events: Array<{
+        seq: number;
+        timestamp: string;
+        kind: string;
+        agentIndex: number | null;
+        channelId: string | null;
+        sessionId: string | null;
+        turnId: string | null;
+        payload: unknown;
+      }>;
+    }) => void;
+    __BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
       events: Array<{
         seq: number;
@@ -7677,6 +7696,11 @@ let mockNxtlinqAuthorizationConfig: {
   trustStore: string | null;
   receiptRoot: string;
 } | null = null;
+let mockNxtlinqAttestInitialization: {
+  status: "missing" | "initialized" | "workspacePrivateKey" | "invalid";
+  detail: string | null;
+} = { status: "initialized", detail: null };
+let mockNxtlinqGatewayInstalled = true;
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -8714,6 +8738,7 @@ async function handleUpdateManagedAgent(args: {
     model?: string | null;
     systemPrompt?: string | null;
     envVars?: Record<string, string>;
+    workingDirectory?: string | null;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
   };
@@ -8730,6 +8755,9 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.envVars !== undefined) {
     agent.env_vars = { ...args.input.envVars };
+  }
+  if (args.input.workingDirectory !== undefined) {
+    agent.working_directory = args.input.workingDirectory;
   }
   if (args.input.respondTo !== undefined) {
     agent.respond_to = args.input.respondTo;
@@ -10117,6 +10145,11 @@ export function maybeInstallE2eTauriMocks() {
   mockNxtlinqAuthorizationConfig = config.mock?.nxtlinqAuthorizationConfig
     ? { ...config.mock.nxtlinqAuthorizationConfig }
     : null;
+  mockNxtlinqAttestInitialization = {
+    status: config.mock?.nxtlinqAttestInitialization?.status ?? "initialized",
+    detail: config.mock?.nxtlinqAttestInitialization?.detail ?? null,
+  };
+  mockNxtlinqGatewayInstalled = true;
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
@@ -10454,6 +10487,9 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);
+  };
+  window.__BUZZ_E2E_SEED_LIVE_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
+    injectLiveObserverEventsForE2E(agentPubkey, events);
   };
   const meshModelName = (modelId: string) => {
     const basename = modelId.split("/").at(-1) ?? modelId;
@@ -11899,14 +11935,28 @@ export function maybeInstallE2eTauriMocks() {
       case "discover_nxtlinq_authorization_gateway":
         return {
           command: "nxtlinq-authorization-gateway",
-          resolved_path: "/tmp/buzz/bin/nxtlinq-authorization-gateway",
-          available: true,
+          resolved_path: mockNxtlinqGatewayInstalled
+            ? "/tmp/buzz/bin/nxtlinq-authorization-gateway"
+            : null,
+          available: mockNxtlinqGatewayInstalled,
         };
-      case "install_nxtlinq_authorization_gateway":
-        return handleInstallAcpRuntime(
+      case "install_nxtlinq_authorization_gateway": {
+        const result = await handleInstallAcpRuntime(
           { runtimeId: "nxtlinq-authorization-gateway" },
           activeConfig,
         );
+        if (result.success) mockNxtlinqGatewayInstalled = true;
+        return result;
+      }
+      case "uninstall_nxtlinq_authorization_gateway":
+        mockNxtlinqGatewayInstalled = false;
+        return {
+          success: true,
+          steps: [],
+          restarted_count: 0,
+          failed_restart_count: 0,
+          log_path: null,
+        };
       case "get_nxtlinq_authorization_config":
         return (
           mockNxtlinqAuthorizationConfig ?? {
@@ -11926,6 +11976,30 @@ export function maybeInstallE2eTauriMocks() {
       case "pick_nxtlinq_trust_store":
       case "pick_nxtlinq_directory":
         return null;
+      case "inspect_nxtlinq_attest_initialization":
+        return { ...mockNxtlinqAttestInitialization };
+      case "initialize_nxtlinq_attest": {
+        const setup = payload as { keyId: string };
+        const trustStorePath =
+          "/tmp/buzz/nxtlinq/trusted-signers/mock-public-key-fingerprint.json";
+        mockNxtlinqAttestInitialization = {
+          status: "initialized",
+          detail: null,
+        };
+        mockNxtlinqAuthorizationConfig = {
+          trustStore: trustStorePath,
+          receiptRoot:
+            mockNxtlinqAuthorizationConfig?.receiptRoot ??
+            "/tmp/buzz/nxtlinq/receipts",
+        };
+        return {
+          cancelled: false,
+          signerKeyId: setup.keyId,
+          publicKeyFingerprint: "sha256:mock-public-key-fingerprint",
+          privateKeyStorage: "System secure storage",
+          trustStorePath,
+        };
+      }
       case "check_nxtlinq_authorization_setup": {
         const setup = payload as {
           projectRoot: string;
@@ -11971,6 +12045,38 @@ export function maybeInstallE2eTauriMocks() {
           error: null,
         };
       }
+      case "preview_nxtlinq_manifest_policy": {
+        const setup = payload as { projectRoot: string; policy: unknown };
+        const proposed = `${JSON.stringify(setup.policy, null, 2)}\n`;
+        return {
+          manifestPath: `${setup.projectRoot}/nxtlinq/agent.manifest.json`,
+          currentManifest: '{"name":"existing"}\n',
+          proposedManifest: proposed,
+          unifiedDiff: `--- a/nxtlinq/agent.manifest.json\n+++ b/nxtlinq/agent.manifest.json\n@@ -1,1 +1,1 @@\n-{"name":"existing"}\n+${proposed.replaceAll("\n", "\n+")}`,
+          currentSha256: "b".repeat(64),
+          changed: true,
+          requiresSignature: true,
+        };
+      }
+      case "apply_nxtlinq_manifest_policy": {
+        const setup = payload as { projectRoot: string; policy: unknown };
+        const proposed = `${JSON.stringify(setup.policy, null, 2)}\n`;
+        return {
+          manifestPath: `${setup.projectRoot}/nxtlinq/agent.manifest.json`,
+          currentManifest: proposed,
+          proposedManifest: proposed,
+          unifiedDiff: "",
+          currentSha256: "c".repeat(64),
+          changed: false,
+          requiresSignature: false,
+        };
+      }
+      case "sign_nxtlinq_manifest":
+        return {
+          cancelled: false,
+          signerKeyId: "mock-signer",
+          manifestSha256: "d".repeat(64),
+        };
       case "discover_backend_providers":
         return activeConfig?.mock?.backendProviders ?? [];
       case "probe_backend_provider": {
