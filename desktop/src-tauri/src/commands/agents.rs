@@ -6,15 +6,14 @@ use super::managed_agent_definition::validate_create_definition;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
+        find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
+        managed_agent_avatar_url, normalize_agent_args, resolve_provider_binary,
+        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -439,73 +438,6 @@ pub(super) async fn start_local_agent_with_preflight(
         &personas,
         &crate::managed_agents::load_global_agent_config(app).unwrap_or_default(),
     )
-}
-
-/// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
-/// spawn_blocking, and persists the result (backend_agent_id or last_error).
-///
-/// Idempotency: calling deploy on an already-deployed agent sends the same payload
-/// again. Providers are expected to handle this as an update-in-place or no-op —
-/// the protocol does not include an explicit `undeploy` operation (deferred to v2).
-///
-/// Returns Ok(()) on success, Err(message) on failure. Either way the record is
-/// updated and saved before returning.
-async fn deploy_to_provider(
-    app: &AppHandle,
-    state: &AppState,
-    pubkey: &str,
-    provider_id: &str,
-    config: &serde_json::Value,
-    agent_json: serde_json::Value,
-    cached_binary_path: Option<&str>,
-) -> Result<(), String> {
-    // Resolve via discovered candidates only. Cached path must match BOTH
-    // "is a discovered candidate" AND "belongs to this provider_id". A tampered
-    // record cannot redirect deploys to a different provider's binary.
-    let bin_path = cached_binary_path
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.exists())
-        .map(|p| p.canonicalize().unwrap_or(p))
-        .filter(|canonical| {
-            discover_provider_candidates().iter().any(|(id, cp)| {
-                id == provider_id && cp.canonicalize().ok().as_ref() == Some(canonical)
-            })
-        })
-        .map_or_else(|| resolve_provider_binary(provider_id), Ok)?;
-
-    let config_clone = config.clone();
-    let deploy_result =
-        tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config_clone))
-            .await
-            .map_err(|e| format!("spawn_blocking failed: {e}"))?;
-
-    // Persist result under lock.
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let rec = records
-        .iter_mut()
-        .find(|r| r.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
-
-    match deploy_result {
-        Ok(backend_agent_id) => {
-            rec.backend_agent_id = Some(backend_agent_id);
-            rec.last_started_at = Some(now_iso());
-            rec.updated_at = now_iso();
-            rec.last_error = None;
-        }
-        Err(ref e) => {
-            rec.last_error = Some(e.clone());
-            rec.updated_at = now_iso();
-            save_managed_agents(app, &records)?;
-            return Err(e.clone());
-        }
-    }
-    save_managed_agents(app, &records)?;
-    Ok(())
 }
 
 // Async so the blocking body (disk reads of agent/persona records, per-agent
@@ -992,23 +924,15 @@ pub async fn create_managed_agent(
 
     // ── Phase 5: provider deploy (async, outside lock) ───────────────────────
     let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
-        if let BackendKind::Provider { ref id, ref config } = input.backend {
-            // Read the saved record to build the deploy payload (record has the
-            // canonical field values after Phase 3 normalization).
-            let agent_json = {
-                let _g = state
-                    .managed_agents_store_lock
-                    .lock()
-                    .map_err(|e| e.to_string())?;
-                let records = load_managed_agents(&app)?;
-                let rec = records
-                    .iter()
-                    .find(|r| r.pubkey == pubkey)
-                    .ok_or_else(|| "agent disappeared".to_string())?;
-                build_deploy_payload(&app, &state, rec)?
-            };
-            match deploy_to_provider(&app, &state, &pubkey, id, config, agent_json, None).await {
-                Ok(()) => spawn_error,
+        if let BackendKind::Provider { .. } = input.backend {
+            // The deploy snapshots the saved record (canonical field values
+            // after Phase 3 normalization) under the per-agent deploy lock
+            // and binds its completion to that snapshot. Any failure —
+            // including payload build — lands in `spawn_error`: the agent
+            // record exists either way, and this response field is the
+            // channel for "created but not deployed".
+            match provider_access::deploy_to_provider(&app, &state, &pubkey).await {
+                Ok(_) => spawn_error,
                 Err(e) => Some(e),
             }
         } else {
@@ -1065,11 +989,7 @@ pub async fn start_managed_agent(
     let owner_hex = workspace_owner_hex(&state)?;
     enum StartTarget {
         Local,
-        Provider {
-            backend: BackendKind,
-            cached_binary_path: Option<String>,
-            agent_json: serde_json::Value,
-        },
+        Provider,
     }
 
     // Collect backend info under lock; async preflight/spawn happens below.
@@ -1117,11 +1037,7 @@ pub async fn start_managed_agent(
         let target = if record.backend == BackendKind::Local {
             StartTarget::Local
         } else {
-            StartTarget::Provider {
-                backend: record.backend.clone(),
-                cached_binary_path: record.provider_binary_path.clone(),
-                agent_json: build_deploy_payload(&app, &state, record)?,
-            }
+            StartTarget::Provider
         };
 
         (target, reconcile)
@@ -1131,48 +1047,10 @@ pub async fn start_managed_agent(
         StartTarget::Local => {
             start_local_agent_with_preflight(&app, &state, &pubkey, &owner_hex, false).await
         }
-        StartTarget::Provider {
-            backend: BackendKind::Provider { id, config },
-            cached_binary_path,
-            agent_json,
-        } => {
-            deploy_to_provider(
-                &app,
-                &state,
-                &pubkey,
-                &id,
-                &config,
-                agent_json,
-                cached_binary_path.as_deref(),
-            )
-            .await?;
-
-            // Return updated summary.
-            let _store_guard = state
-                .managed_agents_store_lock
-                .lock()
-                .map_err(|e| e.to_string())?;
-            let records = load_managed_agents(&app)?;
-            let runtimes = state
-                .managed_agent_processes
-                .lock()
-                .map_err(|e| e.to_string())?;
-            let record = records
-                .iter()
-                .find(|r| r.pubkey == pubkey)
-                .ok_or_else(|| format!("agent {pubkey} not found"))?;
-            let personas = load_personas(&app).unwrap_or_default();
-            build_managed_agent_summary(
-                &app,
-                record,
-                &runtimes,
-                &personas,
-                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-            )
-        }
-        StartTarget::Provider { backend, .. } => Err(format!(
-            "agent {pubkey} has unsupported backend kind: {backend:?}"
-        )),
+        // Snapshots the record and payload under the per-agent deploy lock,
+        // binds completion to that snapshot, and returns the summary of the
+        // freshly persisted record on success-as-current.
+        StartTarget::Provider => provider_access::deploy_to_provider(&app, &state, &pubkey).await,
     };
 
     // ── Profile reconciliation (fire-and-forget) ────────────────────────────
@@ -1353,7 +1231,7 @@ pub async fn delete_managed_agent(
 // No backend Tauri command needed. Presence IS the status.
 #[path = "agents_deploy.rs"]
 mod deploy;
-pub(super) mod provider_access;
+pub(crate) mod provider_access;
 use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::{deploy_payload_json, DeployProjections};
@@ -1369,3 +1247,6 @@ pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
 #[cfg(test)]
 #[path = "agents_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod provider_access_tests;

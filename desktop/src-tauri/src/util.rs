@@ -4,6 +4,31 @@ pub fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Mint a fresh `updated_at` stamp guaranteed to differ from `previous`.
+///
+/// A managed agent's `updated_at` doubles as the configuration generation
+/// that in-flight provider deploys are bound to (see
+/// `commands::agents::provider_access::bind_completion`), so an edit must
+/// change the string even when the platform clock is too coarse to have
+/// ticked since `previous` was written, or has stepped backwards onto it.
+/// On a collision the fresh stamp is nudged forward by one nanosecond, which
+/// stays valid RFC 3339 and preserves ordering.
+pub(crate) fn bumped_updated_at(previous: &str) -> String {
+    bumped_updated_at_from(Utc::now(), previous)
+}
+
+fn bumped_updated_at_from(now: chrono::DateTime<Utc>, previous: &str) -> String {
+    let fresh = now.to_rfc3339();
+    if fresh != previous {
+        return fresh;
+    }
+    // `checked_add_signed` only fails at the far end of chrono's date range;
+    // degrade to the un-nudged stamp rather than panic.
+    now.checked_add_signed(chrono::TimeDelta::nanoseconds(1))
+        .map(|nudged| nudged.to_rfc3339())
+        .unwrap_or(fresh)
+}
+
 /// Deserialize an `Option<Option<T>>` field that distinguishes an absent key
 /// from an explicit JSON `null`.
 ///
@@ -298,6 +323,32 @@ mod tests {
         assert_eq!(absent.ttl, None);
         assert_eq!(null.ttl, Some(None));
         assert_eq!(set.ttl, Some(Some(3600)));
+    }
+
+    #[test]
+    fn bumped_updated_at_always_changes_the_generation() {
+        use chrono::Utc;
+
+        // Collision (coarse or stepped-back clock lands on the exact previous
+        // stamp): the result must still differ, stay valid RFC 3339, and sort
+        // after the previous stamp.
+        let now = Utc::now();
+        let previous = now.to_rfc3339();
+        let bumped = super::bumped_updated_at_from(now, &previous);
+        assert_ne!(bumped, previous);
+        let parsed = chrono::DateTime::parse_from_rfc3339(&bumped).expect("valid rfc3339");
+        assert_eq!(
+            parsed.timestamp_nanos_opt(),
+            now.timestamp_nanos_opt().map(|nanos| nanos + 1)
+        );
+
+        // No collision: the fresh stamp is returned untouched.
+        let stale = "2020-01-01T00:00:00+00:00";
+        let fresh = super::bumped_updated_at_from(now, stale);
+        assert_eq!(fresh, previous);
+
+        // The public wrapper never echoes its input back.
+        assert_ne!(super::bumped_updated_at(&previous), previous);
     }
 
     #[test]

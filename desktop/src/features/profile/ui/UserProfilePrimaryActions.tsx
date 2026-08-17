@@ -34,6 +34,7 @@ export function ProfilePrimaryActions({
   isFollowing,
   messagePending,
   onAgentPrimaryAction,
+  onAgentRedeploy,
   onAgentRestart,
   onHuddle,
   onMessage,
@@ -53,6 +54,7 @@ export function ProfilePrimaryActions({
   isFollowing: boolean;
   messagePending?: boolean;
   onAgentPrimaryAction?: () => void;
+  onAgentRedeploy?: () => void;
   onAgentRestart?: () => void;
   onHuddle?: () => void;
   onMessage?: () => void;
@@ -79,7 +81,8 @@ export function ProfilePrimaryActions({
     onMessage !== undefined ||
     onHuddle !== undefined ||
     (onAgentPrimaryAction !== undefined && agentActionLabel !== undefined) ||
-    onAgentRestart !== undefined;
+    onAgentRestart !== undefined ||
+    onAgentRedeploy !== undefined;
 
   if (!hasActions) {
     return null;
@@ -108,6 +111,15 @@ export function ProfilePrimaryActions({
           label="Restart agent"
           onClick={onAgentRestart}
           testId="user-profile-agent-restart"
+        />
+      ) : null}
+      {onAgentRedeploy ? (
+        <ProfileActionTile
+          disabled={agentActionDisabled}
+          icon={RefreshCw}
+          label="Redeploy"
+          onClick={onAgentRedeploy}
+          testId="user-profile-agent-redeploy"
         />
       ) : null}
       {onMessage ? (

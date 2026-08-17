@@ -7,20 +7,10 @@ import {
   type AttachManagedAgentToChannelResult,
   useAcpRuntimesQuery,
   useAvailableAcpRuntimes,
-  useCreateManagedAgentMutation,
-  useCreatePersonaMutation,
-  useDeleteManagedAgentMutation,
-  useDeletePersonaMutation,
   useManagedAgentLogQuery,
   useRelayAgentsQuery,
   useManagedAgentsQuery,
   usePersonasQuery,
-  useSetManagedAgentStartOnAppLaunchMutation,
-  useSetPersonaActiveMutation,
-  useStartManagedAgentMutation,
-  useStopManagedAgentMutation,
-  useUpdateManagedAgentMutation,
-  useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { AddAgentToChannelDialog } from "@/features/agents/ui/AddAgentToChannelDialog";
@@ -31,6 +21,7 @@ import {
 } from "@/features/agents/lib/instanceInputForDefinition";
 import { describeLogFile } from "@/features/agents/ui/agentUi";
 import { useAgentLifecycleActions } from "@/features/profile/ui/useAgentLifecycleActions";
+import { useAgentProfileMutations } from "@/features/profile/ui/useAgentProfileMutations";
 import {
   duplicatePersonaDialogState,
   editPersonaDialogState,
@@ -238,16 +229,20 @@ export function UserProfilePanel({
   const relayAgentsQuery = useRelayAgentsQuery({ enabled: true });
   const availableRuntimesQuery = useAvailableAcpRuntimes();
   const acpRuntimesQuery = useAcpRuntimesQuery();
-  const createAgentMutation = useCreateManagedAgentMutation();
-  const updateManagedAgentMutation = useUpdateManagedAgentMutation();
-  const startAgentMutation = useStartManagedAgentMutation();
-  const stopAgentMutation = useStopManagedAgentMutation();
-  const deleteAgentMutation = useDeleteManagedAgentMutation();
-  const startOnLaunchMutation = useSetManagedAgentStartOnAppLaunchMutation();
-  const createPersonaMutation = useCreatePersonaMutation();
-  const updatePersonaMutation = useUpdatePersonaMutation();
-  const deletePersonaMutation = useDeletePersonaMutation();
-  const setPersonaActiveMutation = useSetPersonaActiveMutation();
+  const {
+    createAgentMutation,
+    updateManagedAgentMutation,
+    startAgentMutation,
+    redeployAgentMutation,
+    stopAgentMutation,
+    deleteAgentMutation,
+    startOnLaunchMutation,
+    createPersonaMutation,
+    updatePersonaMutation,
+    deletePersonaMutation,
+    setPersonaActiveMutation,
+    isAgentActionPending,
+  } = useAgentProfileMutations();
   const usersBatchQuery = useUsersBatchQuery(
     effectivePubkey ? [effectivePubkey] : [],
   );
@@ -334,17 +329,6 @@ export function UserProfilePanel({
     isOwner === true &&
     resolvedPersona !== undefined &&
     managedAgent === undefined;
-  const isAgentActionPending =
-    createAgentMutation.isPending ||
-    updateManagedAgentMutation.isPending ||
-    startAgentMutation.isPending ||
-    stopAgentMutation.isPending ||
-    deleteAgentMutation.isPending ||
-    startOnLaunchMutation.isPending ||
-    createPersonaMutation.isPending ||
-    updatePersonaMutation.isPending ||
-    deletePersonaMutation.isPending ||
-    setPersonaActiveMutation.isPending;
   const isFollowing =
     !isSelf &&
     pubkeyLower.length > 0 &&
@@ -449,11 +433,12 @@ export function UserProfilePanel({
     ],
   );
 
-  const { handleAgentPrimaryAction, handleAgentRestart } =
+  const { handleAgentPrimaryAction, handleAgentRedeploy, handleAgentRestart } =
     useAgentLifecycleActions({
       channels: channelsQuery.data,
       managedAgent,
       relayAgents: relayAgentsQuery.data,
+      redeployManagedAgent: redeployAgentMutation.mutateAsync,
       startManagedAgent: startAgentMutation.mutateAsync,
       stopManagedAgent: stopAgentMutation.mutateAsync,
     });
@@ -796,6 +781,7 @@ export function UserProfilePanel({
           followMutation={followMutation}
           agentInstruction={agentInstruction}
           handleAgentPrimaryAction={handleAgentPrimaryAction}
+          handleAgentRedeploy={handleAgentRedeploy}
           handleAgentRestart={handleAgentRestart}
           handleEditAgent={handleEditAgent}
           handleToggleAgentAutoStart={handleToggleAgentAutoStart}

@@ -14,6 +14,7 @@ type DeleteManagedAgentInput = {
 
 type StartManagedAgent = (pubkey: string) => Promise<unknown>;
 type StopManagedAgent = (pubkey: string) => Promise<unknown>;
+type RedeployManagedAgent = (pubkey: string) => Promise<unknown>;
 type DeleteManagedAgent = (input: DeleteManagedAgentInput) => Promise<unknown>;
 
 type ManagedAgentChannelContext = {
@@ -45,6 +46,18 @@ export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   }
 
   return "Start agent";
+}
+
+export type ManagedAgentSecondaryAction = "restart" | "redeploy";
+
+export function getManagedAgentSecondaryAction(
+  agent: ManagedAgent,
+): ManagedAgentSecondaryAction | null {
+  if (agent.backend.type === "provider") {
+    return agent.backendAgentId ? "redeploy" : null;
+  }
+
+  return isManagedAgentActive(agent) ? "restart" : null;
 }
 
 export function resolveManagedAgentChannelId(
@@ -86,6 +99,38 @@ export async function startManagedAgentWithRules({
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
   await startManagedAgent(agent.pubkey);
+}
+
+/**
+ * What a successful redeploy is allowed to claim.
+ *
+ * A provider returning an `agent_id` proves the configuration was *delivered*,
+ * never that the runtime changed: per `docs/remote-agents.md` (§Deploy State
+ * Machine, "Documented consequence") a deploy against a live instance is a
+ * strict no-op that mutates nothing, and "configuration edits to a running
+ * remote agent do not take effect until it next exits" — fresh configuration
+ * materializes exactly when a fresh generation does. So the notice reports the
+ * send and names the generation boundary, and never says "Redeployed".
+ * Pinned by the built-in provider's own contract test
+ * (`crates/buzz-backend-kubernetes/src/reconcile.rs`:
+ * `started_pod_returns_its_id_having_applied_nothing`).
+ */
+export const REDEPLOY_SENT_NOTICE =
+  "Settings sent to the provider. A running agent keeps its current configuration until it next restarts.";
+
+export async function redeployManagedAgentWithRules({
+  agent,
+  redeployManagedAgent,
+}: {
+  agent: ManagedAgent;
+  redeployManagedAgent: RedeployManagedAgent;
+}): Promise<ManagedAgentActionResult> {
+  if (getManagedAgentSecondaryAction(agent) !== "redeploy") {
+    throw new Error("Agent is not deployed on a provider.");
+  }
+
+  await redeployManagedAgent(agent.pubkey);
+  return { noticeMessage: REDEPLOY_SENT_NOTICE };
 }
 
 export async function respawnManagedAgentWithRules({

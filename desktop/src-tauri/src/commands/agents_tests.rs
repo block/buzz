@@ -1,7 +1,7 @@
 use super::*;
 use crate::managed_agents::AgentDefinition;
 
-fn bare_agent_record(
+pub(super) fn bare_agent_record(
     persona_id: Option<&str>,
     model: Option<&str>,
     provider: Option<&str>,
@@ -635,6 +635,34 @@ fn provider_upgrade_reconciliation_targets_existing_deployments_only_in_marked_b
     assert!(!provider_access::needs_reconciliation_with_policy(
         &record, true
     ));
+}
+
+#[test]
+fn redeploy_guard_requires_provider_backend_and_existing_deployment() {
+    use crate::managed_agents::BackendKind;
+
+    let payload = serde_json::json!({"name": "Agent"});
+    let mut record = bare_agent_record(None, None, None);
+    let error = provider_access::redeploy_provider_target("agent", &record, &payload).unwrap_err();
+    assert!(error.contains("not provider-backed"));
+
+    record.backend = BackendKind::Provider {
+        id: "provider".to_string(),
+        config: serde_json::json!({"region": "test"}),
+    };
+    let error = provider_access::redeploy_provider_target("agent", &record, &payload).unwrap_err();
+    assert!(error.contains("has not been deployed yet"));
+
+    record.backend_agent_id = Some("existing-provider-agent".to_string());
+    record.updated_at = "generation-1".to_string();
+    let captured = provider_access::redeploy_provider_target("agent", &record, &payload)
+        .expect("deployed provider target");
+    assert_eq!(captured.provider_id, "provider");
+    assert_eq!(captured.config["region"], "test");
+    assert_eq!(captured.cached_binary_path, None);
+    assert_eq!(captured.updated_at, "generation-1");
+    // The captured generation now carries the digest of the whole deploy input.
+    assert_eq!(captured.payload_digest.len(), 64);
 }
 
 #[test]

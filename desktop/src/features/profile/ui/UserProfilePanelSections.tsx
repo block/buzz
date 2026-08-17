@@ -4,6 +4,7 @@ import { ChevronDown, ChevronUp, Pencil } from "lucide-react";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
   getManagedAgentPrimaryActionLabel,
+  getManagedAgentSecondaryAction,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
@@ -70,6 +71,7 @@ export type ProfileSummaryViewProps = {
   canInstantiateAgent: boolean;
   agentInstruction: string | null;
   handleAgentPrimaryAction: () => void;
+  handleAgentRedeploy: () => void;
   handleAgentRestart: () => void;
   handleEditAgent: () => void;
   handleToggleAgentAutoStart: () => void;
@@ -146,6 +148,7 @@ export function ProfileSummaryView({
   canInstantiateAgent,
   agentInstruction,
   handleAgentPrimaryAction,
+  handleAgentRedeploy,
   handleAgentRestart,
   handleEditAgent,
   handleToggleAgentAutoStart,
@@ -210,6 +213,9 @@ export function ProfileSummaryView({
     resetValue: "0px",
     targetRef: stickyLayoutRef,
   });
+  const managedAgentSecondaryAction = managedAgent
+    ? getManagedAgentSecondaryAction(managedAgent)
+    : null;
 
   const showMemoriesTab = isOwner === true && Boolean(pubkey);
   const showInstructionBlock =
@@ -441,11 +447,13 @@ export function ProfileSummaryView({
               : undefined
           }
           onAgentRestart={
-            isOwner === true &&
-            managedAgent?.backend.type === "local" &&
-            (managedAgent.status === "running" ||
-              managedAgent.status === "deployed")
+            isOwner === true && managedAgentSecondaryAction === "restart"
               ? handleAgentRestart
+              : undefined
+          }
+          onAgentRedeploy={
+            isOwner === true && managedAgentSecondaryAction === "redeploy"
+              ? handleAgentRedeploy
               : undefined
           }
           isFollowing={isFollowing}

@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getManagedAgentSecondaryAction,
+  REDEPLOY_SENT_NOTICE,
+  redeployManagedAgentWithRules,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -79,6 +82,100 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+test("deployed provider agents expose redeploy as their secondary action", () => {
+  assert.equal(
+    getManagedAgentSecondaryAction(
+      agent({
+        backend: { type: "provider", id: "provider", config: {} },
+        backendAgentId: "remote-agent",
+        status: "deployed",
+      }),
+    ),
+    "redeploy",
+  );
+  assert.equal(
+    getManagedAgentSecondaryAction(
+      agent({
+        backend: { type: "provider", id: "provider", config: {} },
+        status: "not_deployed",
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    getManagedAgentSecondaryAction(agent({ status: "running" })),
+    "restart",
+  );
+  assert.equal(
+    getManagedAgentSecondaryAction(agent({ status: "stopped" })),
+    null,
+  );
+});
+
+/**
+ * The claim boundary the reviewer flagged. A provider that answers a deploy
+ * with an `agent_id` has proved delivery, not application: the built-in
+ * Kubernetes provider's live row is a strict, zero-mutation no-op that returns
+ * the existing id (pinned in `crates/buzz-backend-kubernetes/src/reconcile.rs`,
+ * `started_pod_returns_its_id_having_applied_nothing`), and
+ * `docs/remote-agents.md` says edits reach a running agent only on its next
+ * fresh generation. So the notice may report the send and the generation
+ * boundary, and must not claim the agent was redeployed or updated.
+ */
+test("a successful redeploy reports delivery, never a proven runtime change", async () => {
+  const deployed = agent({
+    backend: { type: "provider", id: "kubernetes", config: {} },
+    backendAgentId: "buzz-agent-abc123",
+    status: "deployed",
+  });
+
+  let calledWith = null;
+  const result = await redeployManagedAgentWithRules({
+    agent: deployed,
+    redeployManagedAgent: async (pubkey) => {
+      calledWith = pubkey;
+      // What a provider can actually return: an id. It is the same id the
+      // live no-op row returns, so it distinguishes nothing.
+      return { ...deployed };
+    },
+  });
+
+  assert.equal(calledWith, deployed.pubkey);
+  assert.equal(result.noticeMessage, REDEPLOY_SENT_NOTICE);
+  assert.match(result.noticeMessage, /sent to the provider/i);
+  assert.match(result.noticeMessage, /until it next restarts/i);
+  for (const forbidden of [
+    /redeployed/i,
+    /\bapplied\b/i,
+    /now running/i,
+    /updated the agent/i,
+  ]) {
+    assert.doesNotMatch(
+      result.noticeMessage,
+      forbidden,
+      `redeploy notice must not claim a proven runtime change: ${forbidden}`,
+    );
+  }
+});
+
+test("redeploy refuses an agent that has no provider deployment", async () => {
+  let called = false;
+  await assert.rejects(
+    redeployManagedAgentWithRules({
+      agent: agent({
+        backend: { type: "provider", id: "kubernetes", config: {} },
+        backendAgentId: null,
+        status: "not_deployed",
+      }),
+      redeployManagedAgent: async () => {
+        called = true;
+      },
+    }),
+    /not deployed on a provider/i,
+  );
+  assert.equal(called, false, "refused redeploy still called the backend");
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------

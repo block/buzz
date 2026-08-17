@@ -26,7 +26,7 @@ use crate::{
         DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
-    util::now_iso,
+    util::bumped_updated_at,
 };
 
 /// Query available models from an agent via `buzz-acp models --json`.
@@ -824,7 +824,7 @@ pub async fn update_managed_agent(
             record.respond_to_allowlist = prospective_allowlist;
         }
 
-        record.updated_at = now_iso();
+        record.updated_at = bumped_updated_at(&record.updated_at);
 
         save_managed_agents(&app, &records)?;
 

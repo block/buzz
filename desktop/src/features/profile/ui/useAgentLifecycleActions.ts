@@ -3,6 +3,8 @@ import { toast } from "sonner";
 
 import {
   isManagedAgentActive,
+  redeployManagedAgentWithRules,
+  REDEPLOY_SENT_NOTICE,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
@@ -14,12 +16,14 @@ export function useAgentLifecycleActions({
   channels,
   managedAgent,
   relayAgents,
+  redeployManagedAgent,
   startManagedAgent,
   stopManagedAgent,
 }: {
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
   relayAgents: readonly RelayAgent[] | undefined;
+  redeployManagedAgent: (pubkey: string) => Promise<unknown>;
   startManagedAgent: (pubkey: string) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
@@ -81,5 +85,27 @@ export function useAgentLifecycleActions({
     }
   }, [managedAgent, startManagedAgent, stopManagedAgent]);
 
-  return { handleAgentPrimaryAction, handleAgentRestart };
+  const handleAgentRedeploy = React.useCallback(async () => {
+    if (!managedAgent) return;
+
+    try {
+      const result = await redeployManagedAgentWithRules({
+        agent: managedAgent,
+        redeployManagedAgent,
+      });
+      // Never "Redeployed" — the provider's answer proves delivery, not that
+      // the running agent picked the settings up. See REDEPLOY_SENT_NOTICE.
+      toast.success(result.noticeMessage ?? REDEPLOY_SENT_NOTICE);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Agent redeploy failed.",
+      );
+    }
+  }, [managedAgent, redeployManagedAgent]);
+
+  return {
+    handleAgentPrimaryAction,
+    handleAgentRedeploy,
+    handleAgentRestart,
+  };
 }

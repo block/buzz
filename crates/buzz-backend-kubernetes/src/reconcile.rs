@@ -843,6 +843,51 @@ mod tests {
         );
     }
 
+    /// The seam the desktop's "Redeploy" button reports against.
+    ///
+    /// Buzz Desktop lets an owner re-send a deployed agent's configuration and
+    /// stamps the returned `agent_id` on its record. This pins what that
+    /// answer is worth when the instance is live: the id is the one the
+    /// desktop already held, and *nothing* was applied — no Secret carrying
+    /// the edited environment was written, so the new configuration never even
+    /// reached the cluster. A desktop that reported "Redeployed" would be
+    /// reporting this call as a runtime change; what it may honestly report is
+    /// delivery plus the generation boundary (`:867-877`).
+    ///
+    /// Both shapes of edit are covered, because they fail differently: a
+    /// changed env *value* (an edited model or system prompt) does not even
+    /// move the create-intent fingerprint, and a changed env *key* does — and
+    /// the live row no-ops either way.
+    #[test]
+    fn started_pod_returns_its_id_having_applied_nothing() {
+        let id = identity();
+        let cfg = config();
+        let fake = Fake::default().with_pod(our_pod(&id, &cfg, Some(running())));
+
+        let mut edited = env();
+        edited.insert("BUZZ_RELAY_URL".into(), "wss://edited-after-deploy".into());
+        edited.insert("BUZZ_ACP_MODEL".into(), "edited-model".into());
+
+        let agent_id = block_on(deploy(&fake, &id, &cfg, edited)).expect("deploy answers");
+
+        assert_eq!(
+            agent_id,
+            id.pod_name(),
+            "the answer is the id the caller already had — success cannot \
+             distinguish an applied config from a no-op"
+        );
+        assert_eq!(
+            fake.mutations(),
+            [format!("ensure_namespace {}", cfg.namespace)],
+            "the live row mutated something while reporting success"
+        );
+        assert!(
+            fake.created_secrets.borrow().is_empty(),
+            "the edited configuration was written to the cluster — it must not \
+             be, and it is why success may not claim the agent is running it"
+        );
+    }
+
     /// Terminated → fenced delete → disappearance → recreate. The normal
     /// restart path, and the fence must carry the observed uid/rv.
     #[test]

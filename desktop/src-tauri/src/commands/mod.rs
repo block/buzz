@@ -10,7 +10,7 @@ mod agent_models_env;
 mod agent_providers;
 mod agent_settings;
 mod agent_update_rollback;
-mod agents;
+pub(crate) mod agents;
 mod canvas;
 mod channel_templates;
 mod channel_window;
