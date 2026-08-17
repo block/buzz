@@ -24,7 +24,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
+use crate::handlers::side_effects::{
+    emit_group_discovery_events, publish_nip43_member_added, publish_nip43_membership_list,
+};
 use buzz_core::invite::{
     hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
     MIN_INVITE_TTL_SECS, V2_PREFIX,
@@ -396,7 +398,7 @@ pub async fn claim_invite(
         let token_hash = hash_v2_code(&request.code);
         let outcome = state
             .db
-            .claim_relay_invite(
+            .claim_relay_invite_with_channels(
                 tenant.community(),
                 &token_hash,
                 &claimer_hex,
@@ -405,12 +407,13 @@ pub async fn claim_invite(
                     .join_policy
                     .as_ref()
                     .map(|policy| policy.version.as_str()),
+                &state.config.invite_default_channels,
             )
             .await
             .map_err(|e| internal_error(&format!("v2 invite claim: {e}")))?;
 
         return match outcome {
-            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
+            buzz_db::relay_invite::ClaimOutcome::Joined { channel_ids, .. } => {
                 tracing::info!(
                     community = %tenant.community(),
                     member = %claimer_hex,
@@ -425,6 +428,7 @@ pub async fn claim_invite(
                 if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
                     tracing::warn!("failed to publish NIP-43 membership list after v2 claim: {e}");
                 }
+                publish_invite_channel_snapshots(&tenant, &state, &pubkey, &channel_ids).await;
                 Ok(Json(serde_json::json!({
                     "status": "joined",
                     "community_id": tenant.community().to_string(),
@@ -432,7 +436,8 @@ pub async fn claim_invite(
                     "role": "member",
                 })))
             }
-            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
+            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { channel_ids, .. } => {
+                publish_invite_channel_snapshots(&tenant, &state, &pubkey, &channel_ids).await;
                 Ok(Json(serde_json::json!({
                     "status": "already_member",
                     "community_id": tenant.community().to_string(),
@@ -473,9 +478,9 @@ pub async fn claim_invite(
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
     }
 
-    let was_inserted = state
+    let claim = state
         .db
-        .claim_relay_membership(
+        .claim_relay_membership_with_channels(
             tenant.community(),
             &claimer_hex,
             &payload.r,
@@ -484,11 +489,12 @@ pub async fn claim_invite(
                 .join_policy
                 .as_ref()
                 .map(|policy| policy.version.as_str()),
+            &state.config.invite_default_channels,
         )
         .await
         .map_err(|e| internal_error(&format!("invite claim insert: {e}")))?;
 
-    if was_inserted {
+    if claim.inserted {
         tracing::info!(
             community = %tenant.community(),
             member = %claimer_hex,
@@ -501,13 +507,34 @@ pub async fn claim_invite(
             tracing::warn!("failed to publish NIP-43 membership list after claim: {e}");
         }
     }
+    publish_invite_channel_snapshots(&tenant, &state, &pubkey, &claim.channel_ids).await;
 
     Ok(Json(serde_json::json!({
-        "status": if was_inserted { "joined" } else { "already_member" },
+        "status": if claim.inserted { "joined" } else { "already_member" },
         "community_id": tenant.community().to_string(),
         "host": tenant.host(),
         "role": payload.r,
     })))
+}
+
+async fn publish_invite_channel_snapshots(
+    tenant: &buzz_core::TenantContext,
+    state: &Arc<AppState>,
+    pubkey: &nostr::PublicKey,
+    channel_ids: &[uuid::Uuid],
+) {
+    let pubkey_bytes = pubkey.to_bytes();
+    for &channel_id in channel_ids {
+        state.invalidate_membership(tenant, channel_id, &pubkey_bytes);
+        if let Err(error) = emit_group_discovery_events(tenant, state, channel_id).await {
+            tracing::warn!(
+                channel = %channel_id,
+                member = %pubkey.to_hex(),
+                %error,
+                "failed to publish channel membership snapshot after invite claim"
+            );
+        }
+    }
 }
 
 /// Fixed-window rate limit on claim attempts, keyed by community and claimer

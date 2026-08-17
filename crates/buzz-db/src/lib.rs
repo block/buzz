@@ -4388,6 +4388,26 @@ impl Db {
             .await
     }
 
+    /// Claim relay membership and configured default channels atomically.
+    pub async fn claim_relay_membership_with_channels(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        policy_version: Option<&str>,
+        default_channel_names: &[String],
+    ) -> Result<relay_members::RelayMembershipClaim> {
+        relay_members::claim_relay_membership_with_channels(
+            &self.pool,
+            community,
+            pubkey,
+            role,
+            policy_version,
+            default_channel_names,
+        )
+        .await
+    }
+
     /// Returns whether a member has persisted acceptance evidence for a policy version.
     #[datastore_span(name = "has_join_policy_acceptance", system = "postgresql")]
     pub async fn has_join_policy_acceptance(
@@ -4521,6 +4541,26 @@ impl Db {
             token_hash,
             claimer_pubkey,
             policy_version,
+        )
+        .await
+    }
+
+    /// Claim a v2 relay invite and configured default channels atomically.
+    pub async fn claim_relay_invite_with_channels(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8; 32],
+        claimer_pubkey: &str,
+        policy_version: Option<&str>,
+        default_channel_names: &[String],
+    ) -> Result<relay_invite::ClaimOutcome> {
+        relay_invite::claim_relay_invite_with_channels(
+            &self.pool,
+            community,
+            token_hash,
+            claimer_pubkey,
+            policy_version,
+            default_channel_names,
         )
         .await
     }
