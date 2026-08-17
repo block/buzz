@@ -19,6 +19,7 @@ import { TeamShareDialog } from "./TeamShareDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
+import { HostAgentsSection } from "./HostAgentsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
@@ -90,6 +91,13 @@ export function AgentsView() {
   const runningAgentCount = agents.managedAgents.filter((agent) =>
     isManagedAgentActive(agent),
   ).length;
+  const managedPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (agents.managedAgents ?? []).map((agent) => agent.pubkey.toLowerCase()),
+      ),
+    [agents.managedAgents],
+  );
   const hasSavedAgentDefaults = Boolean(
     globalConfig.preferred_runtime?.trim() ||
       globalConfig.provider?.trim() ||
@@ -265,6 +273,13 @@ export function AgentsView() {
                 void personas.handleSetActive(persona, false, "library");
               }}
               onDeletePersona={personas.openDelete}
+            />
+
+            <HostAgentsSection
+              managedPubkeys={managedPubkeys}
+              onOpenAgentProfile={(pubkey, options) => {
+                openProfilePanel?.(pubkey, options);
+              }}
             />
 
             <TeamsSection

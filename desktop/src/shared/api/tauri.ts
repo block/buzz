@@ -108,6 +108,8 @@ type RawRelayAgent = {
   status: RelayAgent["status"];
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
+  /** kind:10100 content `host` — optional host lineage pubkey. */
+  host?: string | null;
 };
 
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
@@ -664,7 +666,16 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
     status: agent.status,
     respondTo: agent.respond_to ?? null,
     respondToAllowlist: agent.respond_to_allowlist ?? [],
+    hostPubkey: normalizeHostPubkey(agent.host),
   };
+}
+
+/** Accept only a non-empty 64-hex host pubkey; reject junk from open 10100 content. */
+function normalizeHostPubkey(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(trimmed)) return null;
+  return trimmed;
 }
 
 export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {

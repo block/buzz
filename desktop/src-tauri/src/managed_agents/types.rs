@@ -207,6 +207,11 @@ pub struct RelayAgentInfo {
     pub respond_to: Option<RespondTo>,
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Host lineage pubkey from kind:10100 content `host` (virtual mint / house
+    /// field). Optional — absent for Local-native directory entries that never
+    /// set lineage. Desktop surfaces this as an environment badge only.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
