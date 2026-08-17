@@ -43,8 +43,14 @@ const messageMetadataTextStyle = TextStyle(
   letterSpacing: 0,
 );
 
-/// Message timestamps share the secondary author metadata style.
-const messageTimestampTextStyle = messageMetadataTextStyle;
+/// Message timestamps: 13.1sp regular, one step below 15sp author names.
+const messageTimestampTextStyle = TextStyle(
+  fontFamily: _fontFamily,
+  fontSize: 13.1,
+  fontWeight: FontWeight.w400,
+  height: 17 / 13.1,
+  letterSpacing: 0,
+);
 
 /// Compact reply previews: 13.1sp regular on a 17sp line height.
 const replyPreviewTextStyle = TextStyle(
@@ -121,8 +127,8 @@ const systemMessageBodyTextStyle = TextStyle(
 /// Activity sender names share the primary author style.
 const activityUsernameTextStyle = messageUsernameTextStyle;
 
-/// Activity timestamps share the secondary author metadata style.
-const activityTimestampTextStyle = messageMetadataTextStyle;
+/// Activity timestamps share the compact message timestamp treatment.
+const activityTimestampTextStyle = messageTimestampTextStyle;
 
 /// Activity context labels: 13.1sp medium on a 17sp line height.
 const activityContextTextStyle = TextStyle(

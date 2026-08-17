@@ -2690,14 +2690,12 @@ test("duplicate instances move from the agents gallery into the agent profile", 
   await page.getByTestId(`user-profile-instance-${additionalPubkey}`).click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
-  await expect(page.getByTestId("user-profile-delete-agent-row")).toBeVisible();
+  await expect(page.getByTestId("user-profile-agent-status")).toContainText(
+    "Stopped",
+  );
   await expect(
     page.getByTestId("user-profile-settings-menu-trigger"),
   ).toHaveCount(0);
-  await expect(
-    page.getByTestId("user-profile-duplicate-agent-row"),
-  ).toBeVisible();
-  await expect(page.getByTestId("user-profile-export-agent-row")).toBeVisible();
   await expect(
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
   ).toHaveCount(0);

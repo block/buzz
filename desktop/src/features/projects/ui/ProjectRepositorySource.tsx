@@ -26,7 +26,10 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { GitHubMark } from "./GitHubMark";
-import { PROJECT_PANEL_ACTION_BUTTON_CLASS } from "./projectPanelStyles";
+import {
+  PROJECT_PANEL_ACTION_BUTTON_CLASS,
+  PROJECT_PICKER_TRIGGER_CLASS,
+} from "./projectPanelStyles";
 
 /** Branch picker shared by the readme and files panel headers. */
 export function RepositoryBranchDropdown({
@@ -34,7 +37,6 @@ export function RepositoryBranchDropdown({
   branchOptions,
   selectedTag,
   tagOptions = [],
-  compact,
   createBranchDisabled,
   createBranchTitle,
   deleteBranchDisabled,
@@ -48,8 +50,6 @@ export function RepositoryBranchDropdown({
   branchOptions: string[];
   selectedTag?: string | null;
   tagOptions?: Array<{ name: string; commit: string }>;
-  /** Smaller trigger for inline headers. */
-  compact?: boolean;
   createBranchDisabled?: boolean;
   createBranchTitle?: string;
   deleteBranchDisabled?: boolean;
@@ -74,17 +74,13 @@ export function RepositoryBranchDropdown({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          className={
-            compact
-              ? "h-7 max-w-full gap-1.5 rounded-md px-3 font-mono text-sm font-medium hover:border-input"
-              : "h-6 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold hover:border-input"
-          }
+          className={PROJECT_PICKER_TRIGGER_CLASS}
           size="sm"
           type="button"
           variant="outline"
         >
           <RefIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="truncate">{selectedTag ?? branch}</span>
+          <span className="truncate font-mono">{selectedTag ?? branch}</span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
@@ -229,7 +225,7 @@ export function RepoSourceDropdown({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          className="h-7 max-w-full shrink-0 gap-1.5 rounded-md px-3 text-sm font-medium hover:border-input"
+          className={PROJECT_PICKER_TRIGGER_CLASS}
           size="sm"
           type="button"
           variant="outline"

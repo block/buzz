@@ -42,6 +42,7 @@ const ISSUE_SCOPE_OPTIONS: Array<{
 }> = [
   { label: "All", value: "all" },
   { label: "My Issues", value: "mine" },
+  { label: "Assigned to me", value: "assigned" },
 ];
 
 type ProjectsListHeaderBarProps = {
