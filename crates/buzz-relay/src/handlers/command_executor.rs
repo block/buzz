@@ -23,6 +23,7 @@ use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::DbError;
 use buzz_workflow::executor::TriggerContext;
+use buzz_workflow::schema::{parse_approver_spec, ApproverSpec};
 
 use crate::state::AppState;
 use crate::webhook_secret;
@@ -1007,34 +1008,26 @@ async fn handle_workflow_trigger(
 
 /// Enforce the approver_spec field against the requesting pubkey.
 ///
-/// Accepted specs:
-/// - `""` or `"any"` — any authenticated user may approve.
-/// - 64-char lowercase hex string — only that exact pubkey may approve.
+/// The accepted forms are defined by [`parse_approver_spec`] in `buzz-workflow`,
+/// which also runs at definition-validation time. Both paths share one rule, so
+/// a stored definition cannot carry a spec this function would reject.
 ///
-/// All other formats are rejected (fail-closed).
+/// Unparseable specs fail closed. Rows written before validation existed may
+/// still hold one, so this arm stays reachable.
 fn check_approver_spec(approver_spec: &str, requester_hex: &str) -> Result<(), IngestError> {
-    let spec = approver_spec.trim();
-
-    // Empty or "any" — anyone may approve
-    if spec.is_empty() || spec == "any" {
-        return Ok(());
-    }
-
-    // Exact pubkey match (64-char hex, case-insensitive)
-    if spec.len() == 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
-        if requester_hex.to_lowercase() == spec.to_lowercase() {
-            return Ok(());
+    match parse_approver_spec(approver_spec) {
+        Ok(ApproverSpec::Anyone) => Ok(()),
+        Ok(ApproverSpec::Pubkey(pubkey)) => {
+            if requester_hex.to_lowercase() == pubkey {
+                Ok(())
+            } else {
+                Err(IngestError::Rejected(
+                    "forbidden: not the designated approver for this request".into(),
+                ))
+            }
         }
-        return Err(IngestError::Rejected(
-            "forbidden: not the designated approver for this request".into(),
-        ));
+        Err(e) => Err(IngestError::Rejected(format!("forbidden: {e}"))),
     }
-
-    // Role-based or unrecognised — fail closed
-    Err(IngestError::Rejected(format!(
-        "forbidden: approver spec '{}' is not yet supported",
-        spec
-    )))
 }
 
 async fn handle_approval_grant(
@@ -1384,4 +1377,56 @@ async fn resume_workflow_after_approval(
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const APPROVER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    #[test]
+    fn any_spec_admits_any_requester() {
+        assert!(check_approver_spec("any", OTHER).is_ok());
+        assert!(check_approver_spec("", OTHER).is_ok());
+        assert!(check_approver_spec("   ", OTHER).is_ok());
+    }
+
+    #[test]
+    fn pubkey_spec_admits_only_that_pubkey() {
+        assert!(check_approver_spec(APPROVER, APPROVER).is_ok());
+        assert!(check_approver_spec(&APPROVER.to_uppercase(), APPROVER).is_ok());
+        assert!(check_approver_spec(APPROVER, OTHER).is_err());
+    }
+
+    #[test]
+    fn unenforceable_spec_fails_closed() {
+        // Rows predating definition-time validation may still hold these.
+        for spec in ["@release-manager", "release-manager", &APPROVER[..63]] {
+            assert!(
+                check_approver_spec(spec, APPROVER).is_err(),
+                "spec {spec:?} must not authorize anyone"
+            );
+        }
+    }
+
+    #[test]
+    fn enforcement_agrees_with_definition_validation() {
+        // The cross-boundary invariant: any spec that survives definition
+        // validation is a spec this handler can enforce. Before the shared
+        // parser the two disagreed, and "@release-manager" saved clean then
+        // failed at approval time — block/buzz#2878.
+        for spec in ["any", "", APPROVER] {
+            assert!(
+                parse_approver_spec(spec).is_ok(),
+                "spec {spec:?} should validate at definition time"
+            );
+            assert!(
+                check_approver_spec(spec, APPROVER).is_ok()
+                    || check_approver_spec(spec, OTHER).is_ok(),
+                "spec {spec:?} validates, so some requester must be able to approve it"
+            );
+        }
+    }
 }

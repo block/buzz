@@ -131,7 +131,12 @@ pub enum ActionDef {
     },
     /// Suspend execution and request approval.
     RequestApproval {
-        /// User mention or role (e.g. `"@release-manager"`).
+        /// Who may approve. Either `"any"` (any authenticated member of the
+        /// community) or a 64-character hex pubkey designating a single
+        /// approver. An empty string is treated as `"any"`.
+        ///
+        /// Role mentions such as `"@release-manager"` are not supported and are
+        /// rejected by [`WorkflowDef::validate`]. See [`parse_approver_spec`].
         from: String,
         /// Message shown to the approver.
         message: String,
@@ -203,6 +208,18 @@ impl WorkflowDef {
                     step.id
                 )));
             }
+
+            // An approver spec the relay cannot enforce must not be storable.
+            // Without this check the definition saves clean and fails only when
+            // a human tries to approve, which is the worst place to find out.
+            if let ActionDef::RequestApproval { from, .. } = &step.action {
+                parse_approver_spec(from).map_err(|e| match e {
+                    WorkflowError::InvalidDefinition(msg) => WorkflowError::InvalidDefinition(
+                        format!("step '{}': {}", step.id, msg),
+                    ),
+                    other => other,
+                })?;
+            }
         }
 
         if let TriggerDef::Schedule { cron, interval } = &self.trigger {
@@ -240,6 +257,60 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+/// Who may approve a `request_approval` step.
+///
+/// This type and [`parse_approver_spec`] are the single definition of an
+/// approver specification. Definition-time validation and the relay's
+/// approve/deny path both parse through them, so a definition that saves is a
+/// definition the relay can enforce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApproverSpec {
+    /// Any authenticated member of the community may approve.
+    ///
+    /// Produced by `"any"` and by the empty string. The empty form is accepted
+    /// because definitions already stored may omit `from`.
+    Anyone,
+    /// Only the named pubkey may approve. Always lowercase hex.
+    Pubkey(String),
+}
+
+/// Parse an approver specification.
+///
+/// Accepted forms:
+///
+/// - `""` or whitespace — anyone may approve
+/// - `"any"` — anyone may approve
+/// - a 64-character hex pubkey — only that key may approve
+///
+/// Everything else is rejected, including the `"@role"` mention syntax. Role
+/// approval has no membership lookup behind it; accepting the syntax here would
+/// let a definition save carrying a gate that cannot be enforced.
+pub fn parse_approver_spec(spec: &str) -> Result<ApproverSpec, WorkflowError> {
+    let trimmed = spec.trim();
+
+    if trimmed.is_empty() || trimmed == "any" {
+        return Ok(ApproverSpec::Anyone);
+    }
+
+    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(ApproverSpec::Pubkey(trimmed.to_lowercase()));
+    }
+
+    if let Some(role) = trimmed.strip_prefix('@') {
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "approver '@{role}' uses role-mention syntax, which is not supported. \
+             Use a 64-character hex pubkey to designate a single approver, or 'any' \
+             to let any member of the community approve"
+        )));
+    }
+
+    Err(WorkflowError::InvalidDefinition(format!(
+        "approver '{trimmed}' is not a recognised approver spec. \
+         Use a 64-character hex pubkey to designate a single approver, or 'any' \
+         to let any member of the community approve"
+    )))
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -357,7 +428,7 @@ mod tests {
             "  - id: topic\n    action: set_channel_topic\n    topic: Status active\n",
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
-            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
+            "  - id: approve\n    action: request_approval\n    from: 'any'\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
@@ -393,7 +464,10 @@ mod tests {
             "name: Deploy Approval\n",
             "trigger:\n  on: webhook\n",
             "steps:\n",
-            "  - id: request\n    action: request_approval\n    from: '@engineering-lead'\n",
+            // Was '@engineering-lead' — role mentions never reached an
+            // enforceable spec, so the example now designates a pubkey.
+            "  - id: request\n    action: request_approval\n",
+            "    from: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'\n",
             "    message: Approve deploy?\n    timeout: 4h\n",
             "  - id: notify_approved\n    if: 'steps_request_output_approved == true'\n",
             "    action: send_message\n    text: Deploy approved\n",
@@ -868,6 +942,70 @@ mod tests {
         // 30m = 1800s, well above the 60s minimum.
         let yaml = "name: Interval Schedule\ntrigger:\n  on: schedule\n  interval: 30m\nsteps:\n  - id: s1\n    action: send_message\n    text: tick\n";
         assert!(parse_yaml(yaml).is_ok(), "30m interval should be valid");
+    }
+
+    /// Build a workflow whose single step requests approval from `from`.
+    fn approval_yaml(from: &str) -> String {
+        format!(
+            "name: Release\ntrigger:\n  on: message_posted\nsteps:\n  - id: gate\n    action: request_approval\n    from: '{from}'\n    message: 'Ship it?'\n"
+        )
+    }
+
+    const PUBKEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn validate_rejects_role_mention_approver() {
+        // The syntax the schema used to document. It saved clean and failed
+        // only when a human tried to approve — see block/buzz#2878.
+        let err = parse_yaml(&approval_yaml("@release-manager")).unwrap_err();
+        let WorkflowError::InvalidDefinition(msg) = err else {
+            panic!("expected InvalidDefinition");
+        };
+        assert!(msg.contains("gate"), "message should name the step: {msg}");
+        assert!(
+            msg.contains("role-mention"),
+            "message should explain the rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unrecognised_approver() {
+        let err = parse_yaml(&approval_yaml("release-manager")).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn validate_rejects_short_hex_approver() {
+        // 63 characters — one shy of a pubkey, and previously accepted by
+        // neither path while saving without complaint.
+        let err = parse_yaml(&approval_yaml(&PUBKEY[..63])).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn validate_accepts_any_and_pubkey_approvers() {
+        assert!(parse_yaml(&approval_yaml("any")).is_ok(), "'any' is valid");
+        assert!(
+            parse_yaml(&approval_yaml(PUBKEY)).is_ok(),
+            "a 64-char hex pubkey is valid"
+        );
+    }
+
+    #[test]
+    fn parse_approver_spec_maps_each_accepted_form() {
+        assert_eq!(parse_approver_spec("").unwrap(), ApproverSpec::Anyone);
+        assert_eq!(parse_approver_spec("   ").unwrap(), ApproverSpec::Anyone);
+        assert_eq!(parse_approver_spec("any").unwrap(), ApproverSpec::Anyone);
+        assert_eq!(
+            parse_approver_spec(&PUBKEY.to_uppercase()).unwrap(),
+            ApproverSpec::Pubkey(PUBKEY.to_owned()),
+            "hex is normalised to lowercase so comparison is case-insensitive"
+        );
+        assert_eq!(
+            parse_approver_spec(&format!("  {PUBKEY}  ")).unwrap(),
+            ApproverSpec::Pubkey(PUBKEY.to_owned()),
+            "surrounding whitespace is trimmed"
+        );
     }
 
     #[test]
