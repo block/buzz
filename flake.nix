@@ -47,6 +47,53 @@
             overlays = [ (import rust-overlay) ];
           };
 
+          androidEmulatorSupported = system == "x86_64-linux";
+          androidPkgs = import nixpkgsForSystem {
+            inherit system;
+            config = {
+              allowUnfree = true;
+              android_sdk.accept_license = true;
+            };
+          };
+
+          androidBuildComposition =
+            if androidEmulatorSupported then
+              androidPkgs.androidenv.composeAndroidPackages {
+                platformVersions = [
+                  "34"
+                  "35"
+                  "36"
+                ];
+                buildToolsVersions = [
+                  "35.0.0"
+                  "36.0.0"
+                ];
+                includeNDK = true;
+                ndkVersions = [ "28.2.13676358" ];
+                includeCmake = true;
+                cmakeVersions = [ "3.22.1" ];
+              }
+            else
+              null;
+
+          androidEmulatorComposition =
+            if androidEmulatorSupported then
+              androidPkgs.androidenv.composeAndroidPackages {
+                platformVersions = [ "36" ];
+                includeEmulator = true;
+                includeSystemImages = true;
+                systemImageTypes = [ "default" ];
+                abiVersions = [ "x86_64" ];
+                includeNDK = false;
+                includeCmake = false;
+              }
+            else
+              null;
+
+          androidBuildSdk = if androidEmulatorSupported then androidBuildComposition.androidsdk else null;
+          androidEmulatorSdk =
+            if androidEmulatorSupported then androidEmulatorComposition.androidsdk else null;
+
           flutterPkgs = import nixpkgs-flutter { inherit system; };
 
           toolchainChannel = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
@@ -156,12 +203,19 @@
               label,
               extraPackages ? [ ],
               withFlutter ? false,
+              withAndroid ? false,
             }:
+            assert !withAndroid || androidEmulatorSupported;
             pkgs.mkShell (
               {
                 packages =
                   commonPackages
                   ++ pkgs.lib.optionals withFlutter [ flutterPkgs.flutter ]
+                  ++ pkgs.lib.optionals withAndroid [
+                    androidBuildSdk
+                    androidEmulatorSdk
+                    pkgs.jdk17
+                  ]
                   ++ extraPackages
                   ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux linuxPackages;
 
@@ -193,6 +247,17 @@
               }
               // pkgs.lib.optionalAttrs withFlutter {
                 FLUTTER_SUPPRESS_ANALYTICS = "true";
+              }
+              // pkgs.lib.optionalAttrs withAndroid {
+                ANDROID_HOME = "${androidBuildSdk}/libexec/android-sdk";
+                ANDROID_SDK_ROOT = "${androidBuildSdk}/libexec/android-sdk";
+                ANDROID_NDK_ROOT = "${androidBuildSdk}/libexec/android-sdk/ndk/28.2.13676358";
+                JAVA_HOME = pkgs.jdk17.home;
+                GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${androidBuildSdk}/libexec/android-sdk/build-tools/35.0.0/aapt2";
+                BUZZ_ANDROID_EMULATOR_SDK = "${androidEmulatorSdk}/libexec/android-sdk";
+                BUZZ_ANDROID_EMULATOR_API = "36";
+                BUZZ_ANDROID_EMULATOR_ABI = "x86_64";
+                BUZZ_ANDROID_EMULATOR_SERIAL = "emulator-5556";
               }
             );
         in
@@ -227,6 +292,13 @@
               label = "full";
               extraPackages = occasionalPackages;
               withFlutter = true;
+            };
+          }
+          // pkgs.lib.optionalAttrs androidEmulatorSupported {
+            mobile-android = mkBuzzShell {
+              label = "mobile Android emulator";
+              withFlutter = true;
+              withAndroid = true;
             };
           };
         };

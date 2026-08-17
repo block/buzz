@@ -707,6 +707,14 @@ mobile-build-android:
     ./scripts/mobile-worktree-overrides.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
 
+# Manage the isolated Android emulator (run inside `nix develop .#mobile-android`)
+mobile-emulator *ARGS:
+    ./scripts/mobile-android-emulator.sh {{ARGS}}
+
+# Boot the emulator and run a selected on-device integration test
+mobile-emulator-test target:
+    ./scripts/mobile-android-emulator.sh test {{target}}
+
 # Run the mobile app on iOS simulator (worktree-aware debug identity)
 mobile-dev:
     #!/usr/bin/env bash
