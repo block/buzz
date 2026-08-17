@@ -6,6 +6,8 @@ use crate::{
     relay::{query_relay, submit_event},
 };
 
+const CANVAS_HISTORY_LIMIT: u64 = 50;
+
 /// Read the most recent canvas event (kind:40100) for a channel.
 #[tauri::command]
 pub async fn get_canvas(
@@ -39,6 +41,39 @@ pub async fn get_canvas(
         "event_id": event.id.to_hex(),
         "updated_at": event.created_at.as_secs(),
         "author": event.pubkey.to_hex(),
+    }))
+}
+
+/// Read the most recent signed canvas revisions for a channel.
+///
+/// Canvas events are append-only kind:40100 events, so the relay already
+/// retains the complete revision history. The bounded response keeps the
+/// Desktop panel predictable for heavily edited canvases while preserving the
+/// newest revision as the first item.
+#[tauri::command]
+pub async fn get_canvas_history(
+    channel_id: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [40100],
+            "#h": [channel_id],
+            "limit": CANVAS_HISTORY_LIMIT
+        })],
+    )
+    .await?;
+
+    events.sort_by_key(|event| std::cmp::Reverse(event.created_at));
+
+    Ok(serde_json::json!({
+        "revisions": events.into_iter().map(|event| serde_json::json!({
+            "event_id": event.id.to_hex(),
+            "content": event.content,
+            "updated_at": event.created_at.as_secs(),
+            "author": event.pubkey.to_hex(),
+        })).collect::<Vec<_>>(),
     }))
 }
 

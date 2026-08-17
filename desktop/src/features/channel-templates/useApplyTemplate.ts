@@ -13,7 +13,7 @@ import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRunti
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
-import { setCanvas } from "@/shared/api/tauri";
+import { setCanvas } from "@/shared/api/tauriCanvas";
 import type { ChannelTemplate } from "@/shared/api/types";
 
 /**

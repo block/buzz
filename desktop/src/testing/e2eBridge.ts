@@ -148,6 +148,13 @@ type MockTeamSeed = {
   personaIds: string[];
 };
 
+type MockCanvasRevisionSeed = {
+  eventId: string;
+  content: string;
+  updatedAt: number;
+  author: string;
+};
+
 type MockSearchProfileSeed = {
   pubkey: string;
   displayName: string | null;
@@ -323,6 +330,8 @@ type E2eConfig = {
     deepHistoryMessageCount?: number;
     feedReadError?: string;
     canvasReadError?: string;
+    /** Signed kind:40100 revisions returned by the mocked canvas history query. */
+    canvasHistory?: MockCanvasRevisionSeed[];
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
     applyCommunityDelayMs?: number;
@@ -13283,7 +13292,28 @@ export function maybeInstallE2eTauriMocks() {
           throw new Error(canvasReadError);
         }
         // Return the no-canvas success shape — content null means no canvas set.
-        return { content: null, updated_at: null, author: null };
+        return {
+          content: null,
+          event_id: null,
+          updated_at: null,
+          author: null,
+        };
+      }
+      case "get_canvas_history": {
+        const canvasReadError = activeConfig?.mock?.canvasReadError;
+        if (canvasReadError) {
+          throw new Error(canvasReadError);
+        }
+        return {
+          revisions: (activeConfig?.mock?.canvasHistory ?? []).map(
+            (revision) => ({
+              event_id: revision.eventId,
+              content: revision.content,
+              updated_at: revision.updatedAt,
+              author: revision.author,
+            }),
+          ),
+        };
       }
       // ── Local-save archive ──────────────────────────────────────────────
       // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests

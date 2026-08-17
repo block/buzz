@@ -711,6 +711,7 @@ pub fn run() {
             join_channel,
             leave_channel,
             get_canvas,
+            get_canvas_history,
             set_canvas,
             get_feed,
             search_messages,

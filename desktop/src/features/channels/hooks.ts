@@ -6,7 +6,6 @@ import {
   archiveChannel,
   createChannel,
   deleteChannel,
-  getCanvas,
   getChannelDetails,
   getChannelMembers,
   getChannels,
@@ -16,12 +15,16 @@ import {
   openDm,
   invokeTauri,
   removeChannelMember,
-  setCanvas,
   setChannelPurpose,
   setChannelTopic,
   unarchiveChannel,
   updateChannel,
 } from "@/shared/api/tauri";
+import {
+  getCanvas,
+  getCanvasHistory,
+  setCanvas,
+} from "@/shared/api/tauriCanvas";
 import type {
   AddChannelMembersInput,
   Channel,
@@ -920,6 +923,22 @@ export function useCanvasQuery(channelId: string | null, enabled = true) {
   });
 }
 
+export function useCanvasHistoryQuery(
+  channelId: string | null,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["channel-canvas-history", channelId],
+    queryFn: () => {
+      if (!channelId) {
+        return Promise.reject(new Error("No channel selected"));
+      }
+      return getCanvasHistory(channelId);
+    },
+    enabled: enabled && channelId !== null,
+  });
+}
+
 export function useSetCanvasMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
@@ -934,6 +953,9 @@ export function useSetCanvasMutation(channelId: string | null) {
       if (channelId) {
         void queryClient.invalidateQueries({
           queryKey: ["channel-canvas", channelId],
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ["channel-canvas-history", channelId],
         });
       }
     },

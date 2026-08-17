@@ -12,6 +12,7 @@ import {
   openCreateChannelDialog,
   openNewMessagePage,
 } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
@@ -2942,6 +2943,95 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(leaveBox).not.toBeNull();
   expect(channelIdBox?.y).toBeLessThan(canvasBox?.y);
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
+});
+
+test("canvas shows signed revision history and opens earlier revisions read-only", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    canvasHistory: [
+      {
+        eventId: "canvas-current-revision",
+        content: "# Current canvas\n\nLatest signed content.",
+        updatedAt: 1_751_353_200,
+        author: TEST_IDENTITIES.alice.pubkey,
+      },
+      {
+        eventId: "canvas-earlier-revision",
+        content: "# Earlier canvas\n\nPrevious signed content.",
+        updatedAt: 1_751_266_800,
+        author: TEST_IDENTITIES.bob.pubkey,
+      },
+    ],
+  });
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+
+  const canvasSection = page.getByTestId("channel-canvas-section");
+  await expect(
+    canvasSection.getByTestId("channel-canvas-content"),
+  ).toContainText("Latest signed content.");
+  await expect(
+    canvasSection.getByTestId("channel-canvas-current-metadata"),
+  ).toContainText("alice");
+  await expect(
+    canvasSection.getByTestId("channel-canvas-history"),
+  ).toBeVisible();
+  if (process.env.BUZZ_CANVAS_HISTORY_SCREENSHOTS === "1") {
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: "test-results/canvas-revision-history-current.png",
+    });
+  }
+
+  await canvasSection
+    .getByTestId("channel-canvas-revision-canvas-earlier-revision")
+    .click();
+  await expect(
+    canvasSection.getByTestId("channel-canvas-content"),
+  ).toContainText("Previous signed content.");
+  await expect(
+    canvasSection.getByText("Viewing an earlier revision (read-only)."),
+  ).toBeVisible();
+  await expect(canvasSection.getByTestId("channel-canvas-edit")).toHaveCount(0);
+  if (process.env.BUZZ_CANVAS_HISTORY_SCREENSHOTS === "1") {
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: "test-results/canvas-revision-history-earlier.png",
+    });
+  }
+
+  await canvasSection.getByTestId("channel-canvas-current-revision").click();
+  await expect(
+    canvasSection.getByTestId("channel-canvas-content"),
+  ).toContainText("Latest signed content.");
+  await expect(canvasSection.getByTestId("channel-canvas-edit")).toBeVisible();
+});
+
+test("canvas shows an empty revision history before the first save", async ({
+  page,
+}) => {
+  await installMockBridge(page, { canvasHistory: [] });
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-canvas-ingress").click();
+
+  const canvasSection = page.getByTestId("channel-canvas-section");
+  await expect(
+    canvasSection.getByTestId("channel-canvas-history-empty"),
+  ).toHaveText(
+    "No revision history yet — save the canvas to start tracking changes.",
+  );
+  await expect(canvasSection.getByTestId("channel-canvas-edit")).toContainText(
+    "Create canvas",
+  );
+  if (process.env.BUZZ_CANVAS_HISTORY_SCREENSHOTS === "1") {
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: "test-results/canvas-revision-history-empty.png",
+    });
+  }
 });
 
 async function seedHomeInboxMention(
