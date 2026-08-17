@@ -1,10 +1,12 @@
 use tauri::{AppHandle, Manager};
 const ENV_KEYS: &[&str] = &[
     "COMMAND_ADVISER_PERSONA_ID",
+    "COMMAND_ADVISER_MEMORY_URL",
     "COMMAND_ADVISER_RAG_URL",
     "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
     "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
     "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
+    "BUZZ_ACP_EXPERIENCE_OUTBOX",
 ];
 
 pub(super) fn is_command_adviser_persona(persona_id: &str) -> bool {
@@ -32,6 +34,7 @@ pub(super) fn apply_source_env(
     command: &mut std::process::Command,
     app: &AppHandle,
     persona_id: Option<&str>,
+    agent_pubkey: &str,
 ) {
     for key in ENV_KEYS {
         command.env_remove(key);
@@ -45,7 +48,14 @@ pub(super) fn apply_source_env(
         Err(_) => return,
     };
     let config_path = config_dir.join("trusted-lan-sources.json");
+    command.env(
+        "BUZZ_ACP_EXPERIENCE_OUTBOX",
+        config_dir
+            .join("experience-outbox")
+            .join(format!("{agent_pubkey}.sqlite3")),
+    );
     if let Ok(Some(config)) = crate::command_services::trusted_lan::load_optional(&config_path) {
+        command.env("COMMAND_ADVISER_MEMORY_URL", config.memory_url().as_str());
         command.env("COMMAND_ADVISER_RAG_URL", config.rag_url().as_str());
         command.env(
             "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",

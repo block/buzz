@@ -5,6 +5,8 @@
 //! Provides [`StoredEvent`], filter matching, kind constants, and event
 //! verification. All other Buzz crates depend on this one.
 
+/// Bounded encrypted records of adviser task experience.
+pub mod agent_experience;
 /// AgentMemory's CPython-compatible canonical JSON encoder.
 pub mod agent_memory_canonical;
 /// NIP-AM: Agent Turn Metric — payload type and encrypt/decrypt helpers.
@@ -50,6 +52,8 @@ pub mod tenant;
 /// Schnorr signature and event ID verification.
 pub mod verification;
 
+#[cfg(test)]
+mod agent_experience_tests;
 #[cfg(test)]
 mod command_brief_tests;
 

@@ -3,6 +3,10 @@
 mod acp;
 mod config;
 mod engram_fetch;
+mod engram_recall;
+mod experience_capture;
+mod experience_outbox;
+mod experience_projection;
 mod filter;
 mod observer;
 mod pool;
@@ -11,6 +15,13 @@ mod queue;
 mod relay;
 mod setup_mode;
 mod usage;
+
+#[cfg(test)]
+mod engram_recall_tests;
+#[cfg(test)]
+mod experience_capture_tests;
+#[cfg(test)]
+mod experience_projection_tests;
 
 pub use usage::TurnUsage;
 
@@ -1674,6 +1685,34 @@ async fn tokio_main() -> Result<()> {
     }
     let owner_cache = OwnerCache::new(startup_owner.clone());
 
+    if config.memory_enabled {
+        if let Some(owner_pubkey) = startup_owner
+            .as_deref()
+            .and_then(|value| PublicKey::from_hex(value).ok())
+        {
+            let outbox_path = std::env::var_os("BUZZ_ACP_EXPERIENCE_OUTBOX")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .join(".buzz")
+                        .join("experience-outbox.sqlite3")
+                });
+            if let Err(error) = experience_capture::initialize_experience_runtime(
+                &outbox_path,
+                config.keys.clone(),
+                owner_pubkey,
+                relay.rest_client(),
+            ) {
+                tracing::warn!(
+                    path = %outbox_path.display(),
+                    %error,
+                    "experience_learning_degraded: outbox unavailable"
+                );
+            }
+        }
+    }
+
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
     let mut relay_observer_publisher = None;
@@ -1843,6 +1882,10 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        active_memory: std::env::var("COMMAND_ADVISER_MEMORY_URL")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .and_then(|endpoint| engram_recall::ActiveMemoryClient::from_endpoint(&endpoint).ok()),
     });
 
     if !config.memory_enabled {
@@ -4511,6 +4554,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     const COMMAND_ADVISER_SOURCE_ENV: &[&str] = &[
         "COMMAND_ADVISER_PERSONA_ID",
+        "COMMAND_ADVISER_MEMORY_URL",
         "COMMAND_ADVISER_RAG_URL",
         "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
         "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
@@ -6285,6 +6329,7 @@ mod build_mcp_servers_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let expected = [
             ("COMMAND_ADVISER_PERSONA_ID", "builtin:command-intelligence"),
+            ("COMMAND_ADVISER_MEMORY_URL", "http://127.0.0.1:8006/mcp/"),
             ("COMMAND_ADVISER_RAG_URL", "http://192.168.1.107:8005/mcp/"),
             (
                 "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",

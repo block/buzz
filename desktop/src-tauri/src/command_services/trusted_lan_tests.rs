@@ -17,12 +17,14 @@ fn accepts_the_approved_literal_private_endpoints() {
 }
 
 #[test]
-fn accepts_literal_loopback_for_the_mac_local_rag_only() {
+fn accepts_literal_loopback_for_mac_local_command_sources() {
+    let memory = TrustedLanEndpoint::parse_memory("http://127.0.0.1:8006/mcp")
+        .expect("Mac-local Memory endpoint");
     let rag = TrustedLanEndpoint::parse_rag("http://127.0.0.1:8005/mcp/")
         .expect("Mac-local RAG endpoint");
 
+    assert_eq!(memory.as_str(), "http://127.0.0.1:8006/mcp");
     assert_eq!(rag.as_str(), "http://127.0.0.1:8005/mcp/");
-    assert!(TrustedLanEndpoint::parse_memory("http://127.0.0.1:8006/mcp").is_err());
 }
 
 #[test]
@@ -126,7 +128,6 @@ fn rejects_routes_outside_the_trusted_lan_contract() {
     for rejected in [
         "https://192.168.1.26:8006/mcp",
         "http://memory.home.arpa:8006/mcp",
-        "http://127.0.0.1:8006/mcp",
         "http://8.8.8.8:8006/mcp",
         "http://192.168.1.26:8006/mcp?x=1",
         "http://user:secret@192.168.1.26:8006/mcp",

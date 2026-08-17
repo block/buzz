@@ -19,6 +19,10 @@ use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
+use buzz_command_sources::mcp_http::McpHttpClient;
+use buzz_core::agent_experience::{
+    experience_projection_payload, from_engram_body, ExperienceRecordV1,
+};
 use buzz_core::engram::{
     self, conversation_key, d_tag, normalize_slug, select_head, validate_and_decrypt, Body, Listing,
 };
@@ -734,6 +738,173 @@ pub async fn cmd_rm(
     Ok(())
 }
 
+fn memory_client(endpoint: &str) -> Result<McpHttpClient, CliError> {
+    let endpoint = url::Url::parse(endpoint)
+        .map_err(|_| CliError::Usage("--memory-url must be a valid URL".into()))?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(CliError::Usage(
+            "--memory-url must be an HTTP MCP endpoint without embedded credentials".into(),
+        ));
+    }
+    McpHttpClient::new(endpoint)
+        .map_err(|_| CliError::Usage("--memory-url is not a valid MCP endpoint".into()))
+}
+
+/// `buzz mem history` — query the full immutable lineage in the derived store.
+pub async fn cmd_history(
+    client: &BuzzClient,
+    memory_key: &str,
+    owner_flag: Option<&str>,
+    memory_url: &str,
+    limit: u32,
+) -> Result<(), CliError> {
+    if memory_key.trim().is_empty() || !(1..=500).contains(&limit) {
+        return Err(CliError::Usage(
+            "--key must be non-empty and --limit must be between 1 and 500".into(),
+        ));
+    }
+    let owner = resolve_owner(client, owner_flag)?;
+    let result = memory_client(memory_url)?
+        .call_tool(
+            "recall_memory_history",
+            serde_json::json!({
+                "memory_key": memory_key,
+                "owner_id": owner.to_hex(),
+                "limit": limit,
+            }),
+        )
+        .await
+        .map_err(|error| CliError::Other(format!("Memory MCP history failed: {error}")))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result)
+            .map_err(|error| CliError::Other(format!("history encoding failed: {error}")))?
+    );
+    Ok(())
+}
+
+fn decode_experience_event(
+    event: &nostr::Event,
+    agent: &PublicKey,
+    owner: &PublicKey,
+    client: &BuzzClient,
+) -> Result<Option<ExperienceRecordV1>, CliError> {
+    if event.verify().is_err() {
+        return Ok(None);
+    }
+    let their_pubkey = if client.keys().public_key() == *agent {
+        owner
+    } else {
+        agent
+    };
+    let body = match validate_and_decrypt(
+        event,
+        agent,
+        owner,
+        client.keys().secret_key(),
+        their_pubkey,
+    ) {
+        Ok(body) => body,
+        Err(_) => return Ok(None),
+    };
+    let Body::Memory { slug, .. } = &body else {
+        return Ok(None);
+    };
+    if !slug.starts_with("mem/experience/") {
+        return Ok(None);
+    }
+    from_engram_body(&body)
+        .map(Some)
+        .map_err(|_| CliError::Other(format!("invalid experience event {}", event.id.to_hex())))
+}
+
+/// `buzz mem rebuild-index` — idempotently replay authoritative Buzz history.
+pub async fn cmd_rebuild_index(
+    client: &BuzzClient,
+    owner_flag: Option<&str>,
+    memory_url: &str,
+    from: Option<u64>,
+    batch_size: u32,
+) -> Result<(), CliError> {
+    if !(1..=500).contains(&batch_size) {
+        return Err(CliError::Usage(
+            "--batch-size must be between 1 and 500".into(),
+        ));
+    }
+    let owner = resolve_owner(client, owner_flag)?;
+    let agent = client.keys().public_key();
+    let mut filter = serde_json::json!({
+        "kinds": [KIND_AGENT_ENGRAM],
+        "authors": [agent.to_hex()],
+        "#p": [owner.to_hex()],
+    });
+    if let Some(from) = from {
+        filter["since"] = serde_json::json!(from);
+    }
+    let mut events = client.query_all(filter).await?;
+    events.sort_by(|left, right| {
+        let left_time = left.get("created_at").and_then(serde_json::Value::as_u64);
+        let right_time = right.get("created_at").and_then(serde_json::Value::as_u64);
+        left_time.cmp(&right_time).then_with(|| {
+            left.get("id")
+                .and_then(serde_json::Value::as_str)
+                .cmp(&right.get("id").and_then(serde_json::Value::as_str))
+        })
+    });
+
+    let memory = memory_client(memory_url)?;
+    let mut projected = 0usize;
+    let mut skipped = 0usize;
+    let mut poisoned = 0usize;
+    for page in events.chunks(batch_size as usize) {
+        for value in page {
+            let event = match serde_json::from_value::<nostr::Event>(value.clone()) {
+                Ok(event) => event,
+                Err(_) => {
+                    poisoned += 1;
+                    continue;
+                }
+            };
+            let record = match decode_experience_event(&event, &agent, &owner, client) {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(_) => {
+                    poisoned += 1;
+                    continue;
+                }
+            };
+            let arguments = match experience_projection_payload(&event, &owner, &record) {
+                Ok(arguments) => arguments,
+                Err(_) => {
+                    poisoned += 1;
+                    continue;
+                }
+            };
+            memory
+                .call_tool("record_projected_event", arguments)
+                .await
+                .map_err(|error| {
+                    CliError::Other(format!(
+                        "Memory MCP projection failed after {projected} record(s): {error}"
+                    ))
+                })?;
+            projected += 1;
+        }
+        eprintln!("rebuild checkpoint: {projected} experience record(s) projected");
+    }
+    eprintln!("rebuild complete: projected={projected} skipped={skipped} poisoned={poisoned}");
+    Ok(())
+}
+
 pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::MemCmd;
     match cmd {
@@ -774,6 +945,18 @@ pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), Cli
             .await
         }
         MemCmd::Rm { slug, owner } => cmd_rm(client, &slug, owner.as_deref()).await,
+        MemCmd::History {
+            key,
+            owner,
+            memory_url,
+            limit,
+        } => cmd_history(client, &key, owner.as_deref(), &memory_url, limit).await,
+        MemCmd::RebuildIndex {
+            owner,
+            memory_url,
+            from,
+            batch_size,
+        } => cmd_rebuild_index(client, owner.as_deref(), &memory_url, from, batch_size).await,
     }
 }
 

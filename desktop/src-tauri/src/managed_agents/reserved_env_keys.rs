@@ -74,10 +74,12 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "LM_STUDIO_FALLBACK_PROVIDER",
     "LM_STUDIO_API_TOKEN",
     "COMMAND_ADVISER_PERSONA_ID",
+    "COMMAND_ADVISER_MEMORY_URL",
     "COMMAND_ADVISER_RAG_URL",
     "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
     "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
     "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
+    "BUZZ_ACP_EXPERIENCE_OUTBOX",
     // Desktop ownership markers: these brand every spawned harness with the
     // launching Desktop instance. A user-supplied override would let a
     // definition masquerade as a different instance or fake the nonce used
